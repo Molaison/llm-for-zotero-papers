@@ -11,6 +11,7 @@ import {
   type ReasoningProvider,
 } from "../utils/reasoningProfiles";
 import { MAX_ALLOWED_TOKENS } from "../utils/llmDefaults";
+import { isTextOnlyModel } from "../providers/modelChecks";
 import { BUNDLED_MODEL_CAPABILITY_REGISTRY } from "./bundled";
 import {
   inferProviderFromApiBase,
@@ -407,10 +408,11 @@ function mergeReasoning(
 
 function defaultInputs(
   provider: ModelCapabilityProvider,
+  model: string,
 ): ResolvedModelCapabilities["inputs"] {
   return {
     text: true,
-    image: true,
+    image: !isTextOnlyModel(model),
     video: provider === "gemini" || provider === "kimi",
     pdf: provider === "anthropic" || provider === "gemini",
   };
@@ -563,7 +565,7 @@ export function getModelCapabilities(
       ? { ...defaultSampling(), ...clone(entry.sampling) }
       : defaultSampling(),
     inputs: {
-      ...defaultInputs(provider),
+      ...defaultInputs(provider, model),
       ...(entry?.inputs || {}),
       ...(live?.inputs || {}),
     },

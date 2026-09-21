@@ -155,11 +155,39 @@ describe("agent model factory", function () {
     });
     assert.isFalse(anthropicCapabilities.fileInputs);
     assert.deepEqual(chatCompatCapabilities.contentInputs, {
-      images: false,
+      images: true,
       pdfDocuments: false,
       nativeFiles: false,
     });
     assert.isFalse(chatCompatCapabilities.fileInputs);
+  });
+
+  it("allows new and existing DeepSeek image inputs in both API transports", function () {
+    for (const providerProtocol of [
+      "openai_chat_compat",
+      "anthropic_messages",
+    ] as const) {
+      for (const model of [
+        "deepseek-v4-pro",
+        "deepseek-reasoner",
+        "deepseek-new-model",
+      ]) {
+        const request = makeRequest({
+          model,
+          providerProtocol,
+          apiBase:
+            providerProtocol === "anthropic_messages"
+              ? "https://api.deepseek.com/anthropic"
+              : "https://api.deepseek.com/v1",
+        });
+        const adapter = createAgentModelAdapter(request);
+        assert.deepEqual(adapter.getCapabilities(request).contentInputs, {
+          images: true,
+          pdfDocuments: false,
+          nativeFiles: false,
+        });
+      }
+    }
   });
 
   it("applies manual input mode overrides to agent content inputs", function () {

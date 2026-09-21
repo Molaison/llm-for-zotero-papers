@@ -5,6 +5,45 @@ import { getModelCapabilities } from "../src/modelCapabilities";
 
 describe("modelReasoningController", function () {
   describe("isScreenshotUnsupportedModel", function () {
+    it("updates figure availability when switching DeepSeek endpoints and input modes", function () {
+      for (const model of [
+        "deepseek-v4-pro",
+        "deepseek-reasoner",
+        "deepseek-new-model",
+      ]) {
+        const protocol = "anthropic_messages";
+        const official = "https://api.deepseek.com/anthropic";
+        const relay = "https://relay.example/anthropic";
+        assert.isFalse(
+          isScreenshotUnsupportedModel(model, protocol, "api_key", official),
+        );
+        assert.isFalse(
+          isScreenshotUnsupportedModel(model, protocol, "api_key", relay),
+        );
+        assert.isFalse(
+          isScreenshotUnsupportedModel(
+            model,
+            protocol,
+            "api_key",
+            relay,
+            "vision_allowed",
+          ),
+        );
+        assert.isTrue(
+          isScreenshotUnsupportedModel(
+            model,
+            protocol,
+            "api_key",
+            official,
+            "text_only",
+          ),
+        );
+        assert.isFalse(
+          isScreenshotUnsupportedModel(model, protocol, "api_key", official),
+        );
+      }
+    });
+
     it("allows DeepSeek vision variants unless text-only mode is selected", function () {
       const model = "deepseek-v4-flash-vision-exp";
       const protocol = "openai_chat_compat";

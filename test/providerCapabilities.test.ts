@@ -1,7 +1,18 @@
 import { assert } from "chai";
 import { isTextOnlyModel, resolveProviderCapabilities } from "../src/providers";
+import {
+  getModelCapabilities,
+  publishModelCapabilityCatalog,
+  resetModelCapabilityStateForTests,
+  setModelCapabilityRegistryForTests,
+} from "../src/modelCapabilities";
+import { isScreenshotUnsupportedModel } from "../src/modules/contextPanel/setupHandlers/controllers/modelReasoningController";
 
 describe("provider capabilities", function () {
+  afterEach(function () {
+    resetModelCapabilityStateForTests();
+  });
+
   it("routes first-party PDF providers to native support", function () {
     for (const entry of [
       {
@@ -163,49 +174,48 @@ describe("provider capabilities", function () {
     }
   });
 
-  it("keeps known DeepSeek text families conservative in automatic mode", function () {
+  it("allows DeepSeek image input by default across model names and endpoints", function () {
     for (const model of [
       "deepseek-chat",
       "deepseek-reasoner",
       "deepseek-v4-flash",
       "deepseek-v4-pro",
+      "deepseek-v4-flash-0731",
       "deepseek/deepseek-v4-pro",
-    ]) {
-      assert.isTrue(isTextOnlyModel(model), model);
-      assert.deepInclude(
-        resolveProviderCapabilities({
-          model,
-          apiBase: "https://api.deepseek.com/v1",
-          protocol: "openai_chat_compat",
-        }),
-        {
-          pdf: "none",
-          images: false,
-          multimodal: false,
-        },
-      );
-    }
-  });
-
-  it("allows explicit and unknown DeepSeek vision-capable names", function () {
-    for (const model of [
+      "deepseek-flash",
+      "deepseek-v4.1-flash",
+      "deepseek-new-model",
       "deepseek-v4-flash-vision-exp",
       "deepseek-vl2",
-      "deepseek-custom",
     ]) {
       assert.isFalse(isTextOnlyModel(model), model);
-      assert.deepInclude(
-        resolveProviderCapabilities({
-          model,
-          apiBase: "https://api.deepseek.com/v1",
-          protocol: "openai_chat_compat",
-        }),
-        {
-          pdf: "none",
-          images: true,
-          multimodal: true,
-        },
-      );
+      for (const apiBase of [
+        "https://api.deepseek.com/v1",
+        "https://api.deepseek.com/anthropic",
+        "https://openrouter.ai/api/v1",
+        "http://localhost:11434/v1",
+        undefined,
+      ]) {
+        assert.deepInclude(
+          resolveProviderCapabilities({
+            model,
+            apiBase,
+            protocol: "openai_chat_compat",
+          }),
+          { pdf: "none", images: true, multimodal: true },
+          `${model} at ${apiBase}`,
+        );
+        assert.deepInclude(
+          resolveProviderCapabilities({
+            model,
+            apiBase,
+            protocol: "openai_chat_compat",
+            inputMode: "text_only",
+          }),
+          { pdf: "none", images: false, multimodal: false },
+          `Explicit text-only: ${model} at ${apiBase}`,
+        );
+      }
     }
   });
 
@@ -225,11 +235,76 @@ describe("provider capabilities", function () {
     );
   });
 
+  it("uses model image metadata consistently in Auto mode and respects manual choices", function () {
+    const identity = {
+      model: "deepseek-new-model",
+      apiBase: "https://api.deepseek.com/anthropic",
+      protocol: "anthropic_messages",
+      authMode: "api_key",
+    };
+    const assertImageSupport = (expected: boolean) => {
+      assert.equal(getModelCapabilities(identity).inputs.image, expected);
+      assert.equal(resolveProviderCapabilities(identity).images, expected);
+      assert.equal(
+        isScreenshotUnsupportedModel(
+          identity.model,
+          identity.protocol,
+          identity.authMode,
+          identity.apiBase,
+        ),
+        !expected,
+      );
+    };
+
+    assertImageSupport(true);
+    assert.isTrue(
+      setModelCapabilityRegistryForTests({
+        schemaVersion: 1,
+        revision: 100,
+        models: [
+          { match: { exact: identity.model }, inputs: { image: false } },
+        ],
+      }),
+    );
+    assertImageSupport(false);
+
+    // A catalog row without image metadata must not erase a declared value.
+    publishModelCapabilityCatalog(identity, [
+      { id: identity.model, source: "live" },
+    ]);
+    assertImageSupport(false);
+    publishModelCapabilityCatalog(identity, [
+      {
+        id: identity.model,
+        source: "live",
+        inputs: { image: true },
+      },
+    ]);
+    assertImageSupport(true);
+    assert.isFalse(
+      resolveProviderCapabilities({ ...identity, inputMode: "text_only" })
+        .images,
+    );
+
+    publishModelCapabilityCatalog(identity, [
+      {
+        id: identity.model,
+        source: "live",
+        inputs: { image: false },
+      },
+    ]);
+    assertImageSupport(false);
+    assert.isTrue(
+      resolveProviderCapabilities({ ...identity, inputMode: "vision_allowed" })
+        .images,
+    );
+  });
+
   it("allows vision input without forcing PDF support", function () {
     assert.deepInclude(
       resolveProviderCapabilities({
         model: "deepseek-v4-pro",
-        apiBase: "https://api.deepseek.com/v1",
+        apiBase: "https://openrouter.ai/api/v1",
         protocol: "openai_chat_compat",
         inputMode: "vision_allowed",
       }),
@@ -241,6 +316,23 @@ describe("provider capabilities", function () {
     );
   });
 
+  it("lets explicit image metadata override a legacy name-based default", function () {
+    const identity = {
+      model: "local-reasoner",
+      apiBase: "http://localhost:1234/v1",
+      protocol: "openai_chat_compat",
+    };
+    assert.isFalse(resolveProviderCapabilities(identity).images);
+    publishModelCapabilityCatalog(identity, [
+      {
+        id: identity.model,
+        source: "live",
+        inputs: { image: true },
+      },
+    ]);
+    assert.isTrue(resolveProviderCapabilities(identity).images);
+  });
+
   it("treats missing and invalid input modes as automatic detection", function () {
     assert.deepInclude(
       resolveProviderCapabilities({
@@ -250,8 +342,8 @@ describe("provider capabilities", function () {
       }),
       {
         pdf: "none",
-        images: false,
-        multimodal: false,
+        images: true,
+        multimodal: true,
       },
     );
     assert.deepInclude(
@@ -263,8 +355,8 @@ describe("provider capabilities", function () {
       }),
       {
         pdf: "none",
-        images: false,
-        multimodal: false,
+        images: true,
+        multimodal: true,
       },
     );
   });
