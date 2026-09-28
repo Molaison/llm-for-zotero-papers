@@ -463,7 +463,7 @@ describe("reasoningProfiles", function () {
     });
 
     it("builds conservative MiMo thinking payloads", function () {
-      // Sending nothing is "Auto — provider default", not a level of its own.
+      // Sending nothing is "Auto", not a level of its own.
       assert.deepEqual(
         buildReasoningPayload(
           { provider: "mimo", level: "auto" },

@@ -595,7 +595,7 @@ const MIMO_THINKING_PROFILE: ProviderProfile = {
 // Qwen's control is enable_thinking: true | false (alibabacloud.com/help/en/
 // model-studio/deep-thinking) — a switch, not an effort ladder, so the levels
 // are named for what they do rather than borrowed from a scale Qwen has not
-// got. "Auto — provider default" covers sending neither.
+// got. "Auto" covers sending neither.
 const QWEN_TOGGLE_PROFILE: ProviderProfile = {
   supportsReasoning: true,
   defaultLevel: "on",

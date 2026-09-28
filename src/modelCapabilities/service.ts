@@ -742,7 +742,7 @@ export function getModelReasoningChoices(
 ) {
   if (capabilities.reasoning.kind === "none") return [];
   return [
-    { level: "auto", label: "Auto — provider default", enabled: true },
+    { level: "auto", label: "Auto", enabled: true },
     ...capabilities.reasoning.options
       .filter(
         (option) =>

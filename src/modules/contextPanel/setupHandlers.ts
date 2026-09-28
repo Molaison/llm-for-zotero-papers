@@ -5688,7 +5688,7 @@ export function setupHandlers(
       selectedLevel === "auto"
     ) {
       reasoningBtn.dataset.reasoningAdjustment =
-        "The previous reasoning level is unavailable for this model. Using the provider default.";
+        "The previous reasoning level is unavailable for this model. Using Auto.";
     }
     return {
       provider,
@@ -5961,7 +5961,6 @@ export function setupHandlers(
             params.currentValue.toLowerCase() === choice.value.toLowerCase()
               ? `\u2713 ${choice.label}`
               : choice.label,
-          title: choice.description || choice.label,
         },
       );
       const applySelection = (event: Event) => {

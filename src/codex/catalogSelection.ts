@@ -8,7 +8,6 @@ export type CodexReasoningEffort = {
 export type CodexReasoningChoice = {
   value: string;
   label: string;
-  description?: string;
 };
 
 export type CodexCatalogModelCandidate = {
@@ -30,25 +29,16 @@ export function formatCodexReasoningLabel(value: string): string {
     .join(" ");
 }
 
+// The menu names each choice by its level alone; catalog descriptions and the
+// default effort are not shown.
 export function buildCodexReasoningChoices(params: {
   efforts: readonly (string | CodexReasoningEffort)[];
-  defaultEffort?: string;
   excludedEfforts?: readonly string[];
-  showDefaultInAutoLabel?: boolean;
 }): CodexReasoningChoice[] {
-  const defaultEffort = params.defaultEffort?.trim() || "";
   const excluded = new Set(
     (params.excludedEfforts || []).map((effort) => effort.trim().toLowerCase()),
   );
-  const choices: CodexReasoningChoice[] = [
-    {
-      value: "auto",
-      label:
-        params.showDefaultInAutoLabel && defaultEffort
-          ? `Auto (${formatCodexReasoningLabel(defaultEffort)})`
-          : "Auto",
-    },
-  ];
+  const choices: CodexReasoningChoice[] = [{ value: "auto", label: "Auto" }];
   const seen = new Set<string>(["auto"]);
 
   for (const rawEffort of params.efforts) {
@@ -57,13 +47,7 @@ export function buildCodexReasoningChoices(params: {
     const key = value.toLowerCase();
     if (!value || excluded.has(key) || seen.has(key)) continue;
     seen.add(key);
-    const description =
-      typeof rawEffort === "string" ? "" : rawEffort.description?.trim() || "";
-    choices.push({
-      value,
-      label: formatCodexReasoningLabel(value),
-      ...(description ? { description } : {}),
-    });
+    choices.push({ value, label: formatCodexReasoningLabel(value) });
   }
 
   return choices;
