@@ -55,6 +55,10 @@ import {
   runConversationSchemaMigrationOnce,
 } from "../shared/conversationSchemaMigrations";
 import {
+  runConversationStoreStartupSchema,
+  type StartupSchemaPass,
+} from "../shared/startupSchemaFingerprint";
+import {
   allocateConversationKeyInTransaction,
   withRetiredKeyErrorMapping,
   nextUnissuedConversationKeyInRange,
@@ -1246,12 +1250,31 @@ async function backfillUpstreamConversationInstanceIDs(): Promise<void> {
   }
 }
 
+/**
+ * Migrations the startup schema pass guards with markers.  Their IDs are part
+ * of the startup fingerprint, so declaring a new one here forces the next
+ * launch back through the transactional pass (see startupSchemaFingerprint).
+ */
+export const CHAT_STORE_STARTUP_MIGRATION_IDS = [
+  CONVERSATION_ID_TRANSITION_MIGRATION_ID,
+  CONVERSATION_INSTANCE_ID_MIGRATION_IDS.upstream,
+  CONVERSATION_KEY_LEDGER_MIGRATION_ID,
+] as const;
+
+/**
+ * Bump when the startup schema pass changes in a way that must run inside a
+ * transaction once (a new multi-statement repair, a table rebuild).
+ */
+const CHAT_STORE_STARTUP_SCHEMA_REVISION = 1;
+
 export async function initChatStore(): Promise<void> {
   const conversationIDTransitionAlreadyApplied =
     await hasConversationSchemaMigration(
       CONVERSATION_ID_TRANSITION_MIGRATION_ID,
     );
-  await Zotero.DB.executeTransaction(async () => {
+  const applyStartupSchema = async ({
+    atomically,
+  }: StartupSchemaPass): Promise<void> => {
     await initConversationRegistryStore();
     await migrateLegacyChatStore();
 
@@ -1859,11 +1882,13 @@ export async function initChatStore(): Promise<void> {
       system: "upstream",
       kind: "global",
       catalogTables: [GLOBAL_CONVERSATIONS_TABLE, PAPER_CONVERSATIONS_TABLE],
+      atomically,
     });
     await retireOrphanedConversationLedgerEntries({
       system: "upstream",
       kind: "paper",
       catalogTables: [GLOBAL_CONVERSATIONS_TABLE, PAPER_CONVERSATIONS_TABLE],
+      atomically,
     });
     await initializeConversationKeyCounterInTransaction({
       system: "upstream",
@@ -1897,6 +1922,12 @@ export async function initChatStore(): Promise<void> {
     await installConversationKeyLedgerMessageTriggers({
       messageTable: CHAT_MESSAGES_TABLE,
     });
+  };
+  await runConversationStoreStartupSchema({
+    storeID: "upstream",
+    schemaRevision: CHAT_STORE_STARTUP_SCHEMA_REVISION,
+    migrationIDs: CHAT_STORE_STARTUP_MIGRATION_IDS,
+    body: applyStartupSchema,
   });
   await cleanupLeakedWebchatGhostTitlesOnce();
   await sweepWebchatSessionConversations();

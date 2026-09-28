@@ -5,7 +5,13 @@ import {
   CODEX_GLOBAL_CONVERSATION_KEY_BASE,
 } from "../src/shared/conversationKeySpace";
 import {
+  markConversationIDTransitionMigrationApplied,
+  CONVERSATION_SCHEMA_MIGRATIONS_TABLE,
+} from "../src/shared/conversationSchemaMigrations";
+import { startupSchemaFingerprintID } from "../src/shared/startupSchemaFingerprint";
+import {
   appendMessage,
+  CHAT_STORE_STARTUP_MIGRATION_IDS,
   createGlobalConversation,
   initChatStore,
   loadConversation,
@@ -14,6 +20,7 @@ import {
 import {
   appendCodexMessage,
   clearCodexConversation,
+  CODEX_STORE_STARTUP_MIGRATION_IDS,
   getCodexConversationSummary,
   initCodexAppServerStore,
   loadCodexConversation,
@@ -23,6 +30,7 @@ import {
 import {
   appendClaudeMessage,
   clearClaudeConversation,
+  CLAUDE_STORE_STARTUP_MIGRATION_IDS,
   getClaudeConversationSummary,
   initClaudeCodeStore,
   loadClaudeConversation,
@@ -55,6 +63,7 @@ type SqliteHarness = {
   all: (sql: string, params?: unknown[]) => Record<string, unknown>[];
   run: (sql: string, params?: unknown[]) => void;
   transactions: () => number;
+  statements: Array<{ sql: string; params: unknown[]; inTransaction: boolean }>;
 };
 
 function installSqliteZotero(): SqliteHarness {
@@ -76,7 +85,14 @@ function installSqliteZotero(): SqliteHarness {
         return Reflect.get(target, prop, receiver);
       },
     });
+  const statements: SqliteHarness["statements"] = [];
+  let openTransactions = 0;
   const queryAsync = async (sql: string, params?: unknown[]) => {
+    statements.push({
+      sql,
+      params: Array.isArray(params) ? params : [],
+      inTransaction: openTransactions > 0,
+    });
     const head = sql.trimStart().slice(0, 8).toUpperCase();
     const stmt = db.prepare(sql);
     if (
@@ -108,7 +124,12 @@ function installSqliteZotero(): SqliteHarness {
       queryAsync,
       executeTransaction: async (task: () => Promise<unknown>) => {
         transactions += 1;
-        return await task();
+        openTransactions += 1;
+        try {
+          return await task();
+        } finally {
+          openTransactions -= 1;
+        }
       },
     },
   };
@@ -123,6 +144,7 @@ function installSqliteZotero(): SqliteHarness {
       db.prepare(sql).run(...((params || []) as never[]));
     },
     transactions: () => transactions,
+    statements,
   };
 }
 
@@ -482,6 +504,258 @@ describe("conversation store mechanics", function () {
         [conversationKey],
       );
       assert.strictEqual(Number(row.count), 1);
+    });
+  });
+
+  describe("startup schema fingerprint", function () {
+    const STORES = [
+      {
+        storeID: "upstream",
+        init: initChatStore,
+        migrationIDs: CHAT_STORE_STARTUP_MIGRATION_IDS as readonly string[],
+      },
+      {
+        storeID: "claude-code",
+        init: initClaudeCodeStore,
+        migrationIDs: CLAUDE_STORE_STARTUP_MIGRATION_IDS as readonly string[],
+      },
+      {
+        storeID: "codex",
+        init: initCodexAppServerStore,
+        migrationIDs: CODEX_STORE_STARTUP_MIGRATION_IDS as readonly string[],
+      },
+    ] as const;
+
+    // Agent stores are lazy; creating their tables up front makes the startup
+    // pass install (and, warm, reconcile) the agent fence too.
+    function createAgentTables(): void {
+      harness.run(
+        `CREATE TABLE llm_for_zotero_agent_memory (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          conversation_key INTEGER NOT NULL,
+          question_excerpt TEXT NOT NULL,
+          tools_used_json TEXT NOT NULL,
+          answer_excerpt TEXT NOT NULL,
+          created_at INTEGER NOT NULL
+        )`,
+      );
+      harness.run(
+        `CREATE TABLE llm_for_zotero_agent_coverage (
+          scope_key TEXT NOT NULL,
+          coverage_key TEXT NOT NULL,
+          resource_key TEXT NOT NULL,
+          durable INTEGER NOT NULL,
+          origin_conversation_key INTEGER,
+          entry_json TEXT NOT NULL,
+          updated_at INTEGER NOT NULL,
+          PRIMARY KEY(scope_key, coverage_key)
+        )`,
+      );
+      harness.run(
+        `CREATE TABLE llm_for_zotero_attachment_refs (
+          owner_type TEXT NOT NULL,
+          owner_id INTEGER NOT NULL,
+          blob_hash TEXT NOT NULL,
+          updated_at INTEGER NOT NULL,
+          PRIMARY KEY(owner_type, owner_id, blob_hash)
+        )`,
+      );
+    }
+
+    function fingerprint(storeID: string): string | undefined {
+      const [row] = harness.all(
+        `SELECT description FROM ${CONVERSATION_SCHEMA_MIGRATIONS_TABLE} WHERE id = ?`,
+        [startupSchemaFingerprintID(storeID)],
+      );
+      return row ? String(row.description) : undefined;
+    }
+
+    function installedTriggers(): string[] {
+      return harness
+        .all(`SELECT name FROM sqlite_master WHERE type = 'trigger'`)
+        .map((row) => String(row.name));
+    }
+
+    async function coldStart(): Promise<void> {
+      for (const store of STORES) {
+        const before = harness.transactions();
+        const from = harness.statements.length;
+        await store.init();
+        assert.isAbove(
+          harness.transactions(),
+          before,
+          `${store.storeID} must migrate inside a transaction on a cold start`,
+        );
+        // Every migration marker a startup pass writes must be declared in
+        // the store's fingerprint list; otherwise adding a migration would
+        // not force the next launch back onto the transactional path.
+        const written = harness.statements
+          .slice(from)
+          .filter(
+            (statement) =>
+              statement.inTransaction &&
+              statement.sql.includes(
+                `INSERT INTO ${CONVERSATION_SCHEMA_MIGRATIONS_TABLE}`,
+              ),
+          )
+          .map((statement) => String(statement.params[0]));
+        assert.isNotEmpty(written);
+        for (const id of written) {
+          if (id === startupSchemaFingerprintID(store.storeID)) continue;
+          assert.include(
+            store.migrationIDs,
+            id,
+            `${store.storeID} wrote migration marker ${id} without declaring it`,
+          );
+        }
+        assert.isString(fingerprint(store.storeID));
+      }
+    }
+
+    it("holds no transaction and issues no trigger DDL on a warm start", async function () {
+      createAgentTables();
+      await coldStart();
+      const triggersAfterCold = installedTriggers().sort();
+      assert.include(
+        triggersAfterCold,
+        "llm_for_zotero_chat_messages_conversation_fence_v2_insert",
+      );
+      assert.include(
+        triggersAfterCold,
+        "llm_for_zotero_codex_conversations_conversation_fence_v2_update",
+      );
+      assert.include(
+        triggersAfterCold,
+        "llm_for_zotero_agent_memory_retired_key_insert",
+      );
+      // Deferred startup maintenance records the ID transition after the
+      // first session; until then the legacy reconciliation branches may run.
+      await markConversationIDTransitionMigrationApplied();
+
+      const beforeWarm = harness.transactions();
+      const from = harness.statements.length;
+      for (const store of STORES) await store.init();
+      const warm = harness.statements.slice(from);
+
+      assert.equal(
+        harness.transactions(),
+        beforeWarm,
+        "a warm start must not open a transaction Zotero could wait on",
+      );
+      assert.deepEqual(
+        warm.filter((statement) => statement.inTransaction),
+        [],
+      );
+      assert.deepEqual(
+        warm
+          .map((statement) => statement.sql)
+          .filter((sql) => /\b(CREATE|DROP)\s+TRIGGER\b/i.test(sql)),
+        [],
+      );
+      assert.deepEqual(installedTriggers().sort(), triggersAfterCold);
+    });
+
+    it("returns to the transactional path when a fingerprint is stale", async function () {
+      createAgentTables();
+      await coldStart();
+      await markConversationIDTransitionMigrationApplied();
+      const current = fingerprint("codex");
+      harness.run(
+        `UPDATE ${CONVERSATION_SCHEMA_MIGRATIONS_TABLE}
+         SET description = 'stale' WHERE id = ?`,
+        [startupSchemaFingerprintID("codex")],
+      );
+
+      const before = harness.transactions();
+      for (const store of STORES) await store.init();
+
+      assert.equal(
+        harness.transactions(),
+        before + 1,
+        "only the store with a stale fingerprint migrates transactionally",
+      );
+      assert.equal(fingerprint("codex"), current);
+    });
+
+    it("keeps the transactional path until the ID transition is recorded", async function () {
+      await coldStart();
+      const before = harness.transactions();
+      for (const store of STORES) await store.init();
+      assert.equal(harness.transactions(), before + STORES.length);
+    });
+
+    it("retires a crash orphan atomically on a warm start", async function () {
+      await coldStart();
+      await markConversationIDTransitionMigrationApplied();
+      // A crash between key allocation and the catalog commit leaves a live
+      // ledger row and a registry row with no catalog witness.
+      const orphanKey = CODEX_GLOBAL_CONVERSATION_KEY_BASE + 77;
+      harness.run(
+        `INSERT INTO llm_for_zotero_conversation_key_ledger
+          (conversation_key, instance_id, conversation_id, system, kind,
+           profile_signature, library_id, issued_at)
+         VALUES (?, 'orphan-instance', 'orphan-conversation', 'codex',
+                 'global', 'profile', 1, 1)`,
+        [orphanKey],
+      );
+      harness.run(
+        `INSERT INTO llm_for_zotero_conversation_registry
+          (instance_id, conversation_id, legacy_conversation_key, system, kind,
+           profile_signature, library_id, created_at, updated_at)
+         VALUES ('orphan-instance', 'orphan-conversation', ?, 'codex',
+                 'global', 'profile', 1, 1, 1)`,
+        [orphanKey],
+      );
+
+      const before = harness.transactions();
+      const from = harness.statements.length;
+      for (const store of STORES) await store.init();
+      const warm = harness.statements.slice(from);
+
+      assert.equal(
+        harness.transactions(),
+        before + 1,
+        "only the orphan's retirement opens a (short) transaction",
+      );
+      const inTransaction = warm.filter((statement) => statement.inTransaction);
+      assert.isTrue(
+        inTransaction.some((statement) =>
+          /UPDATE llm_for_zotero_conversation_key_ledger/.test(statement.sql),
+        ),
+      );
+      assert.isTrue(
+        inTransaction.some((statement) =>
+          /DELETE FROM llm_for_zotero_conversation_registry/.test(
+            statement.sql,
+          ),
+        ),
+      );
+      const [ledger] = harness.all(
+        `SELECT retired_at AS retiredAt FROM llm_for_zotero_conversation_key_ledger
+         WHERE conversation_key = ?`,
+        [orphanKey],
+      );
+      assert.isNotNull(ledger.retiredAt);
+      assert.lengthOf(
+        harness.all(
+          `SELECT 1 FROM llm_for_zotero_conversation_registry
+           WHERE legacy_conversation_key = ?`,
+          [orphanKey],
+        ),
+        0,
+      );
+    });
+
+    it("stays transactional when a declared migration marker is missing", async function () {
+      await coldStart();
+      await markConversationIDTransitionMigrationApplied();
+      harness.run(
+        `DELETE FROM ${CONVERSATION_SCHEMA_MIGRATIONS_TABLE} WHERE id = ?`,
+        [CLAUDE_STORE_STARTUP_MIGRATION_IDS[1]],
+      );
+      const before = harness.transactions();
+      await initClaudeCodeStore();
+      assert.equal(harness.transactions(), before + 1);
     });
   });
 
