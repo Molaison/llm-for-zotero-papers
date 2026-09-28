@@ -1485,6 +1485,25 @@ function isVerifiedQuoteCitation(citation: QuoteCitation): boolean {
   return Boolean(citation.sourceMatchKind || citation.sourceMatchSource);
 }
 
+/** Retrieval metadata alone is not a verified PDF destination. */
+export function hasVerifiedQuoteLocation(citation: QuoteCitation): boolean {
+  return Boolean(
+    citation.sourceMatchSource === "pdf-page-text" &&
+    citation.sourceMatchText &&
+    citation.sourceFingerprint &&
+    normalizePositiveInt(citation.contextItemId) &&
+    normalizePageHintIndex(citation.pageHintIndex) !== undefined &&
+    normalizeZeroBasedIndex(citation.sourceMatchPageOccurrence) !== undefined &&
+    ["exact", "normalized-span", "selected-text", "ellipsis-segment"].includes(
+      citation.sourceMatchKind || "",
+    ) &&
+    bindQuoteCitationToDisplayedText(
+      citation,
+      citation.displayQuoteText || citation.quoteText,
+    ),
+  );
+}
+
 function filterVerifiedQuoteCitations(
   quoteCitations: QuoteCitation[] | undefined | null,
 ): QuoteCitation[] {
@@ -2742,7 +2761,10 @@ function resolveUniqueDisplayedQuoteAnchorCitation(params: {
     quoteText: displayedQuoteText,
     citationLabel: resolved.source.citationLabel,
     sourceMatchText,
-    sourceMatchKind: resolved.match.matchKind,
+    // The anchor's search strategy can be partial, but the checks above
+    // establish support for the complete displayed passage.
+    sourceMatchKind:
+      resolved.match.matchKind === "exact" ? "exact" : "normalized-span",
     sourceMatchSource:
       resolved.source.sourceMatchSource ||
       (resolved.source.pageHintIndex !== undefined
@@ -2860,6 +2882,7 @@ export type QuoteSecondaryEvidence =
         pageLabel?: string;
         sourceMatchText: string;
         sourceMatchKind?: "exact" | "normalized-span";
+        verificationMode?: "complete-quote" | "inline-math-locator";
         sourceMatchPageOccurrence: number;
       };
     }
@@ -2893,16 +2916,16 @@ type StrongPartialQuoteSource = {
   source: QuoteSourceIndexEntry;
 };
 
-type ExactUnpagedInlineMathQuoteSource = {
+type ExactUnpagedQuoteSource = {
   source: QuoteSourceIndexEntry;
 };
 
-function collectExactUnpagedInlineMathQuoteSources(params: {
+function collectExactUnpagedQuoteSources(params: {
   quoteText: string;
   sourceIndex: QuoteSourceIndex;
-}): ExactUnpagedInlineMathQuoteSource[] {
+}): ExactUnpagedQuoteSource[] {
   const displayed = normalizeDisplayedQuoteForExactBinding(params.quoteText);
-  if (!displayed || !splitQuoteAtPairedInlineMath(displayed.quoteText)) {
+  if (!displayed) {
     return [];
   }
 
@@ -3233,26 +3256,23 @@ export function classifyDisplayedQuoteSource(params: {
   if (quoteCitations.length) {
     return { kind: "matched", quoteCitations };
   }
-  const exactUnpagedInlineMathSources =
-    collectExactUnpagedInlineMathQuoteSources({
-      quoteText,
-      sourceIndex: params.secondarySourceIndex || params.sourceIndex,
-    });
-  if (exactUnpagedInlineMathSources.length) {
+  const exactUnpagedSources = collectExactUnpagedQuoteSources({
+    quoteText,
+    sourceIndex: params.secondarySourceIndex || params.sourceIndex,
+  });
+  if (exactUnpagedSources.length) {
     const quoteKey = buildQuoteSecondaryEvidenceKey(quoteText);
     const evidenceByContextItemId = new Map(
       (params.secondaryEvidence || [])
         .filter((entry) => entry.quoteKey === quoteKey)
         .map((entry) => [entry.contextItemId, entry]),
     );
-    const resolvedEvidence = exactUnpagedInlineMathSources.map(
-      ({ source }) => ({
-        source,
-        evidence: source.contextItemId
-          ? evidenceByContextItemId.get(source.contextItemId)
-          : undefined,
-      }),
-    );
+    const resolvedEvidence = exactUnpagedSources.map(({ source }) => ({
+      source,
+      evidence: source.contextItemId
+        ? evidenceByContextItemId.get(source.contextItemId)
+        : undefined,
+    }));
     if (
       resolvedEvidence.some(
         ({ evidence }) => !evidence || evidence.status === "defer",
@@ -3265,7 +3285,11 @@ export function classifyDisplayedQuoteSource(params: {
         entry,
       ): entry is typeof entry & {
         evidence: Extract<QuoteSecondaryEvidence, { status: "matched" }>;
-      } => entry.evidence?.status === "matched",
+      } =>
+        entry.evidence?.status === "matched" &&
+        (Boolean(splitQuoteAtPairedInlineMath(quoteText)) ||
+          entry.evidence.certificate.verificationMode === "complete-quote" ||
+          entry.evidence.certificate.sourceMatchKind === "exact"),
     );
     if (matched.length > 1) return { kind: "defer" };
     if (matched.length === 1) {
@@ -3287,8 +3311,18 @@ export function classifyDisplayedQuoteSource(params: {
   if (trailingPartialCitation) {
     return { kind: "matched", quoteCitations: [trailingPartialCitation] };
   }
+  const hasCompletePdfCertificate = (params.secondaryEvidence || []).some(
+    (entry) =>
+      entry.quoteKey === buildQuoteSecondaryEvidenceKey(quoteText) &&
+      entry.status === "matched" &&
+      entry.certificate.verificationMode === "complete-quote" &&
+      params.sourceIndex.sources.some(
+        (source) => source.contextItemId === entry.contextItemId,
+      ),
+  );
   if (
     params.sourceEvidenceComplete &&
+    !hasCompletePdfCertificate &&
     hasUniqueAffirmativeHardMismatch({
       quoteText,
       sourceIndex: params.secondarySourceIndex || params.sourceIndex,
@@ -3330,6 +3364,7 @@ export function classifyDisplayedQuoteSource(params: {
       )
       .filter(
         ({ evidence }) =>
+          evidence.certificate.verificationMode === "complete-quote" ||
           evidence.certificate.sourceMatchKind !== "normalized-span",
       );
     if (matched.length > 1) return { kind: "defer" };
@@ -3887,7 +3922,7 @@ export function collectDisplayedQuoteVerificationRequests(params: {
         });
       }
     }
-    for (const exact of collectExactUnpagedInlineMathQuoteSources({
+    for (const exact of collectExactUnpagedQuoteSources({
       quoteText,
       sourceIndex: params.sourceIndex,
     })) {
@@ -3898,7 +3933,9 @@ export function collectDisplayedQuoteVerificationRequests(params: {
         quoteKey,
         quoteText,
         contextItemId,
-        verificationMode: "inline-math-locator",
+        verificationMode: splitQuoteAtPairedInlineMath(quoteText)
+          ? "inline-math-locator"
+          : "complete-quote",
       });
     }
   }

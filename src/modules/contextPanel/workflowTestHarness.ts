@@ -2907,7 +2907,7 @@ async function renderAssistantForPanel(
     bubble.querySelectorAll(".llm-quote-card-body"),
   ).map((node) => ((node as Element).textContent || "").trim());
   for (const quoteCard of quoteCards) {
-    if (quoteCard.dataset.quoteStatus === "verified") quoteCard.click();
+    if (quoteCard.dataset.quoteInteractive === "true") quoteCard.click();
   }
   return {
     renderedText: bubble.textContent || "",
@@ -3113,13 +3113,13 @@ async function probeTargetedRerenderScrollStability(params: {
   record("start");
   // The reader is on the last card of the later message: the repeated quote,
   // whose citation id also belongs to an earlier card in the same message.
-  const verifiedCards = Array.from(
+  const interactiveCards = Array.from(
     expandedWrapper.querySelectorAll(
-      '.llm-quote-card[data-quote-status="verified"]',
+      '.llm-quote-card[data-quote-interactive="true"]',
     ),
   ) as HTMLElement[];
-  const card = verifiedCards[verifiedCards.length - 1];
-  if (!card) throw new Error("Expanded message rendered no verified card");
+  const card = interactiveCards[interactiveCards.length - 1];
+  if (!card) throw new Error("Expanded message rendered no interactive card");
   // The card straddles the top edge, as a card the reader has just scrolled
   // past does; the anchor search prefers exactly that card.
   chatBox.scrollTop +=

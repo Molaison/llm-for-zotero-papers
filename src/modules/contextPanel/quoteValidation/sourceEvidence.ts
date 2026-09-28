@@ -18,7 +18,10 @@ import {
   ensureNoteTextCached,
   ensurePDFTextCached,
 } from "../../../services/paperContent/pdfContext";
-import type { QuoteSourceText } from "../../../services/quotes/quoteCitations";
+import {
+  hasVerifiedQuoteLocation,
+  type QuoteSourceText,
+} from "../../../services/quotes/quoteCitations";
 import { normalizePaperContextRefs } from "../../../services/context/normalizers";
 import type { QuoteCitation } from "../../../shared/types";
 import { t } from "../../../utils/i18n";
@@ -327,7 +330,9 @@ export function assistantMarkdownNeedsBackgroundQuoteSearch(
   quoteCitations: QuoteCitation[] | undefined,
 ): boolean {
   const knownIds = new Set(
-    (quoteCitations || []).map((citation) => citation.id),
+    (quoteCitations || [])
+      .filter(hasVerifiedQuoteLocation)
+      .map((citation) => citation.id),
   );
   let hasUnresolvedAnchor = false;
   const withoutResolvedAnchors = (markdown || "").replace(

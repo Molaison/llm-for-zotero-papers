@@ -2,6 +2,7 @@ import type { QuoteCitation } from "../../shared/types";
 import type { Message } from "./types";
 import {
   bindQuoteCitationToDisplayedText,
+  hasVerifiedQuoteLocation,
   findAdjacentStandaloneQuoteCitation,
   normalizeQuoteCitations,
   parseStructuredBlockquoteQuoteBinding,
@@ -238,7 +239,9 @@ function createOccurrenceFromCitation(
     displayText,
     lookupText,
     citationLabel: citation.citationLabel,
-    trust: "trusted-anchor",
+    trust: hasVerifiedQuoteLocation(citation)
+      ? "trusted-anchor"
+      : "unverified-source-label",
     source: "structured-anchor",
     contextItemId: citation.contextItemId,
     itemId: citation.itemId,
@@ -322,7 +325,11 @@ function createLegacyOccurrence(params: {
       ? resolveQuoteCitationLookupText(citation)
       : params.quoteText,
     citationLabel: citation?.citationLabel || citationLabel,
-    trust: citation ? "verified-source" : "legacy-inferred",
+    trust: citation
+      ? hasVerifiedQuoteLocation(citation)
+        ? "verified-source"
+        : "unverified-source-label"
+      : "legacy-inferred",
     source: citation ? "verified-markdown" : "legacy-markdown",
     contextItemId: citation?.contextItemId,
     itemId: citation?.itemId,
@@ -502,6 +509,9 @@ export function buildQuoteRenderPlan(
             citation?.citationLabel || structuredBinding.citationLabel || "",
           ]
             .filter(Boolean)
+            .join("\n")
+            .split("\n")
+            .map((line) => `> ${line}`)
             .join("\n"),
         );
         index -= 1;

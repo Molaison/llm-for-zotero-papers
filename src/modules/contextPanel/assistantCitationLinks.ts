@@ -15,6 +15,7 @@ import {
 } from "../../services/context/normalizers";
 import {
   findMatchingTrustedQuoteCitation,
+  hasVerifiedQuoteLocation,
   MIN_NEAR_COMPLETE_QUOTE_SUPPORT_COVERAGE,
   MIN_NEAR_COMPLETE_QUOTE_SUPPORTED_TOKENS,
   normalizeQuoteCitations,
@@ -4732,6 +4733,10 @@ function createQuoteCitationAnchorElement(params: {
     quoteText: displayText,
     quoteCitationId: params.quoteCitation.id,
     citationContent,
+    status: hasVerifiedQuoteLocation(params.quoteCitation)
+      ? "verified"
+      : "unresolved",
+    interactive: true,
   });
 }
 
@@ -4786,7 +4791,10 @@ function createQuoteRenderOccurrenceElement(params: {
       quoteOccurrenceId: params.occurrence.occurrenceId,
       citationContent,
       quoteContent: params.quoteContent,
-      status: "verified",
+      status: hasVerifiedQuoteLocation(trustedCitation)
+        ? "verified"
+        : "unresolved",
+      interactive: true,
     });
   }
 
@@ -5518,6 +5526,10 @@ export function decorateAssistantCitationLinks(params: {
       quoteCitationId: trustedQuoteCitation.id,
       citationContent: citationElement,
       quoteContent: displayedQuoteContent,
+      status: hasVerifiedQuoteLocation(trustedQuoteCitation)
+        ? "verified"
+        : "unresolved",
+      interactive: true,
     });
     const blockquoteParent = blockquote.parentNode;
     if (!blockquoteParent) continue;

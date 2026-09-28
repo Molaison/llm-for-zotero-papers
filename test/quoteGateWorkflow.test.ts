@@ -103,7 +103,7 @@ describe("minimal source-match quote gate workflow", function () {
     resetQuoteValidationActivityForTests();
   });
 
-  it("keeps a registered Eppler anchor trusted without source I/O", async function () {
+  it("keeps a fully certified Eppler anchor trusted without source I/O", async function () {
     const source = installPdfSource(contextItemId, "Unneeded PDF text.");
     restoreSource = source.restore;
     const citation = buildQuoteCitation({
@@ -119,6 +119,9 @@ describe("minimal source-match quote gate workflow", function () {
       contextItemId,
       itemId: paper.itemId,
       pageHintLabel: "10",
+      pageHintIndex: 9,
+      sourceFingerprint: "pdf:eppler",
+      sourceMatchPageOccurrence: 0,
     });
     assert.isDefined(citation);
     const userMessage: Message = {

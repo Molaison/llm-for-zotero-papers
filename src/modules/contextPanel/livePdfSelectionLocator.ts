@@ -2387,6 +2387,7 @@ export async function verifyCompleteQuoteInLivePdfJs(
             pageLabel: inlineMathLocation.page.pageLabel,
             sourceMatchText: inlineMathLocation.sourceMatchText,
             sourceMatchKind: "normalized-span",
+            verificationMode: "inline-math-locator",
             sourceMatchPageOccurrence:
               inlineMathLocation.sourceMatchPageOccurrence,
           },
@@ -2461,6 +2462,7 @@ export async function verifyCompleteQuoteInLivePdfJs(
       sourceMatchText,
       sourceMatchKind:
         sourceMatchText === cleanQuote ? "exact" : "normalized-span",
+      verificationMode: "complete-quote",
       sourceMatchPageOccurrence: location.span.occurrenceIndex,
     },
   };
