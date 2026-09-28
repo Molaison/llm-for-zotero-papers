@@ -19,6 +19,9 @@ import type {
   StoredChunkMeta,
 } from "./store";
 
+/** sourceType of a document whose attachment yielded no text (e.g. a scan). */
+export const NO_TEXT_SOURCE_TYPE = "none";
+
 export type IndexLane = "prefetch" | "urgent";
 export type IndexAttachmentResult = {
   status: "indexed" | "unchanged" | "no_text" | "skipped";
@@ -135,6 +138,29 @@ export async function indexAttachment(params: {
     );
     const ctx = pdfTextCache.get(attachmentId);
     if (!ctx || !ctx.chunks.length) {
+      // Persist a zero-chunk row: a scanned PDF is then not re-extracted every
+      // session, and reconcile still re-queues it when the file changes or a
+      // MinerU cache appears (its sourceType is not "mineru").
+      const fileState = await readAttachmentFileState(params.item);
+      await params.store.upsertDocument({
+        attachmentId,
+        attachmentKey: String(
+          (params.item as unknown as { key?: unknown }).key || "",
+        ),
+        libraryID: params.libraryID,
+        parentItemId:
+          typeof params.item.parentID === "number"
+            ? params.item.parentID
+            : null,
+        title: "",
+        sourceType: NO_TEXT_SOURCE_TYPE,
+        sourceFingerprint: NO_TEXT_SOURCE_TYPE,
+        sourceMtime: fileState?.mtime ?? null,
+        sourceSize: fileState?.size ?? null,
+        chunkerVersion: LIBRARY_TEXT_INDEX_CHUNKER_VERSION,
+        byteEstimate: 0,
+        chunks: [],
+      });
       return {
         status: "no_text",
         attachmentId,

@@ -28,3 +28,5 @@ export const INDEX_PRIORITY = {
   writeThrough: 10,
 } as const;
 export const INDEX_URGENT_MIN_PRIORITY = 5; // >= this drains regardless of user idle
+export const INDEX_URGENT_ADD_BATCH_MAX = 20; // a larger notifier add batch (e.g. an initial sync) goes to prefetch
+export const INDEX_STOP_GRACE_MS = 10_000; // stop() waits this long for an in-flight job before closing

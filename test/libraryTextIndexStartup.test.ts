@@ -49,4 +49,30 @@ describe("library text index startup", function () {
       harness.close();
     }
   });
+  it("with the pref off, startup never opens or creates the index database", async function () {
+    let opened = 0;
+    (globalThis as any).Zotero = {
+      ...(previous || {}),
+      Libraries: { userLibraryID: 1, getAll: () => [{ libraryID: 1 }] },
+      Items: { get: () => false },
+      Prefs: {
+        get: (key: string) =>
+          key.endsWith(".libraryTextIndexEnabled") ? false : undefined,
+      },
+    };
+    await startLibraryTextIndex({
+      getStore: async () => {
+        opened += 1;
+        return null;
+      },
+      getSnapshot: async () =>
+        ({
+          pdfAttachmentIdsByItemId: new Map(),
+          attachmentById: new Map(),
+          itemById: new Map(),
+        }) as any,
+    });
+    await new Promise((r) => setTimeout(r, 10)); // let a first drain run, if any
+    assert.equal(opened, 0);
+  });
 });

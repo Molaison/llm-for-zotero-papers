@@ -11,6 +11,8 @@ import {
   INDEX_DRAIN_GAP_MS,
   INDEX_PRIORITY,
   INDEX_RETRY_BACKOFF_MS,
+  INDEX_STOP_GRACE_MS,
+  INDEX_URGENT_ADD_BATCH_MAX,
 } from "../src/services/libraryTextIndex/constants";
 
 type Timer = { cb: () => void; at: number; cleared: boolean };
@@ -371,6 +373,19 @@ describe("library text index scheduler", function () {
       extraData: {},
       receivedAt: 0,
     });
+    assert.equal(
+      (await store.dequeueNext({ now: clock }))?.reason,
+      "added",
+      "a modify on an already-queued attachment leaves its row alone",
+    );
+    await store.removeFromQueue([2]);
+    await scheduler.handleChange({
+      event: "modify",
+      type: "file",
+      ids: [2],
+      extraData: {},
+      receivedAt: 0,
+    });
     assert.equal((await store.dequeueNext({ now: clock }))?.reason, "modified");
     await store.upsertDocument(docRow(2));
     await scheduler.handleChange({
@@ -423,7 +438,7 @@ describe("library text index scheduler", function () {
     assert.equal((await store.countQueue(1)).queued, 0);
   });
 
-  it("a job finishing after stop() does not reschedule", async function () {
+  it("stop() waits for the in-flight job, and a job finishing after stop() does not reschedule", async function () {
     let finish!: () => void;
     (scheduler as any).env.indexOne = () =>
       new Promise<any>((r) => {
@@ -438,20 +453,196 @@ describe("library text index scheduler", function () {
     await scheduler.enqueue([1], "added");
     scheduler.start();
     await runDueTimers();
-    await scheduler.stop();
-    timers.length = 0;
-    finish();
+    let stopped = false;
+    const stopping = scheduler.stop().then(() => {
+      stopped = true;
+    });
     await new Promise((r) => setImmediate(r));
-    assert.lengthOf(timers, 0, "no timer armed after stop");
+    assert.isFalse(stopped, "stop() must not resolve under a running job");
+    finish();
+    await stopping;
+    const armed = timers.filter((t) => !t.cleared);
+    assert.lengthOf(armed, 0, "no timer armed after stop");
   });
 
-  it("does nothing when disabled", async function () {
-    (scheduler as any).env.isEnabled = () => false;
+  it("stop() gives up waiting for a stuck job after the grace period", async function () {
+    (scheduler as any).env.indexOne = () => new Promise(() => undefined);
     await scheduler.enqueue([1], "added");
     scheduler.start();
+    await runDueTimers();
+    let stopped = false;
+    const stopping = scheduler.stop().then(() => {
+      stopped = true;
+    });
+    clock += INDEX_STOP_GRACE_MS - 1;
+    await runDueTimers();
+    assert.isFalse(stopped);
+    clock += 1;
+    await runDueTimers();
+    await stopping;
+    assert.isTrue(stopped);
+    await scheduler.stop(); // an abandoned job is not waited for twice
+  });
+
+  it("a backoff timer does not delay newer work", async function () {
+    (scheduler as any).env.indexOne = async ({ item, lane }: any) => {
+      if (item.id === 1) throw new Error("extract failed");
+      indexed.push({ id: item.id, lane });
+      return {
+        status: "indexed",
+        attachmentId: item.id,
+        chunkCount: 0,
+        elapsedMs: 1,
+      };
+    };
+    await scheduler.enqueue([1], "added");
+    scheduler.start();
+    await drainAll(2); // 1 fails; the loop parks on a 60 s backoff timer
+    await scheduler.enqueue([2], "writeThrough");
     await drainAll(2);
+    assert.deepEqual(indexed, [{ id: 2, lane: "urgent" }]);
+  });
+
+  it("modify never promotes a queued prefetch row or resurrects a parked row", async function () {
+    await store.enqueue([
+      {
+        attachmentId: 1,
+        libraryID: 1,
+        priority: INDEX_PRIORITY.prefetch,
+        reason: "prefetch",
+      },
+      {
+        attachmentId: 2,
+        libraryID: 1,
+        priority: INDEX_PRIORITY.prefetch,
+        reason: "prefetch",
+      },
+    ]);
+    for (let i = 0; i < 3; i += 1)
+      await store.markQueueAttempt(2, "permanent", clock);
+    await scheduler.handleChange({
+      event: "modify",
+      type: "item",
+      ids: [1, 2],
+      extraData: {},
+      receivedAt: 0,
+    });
+    const rows = harness.rows(
+      "SELECT attachment_id, priority, attempts FROM queue ORDER BY attachment_id",
+    );
+    assert.deepEqual(
+      rows.map((r) => [r.attachment_id, r.priority, r.attempts]),
+      [
+        [1, INDEX_PRIORITY.prefetch, 0],
+        [2, INDEX_PRIORITY.prefetch, 3],
+      ],
+    );
+    // A modify on an attachment with no document and no queue row is enqueued.
+    await scheduler.handleChange({
+      event: "modify",
+      type: "item",
+      ids: [3],
+      extraData: {},
+      receivedAt: 0,
+    });
+    assert.equal(
+      harness.rows("SELECT reason FROM queue WHERE attachment_id = 3")[0]
+        ?.reason,
+      "modified",
+    );
+    // A real file change re-queues an indexed paper even with a parked row.
+    await store.upsertDocument(docRow(2));
+    fileStates.set(2, { path: "/p.pdf", size: 999, mtime: 1000 });
+    await scheduler.handleChange({
+      event: "modify",
+      type: "file",
+      ids: [2],
+      extraData: {},
+      receivedAt: 0,
+    });
+    assert.equal(
+      harness.rows("SELECT attempts FROM queue WHERE attachment_id = 2")[0]
+        ?.attempts,
+      0,
+    );
+  });
+
+  it("enqueues a large notifier add batch at prefetch priority and a small one as urgent", async function () {
+    const big = Array.from(
+      { length: INDEX_URGENT_ADD_BATCH_MAX + 1 },
+      (_, i) => 100 + i,
+    );
+    await scheduler.handleChange({
+      event: "add",
+      type: "item",
+      ids: big,
+      extraData: {},
+      receivedAt: 0,
+    });
+    const priorities = harness
+      .rows("SELECT DISTINCT priority FROM queue")
+      .map((r) => r.priority);
+    assert.deepEqual(
+      priorities,
+      [INDEX_PRIORITY.prefetch],
+      "an initial sync must not flood the urgent lane",
+    );
+    const small = Array.from(
+      { length: INDEX_URGENT_ADD_BATCH_MAX },
+      (_, i) => 500 + i,
+    );
+    await scheduler.handleChange({
+      event: "add",
+      type: "item",
+      ids: small,
+      extraData: {},
+      receivedAt: 0,
+    });
+    assert.lengthOf(
+      harness.rows("SELECT * FROM queue WHERE priority = ?", [
+        INDEX_PRIORITY.added,
+      ]),
+      INDEX_URGENT_ADD_BATCH_MAX,
+    );
+  });
+
+  it("takes no prefetch job above the soft budget, but still runs urgent jobs", async function () {
+    budget = 1000; // soft limit 900
+    await store.upsertDocument(docRow(9, { byteEstimate: 950 }));
+    await scheduler.enqueue([1], "prefetch");
+    await scheduler.enqueue([2], "added");
+    scheduler.start();
+    await drainAll(4);
+    assert.deepEqual(indexed, [{ id: 2, lane: "urgent" }]);
+  });
+
+  it("does nothing, and never opens the index, when disabled", async function () {
+    (scheduler as any).env.isEnabled = () => false;
+    let opened = 0;
+    (scheduler as any).env.getStore = async () => {
+      opened += 1;
+      return store;
+    };
+    await scheduler.enqueue([1], "added");
+    await scheduler.handleChange({
+      event: "add",
+      type: "item",
+      ids: [2],
+      extraData: {},
+      receivedAt: 0,
+    });
+    await scheduler.reconcileAll();
+    assert.equal(await scheduler.enforceBudget(), 0);
+    scheduler.start();
+    await drainAll(2);
+    assert.isTrue(await scheduler.waitForIdle(1000));
     assert.deepEqual(indexed, []);
     assert.isFalse((await scheduler.getStatus(1)).enabled);
+    assert.equal(
+      opened,
+      0,
+      "a disabled index never opens (or creates) its database",
+    );
   });
 
   it("waitForIdle resolves true once both lanes are drained and false on timeout", async function () {
@@ -466,5 +657,10 @@ describe("library text index scheduler", function () {
     clock += 200;
     await runDueTimers();
     assert.isFalse(await stuck);
+    // Release the stuck job so afterEach's stop() does not wait on it.
+    const stopping = scheduler.stop();
+    clock += INDEX_STOP_GRACE_MS;
+    await runDueTimers();
+    await stopping;
   });
 });

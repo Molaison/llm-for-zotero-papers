@@ -107,6 +107,9 @@ export async function startLibraryTextIndex(
     libraryTextIndexScheduler.handleContextLoaded(itemId),
   );
   libraryTextIndexScheduler.start();
+  // Disabled: stay subscribed (every handler re-checks the pref) but never
+  // open, and so never create, the index database.
+  if (!scheduler.env.isEnabled()) return;
   await libraryTextIndexScheduler.reconcileAll();
 }
 

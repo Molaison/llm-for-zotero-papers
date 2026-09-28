@@ -198,7 +198,33 @@ describe("library text indexer", function () {
       lane: "prefetch",
     });
     assert.equal(result.status, "no_text");
-    assert.isNull(await store.getDocument(9999));
+    // A zero-chunk row, so a scanned PDF is not re-extracted every session;
+    // reconcile's stat and MinerU-upgrade checks still re-queue it on change.
+    const row = await store.getDocument(9999);
+    assert.equal(row?.sourceType, "none");
+    assert.equal(row?.chunkCount, 0);
+    assert.equal(row?.byteEstimate, 0);
+    assert.deepEqual((await store.getCoverage([9999])).missing, []);
+  });
+
+  it("records the file state on a no_text row so a changed file is re-queued", async function () {
+    const item = Object.assign(mockPdfAttachment(9999), {
+      getFilePathAsync: async () => "/storage/K9999/scan.pdf",
+    }) as unknown as Zotero.Item;
+    (globalThis as any).IOUtils.stat = async () => ({
+      size: 777,
+      lastModified: 4242,
+    });
+    const result = await indexAttachment({
+      item,
+      libraryID: 1,
+      store,
+      lane: "prefetch",
+    });
+    assert.equal(result.status, "no_text");
+    const row = await store.getDocument(9999);
+    assert.equal(row?.sourceMtime, 4242);
+    assert.equal(row?.sourceSize, 777);
   });
 
   it("pins the chunker output so a chunking change forces a version bump", async function () {

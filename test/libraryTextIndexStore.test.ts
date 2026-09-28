@@ -269,4 +269,16 @@ describe("library text index store", function () {
       "nothing else changes",
     );
   });
+  it("never offers a zero-byte (no-text) document for eviction", async function () {
+    await store.upsertDocument(
+      doc(1, [], { sourceType: "none", byteEstimate: 0 }),
+    );
+    await store.upsertDocument(doc(2, ["alpha"]));
+    await store.touchDocuments([1, 2], 1000);
+    const lru = await store.listLeastRecentlyUsed(10, 5000);
+    assert.deepEqual(
+      lru.map((r) => r.attachmentId),
+      [2],
+    );
+  });
 });

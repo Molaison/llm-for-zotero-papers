@@ -27,6 +27,8 @@ import {
   INDEX_PRIORITY,
   INDEX_RECENT_USE_PROTECT_MS,
   INDEX_RECONCILE_STAT_BATCH,
+  INDEX_STOP_GRACE_MS,
+  INDEX_URGENT_ADD_BATCH_MAX,
   INDEX_URGENT_MIN_PRIORITY,
   LIBRARY_TEXT_INDEX_CHUNKER_VERSION,
 } from "./constants";
@@ -159,6 +161,10 @@ type ItemShape = {
 export class LibraryTextIndexScheduler {
   private readonly env: SchedulerEnv;
   private timer: unknown = null;
+  /** When the armed timer fires; an earlier kick replaces it. */
+  private timerDueAt = 0;
+  /** The drain in progress, so stop() can let its write finish. */
+  private inflight: Promise<void> | null = null;
   private running = false;
   private draining = false;
   /** A kick arrived mid-drain; re-check the queue once the drain ends. */
@@ -216,6 +222,22 @@ export class LibraryTextIndexScheduler {
     }
     this.rekick = false;
     this.resolveIdle();
+    // Let a running job finish its write before the caller closes the
+    // database, but never hold shutdown longer than the grace period.
+    const inflight = this.inflight;
+    if (!inflight) return;
+    let grace: unknown = null;
+    const expired = await Promise.race([
+      inflight.then(() => false),
+      new Promise<boolean>((resolve) => {
+        grace = this.env.setTimer(() => resolve(true), INDEX_STOP_GRACE_MS);
+      }),
+    ]);
+    if (grace !== null) this.env.clearTimer(grace);
+    if (expired) {
+      if (this.inflight === inflight) this.inflight = null; // abandoned
+      appLogger.debug("LLM index: stopped without waiting for a stuck job");
+    }
   }
 
   kick(delayMs = 0): void {
@@ -224,12 +246,23 @@ export class LibraryTextIndexScheduler {
       if (delayMs === 0) this.rekick = true;
       return;
     }
-    if (this.timer !== null) return;
+    const dueAt = this.env.now() + delayMs;
+    if (this.timer !== null) {
+      // A parked loop may be waiting on a long backoff; newer work must not.
+      if (dueAt >= this.timerDueAt) return;
+      this.env.clearTimer(this.timer);
+      this.timer = null;
+    }
     const generation = this.generation;
+    this.timerDueAt = dueAt;
     this.timer = this.env.setTimer(() => {
       this.timer = null;
       if (generation !== this.generation) return;
-      void this.drainOne();
+      const drain = this.drainOne();
+      this.inflight = drain;
+      void drain.finally(() => {
+        if (this.inflight === drain) this.inflight = null;
+      });
     }, delayMs);
     (this.timer as { unref?: () => void } | null)?.unref?.();
   }
@@ -282,6 +315,7 @@ export class LibraryTextIndexScheduler {
   }
 
   async reconcileAll(): Promise<void> {
+    if (!this.env.isEnabled()) return;
     for (const libraryID of this.env.listLibraryIds()) {
       try {
         await this.reconcile(libraryID);
@@ -431,17 +465,36 @@ export class LibraryTextIndexScheduler {
     if (change.event !== "add" && change.event !== "modify") return;
     const attachmentIds = this.expandToAttachments(ids, false);
     if (change.event === "add") {
-      await this.enqueue(attachmentIds, "added");
+      // An initial sync adds thousands of items at once: those wait for idle.
+      await this.enqueue(
+        attachmentIds,
+        attachmentIds.length > INDEX_URGENT_ADD_BATCH_MAX
+          ? "prefetch"
+          : "added",
+      );
       return;
     }
-    // Metadata edits and sync touches fire `modify` on every item; only
-    // re-extract when the file itself changed or the paper was never indexed.
+    // Metadata edits and sync touches fire `modify` on every item. Re-extract
+    // only when the file really changed, or when the paper is neither indexed
+    // nor queued: re-enqueueing a queued row would promote a prefetch row to
+    // urgent and give a parked row fresh attempts.
     const store = await this.env.getStore();
     if (!store) return;
+    const queuedByLibrary = new Map<number, Set<number>>();
     const changed: number[] = [];
     for (const attachmentId of attachmentIds) {
       const row = await store.getDocument(attachmentId);
-      if (!row || (await this.staleReason(row))) changed.push(attachmentId);
+      if (row) {
+        if (await this.staleReason(row)) changed.push(attachmentId);
+        continue;
+      }
+      const libraryID = this.libraryFor(attachmentId);
+      let queued = queuedByLibrary.get(libraryID);
+      if (!queued) {
+        queued = await store.listQueuedAttachmentIds(libraryID);
+        queuedByLibrary.set(libraryID, queued);
+      }
+      if (!queued.has(attachmentId)) changed.push(attachmentId);
     }
     await this.enqueue(changed, "modified");
   }
@@ -468,6 +521,7 @@ export class LibraryTextIndexScheduler {
   }
 
   async enforceBudget(): Promise<number> {
+    if (!this.env.isEnabled()) return 0;
     const store = await this.env.getStore();
     if (!store) return 0;
     const budget = this.env.budgetBytes();
@@ -518,7 +572,14 @@ export class LibraryTextIndexScheduler {
         minPriority: INDEX_URGENT_MIN_PRIORITY,
       });
       let lane: "urgent" | "prefetch" = "urgent";
-      if (!job && this.env.isUserIdle() && retrievalActivity === 0) {
+      if (
+        !job &&
+        this.env.isUserIdle() &&
+        retrievalActivity === 0 &&
+        (await store.sumByteEstimates()) <
+          this.env.budgetBytes() * INDEX_BUDGET_SOFT_RATIO
+      ) {
+        // Above the soft budget, prefetch would only index-then-evict.
         job = await store.dequeueNext({ now });
         lane = "prefetch";
       }
@@ -651,6 +712,7 @@ export class LibraryTextIndexScheduler {
         resolve(true);
       };
       this.idleWaiters.push(done);
+      if (!this.env.isEnabled()) return done();
       void this.env
         .getStore()
         .then(async (store) => {

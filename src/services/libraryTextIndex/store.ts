@@ -342,7 +342,7 @@ export class LibraryTextIndexStore {
     Array<{ attachmentId: number; byteEstimate: number; lastUsedAt: number }>
   > {
     const rows = (await this.q(
-      `SELECT attachment_id, byte_estimate, last_used_at FROM documents WHERE last_used_at < ? ORDER BY last_used_at ASC, attachment_id ASC LIMIT ?`,
+      `SELECT attachment_id, byte_estimate, last_used_at FROM documents WHERE last_used_at < ? AND byte_estimate > 0 ORDER BY last_used_at ASC, attachment_id ASC LIMIT ?`,
       [notUsedSince, limit],
     )) as Array<{
       attachment_id: number;
