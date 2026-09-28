@@ -1947,17 +1947,25 @@ export class LibraryRetrieveService {
         const maxSnippets = Math.min(input.perPaperTopK, remaining);
         let paperSnippets: LibraryRetrieveSnippet[];
         if (useIndexSnippets && record.indexed && record.paperContext) {
-          const hits =
-            indexHitsByAttachment.get(record.paperContext.contextItemId) || [];
-          paperSnippets = timer.spanSync("index_search", () =>
-            this.snippetsFromIndexHits({
-              record,
-              hits,
+          const hits = await timer.span("index_search", () =>
+            this.indexHitsForPaper({
+              attachmentId: record.paperContext!.contextItemId,
+              passHits: indexHitsByAttachment.get(
+                record.paperContext!.contextItemId,
+              ),
+              queryOverride:
+                triagePerPaperQueries?.[String(record.target.itemId)],
               maxSnippets,
-              preferBodyEvidence,
             }),
           );
-          record.queryState.add("content_loaded");
+          paperSnippets = this.snippetsFromIndexHits({
+            record,
+            hits,
+            maxSnippets,
+            preferBodyEvidence,
+          });
+          // Loaded only when the index actually served text for the paper.
+          if (hits.length) record.queryState.add("content_loaded");
         } else {
           if (indexResult && !record.indexed) {
             if (fallbackRead >= MAX_UNINDEXED_FALLBACK_PAPERS) {
@@ -2209,6 +2217,37 @@ export class LibraryRetrieveService {
       }
     }
     if (papers.length) methodsUsed.add("fts");
+  }
+
+  /**
+   * The index chunks an indexed paper's evidence comes from: triage's
+   * per-paper query searched against this paper alone, else the pass hits,
+   * else the paper's leading body chunks (the direct path likewise admits
+   * zero-score chunks, so a paper the index did not rank is still read).
+   */
+  private async indexHitsForPaper(params: {
+    attachmentId: number;
+    passHits?: IndexedChunkHit[];
+    queryOverride?: string;
+    maxSnippets: number;
+  }): Promise<IndexedChunkHit[]> {
+    if (params.maxSnippets <= 0) return [];
+    if (params.queryOverride) {
+      const own = await this.textIndex.search({
+        scopeAttachmentIds: [params.attachmentId],
+        queries: [params.queryOverride],
+        maxPapers: 1,
+        perPaperTopK: params.maxSnippets,
+      });
+      if (own?.chunks.length) return own.chunks;
+    }
+    if (params.passHits?.length) return params.passHits;
+    return (
+      (await this.textIndex.leadingChunks(
+        params.attachmentId,
+        params.maxSnippets,
+      )) || []
+    );
   }
 
   /**

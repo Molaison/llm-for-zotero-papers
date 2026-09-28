@@ -384,11 +384,14 @@ export type RetrieveServiceRigOptions = {
    * lexical pass is weak and the probe-reformulation loop runs.
    */
   unmatchedMetadata?: boolean;
+  /** What the fake triage returns (default null: keep lexical ranking). */
+  triageResult?: Awaited<ReturnType<Triage>>;
 };
 
 const DISABLED_TEXT_INDEX: LibraryTextIndexFacade = {
   isEnabled: () => false,
   search: async () => null,
+  leadingChunks: async () => null,
 };
 
 /**
@@ -446,7 +449,7 @@ export function createRetrieveServiceRig(
   };
   const triage: Triage = async () => {
     triageCount += 1;
-    return null;
+    return options.triageResult ?? null;
   };
   const service = new RigLibraryRetrieveService(
     makeGateway(entries, {

@@ -12,7 +12,9 @@ import { libraryTextIndexScheduler, type SchedulerEnv } from "./scheduler";
 import { createUserIdleTracker, type UserIdleTracker } from "./userIdle";
 import { isLibraryTextIndexEnabled } from "./scheduler";
 import {
+  readLeadingIndexChunks,
   searchLibraryTextIndex,
+  type IndexedChunkHit,
   type LibraryTextIndexSearchParams,
   type LibraryTextIndexSearchResult,
 } from "./search";
@@ -40,6 +42,14 @@ export type LibraryTextIndexFacade = {
   search(
     params: Omit<LibraryTextIndexSearchParams, "store">,
   ): Promise<LibraryTextIndexSearchResult | null>;
+  /**
+   * A document's first `k` chunks (body first) as zero-score hits. Null when
+   * the index is disabled, cannot be opened, or the read fails.
+   */
+  leadingChunks(
+    attachmentId: number,
+    k: number,
+  ): Promise<IndexedChunkHit[] | null>;
 };
 export const libraryTextIndex: LibraryTextIndexFacade = {
   isEnabled: () => isLibraryTextIndexEnabled(),
@@ -55,6 +65,18 @@ export const libraryTextIndex: LibraryTextIndexFacade = {
         "LLM index: search failed; falling back to the direct path",
         error,
       );
+      return null;
+    }
+  },
+  async leadingChunks(attachmentId, k) {
+    if (!isLibraryTextIndexEnabled()) return null;
+    try {
+      const store = await getLibraryTextIndexStore();
+      return store
+        ? await readLeadingIndexChunks(store, attachmentId, k)
+        : null;
+    } catch (error) {
+      appLogger.warn("LLM index: leading-chunk read failed", error);
       return null;
     }
   },

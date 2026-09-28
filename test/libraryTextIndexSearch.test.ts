@@ -12,7 +12,11 @@ import { setAppLogSinkForTests, type AppLogLevel } from "../src/core/logging";
 import { LibraryTextIndexStore } from "../src/services/libraryTextIndex/store";
 import { openLibraryTextIndexDb } from "../src/services/libraryTextIndex/db";
 import { buildIndexDocumentFromPdfContext } from "../src/services/libraryTextIndex/indexer";
-import { searchLibraryTextIndex } from "../src/services/libraryTextIndex/search";
+import {
+  readLeadingIndexChunks,
+  searchLibraryTextIndex,
+} from "../src/services/libraryTextIndex/search";
+import { isBodyEvidenceSection } from "../src/shared/libraryChatEvidencePolicy";
 import { libraryTextIndex } from "../src/services/libraryTextIndex";
 import {
   buildChunkIndex,
@@ -231,6 +235,55 @@ describe("library text index search", function () {
     ]);
   });
 
+  it("reads a document's leading chunks body first, in chunk order, with zero scores", async function () {
+    const bio = await buildFixturePdfContext("bioSingleHash", 9001);
+    await store.upsertDocument(
+      buildIndexDocumentFromPdfContext({
+        attachmentId: 9001,
+        attachmentKey: "A",
+        libraryID: 1,
+        parentItemId: 100,
+        fileState: null,
+        ctx: bio,
+      }),
+    );
+    const all = await store.getChunksForDocument(9001);
+    const isBody = (c: { meta: { sectionLabel?: string; chunkKind?: any } }) =>
+      isBodyEvidenceSection(c.meta.sectionLabel, c.meta.chunkKind);
+    const bodyIndexes = all.filter(isBody).map((c) => c.chunkIndex);
+    const frontIndexes = all.filter((c) => !isBody(c)).map((c) => c.chunkIndex);
+    assert.isAbove(bodyIndexes.length, 1, "fixture has body chunks");
+    assert.isAbove(frontIndexes.length, 0, "fixture has front matter");
+    const k = 2;
+    const leading = await readLeadingIndexChunks(store, 9001, k);
+    assert.deepEqual(
+      leading.map((c) => c.chunkIndex),
+      bodyIndexes.slice(0, k),
+      "the first body chunks, in chunk order",
+    );
+    for (const [i, c] of leading.entries()) {
+      assert.equal(c.rank, i + 1);
+      assert.equal(c.bm25Score, 0);
+      assert.equal(c.hybridScore, 0);
+      assert.equal(c.evidenceScore, 0);
+      assert.deepEqual(c.matchedTerms, []);
+      assert.equal(c.parentItemId, 100);
+      assert.equal(c.sourceType, bio.sourceType);
+    }
+    // Asked for more than the body holds: body first, then front matter in order.
+    const everything = await readLeadingIndexChunks(store, 9001, all.length);
+    assert.deepEqual(
+      everything.map((c) => c.chunkIndex),
+      [...bodyIndexes, ...frontIndexes],
+    );
+    assert.deepEqual(await readLeadingIndexChunks(store, 9999, 3), []);
+    const viaFacade = await libraryTextIndex.leadingChunks(9001, k);
+    assert.deepEqual(
+      viaFacade?.map((c) => c.chunkIndex),
+      bodyIndexes.slice(0, k),
+    );
+  });
+
   it("searches through the facade, and returns null when the index is disabled", async function () {
     const bio = await buildFixturePdfContext("bioSingleHash", 9001);
     await store.upsertDocument(
@@ -263,6 +316,7 @@ describe("library text index search", function () {
     try {
       assert.isFalse(libraryTextIndex.isEnabled());
       assert.isNull(await libraryTextIndex.search(params));
+      assert.isNull(await libraryTextIndex.leadingChunks(9001, 2));
     } finally {
       prefs.get = originalGet;
     }
@@ -301,5 +355,17 @@ describe("library text index search", function () {
     const warns = emitted.filter((e) => e.level === "warn");
     assert.lengthOf(warns, 1);
     assert.include(String(warns[0].args[0]), "search failed");
+    const originalGetChunks =
+      LibraryTextIndexStore.prototype.getChunksForDocument;
+    LibraryTextIndexStore.prototype.getChunksForDocument = async function () {
+      throw new Error("database is locked");
+    };
+    setAppLogSinkForTests(() => undefined);
+    try {
+      assert.isNull(await libraryTextIndex.leadingChunks(9001, 2));
+    } finally {
+      setAppLogSinkForTests(null);
+      LibraryTextIndexStore.prototype.getChunksForDocument = originalGetChunks;
+    }
   });
 });

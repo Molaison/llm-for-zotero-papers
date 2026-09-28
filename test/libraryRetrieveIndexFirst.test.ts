@@ -53,21 +53,41 @@ const fullCoverage = (n: number) => ({
 
 /** A fake index whose answer depends on the queries it is asked. */
 function fakeIndex(
-  answer: (queries: string[]) => Partial<LibraryTextIndexSearchResult>,
-): LibraryTextIndexFacade & { calls: string[][] } {
+  answer: (
+    queries: string[],
+    scopeAttachmentIds: number[],
+  ) => Partial<LibraryTextIndexSearchResult>,
+  leading: (
+    attachmentId: number,
+    k: number,
+  ) => ReturnType<typeof hit>[] = () => [],
+): LibraryTextIndexFacade & {
+  calls: string[][];
+  scopes: number[][];
+  leadingCalls: Array<[number, number]>;
+} {
   const calls: string[][] = [];
+  const scopes: number[][] = [];
+  const leadingCalls: Array<[number, number]> = [];
   return {
     calls,
+    scopes,
+    leadingCalls,
     isEnabled: () => true,
+    async leadingChunks(attachmentId, k) {
+      leadingCalls.push([attachmentId, k]);
+      return leading(attachmentId, k);
+    },
     async search(params) {
       calls.push(params.queries);
+      scopes.push(params.scopeAttachmentIds);
       return {
         chunks: [],
         papers: [],
         coverage: fullCoverage(params.scopeAttachmentIds.length),
         queryTerms: ["method"],
         timings: {},
-        ...answer(params.queries),
+        ...answer(params.queries, params.scopeAttachmentIds),
       };
     },
   };
@@ -290,5 +310,76 @@ describe("library retrieve, index first (v2 rules)", function () {
       contextItemId: s!.contextItemId,
     });
     assert.deepEqual(convention(indexSnippet), convention(directSnippet));
+  });
+
+  it("an indexed paper the index did not rank still gets its leading body chunks as evidence", async function () {
+    const index = fakeIndex(
+      () => ({ chunks: [], papers: [] }),
+      (attachmentId, k) =>
+        Array.from({ length: Math.min(k, 2) }, (_, i) => ({
+          ...hit(
+            attachmentId,
+            attachmentId - 1,
+            i + 2,
+            i + 1,
+            `Body passage ${i} of ${attachmentId}.`,
+          ),
+          bm25Score: 0,
+          hybridScore: 0,
+          evidenceScore: 0,
+          matchedTerms: [],
+        })),
+    );
+    const rig = createRetrieveServiceRig({ papers: 2, textIndex: index });
+    const result = await rig.service.retrieve({
+      query: "overall conclusions across these papers",
+      intent: "summarize",
+      depth: "evidence",
+    });
+    assert.deepEqual(
+      [...new Set(result.snippets.map((s) => s.itemId))].sort(),
+      ["10", "20"],
+    );
+    assert.isTrue(result.snippets.every((s) => s.matchMethod === "bm25"));
+    assert.equal(rig.ensurePaperContextCalls(), 0);
+    assert.equal(result.answerContract.indexedTextCoverage, "complete");
+    assert.sameMembers(
+      index.leadingCalls.map(([attachmentId]) => attachmentId),
+      [11, 21],
+    );
+  });
+
+  it("searches the index with triage's per-paper query for that paper", async function () {
+    const index = fakeIndex((queries) =>
+      queries.includes("method")
+        ? { chunks: [hit(21, 20, 0, 1, "p")], papers: [paper(21, 20, 9, 1)] }
+        : queries.includes("grid cell firing")
+          ? { chunks: [hit(31, 30, 4, 1, "Grid cells fire.")], papers: [] }
+          : { chunks: [], papers: [] },
+    );
+    const rig = createRetrieveServiceRig({
+      papers: 3,
+      textIndex: index,
+      unmatchedMetadata: true,
+      modelConfigured: true,
+      triageResult: {
+        selectedItemIds: ["30"],
+        perPaperQueries: { "30": "grid cell firing" },
+      },
+    });
+    const result = await rig.service.retrieve({
+      query: "method",
+      depth: "evidence",
+    });
+    assert.equal(rig.triageCalls(), 1);
+    const i = index.calls.findIndex((q) => q.includes("grid cell firing"));
+    assert.isAtLeast(i, 0, "the per-paper query reached the index");
+    assert.deepEqual(index.calls[i], ["grid cell firing"]);
+    assert.deepEqual(index.scopes[i], [31]);
+    const paper30 = result.snippets.filter((s) => s.itemId === "30");
+    assert.deepEqual(
+      paper30.map((s) => s.chunkIndex),
+      [4],
+    );
   });
 });

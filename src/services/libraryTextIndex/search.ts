@@ -1,3 +1,4 @@
+import { isBodyEvidenceSection } from "../../shared/libraryChatEvidencePolicy";
 import { RRF_K } from "../retrieval/constants";
 import { tokenizeRetrievalQuery } from "../retrieval/retrievalTokenizer";
 import { MAX_QUERY_TERMS } from "./constants";
@@ -268,4 +269,40 @@ export async function searchLibraryTextIndex(
       .touchDocuments(papers.map((p) => p.attachmentId))
       .catch(() => undefined);
   return { chunks, papers, coverage, queryTerms, timings };
+}
+
+/**
+ * A document's first `k` chunks as zero-score hits, body chunks first (in
+ * chunk order) and front matter after, for a shortlisted paper the index did
+ * not rank. Mirrors the direct path, whose candidate builder admits
+ * zero-score chunks, so a synthesis read still gets each paper's body.
+ */
+export async function readLeadingIndexChunks(
+  store: LibraryTextIndexStore,
+  attachmentId: number,
+  k: number,
+): Promise<IndexedChunkHit[]> {
+  const limit = Math.max(0, Math.floor(k));
+  if (!limit) return [];
+  const stored = await store.getChunksForDocument(attachmentId);
+  const isBody = (c: (typeof stored)[number]) =>
+    isBodyEvidenceSection(c.meta.sectionLabel, c.meta.chunkKind);
+  const ordered = [
+    ...stored.filter(isBody),
+    ...stored.filter((c) => !isBody(c)),
+  ];
+  return ordered.slice(0, limit).map((c, index) => ({
+    attachmentId: c.attachmentId,
+    parentItemId: c.parentItemId,
+    chunkIndex: c.chunkIndex,
+    text: c.text,
+    title: c.title,
+    sourceType: c.sourceType,
+    meta: c.meta,
+    bm25Score: 0,
+    hybridScore: 0,
+    rank: index + 1,
+    evidenceScore: 0,
+    matchedTerms: [],
+  }));
 }
