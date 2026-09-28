@@ -112,7 +112,7 @@ export async function searchLibraryTextIndex(
   };
   const scope = new Set(params.scopeAttachmentIds);
   const coverageRaw = await mark("coverage", () =>
-    params.store.getCoverage(params.scopeAttachmentIds),
+    params.store.getCoverage([...scope]),
   );
   const coverage: IndexCoverage = {
     scopeAttachments: scope.size,

@@ -8,6 +8,7 @@ import {
   snapshotTestGlobals,
   type TestGlobalSnapshot,
 } from "./helpers/retrievalCorpus";
+import { setAppLogSinkForTests, type AppLogLevel } from "../src/core/logging";
 import { LibraryTextIndexStore } from "../src/services/libraryTextIndex/store";
 import { openLibraryTextIndexDb } from "../src/services/libraryTextIndex/db";
 import { buildIndexDocumentFromPdfContext } from "../src/services/libraryTextIndex/indexer";
@@ -134,6 +135,18 @@ describe("library text index search", function () {
       all.chunks.filter((c) => c.attachmentId === 9002).length,
       3,
     );
+    const duplicated = await searchLibraryTextIndex({
+      store,
+      scopeAttachmentIds: [9001, 9001, 9002, 9003, 9003],
+      queries: ["kinematic condition contact line"],
+      maxPapers: 2,
+      perPaperTopK: 3,
+    });
+    assert.deepEqual(duplicated.coverage, all.coverage);
+    assert.equal(
+      duplicated.coverage.indexed + duplicated.coverage.unindexed.length,
+      duplicated.coverage.scopeAttachments,
+    );
     const scoped = await searchLibraryTextIndex({
       store,
       scopeAttachmentIds: [9001],
@@ -245,5 +258,40 @@ describe("library text index search", function () {
     } finally {
       prefs.get = originalGet;
     }
+  });
+
+  it("degrades to null through the facade when the index SQL throws", async function () {
+    const bio = await buildFixturePdfContext("bioSingleHash", 9001);
+    await store.upsertDocument(
+      buildIndexDocumentFromPdfContext({
+        attachmentId: 9001,
+        attachmentKey: "A",
+        libraryID: 1,
+        parentItemId: 100,
+        fileState: null,
+        ctx: bio,
+      }),
+    );
+    const emitted: Array<{ level: AppLogLevel; args: readonly unknown[] }> = [];
+    const originalGetPostings = LibraryTextIndexStore.prototype.getPostings;
+    LibraryTextIndexStore.prototype.getPostings = async function () {
+      throw new Error("database is locked");
+    };
+    setAppLogSinkForTests((level, args) => emitted.push({ level, args }));
+    try {
+      const result = await libraryTextIndex.search({
+        scopeAttachmentIds: [9001],
+        queries: ["place field"],
+        maxPapers: 1,
+        perPaperTopK: 3,
+      });
+      assert.isNull(result);
+    } finally {
+      setAppLogSinkForTests(null);
+      LibraryTextIndexStore.prototype.getPostings = originalGetPostings;
+    }
+    const warns = emitted.filter((e) => e.level === "warn");
+    assert.lengthOf(warns, 1);
+    assert.include(String(warns[0].args[0]), "search failed");
   });
 });

@@ -36,7 +36,7 @@ export type {
 
 export type LibraryTextIndexFacade = {
   isEnabled(): boolean;
-  /** Null when the index is disabled or its database cannot be opened. */
+  /** Null when the index is disabled, cannot be opened, or the search fails. */
   search(
     params: Omit<LibraryTextIndexSearchParams, "store">,
   ): Promise<LibraryTextIndexSearchResult | null>;
@@ -45,8 +45,18 @@ export const libraryTextIndex: LibraryTextIndexFacade = {
   isEnabled: () => isLibraryTextIndexEnabled(),
   async search(params) {
     if (!isLibraryTextIndexEnabled()) return null;
-    const store = await getLibraryTextIndexStore();
-    return store ? searchLibraryTextIndex({ ...params, store }) : null;
+    // The facade owns "never throws": an index failure (locked database,
+    // disk I/O) degrades to the direct path instead of failing the question.
+    try {
+      const store = await getLibraryTextIndexStore();
+      return store ? await searchLibraryTextIndex({ ...params, store }) : null;
+    } catch (error) {
+      appLogger.warn(
+        "LLM index: search failed; falling back to the direct path",
+        error,
+      );
+      return null;
+    }
   },
 };
 
