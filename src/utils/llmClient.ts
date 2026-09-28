@@ -138,6 +138,7 @@ import {
 } from "../codexAuth/modelCatalog";
 import {
   AUTO_REQUIRED_OUTPUT_TOKEN_SEED,
+  INPUT_ESTIMATE_SAFETY_RATIO,
   resolveContextAllocation,
   resolveOutputRequestPolicy,
   resolveOutputReserve,
@@ -3138,20 +3139,43 @@ export function resolveOllamaNumPredict(
   return undefined;
 }
 
+export const OLLAMA_NUM_CTX_MIN_TIER = 4_096;
+/** Answer room reserved inside num_ctx when the user set no output limit. */
+export const OLLAMA_AUTO_OUTPUT_RESERVE_TOKENS = 4_096;
+
 /**
- * Ollama's runtime context window defaults well below a model's trained
- * maximum, so a prompt sized against the trained figure is silently truncated.
- * Allocating exactly the cap the plugin trimmed to keeps the claim and the
- * allocation in agreement.
+ * Ollama allocates the KV cache for num_ctx up front and offloads layers to
+ * the CPU when it does not fit, so asking for the model's whole window makes
+ * small GPUs crawl. Ask for what this request needs, rounded up to a few
+ * stable power-of-two tiers so the runner is not reloaded on every turn, and
+ * never above the cap the prompt was trimmed to. Omitting num_ctx is not an
+ * option: Ollama's small default would silently truncate long prompts.
  */
-export function resolveOllamaNumCtx(
-  protocol: ProviderProtocol,
-  limitTokens: number,
-): number | undefined {
-  if (protocol !== "ollama_native") return undefined;
-  return Number.isSafeInteger(limitTokens) && limitTokens > 0
-    ? limitTokens
-    : undefined;
+export function resolveOllamaNumCtx(params: {
+  protocol: ProviderProtocol;
+  /** This request's prompt estimate: messages incl. system prompt, tools, images. */
+  estimatedPromptTokens: number;
+  outputPolicy: OutputRequestPolicy;
+  /** Resolved input limit: trained length, user cap, or the default. */
+  contextWindowTokens: number;
+}): number | undefined {
+  if (params.protocol !== "ollama_native") return undefined;
+  const promptTokens = Number.isFinite(params.estimatedPromptTokens)
+    ? Math.max(0, params.estimatedPromptTokens)
+    : 0;
+  const policy = params.outputPolicy;
+  const reserve =
+    policy.mode === "numeric" &&
+    policy.source === "custom" &&
+    Number.isFinite(policy.tokens) &&
+    policy.tokens > 0
+      ? policy.tokens
+      : OLLAMA_AUTO_OUTPUT_RESERVE_TOKENS;
+  const need = Math.ceil(promptTokens * INPUT_ESTIMATE_SAFETY_RATIO) + reserve;
+  let tier = OLLAMA_NUM_CTX_MIN_TIER;
+  while (tier < need && tier < Number.MAX_SAFE_INTEGER / 2) tier *= 2;
+  const cap = params.contextWindowTokens;
+  return Number.isSafeInteger(cap) && cap > 0 ? Math.min(tier, cap) : tier;
 }
 
 type OllamaChatChunk = {
@@ -4311,7 +4335,12 @@ export async function callLLM(params: ChatParams): Promise<ModelTurnOutcome> {
       attachments: params.attachments,
       reasoning: params.reasoning,
       contextCache: params.contextCache,
-      numCtx: resolveOllamaNumCtx(providerProtocol, inputCap.limitTokens),
+      numCtx: resolveOllamaNumCtx({
+        protocol: providerProtocol,
+        estimatedPromptTokens: inputCap.estimatedAfterTokens,
+        outputPolicy,
+        contextWindowTokens: inputCap.limitTokens,
+      }),
       profileOverride: params.profileOverride,
     });
   }
@@ -4471,7 +4500,12 @@ export async function callLLMStream(
       attachments: params.attachments,
       reasoning: params.reasoning,
       contextCache: params.contextCache,
-      numCtx: resolveOllamaNumCtx(providerProtocol, inputCap.limitTokens),
+      numCtx: resolveOllamaNumCtx({
+        protocol: providerProtocol,
+        estimatedPromptTokens: inputCap.estimatedAfterTokens,
+        outputPolicy,
+        contextWindowTokens: inputCap.limitTokens,
+      }),
       profileOverride: params.profileOverride,
     });
   }

@@ -33,7 +33,10 @@ import {
   resolveAgentRecoverableCompletion,
 } from "./completion";
 import { normalizeTemperature } from "../../utils/normalization";
-import { resolveContextWindowTokens } from "../../utils/modelInputCap";
+import {
+  estimateWirePayloadTokens,
+  resolveContextWindowTokens,
+} from "../../utils/modelInputCap";
 import { resolveProviderTransportEndpoint } from "../../utils/providerTransport";
 import { getModelCapabilities } from "../../modelCapabilities";
 import type {
@@ -243,9 +246,14 @@ export class OllamaNativeAgentAdapter implements AgentModelAdapter {
       request,
       "ollama_native",
     );
-    const numCtx = resolveOllamaNumCtx(
-      "ollama_native",
-      resolveContextWindowTokens(
+    const numCtx = resolveOllamaNumCtx({
+      protocol: "ollama_native",
+      estimatedPromptTokens: estimateWirePayloadTokens({
+        messages: resolvedMessages,
+        tools,
+      }),
+      outputPolicy,
+      contextWindowTokens: resolveContextWindowTokens(
         request.model || "",
         request.advanced?.inputTokenCap,
         {
@@ -255,7 +263,7 @@ export class OllamaNativeAgentAdapter implements AgentModelAdapter {
           profileOverride: request.advanced?.profileOverride,
         },
       ),
-    );
+    });
     const response = await postWithReasoningFallback({
       url,
       scope: { conversationKey: request.conversationKey },

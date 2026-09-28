@@ -285,6 +285,56 @@ describe("agent adapters honour model profile overrides", function () {
     );
   });
 
+  it("ollama_native sizes num_ctx to a short request", async function () {
+    const body = captureBody({
+      ndjson: ['{"message":{"content":"hi"},"done":true}\n'],
+    });
+
+    await new OllamaNativeAgentAdapter().runStep({
+      request: makeRequest({
+        model: "qwen3:8b",
+        apiBase: "http://localhost:11434",
+        providerProtocol: "ollama_native",
+        advanced: advancedWith({}, "qwen3:8b"),
+      }),
+      messages: [{ role: "user", content: "Summarize" }],
+      tools,
+    });
+
+    const numCtx = (body.read().options as Record<string, unknown>).num_ctx;
+    assert.isNumber(numCtx);
+    assert.isAtMost(numCtx as number, 16_384);
+  });
+
+  it("ollama_native caps num_ctx at the user's context window", async function () {
+    const body = captureBody({
+      ndjson: ['{"message":{"content":"hi"},"done":true}\n'],
+    });
+
+    await new OllamaNativeAgentAdapter().runStep({
+      request: makeRequest({
+        model: "qwen3:8b",
+        apiBase: "http://localhost:11434",
+        providerProtocol: "ollama_native",
+        advanced: {
+          temperature: 0.3,
+          outputTokenLimit: { mode: "auto" as const },
+          profileOverride: {
+            forModel: "qwen3:8b",
+            limits: { contextWindowTokens: 8_192 },
+          },
+        },
+      }),
+      messages: [{ role: "user", content: "word ".repeat(20_000) }],
+      tools,
+    });
+
+    assert.equal(
+      (body.read().options as Record<string, unknown>).num_ctx,
+      8_192,
+    );
+  });
+
   it("ollama_native treats a length done_reason as incomplete", async function () {
     captureBody({
       ndjson: [
