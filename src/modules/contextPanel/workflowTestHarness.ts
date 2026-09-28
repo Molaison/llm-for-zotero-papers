@@ -60,6 +60,7 @@ import {
 import type { ResolvedContextSource, SendQuestionOptions } from "./types";
 import type {
   WorkflowTestApi,
+  WorkflowTestConversationHistoryTexts,
   WorkflowTestAssistantRenderResult,
   WorkflowTestAttachmentFixture,
   WorkflowTestDiagnostics,
@@ -150,7 +151,11 @@ import {
   type WorkflowTestFinalRequestSnapshot,
 } from "./workflowTestHooks";
 import { dispatchZoteroItemsAsContext } from "./zoteroItemContextMenu";
-import { appendMessage, getPaperConversation } from "../../utils/chatStore";
+import {
+  appendMessage,
+  getPaperConversation,
+  loadConversation,
+} from "../../utils/chatStore";
 import { appendCodexMessage } from "../../codexAppServer/store";
 import { appendClaudeMessage } from "../../claudeCode/store";
 import {
@@ -3956,6 +3961,23 @@ async function withPendingStandaloneSend(
     throw new Error("Standalone send did not finish");
 }
 
+async function getConversationHistoryTexts(
+  conversationKey: number,
+): Promise<WorkflowTestConversationHistoryTexts> {
+  assertWorkflowTestEnabled();
+  const toEntries = (
+    messages: ReadonlyArray<{ role: string; text?: string | null }>,
+  ) =>
+    messages.map((message) => ({
+      role: message.role,
+      text: message.text || "",
+    }));
+  return {
+    memory: toEntries(chatHistory.get(conversationKey) || []),
+    stored: toEntries(await loadConversation(conversationKey, 200)),
+  };
+}
+
 async function seedStandaloneConversation(
   turns: Array<{ role: "user" | "assistant"; text: string } & Partial<Message>>,
 ): Promise<WorkflowTestStandaloneDiagnostics> {
@@ -5849,6 +5871,7 @@ export function installWorkflowTestHarness(targetAddon: {
     notifyStandaloneItemChanges,
     addItemsAsStandaloneContext,
     getLastFinalRequest: () => lastFinalRequest,
+    getConversationHistoryTexts,
     getStandaloneDiagnostics,
     closeStandalone,
     getLastSend: () => lastSend,

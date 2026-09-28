@@ -255,6 +255,7 @@ import {
   isConversationWriteGenerationCurrent,
   areConversationWritesFrozen,
   finishRequest,
+  isRequestActive,
   isRequestOwner,
   nextRequestId,
   isRequestPending,
@@ -3298,39 +3299,16 @@ function notifyProviderDispatch(
   ownershipLease?: PanelOperationLease | null,
   callback?: () => void,
 ): boolean {
-  if (ownershipLease && !isPanelOperationLeaseCurrent(ownershipLease)) {
-    return false;
+  // The request is dispatched for its own conversation whether or not this
+  // panel still shows it; only the composer write belongs to the panel.
+  const panelIsCurrent =
+    (!ownershipLease || isPanelOperationLeaseCurrent(ownershipLease)) &&
+    requireCurrentPanelOwnership(body, item, "provider-dispatch");
+  if (panelIsCurrent && ui.inputBox) {
+    ui.inputBox.disabled = isPanelWebChatMode(body);
   }
-  if (!requireCurrentPanelOwnership(body, item, "provider-dispatch")) {
-    return false;
-  }
-  if (ui.inputBox) ui.inputBox.disabled = isPanelWebChatMode(body);
   callback?.();
   return true;
-}
-
-function createOwnershipFencedProviderDispatch(params: {
-  body: Element;
-  item: Zotero.Item;
-  lease: PanelOperationLease;
-  callback?: () => void;
-}): () => void {
-  return () => {
-    if (
-      !isPanelOperationLeaseCurrent(params.lease) ||
-      !requireCurrentPanelOwnership(
-        params.body,
-        params.item,
-        "agent-provider-dispatch",
-      )
-    ) {
-      getAbortController(getConversationKey(params.item))?.abort();
-      const error = new Error("Panel ownership changed before dispatch");
-      error.name = "AbortError";
-      throw error;
-    }
-    params.callback?.();
-  };
 }
 
 function getPanelBodyConversationKey(
@@ -5886,10 +5864,7 @@ export async function editLatestUserMessageAndRetry(
     }
   }
   const requestIsActive = () =>
-    requestId === undefined ||
-    (isRequestOwner(conversationKey, requestId) &&
-      getCancelledRequestId(conversationKey) < requestId &&
-      !getAbortController(conversationKey)?.signal.aborted);
+    requestId === undefined || isRequestActive(conversationKey, requestId);
   if (!requestIsActive()) return "stale";
   // Retry must act on the state the user SEES: complete any pending turn
   // deletion first so the hidden turn cannot be the retry target. finalize is
@@ -6278,12 +6253,10 @@ export async function retryLatestAssistantResponse(
     finishPanelRequest(body, item, initialConversationKey, thisRequestId);
     return;
   }
-  const requestIsActive = () =>
-    isRequestOwner(conversationKey, thisRequestId) &&
-    getCancelledRequestId(conversationKey) < thisRequestId &&
-    !getAbortController(conversationKey)?.signal.aborted &&
-    isPanelOperationLeaseCurrent(ownershipLease) &&
-    requireCurrentPanelOwnership(body, item, "retry-response-continuation");
+  // Switching the panel to another conversation never stops the retry; the
+  // entry gate above already required ownership, and rendering is keyed by
+  // conversation from here on.
+  const requestIsActive = () => isRequestActive(conversationKey, thisRequestId);
   const releaseRequest = () => {
     if (!finishPanelRequest(body, item, conversationKey, thisRequestId)) {
       return false;
@@ -7396,10 +7369,7 @@ export async function editUserTurnAndRetry(opts: {
     }
   }
   const requestIsActive = () =>
-    requestId === undefined ||
-    (isRequestOwner(conversationKey, requestId) &&
-      getCancelledRequestId(conversationKey) < requestId &&
-      !getAbortController(conversationKey)?.signal.aborted);
+    requestId === undefined || isRequestActive(conversationKey, requestId);
   if (!requestIsActive()) return false;
   // Edit acts on the state the user SEES: complete any pending turn deletion
   // first. history stays RAW below on purpose — truncation after the edited
@@ -8626,15 +8596,12 @@ async function retryLatestAgentResponse(
       ),
     );
   }
-  if (!isOwnershipCurrent("retry-agent-response-load")) return true;
+  const retryIsActive = () =>
+    requestId === undefined ||
+    isRequestActive(getConversationKey(item), requestId);
+  if (!retryIsActive()) return true;
   await initAgentSubsystem();
-  if (!isOwnershipCurrent("retry-agent-response-runtime")) return true;
-  const guardedProviderDispatch = createOwnershipFencedProviderDispatch({
-    body,
-    item,
-    lease: ownershipLease!,
-    callback: onProviderDispatch,
-  });
+  if (!retryIsActive()) return true;
   await retryAgentTurn(
     body,
     item,
@@ -8656,7 +8623,7 @@ async function retryLatestAgentResponse(
       ownershipLease,
     ),
     requestId,
-    guardedProviderDispatch,
+    onProviderDispatch,
     activePaperContextOverride,
   );
   return true;
@@ -8713,20 +8680,16 @@ async function sendAgentQuestion(opts: {
     );
   if (!isOwnershipCurrent("send-agent-question")) return;
   const conversationKey = getConversationKey(opts.item);
-  if (
-    opts.requestId !== undefined &&
-    (!isRequestOwner(conversationKey, opts.requestId) ||
-      getCancelledRequestId(conversationKey) >= opts.requestId ||
-      Boolean(getAbortController(conversationKey)?.signal.aborted))
-  ) {
-    return;
-  }
+  const requestIsStillActive = () =>
+    opts.requestId === undefined ||
+    isRequestActive(conversationKey, opts.requestId);
+  if (!requestIsStillActive()) return;
   const safeConversationScope = await validateConversationScopeForItem({
     item: opts.item,
     conversationKey,
     conversationSystem: opts.conversationSystem,
   });
-  if (!isOwnershipCurrent("send-agent-question-scope")) return;
+  if (!requestIsStillActive()) return;
   if (!safeConversationScope) {
     const ui = getPanelRequestUI(opts.body);
     const helpers = createPanelUpdateHelpers(
@@ -8742,23 +8705,9 @@ async function sendAgentQuestion(opts: {
     return;
   }
   await initAgentSubsystem();
-  if (!isOwnershipCurrent("send-agent-question-runtime")) return;
-  if (
-    opts.requestId !== undefined &&
-    (!isRequestOwner(conversationKey, opts.requestId) ||
-      getCancelledRequestId(conversationKey) >= opts.requestId ||
-      Boolean(getAbortController(conversationKey)?.signal.aborted))
-  ) {
-    return;
-  }
-  const guardedProviderDispatch = createOwnershipFencedProviderDispatch({
-    body: opts.body,
-    item: opts.item,
-    lease: ownershipLease!,
-    callback: opts.onProviderDispatch,
-  });
+  if (!requestIsStillActive()) return;
   await sendAgentTurn(
-    { ...opts, onProviderDispatch: guardedProviderDispatch },
+    opts,
     buildAgentEngineDeps(
       opts.item,
       opts.conversationSystem,
@@ -8820,12 +8769,11 @@ export async function sendQuestion(
     if (!claimed) return;
     thisRequestId = claimed.requestId;
   }
+  // Switching the panel to another conversation never stops the request
+  // (#481): only the user's cancel does. The entry gate above required
+  // ownership; rendering is keyed by conversation from here on.
   const requestIsActive = (conversationKey: number) =>
-    isRequestOwner(conversationKey, thisRequestId) &&
-    getCancelledRequestId(conversationKey) < thisRequestId &&
-    !getAbortController(conversationKey)?.signal.aborted &&
-    isPanelOperationLeaseCurrent(ownershipLease) &&
-    requireCurrentPanelOwnership(body, item, "send-question-continuation");
+    isRequestActive(conversationKey, thisRequestId);
   const finishBeforeDispatch = () => {
     if (!claimedHere) return false;
     const currentConversationKey = getConversationKey(item);

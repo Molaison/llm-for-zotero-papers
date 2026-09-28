@@ -437,6 +437,11 @@ export type WorkflowTestCrossPaperHistoryIsolationResult = {
   paperBMessageRowsAfter: number;
 };
 
+export type WorkflowTestConversationHistoryTexts = {
+  memory: Array<{ role: string; text: string }>;
+  stored: Array<{ role: string; text: string }>;
+};
+
 export type WorkflowTestApi = {
   planRetrievalQuery: typeof resolveRetrievalQueryPlan;
   checkProviderConversationTransport: (params: {
@@ -730,6 +735,10 @@ export type WorkflowTestApi = {
   startNewStandaloneConversation: () => Promise<WorkflowTestStandaloneDiagnostics>;
   clickStandaloneReasoningOption: (label: string) => Promise<void>;
   getLastFinalRequest: () => WorkflowTestFinalRequestSnapshot | null;
+  /** Test-only read of a conversation's turns, in memory and as stored. */
+  getConversationHistoryTexts: (
+    conversationKey: number,
+  ) => Promise<WorkflowTestConversationHistoryTexts>;
   seedStandaloneUserMessage: (
     text: string,
   ) => Promise<WorkflowTestStandaloneDiagnostics>;

@@ -296,13 +296,31 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
       if (rawSubmittedText) deps.queueFollowUpInput(rawSubmittedText);
       return;
     }
+    // Only a user cancel (or a superseding request) stops preparation.
+    // Switching the panel to another conversation must not: `item` and
+    // `request.conversationKey` are captured above, so the send continues for
+    // the conversation it was issued in, and rendering stays keyed by that
+    // conversation.
     const requestIsActive = () =>
       deps.isRequestOwner(request.conversationKey, request.requestId) &&
       !request.signal.aborted;
-    const operationIsActive = () =>
-      requestIsActive() &&
-      (!deps.requireCurrentOwnership ||
-        deps.requireCurrentOwnership(item, "send-continuation"));
+    // Panel-level getters follow whatever conversation the panel shows, so
+    // read them once, before the first await. A switch during preparation
+    // must not change the runtime, profile, or model of this send.
+    const panelSelectedProfile = deps.getSelectedProfile();
+    const panel = {
+      isAgentMode: deps.isAgentMode(),
+      isGlobalMode: deps.isGlobalMode(),
+      isClaudeConversationSystem: deps.isClaudeConversationSystem(),
+      isCodexConversationSystem: deps.isCodexConversationSystem(),
+      selectedProfile: panelSelectedProfile,
+      currentModelName: deps.getCurrentModelName(),
+      selectedReasoning: deps.getSelectedReasoning(),
+      advancedModelParams: deps.getAdvancedModelParams(
+        panelSelectedProfile?.entryId,
+      ),
+      activeEditSession: deps.getActiveEditSession(),
+    };
     let planContext = getPlanningRuntimeContext(request.conversationKey);
     let pendingPlanExecution: Awaited<
       ReturnType<typeof takePendingPlanExecution>
@@ -335,7 +353,7 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
       deps.closePaperPicker();
       deps.autoLockGlobalChat();
 
-      const earlyProfile = deps.getSelectedProfile();
+      const earlyProfile = panel.selectedProfile;
       const codexNativeSkillText =
         earlyProfile?.authMode === "codex_app_server"
           ? resolveSkillDirectiveText(rawSubmittedText, getAllSkills())
@@ -354,15 +372,15 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
       );
       const primarySelectedText = selectedTexts[0] || "";
       const contextSource = await deps.resolveContextSource();
-      if (!operationIsActive()) return;
+      if (!requestIsActive()) return;
       const allSelectedPaperContexts = deps.getSelectedPaperContexts(item.id);
       const selectedCollectionContexts = deps.getSelectedCollectionContexts(
         item.id,
       );
       const selectedTagContexts = deps.getSelectedTagContexts(item.id);
       const usesPluginAgentMode =
-        (deps.isAgentMode() || deps.isClaudeConversationSystem()) &&
-        !deps.isCodexConversationSystem();
+        (panel.isAgentMode || panel.isClaudeConversationSystem) &&
+        !panel.isCodexConversationSystem;
       // Plugin Agent mode uses text/MinerU pipeline by default, but if the user
       // explicitly forced PDF mode on a paper, honour that choice.
       const pdfModePaperContexts = deps.getPdfModePaperContexts(
@@ -386,7 +404,7 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
             paperContexts: allSelectedPaperContexts,
           })
         : [];
-      if (!operationIsActive()) return;
+      if (!requestIsActive()) return;
       // Resolve PDFs based on model capability. The visible chip/attachment state
       // stays unchanged; these variables are the provider-specific model inputs.
       const isWebChat = earlyProfile?.authMode === "webchat";
@@ -430,12 +448,10 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
         });
       const earlyModelName = (
         earlyProfile?.model ||
-        deps.getCurrentModelName() ||
+        panel.currentModelName ||
         ""
       ).trim();
-      const earlyAdvancedParams = deps.getAdvancedModelParams(
-        earlyProfile?.entryId,
-      );
+      const earlyAdvancedParams = panel.advancedModelParams;
       const selectedBaseFiles = deps.getSelectedFiles(item.id);
       if (useCodexAttachmentPolicy) {
         const blockedAttachments =
@@ -487,7 +503,7 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
         isWebChat,
         useCodexAttachmentPolicy,
       });
-      if (!operationIsActive()) return;
+      if (!requestIsActive()) return;
       if (!pdfInputs.ok) return;
       const {
         selectedFiles,
@@ -496,10 +512,10 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
         pdfUploadSystemMessages,
         localDocuments,
       } = pdfInputs;
-      if (localDocuments.length && deps.isClaudeConversationSystem()) {
+      if (localDocuments.length && panel.isClaudeConversationSystem) {
         try {
           await deps.preflightLocalPdfCapability?.();
-          if (!operationIsActive()) return;
+          if (!requestIsActive()) return;
         } catch (error) {
           deps.setStatusMessage?.(
             error instanceof Error && error.message.trim()
@@ -526,7 +542,7 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
         allSelectedPaperContexts.length > 0 ||
         selectedCollectionContexts.length > 0 ||
         selectedTagContexts.length > 0 ||
-        !deps.isGlobalMode();
+        !panel.isGlobalMode;
 
       if (
         !text &&
@@ -592,7 +608,7 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
               selectedTextPaperContexts,
               resolvedSelectedTextAnchors,
               includeAnchorContext: isWebChat,
-              includePaperAttribution: deps.isGlobalMode(),
+              includePaperAttribution: panel.isGlobalMode,
             },
           )
         : resolvedPromptText;
@@ -633,11 +649,11 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
         const titleGeneration = deps.getConversationWriteGeneration?.(
           deps.getConversationKey(item),
         );
-        const touchTitle = deps.isClaudeConversationSystem()
+        const touchTitle = panel.isClaudeConversationSystem
           ? deps.touchClaudeConversationTitle
-          : deps.isCodexConversationSystem()
+          : panel.isCodexConversationSystem
             ? deps.touchCodexConversationTitle
-            : deps.isGlobalMode()
+            : panel.isGlobalMode
               ? deps.touchGlobalConversationTitle
               : deps.touchPaperConversationTitle;
         void touchTitle(
@@ -649,19 +665,17 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
         });
       }
 
-      const selectedProfile = deps.getSelectedProfile();
+      const selectedProfile = panel.selectedProfile;
       const shouldRetainClaudeRuntime =
-        deps.isClaudeConversationSystem() ||
+        panel.isClaudeConversationSystem ||
         selectedProfile?.providerLabel === "Claude Code";
       const activeModelName = (
         selectedProfile?.model ||
-        deps.getCurrentModelName() ||
+        panel.currentModelName ||
         ""
       ).trim();
-      const selectedReasoning = deps.getSelectedReasoning();
-      const advancedParams = deps.getAdvancedModelParams(
-        selectedProfile?.entryId,
-      );
+      const selectedReasoning = panel.selectedReasoning;
+      const advancedParams = panel.advancedModelParams;
       const images = [
         ...(deps.isScreenshotUnsupportedModel(
           activeModelName,
@@ -675,10 +689,10 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
         ...pdfPageImageDataUrls,
       ];
 
-      const activeEditSession = deps.getActiveEditSession();
+      const activeEditSession = panel.activeEditSession;
       if (activeEditSession) {
         const latest = await deps.getLatestEditablePair();
-        if (!operationIsActive()) return;
+        if (!requestIsActive()) return;
         if (!latest) {
           deps.setActiveEditSession(null);
           deps.setStatusMessage?.("No editable latest prompt", "error");
@@ -826,14 +840,14 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
           : composedQuestion;
       if (shouldRetainClaudeRuntime) {
         await deps.retainClaudeRuntime?.(deps.body, item);
-        if (!operationIsActive()) return;
+        if (!requestIsActive()) return;
       }
       const activeNoteScope = resolveNoteEditingScope(item);
       const activeNoteContext = buildNoteEditingTurnContext({
         scope: activeNoteScope,
         snapshot: readNoteSnapshot(item),
       }).activeNoteContext;
-      if (!operationIsActive()) return;
+      if (!requestIsActive()) return;
       let webchatSendOutcome: "success" | "failed" | "cancelled" | null = null;
       const sendTask = deps.sendQuestion({
         body: deps.body,

@@ -797,6 +797,7 @@ describe("sendFlowController", function () {
         composerDraftClearedCalls,
       }),
       getDraftValue: () => draftValue,
+      abortRequest: () => activeAbortController?.abort(),
       getLastSend: () => ({
         lastSentQuestion,
         lastSentDisplayQuestion,
@@ -939,7 +940,7 @@ describe("sendFlowController", function () {
     });
   });
 
-  it("restores the draft when ownership changes during asynchronous preparation", async function () {
+  it("keeps sending when the panel switches away during asynchronous preparation", async function () {
     let resolveContext: ((value: ResolvedContextSource | null) => void) | null =
       null;
     const contextReady = new Promise<ResolvedContextSource | null>(
@@ -955,12 +956,146 @@ describe("sendFlowController", function () {
 
     const send = controller.doSend();
     assert.equal(inputBox.value, "");
+    // The user switches to another conversation while the request prepares.
     owned = false;
+    resolveContext?.(null);
+    await send;
+
+    assert.equal(getCounts().sendCalled, 1);
+    assert.equal(getCounts().editCalled, 0);
+    assert.equal(inputBox.value, "");
+    assert.equal(getDraftValue(), "");
+  });
+
+  it("keeps the original runtime and model when the panel switches to a Claude Code conversation during preparation", async function () {
+    let resolveContext: ((value: ResolvedContextSource | null) => void) | null =
+      null;
+    const contextReady = new Promise<ResolvedContextSource | null>(
+      (resolve) => {
+        resolveContext = resolve;
+      },
+    );
+    const paperProfile = {
+      entryId: "paper-entry",
+      model: "paper-model",
+      apiBase: "https://paper.example",
+      apiKey: "paper-key",
+      authMode: "api_key",
+      providerProtocol: "openai_chat_compat",
+      providerLabel: "Paper Provider",
+    };
+    const claudeProfile = {
+      entryId: "claude-entry",
+      model: "claude-code-model",
+      apiBase: "",
+      apiKey: "",
+      authMode: "claude_code",
+      providerProtocol: "anthropic_messages",
+      providerLabel: "Claude Code",
+    };
+    const paperReasoning = { provider: "openai", level: "low" };
+    const claudeReasoning = { provider: "anthropic", level: "high" };
+    const paperAdvanced = { temperature: 0.1 };
+    const claudeAdvanced = { temperature: 0.9 };
+    let switched = false;
+    let sentOpts: any = null;
+    const touchedTitles: string[] = [];
+    let retainClaudeRuntimeCalls = 0;
+    const { controller } = createBaseDeps({
+      resolveContextSource: () => contextReady,
+      isAgentMode: () => false,
+      isGlobalMode: () => switched,
+      isClaudeConversationSystem: () => switched,
+      isCodexConversationSystem: () => false,
+      getSelectedProfile: () => (switched ? claudeProfile : paperProfile),
+      getCurrentModelName: () =>
+        switched ? "claude-code-model" : "paper-model",
+      getSelectedReasoning: () => (switched ? claudeReasoning : paperReasoning),
+      getAdvancedModelParams: (entryId: string | undefined) =>
+        entryId === "claude-entry" || switched ? claudeAdvanced : paperAdvanced,
+      touchClaudeConversationTitle: async () => {
+        touchedTitles.push("claude");
+      },
+      touchGlobalConversationTitle: async () => {
+        touchedTitles.push("global");
+      },
+      touchPaperConversationTitle: async () => {
+        touchedTitles.push("paper");
+      },
+      retainClaudeRuntime: async () => {
+        retainClaudeRuntimeCalls += 1;
+      },
+      sendQuestion: async (opts: any) => {
+        opts.onProviderDispatch?.();
+        sentOpts = opts;
+      },
+    });
+
+    const send = controller.doSend();
+    // The user switches to a Claude Code conversation while preparing.
+    switched = true;
+    resolveContext?.(null);
+    await send;
+
+    assert.isNotNull(sentOpts);
+    assert.equal(sentOpts.runtimeMode, "chat");
+    assert.equal(sentOpts.model, "paper-model");
+    assert.equal(sentOpts.apiBase, "https://paper.example");
+    assert.equal(sentOpts.authMode, "api_key");
+    assert.equal(sentOpts.modelEntryId, "paper-entry");
+    assert.equal(sentOpts.modelProviderLabel, "Paper Provider");
+    assert.deepEqual(sentOpts.reasoning, paperReasoning);
+    assert.deepEqual(sentOpts.advanced, paperAdvanced);
+    assert.deepEqual(touchedTitles, ["paper"]);
+    assert.equal(retainClaudeRuntimeCalls, 0);
+  });
+
+  it("stops and restores the draft when the user cancels during asynchronous preparation", async function () {
+    let resolveContext: ((value: ResolvedContextSource | null) => void) | null =
+      null;
+    const contextReady = new Promise<ResolvedContextSource | null>(
+      (resolve) => {
+        resolveContext = resolve;
+      },
+    );
+    const { controller, inputBox, getCounts, getDraftValue, abortRequest } =
+      createBaseDeps({
+        resolveContextSource: () => contextReady,
+      });
+
+    const send = controller.doSend();
+    assert.equal(inputBox.value, "");
+    abortRequest();
     resolveContext?.(null);
     await send;
 
     assert.equal(getCounts().sendCalled, 0);
     assert.equal(getCounts().editCalled, 0);
+    assert.equal(inputBox.value, "ask question");
+    assert.equal(getDraftValue(), "ask question");
+  });
+
+  it("stops and restores the draft when the request loses ownership during asynchronous preparation", async function () {
+    let resolveContext: ((value: ResolvedContextSource | null) => void) | null =
+      null;
+    const contextReady = new Promise<ResolvedContextSource | null>(
+      (resolve) => {
+        resolveContext = resolve;
+      },
+    );
+    let requestOwned = true;
+    const { controller, inputBox, getCounts, getDraftValue } = createBaseDeps({
+      isRequestOwner: () => requestOwned,
+      resolveContextSource: () => contextReady,
+    });
+
+    const send = controller.doSend();
+    assert.equal(inputBox.value, "");
+    requestOwned = false;
+    resolveContext?.(null);
+    await send;
+
+    assert.equal(getCounts().sendCalled, 0);
     assert.equal(inputBox.value, "ask question");
     assert.equal(getDraftValue(), "ask question");
   });

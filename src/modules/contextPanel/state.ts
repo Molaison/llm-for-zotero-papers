@@ -233,6 +233,23 @@ export function isRequestOwner(
   );
 }
 
+/**
+ * The request's own cancel token: it still owns its conversation, the user has
+ * not cancelled it, and its abort signal has not fired. Which conversation a
+ * panel currently shows is deliberately not part of this — switching away
+ * only changes where content renders, never whether the request continues.
+ */
+export function isRequestActive(
+  conversationKey: number,
+  requestId: number,
+): boolean {
+  return (
+    isRequestOwner(conversationKey, requestId) &&
+    getCancelledRequestId(conversationKey) < requestId &&
+    !getAbortController(conversationKey)?.signal.aborted
+  );
+}
+
 export function finishRequest(
   conversationKey: number,
   requestId: number,
