@@ -323,6 +323,14 @@ function scheduleMineruAutoWatchRegistration(): void {
   });
 }
 
+function scheduleLibraryTextIndexStartup(): void {
+  runDeferredStartupTask("library text index", async () => {
+    const { startLibraryTextIndex } =
+      await import("./services/libraryTextIndex");
+    await startLibraryTextIndex();
+  });
+}
+
 function scheduleModelCapabilityRefresh(): void {
   if (__env__ === "test") return;
   runDeferredStartupTask("model capability registry", async () => {
@@ -358,6 +366,7 @@ function scheduleDeferredStartupWork(
   scheduleAttachmentMaintenance();
   scheduleWebChatRelayRegistration();
   scheduleMineruAutoWatchRegistration();
+  scheduleLibraryTextIndexStartup();
   scheduleModelCapabilityRefresh();
 }
 
@@ -554,6 +563,13 @@ async function onShutdown(): Promise<void> {
   dedicatedChatPaneDisposers.clear();
   zoteroChangeDispatcher.unregisterNativeObserver();
   await zoteroChangeDispatcher.flush();
+  try {
+    const { stopLibraryTextIndex } =
+      await import("./services/libraryTextIndex");
+    await stopLibraryTextIndex();
+  } catch (error) {
+    appLogger.debug("LLM index: shutdown skipped", error);
+  }
   unregisterPaperConversationRestoreNotifications();
   await shutdownPaperRestoreSelections();
   disposePendingDeletionSubsystem();

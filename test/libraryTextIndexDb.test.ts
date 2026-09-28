@@ -1,12 +1,24 @@
 import { assert } from "chai";
 import { installLibraryTextIndexSqlite } from "./helpers/libraryTextIndexDb";
 import {
+  closeLibraryTextIndexDb,
   ensureLibraryTextIndexSchema,
+  getLibraryTextIndexDbPath,
   openLibraryTextIndexDb,
+  setLibraryTextIndexDbForTests,
 } from "../src/services/libraryTextIndex/db";
 import { LIBRARY_TEXT_INDEX_SCHEMA_VERSION } from "../src/services/libraryTextIndex/constants";
 
 describe("library text index db", function () {
+  // db.ts keeps module state (connection, pending open, test override); start
+  // and end every test without any, whatever ran before.
+  beforeEach(function () {
+    setLibraryTextIndexDbForTests(null);
+  });
+  afterEach(function () {
+    setLibraryTextIndexDbForTests(null);
+  });
+
   it("creates every table and records the schema version", async function () {
     const harness = installLibraryTextIndexSqlite();
     try {
@@ -95,6 +107,71 @@ describe("library text index db", function () {
     (globalThis as any).Zotero = {};
     try {
       assert.isNull(await openLibraryTextIndexDb());
+    } finally {
+      (globalThis as any).Zotero = previous;
+    }
+  });
+  it("close waits for an open in flight and closes that handle without deleting the file", async function () {
+    const previous = (globalThis as any).Zotero;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const closes: unknown[][] = [];
+    class FakeConnection {
+      async queryAsync(sql: string) {
+        await gate;
+        return sql.startsWith("SELECT") ? [] : undefined;
+      }
+      async executeTransaction<T>(fn: () => Promise<T>) {
+        return fn();
+      }
+      async closeDatabase(...args: unknown[]) {
+        closes.push(args);
+      }
+    }
+    (globalThis as any).Zotero = {
+      DBConnection: FakeConnection,
+      DataDirectory: { dir: "/tmp" },
+    };
+    try {
+      const opening = openLibraryTextIndexDb();
+      const closing = closeLibraryTextIndexDb();
+      release();
+      assert.isOk(await opening);
+      await closing;
+      assert.lengthOf(closes, 1, "the handle opened during shutdown is closed");
+      assert.notEqual(closes[0][0], true, "never close with permanent=true");
+    } finally {
+      (globalThis as any).Zotero = previous;
+    }
+  });
+  it("opens the index by absolute path, so Zotero treats it as an external database", async function () {
+    // A bare name makes Zotero run its main-database routine on open: after an
+    // unclean shutdown it shows the pane-wide "checking database integrity"
+    // meter and never clears it (Zotero.locked swallows every keystroke), and it
+    // schedules idle-time .bak backups. An absolute path skips both.
+    const previous = (globalThis as any).Zotero;
+    const constructed: string[] = [];
+    class FakeConnection {
+      constructor(nameOrPath: string) {
+        constructed.push(nameOrPath);
+      }
+      async queryAsync(sql: string) {
+        return sql.startsWith("SELECT") ? [] : undefined;
+      }
+      async executeTransaction<T>(fn: () => Promise<T>) {
+        return fn();
+      }
+    }
+    (globalThis as any).Zotero = {
+      DBConnection: FakeConnection,
+      DataDirectory: { dir: "/data/zotero" },
+    };
+    try {
+      assert.isOk(await openLibraryTextIndexDb());
+      assert.deepEqual(constructed, [getLibraryTextIndexDbPath()]);
+      assert.equal(constructed[0], "/data/zotero/llm-for-zotero-index.sqlite");
     } finally {
       (globalThis as any).Zotero = previous;
     }

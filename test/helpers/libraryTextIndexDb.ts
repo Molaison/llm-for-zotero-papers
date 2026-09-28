@@ -9,6 +9,7 @@ import {
   setLibraryTextIndexDbForTests,
   type LibraryTextIndexDb,
 } from "../../src/services/libraryTextIndex/db";
+import { resetLibraryTextIndexStoreForTests } from "../../src/services/libraryTextIndex/store";
 
 function toZoteroRow(row: Record<string, unknown>) {
   return new Proxy(row, {
@@ -63,6 +64,8 @@ export function installLibraryTextIndexSqlite() {
       db.prepare(sql).all(...bindable(params)) as Record<string, unknown>[],
     close: () => {
       setLibraryTextIndexDbForTests(null);
+      // Never leave a shared store bound to the closed DatabaseSync.
+      resetLibraryTextIndexStoreForTests();
       db.close();
     },
   };

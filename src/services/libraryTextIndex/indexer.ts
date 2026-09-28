@@ -159,6 +159,20 @@ export async function indexAttachment(params: {
       existing.sourceFingerprint === doc.sourceFingerprint &&
       existing.chunkerVersion === doc.chunkerVersion
     ) {
+      // Same text, new stat (e.g. file sync re-downloaded identical bytes):
+      // record it, or reconcile flags the paper stale at every startup.
+      // A failed stat (both null) is not news; keep the recorded one.
+      const statRead = doc.sourceMtime !== null || doc.sourceSize !== null;
+      if (
+        statRead &&
+        (existing.sourceMtime !== doc.sourceMtime ||
+          existing.sourceSize !== doc.sourceSize)
+      ) {
+        await params.store.updateFileState(attachmentId, {
+          mtime: doc.sourceMtime,
+          size: doc.sourceSize,
+        });
+      }
       return {
         status: "unchanged",
         attachmentId,

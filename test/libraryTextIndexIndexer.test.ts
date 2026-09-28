@@ -103,6 +103,36 @@ describe("library text indexer", function () {
     );
   });
 
+  it("records a new file stat on an unchanged re-index so reconcile stops flagging it stale", async function () {
+    const item = Object.assign(mockPdfAttachment(9001), {
+      getFilePathAsync: async () => "/storage/K9001/paper.pdf",
+    }) as unknown as Zotero.Item;
+    await buildFixturePdfContext("bioSingleHash", 9001);
+    pdfTextCache.clear();
+    const io = (globalThis as any).IOUtils;
+    let lastModified = 1000;
+    io.stat = async () => ({ size: 4096, lastModified });
+    const first = await indexAttachment({
+      item,
+      libraryID: 1,
+      store,
+      lane: "urgent",
+    });
+    assert.equal(first.status, "indexed");
+    assert.equal((await store.getDocument(9001))?.sourceMtime, 1000);
+    lastModified = 2000; // file sync re-downloaded identical bytes
+    const second = await indexAttachment({
+      item,
+      libraryID: 1,
+      store,
+      lane: "urgent",
+    });
+    assert.equal(second.status, "unchanged");
+    const row = await store.getDocument(9001);
+    assert.equal(row?.sourceMtime, 2000);
+    assert.equal(row?.sourceSize, 4096);
+  });
+
   it("keeps a context the question path already loaded (write-through never evicts the agent's paper)", async function () {
     const item = mockPdfAttachment(9001);
     await buildFixturePdfContext("bioSingleHash", 9001);

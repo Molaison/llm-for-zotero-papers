@@ -5494,9 +5494,69 @@ export function installWorkflowTestHarness(targetAddon: {
       };
     },
     getRecentRetrievalTimings: (limit) => getRecentRetrievalTimings(limit),
-    // Temporary no-ops until the library text index exists.
-    libraryTextIndexStatus: async () => ({ enabled: false }),
-    waitForLibraryTextIndexIdle: async () => true,
+    libraryTextIndexStatus: async () => {
+      const { libraryTextIndexScheduler } =
+        await import("../../services/libraryTextIndex");
+      return libraryTextIndexScheduler.getStatus(
+        Zotero.Libraries.userLibraryID,
+      );
+    },
+    setLibraryTextIndexUserIdle: async (idle) => {
+      const { setUserIdleForTests } =
+        await import("../../services/libraryTextIndex/userIdle");
+      const { libraryTextIndexScheduler } =
+        await import("../../services/libraryTextIndex");
+      setUserIdleForTests(idle);
+      libraryTextIndexScheduler.onUserIdleChange(idle !== false);
+    },
+    waitForLibraryTextIndexIdle: async (timeoutMs) => {
+      // The scaffold's tester is never "user idle"; force it so prefetch drains.
+      const { setUserIdleForTests } =
+        await import("../../services/libraryTextIndex/userIdle");
+      const { libraryTextIndexScheduler } =
+        await import("../../services/libraryTextIndex");
+      setUserIdleForTests(true);
+      libraryTextIndexScheduler.onUserIdleChange(true);
+      return libraryTextIndexScheduler.waitForIdle(timeoutMs);
+    },
+    libraryTextIndexCoverage: async (attachmentIds) => {
+      const { getLibraryTextIndexStore } =
+        await import("../../services/libraryTextIndex/store");
+      const store = await getLibraryTextIndexStore();
+      if (!store) throw new Error("library text index store unavailable");
+      const coverage = await store.getCoverage(attachmentIds);
+      return {
+        indexed: [...coverage.indexed],
+        missing: coverage.missing,
+        failed: coverage.failed,
+      };
+    },
+    forgetLibraryTextIndexDocuments: async (attachmentIds) => {
+      const { getLibraryTextIndexStore } =
+        await import("../../services/libraryTextIndex/store");
+      const store = await getLibraryTextIndexStore();
+      if (!store) throw new Error("library text index store unavailable");
+      await store.removeFromQueue(attachmentIds);
+      await store.deleteDocuments(attachmentIds);
+    },
+    reconcileLibraryTextIndex: async () => {
+      const { libraryTextIndexScheduler } =
+        await import("../../services/libraryTextIndex");
+      return libraryTextIndexScheduler.reconcile(
+        Zotero.Libraries.userLibraryID,
+      );
+    },
+    loadPaperContextForTest: async (attachmentId) => {
+      const { pdfTextCache } =
+        await import("../../services/paperContent/contextCache");
+      const { ensurePDFTextCached } =
+        await import("../../services/paperContent/pdfContext");
+      const item = Zotero.Items.get(attachmentId);
+      if (!item) throw new Error(`No attachment ${attachmentId}`);
+      // A fresh load, as when a question first reads this paper.
+      pdfTextCache.delete(attachmentId);
+      await ensurePDFTextCached(item);
+    },
     async clearPaperTextCacheForBench() {
       const { pdfTextCache, pdfTextLoadingTasks } =
         await import("../../services/paperContent/contextCache");

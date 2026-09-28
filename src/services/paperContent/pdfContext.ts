@@ -801,6 +801,14 @@ export function invalidateCachedContextText(itemId: number): void {
   // text and scores after a MinerU refresh.  Lazy import to avoid circular
   // dependency (multiContextPlanner imports from pdfContext).
   invalidateRetrievalCandidates(normalizedItemId);
+  // Re-index the new text. Lazy import: indexer.ts imports this module.
+  void import("../libraryTextIndex/scheduler")
+    .then(({ libraryTextIndexScheduler }) =>
+      libraryTextIndexScheduler.enqueue([normalizedItemId], "textInvalidated"),
+    )
+    .catch((error) =>
+      appLogger.debug("LLM index: re-index enqueue failed", error),
+    );
   // Clear embedding cache — chunks will change when MinerU content is refreshed,
   // so cached embeddings are stale. Do NOT delete MinerU files themselves:
   // this function is called right after writeMineruCacheFiles(), so deleting

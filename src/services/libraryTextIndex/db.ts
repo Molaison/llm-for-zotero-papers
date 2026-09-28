@@ -158,7 +158,12 @@ export async function openLibraryTextIndexDb(): Promise<LibraryTextIndexDb | nul
       return null;
     }
     try {
-      const raw = new zotero.DBConnection(LIBRARY_TEXT_INDEX_DB_NAME);
+      // An absolute path makes Zotero treat this as an external database. A
+      // bare name gets Zotero's main-database routine: after an unclean
+      // shutdown it runs an integrity check behind the pane-wide progress
+      // meter and never clears it (Zotero.locked then swallows every
+      // keystroke), and it schedules idle-time .bak backups of the file.
+      const raw = new zotero.DBConnection(getLibraryTextIndexDbPath());
       // Call as methods: Zotero's connection reads `this._callbacks` inside
       // executeTransaction (see the note in utils/usageHistoryBackfill.ts).
       const db: LibraryTextIndexDb = {
@@ -185,6 +190,15 @@ export async function openLibraryTextIndexDb(): Promise<LibraryTextIndexDb | nul
 }
 
 export async function closeLibraryTextIndexDb(): Promise<void> {
+  // An open racing shutdown must finish first, or its handle leaks.
+  const pending = openPromise;
+  if (!connection && pending) {
+    try {
+      await pending;
+    } catch {
+      // The open failed; there is nothing to close.
+    }
+  }
   const db = connection;
   connection = null;
   openPromise = null;

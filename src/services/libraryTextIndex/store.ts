@@ -164,6 +164,20 @@ export class LibraryTextIndexStore {
     this.stats = null;
   }
 
+  /**
+   * Records a new file stat for a document whose text did not change (a
+   * re-download with identical bytes), so reconcile stops flagging it stale.
+   */
+  async updateFileState(
+    attachmentId: number,
+    state: { mtime: number | null; size: number | null },
+  ): Promise<void> {
+    await this.q(
+      `UPDATE documents SET source_mtime = ?, source_size = ? WHERE attachment_id = ?`,
+      [state.mtime, state.size, attachmentId],
+    );
+  }
+
   async deleteDocuments(attachmentIds: number[]): Promise<void> {
     if (!attachmentIds.length) return;
     await this.db.executeTransaction(async () => {
@@ -427,6 +441,15 @@ export class LibraryTextIndexStore {
     };
   }
 
+  /** Every queued attachment in a library, parked (attempt cap reached) or pending. */
+  async listQueuedAttachmentIds(libraryID: number): Promise<Set<number>> {
+    const rows = (await this.q(
+      `SELECT attachment_id FROM queue WHERE library_id = ?`,
+      [libraryID],
+    )) as Array<{ attachment_id: number }>;
+    return new Set(rows.map((row) => Number(row.attachment_id)));
+  }
+
   async getDbBytes(): Promise<number> {
     const rows = (await this.q(
       `SELECT page_count * page_size AS bytes FROM pragma_page_count(), pragma_page_size()`,
@@ -480,15 +503,16 @@ function toQueueRow(row: Record<string, unknown>): QueueRow {
   };
 }
 
-let storePromise: Promise<LibraryTextIndexStore | null> | null = null;
+// The shared store is bound to the connection it was built on; a closed and
+// reopened connection gets a new store rather than a store over a dead handle.
+let shared: { db: LibraryTextIndexDb; store: LibraryTextIndexStore } | null =
+  null;
 export async function getLibraryTextIndexStore(): Promise<LibraryTextIndexStore | null> {
-  storePromise ??= openLibraryTextIndexDb().then((db) =>
-    db ? new LibraryTextIndexStore(db) : null,
-  );
-  const store = await storePromise;
-  if (!store) storePromise = null;
-  return store;
+  const db = await openLibraryTextIndexDb();
+  if (!db) return null;
+  if (shared?.db !== db) shared = { db, store: new LibraryTextIndexStore(db) };
+  return shared.store;
 }
 export function resetLibraryTextIndexStoreForTests(): void {
-  storePromise = null;
+  shared = null;
 }

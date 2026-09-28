@@ -1,6 +1,7 @@
 import { assert } from "chai";
 import { installLibraryTextIndexSqlite } from "./helpers/libraryTextIndexDb";
 import {
+  getLibraryTextIndexStore,
   LibraryTextIndexStore,
   type IndexDocumentInput,
 } from "../src/services/libraryTextIndex/store";
@@ -216,5 +217,56 @@ describe("library text index store", function () {
     assert.equal(row?.priority, 9);
     assert.equal(row?.attempts, 0);
     assert.equal(row?.reason, "modified");
+  });
+  it("lists the attachment ids that already have a queue row, parked or pending, per library", async function () {
+    await store.enqueue([
+      { attachmentId: 1, libraryID: 1, priority: 0, reason: "prefetch" },
+      { attachmentId: 2, libraryID: 1, priority: 9, reason: "added" },
+      { attachmentId: 3, libraryID: 2, priority: 0, reason: "prefetch" },
+    ]);
+    for (let i = 0; i < 3; i += 1) await store.markQueueAttempt(1, "boom");
+    assert.deepEqual(
+      [...(await store.listQueuedAttachmentIds(1))].sort(),
+      [1, 2],
+      "a parked row is still a queue row",
+    );
+    assert.deepEqual([...(await store.listQueuedAttachmentIds(2))], [3]);
+    assert.equal((await store.listQueuedAttachmentIds(9)).size, 0);
+  });
+  it("the shared store follows the current connection instead of outliving it", async function () {
+    const first = await getLibraryTextIndexStore();
+    assert.strictEqual(await getLibraryTextIndexStore(), first, "cached");
+    const second = installLibraryTextIndexSqlite();
+    try {
+      const rebound = await getLibraryTextIndexStore();
+      assert.notStrictEqual(
+        rebound,
+        first,
+        "a new connection gets a new store",
+      );
+      await rebound!.enqueue([
+        { attachmentId: 5, libraryID: 1, priority: 0, reason: "prefetch" },
+      ]);
+      assert.lengthOf(second.rows("SELECT * FROM queue"), 1);
+    } finally {
+      second.close();
+    }
+  });
+  it("updates only a document's file state", async function () {
+    await store.upsertDocument(doc(1, ["alpha beta"]));
+    const before = (await store.getDocument(1))!;
+    await store.updateFileState(1, { mtime: 7777, size: null });
+    const after = (await store.getDocument(1))!;
+    assert.equal(after.sourceMtime, 7777);
+    assert.isNull(after.sourceSize);
+    assert.deepEqual(
+      {
+        ...after,
+        sourceMtime: before.sourceMtime,
+        sourceSize: before.sourceSize,
+      },
+      before,
+      "nothing else changes",
+    );
   });
 });
