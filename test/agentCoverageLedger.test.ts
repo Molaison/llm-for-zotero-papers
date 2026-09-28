@@ -308,6 +308,38 @@ describe("agent coverage ledger", function () {
     );
   });
 
+  it("records a visual paper_read redirect that carries no pages or artifacts", async function () {
+    // A `use_figures_mode` redirect has neither `pages` nor artifacts. Hashing
+    // `undefined` used to throw "can't access property length" inside
+    // commitAgentCoverageActivities, which failed the whole turn after the
+    // model had already streamed its answer.
+    const req = request();
+    await commitAgentCoverageActivities({
+      conversationKey: req.conversationKey,
+      activities: [
+        {
+          toolName: "paper_read",
+          input: { mode: "visual", query: "dataset statistics" },
+          content: {
+            mode: "visual",
+            status: "use_figures_mode",
+            backend: "pdf_figure_extraction",
+            query: "dataset statistics",
+            paperContext: req.turnPaperScope.papers[0]?.paper,
+            guidance: "Call paper_read({ mode:'figures' }).",
+          },
+          request: req,
+          timestamp: 7,
+        },
+      ],
+    });
+    const block = buildAgentCoverageContextBlock({
+      conversationKey: req.conversationKey,
+      request: req,
+    });
+    assert.include(block, "Known coverage from prior agent reads:");
+  });
+
   it("persists, hydrates, renders, and clears conversation coverage", async function () {
     const { rows, restore } = installCoverageMockDb();
     try {

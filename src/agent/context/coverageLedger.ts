@@ -157,7 +157,9 @@ function normalizeRecord(value: unknown): Record<string, unknown> {
 }
 
 function stableJson(value: unknown): string {
-  return JSON.stringify(stabilizeForJson(value));
+  // JSON.stringify(undefined) is undefined, not a string; a visual paper_read
+  // redirect with neither pages nor artifacts hashes exactly that value.
+  return JSON.stringify(stabilizeForJson(value)) ?? "";
 }
 
 function stabilizeForJson(value: unknown): unknown {
