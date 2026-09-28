@@ -5494,6 +5494,18 @@ export function installWorkflowTestHarness(targetAddon: {
       };
     },
     getRecentRetrievalTimings: (limit) => getRecentRetrievalTimings(limit),
+    // Temporary no-ops until the library text index exists.
+    libraryTextIndexStatus: async () => ({ enabled: false }),
+    waitForLibraryTextIndexIdle: async () => true,
+    async clearPaperTextCacheForBench() {
+      const { pdfTextCache, pdfTextLoadingTasks } =
+        await import("../../services/paperContent/contextCache");
+      const { invalidateRetrievalCandidates } =
+        await import("../../services/retrieval/cacheInvalidation");
+      pdfTextCache.clear();
+      pdfTextLoadingTasks.clear();
+      invalidateRetrievalCandidates();
+    },
     async checkProviderConversationTransport(input) {
       const params = {
         ...input,

@@ -468,6 +468,15 @@ export type WorkflowTestApi = {
     intent?: "enumerate" | "verify" | "summarize";
   }) => Promise<LibraryRetrieveBenchResult>;
   getRecentRetrievalTimings: (limit?: number) => RetrievalTimingReport[];
+  // Temporary stubs for the library search benchmark; the text index
+  // replaces them with the real status and idle wait.
+  libraryTextIndexStatus: () => Promise<
+    { enabled: boolean } & Record<string, unknown>
+  >;
+  waitForLibraryTextIndexIdle: (timeoutMs: number) => Promise<boolean>;
+  // Drops every loaded paper text and retrieval candidate so the next
+  // retrieval starts as if no paper had been read this session.
+  clearPaperTextCacheForBench: () => Promise<void>;
   checkProviderConversationTransport: (params: {
     conversationKey: number;
     model: string;
