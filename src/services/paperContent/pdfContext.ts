@@ -42,7 +42,11 @@ import {
 } from "../quotes/quoteCitations";
 import { readNoteSnapshot } from "../notes/noteSnapshot";
 import { readAttachmentBytes } from "../attachmentStorage";
-import { pdfTextCache, pdfTextLoadingTasks } from "./contextCache";
+import {
+  notifyPdfContextLoaded,
+  pdfTextCache,
+  pdfTextLoadingTasks,
+} from "./contextCache";
 import {
   buildAndWriteManifest,
   buildManifest,
@@ -413,7 +417,10 @@ async function cacheTextAttachment(
 
 async function cachePDFText(
   item: Zotero.Item,
-  options?: { sourceMode?: PaperContentSourceMode },
+  options?: {
+    sourceMode?: PaperContentSourceMode;
+    preferFulltextCache?: boolean;
+  },
 ) {
   if (pdfTextCache.has(item.id)) return;
 
@@ -466,7 +473,7 @@ async function cachePDFText(
     }
 
     // 2. Fallback to Zotero.PDFWorker
-    if (!pdfText && pdfItem) {
+    const tryPdfWorker = async (pdfItem: Zotero.Item) => {
       try {
         const result = await Zotero.PDFWorker.getFullText(pdfItem.id);
         if (result && result.text) {
@@ -484,15 +491,28 @@ async function cachePDFText(
       } catch (e) {
         appLogger.warn("PDF extraction failed:", e);
       }
-    }
+    };
 
     // 3. Fallback to Zotero's full-text cache/index. PDFWorker can return no
     // text even when Zotero already has indexed text for the attachment.
-    if (!pdfText && pdfItem) {
+    const tryFulltextCache = async (pdfItem: Zotero.Item) => {
       const cachedText = await readZoteroFulltextCache(pdfItem);
       if (cachedText) {
         pdfText = cachedText;
         sourceType = "zotero-fulltext-cache";
+      }
+    };
+
+    // Background indexing (preferFulltextCache) swaps steps 2 and 3 so it
+    // almost never runs pdf.js; interactive callers keep the page-aware
+    // PDFWorker text first.
+    if (!pdfText && pdfItem) {
+      if (options?.preferFulltextCache) {
+        await tryFulltextCache(pdfItem);
+        if (!pdfText) await tryPdfWorker(pdfItem);
+      } else {
+        await tryPdfWorker(pdfItem);
+        if (!pdfText) await tryFulltextCache(pdfItem);
       }
     }
 
@@ -653,7 +673,12 @@ async function cachePDFText(
 
 export async function ensurePDFTextCached(
   item: Zotero.Item,
-  options?: { sourceMode?: PaperContentSourceMode },
+  options?: {
+    sourceMode?: PaperContentSourceMode;
+    preferFulltextCache?: boolean;
+    /** Background index loads: fill the cache without firing the write-through hook. */
+    silentLoad?: boolean;
+  },
 ): Promise<void> {
   const cached = pdfTextCache.get(item.id);
   if (cached && cachedContextMatchesSourceMode(cached, options?.sourceMode)) {
@@ -679,6 +704,11 @@ export async function ensurePDFTextCached(
   const task = (async () => {
     try {
       await cachePDFText(item, options);
+      // Fresh loads with text only; cache hits and waits on an existing task return before this.
+      const loaded = pdfTextCache.get(item.id);
+      if (loaded && loaded.chunks.length && !options?.silentLoad) {
+        notifyPdfContextLoaded(item.id);
+      }
     } finally {
       pdfTextLoadingTasks.delete(item.id);
     }

@@ -26,6 +26,22 @@ import type {
 
 const encoder = new TextEncoder();
 
+/**
+ * Fixture "PDF text" per attachment id. Zotero's full-text cache file and
+ * PDFWorker both serve it, so a test can tell the two sources apart only by
+ * `sourceType` and `pdfWorkerCalls`. Empty by default: existing suites keep
+ * falling through to an empty context.
+ */
+const fulltextCacheText = new Map<number, string>();
+/** Attachment ids passed to the stubbed `Zotero.PDFWorker.getFullText`. */
+const pdfWorkerCalls: number[] = [];
+const FULLTEXT_CACHE_DIR = "/tmp/zotero-fulltext-cache";
+
+function fulltextCacheIdForPath(filePath: string): number | null {
+  const match = /^\/tmp\/zotero-fulltext-cache\/(\d+)\.cache$/.exec(filePath);
+  return match ? Number(match[1]) : null;
+}
+
 export type MemoryIO = {
   files: Map<string, Uint8Array>;
   dirs: Set<string>;
@@ -67,7 +83,13 @@ export function setupMemoryIO(): MemoryIO {
     read: async (filePath: string) => {
       const normalized = normalizePath(filePath);
       const data = files.get(normalized);
-      if (!data) throw new Error(`Missing file: ${filePath}`);
+      if (!data) {
+        const fulltextId = fulltextCacheIdForPath(normalized);
+        const text =
+          fulltextId === null ? undefined : fulltextCacheText.get(fulltextId);
+        if (text !== undefined) return encoder.encode(text);
+        throw new Error(`Missing file: ${filePath}`);
+      }
       return data;
     },
     makeDirectory: async (filePath: string) => {
@@ -124,8 +146,17 @@ export function setupZoteroGlobals(parentTitle = "Mock MinerU Paper"): void {
     Items: {
       get: (id: number) => (id === 100 ? parentItem : null),
     },
+    Fulltext: {
+      getItemCacheFile: (item: { id: number }) => ({
+        exists: () => fulltextCacheText.has(item.id),
+        path: `${FULLTEXT_CACHE_DIR}/${item.id}.cache`,
+      }),
+    },
     PDFWorker: {
-      getFullText: async () => ({ text: "" }),
+      getFullText: async (id: number) => {
+        pdfWorkerCalls.push(id);
+        return { text: fulltextCacheText.get(id) || "" };
+      },
     },
   };
   (globalThis as unknown as { ztoolkit: unknown }).ztoolkit = {
@@ -144,12 +175,22 @@ const STUBBED_GLOBAL_NAMES: StubbedGlobalName[] = [
 export type TestGlobalSnapshot = {
   present: Partial<Record<StubbedGlobalName, unknown>>;
   absent: StubbedGlobalName[];
+  /** Shared with the stubbed Zotero globals; see {@link setupZoteroGlobals}. */
+  fulltextCacheText: Map<number, string>;
+  pdfWorkerCalls: number[];
 };
 
 /** Record the globals this helper replaces so a suite can put them back. */
 export function snapshotTestGlobals(): TestGlobalSnapshot {
   const scope = globalThis as unknown as Record<string, unknown>;
-  const snapshot: TestGlobalSnapshot = { present: {}, absent: [] };
+  fulltextCacheText.clear();
+  pdfWorkerCalls.length = 0;
+  const snapshot: TestGlobalSnapshot = {
+    present: {},
+    absent: [],
+    fulltextCacheText,
+    pdfWorkerCalls,
+  };
   for (const name of STUBBED_GLOBAL_NAMES) {
     if (name in scope) snapshot.present[name] = scope[name];
     else snapshot.absent.push(name);
@@ -170,6 +211,8 @@ export function restoreTestGlobals(snapshot: TestGlobalSnapshot): void {
   for (const name of snapshot.absent) {
     delete scope[name];
   }
+  fulltextCacheText.clear();
+  pdfWorkerCalls.length = 0;
   pdfTextCache.clear();
 }
 
