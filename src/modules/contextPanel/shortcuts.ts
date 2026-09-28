@@ -31,7 +31,7 @@ import {
 import { setStatus } from "./textUtils";
 import { showShortcutEditDialog } from "./shortcutEditDialog";
 import { showStandaloneConfirmationDialog } from "./standaloneConfirmationDialog";
-import { t } from "../../utils/i18n";
+import { isChineseLocale, t } from "../../utils/i18n";
 
 const shortcutRenderGeneration = new WeakMap<Element, number>();
 
@@ -47,18 +47,36 @@ export function isShortcutMenuVisible(menu: HTMLDivElement | null): boolean {
   return Boolean(menu && menu.style.display !== "none");
 }
 
-export async function loadShortcutText(file: string): Promise<string> {
-  if (shortcutTextCache.has(file)) {
-    return shortcutTextCache.get(file)!;
+async function fetchShortcutFile(path: string): Promise<string | null> {
+  if (shortcutTextCache.has(path)) {
+    return shortcutTextCache.get(path)!;
   }
-  const uri = `chrome://${config.addonRef}/content/shortcuts/${file}`;
+  const uri = `chrome://${config.addonRef}/content/shortcuts/${path}`;
   const fetchFn = ztoolkit.getGlobal("fetch") as typeof fetch;
-  const res = await fetchFn(uri);
-  if (!res.ok) {
+  try {
+    const res = await fetchFn(uri);
+    if (!res.ok) return null;
+    const text = await res.text();
+    shortcutTextCache.set(path, text);
+    return text;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Load a built-in shortcut prompt in the plugin's UI language, falling back
+ * to the English file when no localized copy exists.
+ */
+export async function loadShortcutText(file: string): Promise<string> {
+  if (isChineseLocale()) {
+    const localized = await fetchShortcutFile(`zh-CN/${file}`);
+    if (localized !== null) return localized;
+  }
+  const text = await fetchShortcutFile(file);
+  if (text === null) {
     throw new Error(`Failed to load ${file}`);
   }
-  const text = await res.text();
-  shortcutTextCache.set(file, text);
   return text;
 }
 

@@ -1207,6 +1207,11 @@ function getEffectiveLocale(): string {
   }
 }
 
+/** True when the plugin's effective UI locale is Chinese. */
+export function isChineseLocale(): boolean {
+  return getEffectiveLocale().startsWith("zh");
+}
+
 /**
  * Translate an English UI string.
  *
@@ -1217,7 +1222,7 @@ function getEffectiveLocale(): string {
  * Usage:  `button.textContent = t("Start All");`
  */
 export function t(en: string): string {
-  if (getEffectiveLocale().startsWith("zh")) {
+  if (isChineseLocale()) {
     return zhCN[en] ?? en;
   }
   return en;
