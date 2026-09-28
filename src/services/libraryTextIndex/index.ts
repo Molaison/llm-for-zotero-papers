@@ -10,6 +10,13 @@ import { INDEX_USER_IDLE_SECONDS } from "./constants";
 import { closeLibraryTextIndexDb } from "./db";
 import { libraryTextIndexScheduler, type SchedulerEnv } from "./scheduler";
 import { createUserIdleTracker, type UserIdleTracker } from "./userIdle";
+import { isLibraryTextIndexEnabled } from "./scheduler";
+import {
+  searchLibraryTextIndex,
+  type LibraryTextIndexSearchParams,
+  type LibraryTextIndexSearchResult,
+} from "./search";
+import { getLibraryTextIndexStore } from "./store";
 
 export {
   libraryTextIndexScheduler,
@@ -18,6 +25,30 @@ export {
   getLibraryTextIndexBudgetBytes,
 } from "./scheduler";
 export type { LibraryTextIndexStatus } from "./scheduler";
+export { searchLibraryTextIndex } from "./search";
+export type {
+  IndexCoverage,
+  IndexedChunkHit,
+  IndexedPaperHit,
+  LibraryTextIndexSearchParams,
+  LibraryTextIndexSearchResult,
+} from "./search";
+
+export type LibraryTextIndexFacade = {
+  isEnabled(): boolean;
+  /** Null when the index is disabled or its database cannot be opened. */
+  search(
+    params: Omit<LibraryTextIndexSearchParams, "store">,
+  ): Promise<LibraryTextIndexSearchResult | null>;
+};
+export const libraryTextIndex: LibraryTextIndexFacade = {
+  isEnabled: () => isLibraryTextIndexEnabled(),
+  async search(params) {
+    if (!isLibraryTextIndexEnabled()) return null;
+    const store = await getLibraryTextIndexStore();
+    return store ? searchLibraryTextIndex({ ...params, store }) : null;
+  },
+};
 
 let unsubscribeChanges: (() => void) | null = null;
 let unsubscribeContexts: (() => void) | null = null;
