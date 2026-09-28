@@ -68,6 +68,7 @@ export type StoredChunk = {
   meta: StoredChunkMeta;
   title: string;
   parentItemId: number | null;
+  sourceType: string;
 };
 export type CorpusStats = {
   chunkCount: number;
@@ -256,7 +257,7 @@ export class LibraryTextIndexStore {
         .map(() => "(c.attachment_id = ? AND c.chunk_index = ?)")
         .join(" OR ");
       const rows = (await this.q(
-        `SELECT c.attachment_id, c.chunk_index, c.text, c.token_count, c.meta_json, d.title, d.parent_item_id
+        `SELECT c.attachment_id, c.chunk_index, c.text, c.token_count, c.meta_json, d.title, d.parent_item_id, d.source_type
          FROM chunks c JOIN documents d ON d.attachment_id = c.attachment_id WHERE ${where}`,
         batch.flatMap((r) => [r.attachmentId, r.chunkIndex]),
       )) as Array<Record<string, unknown>>;
@@ -267,7 +268,7 @@ export class LibraryTextIndexStore {
 
   async getChunksForDocument(attachmentId: number): Promise<StoredChunk[]> {
     const rows = (await this.q(
-      `SELECT c.attachment_id, c.chunk_index, c.text, c.token_count, c.meta_json, d.title, d.parent_item_id
+      `SELECT c.attachment_id, c.chunk_index, c.text, c.token_count, c.meta_json, d.title, d.parent_item_id, d.source_type
        FROM chunks c JOIN documents d ON d.attachment_id = c.attachment_id WHERE c.attachment_id = ? ORDER BY c.chunk_index`,
       [attachmentId],
     )) as Array<Record<string, unknown>>;
@@ -488,6 +489,7 @@ function toStoredChunk(row: Record<string, unknown>): StoredChunk {
     title: String(row.title),
     parentItemId:
       row.parent_item_id === null ? null : Number(row.parent_item_id),
+    sourceType: String(row.source_type),
   };
 }
 function toQueueRow(row: Record<string, unknown>): QueueRow {

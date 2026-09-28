@@ -17,6 +17,8 @@ export type IndexedChunkHit = {
   chunkIndex: number;
   text: string;
   title: string;
+  /** The indexed document's source (`mineru`, `zotero-fulltext-cache`, ...). */
+  sourceType: string;
   meta: StoredChunkMeta;
   bm25Score: number;
   vectorScore?: number;
@@ -245,6 +247,7 @@ export async function searchLibraryTextIndex(
       chunkIndex: c.chunkIndex,
       text: c.text,
       title: c.title,
+      sourceType: c.sourceType,
       meta: c.meta,
       bm25Score: s.score,
       hybridScore: s.score,

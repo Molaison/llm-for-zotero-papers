@@ -8,6 +8,7 @@ import {
   setLibraryTextIndexDbForTests,
 } from "../src/services/libraryTextIndex/db";
 import { LIBRARY_TEXT_INDEX_SCHEMA_VERSION } from "../src/services/libraryTextIndex/constants";
+import { setAppLogSinkForTests } from "../src/core/logging";
 
 describe("library text index db", function () {
   // db.ts keeps module state (connection, pending open, test override); start
@@ -173,6 +174,24 @@ describe("library text index db", function () {
       assert.deepEqual(constructed, [getLibraryTextIndexDbPath()]);
       assert.equal(constructed[0], "/data/zotero/llm-for-zotero-index.sqlite");
     } finally {
+      (globalThis as any).Zotero = previous;
+    }
+  });
+  it("caches a missing Zotero.DBConnection as null for the session without a warning", async function () {
+    const previous = (globalThis as any).Zotero;
+    const emitted: string[] = [];
+    setAppLogSinkForTests((level) => emitted.push(level));
+    (globalThis as any).Zotero = { DataDirectory: { dir: "/tmp" } };
+    try {
+      assert.isNull(await openLibraryTextIndexDb());
+      assert.isNull(await openLibraryTextIndexDb());
+      assert.notInclude(
+        emitted,
+        "warn",
+        "an unavailable connection is not a failure",
+      );
+    } finally {
+      setAppLogSinkForTests(null);
       (globalThis as any).Zotero = previous;
     }
   });

@@ -155,6 +155,14 @@ describe("library text index search", function () {
       perPaperTopK: 3,
     });
     assert.isTrue(scoped.chunks.every((c) => c.attachmentId === 9001));
+    // Each hit carries its document's source, so snippets can label it.
+    assert.isNotEmpty(all.chunks);
+    for (const c of all.chunks) {
+      assert.equal(
+        c.sourceType,
+        c.attachmentId === 9001 ? bio.sourceType : math.sourceType,
+      );
+    }
   });
 
   it("unions terms across query variants, caps them, and returns nothing for an empty query", async function () {

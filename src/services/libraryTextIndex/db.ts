@@ -152,7 +152,9 @@ export async function openLibraryTextIndexDb(): Promise<LibraryTextIndexDb | nul
   openPromise = (async () => {
     const zotero = getZotero();
     if (!zotero?.DBConnection) {
-      appLogger.warn(
+      // Not a failure (tests, stripped hosts): openPromise stays resolved to
+      // null, so the session asks once and every caller takes the direct path.
+      appLogger.debug(
         "LLM index: Zotero.DBConnection unavailable; library text index disabled",
       );
       return null;

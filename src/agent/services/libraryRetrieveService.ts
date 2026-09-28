@@ -66,6 +66,17 @@ import {
   type RetrievalTimer,
 } from "../../services/retrieval/retrievalTiming";
 import { appLogger } from "../../core/logging";
+import {
+  beginRetrievalActivity,
+  libraryTextIndex,
+  type IndexedChunkHit,
+  type IndexedPaperHit,
+  type LibraryTextIndexFacade,
+} from "../../services/libraryTextIndex";
+import {
+  INDEX_COVERAGE_SKIP_PROBES_RATIO,
+  MAX_UNINDEXED_FALLBACK_PAPERS,
+} from "../../services/libraryTextIndex/constants";
 
 export type LibraryRetrieveDepth = "pool" | "metadata" | "evidence" | "verify";
 export type LibraryRetrieveIntent = "enumerate" | "verify" | "summarize";
@@ -405,6 +416,12 @@ type ResourceRecord = {
   bm25TermHits: number;
   bm25DistinctiveHits: number;
   quicksearchMatched: boolean;
+  /** Blended library-text-index contribution, merged by max across rounds. */
+  indexScore: number;
+  /** The library text index ranked this paper for the query. */
+  indexMatched: boolean;
+  /** The paper's attachment is in the library text index. */
+  indexed: boolean;
   matchedQueryVariants: Set<string>;
   score: number;
   why: string[];
@@ -444,6 +461,10 @@ const TRIAGE_MAX_CANDIDATES = 40;
 // term weights so distinctive-vocabulary overlap outranks generic noise.
 const BM25_BLEND_WEIGHT = 8;
 
+// Normalized library-text-index contribution: the best index-ranked paper
+// scores like a quicksearch hit (12), the rest in proportion.
+const INDEX_BLEND_WEIGHT = 12;
+
 const BM25_MIN_TERM_HITS = 2;
 
 /**
@@ -455,7 +476,10 @@ const BM25_MIN_TERM_HITS = 2;
  */
 function recordMatchedQuery(record: ResourceRecord): boolean {
   return (
-    record.metadataScore > 0 || record.ftsScore > 0 || recordBm25Matched(record)
+    record.indexMatched ||
+    record.metadataScore > 0 ||
+    record.ftsScore > 0 ||
+    recordBm25Matched(record)
   );
 }
 
@@ -799,13 +823,17 @@ function sourceKindFromPdfContext(
   pdfContext: PdfContext | undefined,
   paperContext: PaperContextRef,
 ): LibraryRetrieveSourceKind {
-  if (
-    pdfContext?.sourceType === "mineru" ||
-    paperContext.contentSourceMode === "mineru"
-  ) {
+  return sourceKindFromSourceType(pdfContext?.sourceType, paperContext);
+}
+
+function sourceKindFromSourceType(
+  sourceType: string | undefined,
+  paperContext: PaperContextRef,
+): LibraryRetrieveSourceKind {
+  if (sourceType === "mineru" || paperContext.contentSourceMode === "mineru") {
     return "mineru";
   }
-  if (pdfContext?.sourceType?.startsWith("attachment-")) return "attachment";
+  if (sourceType?.startsWith("attachment-")) return "attachment";
   return "pdf_text";
 }
 
@@ -1386,15 +1414,19 @@ export class LibraryRetrieveService {
     private readonly candidateBuilder: CandidateBuilder = buildPaperRetrievalCandidates,
     private readonly probeReformulator: typeof generateRetrievalProbeReformulation = generateRetrievalProbeReformulation,
     private readonly triage: typeof triageCandidatesWithModel = triageCandidatesWithModel,
+    private readonly textIndex: LibraryTextIndexFacade = libraryTextIndex,
   ) {}
 
   async retrieve(
     params: LibraryRetrieveParams,
   ): Promise<LibraryRetrieveResult> {
     const timer = createRetrievalTimer();
+    // The background indexer backs off while a question is being answered.
+    const endActivity = beginRetrievalActivity();
     try {
       return await this.retrieveTimed(params, timer);
     } finally {
+      endActivity();
       const report = timer.finish();
       recordRetrievalTiming(report);
       appLogger.debug("LLM retrieve timing", report);
@@ -1501,6 +1533,56 @@ export class LibraryRetrieveService {
 
     rescorePoolBm25(input.queryPlan);
 
+    // Library text index first. A null result (disabled, unavailable, or
+    // failed) leaves every index rule below inert: today's path runs as is.
+    const scopeAttachmentIds = records
+      .map((record) => record.paperContext?.contextItemId)
+      .filter((id): id is number => typeof id === "number");
+    const searchIndex = (queries: string[]) =>
+      this.textIndex.search({
+        scopeAttachmentIds,
+        queries: queries.length ? queries : [input.query],
+        maxPapers: input.maxCandidatePapers,
+        perPaperTopK: Math.max(input.perPaperTopK, 5),
+      });
+    const indexResult =
+      input.depth === "pool" ||
+      input.depth === "metadata" ||
+      !this.textIndex.isEnabled()
+        ? null
+        : await timer.span("index_search", () =>
+            searchIndex(input.queryPlan.effectiveQueries),
+          );
+    const indexHitsByAttachment = new Map<number, IndexedChunkHit[]>();
+    const collectIndexHits = (chunks: IndexedChunkHit[]) => {
+      for (const hit of chunks) {
+        const list = indexHitsByAttachment.get(hit.attachmentId) || [];
+        if (list.some((known) => known.chunkIndex === hit.chunkIndex)) continue;
+        list.push(hit);
+        indexHitsByAttachment.set(hit.attachmentId, list);
+      }
+    };
+    let indexCoversScope = false;
+    if (indexResult) {
+      timer.count("indexChunks", indexResult.chunks.length);
+      const unindexed = new Set(indexResult.coverage.unindexed);
+      for (const record of records) {
+        record.indexed = Boolean(
+          record.paperContext &&
+          !unindexed.has(record.paperContext.contextItemId),
+        );
+      }
+      this.applyIndexPapers(records, indexResult.papers, methodsUsed);
+      collectIndexHits(indexResult.chunks);
+      indexCoversScope =
+        indexResult.coverage.scopeAttachments > 0 &&
+        indexResult.coverage.indexed / indexResult.coverage.scopeAttachments >=
+          INDEX_COVERAGE_SKIP_PROBES_RATIO;
+    }
+    // Only the quicksearch passes are skipped; below the ratio they are the
+    // only way to discover papers the index does not hold yet.
+    const skipProbes = indexCoversScope;
+
     let probeRounds = 0;
     const variantsTried = new Set(
       buildQuicksearchProbes(input.queryPlan).map((probe) =>
@@ -1518,9 +1600,11 @@ export class LibraryRetrieveService {
       input.depth !== "metadata" &&
       (input.methods.includes("fts") || input.methods.includes("exact"))
     ) {
-      indexedScan = await timer.span("quicksearch", () =>
-        this.addQuicksearchMatches(scope, records, input, warnings),
-      );
+      if (!skipProbes) {
+        indexedScan = await timer.span("quicksearch", () =>
+          this.addQuicksearchMatches(scope, records, input, warnings),
+        );
+      }
       if (input.methods.includes("fts")) methodsUsed.add("fts");
 
       const probeDeadline = Date.now() + PROBE_LOOP_DEADLINE_MS;
@@ -1583,29 +1667,44 @@ export class LibraryRetrieveService {
               readIntent: input.queryPlan.readIntent,
             }),
           };
-          const rescan = await this.addQuicksearchMatches(
-            scope,
-            records,
-            input,
-            warnings,
-            {
-              probesOverride: freshVariants
-                .flatMap((variant) => expandProbeText(variant))
-                .slice(0, QUICKSEARCH_MAX_PROBES),
-            },
-          );
-          indexedScan = {
-            available: Math.max(indexedScan.available, rescan.available),
-            scanned: Math.max(indexedScan.scanned, rescan.scanned),
-            matched: indexedScan.matched,
-            truncated: indexedScan.truncated || rescan.truncated,
-          };
+          if (indexResult) {
+            // Variants search the index (milliseconds) and merge paper hits
+            // by max score.
+            const round = await timer.span("index_search", () =>
+              searchIndex(freshVariants),
+            );
+            if (round) {
+              this.applyIndexPapers(records, round.papers, methodsUsed);
+              collectIndexHits(round.chunks);
+            }
+          }
+          if (!skipProbes) {
+            const rescan = await this.addQuicksearchMatches(
+              scope,
+              records,
+              input,
+              warnings,
+              {
+                probesOverride: freshVariants
+                  .flatMap((variant) => expandProbeText(variant))
+                  .slice(0, QUICKSEARCH_MAX_PROBES),
+              },
+            );
+            indexedScan = {
+              available: Math.max(indexedScan.available, rescan.available),
+              scanned: Math.max(indexedScan.scanned, rescan.scanned),
+              matched: indexedScan.matched,
+              truncated: indexedScan.truncated || rescan.truncated,
+            };
+          }
           rescorePoolBm25(input.queryPlan);
         }
       });
       indexedScan = {
         ...indexedScan,
-        matched: records.filter((record) => record.quicksearchMatched).length,
+        matched: records.filter(
+          (record) => record.quicksearchMatched || record.indexMatched,
+        ).length,
       };
     }
 
@@ -1618,6 +1717,7 @@ export class LibraryRetrieveService {
         record.metadataScore +
         record.ftsScore +
         (maxBm25 > 0 ? (record.bm25Score / maxBm25) * BM25_BLEND_WEIGHT : 0) +
+        record.indexScore +
         (record.paperContext ? 0.5 : 0);
       if (record.metadataScore > 0) {
         record.queryState.add("matched_metadata");
@@ -1815,6 +1915,8 @@ export class LibraryRetrieveService {
     const snippets: LibraryRetrieveSnippet[] = [];
     let snippetPapersExpanded = 0;
     let evidencePapers = 0;
+    let fallbackRead = 0;
+    let fallbackSkipped = 0;
     const wantedSections = params.request?.classifiedIntent?.wantedSections
       ?.length
       ? params.request.classifiedIntent.wantedSections
@@ -1833,24 +1935,57 @@ export class LibraryRetrieveService {
       const fullTextRecords = candidateRecords
         .filter((record) => record.paperContext)
         .slice(0, input.maxFullTextPapers);
+      // Indexed papers answer from their index hits without loading text;
+      // verify/exact scanning still needs the whole document.
+      const useIndexSnippets =
+        Boolean(indexResult) &&
+        input.depth === "evidence" &&
+        !input.requireExact;
       for (const record of fullTextRecords) {
         if (snippets.length >= input.maxTotalSnippets) break;
         const remaining = input.maxTotalSnippets - snippets.length;
-        const paperSnippets = await timer.span("paper_snippets", () =>
-          this.retrievePaperSnippets({
-            record,
-            input,
-            maxSnippets: Math.min(input.perPaperTopK, remaining),
-            preferBodyEvidence,
-            wantedSections,
-            queryOverride:
-              triagePerPaperQueries?.[String(record.target.itemId)],
-            apiBase: params.apiBase,
-            apiKey: params.apiKey,
-            methodsUsed,
-            warnings,
-          }),
-        );
+        const maxSnippets = Math.min(input.perPaperTopK, remaining);
+        let paperSnippets: LibraryRetrieveSnippet[];
+        if (useIndexSnippets && record.indexed && record.paperContext) {
+          const hits =
+            indexHitsByAttachment.get(record.paperContext.contextItemId) || [];
+          paperSnippets = timer.spanSync("index_search", () =>
+            this.snippetsFromIndexHits({
+              record,
+              hits,
+              maxSnippets,
+              preferBodyEvidence,
+            }),
+          );
+          record.queryState.add("content_loaded");
+        } else {
+          if (indexResult && !record.indexed) {
+            if (fallbackRead >= MAX_UNINDEXED_FALLBACK_PAPERS) {
+              fallbackSkipped += 1;
+              continue;
+            }
+            fallbackRead += 1;
+          }
+          paperSnippets = await timer.span(
+            indexResult && !record.indexed
+              ? "fallback_snippets"
+              : "paper_snippets",
+            () =>
+              this.retrievePaperSnippets({
+                record,
+                input,
+                maxSnippets,
+                preferBodyEvidence,
+                wantedSections,
+                queryOverride:
+                  triagePerPaperQueries?.[String(record.target.itemId)],
+                apiBase: params.apiBase,
+                apiKey: params.apiKey,
+                methodsUsed,
+                warnings,
+              }),
+          );
+        }
         timer.count("papersTouched");
         if (!record.queryState.has("content_loaded")) continue;
         snippetPapersExpanded += 1;
@@ -1866,6 +2001,31 @@ export class LibraryRetrieveService {
           "Verify mode found no exact passage snippets in the searched full-text candidates.",
         );
       }
+    }
+    if (indexResult && indexResult.coverage.unindexed.length) {
+      const unindexedCount = indexResult.coverage.unindexed.length;
+      const failedCount = indexResult.coverage.failed.length;
+      const notRead = Math.max(0, unindexedCount - fallbackRead);
+      warnings.push(
+        `${unindexedCount} paper(s) in scope are not yet in the library text index${
+          failedCount ? `, ${failedCount} could not be indexed` : ""
+        }; ${fallbackRead} were read directly, ${notRead} were not read.`,
+      );
+    }
+    if (indexResult && indexCoversScope) {
+      // Coverage comes from the index, not from a quicksearch scan.
+      indexedScan = {
+        available: indexedTextAvailable,
+        scanned: indexResult.coverage.indexed + fallbackRead,
+        matched: records.filter((record) => record.indexMatched).length,
+        truncated:
+          fallbackSkipped > 0 ||
+          indexResult.coverage.unindexed.length > fallbackRead,
+      };
+    } else if (indexResult && fallbackSkipped > 0) {
+      // Quicksearch scanned the scope, but shortlisted papers outside the
+      // index went unread past the fallback cap: the scan is not complete.
+      indexedScan = { ...indexedScan, truncated: true };
     }
 
     const snippetQuotePack = timer.spanSync("rank", () =>
@@ -2013,10 +2173,94 @@ export class LibraryRetrieveService {
   ): number {
     return records.filter(
       (record) =>
+        record.indexMatched ||
         record.metadataScore > 0 ||
         record.ftsScore > 0 ||
         recordBm25Matched(record),
     ).length;
+  }
+
+  /** Blends index paper hits into the records, merging by max across rounds. */
+  private applyIndexPapers(
+    records: ResourceRecord[],
+    papers: IndexedPaperHit[],
+    methodsUsed: Set<LibraryRetrieveMethod>,
+  ): void {
+    const recordByAttachment = new Map<number, ResourceRecord>();
+    for (const record of records) {
+      if (record.paperContext) {
+        recordByAttachment.set(record.paperContext.contextItemId, record);
+      }
+    }
+    const best = papers.reduce((max, paper) => Math.max(max, paper.score), 0);
+    for (const paper of papers) {
+      const record = recordByAttachment.get(paper.attachmentId);
+      if (!record) continue;
+      const score = best > 0 ? (paper.score / best) * INDEX_BLEND_WEIGHT : 0;
+      if (score <= record.indexScore) continue;
+      record.indexScore = score;
+      record.indexMatched = true;
+      record.queryState.add("matched_bm25");
+      record.resourceState.add("text_indexed");
+      if (!record.why.some((why) => why.startsWith("library index:"))) {
+        record.why.push(
+          `library index: ${paper.matchingChunks} matching passage(s)`,
+        );
+      }
+    }
+    if (papers.length) methodsUsed.add("fts");
+  }
+
+  /**
+   * Snippets for an indexed paper straight from its index hits, with the
+   * same body-first admission as `retrievePaperSnippets`.
+   */
+  private snippetsFromIndexHits(params: {
+    record: ResourceRecord;
+    hits: IndexedChunkHit[];
+    maxSnippets: number;
+    preferBodyEvidence: boolean;
+  }): LibraryRetrieveSnippet[] {
+    const paperContext = params.record.paperContext;
+    if (!paperContext || params.maxSnippets <= 0) return [];
+    const citationLabel = formatPaperCitationLabel(paperContext);
+    const sourceLabel = formatPaperSourceLabel(paperContext);
+    const isBody = (hit: IndexedChunkHit) =>
+      isBodyEvidenceSection(hit.meta.sectionLabel, hit.meta.chunkKind);
+    // Body evidence fills the slots first; front matter is capped at one.
+    const ordered = params.preferBodyEvidence
+      ? [
+          ...params.hits.filter(isBody),
+          ...params.hits.filter((hit) => !isBody(hit)).slice(0, 1),
+        ]
+      : params.hits;
+    const snippets: LibraryRetrieveSnippet[] = [];
+    for (const hit of ordered) {
+      if (snippets.length >= params.maxSnippets) break;
+      snippets.push({
+        snippetId: `lr_${paperContext.itemId}_${paperContext.contextItemId}_${hit.chunkIndex}_bm25`,
+        itemId: String(paperContext.itemId),
+        contextItemId: String(paperContext.contextItemId),
+        chunkIndex: hit.chunkIndex,
+        title: hit.title || paperContext.title,
+        citationLabel,
+        sourceLabel,
+        sourceKind: sourceKindFromSourceType(hit.sourceType, paperContext),
+        matchMethod: "bm25",
+        sectionLabel: hit.meta.sectionLabel,
+        chunkKind: hit.meta.chunkKind,
+        // Same convention as the direct path's BM25 snippets: no
+        // charStart/charEnd/pageLabel (exact snippets carry chunk-relative
+        // offsets; document offsets from the index would mean something else).
+        snippet: truncateText(hit.text, 900),
+        surroundingText: truncateText(hit.text, 1200),
+        score: Number(
+          (params.record.score + hit.evidenceScore * 10).toFixed(3),
+        ),
+        whyMatched: "Library index BM25 ranked this passage highly",
+      });
+    }
+    return snippets;
   }
 
   private applyPoolBm25Scores(
@@ -2287,6 +2531,9 @@ export class LibraryRetrieveService {
         bm25TermHits: 0,
         bm25DistinctiveHits: 0,
         quicksearchMatched: false,
+        indexScore: 0,
+        indexMatched: false,
+        indexed: false,
         matchedQueryVariants: new Set(scored.matchedQueryVariants),
         score: scored.score,
         why: scored.why,

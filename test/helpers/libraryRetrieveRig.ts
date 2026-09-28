@@ -13,19 +13,26 @@ import type {
   PdfContext,
 } from "../../src/services/paperContent/types";
 import type { PaperContextRef } from "../../src/shared/types";
+import type { LibraryTextIndexFacade } from "../../src/services/libraryTextIndex";
 import { resolvedAgentRequest } from "./resolvedAgentRequest";
 
 export function makeItem(
   itemId: number,
   title: string,
   abstractNote = "",
-  options: { hasPdf?: boolean; collectionIds?: number[]; tags?: string[] } = {},
+  options: {
+    hasPdf?: boolean;
+    collectionIds?: number[];
+    tags?: string[];
+    contextItemId?: number;
+  } = {},
 ): {
   target: LibraryItemTarget;
   metadata: EditableArticleMetadataSnapshot;
   paperContext: PaperContextRef | null;
 } {
   const hasPdf = options.hasPdf !== false;
+  const contextItemId = options.contextItemId ?? 1000 + itemId;
   return {
     target: {
       itemId,
@@ -36,7 +43,7 @@ export function makeItem(
       attachments: hasPdf
         ? [
             {
-              contextItemId: 1000 + itemId,
+              contextItemId,
               title: "PDF",
               contentType: "application/pdf",
             },
@@ -80,7 +87,7 @@ export function makeItem(
     paperContext: hasPdf
       ? {
           itemId,
-          contextItemId: 1000 + itemId,
+          contextItemId,
           title,
           firstCreator: "Smith",
           year: "2024",
@@ -344,30 +351,69 @@ export class RigLibraryRetrieveService extends ResolvedLibraryRetrieveService {
 type CandidateBuilder = NonNullable<
   ConstructorParameters<typeof ResolvedLibraryRetrieveService>[2]
 >;
+type ProbeReformulator = NonNullable<
+  ConstructorParameters<typeof ResolvedLibraryRetrieveService>[3]
+>;
+type Triage = NonNullable<
+  ConstructorParameters<typeof ResolvedLibraryRetrieveService>[4]
+>;
 
 export type RetrieveServiceRig = {
   service: RigLibraryRetrieveService;
   entries: ReturnType<typeof makeItem>[];
   candidateBuilderCalls: number[];
+  quicksearchCalls: () => number;
+  ensurePaperContextCalls: () => number;
+  triageCalls: () => number;
+  reformulationCalls: () => number;
+};
+
+export type RetrieveServiceRigOptions = {
+  papers?: number;
+  /** Defaults to a disabled index, so the rig keeps today's direct path. */
+  textIndex?: LibraryTextIndexFacade;
+  /** Variants the fake reformulator returns, one list per round. */
+  reformulations?: string[][];
+  /**
+   * Passes model credentials into `retrieve` so `hasModelConfig` is true.
+   * Defaults to true when `reformulations` are scripted.
+   */
+  modelConfigured?: boolean;
+  /**
+   * Titles and abstracts that do not mention "method", so the first
+   * lexical pass is weak and the probe-reformulation loop runs.
+   */
+  unmatchedMetadata?: boolean;
+};
+
+const DISABLED_TEXT_INDEX: LibraryTextIndexFacade = {
+  isEnabled: () => false,
+  search: async () => null,
 };
 
 /**
- * Builds a service over `papers` PDF-backed items whose titles, abstracts
- * and chunks all mention "method", with a candidate builder that returns
- * two evidence chunks per paper.
+ * Builds a service over `papers` PDF-backed items (item ids 10, 20, 30...,
+ * attachment ids 11, 21, 31...) whose titles, abstracts (unless
+ * `unmatchedMetadata`) and chunks all mention "method", with a candidate builder that returns two evidence
+ * chunks per paper.
  */
 export function createRetrieveServiceRig(
-  options: { papers?: number } = {},
+  options: RetrieveServiceRigOptions = {},
 ): RetrieveServiceRig {
   const count = Math.max(0, Math.floor(options.papers ?? 2));
-  const entries = Array.from({ length: count }, (_, index) =>
-    makeItem(
-      index + 1,
-      `Method paper ${index + 1}`,
-      "This paper describes a method.",
-      { hasPdf: true },
-    ),
-  );
+  const entries = Array.from({ length: count }, (_, index) => {
+    const itemId = (index + 1) * 10;
+    return makeItem(
+      itemId,
+      options.unmatchedMetadata
+        ? `Paper ${index + 1}`
+        : `Method paper ${index + 1}`,
+      options.unmatchedMetadata
+        ? "This paper describes a procedure."
+        : "This paper describes a method.",
+      { hasPdf: true, contextItemId: itemId + 1 },
+    );
+  });
   const candidateBuilderCalls: number[] = [];
   const candidateBuilder: CandidateBuilder = async (
     paperContext,
@@ -388,16 +434,59 @@ export function createRetrieveServiceRig(
       evidenceScore: 1 - index * 0.1,
     }));
   };
+  const gatewayQuicksearchCalls: unknown[] = [];
+  let ensurePaperContextCount = 0;
+  let triageCount = 0;
+  let reformulationCount = 0;
+  const reformulations = options.reformulations || [];
+  const probeReformulator: ProbeReformulator = async () => {
+    const variants = reformulations[reformulationCount] || [];
+    reformulationCount += 1;
+    return { variants, notes: [] };
+  };
+  const triage: Triage = async () => {
+    triageCount += 1;
+    return null;
+  };
   const service = new RigLibraryRetrieveService(
-    makeGateway(entries) as any,
+    makeGateway(entries, {
+      quicksearchCalls: gatewayQuicksearchCalls as Array<{ query?: string }>,
+    }) as any,
     {
-      ensurePaperContext: async () =>
-        makePdfContext([
+      ensurePaperContext: async () => {
+        ensurePaperContextCount += 1;
+        return makePdfContext([
           "Abstract\nThis paper describes a method.",
           "Methods\nThe method is evaluated on two datasets.",
-        ]),
+        ]);
+      },
     } as any,
     candidateBuilder,
+    probeReformulator,
+    triage,
+    options.textIndex || DISABLED_TEXT_INDEX,
   );
-  return { service, entries, candidateBuilderCalls };
+  const modelConfigured = options.modelConfigured ?? reformulations.length > 0;
+  if (modelConfigured) {
+    const retrieve = service.retrieve.bind(service);
+    // Caller variants keep the query planner off the network; the plan's
+    // effective queries stay the plain query.
+    service.retrieve = (params) =>
+      retrieve({
+        apiKey: "test-key",
+        ...params,
+        queryVariants: params.queryVariants?.length
+          ? params.queryVariants
+          : [params.query],
+      });
+  }
+  return {
+    service,
+    entries,
+    candidateBuilderCalls,
+    quicksearchCalls: () => gatewayQuicksearchCalls.length,
+    ensurePaperContextCalls: () => ensurePaperContextCount,
+    triageCalls: () => triageCount,
+    reformulationCalls: () => reformulationCount,
+  };
 }
