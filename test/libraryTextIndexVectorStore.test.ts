@@ -122,4 +122,120 @@ describe("library vector store", function () {
     assert.isFalse(m.has(1));
     assert.equal(m.rows, 1);
   });
+  it("quantizes a zero vector to zeros without NaN", function () {
+    const z = quantizeVector([0, 0, 0]);
+    assert.deepEqual(Array.from(z.q), [0, 0, 0]);
+    assert.isTrue(Number.isFinite(z.scale));
+    assert.equal(dotQuantized(z, quantizeVector([1, 2, 3])), 0);
+  });
+
+  it("refuses to write a shard with a wrong-length vector", async function () {
+    let error: unknown;
+    try {
+      await writeVectorShard("bad", 5, [quantizeVector([1, 2, 3])], 4);
+    } catch (e) {
+      error = e;
+    }
+    assert.instanceOf(error, Error);
+    assert.match((error as Error).message, /3 dimensions.*expects 4/);
+  });
+
+  it("matrix search scores a short query over its own length only", function () {
+    const m = new LibraryVectorMatrix(3);
+    m.addDocument(1, [quantizeVector([1, 0, 0])]);
+    const hits = m.search(quantizeVector([1, 0]), new Set([1]), 1);
+    assert.lengthOf(hits, 1);
+    assert.isTrue(Number.isFinite(hits[0].score));
+    assert.closeTo(hits[0].score, 1, 0.02);
+  });
+
+  it("matrix addDocument throws on a wrong-length vector and leaves rows unchanged", function () {
+    const m = new LibraryVectorMatrix(3);
+    m.addDocument(1, [quantizeVector([1, 0, 0])]);
+    assert.throws(
+      () => m.addDocument(2, [quantizeVector([1, 0, 0, 0])]),
+      /4 dimensions.*expects 3/,
+    );
+    assert.equal(m.rows, 1);
+    assert.isFalse(m.has(2));
+    assert.throws(
+      () =>
+        m.addDocuments([
+          {
+            attachmentId: 3,
+            chunkCount: 2,
+            vectors: [quantizeVector([1, 0, 0])],
+          },
+        ]),
+      /declares 2 chunks/,
+    );
+    assert.isFalse(m.has(3));
+  });
+
+  it("matrix re-add replaces a document's rows", function () {
+    const m = new LibraryVectorMatrix(3);
+    m.addDocument(1, [quantizeVector([1, 0, 0]), quantizeVector([0, 1, 0])]);
+    m.addDocument(2, [quantizeVector([0, 0, 1])]);
+    m.addDocument(1, [quantizeVector([0, 1, 0])]);
+    assert.equal(m.rows, 2);
+    const hits = m.search(quantizeVector([1, 0, 0]), new Set([1]), 5);
+    assert.deepEqual(
+      hits.map((h) => [h.attachmentId, h.chunkIndex]),
+      [[1, 0]],
+    );
+    assert.closeTo(hits[0].score, 0, 0.02);
+  });
+
+  it("matrix removeDocument of an absent id is a no-op", function () {
+    const m = new LibraryVectorMatrix(3);
+    m.addDocument(1, [quantizeVector([1, 0, 0])]);
+    const before = m.reallocationCount;
+    m.removeDocument(99);
+    assert.equal(m.rows, 1);
+    assert.isTrue(m.has(1));
+    assert.equal(m.reallocationCount, before);
+  });
+
+  it("matrix grows by doubling: 200 one-by-one adds reallocate O(log n) times", function () {
+    const m = new LibraryVectorMatrix(8);
+    const vec = quantizeVector([1, 2, 3, 4, 5, 6, 7, 8]);
+    for (let id = 0; id < 200; id += 1) m.addDocument(id, [vec, vec]);
+    assert.equal(m.rows, 400);
+    assert.isAtLeast(m.reallocationCount, 1);
+    assert.isAtMost(m.reallocationCount, Math.ceil(Math.log2(400)));
+  });
+
+  it("matrix addDocuments of N entries matches N addDocument calls", function () {
+    const dims = 16;
+    const random = () =>
+      quantizeVector(Array.from({ length: dims }, () => Math.random() - 0.5));
+    const entries = Array.from({ length: 60 }, (_, i) => {
+      const vectors = Array.from({ length: 1 + (i % 4) }, random);
+      return {
+        attachmentId: 100 + (i % 45),
+        chunkCount: vectors.length,
+        vectors,
+      };
+    });
+    const oneByOne = new LibraryVectorMatrix(dims);
+    const bulk = new LibraryVectorMatrix(dims);
+    const seed = [random(), random()];
+    oneByOne.addDocument(105, seed);
+    bulk.addDocument(105, seed);
+    for (const e of entries) oneByOne.addDocument(e.attachmentId, e.vectors);
+    bulk.addDocuments(entries);
+    assert.equal(bulk.rows, oneByOne.rows);
+    const fresh = new LibraryVectorMatrix(dims);
+    fresh.addDocuments(entries);
+    assert.isAbove(fresh.rows, 64);
+    assert.equal(fresh.reallocationCount, 1);
+    const scope = new Set(entries.map((e) => e.attachmentId));
+    for (let trial = 0; trial < 5; trial += 1) {
+      const q = random();
+      assert.deepEqual(
+        bulk.search(q, scope, 1000),
+        oneByOne.search(q, scope, 1000),
+      );
+    }
+  });
 });

@@ -289,17 +289,39 @@ export async function measureVectorBytes(namespace: string): Promise<number> {
 
 // ── In-memory matrix ─────────────────────────────────────────────────────────
 
+export type VectorMatrixEntry = {
+  attachmentId: number;
+  chunkCount: number;
+  vectors: QuantizedVector[];
+};
+
+const MIN_MATRIX_CAPACITY_ROWS = 64;
+
+/**
+ * Contiguous int8 matrix of chunk vectors with a brute-force scoped search.
+ *
+ * Backing arrays carry spare capacity and grow by doubling, so appending rows
+ * one document at a time is amortized O(1) per row. `addDocuments` sizes the
+ * arrays once for a bulk load.
+ */
 export class LibraryVectorMatrix {
   private data = new Int8Array(0);
   private scales = new Float32Array(0);
+  private capacity = 0; // rows the backing arrays can hold
   private owner: number[] = []; // attachmentId per row
   private chunk: number[] = []; // chunkIndex per row
-  private rowsByDoc = new Map<number, number[]>();
+  private rowsByDoc = new Map<number, number>(); // attachmentId -> row count
+  private reallocations = 0;
 
   constructor(readonly dims: number) {}
 
   get rows(): number {
     return this.owner.length;
+  }
+
+  /** Test-only: how many times the backing arrays have been reallocated. */
+  get reallocationCount(): number {
+    return this.reallocations;
   }
 
   has(attachmentId: number): boolean {
@@ -308,55 +330,49 @@ export class LibraryVectorMatrix {
 
   /** Rows map to (attachmentId, chunkIndex = position in `vectors`). */
   addDocument(attachmentId: number, vectors: QuantizedVector[]): void {
-    if (this.has(attachmentId)) this.removeDocument(attachmentId);
-    const start = this.rows;
-    const next = new Int8Array((start + vectors.length) * this.dims);
-    next.set(this.data, 0);
-    const nextScales = new Float32Array(start + vectors.length);
-    nextScales.set(this.scales, 0);
-    vectors.forEach((v, i) => {
-      next.set(v.q.subarray(0, this.dims), (start + i) * this.dims);
-      nextScales[start + i] = v.scale;
-      this.owner.push(attachmentId);
-      this.chunk.push(i);
-    });
-    this.data = next;
-    this.scales = nextScales;
-    this.rowsByDoc.set(
-      attachmentId,
-      vectors.map((_, i) => start + i),
-    );
+    this.addDocuments([{ attachmentId, chunkCount: vectors.length, vectors }]);
+  }
+
+  /**
+   * Adds many documents with one capacity check. Equivalent to calling
+   * `addDocument` for each entry in order: an id already present (or repeated
+   * later in `entries`) is replaced by its last occurrence.
+   */
+  addDocuments(entries: VectorMatrixEntry[]): void {
+    const latest = new Map<number, VectorMatrixEntry>();
+    for (const entry of entries) {
+      if (entry.chunkCount !== entry.vectors.length) {
+        throw new Error(
+          `Attachment ${entry.attachmentId} declares ${entry.chunkCount} chunks but has ${entry.vectors.length} vectors`,
+        );
+      }
+      for (const v of entry.vectors) this.assertDims(v);
+      latest.delete(entry.attachmentId);
+      latest.set(entry.attachmentId, entry);
+    }
+    if (!latest.size) return;
+    const replaced = new Set<number>();
+    for (const id of latest.keys()) if (this.has(id)) replaced.add(id);
+    if (replaced.size) this.compactWithout(replaced);
+    let added = 0;
+    for (const entry of latest.values()) added += entry.vectors.length;
+    this.ensureCapacity(this.rows + added);
+    for (const entry of latest.values()) {
+      entry.vectors.forEach((v, i) => {
+        const row = this.rows;
+        this.data.set(v.q, row * this.dims);
+        this.scales[row] = v.scale;
+        this.owner.push(entry.attachmentId);
+        this.chunk.push(i);
+      });
+      this.rowsByDoc.set(entry.attachmentId, entry.vectors.length);
+    }
   }
 
   /** O(rows); runs on deletes and re-indexes only, never on the query path. */
   removeDocument(attachmentId: number): void {
-    const keep: number[] = [];
-    for (let r = 0; r < this.rows; r += 1) {
-      if (this.owner[r] !== attachmentId) keep.push(r);
-    }
-    const next = new Int8Array(keep.length * this.dims);
-    const nextScales = new Float32Array(keep.length);
-    const owner: number[] = [];
-    const chunk: number[] = [];
-    keep.forEach((r, i) => {
-      next.set(
-        this.data.subarray(r * this.dims, (r + 1) * this.dims),
-        i * this.dims,
-      );
-      nextScales[i] = this.scales[r];
-      owner.push(this.owner[r]);
-      chunk.push(this.chunk[r]);
-    });
-    this.data = next;
-    this.scales = nextScales;
-    this.owner = owner;
-    this.chunk = chunk;
-    this.rowsByDoc = new Map();
-    owner.forEach((id, r) => {
-      const rows = this.rowsByDoc.get(id) || [];
-      rows.push(r);
-      this.rowsByDoc.set(id, rows);
-    });
+    if (!this.has(attachmentId)) return;
+    this.compactWithout(new Set([attachmentId]));
   }
 
   search(
@@ -384,5 +400,53 @@ export class LibraryVectorMatrix {
         a.chunkIndex - b.chunkIndex,
     );
     return hits.slice(0, Math.max(1, topK));
+  }
+
+  private assertDims(v: QuantizedVector): void {
+    if (v.q.length !== this.dims) {
+      throw new Error(
+        `Vector has ${v.q.length} dimensions; the matrix expects ${this.dims}`,
+      );
+    }
+  }
+
+  private ensureCapacity(neededRows: number): void {
+    if (neededRows <= this.capacity) return;
+    const capacity = Math.max(
+      neededRows,
+      this.capacity * 2,
+      MIN_MATRIX_CAPACITY_ROWS,
+    );
+    const data = new Int8Array(capacity * this.dims);
+    data.set(this.data.subarray(0, this.rows * this.dims), 0);
+    const scales = new Float32Array(capacity);
+    scales.set(this.scales.subarray(0, this.rows), 0);
+    this.data = data;
+    this.scales = scales;
+    this.capacity = capacity;
+    this.reallocations += 1;
+  }
+
+  /** Drops the rows of `ids` in place, keeping capacity and row order. */
+  private compactWithout(ids: ReadonlySet<number>): void {
+    let write = 0;
+    for (let read = 0; read < this.rows; read += 1) {
+      const id = this.owner[read];
+      if (ids.has(id)) continue;
+      if (write !== read) {
+        this.data.copyWithin(
+          write * this.dims,
+          read * this.dims,
+          (read + 1) * this.dims,
+        );
+        this.scales[write] = this.scales[read];
+        this.owner[write] = id;
+        this.chunk[write] = this.chunk[read];
+      }
+      write += 1;
+    }
+    this.owner.length = write;
+    this.chunk.length = write;
+    for (const id of ids) this.rowsByDoc.delete(id);
   }
 }
