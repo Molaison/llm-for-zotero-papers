@@ -3,6 +3,8 @@ import type { ConversationSystem, QuoteCitation } from "../../shared/types";
 import type { WorkflowTestFinalRequestSnapshot } from "./workflowTestHooks";
 import type { RuntimeConversationSystem } from "./runtimeSystemControls";
 import type { resolveRetrievalQueryPlan } from "../../services/retrieval/retrievalQueryPlan";
+import type { RetrievalTimingReport } from "../../services/retrieval/retrievalTiming";
+import type { LibraryRetrieveResult } from "../../agent/services/libraryRetrieveService";
 
 export type WorkflowTestFixture = {
   parentItemId: number;
@@ -442,8 +444,30 @@ export type WorkflowTestConversationHistoryTexts = {
   stored: Array<{ role: string; text: string }>;
 };
 
+/**
+ * One library retrieval run by the workflow bench: wall-clock time, the
+ * phase report the service recorded, and what came back.
+ */
+export type LibraryRetrieveBenchResult = {
+  elapsedMs: number;
+  timing: RetrievalTimingReport | null;
+  paperItemIds: number[];
+  snippetItemIds: number[];
+  snippetTexts: string[];
+  snippetCount: number;
+  warnings: string[];
+  queryCoverage: LibraryRetrieveResult["resourcePool"]["queryCoverage"];
+};
+
 export type WorkflowTestApi = {
   planRetrievalQuery: typeof resolveRetrievalQueryPlan;
+  libraryRetrieveBench: (input: {
+    query: string;
+    collectionIds?: number[];
+    depth?: "evidence" | "verify";
+    intent?: "enumerate" | "verify" | "summarize";
+  }) => Promise<LibraryRetrieveBenchResult>;
+  getRecentRetrievalTimings: (limit?: number) => RetrievalTimingReport[];
   checkProviderConversationTransport: (params: {
     conversationKey: number;
     model: string;

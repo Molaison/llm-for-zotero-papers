@@ -60,6 +60,12 @@ import type {
 import type { PdfService } from "./pdfService";
 import type { ModelProfileOverride } from "../../modelCapabilities";
 import { libraryIndexService } from "../../services/libraryIndexService";
+import {
+  createRetrievalTimer,
+  recordRetrievalTiming,
+  type RetrievalTimer,
+} from "../../services/retrieval/retrievalTiming";
+import { appLogger } from "../../core/logging";
 
 export type LibraryRetrieveDepth = "pool" | "metadata" | "evidence" | "verify";
 export type LibraryRetrieveIntent = "enumerate" | "verify" | "summarize";
@@ -1361,6 +1367,18 @@ function buildAnswerContract(params: {
   };
 }
 
+type LibraryRetrieveParams = LibraryRetrieveInput & {
+  request?: AgentRuntimeRequest;
+  item?: Zotero.Item | null;
+  model?: string;
+  apiBase?: string;
+  apiKey?: string;
+  authMode?: AgentRuntimeRequest["authMode"];
+  providerProtocol?: AgentRuntimeRequest["providerProtocol"];
+  profileOverride?: ModelProfileOverride;
+  signal?: AbortSignal;
+};
+
 export class LibraryRetrieveService {
   constructor(
     private readonly zoteroGateway: ZoteroGateway,
@@ -1371,17 +1389,21 @@ export class LibraryRetrieveService {
   ) {}
 
   async retrieve(
-    params: LibraryRetrieveInput & {
-      request?: AgentRuntimeRequest;
-      item?: Zotero.Item | null;
-      model?: string;
-      apiBase?: string;
-      apiKey?: string;
-      authMode?: AgentRuntimeRequest["authMode"];
-      providerProtocol?: AgentRuntimeRequest["providerProtocol"];
-      profileOverride?: ModelProfileOverride;
-      signal?: AbortSignal;
-    },
+    params: LibraryRetrieveParams,
+  ): Promise<LibraryRetrieveResult> {
+    const timer = createRetrievalTimer();
+    try {
+      return await this.retrieveTimed(params, timer);
+    } finally {
+      const report = timer.finish();
+      recordRetrievalTiming(report);
+      appLogger.debug("LLM retrieve timing", report);
+    }
+  }
+
+  private async retrieveTimed(
+    params: LibraryRetrieveParams,
+    timer: RetrievalTimer,
   ): Promise<LibraryRetrieveResult> {
     const requestedIntent = params.intent;
     const requestedDepth = params.depth;
@@ -1389,32 +1411,32 @@ export class LibraryRetrieveService {
     // so the query planner can see corpus samples for language and
     // vocabulary matching.
     const provisionalInput = normalizeInput(params, params.request);
-    const scope = await this.resolveScope(
-      provisionalInput,
-      params.request,
-      params.item,
+    const scope = await timer.span("scope", () =>
+      this.resolveScope(provisionalInput, params.request, params.item),
     );
-    const queryPlan = await resolveRetrievalQueryPlan({
-      query: params.query,
-      queryVariants: params.queryVariants,
-      readIntent:
-        params.request?.classifiedIntent?.semantic?.reading.coverage ===
-        "exhaustive"
-          ? "full-once"
-          : "targeted",
-      hasRetrievalContext:
-        requestedDepth !== "verify" && requestedIntent !== "verify",
-      model: params.model || params.request?.model,
-      apiBase: params.apiBase || params.request?.apiBase,
-      apiKey: params.apiKey || params.request?.apiKey,
-      authMode: params.authMode || params.request?.authMode,
-      providerProtocol:
-        params.providerProtocol || params.request?.providerProtocol,
-      profileOverride:
-        params.profileOverride || params.request?.advanced?.profileOverride,
-      signal: params.signal,
-      sourceSamples: this.buildScopeSourceSamples(scope),
-    });
+    const queryPlan = await timer.span("plan", () =>
+      resolveRetrievalQueryPlan({
+        query: params.query,
+        queryVariants: params.queryVariants,
+        readIntent:
+          params.request?.classifiedIntent?.semantic?.reading.coverage ===
+          "exhaustive"
+            ? "full-once"
+            : "targeted",
+        hasRetrievalContext:
+          requestedDepth !== "verify" && requestedIntent !== "verify",
+        model: params.model || params.request?.model,
+        apiBase: params.apiBase || params.request?.apiBase,
+        apiKey: params.apiKey || params.request?.apiKey,
+        authMode: params.authMode || params.request?.authMode,
+        providerProtocol:
+          params.providerProtocol || params.request?.providerProtocol,
+        profileOverride:
+          params.profileOverride || params.request?.advanced?.profileOverride,
+        signal: params.signal,
+        sourceSamples: this.buildScopeSourceSamples(scope),
+      }),
+    );
     queryPlan.retrievalPurpose =
       params.request?.classifiedIntent?.semantic?.retrievalPurpose;
     queryPlan.quoteAnchorPolicy =
@@ -1447,16 +1469,22 @@ export class LibraryRetrieveService {
       );
     }
 
-    const records = this.buildResourceRecords(scope.items, input);
+    const records = timer.spanSync("records", () =>
+      this.buildResourceRecords(scope.items, input),
+    );
     let poolBm25Corpus: ReturnType<typeof buildChunkIndex> | undefined;
     const rescorePoolBm25 = (queryPlan: RetrievalQueryPlan): void => {
       if (!queryPlan.lexicalTerms.length || !records.length) return;
-      poolBm25Corpus ??= buildChunkIndex(
-        records.map((record) =>
-          [record.target.title, record.abstractText].filter(Boolean).join("\n"),
-        ),
-      );
-      this.applyPoolBm25Scores(records, queryPlan, poolBm25Corpus);
+      timer.spanSync("pool_bm25", () => {
+        poolBm25Corpus ??= buildChunkIndex(
+          records.map((record) =>
+            [record.target.title, record.abstractText]
+              .filter(Boolean)
+              .join("\n"),
+          ),
+        );
+        this.applyPoolBm25Scores(records, queryPlan, poolBm25Corpus);
+      });
     };
     if (records.length) methodsUsed.add("metadata");
     if (records.some((record) => record.abstractText))
@@ -1490,91 +1518,91 @@ export class LibraryRetrieveService {
       input.depth !== "metadata" &&
       (input.methods.includes("fts") || input.methods.includes("exact"))
     ) {
-      indexedScan = await this.addQuicksearchMatches(
-        scope,
-        records,
-        input,
-        warnings,
+      indexedScan = await timer.span("quicksearch", () =>
+        this.addQuicksearchMatches(scope, records, input, warnings),
       );
       if (input.methods.includes("fts")) methodsUsed.add("fts");
 
       const probeDeadline = Date.now() + PROBE_LOOP_DEADLINE_MS;
-      while (
-        hasModelConfig &&
-        probeRounds < MAX_EXTRA_PROBE_ROUNDS &&
-        this.countMatchedRecords(records, input.queryPlan) <
-          PROBE_WEAK_MATCH_THRESHOLD &&
-        Date.now() < probeDeadline &&
-        !params.signal?.aborted
-      ) {
-        const matchedProbes = Array.from(
-          new Set(
-            records.flatMap((record) =>
-              Array.from(record.matchedQueryVariants),
+      await timer.span("probe_loop", async () => {
+        while (
+          hasModelConfig &&
+          probeRounds < MAX_EXTRA_PROBE_ROUNDS &&
+          this.countMatchedRecords(records, input.queryPlan) <
+            PROBE_WEAK_MATCH_THRESHOLD &&
+          Date.now() < probeDeadline &&
+          !params.signal?.aborted
+        ) {
+          const matchedProbes = Array.from(
+            new Set(
+              records.flatMap((record) =>
+                Array.from(record.matchedQueryVariants),
+              ),
             ),
-          ),
-        ).slice(0, 8);
-        const reformulation = await this.probeReformulator({
-          query: input.query,
-          triedProbes: Array.from(variantsTried),
-          matchedProbes,
-          scopeTitles: scope.items
-            .slice(0, 8)
-            .map((item) => item.title)
-            .filter(Boolean),
-          model: params.model || params.request?.model,
-          apiBase: params.apiBase || params.request?.apiBase,
-          apiKey: params.apiKey || params.request?.apiKey,
-          authMode: params.authMode || params.request?.authMode,
-          providerProtocol:
-            params.providerProtocol || params.request?.providerProtocol,
-          profileOverride:
-            params.profileOverride || params.request?.advanced?.profileOverride,
-          signal: params.signal,
-        });
-        warnings.push(...reformulation.notes);
-        const freshVariants = Array.from(
-          new Set(
-            reformulation.variants
-              .map((variant) => variant.trim())
-              .filter(Boolean),
-          ),
-        ).filter((variant) => !variantsTried.has(variant.toLowerCase()));
-        if (!freshVariants.length) break;
-        probeRounds += 1;
-        for (const variant of freshVariants) {
-          variantsTried.add(variant.toLowerCase());
-        }
-        // Fresh variants go first so the variant cap trims older ones.
-        input = {
-          ...input,
-          queryPlan: buildRetrievalQueryPlan({
+          ).slice(0, 8);
+          const reformulation = await this.probeReformulator({
             query: input.query,
-            queryVariants: [...freshVariants, ...input.queryPlan.variants],
-            maxVariants: RETRIEVAL_QUERY_VARIANT_HARD_LIMIT,
-            notes: input.queryPlan.notes,
-            readIntent: input.queryPlan.readIntent,
-          }),
-        };
-        const rescan = await this.addQuicksearchMatches(
-          scope,
-          records,
-          input,
-          warnings,
-          {
-            probesOverride: freshVariants
-              .flatMap((variant) => expandProbeText(variant))
-              .slice(0, QUICKSEARCH_MAX_PROBES),
-          },
-        );
-        indexedScan = {
-          available: Math.max(indexedScan.available, rescan.available),
-          scanned: Math.max(indexedScan.scanned, rescan.scanned),
-          matched: indexedScan.matched,
-          truncated: indexedScan.truncated || rescan.truncated,
-        };
-        rescorePoolBm25(input.queryPlan);
-      }
+            triedProbes: Array.from(variantsTried),
+            matchedProbes,
+            scopeTitles: scope.items
+              .slice(0, 8)
+              .map((item) => item.title)
+              .filter(Boolean),
+            model: params.model || params.request?.model,
+            apiBase: params.apiBase || params.request?.apiBase,
+            apiKey: params.apiKey || params.request?.apiKey,
+            authMode: params.authMode || params.request?.authMode,
+            providerProtocol:
+              params.providerProtocol || params.request?.providerProtocol,
+            profileOverride:
+              params.profileOverride ||
+              params.request?.advanced?.profileOverride,
+            signal: params.signal,
+          });
+          warnings.push(...reformulation.notes);
+          const freshVariants = Array.from(
+            new Set(
+              reformulation.variants
+                .map((variant) => variant.trim())
+                .filter(Boolean),
+            ),
+          ).filter((variant) => !variantsTried.has(variant.toLowerCase()));
+          if (!freshVariants.length) break;
+          probeRounds += 1;
+          for (const variant of freshVariants) {
+            variantsTried.add(variant.toLowerCase());
+          }
+          // Fresh variants go first so the variant cap trims older ones.
+          input = {
+            ...input,
+            queryPlan: buildRetrievalQueryPlan({
+              query: input.query,
+              queryVariants: [...freshVariants, ...input.queryPlan.variants],
+              maxVariants: RETRIEVAL_QUERY_VARIANT_HARD_LIMIT,
+              notes: input.queryPlan.notes,
+              readIntent: input.queryPlan.readIntent,
+            }),
+          };
+          const rescan = await this.addQuicksearchMatches(
+            scope,
+            records,
+            input,
+            warnings,
+            {
+              probesOverride: freshVariants
+                .flatMap((variant) => expandProbeText(variant))
+                .slice(0, QUICKSEARCH_MAX_PROBES),
+            },
+          );
+          indexedScan = {
+            available: Math.max(indexedScan.available, rescan.available),
+            scanned: Math.max(indexedScan.scanned, rescan.scanned),
+            matched: indexedScan.matched,
+            truncated: indexedScan.truncated || rescan.truncated,
+          };
+          rescorePoolBm25(input.queryPlan);
+        }
+      });
       indexedScan = {
         ...indexedScan,
         matched: records.filter((record) => record.quicksearchMatched).length,
@@ -1655,28 +1683,30 @@ export class LibraryRetrieveService {
         matchedRecords.length > input.maxFullTextPapers * 2) &&
       hasModelConfig;
     if (shouldTriage) {
-      const triageResult = await this.triage({
-        query: input.query,
-        intent: input.intent,
-        candidates: candidateRecords
-          .slice(0, TRIAGE_MAX_CANDIDATES)
-          .map((record) => ({
-            itemId: String(record.target.itemId),
-            title: record.target.title,
-            abstract: truncateText(record.abstractText, 300),
-            matchedVia: record.why.slice(0, 2).join("; "),
-          })),
-        maxSelect: input.maxFullTextPapers,
-        model: params.model || params.request?.model,
-        apiBase: params.apiBase || params.request?.apiBase,
-        apiKey: params.apiKey || params.request?.apiKey,
-        authMode: params.authMode || params.request?.authMode,
-        providerProtocol:
-          params.providerProtocol || params.request?.providerProtocol,
-        profileOverride:
-          params.profileOverride || params.request?.advanced?.profileOverride,
-        signal: params.signal,
-      });
+      const triageResult = await timer.span("triage", () =>
+        this.triage({
+          query: input.query,
+          intent: input.intent,
+          candidates: candidateRecords
+            .slice(0, TRIAGE_MAX_CANDIDATES)
+            .map((record) => ({
+              itemId: String(record.target.itemId),
+              title: record.target.title,
+              abstract: truncateText(record.abstractText, 300),
+              matchedVia: record.why.slice(0, 2).join("; "),
+            })),
+          maxSelect: input.maxFullTextPapers,
+          model: params.model || params.request?.model,
+          apiBase: params.apiBase || params.request?.apiBase,
+          apiKey: params.apiKey || params.request?.apiKey,
+          authMode: params.authMode || params.request?.authMode,
+          providerProtocol:
+            params.providerProtocol || params.request?.providerProtocol,
+          profileOverride:
+            params.profileOverride || params.request?.advanced?.profileOverride,
+          signal: params.signal,
+        }),
+      );
       if (triageResult) {
         const rank = new Map(
           triageResult.selectedItemIds.map((itemId, index) => [itemId, index]),
@@ -1806,18 +1836,22 @@ export class LibraryRetrieveService {
       for (const record of fullTextRecords) {
         if (snippets.length >= input.maxTotalSnippets) break;
         const remaining = input.maxTotalSnippets - snippets.length;
-        const paperSnippets = await this.retrievePaperSnippets({
-          record,
-          input,
-          maxSnippets: Math.min(input.perPaperTopK, remaining),
-          preferBodyEvidence,
-          wantedSections,
-          queryOverride: triagePerPaperQueries?.[String(record.target.itemId)],
-          apiBase: params.apiBase,
-          apiKey: params.apiKey,
-          methodsUsed,
-          warnings,
-        });
+        const paperSnippets = await timer.span("paper_snippets", () =>
+          this.retrievePaperSnippets({
+            record,
+            input,
+            maxSnippets: Math.min(input.perPaperTopK, remaining),
+            preferBodyEvidence,
+            wantedSections,
+            queryOverride:
+              triagePerPaperQueries?.[String(record.target.itemId)],
+            apiBase: params.apiBase,
+            apiKey: params.apiKey,
+            methodsUsed,
+            warnings,
+          }),
+        );
+        timer.count("papersTouched");
         if (!record.queryState.has("content_loaded")) continue;
         snippetPapersExpanded += 1;
         record.resourceState.add("text_indexed");
@@ -1834,16 +1868,14 @@ export class LibraryRetrieveService {
       }
     }
 
-    const dedupedRawSnippets = this.dedupeAndRankSnippets(snippets).slice(
-      0,
-      input.maxTotalSnippets,
-    );
-    const snippetQuotePack = attachQuoteCitationsToSnippets(
-      dedupedRawSnippets,
-      {
-        includeQuoteAnchors:
-          input.depth === "verify" || input.intent === "verify",
-      },
+    const snippetQuotePack = timer.spanSync("rank", () =>
+      attachQuoteCitationsToSnippets(
+        this.dedupeAndRankSnippets(snippets).slice(0, input.maxTotalSnippets),
+        {
+          includeQuoteAnchors:
+            input.depth === "verify" || input.intent === "verify",
+        },
+      ),
     );
     const dedupedSnippets = snippetQuotePack.snippets;
     const snippetPaperKeys = new Set(
