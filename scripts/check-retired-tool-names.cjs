@@ -44,6 +44,8 @@ const RETIRED_TOOL_NAMES = [
   "manage_attachments",
   "undo_last_action",
   "revert_changes",
+  "tool_result_read",
+  "conversation_read",
   ...IDENTIFIER_NAMES,
 ];
 // Repo-relative, forward-slash prefixes matched with startsWith.

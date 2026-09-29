@@ -721,8 +721,9 @@ describe("agent prompt budget", function () {
         tool_calls: [
           {
             id: "call-read",
-            name: "tool_result_read",
+            name: "context_read",
             arguments: {
+              source: "tool_result",
               handle: "trh_latest",
               path: "results",
               offset: 50,
@@ -734,7 +735,7 @@ describe("agent prompt budget", function () {
       {
         role: "tool",
         tool_call_id: "call-read",
-        name: "tool_result_read",
+        name: "context_read",
         content: latestReadContent,
       },
     ];

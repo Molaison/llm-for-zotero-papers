@@ -1,7 +1,7 @@
 ---
 id: write-note
 description: Create, save, or edit a Zotero note or Markdown note, including requested figures or an existing answer. Use only when the user explicitly requests a note.
-version: 15
+version: 16
 contexts: any
 activation: auto
 ---
@@ -36,7 +36,7 @@ Skill activation alone does not authorize persistence.
 Resolve a missing or ambiguous destination with read/search tools or `request_user_input` before proposing the write.
 
 If the user asks to save an existing answer unchanged, use `note_write` with its `sourceMessageId` and the requested destination.
-Use `conversation_read` only when the source identity or exact text needs recovery.
+Use `context_read` with `source: "conversation"` only when the source identity or exact text needs recovery.
 Preserve the existing answer instead of applying the template, rereading papers, or generating a second body.
 The reading and composition steps below apply when the user requests new or revised content.
 

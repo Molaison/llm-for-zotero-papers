@@ -81,4 +81,6 @@ export const RETIRED_TOOL_HINTS: Readonly<Record<string, string>> = {
   write_notes_batch: "note_write_batch",
   undo_last_action: "undo",
   revert_changes: "undo count:N or actionIds:[...]",
+  tool_result_read: "context_read source:'tool_result'",
+  conversation_read: "context_read source:'conversation'",
 };

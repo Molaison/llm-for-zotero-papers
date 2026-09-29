@@ -138,7 +138,6 @@ import {
 } from "./execution/transcriptRecovery";
 import {
   buildToolProgressFingerprint,
-  filterTransientRecoveryTool,
   isUserDeniedToolResult,
   readToolError,
   setToolResultReadAvailability,
@@ -714,9 +713,6 @@ export class AgentRuntime {
       }
       const toolDefinitions =
         this.registry.listToolDefinitionsForRequest(request);
-      const toolSpecs = filterTransientRecoveryTool(
-        this.registry.listToolsForRequest(request),
-      );
       await hydrateAgentEvidenceCache(request.conversationKey);
       await hydrateAgentCoverageLedger({
         conversationKey: request.conversationKey,

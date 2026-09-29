@@ -5,7 +5,7 @@ import {
   hasAgentToolResultHandles,
   upsertAgentToolResultHandles,
 } from "../src/agent/store/toolResultHandles";
-import { createToolResultReadTool } from "../src/agent/tools/read/toolResultRead";
+import { createContextReadTool } from "../src/agent/tools/read/contextRead";
 import type { AgentRuntimeRequest, AgentToolContext } from "../src/agent/types";
 
 function request(conversationKey: number): AgentRuntimeRequest {
@@ -13,6 +13,8 @@ function request(conversationKey: number): AgentRuntimeRequest {
     conversationKey,
     mode: "agent",
     userText: "read stored result",
+    // What the runtime sets once this conversation holds a stored result.
+    metadata: { agentToolResultReadAvailable: true },
   };
 }
 
@@ -33,8 +35,11 @@ async function executeRead(
   args: unknown,
   toolContext: AgentToolContext,
 ): Promise<Record<string, unknown>> {
-  const tool = createToolResultReadTool();
-  const validation = tool.validate(args);
+  const tool = createContextReadTool();
+  const validation = tool.validate({
+    source: "tool_result",
+    ...(args as Record<string, unknown>),
+  });
   assert.isTrue(validation.ok);
   if (!validation.ok) throw new Error(validation.error);
   return (await tool.execute(validation.value, toolContext)) as Record<
@@ -130,14 +135,31 @@ describe("agent tool-result handles", function () {
     assert.deepEqual(output.items, [{ itemId: 11, title: "Paper B" }]);
   });
 
-  it("tracks handle availability in memory and gates tool visibility", async function () {
-    const tool = createToolResultReadTool();
-    assert.isFalse(tool.isAvailable?.(request(1)) === true);
-    assert.isTrue(
-      tool.isAvailable?.({
-        ...request(1),
-        metadata: { agentToolResultReadAvailable: true },
-      }) === true,
+  it("tracks handle availability in memory and gates handle reads, not tool visibility", async function () {
+    const tool = createContextReadTool();
+    // The tool also reads the conversation, so it is never hidden.
+    assert.isUndefined(tool.isAvailable);
+    const unflagged = await tool.execute(
+      {
+        source: "tool_result",
+        handle: "trh_unflagged",
+        offset: 0,
+        textOffset: 0,
+        limit: 20,
+        maxTokens: 6_000,
+        allowStale: false,
+      },
+      {
+        request: { ...request(1), metadata: {} },
+        item: null,
+        currentAnswerText: "",
+        modelName: "test-model",
+      },
+    );
+    assert.equal((unflagged as { ok?: unknown }).ok, false);
+    assert.match(
+      String((unflagged as { error?: unknown }).error),
+      /No stored tool results are available/,
     );
     assert.isFalse(hasAgentToolResultHandles(1));
 

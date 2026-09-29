@@ -135,10 +135,11 @@ export const ZOTERO_MCP_EXCLUDED_TOOL_NAMES: Record<string, string> = {
   // paged result contract ({done, nextOffset, remaining}) lands.
   library_batch:
     "library_batch runs unattended with no progress channel over MCP; use the in-plugin agent or the slash-command surface.",
-  // Deliberately absent and gated on a metadata flag the MCP path never
-  // sets, so advertising it would offer a permanently unavailable tool.
-  tool_result_read:
-    "tool_result_read is gated on an in-plugin metadata flag that the MCP path does not set.",
+  // Both sources are in-plugin conversation state: the transcript and the
+  // turn-scoped tool-result handles. A standalone MCP client shares neither,
+  // and handle reads are gated on a metadata flag the MCP path never sets.
+  context_read:
+    "context_read reads the in-plugin conversation transcript and its stored tool-result handles; an external MCP client has neither, and handle reads are gated on an in-plugin metadata flag the MCP path does not set.",
 };
 const CURATED_READ_TOOL_NAMES = new Set<string>([
   ...ZOTERO_MCP_SAFE_READ_TOOL_NAMES,

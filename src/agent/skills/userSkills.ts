@@ -174,7 +174,7 @@ const BUILTIN_BOOTSTRAP_RAW_HASHES: Partial<
     "1xglfq0",
     "qdqcm0",
   ],
-  "write-note.md": ["172xn8t", "nvca0f"],
+  "write-note.md": ["17lvl1z", "172xn8t", "nvca0f"],
   "literature-review.md": ["kbrknh", "nxpr5d", "1cnjf9i", "3tk61l"],
   "import-cited-reference.md": ["19bomz1"],
 };

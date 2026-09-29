@@ -311,7 +311,7 @@ function attachToolResultHandle<T>(params: {
         ? existingHandle
         : params.handleRecord.handle,
     toolResultHandleNotice:
-      "Use tool_result_read with this handle to retrieve omitted rows, snippets, or sections from the exact stored tool result if needed.",
+      "Call context_read source:'tool_result' with this handle to retrieve omitted rows, snippets, or sections from the exact stored tool result if needed.",
   };
   if (params.content && typeof params.content === "object") {
     return {
@@ -806,7 +806,7 @@ function buildToolResultHandle(params: {
     ),
     toolResultHandle: compactScalar(content.toolResultHandle),
     notice:
-      "Older tool output was cleared under context pressure. If this message includes toolResultHandle, call tool_result_read to retrieve omitted sections from the exact stored result.",
+      "Older tool output was cleared under context pressure. If this message includes toolResultHandle, call context_read source:'tool_result' with this handle to retrieve omitted sections from the exact stored result.",
   };
 }
 

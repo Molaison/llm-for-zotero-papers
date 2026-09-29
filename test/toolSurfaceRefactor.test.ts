@@ -264,7 +264,7 @@ describe("semantic tool surface", function () {
 
     assert.deepEqual(names, [
       "annotate_pdf",
-      "conversation_read",
+      "context_read",
       "file_io",
       "library_cite",
       "library_delete",
@@ -303,7 +303,8 @@ describe("semantic tool surface", function () {
     // Retired into the facades: no longer registered at all. The write
     // delegates live on only inside library_update, library_import, and
     // library_delete; collection, attachment, and saved-search updates are
-    // library_update kinds; the single and multi-revert undos are one `undo`.
+    // library_update kinds; the single and multi-revert undos are one `undo`;
+    // tool-result and conversation reads are one `context_read`.
     for (const retiredName of [
       "read_paper",
       "search_paper",
@@ -333,6 +334,8 @@ describe("semantic tool surface", function () {
       "saved_search_update",
       "undo_last_action",
       "revert_changes",
+      "tool_result_read",
+      "conversation_read",
     ]) {
       assert.notInclude(names, retiredName);
       assert.notExists(registry.getTool(retiredName), `${retiredName} retired`);

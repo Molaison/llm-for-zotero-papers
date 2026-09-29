@@ -382,11 +382,40 @@ describe("user skill bootstrap upgrades", function () {
       canonicalWriteNote,
       "Path pattern: `{papertitle}/{papertitle}.md`",
     );
-    // Version 15 also preserves narrow figure-only note requests.
-    assert.equal(parseSkill(canonicalWriteNote).version, 15);
+    // Version 15 also preserves narrow figure-only note requests; version 16
+    // recovers an existing answer through context_read.
+    assert.equal(parseSkill(canonicalWriteNote).version, 16);
+    assert.include(
+      canonicalWriteNote,
+      '`context_read` with `source: "conversation"`',
+    );
     assert.include(canonicalWriteNote, "narrowly scoped note");
     assert.include(canonicalWriteNote, "`sourceMessageId`");
     assert.include(canonicalWriteNote, "returned `documentId`");
+  });
+
+  it("bootstrap-upgrades an unmodified v15 write-note that has no stored hash", async function () {
+    const baseDir = "/tmp/llm-for-zotero-bootstrap-write-note-v15-test";
+    installMockSkillEnvironment(baseDir, {}, new Map<string, string>());
+    const shipped = BUILTIN_SKILL_FILES["write-note.md"];
+    // The exact v15 file: the one line and the version v16 changed.
+    const v15 = shipped
+      .replace("version: 16\n", "version: 15\n")
+      .replace(
+        'Use `context_read` with `source: "conversation"` only when',
+        "Use `conversation_read` only when",
+      );
+    assert.notEqual(v15, shipped);
+    const writeNotePath = getCanonicalSkillFilePath("write-note");
+    const files: Record<string, string> = { [writeNotePath]: v15 };
+
+    installMockSkillEnvironment(baseDir, files, new Map<string, string>());
+    await initUserSkills();
+
+    const upgraded = files[writeNotePath];
+    assert.equal(parseSkill(upgraded).version, 16);
+    assert.include(upgraded, '`context_read` with `source: "conversation"`');
+    assert.notInclude(upgraded, "conversation_read");
   });
 
   it("migrates declarative supersession without replacing legacy match metadata", function () {

@@ -39,7 +39,7 @@ describe("MCP tool surface has not drifted from the registry", function () {
       "paper_read",
       "research_update",
       "run_command",
-      "tool_result_read",
+      "context_read",
       "task_update",
       "undo",
       "update_plan",
