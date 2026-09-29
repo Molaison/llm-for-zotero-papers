@@ -331,37 +331,91 @@ describe("codexAppServerProcess", function () {
       });
     });
     const emit = (message: unknown) => (proc as any).handleMessage(message);
-    const completion = waitForCodexAppServerTurnCompletion({
-      proc,
-      threadId: "thread",
-      turnId: "turn",
-      timeoutMs: 10,
-    });
-    const request = {
-      id: 91,
-      method: "item/tool/requestUserInput",
-      params: {
+    const originalSetTimeout = globalThis.setTimeout;
+    const originalClearTimeout = globalThis.clearTimeout;
+    const timers = new Map<number, () => void>();
+    let nextTimerId = 0;
+    globalThis.setTimeout = ((callback: () => void, delay: number) => {
+      assert.equal(delay, 10);
+      timers.set(++nextTimerId, callback);
+      return nextTimerId;
+    }) as unknown as typeof setTimeout;
+    globalThis.clearTimeout = ((id: number) =>
+      timers.delete(id)) as unknown as typeof clearTimeout;
+    const flushMicrotasks = async () => {
+      for (let index = 0; index < 12; index += 1) await Promise.resolve();
+    };
+    try {
+      const completion = waitForCodexAppServerTurnCompletion({
+        proc,
         threadId: "thread",
         turnId: "turn",
-        itemId: "question",
-        questions: [],
-      },
-    };
-    emit(request);
-    emit(request);
-    await new Promise((resolve) => setTimeout(resolve, 25));
-    answer({ answers: { scope: { answers: ["Current collection"] } } });
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    emit({
-      method: "turn/completed",
-      params: { threadId: "thread", turn: { id: "turn", status: "completed" } },
-    });
-    await completion;
-    assert.equal(calls, 1);
-    assert.lengthOf(
-      writes.filter((line) => JSON.parse(line).id === 91),
-      1,
-    );
+        timeoutMs: 10,
+      });
+      let settled = false;
+      void completion.then(
+        () => {
+          settled = true;
+        },
+        () => {
+          settled = true;
+        },
+      );
+      const request = {
+        id: 91,
+        method: "item/tool/requestUserInput",
+        params: {
+          threadId: "thread",
+          turnId: "turn",
+          itemId: "question",
+          questions: [],
+        },
+      };
+      emit(request);
+      emit(request);
+      await flushMicrotasks();
+      assert.equal(calls, 1);
+      assert.isTrue(proc.hasPendingUserInput("thread", "turn"));
+      for (let deadline = 0; deadline < 3; deadline += 1) {
+        assert.equal(timers.size, 1, "one inactivity deadline is armed");
+        const [id, fire] = [...timers.entries()][0];
+        timers.delete(id);
+        fire();
+        await flushMicrotasks();
+        assert.isFalse(settled, "a pending question suspends turn timeout");
+        assert.isEmpty(writes);
+      }
+      answer({ answers: { scope: { answers: ["Current collection"] } } });
+      await flushMicrotasks();
+      assert.isFalse(proc.hasPendingUserInput("thread", "turn"));
+      emit({
+        method: "turn/completed",
+        params: {
+          threadId: "thread",
+          turn: { id: "turn", status: "completed" },
+        },
+      });
+      await completion;
+      assert.equal(calls, 1);
+      assert.deepEqual(
+        writes.map((line) => JSON.parse(line)),
+        [
+          {
+            id: 91,
+            result: { answers: { scope: { answers: ["Current collection"] } } },
+          },
+        ],
+      );
+      assert.equal(
+        timers.size,
+        0,
+        "completion cancels the inactivity deadline",
+      );
+    } finally {
+      proc.destroy();
+      globalThis.setTimeout = originalSetTimeout;
+      globalThis.clearTimeout = originalClearTimeout;
+    }
   });
   it("captures a native proposal before turn/start responds and awaits its persistence", async function () {
     const proc = createProcess();
@@ -3022,7 +3076,7 @@ describe("codexAppServerProcess", function () {
       {
         ioGetChildren: async (path) =>
           path === "/Users/alice/.nvm/versions/node"
-            ? ["v20.18.0", "v22.2.0"]
+            ? ["v22.9.0", "v22.10.0"]
             : [],
       },
       async () => {
@@ -3032,8 +3086,8 @@ describe("codexAppServerProcess", function () {
           separator: "/",
         });
         assert.deepEqual(candidates, [
-          "/Users/alice/.nvm/versions/node/v22.2.0/bin/codex",
-          "/Users/alice/.nvm/versions/node/v20.18.0/bin/codex",
+          "/Users/alice/.nvm/versions/node/v22.10.0/bin/codex",
+          "/Users/alice/.nvm/versions/node/v22.9.0/bin/codex",
         ]);
       },
     );

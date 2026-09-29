@@ -651,9 +651,9 @@ describe("agent adapters honour model profile overrides", function () {
       1,
       "a user parameter must not drop the tool definitions",
     );
-    assert.lengthOf(
-      sent.messages as unknown[],
-      1,
+    assert.deepEqual(
+      sent.messages,
+      [{ role: "user", content: "Summarize" }],
       "a user parameter must not replace the conversation",
     );
   });

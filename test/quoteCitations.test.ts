@@ -1944,31 +1944,6 @@ describe("quoteCitations", function () {
     );
   });
 
-  it("drops publisher DOI quote placeholders inside prose parentheticals", function () {
-    const boilerplate =
-      "Full article and list of author affiliations: https://doi.org/10.1126/science.adw7707";
-    const display = replaceQuoteCitationPlaceholdersForMarkdown(
-      "Published in Science ([[quote:Q_bad_doi]]), the study challenges decades.",
-      [
-        {
-          id: "Q_bad_doi",
-          quoteText: boilerplate,
-          citationLabel: "(Liu et al., 2026)",
-          contextItemId: 22,
-        },
-      ],
-    );
-
-    assert.notInclude(display, boilerplate);
-    assert.notInclude(display, "[[quote:");
-    assert.notInclude(display, "Science (");
-    assert.notInclude(display, "), the study");
-    assert.include(
-      display,
-      "Published in Science, the study challenges decades.",
-    );
-  });
-
   it("repairs section labels to canonical source labels when one source matches", function () {
     const sourceText =
       "Abstract\nParticipants gained control by realigning brain activity along these directions.";

@@ -527,40 +527,6 @@ export function buildQuoteTextSearchQueries(
   return queries;
 }
 
-export function buildFindControllerHighlightQueries(
-  text: string,
-  options?: {
-    maxQueries?: number;
-    maxFullQueryLength?: number;
-    maxChunkLength?: number;
-  },
-): string[] {
-  const clean = stripBoundaryEllipsis(sanitizeText(text || "").trim());
-  void options;
-  return clean ? [clean] : [];
-}
-
-export function buildFindControllerFullCoverageQueries(
-  text: string,
-  options?: {
-    maxQueries?: number;
-    maxFullQueryLength?: number;
-  },
-): string[] {
-  const clean = stripBoundaryEllipsis(sanitizeText(text || "").trim());
-  void options;
-  return clean ? [clean] : [];
-}
-
-export function buildFindControllerQuoteQueries(
-  text: string,
-  options?: { maxQueries?: number },
-): string[] {
-  const clean = stripBoundaryEllipsis(sanitizeText(text || "").trim());
-  void options;
-  return clean ? [clean] : [];
-}
-
 function isWeakQuoteSearchQuery(normalizedQuery: string): boolean {
   const tokens = locatorTokensFromNormalizedText(normalizedQuery);
   if (!tokens.length) return true;

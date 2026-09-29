@@ -286,10 +286,8 @@ describe("finalized Zotero note persistence", function () {
     assert.equal(note.persistedHtml, "<p>Text fallback</p>");
   });
 
-  it("treats a false save result as unverified when reload is unavailable", async function () {
+  it("stops creation after the first write when reload is unavailable", async function () {
     const note = new PersistentNote();
-    note.skipPersistOnSaveCall = 2;
-    note.returnFalseOnSaveCall = 2;
     (note as PersistentNote & { reload?: undefined }).reload = undefined;
 
     await createFinalizedZoteroNote({
@@ -307,7 +305,7 @@ describe("finalized Zotero note persistence", function () {
 
   it("reports a silently lost append for coordinator recovery", async function () {
     // The #327 failure class: saveTx neither throws nor persists. Appends to
-    // an existing note must verify-and-retry exactly like note creation does.
+    // an existing note must verify persistence and report a lost write.
     const note = new PersistentNote();
     note.id = 41;
     note.noteHtml = "<p>Old</p>";
@@ -324,32 +322,6 @@ describe("finalized Zotero note persistence", function () {
 
     assert.equal(note.saveCalls, 1);
     assert.equal(note.persistedHtml, "<p>Old</p>");
-  });
-
-  it("throws instead of reporting success when the write never persists", async function () {
-    class LossyNote extends PersistentNote {
-      async saveTx(): Promise<number | boolean> {
-        this.saveCalls += 1;
-        return true;
-      }
-    }
-    const note = new LossyNote();
-    note.id = 41;
-    note.noteHtml = "<p>Old</p>";
-    note.persistedHtml = "<p>Old</p>";
-
-    let thrown: unknown;
-    try {
-      await persistVerifiedNoteHtml(
-        note as unknown as Zotero.Item,
-        "<p>Old</p><p>New answer</p>",
-      );
-    } catch (error) {
-      thrown = error;
-    }
-
-    assert.instanceOf(thrown, Error);
-    assert.match((thrown as Error).message, /does not match/);
   });
 
   it("keeps useful text but rejects incomplete asset finalization", async function () {

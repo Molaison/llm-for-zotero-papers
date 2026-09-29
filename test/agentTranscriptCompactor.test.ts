@@ -359,6 +359,7 @@ describe("CJK summary budget", function () {
     assert.isTrue(result.compacted);
     const summary = result.summaryMessage;
     assert.isOk(summary);
+    assert.include(String(summary?.content), "神经科学研究进展");
     assert.isAtMost(
       estimateTextTokens(
         typeof summary?.content === "string" ? summary.content : "",

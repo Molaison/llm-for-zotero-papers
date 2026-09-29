@@ -32,12 +32,12 @@ describe("search_paper tool", function () {
         retrieveEvidence: async ({
           papers,
         }: {
-          papers: Array<{ itemId: number }>;
+          papers: Array<{ itemId: number; contextItemId: number }>;
         }) =>
           papers.map((paper, index) => ({
             paperContext: {
               itemId: paper.itemId,
-              contextItemId: paper.itemId * 100,
+              contextItemId: paper.contextItemId,
               title: `Paper ${paper.itemId}`,
             },
             chunkIndex: index,
@@ -76,7 +76,24 @@ describe("search_paper tool", function () {
     if (!validated.ok) return;
 
     const result = await tool.execute(validated.value, baseContext);
-    assert.lengthOf((result as { results: unknown[] }).results, 2);
+    assert.deepEqual(
+      (
+        result as {
+          results: Array<{
+            paperContext: { itemId: number; contextItemId: number };
+            text: string;
+          }>;
+        }
+      ).results.map(({ paperContext, text }) => ({
+        itemId: paperContext.itemId,
+        contextItemId: paperContext.contextItemId,
+        text,
+      })),
+      [
+        { itemId: 1, contextItemId: 101, text: "Evidence 1" },
+        { itemId: 2, contextItemId: 202, text: "Evidence 2" },
+      ],
+    );
   });
 
   it("resolves evidence targets from explicit item and attachment IDs", async function () {
@@ -141,9 +158,13 @@ describe("search_paper tool", function () {
   });
 
   it("does not fall back to ambient paper context for invalid evidence targets", async function () {
+    let reads = 0;
     const tool = createSearchPaperTool(
       {
-        retrieveEvidence: async () => [],
+        retrieveEvidence: async () => {
+          reads += 1;
+          return [];
+        },
       } as never,
       {
         ensurePaperContext: async () => {},
@@ -151,7 +172,7 @@ describe("search_paper tool", function () {
       {
         resolvePaperContextTarget: () => null,
         listPaperContexts: (request: AgentToolContext["request"]) =>
-          request.selectedPaperContexts || [],
+          request.turnPaperScope.papers.map((entry) => entry.paper),
       } as never,
     );
 
@@ -171,6 +192,7 @@ describe("search_paper tool", function () {
         /Could not resolve paper target itemId=9, contextItemId=909/,
       );
     }
+    assert.equal(reads, 0);
   });
 
   it("uses presentation summaries for evidence retrieval", function () {
@@ -530,7 +552,21 @@ describe("view_pdf_pages tool", function () {
       );
       assert.exists(followup);
       assert.isArray(followup?.content);
-      const parts = followup?.content as Array<{ type: string }>;
+      const parts = followup?.content as Array<{
+        type: string;
+        text?: string;
+        image_url?: { url: string };
+      }>;
+      assert.equal(
+        parts[1].image_url?.url,
+        "data:image/png;base64,iVBORwECAwQ=",
+      );
+      assert.include(parts[0].text || "", "4");
+      assert.deepInclude(execution.artifacts?.[0], {
+        pageIndex: 3,
+        pageLabel: "4",
+        storedPath: imagePath,
+      });
       assert.deepEqual(
         parts.map((part) => part.type),
         ["text", "image_url"],

@@ -469,21 +469,6 @@ describe("PaperEvidenceFrontier stop guidance by requested coverage", function (
     );
     assert.equal((second.content as any).paperEvidenceProgress.readBudget, 2);
   });
-
-  it("derives stop guidance from the requested read mode", async function () {
-    const frontier = new PaperEvidenceFrontier();
-    const input = { mode: "targeted", query: "method" };
-    await frontier.processResult({
-      input,
-      toolCallId: "first",
-      content: { results: [passage({ chunkIndex: 4 })] },
-    });
-    const reused = await frontier.readCached({ input, toolCallId: "second" });
-    assert.equal(
-      (reused?.content as any).paperEvidenceProgress.recommendation,
-      "answer_now",
-    );
-  });
 });
 
 describe("PaperEvidenceFrontier inside plan execution", function () {

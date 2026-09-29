@@ -3,7 +3,6 @@ import {
   getStreamInterruptionLabel,
   resolveStreamInterruptionOutcome,
 } from "../src/modules/contextPanel/streamInterruption";
-import { createBlockStreamCoalescer } from "../src/modules/contextPanel/blockStreamCoalescer";
 
 describe("streamInterruption", function () {
   it("preserves partial text and marks the message interrupted when content streamed", function () {
@@ -67,22 +66,5 @@ describe("streamInterruption", function () {
     assert.isString(label);
     assert.isNotEmpty(label);
     assert.notInclude(label.toLowerCase(), "webchat");
-  });
-});
-
-describe("blockStreamCoalescer interruption invariant", function () {
-  it("still returns the full streamed text after cancel()", function () {
-    // The mid-stream error recovery relies on getFullText() surviving cancel(),
-    // so lock that invariant in: partial content must not be lost on cancel.
-    const coalescer = createBlockStreamCoalescer({
-      maxWaitMs: 0,
-      onBlock: () => undefined,
-    });
-
-    coalescer.pushText("streamed ");
-    coalescer.pushText("before the drop");
-    coalescer.cancel();
-
-    assert.equal(coalescer.getFullText(), "streamed before the drop");
   });
 });

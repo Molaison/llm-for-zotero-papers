@@ -1,5 +1,5 @@
 import { assert } from "chai";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { recomputeQaSupport } from "../scripts/recompute-qa-support";
@@ -8,8 +8,14 @@ const quote =
   "The fixed day-1 decoder declined from 80% to 62% accuracy by day 10.";
 
 describe("QA support recompute", function () {
+  let directory: string | undefined;
+  afterEach(async function () {
+    if (directory) await rm(directory, { recursive: true, force: true });
+    directory = undefined;
+  });
   it("rescores stored reports from their own answer and events", async function () {
-    const directory = await mkdtemp(join(tmpdir(), "qa-recompute-"));
+    const reportDirectory = await mkdtemp(join(tmpdir(), "qa-recompute-"));
+    directory = reportDirectory;
     const stale = {
       tokens: [],
       medianOverlap: null,
@@ -18,7 +24,7 @@ describe("QA support recompute", function () {
       anchorMatchPassage: 0,
     };
     await writeFile(
-      join(directory, "before-1-f1.json"),
+      join(reportDirectory, "before-1-f1.json"),
       JSON.stringify(
         {
           variant: "before",
@@ -44,7 +50,7 @@ describe("QA support recompute", function () {
       "utf8",
     );
     await writeFile(
-      join(directory, "after-1-f2.json"),
+      join(reportDirectory, "after-1-f2.json"),
       JSON.stringify(
         {
           variant: "after",
@@ -81,7 +87,7 @@ describe("QA support recompute", function () {
     );
     // A real-library case id has more than one letter; it is still a report.
     await writeFile(
-      join(directory, "after-1-rl2.json"),
+      join(reportDirectory, "after-1-rl2.json"),
       JSON.stringify(
         {
           variant: "after",
@@ -107,19 +113,19 @@ describe("QA support recompute", function () {
     );
     // Anything that is not a case report must be left alone.
     await writeFile(
-      join(directory, "setup-before-1.json"),
+      join(reportDirectory, "setup-before-1.json"),
       JSON.stringify({ untouched: true }),
       "utf8",
     );
 
-    assert.deepEqual(await recomputeQaSupport(directory), [
+    assert.deepEqual(await recomputeQaSupport(reportDirectory), [
       "after-1-f2.json: lowOverlapTokens 1 -> 0",
       "after-1-rl2.json: lowOverlapTokens 2 -> 0",
       "before-1-f1.json: lowOverlapTokens 3 -> 0",
     ]);
 
     const read = async (name: string) =>
-      JSON.parse(await readFile(join(directory, name), "utf8"));
+      JSON.parse(await readFile(join(reportDirectory, name), "utf8"));
     const first = await read("before-1-f1.json");
     assert.equal(first.support.tokens.length, 1);
     assert.equal(first.support.tokens[0].claimSentence, quote);

@@ -20,6 +20,11 @@ describe("multipart", function () {
     );
 
     assert.match(result.contentType, /^multipart\/form-data; boundary=/);
+    const boundary = result.contentType.split("boundary=")[1];
+    assert.equal(
+      new TextDecoder().decode(result.body),
+      `--${boundary}\r\nContent-Disposition: form-data; name="purpose___x"\r\n\r\nassistants\r\n--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="paper__.pdf"\r\nContent-Type: application/pdf\r\n\r\n\u0001\u0002\u0003\r\n--${boundary}--\r\n`,
+    );
 
     const bodyText = new TextDecoder().decode(result.body);
     assert.include(bodyText, 'name="purpose___x"');
