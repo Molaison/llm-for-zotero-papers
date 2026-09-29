@@ -771,6 +771,8 @@ const zhCN: Record<string, string> = {
   "{used} of {budget}": "{used} / {budget}",
   "Building…": "正在构建…",
   "Working…": "处理中…",
+  "Could not clear the index. Close other programs that may be using it and try again.":
+    "无法清除索引。请关闭可能正在使用它的其他程序后重试。",
   English: "英语",
   "中文 (简体)": "中文（简体）",
   Off: "关",

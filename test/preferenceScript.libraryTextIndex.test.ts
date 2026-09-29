@@ -8,6 +8,7 @@ import {
 } from "../src/modules/preferenceScript";
 import type { LibraryTextIndexOverview } from "../src/services/libraryTextIndex";
 import { initI18n, t } from "../src/utils/i18n";
+import { setAppLogSinkForTests } from "../src/core/logging";
 import { FakePrefDocument, flushAsync } from "./helpers/fakePreferencesDom";
 
 const MB = 1024 * 1024;
@@ -67,6 +68,7 @@ type Harness = ReturnType<typeof buildBlock> & {
   visible: { on: boolean };
   answer: { confirm: boolean };
   current: { overview: LibraryTextIndexOverview };
+  clock: { now: number };
   release: () => void;
   deps: LibraryTextIndexSettingsDeps;
 };
@@ -82,6 +84,7 @@ function harness(prefs: Record<string, unknown> = {}): Harness {
     } as Record<string, unknown>,
     writes: [] as Array<[string, unknown]>,
     calls: [] as string[],
+    clock: { now: 0 },
     confirms: [] as Array<[string, string]>,
     intervals: [] as Array<{ cb: () => void; ms: number; cleared: boolean }>,
     visible: { on: true },
@@ -127,6 +130,13 @@ function harness(prefs: Record<string, unknown> = {}): Harness {
       (handle as { cleared: boolean }).cleared = true;
     },
     isVisible: () => state.visible.on,
+    start: async () => {
+      state.calls.push("start");
+    },
+    stop: async () => {
+      state.calls.push("stop");
+    },
+    now: () => state.clock.now,
   };
   return {
     ...block,
@@ -267,17 +277,113 @@ describe("preferences: library text index section", function () {
     assert.deepEqual(h.calls, ["clear", "overview"]);
   });
 
-  it("a failed action re-enables the buttons and refreshes the status", async function () {
+  it("a failed Clear or Rebuild says so, and the refresh does not hide it for 15 s", async function () {
+    const warnings: string[] = [];
+    setAppLogSinkForTests((level) => warnings.push(level));
+    try {
+      const h = harness();
+      h.deps.rebuild = async () => {
+        throw new Error("file in use");
+      };
+      bindLibraryTextIndexSettings(h.deps);
+      await flushAsync();
+      h.rebuild.click();
+      await flushAsync();
+      const message =
+        "Could not clear the index. Close other programs that may be using it and try again.";
+      assert.isFalse(h.rebuild.disabled, "buttons are usable again");
+      assert.isFalse(h.clear.disabled);
+      assert.equal(h.status.textContent, message);
+      assert.deepEqual(warnings, ["warn"], "logged once, through the sink");
+      h.clock.now = 14_000;
+      h.intervals[0].cb();
+      await flushAsync();
+      assert.equal(h.status.textContent, message, "still shown at 14 s");
+      h.clock.now = 15_500;
+      h.intervals[0].cb();
+      await flushAsync();
+      assert.include(h.status.textContent, "Indexed 587 of 600 papers");
+
+      // A new action replaces the message at once.
+      const again = harness();
+      again.deps.clear = async () => {
+        throw new Error("file in use");
+      };
+      bindLibraryTextIndexSettings(again.deps);
+      await flushAsync();
+      again.clear.click();
+      await flushAsync();
+      assert.equal(again.status.textContent, message);
+      again.deps.clear = async () => undefined;
+      again.clear.click();
+      await flushAsync();
+      assert.include(again.status.textContent, "Indexed 587 of 600 papers");
+    } finally {
+      setAppLogSinkForTests(null);
+    }
+  });
+
+  it("unchecking the index stops it and checking starts it, then refreshes", async function () {
     const h = harness();
-    h.deps.rebuild = async () => {
-      throw new Error("disk full");
-    };
+    bindLibraryTextIndexSettings(h.deps);
+    await flushAsync();
+    h.calls.length = 0;
+    h.current.overview = overview({ enabled: false });
+    h.enabled.checked = false;
+    h.enabled.dispatch("change");
+    await flushAsync();
+    assert.deepEqual(h.calls, ["stop", "overview"]);
+    assert.equal(h.prefs.libraryTextIndexEnabled, false);
+    assert.equal(h.status.textContent, "Index is off");
+    h.calls.length = 0;
+    h.current.overview = overview();
+    h.enabled.checked = true;
+    h.enabled.dispatch("change");
+    await flushAsync();
+    assert.deepEqual(h.calls, ["start", "overview"]);
+    assert.equal(h.prefs.libraryTextIndexEnabled, true);
+    assert.include(h.status.textContent, "Indexed 587 of 600 papers");
+  });
+
+  it("ignores the toggle while an action runs", async function () {
+    const h = harness();
     bindLibraryTextIndexSettings(h.deps);
     await flushAsync();
     h.rebuild.click();
     await flushAsync();
+    assert.isTrue(h.enabled.disabled, "the toggle is disabled too");
+    h.calls.length = 0;
+    h.enabled.checked = false;
+    h.enabled.dispatch("change");
+    await flushAsync();
+    assert.isTrue(h.enabled.checked, "reverted");
+    assert.notInclude(h.calls, "stop");
+    assert.equal(h.prefs.libraryTextIndexEnabled, true);
+    h.release();
+    await flushAsync();
+    assert.isFalse(h.enabled.disabled);
+  });
+
+  it("disables Rebuild while the index is off, but keeps Clear", async function () {
+    const off = harness({ libraryTextIndexEnabled: false });
+    bindLibraryTextIndexSettings(off.deps);
+    await flushAsync();
+    assert.isTrue(off.rebuild.disabled);
+    assert.isFalse(off.clear.disabled);
+
+    const h = harness();
+    bindLibraryTextIndexSettings(h.deps);
+    await flushAsync();
     assert.isFalse(h.rebuild.disabled);
-    assert.include(h.status.textContent, "Indexed 587 of 600 papers");
+    h.enabled.checked = false;
+    h.enabled.dispatch("change");
+    await flushAsync();
+    assert.isTrue(h.rebuild.disabled);
+    assert.isFalse(h.clear.disabled);
+    h.enabled.checked = true;
+    h.enabled.dispatch("change");
+    await flushAsync();
+    assert.isFalse(h.rebuild.disabled);
   });
 });
 
@@ -381,6 +487,9 @@ describe("formatLibraryTextIndexStatus", function () {
       formatLibraryTextIndexStatus(overview({ enabled: false }), recording);
       assert.include(asked, "Working…");
       assert.include(asked, "Index is off");
+      asked.push(
+        "Could not clear the index. Close other programs that may be using it and try again.",
+      );
       h.release();
       const missing = [...new Set(asked)].filter((key) => t(key) === key);
       assert.deepEqual(missing, []);

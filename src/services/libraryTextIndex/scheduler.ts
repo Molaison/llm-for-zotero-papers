@@ -20,6 +20,7 @@ import { isPdfContextAttachment } from "../paperContent/contextAttachmentSupport
 import type { ZoteroChangeEvent } from "../zoteroChangeDispatcher";
 import {
   INDEX_BUDGET_MB_DEFAULT,
+  INDEX_BUDGET_MB_MIN,
   INDEX_BUDGET_SOFT_RATIO,
   INDEX_DRAIN_GAP_BUSY_MS,
   INDEX_DRAIN_GAP_MS,
@@ -146,7 +147,11 @@ export function isLibraryTextIndexEnabled(): boolean {
 
 export function getLibraryTextIndexBudgetBytes(): number {
   const raw = Number(zotero()?.Prefs?.get?.(BUDGET_PREF, true));
-  const mb = Number.isFinite(raw) && raw > 0 ? raw : INDEX_BUDGET_MB_DEFAULT;
+  // Same floor as the settings pane: a smaller stored value is not honoured.
+  const mb =
+    Number.isFinite(raw) && raw >= INDEX_BUDGET_MB_MIN
+      ? raw
+      : INDEX_BUDGET_MB_DEFAULT;
   return Math.floor(mb * 1024 * 1024);
 }
 

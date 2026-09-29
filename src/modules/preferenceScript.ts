@@ -297,8 +297,14 @@ import {
   clearLibraryTextIndex,
   getLibraryTextIndexOverview,
   rebuildLibraryTextIndex,
+  startLibraryTextIndex,
+  stopLibraryTextIndex,
   type LibraryTextIndexOverview,
 } from "../services/libraryTextIndex";
+import {
+  INDEX_BUDGET_MB_DEFAULT,
+  INDEX_BUDGET_MB_MIN,
+} from "../services/libraryTextIndex/constants";
 import {
   getDefaultClaudeManagedInstructionBlock,
   readClaudeProjectManagedInstructionBlock,
@@ -938,9 +944,11 @@ async function confirmCodexFullAccess(): Promise<boolean> {
 
 // ── Library index section (Customization tab) ─────────────────────
 
-const LIBRARY_TEXT_INDEX_MIN_BUDGET_MB = 50;
-const LIBRARY_TEXT_INDEX_DEFAULT_BUDGET_MB = 500;
 const LIBRARY_TEXT_INDEX_REFRESH_MS = 5000;
+/** How long a failed action's message outlives the periodic refresh. */
+const LIBRARY_TEXT_INDEX_ERROR_HOLD_MS = 15000;
+const LIBRARY_TEXT_INDEX_CLEAR_FAILED =
+  "Could not clear the index. Close other programs that may be using it and try again.";
 
 function formatIndexMegabytes(bytes: number): string {
   const mb = Math.max(0, bytes) / (1024 * 1024);
@@ -1004,13 +1012,17 @@ export type LibraryTextIndexSettingsDeps = {
   clearInterval: (handle: unknown) => void;
   /** Whether the Customization panel is showing; the refresh skips otherwise. */
   isVisible: () => boolean;
+  /** The toggle applies at once: start/stop the running index. */
+  start: () => Promise<void>;
+  stop: () => Promise<void>;
+  now?: () => number;
 };
 
 function readIndexBudgetMb(value: unknown): number {
   const mb = Number(value);
-  return Number.isFinite(mb) && mb >= LIBRARY_TEXT_INDEX_MIN_BUDGET_MB
+  return Number.isFinite(mb) && mb >= INDEX_BUDGET_MB_MIN
     ? Math.floor(mb)
-    : LIBRARY_TEXT_INDEX_DEFAULT_BUDGET_MB;
+    : INDEX_BUDGET_MB_DEFAULT;
 }
 
 /**
@@ -1052,9 +1064,12 @@ export function bindLibraryTextIndexSettings(
   let busy = false;
   let disposed = false;
   let refreshSeq = 0;
+  /** A failed action's message stays on the line until then. */
+  let errorShownUntil = 0;
+  const now = deps.now || Date.now;
 
   const refresh = async () => {
-    if (disposed || busy) return;
+    if (disposed || busy || now() < errorShownUntil) return;
     const seq = ++refreshSeq;
     let text: string;
     try {
@@ -1065,7 +1080,43 @@ export function bindLibraryTextIndexSettings(
     }
     // A newer refresh or an action that started meanwhile owns the line.
     if (disposed || busy || seq !== refreshSeq || !status) return;
+    if (now() < errorShownUntil) return;
     status.textContent = text;
+  };
+
+  const isIndexOn = () => enabledInput?.checked !== false;
+  const syncControls = () => {
+    if (enabledInput) enabledInput.disabled = busy;
+    // Rebuild with the index off would only delete; Clear stays available.
+    if (rebuildButton) rebuildButton.disabled = busy || !isIndexOn();
+    if (clearButton) clearButton.disabled = busy;
+  };
+  const runAction = async (
+    action: () => Promise<void>,
+    failureMessage: string | null,
+  ) => {
+    if (busy || disposed) return;
+    busy = true;
+    errorShownUntil = 0;
+    refreshSeq += 1;
+    syncControls();
+    if (status) status.textContent = tr("Working…");
+    let failed = false;
+    try {
+      await action();
+    } catch (error) {
+      failed = true;
+      appLogger.warn("LLM index: settings action failed", error);
+    } finally {
+      busy = false;
+      if (!disposed) syncControls();
+    }
+    if (failed && failureMessage && status && !disposed) {
+      status.textContent = tr(failureMessage);
+      errorShownUntil = now() + LIBRARY_TEXT_INDEX_ERROR_HOLD_MS;
+      return;
+    }
+    await refresh();
   };
 
   if (enabledInput) {
@@ -1073,8 +1124,14 @@ export function bindLibraryTextIndexSettings(
     enabledInput.checked =
       value !== false && `${value ?? ""}`.toLowerCase() !== "false";
     enabledInput.addEventListener("change", () => {
-      deps.setPref("libraryTextIndexEnabled", enabledInput.checked);
-      void refresh();
+      if (busy) {
+        // An action owns the index right now; the toggle waits for it.
+        enabledInput.checked = !enabledInput.checked;
+        return;
+      }
+      const on = enabledInput.checked;
+      deps.setPref("libraryTextIndexEnabled", on);
+      void runAction(on ? deps.start : deps.stop, null);
     });
   }
 
@@ -1088,7 +1145,7 @@ export function bindLibraryTextIndexSettings(
       );
       const raw = `${budgetInput.value ?? ""}`.trim();
       const next = raw ? Number(raw) : NaN;
-      if (!Number.isFinite(next) || next < LIBRARY_TEXT_INDEX_MIN_BUDGET_MB) {
+      if (!Number.isFinite(next) || next < INDEX_BUDGET_MB_MIN) {
         budgetInput.value = String(stored);
         return;
       }
@@ -1099,30 +1156,9 @@ export function bindLibraryTextIndexSettings(
     });
   }
 
-  const setButtonsDisabled = (disabled: boolean) => {
-    if (rebuildButton) rebuildButton.disabled = disabled;
-    if (clearButton) clearButton.disabled = disabled;
-  };
-  const runAction = async (action: () => Promise<void>) => {
-    if (busy || disposed) return;
-    busy = true;
-    refreshSeq += 1;
-    setButtonsDisabled(true);
-    if (status) status.textContent = tr("Working…");
-    try {
-      await action();
-    } catch (error) {
-      appLogger.warn("LLM index: settings action failed", error);
-    } finally {
-      busy = false;
-      if (!disposed) setButtonsDisabled(false);
-    }
-    await refresh();
-  };
-
   rebuildButton?.addEventListener("click", () => {
-    if (busy) return;
-    void runAction(deps.rebuild);
+    if (busy || !isIndexOn()) return;
+    void runAction(deps.rebuild, LIBRARY_TEXT_INDEX_CLEAR_FAILED);
   });
   clearButton?.addEventListener("click", () => {
     if (busy) return;
@@ -1132,9 +1168,10 @@ export function bindLibraryTextIndexSettings(
         "This deletes the local index database and all embedding files. Your library and PDFs are not touched. Library questions will be slower until the index refills.",
       ),
     );
-    if (confirmed) void runAction(deps.clear);
+    if (confirmed) void runAction(deps.clear, LIBRARY_TEXT_INDEX_CLEAR_FAILED);
   });
 
+  syncControls();
   const interval = deps.setInterval(() => {
     if (deps.isVisible()) void refresh();
   }, LIBRARY_TEXT_INDEX_REFRESH_MS);
@@ -2969,6 +3006,8 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
       getOverview: () => getLibraryTextIndexOverview(),
       rebuild: () => rebuildLibraryTextIndex(),
       clear: () => clearLibraryTextIndex(),
+      start: () => startLibraryTextIndex(),
+      stop: () => stopLibraryTextIndex(),
       confirm: (title, text) => {
         const prompt = (
           globalThis as {

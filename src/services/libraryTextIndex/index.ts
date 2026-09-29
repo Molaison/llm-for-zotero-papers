@@ -1,7 +1,8 @@
 /**
- * Facade for the library text index: lifecycle wiring now, search in Task 8.
- * Callers load this module lazily (hooks.ts), so its own imports are static:
- * one module instance per dependency, whichever loader resolves it.
+ * Facade for the library text index: lifecycle (start/stop), search and
+ * leading-chunk reads, and management for the settings pane (overview,
+ * clear, rebuild). hooks.ts loads it lazily; its own imports are static, so
+ * there is one module instance per dependency, whichever loader resolves it.
  */
 import { appLogger } from "../../core/logging";
 import { onPdfContextLoaded } from "../paperContent/contextCache";
@@ -280,9 +281,23 @@ function serialized(action: () => Promise<void>): Promise<void> {
 }
 
 async function clearNow(): Promise<void> {
+  // Every step is attempted; the first failure is rethrown once at the end,
+  // so the settings pane can say that Clear did not fully work.
+  let failure: unknown = null;
+  const note = (error: unknown) => {
+    failure ??= error;
+    if (!clearFailureLogged) {
+      clearFailureLogged = true;
+      appLogger.warn("LLM index: could not clear the index", error);
+    }
+  };
   // Stop first: stop() lets a job mid-write finish (bounded by the grace
   // period) and closes the connection, so nothing races the delete.
-  await stopLibraryTextIndex();
+  try {
+    await stopLibraryTextIndex();
+  } catch (error) {
+    note(error);
+  }
   // Best effort, each independently: a locked file must not keep the other.
   for (const remove of [
     deleteLibraryTextIndexDatabaseFiles,
@@ -291,22 +306,26 @@ async function clearNow(): Promise<void> {
     try {
       await remove();
     } catch (error) {
-      if (!clearFailureLogged) {
-        clearFailureLogged = true;
-        appLogger.warn("LLM index: could not delete all index files", error);
-      }
+      note(error);
     }
   }
   resetLibraryTextIndexStore();
   clearLoadedVectorState();
+  try {
+    if (isLibraryTextIndexEnabled())
+      await startLibraryTextIndex(lastEnvOverride);
+  } catch (error) {
+    note(error);
+  }
+  if (failure !== null) throw failure;
   appLogger.info("LLM index: cleared");
-  if (isLibraryTextIndexEnabled()) await startLibraryTextIndex(lastEnvOverride);
 }
 
 /**
  * Deletes the index database and every embedding file, then (when the index
  * is enabled) starts it again, which reconciles the library and refills.
- * Idempotent and safe when the index was never created.
+ * Idempotent and safe when the index was never created. Rejects with the
+ * first failure (a file in use, a failed restart) after trying every step.
  */
 export function clearLibraryTextIndex(): Promise<void> {
   return serialized(clearNow);

@@ -67,6 +67,11 @@ describe("workflow: library index settings", function () {
   let win: Window | null = null;
 
   after(async function () {
+    Zotero.Prefs.set(
+      `extensions.zotero.${REF}.libraryTextIndexEnabled`,
+      true,
+      true,
+    );
     if (win && !win.closed) await closePreferences(win);
     if (promptDescriptor)
       Object.defineProperty(services, "prompt", promptDescriptor);
@@ -228,5 +233,32 @@ describe("workflow: library index settings", function () {
       fixture.pdfAttachmentId,
     ]);
     assert.deepEqual(coverage.missing, [], "Rebuild re-filled the paper");
+
+    // The toggle applies at once: off stops the index, on starts it again.
+    const toggle = doc.querySelector(`${PREFIX}-enabled`) as HTMLInputElement;
+    toggle.click();
+    await waitFor(
+      () => status.textContent === "Index is off",
+      15000,
+      `unchecking turns the index off (was "${status.textContent}")`,
+    );
+    assert.isTrue(rebuild.disabled, "Rebuild needs the index on");
+    assert.isFalse(clear.disabled);
+    toggle.click();
+    await waitFor(
+      () =>
+        /^(Building… · )?Indexed \d+ of \d+ papers/.test(
+          status.textContent || "",
+        ),
+      15000,
+      `checking starts it again (was "${status.textContent}")`,
+    );
+    assert.isFalse(rebuild.disabled);
+    assert.isTrue(
+      Zotero.Prefs.get(
+        `extensions.zotero.${REF}.libraryTextIndexEnabled`,
+        true,
+      ),
+    );
   });
 });

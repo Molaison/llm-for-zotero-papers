@@ -14,6 +14,7 @@ import {
 } from "../src/services/libraryTextIndex/db";
 import { resetLibraryTextIndexStoreForTests } from "../src/services/libraryTextIndex/store";
 import { setUserIdleForTests } from "../src/services/libraryTextIndex/userIdle";
+import { setAppLogSinkForTests } from "../src/core/logging";
 import { resetVectorIndexerForTests } from "../src/services/libraryTextIndex/vectorIndexer";
 import type { LibraryIndexSnapshot } from "../src/services/libraryIndex/contracts";
 import { setupMemoryIO, type MemoryIO } from "./helpers/retrievalCorpus";
@@ -215,6 +216,64 @@ describe("library text index management", function () {
       "the only open is the restart, after every delete",
     );
     assert.isOk(await openLibraryTextIndexDb(), "opens normally afterwards");
+  });
+
+  it("clear still restarts but rejects when a file could not be deleted, and the next clear runs", async function () {
+    await startLibraryTextIndex({ getSnapshot: async () => emptySnapshot() });
+    const dbPath = getLibraryTextIndexDbPath();
+    const warnings: string[] = [];
+    setAppLogSinkForTests((level) => {
+      if (level === "warn") warnings.push(level);
+    });
+    const remove = (
+      scope.IOUtils as {
+        remove: (path: string, options?: unknown) => Promise<void>;
+      }
+    ).remove;
+    let locked = true;
+    (scope.IOUtils as { remove: unknown }).remove = async (
+      path: string,
+      options?: unknown,
+    ) => {
+      log.push(`remove:${path}`);
+      if (locked && path === dbPath) throw new Error("file in use");
+      await remove(path, options);
+    };
+    log.length = 0;
+    try {
+      let rejected: unknown = null;
+      await clearLibraryTextIndex().catch((error) => {
+        rejected = error;
+      });
+      assert.instanceOf(rejected, Error, "the failure reaches the caller");
+      assert.include(
+        log,
+        `remove:${VECTORS_DIR}`,
+        "the other deletion was still attempted",
+      );
+      assert.equal(log[log.length - 1], "open", "the index restarted anyway");
+      assert.isAtMost(warnings.length, 1, "one warning at most");
+      locked = false;
+      await clearLibraryTextIndex(); // the serialization tail is not poisoned
+      assert.isFalse(io.files.has(`${dbPath}-wal`));
+    } finally {
+      setAppLogSinkForTests(null);
+    }
+  });
+
+  it("a stored budget below 50 MB falls back to the default, as the settings pane does", async function () {
+    for (const [stored, expectedMb] of [
+      [10, 500],
+      [49, 500],
+      [50, 50],
+      [800, 800],
+    ] as const) {
+      prefs.libraryTextIndexBudgetMB = stored;
+      const overview = await getLibraryTextIndexOverview({
+        getSnapshot: async () => emptySnapshot(),
+      });
+      assert.equal(overview.budgetBytes, expectedMb * 1024 * 1024, `${stored}`);
+    }
   });
 
   it("clear when nothing exists resolves without throwing", async function () {
