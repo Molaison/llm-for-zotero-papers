@@ -14,11 +14,7 @@ import { createLibrarySearchTool } from "./read/librarySearch";
 import { createReadAttachmentTool } from "./read/readAttachment";
 import { createLibraryReadTool } from "./read/libraryRead";
 import { createLiteratureReviewTool } from "./read/reviewLiterature";
-import {
-  createSearchLiteratureOnlineTool,
-  LITERATURE_WORKFLOW_GUIDANCE,
-  matchesLiteratureSearchGuidance,
-} from "./read/searchLiteratureOnline";
+import { createLiteratureSearchTool } from "./read/literatureSearch";
 import { createToolResultReadTool } from "./read/toolResultRead";
 import { createConversationReadTool } from "./read/conversationRead";
 import { createWebReadTool } from "./read/webRead";
@@ -29,7 +25,6 @@ import { ActionContractService } from "../contracts/actionContract";
 import { PlanAmendmentService } from "../plans/amendments";
 import { PdfFigureExtractionService } from "../services/pdfFigureExtractionService";
 import { PdfPageService } from "../services/pdfPageService";
-import { requestsNoteAction, WRITE_NOTE_SKILL_ID } from "../skills/noteIntent";
 import type { AgentToolDefinition } from "../types";
 import { createAmendPlanTool } from "./plan/amendPlan";
 import { createApproveResearchExpansionTool } from "./plan/approveResearchExpansion";
@@ -46,10 +41,6 @@ import { createUpdatePlanTool } from "./plan/updatePlan";
 import { fail, ok, PAPER_CONTEXT_REF_SCHEMA, validateObject } from "./shared";
 import { createAnnotatePdfTool } from "./write/annotatePdf";
 import { createApplyTagsTool } from "./write/applyTags";
-import {
-  createEditCurrentNoteTool,
-  SOURCE_NOTE_COPY_GUIDANCE,
-} from "./write/editCurrentNote";
 import { createFileIOTool } from "./write/fileIO";
 import { createImportIdentifiersTool } from "./write/importIdentifiers";
 import { createImportLocalFilesTool } from "./write/importLocalFiles";
@@ -74,7 +65,8 @@ import {
 import { createTrashItemsTool } from "./write/trashItems";
 import { createUndoLastActionTool } from "./write/undoLastAction";
 import { createUpdateMetadataTool } from "./write/updateMetadata";
-import { createWriteNotesBatchTool } from "./write/writeNotesBatch";
+import { createNoteWriteTool } from "./write/noteWrite";
+import { createNoteWriteBatchTool } from "./write/noteWriteBatch";
 import { createZoteroScriptTool } from "./write/zoteroScript";
 
 type BuiltInAgentToolDeps = {
@@ -114,19 +106,6 @@ const LIBRARY_UPDATE_OPERATION_SCHEMA = {
   },
 };
 
-const LITERATURE_SEARCH_GUIDANCE: ToolGuidance = {
-  matches: matchesLiteratureSearchGuidance,
-  instruction:
-    LITERATURE_WORKFLOW_GUIDANCE +
-    "\n\nSource selection:" +
-    "\n- recommendations, references, citations modes -> always use source:'openalex' (only OpenAlex supports these)." +
-    "\n- search mode -> source:'openalex' (default, broadest coverage), source:'arxiv' (preprints, CS/ML/physics), or source:'europepmc' (biomedical/life sciences)." +
-    "\n\nAuthor search:" +
-    "\n- Encode an author filter from the prepared research scope in the 'author' parameter (e.g. author:'Adrien Peyrache')." +
-    "\n- You can combine 'author' with 'query' to find an author's papers on a specific topic." +
-    "\n- Do NOT put author names in the 'query' parameter; use 'author' instead.",
-};
-
 type UserTextSignals = NonNullable<
   Parameters<ToolGuidance["matches"]>[0]["userTextSignals"]
 >;
@@ -162,21 +141,6 @@ const LIBRARY_UPDATE_GUIDANCE: ToolGuidance = {
     ),
   instruction:
     "Execute resolved library write obligations with library_update and report verified receipts. Central policy decides whether a review card is required. Use kind:'tags' for tag changes, kind:'collections' for collection membership, and kind:'metadata' for item metadata fields. Batch one uniform change across all applicable item IDs in a single call. For different per-item changes, use assignments when the schema supports them; A computation using zotero_script uses the same exact-effect authority; the mechanism alone adds no confirmation. Explicit script prohibitions remain binding. For metadata obligations with permitted external evidence discovery, use literature_search with workflow:'review' and mode:'metadata' to fetch canonical data, then continue through the exact review/update flow. Bind direct metadata updates to the field values in the resolved obligation or approved review.",
-};
-
-const NOTE_WRITE_GUIDANCE: ToolGuidance = {
-  matches: (request, context) =>
-    Boolean(
-      context?.matchedSkillIds.includes(WRITE_NOTE_SKILL_ID) ||
-      request.forcedSkillIds?.includes(WRITE_NOTE_SKILL_ID) ||
-      requestsNoteAction(request) ||
-      request.actionContract?.obligations.some(
-        (obligation) => obligation.capability === "zotero.notes",
-      ),
-    ),
-  instruction:
-    "Use note_write mode:'edit' against the exact note target. For a bound Selected text passage, pass selection:{index:<1-based Selected text number>,replacement:<final Markdown>}. The host binds its owning note, replaces the selected structure, preserves surrounding content and embedded assets, and saves and verifies in one action. Preserve headings and list structure unless the user requests changing them. For precise edits without a bound selection, use patches with plain replacement text; findFormat:'markdown' interprets Markdown copied from library_read. Use mode:'append' to append and mode:'create' for a new note. Resolve a named parent or collection before proposing the write. Pass finalized material by documentId so retries reuse exact content. Safe reviews every note write, including creation; Auto may apply routine same-library note changes directly. After verified success, do not claim that a diff is still awaiting review. " +
-    SOURCE_NOTE_COPY_GUIDANCE,
 };
 
 const LIBRARY_IMPORT_GUIDANCE: ToolGuidance = {
@@ -594,7 +558,6 @@ export function createBuiltInToolRegistry(
     deps.zoteroGateway,
     deps.pdfPageService,
   );
-  const searchLiterature = createSearchLiteratureOnlineTool(deps.zoteroGateway);
   const applyTags = createApplyTagsTool(deps.zoteroGateway);
   const moveToCollection = createMoveToCollectionTool(deps.zoteroGateway);
   const updateMetadata = createUpdateMetadataTool(deps.zoteroGateway);
@@ -605,13 +568,11 @@ export function createBuiltInToolRegistry(
   const createItems = createCreateItemsTool(deps.zoteroGateway);
   const reparentItems = createReparentItemsTool(deps.zoteroGateway);
   const relateItems = createRelateItemsTool(deps.zoteroGateway);
-  const writeNotesBatch = createWriteNotesBatchTool(deps.zoteroGateway);
   const updateLibraryTag = createUpdateLibraryTagTool(deps.zoteroGateway);
   const setItemTags = createSetItemTagsTool(deps.zoteroGateway);
   const savedSearchUpdate = createSavedSearchTool(deps.zoteroGateway);
   const mergeItems = createMergeItemsTool(deps.zoteroGateway);
   const manageAttachments = createManageAttachmentsTool(deps.zoteroGateway);
-  const editCurrentNote = createEditCurrentNoteTool(deps.zoteroGateway);
   const runCommand = createRunCommandTool();
   const importLocalFiles = createImportLocalFilesTool(deps.zoteroGateway);
   const fileIO = createFileIOTool();
@@ -633,16 +594,7 @@ export function createBuiltInToolRegistry(
       figureExtractionService,
     ),
   );
-  registry.register(
-    createRenamedTool({
-      tool: searchLiterature,
-      name: "literature_search",
-      label: "Search Literature",
-      description:
-        "Search scholarly sources and return saved candidates for ranking. Discovery then uses literature_review; explicit imports use library_import directly. Use workflow:'review', mode:'metadata' for external metadata review.",
-      guidance: LITERATURE_SEARCH_GUIDANCE,
-    }),
-  );
+  registry.register(createLiteratureSearchTool(deps.zoteroGateway));
   registry.register(createLiteratureReviewTool(deps.zoteroGateway));
   registry.register(
     createLibraryUpdateTool({
@@ -663,25 +615,8 @@ export function createBuiltInToolRegistry(
       description: "Create or delete Zotero collections.",
     }),
   );
-  registry.register(
-    createRenamedTool({
-      tool: editCurrentNote,
-      name: "note_write",
-      label: "Write Note",
-      description:
-        "Create, append to, or edit one Zotero note and verify native post-state. Use documentId for finalized authored material so retries reuse the exact stored version. Safe reviews every write, including creation. Use note_write_batch for many items.",
-      guidance: NOTE_WRITE_GUIDANCE,
-    }),
-  );
-  registry.register(
-    createRenamedTool({
-      tool: writeNotesBatch,
-      name: "note_write_batch",
-      label: "Write Notes",
-      description:
-        "Write a note onto each of many explicitly identified items in one checkpointed batch operation. To continue an interrupted batch, pass resumeBatchId alone: written items are skipped and the rest are written from the bodies already prepared, so no note is written again or regenerated.",
-    }),
-  );
+  registry.register(createNoteWriteTool(deps.zoteroGateway));
+  registry.register(createNoteWriteBatchTool(deps.zoteroGateway));
   registry.register(savedSearchUpdate);
   registry.register(createCiteExportTool(deps.zoteroGateway));
   registry.register(createLibrarySettingsTool(deps.zoteroGateway));
@@ -725,7 +660,6 @@ export function createBuiltInToolRegistry(
   registry.register(createApproveResearchMutationTool());
 
   const legacyTools: AgentToolDefinition<any, any>[] = [
-    searchLiterature,
     applyTags,
     moveToCollection,
     updateMetadata,
@@ -736,12 +670,10 @@ export function createBuiltInToolRegistry(
     createItems,
     reparentItems,
     relateItems,
-    writeNotesBatch,
     updateLibraryTag,
     setItemTags,
     mergeItems,
     manageAttachments,
-    editCurrentNote,
     importLocalFiles,
   ];
   for (const tool of legacyTools) {

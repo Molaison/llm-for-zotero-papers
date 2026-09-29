@@ -26,21 +26,21 @@ import {
   validateObject,
 } from "../shared";
 
-type SearchLiteratureOnlineMode =
+type LiteratureSearchMode =
   | "recommendations"
   | "references"
   | "citations"
   | "search"
   | "metadata";
 
-type SearchLiteratureOnlineWorkflow = "answer" | "review";
+type LiteratureSearchWorkflow = "answer" | "review";
 
 export const LITERATURE_WORKFLOW_GUIDANCE =
   "Use literature_search to retrieve scholarly candidates, not to present a raw result pool. When the user only asks to find/recommend relevant papers, read the current paper, search and assess titles/abstracts, then call literature_review with the requested number (five when unspecified) of ranked candidate references and short evidence-based relevance reasons. Search further if results are weak; never pad a shortlist. Respect explicit references/citations/source constraints. A Find more continuation requests another batch of the original size: assess unused saved candidates first, then search further as needed, and submit only new candidates with the provided sessionId and revision. The paper-only import-selection card is required in Safe, Auto and YOLO, and discovery never imports silently. Explicit import requests instead use workflow:'answer' to gather and rank candidates, skip existing duplicates, then call library_import for exactly the requested number and destination. Central mutation authorization handles Safe confirmation and direct Auto/YOLO execution. Do not substitute a discovery card for an explicit import. Use workflow:'answer' for evidence supporting an answer/review document; only metadata review continues to use workflow:'review', mode:'metadata'.";
 
-type SearchLiteratureOnlineInput = {
-  workflow: SearchLiteratureOnlineWorkflow;
-  mode: SearchLiteratureOnlineMode;
+type LiteratureSearchInput = {
+  workflow: LiteratureSearchWorkflow;
+  mode: LiteratureSearchMode;
   source?: "openalex" | "arxiv" | "europepmc";
   itemId?: number;
   paperContext?: PaperContextRef;
@@ -62,6 +62,21 @@ export function matchesLiteratureSearchGuidance(
   }
   return false;
 }
+
+export const LITERATURE_SEARCH_GUIDANCE: NonNullable<
+  AgentToolDefinition["guidance"]
+> = {
+  matches: matchesLiteratureSearchGuidance,
+  instruction:
+    LITERATURE_WORKFLOW_GUIDANCE +
+    "\n\nSource selection:" +
+    "\n- recommendations, references, citations modes -> always use source:'openalex' (only OpenAlex supports these)." +
+    "\n- search mode -> source:'openalex' (default, broadest coverage), source:'arxiv' (preprints, CS/ML/physics), or source:'europepmc' (biomedical/life sciences)." +
+    "\n\nAuthor search:" +
+    "\n- Encode an author filter from the prepared research scope in the 'author' parameter (e.g. author:'Adrien Peyrache')." +
+    "\n- You can combine 'author' with 'query' to find an author's papers on a specific topic." +
+    "\n- Do NOT put author names in the 'query' parameter; use 'author' instead.",
+};
 
 function readTraceString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
@@ -165,15 +180,15 @@ function buildLiteratureTraceDetails(
   return details;
 }
 
-export function createSearchLiteratureOnlineTool(
+export function createLiteratureSearchTool(
   zoteroGateway: ZoteroGateway,
-): AgentToolDefinition<SearchLiteratureOnlineInput, unknown> {
+): AgentToolDefinition<LiteratureSearchInput, unknown> {
   const service = new LiteratureSearchService(zoteroGateway);
   return {
     spec: {
-      name: "search_literature_online",
+      name: "literature_search",
       description:
-        "Search scholarly sources and return saved candidate references for ranking. Use literature_review afterward for discovery selection, or library_import directly for an explicit import request. Metadata review uses workflow:'review', mode:'metadata'.",
+        "Search scholarly sources and return saved candidates for ranking. Discovery then uses literature_review; explicit imports use library_import directly. Use workflow:'review', mode:'metadata' for external metadata review.",
       inputSchema: {
         type: "object",
         required: ["mode"],
@@ -219,20 +234,9 @@ export function createSearchLiteratureOnlineTool(
       executionClass: "read",
       workCategory: "retrieval",
     },
-    guidance: {
-      matches: matchesLiteratureSearchGuidance,
-      instruction:
-        LITERATURE_WORKFLOW_GUIDANCE +
-        "\n\nSource selection:" +
-        "\n• recommendations, references, citations modes → always use source:'openalex' (only OpenAlex supports these)." +
-        "\n• search mode → source:'openalex' (default, broadest coverage), source:'arxiv' (preprints, CS/ML/physics), or source:'europepmc' (biomedical/life sciences)." +
-        "\n\nAuthor search:" +
-        "\n• When the user wants papers by a specific author, use the 'author' parameter (e.g. author:'Adrien Peyrache')." +
-        "\n• You can combine 'author' with 'query' to find an author's papers on a specific topic." +
-        "\n• Do NOT put author names in the 'query' parameter — use 'author' instead.",
-    },
+    guidance: LITERATURE_SEARCH_GUIDANCE,
     presentation: {
-      label: "Search Literature Online",
+      label: "Search Literature",
       traceIcon: "library",
       mergeResultIntoCallTrace: true,
       buildTraceDetails: ({ args, content }) =>
@@ -278,7 +282,7 @@ export function createSearchLiteratureOnlineTool(
         args.mode === "citations" ||
         args.mode === "search" ||
         args.mode === "metadata"
-          ? (args.mode as SearchLiteratureOnlineMode)
+          ? (args.mode as LiteratureSearchMode)
           : null;
       if (!mode) {
         return fail("mode is required");
@@ -342,7 +346,7 @@ export function createSearchLiteratureOnlineTool(
           ? args.workflow
           : "answer";
 
-      return ok<SearchLiteratureOnlineInput>({
+      return ok<LiteratureSearchInput>({
         workflow,
         mode,
         source,

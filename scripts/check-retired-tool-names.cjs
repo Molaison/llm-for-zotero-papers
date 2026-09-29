@@ -11,6 +11,9 @@ const RETIRED_TOOL_NAMES = [
   "view_pdf_pages",
   "query_library",
   "read_library",
+  "search_literature_online",
+  "edit_current_note",
+  "write_notes_batch",
 ];
 // Repo-relative, forward-slash prefixes matched with startsWith.
 const ALLOWLIST = [
@@ -22,6 +25,8 @@ const ALLOWLIST = [
   "src/modules/contextPanel/agentTrace/actionCardModel.ts",
   "src/agent/context/toolNames.ts", // LEGACY_* name sets, until Task 2.6
   "src/agent/context/cacheManagement.ts", // retired-name branches, until Task 2.6
+  "src/agent/finalization/finalAnswerController.ts", // accepts search_literature_online from stored tool history
+  "src/modules/contextPanel/agentTrace/noteReviewCard.ts", // accepts edit_current_note from stored review cards
 ];
 const REPO_ROOT = path.resolve(__dirname, "..");
 const SRC_ROOT = path.join(REPO_ROOT, "src");

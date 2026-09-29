@@ -176,6 +176,7 @@ export class AgentFinalAnswerController {
       (record) =>
         record.ok &&
         (record.name === "literature_search" ||
+          // Retired name, still present in stored tool history.
           record.name === "search_literature_online" ||
           (record.name === "literature_review" &&
             (record.content as { discoveryPhase?: string } | undefined)

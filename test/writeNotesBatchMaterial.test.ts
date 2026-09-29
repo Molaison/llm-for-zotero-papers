@@ -1,9 +1,12 @@
 import { assert } from "chai";
 import { rejects } from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
-import { createWriteNotesBatchTool } from "../src/agent/tools/write/writeNotesBatch";
+import { createNoteWriteBatchTool } from "../src/agent/tools/write/noteWriteBatch";
 import { LibraryMutationService } from "../src/agent/services/libraryMutationService";
-import { initAgentChangeJournal } from "../src/agent/store/changeJournal";
+import {
+  initAgentChangeJournal,
+  JOURNAL_ACTIONS_TABLE,
+} from "../src/agent/store/changeJournal";
 import {
   initPlanDocumentStore,
   loadLatestDocumentForRun,
@@ -145,7 +148,7 @@ describe("note batch material", function () {
     db.close();
   });
 
-  function validated(tool: ReturnType<typeof createWriteNotesBatchTool>) {
+  function validated(tool: ReturnType<typeof createNoteWriteBatchTool>) {
     const result = tool.validate({ notes: notes() });
     assert.isTrue(result.ok);
     if (!result.ok) throw new Error("validation failed");
@@ -154,7 +157,7 @@ describe("note batch material", function () {
 
   /** The host prepares a write tool before it asks the user to approve it. */
   async function prepare(
-    tool: ReturnType<typeof createWriteNotesBatchTool>,
+    tool: ReturnType<typeof createNoteWriteBatchTool>,
     input: ReturnType<typeof validated>,
     ctx = context(),
   ) {
@@ -180,7 +183,7 @@ describe("note batch material", function () {
   }
 
   function checklist(
-    tool: ReturnType<typeof createWriteNotesBatchTool>,
+    tool: ReturnType<typeof createNoteWriteBatchTool>,
     input: ReturnType<typeof validated>,
   ) {
     const action = tool.createPendingAction?.(input, context());
@@ -204,7 +207,7 @@ describe("note batch material", function () {
   }
 
   it("finalizes one document per item before any note is written", async function () {
-    const tool = createWriteNotesBatchTool(gateway);
+    const tool = createNoteWriteBatchTool(gateway);
     const output = await tool.execute(validated(tool), context());
 
     assert.equal(documentCount(), 3, "one finalized document per note body");
@@ -229,6 +232,14 @@ describe("note batch material", function () {
     }
     // One journal action owns every step, as Task 1 established.
     assert.lengthOf(new Set(rows.map((row) => row.actionId)), 1);
+    // The module owns the public name, so the journal records it with no
+    // facade supplying journalToolName.
+    const journaled = db
+      .prepare(
+        `SELECT tool_name AS toolName FROM ${JOURNAL_ACTIONS_TABLE} WHERE action_id = ?`,
+      )
+      .get(rows[0].actionId) as { toolName: string } | undefined;
+    assert.equal(journaled?.toolName, "note_write_batch");
 
     const job = await getBatchJob(batchId);
     assert.equal(job?.action, "note_write_batch");
@@ -239,7 +250,7 @@ describe("note batch material", function () {
   });
 
   it("writes the stored document's HTML, not the model-supplied body", async function () {
-    const tool = createWriteNotesBatchTool(gateway);
+    const tool = createNoteWriteBatchTool(gateway);
     const output = await tool.execute(validated(tool), context());
 
     const rows = await listBatchItems(output.batchItems![0].batchId);
@@ -258,7 +269,7 @@ describe("note batch material", function () {
   });
 
   it("reuses the run's documents when the same bodies are written again", async function () {
-    const tool = createWriteNotesBatchTool(gateway);
+    const tool = createNoteWriteBatchTool(gateway);
     const first = await tool.execute(validated(tool), context());
     const second = await tool.execute(validated(tool), context());
 
@@ -271,7 +282,7 @@ describe("note batch material", function () {
 
   it("marks only the item that failed, keeping the others written", async function () {
     failOnParent = 2;
-    const tool = createWriteNotesBatchTool(gateway);
+    const tool = createNoteWriteBatchTool(gateway);
     const output = await tool.execute(validated(tool), context());
 
     const batchId = output.batchItems![0].batchId;
@@ -297,7 +308,7 @@ describe("note batch material", function () {
   });
 
   it("executes the very operation the action contract proposed", async function () {
-    const tool = createWriteNotesBatchTool(gateway);
+    const tool = createNoteWriteBatchTool(gateway);
     const input = validated(tool);
     const proposed = describeLibraryMutationActions(input);
     const output = await tool.execute(input, context());
@@ -353,7 +364,7 @@ describe("note batch material", function () {
   });
 
   it("is never mistaken for the run's finalized document", async function () {
-    const tool = createWriteNotesBatchTool(gateway);
+    const tool = createNoteWriteBatchTool(gateway);
     await tool.execute(validated(tool), context());
 
     // External backends replace the turn's answer with the run's finalized
@@ -362,7 +373,7 @@ describe("note batch material", function () {
   });
 
   it("retries into the same batch instead of orphaning the first", async function () {
-    const tool = createWriteNotesBatchTool(gateway);
+    const tool = createNoteWriteBatchTool(gateway);
     failOnParent = 2;
     const first = await tool.execute(
       await prepare(tool, validated(tool)),
@@ -403,7 +414,7 @@ describe("note batch material", function () {
   });
 
   it("stores a note body the way a single note write would", async function () {
-    const tool = createWriteNotesBatchTool(gateway);
+    const tool = createNoteWriteBatchTool(gateway);
     const output = await tool.execute(
       await prepare(tool, validated(tool)),
       context(),
@@ -419,7 +430,7 @@ describe("note batch material", function () {
   });
 
   it("accepts note bodies that are not publishable documents", async function () {
-    const tool = createWriteNotesBatchTool(gateway);
+    const tool = createNoteWriteBatchTool(gateway);
     const input = tool.validate({
       notes: [
         {
@@ -445,7 +456,7 @@ describe("note batch material", function () {
   });
 
   it("fails only the item whose body could not be finalized", async function () {
-    const tool = createWriteNotesBatchTool(gateway);
+    const tool = createNoteWriteBatchTool(gateway);
     const input = tool.validate({
       notes: [
         { targetItemId: 1, content: "A fine note." },
@@ -471,10 +482,14 @@ describe("note batch material", function () {
   });
 
   it("previews the finalized text on the confirmation card", async function () {
-    const tool = createWriteNotesBatchTool(gateway);
+    const tool = createNoteWriteBatchTool(gateway);
     const input = await prepare(tool, validated(tool));
 
     const items = checklist(tool, input);
+    assert.equal(
+      tool.createPendingAction?.(input, context())?.toolName,
+      "note_write_batch",
+    );
     const byTitle = new Map(
       runDocuments().map((document) => [document.title, document]),
     );
@@ -491,7 +506,7 @@ describe("note batch material", function () {
   });
 
   it("writes nothing until the batch is approved", async function () {
-    const tool = createWriteNotesBatchTool(gateway);
+    const tool = createNoteWriteBatchTool(gateway);
     await prepare(tool, validated(tool));
 
     assert.equal(documentCount(), 3, "material is frozen before approval");
@@ -503,7 +518,7 @@ describe("note batch material", function () {
   });
 
   it("keeps material aligned with the notes left checked", async function () {
-    const tool = createWriteNotesBatchTool(gateway);
+    const tool = createNoteWriteBatchTool(gateway);
     const input = await prepare(tool, validated(tool));
     const applied = tool.applyConfirmation?.(
       input,
@@ -530,7 +545,7 @@ describe("note batch material", function () {
   });
 
   it("writes nothing again for an item its rows already name", async function () {
-    const tool = createWriteNotesBatchTool(gateway);
+    const tool = createNoteWriteBatchTool(gateway);
     const first = await tool.execute(
       await prepare(tool, validated(tool)),
       context(),
@@ -567,7 +582,7 @@ describe("note batch material", function () {
   });
 
   it("seeds an item that has no material as failed, never pending", async function () {
-    const tool = createWriteNotesBatchTool(gateway);
+    const tool = createNoteWriteBatchTool(gateway);
     const input = tool.validate({
       notes: [
         { targetItemId: 1, content: "A fine note." },
@@ -602,7 +617,7 @@ describe("note batch material", function () {
   });
 
   it("never announces a batch item as the turn's finalized material", async function () {
-    const tool = createWriteNotesBatchTool(gateway);
+    const tool = createNoteWriteBatchTool(gateway);
     const output = await tool.execute(validated(tool), context());
     assert.isUndefined(
       (output as { materialRef?: unknown }).materialRef,

@@ -1,7 +1,7 @@
 import { assert } from "chai";
 import { rejects } from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
-import { createWriteNotesBatchTool } from "../src/agent/tools/write/writeNotesBatch";
+import { createNoteWriteBatchTool } from "../src/agent/tools/write/noteWriteBatch";
 import {
   initAgentChangeJournal,
   listJournalActions,
@@ -151,10 +151,10 @@ describe("note batch resume", function () {
   });
 
   function tool() {
-    return createWriteNotesBatchTool(gateway);
+    return createNoteWriteBatchTool(gateway);
   }
 
-  type Tool = ReturnType<typeof createWriteNotesBatchTool>;
+  type Tool = ReturnType<typeof createNoteWriteBatchTool>;
 
   /** Validate, prepare and run one call the way the host would. */
   async function run(

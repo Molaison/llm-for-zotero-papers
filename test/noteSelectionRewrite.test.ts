@@ -1,5 +1,5 @@
 import { assert } from "chai";
-import { createEditCurrentNoteTool } from "../src/agent/tools/write/editCurrentNote";
+import { createNoteWriteTool } from "../src/agent/tools/write/noteWrite";
 import { buildAgentInitialMessages } from "../src/agent/model/messageBuilder";
 import { parseSemanticDecisions } from "../src/agent/model/semanticDecisions";
 import { resolvedAgentRequest } from "./helpers/resolvedAgentRequest";
@@ -11,7 +11,7 @@ function fixture(
   html = before,
   selected = "First method.\nSecond method.\nThird method.",
 ) {
-  const tool = createEditCurrentNoteTool({
+  const tool = createNoteWriteTool({
     getActiveNoteSnapshot: () => ({
       noteId: 55,
       libraryID: 1,

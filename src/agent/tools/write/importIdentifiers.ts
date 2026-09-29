@@ -92,7 +92,7 @@ export function createImportIdentifiersTool(
     },
 
     acceptInheritedApproval: async (_input, approval) => {
-      // Accept review-mode approvals from search_literature_online review cards
+      // Accept review-mode approvals from literature_search review cards
       return (
         (approval.sourceMode === "review" ||
           (approval.sourceMode === "approval" &&

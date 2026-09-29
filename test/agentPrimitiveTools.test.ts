@@ -21,7 +21,7 @@ import { createPaperReadTool } from "../src/agent/tools/read/paperRead";
 import { getPagedOperationId } from "../src/agent/actions/pagedWorkflow";
 import { createFileIOTool } from "../src/agent/tools/write/fileIO";
 import { createBuiltInToolRegistry } from "../src/agent/tools";
-import { createEditCurrentNoteTool } from "../src/agent/tools/write/editCurrentNote";
+import { createNoteWriteTool } from "../src/agent/tools/write/noteWrite";
 import { createApplyTagsTool } from "../src/agent/tools/write/applyTags";
 import { createUpdateMetadataTool } from "../src/agent/tools/write/updateMetadata";
 import { createRunCommandTool } from "../src/agent/tools/write/runCommand";
@@ -1601,7 +1601,7 @@ describe("primitive agent tools", function () {
   it("write tools do not import figure crop cache policing guards", async function () {
     const { readFile } = await import("node:fs/promises");
     const writeToolPaths = [
-      "src/agent/tools/write/editCurrentNote.ts",
+      "src/agent/tools/write/noteWrite.ts",
       "src/agent/tools/write/fileIO.ts",
     ];
     for (const filePath of writeToolPaths) {
@@ -2567,8 +2567,8 @@ describe("primitive agent tools", function () {
     assert.include(turnText, "confirmation card is the deliverable");
   });
 
-  it("edit_current_note confirms and updates the active note", async function () {
-    const tool = createEditCurrentNoteTool(
+  it("note_write confirms and updates the active note", async function () {
+    const tool = createNoteWriteTool(
       nativeNoteGateway({
         getActiveNoteSnapshot: () => ({
           noteId: 55,
@@ -2607,7 +2607,7 @@ describe("primitive agent tools", function () {
       },
     };
 
-    // edit_current_note is always available (supports both edit and create modes)
+    // note_write is always available (supports both edit and create modes)
     assert.isTrue(tool.isAvailable?.(baseContext.request) !== false);
     assert.isTrue(tool.isAvailable?.(noteRequest) !== false);
 
@@ -2681,9 +2681,9 @@ describe("primitive agent tools", function () {
     });
   });
 
-  it("edit_current_note applies patches to the explicit target note", function () {
+  it("note_write applies patches to the explicit target note", function () {
     const requestedNoteIds: Array<number | undefined> = [];
-    const tool = createEditCurrentNoteTool({
+    const tool = createNoteWriteTool({
       getActiveNoteSnapshot: ({ noteId }: { noteId?: number }) => {
         requestedNoteIds.push(noteId);
         return noteId === 77
@@ -2727,9 +2727,9 @@ describe("primitive agent tools", function () {
     assert.equal(validated.value.noteId, 77);
   });
 
-  it("edit_current_note does not police incomplete MinerU figure-block embeds before mutation", async function () {
+  it("note_write does not police incomplete MinerU figure-block embeds before mutation", async function () {
     let replacedContent = "";
-    const tool = createEditCurrentNoteTool(
+    const tool = createNoteWriteTool(
       nativeNoteGateway({
         getActiveNoteSnapshot: () => ({
           noteId: 55,
@@ -2847,9 +2847,9 @@ describe("primitive agent tools", function () {
     }
   });
 
-  it("edit_current_note does not police explicit figure notes without extracted crop embeds", async function () {
+  it("note_write does not police explicit figure notes without extracted crop embeds", async function () {
     let replacedContent = "";
-    const tool = createEditCurrentNoteTool(
+    const tool = createNoteWriteTool(
       nativeNoteGateway({
         getActiveNoteSnapshot: () => ({
           noteId: 55,
@@ -2975,9 +2975,9 @@ describe("primitive agent tools", function () {
     }
   });
 
-  it("edit_current_note allows extracted PDF figure crop embeds", async function () {
+  it("note_write allows extracted PDF figure crop embeds", async function () {
     let replacedContent = "";
-    const tool = createEditCurrentNoteTool(
+    const tool = createNoteWriteTool(
       nativeNoteGateway({
         getActiveNoteSnapshot: activeDraftNoteSnapshot,
         onNativeSave: async ({ content }: { content: string }) => {
@@ -3102,9 +3102,9 @@ describe("primitive agent tools", function () {
     }
   });
 
-  it("edit_current_note does not reject all-figures notes when figure crop metadata is missing", async function () {
+  it("note_write does not reject all-figures notes when figure crop metadata is missing", async function () {
     let replacedContent = "";
-    const tool = createEditCurrentNoteTool(
+    const tool = createNoteWriteTool(
       nativeNoteGateway({
         getActiveNoteSnapshot: activeDraftNoteSnapshot,
         onNativeSave: async ({ content }: { content: string }) => {
@@ -3197,9 +3197,9 @@ describe("primitive agent tools", function () {
     }
   });
 
-  it("edit_current_note allows explicit text-only all-figures notes when extraction failed", async function () {
+  it("note_write allows explicit text-only all-figures notes when extraction failed", async function () {
     let replacedContent = "";
-    const tool = createEditCurrentNoteTool(
+    const tool = createNoteWriteTool(
       nativeNoteGateway({
         getActiveNoteSnapshot: activeDraftNoteSnapshot,
         onNativeSave: async ({ content }: { content: string }) => {
@@ -3301,9 +3301,9 @@ describe("primitive agent tools", function () {
     }
   });
 
-  it("edit_current_note allows no-image-crop all-figures notes when extraction failed", async function () {
+  it("note_write allows no-image-crop all-figures notes when extraction failed", async function () {
     let replacedContent = "";
-    const tool = createEditCurrentNoteTool(
+    const tool = createNoteWriteTool(
       nativeNoteGateway({
         getActiveNoteSnapshot: activeDraftNoteSnapshot,
         onNativeSave: async ({ content }: { content: string }) => {
@@ -3405,9 +3405,9 @@ describe("primitive agent tools", function () {
     }
   });
 
-  it("edit_current_note does not reject all-figures notes when figure crop metadata is stale", async function () {
+  it("note_write does not reject all-figures notes when figure crop metadata is stale", async function () {
     let replacedContent = "";
-    const tool = createEditCurrentNoteTool(
+    const tool = createNoteWriteTool(
       nativeNoteGateway({
         getActiveNoteSnapshot: activeDraftNoteSnapshot,
         onNativeSave: async ({ content }: { content: string }) => {
@@ -3521,9 +3521,9 @@ describe("primitive agent tools", function () {
     }
   });
 
-  it("edit_current_note accepts all-figures crop embeds when only paper title metadata drifted", async function () {
+  it("note_write accepts all-figures crop embeds when only paper title metadata drifted", async function () {
     let replacedContent = "";
-    const tool = createEditCurrentNoteTool(
+    const tool = createNoteWriteTool(
       nativeNoteGateway({
         getActiveNoteSnapshot: activeDraftNoteSnapshot,
         onNativeSave: async ({ content }: { content: string }) => {
@@ -3686,9 +3686,9 @@ describe("primitive agent tools", function () {
     }
   });
 
-  it("edit_current_note does not reject all-figures notes when expected crops are missing", async function () {
+  it("note_write does not reject all-figures notes when expected crops are missing", async function () {
     let replacedContent = "";
-    const tool = createEditCurrentNoteTool(
+    const tool = createNoteWriteTool(
       nativeNoteGateway({
         getActiveNoteSnapshot: activeDraftNoteSnapshot,
         onNativeSave: async ({ content }: { content: string }) => {
@@ -3836,8 +3836,8 @@ describe("primitive agent tools", function () {
     }
   });
 
-  it("edit_current_note compares HTML as Markdown but preserves the approved HTML payload", async function () {
-    const tool = createEditCurrentNoteTool(
+  it("note_write compares HTML as Markdown but preserves the approved HTML payload", async function () {
+    const tool = createNoteWriteTool(
       nativeNoteGateway({
         getActiveNoteSnapshot: () => ({
           noteId: 55,

@@ -2,11 +2,11 @@ import { noteHtmlMatches } from "../src/utils/noteHtml";
 import { renderRawNoteHtml } from "../src/services/notes/noteRendering";
 import { nativeNoteGateway } from "./helpers/nativeNoteGateway";
 import { assert } from "chai";
-import { createEditCurrentNoteTool } from "../src/agent/tools/write/editCurrentNote";
+import { createNoteWriteTool } from "../src/agent/tools/write/noteWrite";
 import type { AgentToolContext } from "../src/agent/types";
 import { composeRetrievalCandidateInvalidation } from "./helpers/hostSurfaces";
 
-describe("editCurrentNote path imports", function () {
+describe("noteWrite path imports", function () {
   let restoreRetrievalInvalidator: (() => void) | null = null;
 
   before(function () {
@@ -46,7 +46,7 @@ describe("editCurrentNote path imports", function () {
 
   it("imports markdown Windows file URLs using native paths", async function () {
     let importedPath = "";
-    const tool = createEditCurrentNoteTool(
+    const tool = createNoteWriteTool(
       nativeNoteGateway({
         getActiveNoteSnapshot: () => ({
           noteId: 55,
@@ -114,7 +114,7 @@ describe("editCurrentNote path imports", function () {
 
   it("imports HTML UNC file URLs using native paths", async function () {
     let importedPath = "";
-    const tool = createEditCurrentNoteTool(
+    const tool = createNoteWriteTool(
       nativeNoteGateway({
         getActiveNoteSnapshot: () => ({
           noteId: 55,
@@ -163,7 +163,7 @@ describe("editCurrentNote path imports", function () {
 
   it("leaves unsupported file URLs unchanged", async function () {
     let importAttempts = 0;
-    const tool = createEditCurrentNoteTool(
+    const tool = createNoteWriteTool(
       nativeNoteGateway({
         getActiveNoteSnapshot: () => ({
           noteId: 55,

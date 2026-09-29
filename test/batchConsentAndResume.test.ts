@@ -3,7 +3,7 @@ import { assert } from "chai";
 import { LibraryMutationService } from "../src/agent/services/libraryMutationService";
 import { executeLibraryMutationAction } from "../src/agent/services/mutationCoordinator";
 import { initAgentChangeJournal } from "../src/agent/store/changeJournal";
-import { createWriteNotesBatchTool } from "../src/agent/tools/write/writeNotesBatch";
+import { createNoteWriteBatchTool } from "../src/agent/tools/write/noteWriteBatch";
 import { ChangeJournalTestDb } from "./helpers/changeJournalTestDb";
 
 /**
@@ -162,7 +162,7 @@ describe("batched note writing", function () {
 
   describe("the confirmation card", function () {
     it("puts every note on one checklist rather than one card each", function () {
-      const tool = createWriteNotesBatchTool(gateway() as never);
+      const tool = createNoteWriteBatchTool(gateway() as never);
       const validated = tool.validate({
         notes: [
           { targetItemId: 1, content: "First summary" },
@@ -184,7 +184,7 @@ describe("batched note writing", function () {
     });
 
     it("writes only the notes left checked", async function () {
-      const tool = createWriteNotesBatchTool(gateway() as never);
+      const tool = createNoteWriteBatchTool(gateway() as never);
       const validated = tool.validate({
         notes: [
           { targetItemId: 1, content: "a" },
@@ -207,7 +207,7 @@ describe("batched note writing", function () {
     });
 
     it("refuses when everything was unchecked", function () {
-      const tool = createWriteNotesBatchTool(gateway() as never);
+      const tool = createNoteWriteBatchTool(gateway() as never);
       const validated = tool.validate({
         notes: [{ targetItemId: 1, content: "a" }],
       });
@@ -220,7 +220,7 @@ describe("batched note writing", function () {
     });
 
     it("rejects entries with no content rather than writing empty notes", function () {
-      const tool = createWriteNotesBatchTool(gateway() as never);
+      const tool = createNoteWriteBatchTool(gateway() as never);
       const result = tool.validate({
         notes: [{ targetItemId: 1, content: "   " }],
       });

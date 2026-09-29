@@ -1,6 +1,6 @@
 import { classifiedFixture, semanticFixture } from "./helpers/semanticIntent";
 import { assert } from "chai";
-import { createSearchLiteratureOnlineTool } from "../src/agent/tools/read/searchLiteratureOnline";
+import { createLiteratureSearchTool } from "../src/agent/tools/read/literatureSearch";
 import { createLiteratureReviewTool } from "../src/agent/tools/read/reviewLiterature";
 import { clearAgentToolResultHandleStore } from "../src/agent/store/toolResultHandles";
 import { AgentFinalAnswerController } from "../src/agent/finalization/finalAnswerController";
@@ -71,7 +71,7 @@ describe("ranked literature discovery workflow", function () {
   });
 
   async function search(context = makeContext()) {
-    const tool = createSearchLiteratureOnlineTool(gateway as never);
+    const tool = createLiteratureSearchTool(gateway as never);
     const input = tool.validate({
       mode: "search",
       workflow: "review",
@@ -343,7 +343,7 @@ describe("ranked literature discovery workflow", function () {
     const context = makeContext();
     context.request.userText =
       "What does recent research say about representational drift?";
-    const tool = createSearchLiteratureOnlineTool(gateway as never);
+    const tool = createLiteratureSearchTool(gateway as never);
     const parsed = tool.validate({
       mode: "search",
       workflow: "answer",
@@ -403,7 +403,7 @@ describe("ranked literature discovery workflow", function () {
       networkCalls++;
       throw new Error("No keyword fallback allowed");
     }) as typeof fetch;
-    const tool = createSearchLiteratureOnlineTool(gateway as never);
+    const tool = createLiteratureSearchTool(gateway as never);
     const parsed = tool.validate({
       mode: "references",
       query: "A seed without a DOI",

@@ -12,7 +12,7 @@ import {
 import { sha256Text } from "../src/agent/store/journalRecoveryBlobStore";
 import { createRenamedTool } from "../src/agent/tools/facade";
 import { AgentToolRegistry } from "../src/agent/tools/registry";
-import { createEditCurrentNoteTool } from "../src/agent/tools/write/editCurrentNote";
+import { createNoteWriteTool } from "../src/agent/tools/write/noteWrite";
 import type { AgentToolContext } from "../src/agent/types";
 import {
   containsVisualFigureFences,
@@ -37,7 +37,7 @@ import {
   semanticFixture,
 } from "./helpers/semanticIntent";
 
-describe("editCurrentNote create tracking", function () {
+describe("noteWrite create tracking", function () {
   it("only defers notes that contain supported visual figure fences", function () {
     assert.isFalse(containsVisualFigureFences("Plain text"));
     assert.isFalse(
@@ -309,7 +309,7 @@ describe("editCurrentNote create tracking", function () {
   it("copies an existing note without adding provenance or rewriting its native formatting", async function () {
     const html = readFileSync("test/fixtures/live-synthetic-note.html", "utf8");
     const original = saveExistingNote(80, 9, html);
-    const tool = createEditCurrentNoteTool({
+    const tool = createNoteWriteTool({
       getItem: (id: number) => savedItems.get(id),
     } as never);
     const validated = tool.validate({
@@ -336,7 +336,7 @@ describe("editCurrentNote create tracking", function () {
   });
 
   it("rejects ambiguous or non-create source-note copying before writing", function () {
-    const tool = createEditCurrentNoteTool({} as never);
+    const tool = createNoteWriteTool({} as never);
     for (const args of [
       { mode: "create", sourceNoteId: 80, content: "Conflicting rewrite" },
       {
@@ -352,7 +352,7 @@ describe("editCurrentNote create tracking", function () {
   it("rejects copying a missing source or a note from another library", async function () {
     const note = saveExistingNote(80, undefined, "<p>Private source</p>");
     note.libraryID = 2;
-    const tool = createEditCurrentNoteTool({
+    const tool = createNoteWriteTool({
       getItem: (id: number) => savedItems.get(id),
     } as never);
     for (const sourceNoteId of [80, 404]) {
@@ -375,7 +375,7 @@ describe("editCurrentNote create tracking", function () {
   });
 
   it("does not remember agent-created HTML notes for response-menu appends", async function () {
-    const tool = createEditCurrentNoteTool({
+    const tool = createNoteWriteTool({
       getItem: (id: number) =>
         id === 9
           ? ({
@@ -447,7 +447,7 @@ describe("editCurrentNote create tracking", function () {
   for (const mode of ["create", "edit", "append"] as const) {
     it(`saves the editable review payload for note ${mode} without duplicating append content`, async function () {
       const existing = saveExistingNote(50, 9, "<p>Existing body</p>");
-      const tool = createEditCurrentNoteTool(new ZoteroGateway());
+      const tool = createNoteWriteTool(new ZoteroGateway());
       const validated = tool.validate({
         mode,
         content: "Proposed body",
@@ -506,7 +506,7 @@ describe("editCurrentNote create tracking", function () {
       const registry = new AgentToolRegistry(contracts);
       registry.register(
         createRenamedTool({
-          tool: createEditCurrentNoteTool(gateway),
+          tool: createNoteWriteTool(gateway),
           name: "note_write",
           description: "Write a note",
         }),
@@ -586,7 +586,7 @@ describe("editCurrentNote create tracking", function () {
       const registry = new AgentToolRegistry(contracts);
       registry.register(
         createRenamedTool({
-          tool: createEditCurrentNoteTool(gateway),
+          tool: createNoteWriteTool(gateway),
           name: "note_write",
           description: "Write a note",
         }),
@@ -688,7 +688,7 @@ describe("editCurrentNote create tracking", function () {
   it("prepares a patch for direct execution without a review-card callback", async function () {
     const before = "<p>copper-limitation first. copper-limitation second.</p>";
     const existing = saveExistingNote(60, 9, before);
-    const tool = createEditCurrentNoteTool(new ZoteroGateway());
+    const tool = createNoteWriteTool(new ZoteroGateway());
     const validated = tool.validate({
       mode: "edit",
       targetNoteId: 60,
@@ -776,7 +776,7 @@ describe("editCurrentNote create tracking", function () {
   ]) {
     it(`patches ${example.name} without damaging the native note`, async function () {
       const existing = saveExistingNote(60, 9, example.before);
-      const tool = createEditCurrentNoteTool(new ZoteroGateway());
+      const tool = createNoteWriteTool(new ZoteroGateway());
       const validated = tool.validate({
         mode: "edit",
         targetNoteId: 60,
@@ -795,7 +795,7 @@ describe("editCurrentNote create tracking", function () {
     const existing = saveExistingNote(60, 9, before);
     const gateway = new ZoteroGateway();
     const reading = gateway.getStandaloneNoteContent({ noteId: 60 })!;
-    const tool = createEditCurrentNoteTool(gateway);
+    const tool = createNoteWriteTool(gateway);
     const validated = tool.validate({
       mode: "edit",
       targetNoteId: 60,
@@ -830,7 +830,7 @@ describe("editCurrentNote create tracking", function () {
     const existing = saveExistingNote(60, 9, before);
     const gateway = new ZoteroGateway();
     const reading = gateway.getStandaloneNoteContent({ noteId: 60 })!;
-    const tool = createEditCurrentNoteTool(gateway);
+    const tool = createNoteWriteTool(gateway);
     const validated = tool.validate({
       mode: "edit",
       targetNoteId: 60,
@@ -869,7 +869,7 @@ describe("editCurrentNote create tracking", function () {
   it("does not match across a paragraph boundary that is missing from the selection", async function () {
     const before = "<p>alpha</p><p>beta</p>";
     const existing = saveExistingNote(60, 9, before);
-    const tool = createEditCurrentNoteTool(new ZoteroGateway());
+    const tool = createNoteWriteTool(new ZoteroGateway());
     const input = tool.validate({
       mode: "edit",
       targetNoteId: 60,
@@ -891,7 +891,7 @@ describe("editCurrentNote create tracking", function () {
     const before =
       "<h2>Research</h2><p>copper-limitation</p><blockquote>Keep this quote.</blockquote>";
     const existing = saveExistingNote(60, 9, before);
-    const tool = createEditCurrentNoteTool(new ZoteroGateway());
+    const tool = createNoteWriteTool(new ZoteroGateway());
     const validated = tool.validate({
       mode: "edit",
       targetNoteId: 60,
@@ -914,7 +914,7 @@ describe("editCurrentNote create tracking", function () {
 
   it("does not rebase a prepared edit when the native note changes before execution", async function () {
     const existing = saveExistingNote(60, 9, "<p>Original text</p>");
-    const tool = createEditCurrentNoteTool(new ZoteroGateway());
+    const tool = createNoteWriteTool(new ZoteroGateway());
     const validated = tool.validate({
       mode: "edit",
       targetNoteId: 60,
@@ -941,7 +941,7 @@ describe("editCurrentNote create tracking", function () {
       9,
       '<p style="color:red">Original text</p>',
     );
-    const tool = createEditCurrentNoteTool(new ZoteroGateway());
+    const tool = createNoteWriteTool(new ZoteroGateway());
     const html = '<p style="color:blue"><strong>Revised text</strong></p>';
     const validated = tool.validate({
       mode: "edit",
@@ -955,7 +955,7 @@ describe("editCurrentNote create tracking", function () {
   });
 
   it("preserves styled HTML when note creation skips the review card", async function () {
-    const tool = createEditCurrentNoteTool(new ZoteroGateway());
+    const tool = createNoteWriteTool(new ZoteroGateway());
     const validated = tool.validate({
       mode: "create",
       content:
@@ -976,7 +976,7 @@ describe("editCurrentNote create tracking", function () {
   });
 
   it("still renders a Markdown note containing inline HTML emphasis", async function () {
-    const tool = createEditCurrentNoteTool(new ZoteroGateway());
+    const tool = createNoteWriteTool(new ZoteroGateway());
     const validated = tool.validate({
       mode: "create",
       target: "item",
@@ -996,7 +996,7 @@ describe("editCurrentNote create tracking", function () {
     const trackedNote = saveExistingNote(50, 9, "<p>Tracked response save</p>");
     rememberAssistantNoteForParent(9, 50);
 
-    const tool = createEditCurrentNoteTool(new ZoteroGateway());
+    const tool = createNoteWriteTool(new ZoteroGateway());
     const result = (
       await tool.execute(
         {
@@ -1016,7 +1016,7 @@ describe("editCurrentNote create tracking", function () {
   });
 
   it("agent create attaches to the only selected paper when no active item exists", async function () {
-    const tool = createEditCurrentNoteTool(new ZoteroGateway());
+    const tool = createNoteWriteTool(new ZoteroGateway());
     const result = (
       await tool.execute(
         {
@@ -1049,7 +1049,7 @@ describe("editCurrentNote create tracking", function () {
 
   it("append mode appends to an explicit note ID", async function () {
     const existing = saveExistingNote(60, 9, "<p>Existing body</p>");
-    const tool = createEditCurrentNoteTool(new ZoteroGateway());
+    const tool = createNoteWriteTool(new ZoteroGateway());
 
     const result = (
       await tool.execute(
@@ -1076,7 +1076,7 @@ describe("editCurrentNote create tracking", function () {
     const existing = saveExistingNote(60, 9, "<p>Existing body</p>");
     existing.wrapOnReload = true;
     const gateway = new ZoteroGateway();
-    const tool = createEditCurrentNoteTool(gateway);
+    const tool = createNoteWriteTool(gateway);
 
     await tool.execute(
       {
@@ -1112,7 +1112,7 @@ describe("editCurrentNote create tracking", function () {
   it("append mode refuses ambiguous child-note targets", async function () {
     saveExistingNote(61, 9, "<p>First note</p>");
     saveExistingNote(62, 9, "<p>Second note</p>");
-    const tool = createEditCurrentNoteTool(new ZoteroGateway());
+    const tool = createNoteWriteTool(new ZoteroGateway());
 
     let error: unknown;
     try {

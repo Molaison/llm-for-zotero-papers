@@ -351,18 +351,6 @@ const AUDIT: Readonly<Record<string, AuditRow>> = {
     fixture: { action: "create", name: "Audit" },
     impact: "state_change",
   },
-  edit_current_note: {
-    operations: ["note_create", "note_edit", "note_append"],
-    verification: "verified",
-    fixture: { mode: "create", targetItemId: 1, content: "Audit body" },
-    impact: "state_change",
-  },
-  write_notes_batch: {
-    operations: ["save_notes_batch"],
-    verification: "verified",
-    fixture: NOTE_BATCH_FIXTURE,
-    impact: "state_change",
-  },
   trash_items: {
     operations: ["trash_items"],
     verification: "verified",

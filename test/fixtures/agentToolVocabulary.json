@@ -39,7 +39,6 @@
   "internal": [
     "apply_tags",
     "create_items",
-    "edit_current_note",
     "import_identifiers",
     "import_local_files",
     "manage_attachments",
@@ -49,13 +48,11 @@
     "relate_items",
     "reparent_items",
     "restore_from_trash",
-    "search_literature_online",
     "set_item_tags",
     "submit_plan_document",
     "tag_update",
     "trash_items",
-    "update_metadata",
-    "write_notes_batch"
+    "update_metadata"
   ],
-  "specBytes": 71787
+  "specBytes": 71687
 }

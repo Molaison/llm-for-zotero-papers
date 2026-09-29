@@ -106,7 +106,7 @@ type StoredBatchNote = {
   collections?: number[];
 };
 
-type WriteNotesBatchInput = {
+type NoteWriteBatchInput = {
   /**
    * Continue the durable batch with this id. The bodies are already frozen,
    * so the call carries no notes and regenerates nothing.
@@ -125,14 +125,12 @@ type WriteNotesBatchInput = {
 };
 
 /** The notes a prepared call will write; empty before a resume is resolved. */
-function notesOf(
-  input: WriteNotesBatchInput,
-): SaveNotesBatchOperation["notes"] {
+function notesOf(input: NoteWriteBatchInput): SaveNotesBatchOperation["notes"] {
   return input.operation?.notes || [];
 }
 
 function resolvedOperation(
-  input: WriteNotesBatchInput,
+  input: NoteWriteBatchInput,
 ): SaveNotesBatchOperation {
   if (!input.operation)
     throw new Error("The note batch was used before it was prepared");
@@ -157,9 +155,9 @@ function batchItemKeys(notes: SaveNotesBatchOperation["notes"]): string[] {
   });
 }
 
-export function createWriteNotesBatchTool(
+export function createNoteWriteBatchTool(
   zoteroGateway: ZoteroGateway,
-): AgentWriteToolDefinition<WriteNotesBatchInput, unknown> {
+): AgentWriteToolDefinition<NoteWriteBatchInput, unknown> {
   const mutationService = new LibraryMutationService(zoteroGateway);
   const finalizer = new DirectDocumentFinalizer(zoteroGateway);
 
@@ -182,7 +180,7 @@ export function createWriteNotesBatchTool(
    * published, so preparing the same batch again mints no second copy.
    */
   async function prepareBatchMaterial(
-    input: WriteNotesBatchInput,
+    input: NoteWriteBatchInput,
     context: AgentToolContext,
   ): Promise<PreparedBatchItem[]> {
     if (input._items) return input._items;
@@ -253,7 +251,7 @@ export function createWriteNotesBatchTool(
    * `execute`. A cancelled resume must leave the batch exactly as it was.
    */
   async function resolveResume(
-    input: WriteNotesBatchInput,
+    input: NoteWriteBatchInput,
     context: AgentToolContext,
   ): Promise<PreparedBatchItem[]> {
     const batchId = input.resumeBatchId as string;
@@ -420,7 +418,7 @@ export function createWriteNotesBatchTool(
 
   /** Seeds the durable rows for an approved batch, reusing any it already has. */
   async function openBatch(
-    input: WriteNotesBatchInput,
+    input: NoteWriteBatchInput,
     context: AgentToolContext,
   ): Promise<AgentBatchBinding> {
     const items = await prepareBatchMaterial(input, context);
@@ -472,9 +470,9 @@ export function createWriteNotesBatchTool(
   return {
     effectOperations: ["save_notes_batch"],
     spec: {
-      name: "write_notes_batch",
+      name: "note_write_batch",
       description:
-        "Write a note onto each of many items in one approved operation. Use this instead of calling note_write once per paper — the user approves the whole set on a single card and can uncheck any of them. Pass resumeBatchId alone to continue an interrupted batch.",
+        "Write a note onto each of many explicitly identified items in one checkpointed batch operation. To continue an interrupted batch, pass resumeBatchId alone: written items are skipped and the rest are written from the bodies already prepared, so no note is written again or regenerated.",
       inputSchema: {
         type: "object",
         additionalProperties: false,
@@ -614,7 +612,7 @@ export function createWriteNotesBatchTool(
       const notes = notesOf(input);
       const continuing = Boolean(input._resume);
       return {
-        toolName: "write_notes_batch",
+        toolName: "note_write_batch",
         title: `Write ${notes.length} note${notes.length === 1 ? "" : "s"}`,
         description: continuing
           ? `Continue an interrupted batch by writing its remaining ${notes.length} note${notes.length === 1 ? "" : "s"}. These are the bodies the batch already prepared; nothing was written again. Uncheck any you do not want. This can be undone.`
@@ -736,7 +734,7 @@ export function createWriteNotesBatchTool(
                   }
                 : {}),
             },
-            "write_notes_batch",
+            "note_write_batch",
           )
         : settledBatchResult(resume);
       const batchItems = await readBatchOutcomes(

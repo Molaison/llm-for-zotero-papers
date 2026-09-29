@@ -1,12 +1,12 @@
 import { semanticFixture } from "./helpers/semanticIntent";
 import { assert } from "chai";
-import { createSearchLiteratureOnlineTool } from "../src/agent/tools/read/searchLiteratureOnline";
+import { createLiteratureSearchTool } from "../src/agent/tools/read/literatureSearch";
 import type { AgentToolContext } from "../src/agent/types";
 import { resolvedAgentRequest } from "./helpers/resolvedAgentRequest";
 
-describe("search_literature_online tool", function () {
+describe("literature_search tool", function () {
   it("returns discovery candidates for ranking and leaves explicit imports to mutation authorization", async function () {
-    const tool = createSearchLiteratureOnlineTool({} as never);
+    const tool = createLiteratureSearchTool({} as never);
     const result = {
       callId: "discovery",
       name: "literature_search",
@@ -133,7 +133,7 @@ describe("search_literature_online tool", function () {
         throw new Error(`Unexpected URL: ${href}`);
       }) as typeof fetch;
 
-    const tool = createSearchLiteratureOnlineTool({
+    const tool = createLiteratureSearchTool({
       resolveMetadataItem: () => null,
       getEditableArticleMetadata: () => null,
       fetchMetadataByIdentifier: async () => null,
@@ -194,7 +194,7 @@ describe("search_literature_online tool", function () {
       }) as typeof fetch;
 
     const item = { id: 7 } as any;
-    const tool = createSearchLiteratureOnlineTool({
+    const tool = createLiteratureSearchTool({
       resolveMetadataItem: () => item,
       getEditableArticleMetadata: () =>
         ({
@@ -245,7 +245,7 @@ describe("search_literature_online tool", function () {
         throw new Error(`Unexpected URL: ${href}`);
       }) as typeof fetch;
 
-    const tool = createSearchLiteratureOnlineTool({
+    const tool = createLiteratureSearchTool({
       resolveMetadataItem: () => null,
       getEditableArticleMetadata: () => null,
     } as never);
@@ -287,7 +287,7 @@ describe("search_literature_online tool", function () {
       validated.value,
       {
         callId: "call-search",
-        name: "search_literature_online",
+        name: "literature_search",
         ok: true,
         content: result,
       },
@@ -322,7 +322,7 @@ describe("search_literature_online tool", function () {
         throw new Error(`Unexpected URL: ${href}`);
       }) as typeof fetch;
 
-    const tool = createSearchLiteratureOnlineTool({
+    const tool = createLiteratureSearchTool({
       resolveMetadataItem: () => null,
       getEditableArticleMetadata: () => null,
     } as never);
@@ -341,7 +341,7 @@ describe("search_literature_online tool", function () {
       validated.value,
       {
         callId: "call-search",
-        name: "search_literature_online",
+        name: "literature_search",
         ok: true,
         content: result,
       },
@@ -352,7 +352,7 @@ describe("search_literature_online tool", function () {
   });
 
   it("adds guidance for live paper discovery requests", function () {
-    const tool = createSearchLiteratureOnlineTool({
+    const tool = createLiteratureSearchTool({
       resolveMetadataItem: () => null,
       getEditableArticleMetadata: () => null,
     } as never);

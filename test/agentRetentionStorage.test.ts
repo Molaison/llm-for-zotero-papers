@@ -3,7 +3,7 @@ import { DatabaseSync } from "node:sqlite";
 import { AgentRuntime } from "../src/agent/runtime";
 import { AgentToolRegistry } from "../src/agent/tools/registry";
 import { createConversationReadTool } from "../src/agent/tools/read/conversationRead";
-import { createEditCurrentNoteTool } from "../src/agent/tools/write/editCurrentNote";
+import { createNoteWriteTool } from "../src/agent/tools/write/noteWrite";
 import {
   clearAgentTranscriptStore,
   loadLatestAgentTranscriptSegment,
@@ -138,7 +138,7 @@ describe("retention through existing SQLite storage", function () {
       textOffset = output.nextTextOffset;
     }
     assert.equal(recovered, answer);
-    const note = createEditCurrentNoteTool({} as never);
+    const note = createNoteWriteTool({} as never);
     const input = note.validate({
       mode: "create",
       target: "standalone",

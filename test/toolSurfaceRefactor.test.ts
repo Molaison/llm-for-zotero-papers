@@ -302,19 +302,15 @@ describe("semantic tool surface", function () {
       "answer",
       "review",
     ]);
-    for (const legacyName of [
-      "search_literature_online",
-      "edit_current_note",
-      "import_identifiers",
-      "update_metadata",
-    ]) {
+    for (const legacyName of ["import_identifiers", "update_metadata"]) {
       assert.notInclude(names, legacyName);
       assert.exists(
         registry.getTool(legacyName),
         `${legacyName} remains internally callable`,
       );
     }
-    // Retired into paper_read, library_search, and library_read: no longer
+    // Retired into paper_read, library_search, library_read,
+    // literature_search, note_write, and note_write_batch: no longer
     // registered at all.
     for (const retiredName of [
       "read_paper",
@@ -322,10 +318,15 @@ describe("semantic tool surface", function () {
       "view_pdf_pages",
       "query_library",
       "read_library",
+      "search_literature_online",
+      "edit_current_note",
+      "write_notes_batch",
     ]) {
       assert.notInclude(names, retiredName);
       assert.notExists(registry.getTool(retiredName), `${retiredName} retired`);
     }
+    // read_attachment is model-visible and keeps its approval gate.
+    assert.isFunction(registry.getTool("read_attachment")?.createPendingAction);
     assert.exists(registry.getTool("web_search"));
     assert.exists(registry.getTool("web_read"));
     assert.notInclude(names, "web_search");

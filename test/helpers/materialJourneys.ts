@@ -3,8 +3,8 @@ import { AgentRuntime } from "../../src/agent/runtime";
 import { AgentToolRegistry } from "../../src/agent/tools/registry";
 import { createRenamedTool } from "../../src/agent/tools/facade";
 import { createSubmitDocumentTool } from "../../src/agent/tools/plan/submitPlanDocument";
-import { createEditCurrentNoteTool } from "../../src/agent/tools/write/editCurrentNote";
-import { createWriteNotesBatchTool } from "../../src/agent/tools/write/writeNotesBatch";
+import { createNoteWriteTool } from "../../src/agent/tools/write/noteWrite";
+import { createNoteWriteBatchTool } from "../../src/agent/tools/write/noteWriteBatch";
 import { createUndoLastActionTool } from "../../src/agent/tools/write/undoLastAction";
 import { initPlanDocumentStore } from "../../src/agent/documents/store";
 import { clearAgentTranscriptStore } from "../../src/agent/store/transcriptStore";
@@ -322,7 +322,7 @@ function createDirectJourneyRegistry(): AgentToolRegistry {
   registry.register(createSubmitDocumentTool(submitDocumentGateway));
   registry.register(
     createRenamedTool({
-      tool: createEditCurrentNoteTool(noteGateway),
+      tool: createNoteWriteTool(noteGateway),
       name: "note_write",
       label: "Write Note",
       description:
@@ -602,7 +602,7 @@ function createBatchJourneyRegistry(
   );
   registry.register(
     createRenamedTool({
-      tool: createWriteNotesBatchTool(gateway),
+      tool: createNoteWriteBatchTool(gateway),
       name: "note_write_batch",
       label: "Write Notes",
       description:

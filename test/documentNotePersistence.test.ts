@@ -1,4 +1,4 @@
-import { createEditCurrentNoteTool } from "../src/agent/tools/write/editCurrentNote";
+import { createNoteWriteTool } from "../src/agent/tools/write/noteWrite";
 import { composeRetrievalCandidateInvalidation } from "./helpers/hostSurfaces";
 import { assert } from "chai";
 import { createHash } from "node:crypto";
@@ -272,7 +272,7 @@ describe("durable document note association", function () {
     const gateway = {
       getItem: (id: number) => globals.Zotero.Items.get(id),
     } as any;
-    const tool = createEditCurrentNoteTool(gateway);
+    const tool = createNoteWriteTool(gateway);
     const input = tool.validate({
       mode: "create",
       documentId: document.documentId,
@@ -321,7 +321,7 @@ describe("durable document note association", function () {
     const gateway = {
       getItem: (id: number) => globals.Zotero.Items.get(id),
     } as any;
-    const tool = createEditCurrentNoteTool(gateway);
+    const tool = createNoteWriteTool(gateway);
     const input = tool.validate({
       mode: "create",
       documentId: document.documentId,
@@ -345,7 +345,7 @@ describe("durable document note association", function () {
     const gateway = {
       getItem: (id: number) => globals.Zotero.Items.get(id),
     } as any;
-    const tool = createEditCurrentNoteTool(gateway);
+    const tool = createNoteWriteTool(gateway);
     const input = tool.validate({
       mode: "create",
       documentId: document.documentId,
@@ -365,7 +365,7 @@ describe("durable document note association", function () {
     const gateway = {
       getItem: (id: number) => globals.Zotero.Items.get(id),
     } as any;
-    const tool = createEditCurrentNoteTool(gateway);
+    const tool = createNoteWriteTool(gateway);
     const input = tool.validate({
       mode: "create",
       documentId: document.documentId,
@@ -386,7 +386,7 @@ describe("durable document note association", function () {
     const gateway = {
       getItem: (id: number) => globals.Zotero.Items.get(id),
     } as any;
-    const tool = createEditCurrentNoteTool(gateway);
+    const tool = createNoteWriteTool(gateway);
     const input = tool.validate({
       mode: "create",
       documentId: document.documentId,
@@ -416,7 +416,7 @@ describe("durable document note association", function () {
     const gateway = {
       getItem: (id: number) => globals.Zotero.Items.get(id),
     } as any;
-    const tool = createEditCurrentNoteTool(gateway);
+    const tool = createNoteWriteTool(gateway);
     const input = tool.validate({
       mode: "create",
       documentId: document.documentId,
@@ -455,7 +455,7 @@ describe("durable document note association", function () {
         text: "Original",
       }),
     } as any;
-    const tool = createEditCurrentNoteTool(gateway);
+    const tool = createNoteWriteTool(gateway);
     const input = tool.validate({
       mode: "edit",
       targetNoteId: note.id,
@@ -492,7 +492,7 @@ describe("durable document note association", function () {
         text: "Original",
       }),
     } as any;
-    const tool = createEditCurrentNoteTool(gateway);
+    const tool = createNoteWriteTool(gateway);
     const input = tool.validate({
       mode: "edit",
       targetNoteId: note.id,
@@ -524,7 +524,7 @@ describe("durable document note association", function () {
     const gateway = {
       getItem: (id: number) => globals.Zotero.Items.get(id),
     } as any;
-    const tool = createEditCurrentNoteTool(gateway);
+    const tool = createNoteWriteTool(gateway);
     const input = tool.validate({
       mode: "create",
       documentId: document.documentId,
@@ -555,7 +555,7 @@ describe("durable document note association", function () {
         text: "Original",
       }),
     } as any;
-    const tool = createEditCurrentNoteTool(gateway);
+    const tool = createNoteWriteTool(gateway);
     const input = tool.validate({
       mode: "edit",
       targetNoteId: note.id,

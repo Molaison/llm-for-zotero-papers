@@ -268,9 +268,7 @@ describe("tool guidance contracts", function () {
     const messageBuilder = byPath.get("src/agent/model/messageBuilder.ts");
     const paperRead = byPath.get("src/agent/tools/read/paperRead.ts");
     const noteTools = byPath.get("src/agent/tools/index.ts");
-    const currentNoteTool = byPath.get(
-      "src/agent/tools/write/editCurrentNote.ts",
-    );
+    const currentNoteTool = byPath.get("src/agent/tools/write/noteWrite.ts");
 
     for (const content of [
       analyzeFigures,
@@ -300,7 +298,7 @@ describe("tool guidance contracts", function () {
       messageBuilder!,
       "user-provided image inputs are unaffected",
     );
-    assert.include(currentNoteTool!, "Do not embed MinerU source image paths");
+    assert.include(writeNote!, "Do not embed MinerU source image paths");
   });
 
   it("does not expose hidden legacy call targets in model-visible guidance", function () {

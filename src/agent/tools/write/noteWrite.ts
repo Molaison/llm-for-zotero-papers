@@ -34,7 +34,15 @@ import {
   sha256Text,
   storeRecoveryText,
 } from "../../store/journalRecoveryBlobStore";
-import type { AgentToolContext, AgentWriteToolDefinition } from "../../types";
+import {
+  requestsNoteAction,
+  WRITE_NOTE_SKILL_ID,
+} from "../../skills/noteIntent";
+import type {
+  AgentToolContext,
+  AgentToolDefinition,
+  AgentWriteToolDefinition,
+} from "../../types";
 import {
   fail,
   normalizePositiveInt,
@@ -57,6 +65,22 @@ type NotePatch = {
 
 export const SOURCE_NOTE_COPY_GUIDANCE =
   "To copy an existing note without revising its content, use mode:'create' with sourceNoteId and the requested target/collections instead of reconstructing its content. This preserves the native note, including formatting, original provenance and embedded images; do not generate a new header or perform a corrective edit.";
+
+export const NOTE_WRITE_GUIDANCE: NonNullable<AgentToolDefinition["guidance"]> =
+  {
+    matches: (request, context) =>
+      Boolean(
+        context?.matchedSkillIds.includes(WRITE_NOTE_SKILL_ID) ||
+        request.forcedSkillIds?.includes(WRITE_NOTE_SKILL_ID) ||
+        requestsNoteAction(request) ||
+        request.actionContract?.obligations.some(
+          (obligation) => obligation.capability === "zotero.notes",
+        ),
+      ),
+    instruction:
+      "Use note_write mode:'edit' against the exact note target. For a bound Selected text passage, pass selection:{index:<1-based Selected text number>,replacement:<final Markdown>}. The host binds its owning note, replaces the selected structure, preserves surrounding content and embedded assets, and saves and verifies in one action. Preserve headings and list structure unless the user requests changing them. For precise edits without a bound selection, use patches with plain replacement text; findFormat:'markdown' interprets Markdown copied from library_read. Use mode:'append' to append and mode:'create' for a new note. Resolve a named parent or collection before proposing the write. Pass finalized material by documentId so retries reuse exact content. Safe reviews every note write, including creation; Auto may apply routine same-library note changes directly. After verified success, do not claim that a diff is still awaiting review. " +
+      SOURCE_NOTE_COPY_GUIDANCE,
+  };
 
 /**
  * Sanitise HTML before writing to a Zotero note.  Strips dangerous
@@ -82,7 +106,7 @@ function sanitizeNoteHtml(html: string): string {
   return s;
 }
 
-type EditCurrentNoteInput = {
+type NoteWriteInput = {
   documentId?: string;
   sourceMessageId?: string;
   /** The exact material this proposal is frozen to, resolved once in preparation. */
@@ -112,7 +136,7 @@ type EditCurrentNoteInput = {
   collections?: number[];
 };
 
-function resolveCreateOrAppendContent(input: EditCurrentNoteInput): void {
+function resolveCreateOrAppendContent(input: NoteWriteInput): void {
   if (input.mode !== "create" && input.mode !== "append") return;
   if (input._rawHtmlContent) {
     input._isHtml = true;
@@ -126,7 +150,7 @@ function resolveCreateOrAppendContent(input: EditCurrentNoteInput): void {
 
 function resolveEditSnapshot(
   zoteroGateway: ZoteroGateway,
-  input: EditCurrentNoteInput,
+  input: NoteWriteInput,
   context: AgentToolContext,
 ) {
   if (typeof zoteroGateway.getActiveNoteSnapshot === "function") {
@@ -200,7 +224,7 @@ function getUniqueInScopePaperItemIds(context: AgentToolContext): number[] {
 
 function resolveParentTargetForCreate(
   zoteroGateway: ZoteroGateway,
-  input: Pick<EditCurrentNoteInput, "targetItemId">,
+  input: Pick<NoteWriteInput, "targetItemId">,
   context: AgentToolContext,
 ): { item: Zotero.Item; parentItem: Zotero.Item } | null {
   const resolve = (item: Zotero.Item | null | undefined) => {
@@ -244,7 +268,7 @@ function getNoteItemById(
 
 function resolveAppendNoteTarget(
   zoteroGateway: ZoteroGateway,
-  input: Pick<EditCurrentNoteInput, "targetItemId" | "targetNoteId">,
+  input: Pick<NoteWriteInput, "targetItemId" | "targetNoteId">,
   context: AgentToolContext,
 ): Zotero.Item {
   const explicitNoteId = normalizePositiveInt(input.targetNoteId);
@@ -292,7 +316,7 @@ function resolveAppendNoteTarget(
  * silently rebase an already prepared edit onto a concurrently changed note. */
 function prepareNoteWriteInput(
   zoteroGateway: ZoteroGateway,
-  input: EditCurrentNoteInput,
+  input: NoteWriteInput,
   context: AgentToolContext,
 ): void {
   if (input.sourceNoteId) {
@@ -405,7 +429,7 @@ function prepareNoteWriteInput(
 }
 
 async function prepareWorkflowDocumentNote(
-  input: EditCurrentNoteInput,
+  input: NoteWriteInput,
   context: AgentToolContext,
 ): Promise<void> {
   if (!input.documentId) return;
@@ -429,9 +453,9 @@ async function prepareWorkflowDocumentNote(
   input._documentHasAssets = document.assets.length > 0;
 }
 
-export function createEditCurrentNoteTool(
+export function createNoteWriteTool(
   zoteroGateway: ZoteroGateway,
-): AgentWriteToolDefinition<EditCurrentNoteInput, unknown> {
+): AgentWriteToolDefinition<NoteWriteInput, unknown> {
   return {
     describeAction: (input) => [
       {
@@ -472,9 +496,9 @@ export function createEditCurrentNoteTool(
     ],
     effectOperations: ["note_create", "note_edit", "note_append"],
     spec: {
-      name: "edit_current_note",
+      name: "note_write",
       description:
-        "Edit the current open Zotero note, append to an existing note, or create a new note attached to a paper or as a standalone note. Accepts plain text, Markdown, or HTML with inline styles.",
+        "Create, append to, or edit one Zotero note and verify native post-state. Use documentId for finalized authored material so retries reuse the exact stored version. Safe reviews every write, including creation. Use note_write_batch for many items.",
       inputSchema: {
         type: "object",
         additionalProperties: false,
@@ -580,28 +604,9 @@ export function createEditCurrentNoteTool(
       executionClass: "external_effect",
       workCategory: "zotero_action",
     },
-    guidance: {
-      matches: () => true,
-      instruction:
-        "When a Zotero note is already open/current and the user asks to edit, rewrite, revise, polish, or update that note, call `edit_current_note` with mode 'edit'. NEVER output note text directly in chat. " +
-        "For a selected passage, use selection:{index:<Selected text number>,replacement:<final Markdown>}; the host handles range, structure, persistence and verification. Use patches only for precise edits without a bound selection; content replaces the whole note. " +
-        "When the user asks to append/add content to an existing note, call `edit_current_note` with mode 'append' and `content`; pass `targetNoteId` when the destination note is known. " +
-        "When the user asks to create/write/save a new item note, call `edit_current_note` with mode 'create', target 'item', and `content`; create means a brand-new child note, not appending to the response-save note. " +
-        "For finalized workflow material, call `note_write` with documentId returned by submit_document and omit content. Use mode:create with exact parent targetItemId, or mode:edit/append with exact targetNoteId. For standalone notes, call `edit_current_note` with mode 'create', target 'standalone', and `content`. " +
-        SOURCE_NOTE_COPY_GUIDANCE +
-        " " +
-        "The UI shows saved content and a link to the native note after verification. Do not repeat the full saved note in the completion message. Auto applies routine same-library note changes directly and then displays the verified diff; explicit review and Safe wait on the note card before every write, including creation. " +
-        "Pass Markdown by default. When the user explicitly requests HTML output (e.g. for styled note templates), pass well-formed HTML with inline styles directly. " +
-        "When the note discusses a specific figure, first use `paper_read({ mode:'figures' })` and embed the extracted PDF crop path: `![Figure N](file:///{path})` — auto-imported as a Zotero attachment. " +
-        "Treat paper_read mode:'figures' as the authority for figure crop cache reuse/regeneration; use returned crop paths as-is and do not inspect or validate `figure_crops` metadata before writing. " +
-        "When the note discusses a table, use `paper_read({ mode:'targeted' })` for the table text and surrounding discussion instead of the figure-crop extractor. " +
-        "If paper_read mode:'figures' returns no_figures, mineru_required, error, zero figures, or no image artifact, switch to text-only mode when the user asked for a note: do not include figure images, rendered PDF page screenshots, MinerU source images, or extracted-image placeholders; explicitly state that figure extraction failed or no extracted crops are available, and that explanations are based on captions, figure legends, and surrounding paper text. " +
-        "Do not embed MinerU source image paths for figure notes. " +
-        "User-provided image inputs are unaffected. " +
-        "Text-only models may still copy/embed extracted crop paths into notes when crops are available, but must not make unsupported visual claims beyond caption and surrounding-text evidence.",
-    },
+    guidance: NOTE_WRITE_GUIDANCE,
     presentation: {
-      label: "Edit / Create / Append Note",
+      label: "Write Note",
       buildResultCards: (content) =>
         buildNoteChangeResultCards(content) ||
         buildSavedNoteResultCards(zoteroGateway, content),
@@ -629,7 +634,7 @@ export function createEditCurrentNoteTool(
         ? resolveVerifiedNoteEditCompletion(result, context)
         : null,
     acceptInheritedApproval: async (_input, approval) => {
-      // Accept review-mode approvals from search_literature_online review cards
+      // Accept review-mode approvals from literature_search review cards
       // that chain a save_note operation
       return (
         approval.sourceMode === "review" &&
@@ -782,7 +787,7 @@ export function createEditCurrentNoteTool(
         isLikelyHtmlNoteContent(rawContent);
       const content = hasContent ? normalizeNoteSourceText(rawContent) : "";
 
-      return ok<EditCurrentNoteInput>({
+      return ok<NoteWriteInput>({
         mode,
         documentId,
         sourceMessageId,
@@ -811,7 +816,7 @@ export function createEditCurrentNoteTool(
           mode === "create"
             ? normalizePositiveIntArray(args.collections)
             : undefined,
-      } as EditCurrentNoteInput);
+      } as NoteWriteInput);
     },
     createPendingAction: (input, context) => {
       prepareNoteWriteInput(zoteroGateway, input, context);
@@ -846,7 +851,7 @@ export function createEditCurrentNoteTool(
             ? "Review the note content before creating a standalone note."
             : "Review the note content before attaching it to the paper.";
         return {
-          toolName: "edit_current_note",
+          toolName: "note_write",
           mode: "review",
           title: "Review new note",
           description,
@@ -880,7 +885,7 @@ export function createEditCurrentNoteTool(
           : normalizedContent;
 
         return {
-          toolName: "edit_current_note",
+          toolName: "note_write",
           mode: "review",
           title: "Review note append",
           description: `Review the proposed content before appending it to "${input.noteTitle}".`,
@@ -925,7 +930,7 @@ export function createEditCurrentNoteTool(
         : normalizedContent;
 
       return {
-        toolName: "edit_current_note",
+        toolName: "note_write",
         mode: "review",
         title: `Review note update`,
         description: `Review the proposed note changes for "${input.noteTitle}" before applying them.`,

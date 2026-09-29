@@ -28,6 +28,7 @@ const RETIRED_PRIMITIVES = [
   "import_identifiers",
   "search_literature_online",
   "edit_current_note",
+  "write_notes_batch",
 ];
 
 function assertOnlyFacades(calls: string[]): void {
