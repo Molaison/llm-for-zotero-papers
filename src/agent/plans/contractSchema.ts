@@ -1,24 +1,26 @@
 /**
  * The single owner of the plan-contract JSON schemas the plan tools advertise.
  *
- * update_plan advertises the contract, effect specification, and steps.
- * amend_plan contract_revision references the contract and the effect
- * specification instead of re-embedding them (update_plan and amend_plan are
- * never offered in the same turn). prepare_plan_execution derives its
- * native-alias contract and steps from these constants, because external
- * agents read that shape only from the MCP catalog, and references the effect
- * specification.
+ * Model-visible shape lives in properties, required, and enums only.
+ * registry.listTools() (compactModelSchema) strips every nested description
+ * before a schema reaches a provider or the MCP catalog, so a description here
+ * never tells a model anything; keep descriptions to notes for maintainers.
+ *
+ * update_plan and amend_plan (contract_revision) show the full contract and
+ * steps; they are never offered in the same turn, so neither can point at the
+ * other. update_plan shows the effect specification; amend_plan and
+ * prepare_plan_execution accept it through a smaller schema that names only
+ * its top-level parts. prepare_plan_execution derives its native-alias
+ * contract and steps from these constants, because external agents read that
+ * shape only from the MCP catalog.
  *
  * The schemas guide the model; they are not the host's validation. Every tool
  * still runs the same decoders (decodePlanEffectSpecification in validate(),
  * decodePlanContract when the contract is resolved), so a loosened subtree
- * changes what the model is shown, not what the host accepts.
- *
- * The effect specification keeps its structure and required fields, but its
- * deepest enumerations (operation names, restriction, target, and
- * material-binding variants) are left to the decoder, whose errors name the
- * accepted values. Those subtrees were repeated up to three times inside one
- * schema and cost more than the rest of the plan contract combined.
+ * changes what the model is shown, not what the host accepts. The effect
+ * specification leaves its deepest enumerations (operation names; restriction,
+ * target, and material-binding variants) to the decoder, whose errors name
+ * the accepted values.
  */
 
 /**
@@ -27,10 +29,9 @@
  * no properties into a string parameter, so a bare { type: "object" } is not
  * portable across providers.
  */
-function decodedObject(discriminator: string, description: string) {
+function decodedObject(discriminator: string) {
   return {
     type: "object",
-    description,
     properties: { [discriminator]: { type: "string" } },
   };
 }
@@ -47,18 +48,15 @@ const PLAN_TARGET_BINDING_SCHEMA = {
 
 const PLAN_EFFECT_RESTRICTION_LIST_SCHEMA = {
   type: "array",
-  items: decodedObject(
-    "kind",
-    "{kind:'deny_effects', effects, domains, description, operations?, exceptOperations?} or {kind:'deny_mechanisms', mechanisms, description}.",
-  ),
+  // deny_effects {effects, domains, description, operations?,
+  // exceptOperations?} or deny_mechanisms {mechanisms, description}.
+  items: decodedObject("kind"),
 };
 
 const PLAN_EFFECT_COMMON_PROPERTIES = {
   effectId: { type: "string" },
-  operation: {
-    type: "string",
-    description: "An operation-catalog name such as apply_tags or save_note.",
-  },
+  // An operation-catalog name; the decoder lists the accepted names.
+  operation: { type: "string" },
   parameters: { type: "object", additionalProperties: true },
   review: { type: "string", enum: ["default", "review", "direct"] },
   targetBindings: { type: "array", items: PLAN_TARGET_BINDING_SCHEMA },
@@ -66,10 +64,9 @@ const PLAN_EFFECT_COMMON_PROPERTIES = {
   dependsOnEffectIds: { type: "array", items: { type: "string" } },
   materialBindings: {
     type: "array",
-    items: decodedObject(
-      "role",
-      "Either {role, material:{documentId, documentVersion, contentHash}} or {role, producedByStepId, outputId}.",
-    ),
+    // {role, material:{documentId, documentVersion, contentHash}} or
+    // {role, producedByStepId, outputId}.
+    items: decodedObject("role"),
   },
 };
 
@@ -265,10 +262,9 @@ export const PLAN_EFFECT_SPECIFICATION_SCHEMA = {
           targets: {
             type: "array",
             minItems: 1,
-            items: decodedObject(
-              "domain",
-              "Host-resolved native target: {domain:'zotero', libraryID, targetIds, scopeDigest}, {domain:'filesystem', paths}, or {domain:'execution', fingerprints}.",
-            ),
+            // zotero {libraryID, targetIds, scopeDigest}, filesystem {paths},
+            // or execution {fingerprints}.
+            items: decodedObject("domain"),
           },
         },
       },
@@ -368,46 +364,23 @@ export const PLAN_STEPS_SCHEMA = {
 };
 
 /**
- * A whole replacement contract, by reference to update_plan's shape. It names
- * the contract's two top-level parts so the object survives Gemini's schema
- * sanitizer (a property-less object becomes a string, and a string contract
- * would never reach the decoder as a contract).
+ * A whole replacement effect specification, named only down to its top-level
+ * parts; decodePlanEffectSpecification owns the rest and names what it
+ * rejects.
  */
-export const PLAN_CONTRACT_REFERENCE_SCHEMA = {
-  type: "object",
-  description: "Plan contract; same shape as update_plan.contract.",
-  required: ["deliverable"],
-  properties: {
-    deliverable: decodedObject(
-      "kind",
-      "Same shape as update_plan.contract.deliverable.",
-    ),
-    investigation: decodedObject(
-      "question",
-      "Same shape as update_plan.contract.investigation.",
-    ),
-  },
-};
-
-/** A whole replacement effect specification, by reference to update_plan's. */
 export const PLAN_EFFECT_SPECIFICATION_REFERENCE_SCHEMA = {
   type: "object",
-  description:
-    "Effect specification; same shape as update_plan.effectSpecification.",
   required: ["version", "constraints", "effects", "deferredEffects"],
   properties: {
     version: { type: "integer", enum: [1] },
     constraints: PLAN_EFFECT_RESTRICTION_LIST_SCHEMA,
     effects: {
       type: "array",
-      items: decodedObject("effectId", "Same shape as update_plan effects."),
+      items: decodedObject("effectId"),
     },
     deferredEffects: {
       type: "array",
-      items: decodedObject(
-        "effectId",
-        "Same shape as update_plan deferredEffects.",
-      ),
+      items: decodedObject("effectId"),
     },
   },
 };

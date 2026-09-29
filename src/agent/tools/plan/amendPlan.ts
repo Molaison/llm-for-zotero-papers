@@ -26,7 +26,7 @@ import {
 } from "./updatePlan";
 import { fail, ok, validateObject } from "../shared";
 import {
-  PLAN_CONTRACT_REFERENCE_SCHEMA,
+  PLAN_CONTRACT_SCHEMA,
   PLAN_EFFECT_SPECIFICATION_REFERENCE_SCHEMA,
   PLAN_STEPS_SCHEMA,
 } from "../../plans/contractSchema";
@@ -140,10 +140,10 @@ export function createAmendPlanTool(
               },
             },
           },
-          // A replacement contract is referenced, not re-embedded: validate()
-          // decodes the effect specification and execute() decodes the
-          // contract with the same decoders update_plan uses.
-          contract: PLAN_CONTRACT_REFERENCE_SCHEMA,
+          // update_plan is not offered while executing, so the replacement
+          // contract's shape is shown here in full. The effect specification
+          // is only referenced: validate() decodes it with the same decoder.
+          contract: PLAN_CONTRACT_SCHEMA,
           effectSpecification: PLAN_EFFECT_SPECIFICATION_REFERENCE_SCHEMA,
           steps: PLAN_STEPS_SCHEMA,
         },

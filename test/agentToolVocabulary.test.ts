@@ -2,6 +2,7 @@ import { assert } from "chai";
 import { readFileSync } from "fs";
 import { fileURLToPath } from "url";
 import { createBuiltInToolRegistry } from "../src/agent/tools";
+import { sanitizeGeminiSchema } from "../src/agent/model/geminiNative";
 
 /**
  * Pins the agent tool vocabulary: which tools the model sees, which stay
@@ -52,6 +53,19 @@ const CAPPED_PLAN_TOOLS = [
  */
 const PLAN_SCHEMA_CAP_EXCEPTIONS: ReadonlyMap<string, number> = new Map([
   ["research_update", 7168],
+]);
+
+/**
+ * Model-facing paths Gemini receives as strings on purpose. An effect's
+ * parameters are an open JSON map (decoded by jsonRecord); an open map has no
+ * fixed properties for Gemini to declare. research_update's criterionResults
+ * and frameSlots are open maps of the same kind.
+ */
+const GEMINI_STRING_ALLOWLIST: ReadonlySet<string> = new Set([
+  "update_plan.effectSpecification.effects[].parameters",
+  "update_plan.effectSpecification.deferredEffects[].parameters",
+  "research_update.papers[].criterionResults",
+  "research_update.papers[].finding.frameSlots",
 ]);
 
 const stub: any = new Proxy(function () {}, {
@@ -133,32 +147,70 @@ describe("agent tool vocabulary", function () {
       );
     }
   });
-  it("plan tool schemas name a property on every loosened object", function () {
-    // Gemini's sanitizer turns a nested object with no properties into a
+  it("no plan tool schema path degrades to a string under Gemini's sanitizer", function () {
+    // sanitizeGeminiSchema turns a nested object with no properties into a
     // string parameter; a contract sent as a string never reaches the decoder
-    // as a contract. Objects that declare additionalProperties are open maps.
+    // as a contract. Walk the model-facing schema beside its sanitized form.
     const specs = new Map(registry.listTools().map((t) => [t.name, t]));
-    const bare: string[] = [];
-    const walk = (node: unknown, path: string): void => {
-      if (Array.isArray(node)) {
-        node.forEach((entry, index) => walk(entry, `${path}[${index}]`));
+    const degraded: string[] = [];
+    const walk = (original: unknown, sanitized: unknown, path: string) => {
+      if (!original || typeof original !== "object") return;
+      if (!sanitized || typeof sanitized !== "object") return;
+      const source = original as Record<string, unknown>;
+      const result = sanitized as Record<string, unknown>;
+      if (source.type !== "string" && result.type === "string") {
+        degraded.push(path);
         return;
       }
-      if (!node || typeof node !== "object") return;
-      const schema = node as Record<string, unknown>;
-      if (
-        path &&
-        schema.type === "object" &&
-        schema.properties === undefined &&
-        schema.additionalProperties === undefined
-      )
-        bare.push(path);
-      for (const [key, value] of Object.entries(schema))
-        walk(value, path ? `${path}.${key}` : key);
+      const properties = (source.properties || {}) as Record<string, unknown>;
+      const sanitizedProperties = (result.properties || {}) as Record<
+        string,
+        unknown
+      >;
+      for (const [key, value] of Object.entries(properties))
+        walk(value, sanitizedProperties[key], `${path}.${key}`);
+      if (source.items && result.items)
+        walk(source.items, result.items, `${path}[]`);
     };
-    for (const name of ["update_plan", "amend_plan", "prepare_plan_execution"])
-      walk(specs.get(name)?.inputSchema, "");
-    assert.deepEqual(bare, []);
+    for (const name of CAPPED_PLAN_TOOLS) {
+      const schema = specs.get(name)?.inputSchema;
+      walk(schema, sanitizeGeminiSchema(schema, { topLevel: true }), name);
+    }
+    assert.deepEqual(
+      degraded.filter((path) => !GEMINI_STRING_ALLOWLIST.has(path)),
+      [],
+    );
+  });
+  it("amend_plan shows the whole replacement contract shape", function () {
+    const amend = registry.listTools().find((t) => t.name === "amend_plan");
+    const contract = (amend?.inputSchema as any).properties.contract;
+    assert.includeMembers(contract.properties.investigation.required, [
+      "question",
+      "subquestions",
+      "criteria",
+      "reviewMode",
+      "readingStrategy",
+      "scope",
+      "requiredEvidenceDepth",
+      "estimatedDeepReadPapers",
+      "approvedLargeCorpus",
+    ]);
+    assert.includeMembers(contract.properties.deliverable.required, ["kind"]);
+    assert.includeMembers(
+      contract.properties.deliverable.properties.spec.required,
+      [
+        "kind",
+        "title",
+        "requiredSections",
+        "requiresReferences",
+        "requiresCoverageSection",
+        "allowFigures",
+      ],
+    );
+    assert.include(
+      contract.properties.investigation.properties.scope.properties.kind.enum,
+      "items",
+    );
   });
   it("a retired name is unknown to the registry and the error names the facade", async function () {
     const prepared = await registry.prepareExecution(

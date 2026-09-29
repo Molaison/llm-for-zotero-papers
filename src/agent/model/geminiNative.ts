@@ -173,7 +173,7 @@ function collectGeminiUnionVariants(
     );
 }
 
-function sanitizeGeminiSchema(
+export function sanitizeGeminiSchema(
   schema: unknown,
   options?: { topLevel?: boolean },
 ): Record<string, unknown> {
