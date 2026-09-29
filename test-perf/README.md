@@ -66,3 +66,18 @@ Results are saved under `tmp/library-search-bench/<label>/`:
 `recall@5` is the share of queries whose planted paper is among the top five paper matches, and `snippetHit` is the share whose planted sentence appears in a returned snippet (whitespace collapsed on both sides).
 Both are planted-fact hit rates for retrieval; they do not measure LLM answer quality.
 The comparison reports medians across runs; the sampled RSS maximum is a lower bound on the true peak.
+
+## Real-library ranking check
+
+The synthetic corpus measures latency, but its planted facts are keyword-exact, so it cannot show how the index ranks real papers.
+`scripts/library-index-benchmark.ts` builds the library text index in an in-memory SQLite database from the MinerU caches of a real Zotero data directory, outside Zotero, and compares its ranking with today's per-paper ranking.
+
+```sh
+npx tsx scripts/library-index-benchmark.ts --data-dir "$HOME/Zotero" --ids <50+ ids with a MinerU full.md> \
+    --queries tmp/real-queries.txt [--expected tmp/real-expected.txt]
+```
+
+`--queries` holds one query per line; the optional `--expected` file holds, per query line, the comma-separated attachment ids a reader would accept as the top paper.
+Per query it prints the wall time of each path, overlap@8 of (paper, chunk) pairs, the top paper of each path and whether they agree, then a summary line and a Markdown table.
+Today's path has no cross-paper full-text score, so the baseline orders every paper's candidates by their per-paper BM25 score; the index scores the same chunks with library-wide document frequencies, which is expected to move the top paper when a term is rare inside one paper but common across the library.
+The data directory is read-only: it uses the same copy-on-write overlay as `scripts/retrieval-benchmark.ts` (`installBenchmarkGlobals`).
