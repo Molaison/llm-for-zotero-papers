@@ -165,6 +165,12 @@ export class LibraryReadService {
             metadata?.title ||
             `${rawItem.getDisplayTitle?.() || `Attachment ${itemId}`}`,
           metadata,
+          annotations: sectionSet.has("annotations")
+            ? this.zoteroGateway.getPaperAnnotations({
+                item: rawItem,
+                maxAnnotations: params.maxAnnotations,
+              })
+            : undefined,
           collections: sectionSet.has("collections")
             ? collectionIds
                 .map((collectionId) =>
@@ -176,7 +182,11 @@ export class LibraryReadService {
         addUnsupportedSectionWarnings(
           itemId,
           "attachment",
-          new Set<ReadLibrarySection>(["metadata", "collections"]),
+          new Set<ReadLibrarySection>([
+            "metadata",
+            "collections",
+            "annotations",
+          ]),
         );
         continue;
       }

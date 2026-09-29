@@ -67,6 +67,8 @@ export type AgentActionParameters = {
   targetNoteId?: number;
   targetItemId?: number;
   pageIndex?: number;
+  annotationComment?: string;
+  annotationColor?: string;
   revertCount?: number;
   /** Visible plain text from the prepared native payload, already decoded once. */
   expectedText?: string;

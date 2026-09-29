@@ -496,7 +496,7 @@ export class NoteCapability {
     item: Zotero.Item | null | undefined;
     maxAnnotations?: number;
   }): PaperAnnotationRecord[] {
-    const target = resolveRegularItem(params.item);
+    const target = params.item;
     if (!target) return [];
     const limit =
       Number.isFinite(params.maxAnnotations) &&
@@ -505,16 +505,14 @@ export class NoteCapability {
         : 100;
     const results: PaperAnnotationRecord[] = [];
     try {
-      const pdfs = getPdfChildAttachments(target);
+      const pdfs = target.isAttachment?.()
+        ? [target]
+        : getPdfChildAttachments(target);
       for (const pdf of pdfs) {
         if (results.length >= limit) break;
-        const annotationIds: number[] =
-          (
-            pdf as unknown as { getAnnotations?: () => number[] }
-          ).getAnnotations?.() || [];
-        for (const annotationId of annotationIds) {
+        const annotations = pdf.getAnnotations();
+        for (const annotation of annotations) {
           if (results.length >= limit) break;
-          const annotation = Zotero.Items.get(annotationId);
           if (!annotation?.isAnnotation?.()) continue;
           const ann = annotation as unknown as {
             annotationText?: string;

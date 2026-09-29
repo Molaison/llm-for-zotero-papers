@@ -225,8 +225,6 @@ const AUDIT: Readonly<Record<string, AuditRow>> = {
     fixture: {
       attachmentId: 1,
       pageIndex: 0,
-      pageHeightPoints: 792,
-      rects: [[10, 20, 120, 34]],
       text: "Audit",
     },
     impact: "state_change",

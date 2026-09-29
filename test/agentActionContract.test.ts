@@ -31,6 +31,7 @@ type FakeItemState = {
   noteHtml?: string;
   parentItemId?: number | null;
   annotation?: boolean;
+  annotationFields?: Record<string, unknown>;
 };
 
 function createHarness() {
@@ -141,6 +142,7 @@ function createHarness() {
       const state = items.get(itemId);
       if (!state) return null;
       return {
+        ...state.annotationFields,
         id: itemId,
         libraryID: state.libraryID ?? 1,
         parentID: state.parentItemId ?? false,
@@ -3089,6 +3091,15 @@ describe("Bespoke finalize-branch receipts", function () {
   });
 
   describe("annotate_pdf", function () {
+    const expectedAnnotation = {
+      text: "A full quotation.",
+      comment: "Core result",
+      color: "#ffd400",
+      pageLabel: "2",
+      sortIndex: "00001|000000|00020",
+      position: { pageIndex: 1, rects: [[20, 40, 90, 50]] },
+      source: { documentFingerprint: "fixture", startChar: 0, endChar: 17 },
+    };
     function annotationHarness(params: {
       annotationParent?: number;
       isAnnotation?: boolean;
@@ -3104,6 +3115,15 @@ describe("Bespoke finalize-branch receipts", function () {
         tags: [],
         collections: [],
         fields: {},
+        annotationFields: {
+          annotationType: "highlight",
+          annotationText: expectedAnnotation.text,
+          annotationComment: expectedAnnotation.comment,
+          annotationColor: expectedAnnotation.color,
+          annotationPageLabel: expectedAnnotation.pageLabel,
+          annotationSortIndex: expectedAnnotation.sortIndex,
+          annotationPosition: JSON.stringify(expectedAnnotation.position),
+        },
         kind: params.isAnnotation === false ? "note" : "annotation",
         parentItemId: params.annotationParent ?? 900,
       });
@@ -3116,7 +3136,13 @@ describe("Bespoke finalize-branch receipts", function () {
       capability: "zotero.annotations",
       operation: "annotation_write",
       source: "zotero_native",
-      parameters: { targetItemId: 900, pageIndex: 1 },
+      parameters: {
+        targetItemId: 900,
+        pageIndex: 1,
+        expectedText: expectedAnnotation.text,
+        annotationColor: expectedAnnotation.color,
+        annotationComment: expectedAnnotation.comment,
+      },
       requestedTargets: ["item:900"],
       destinationCollectionIds: [],
     };
@@ -3138,7 +3164,7 @@ describe("Bespoke finalize-branch receipts", function () {
         operation: "annotation_write",
         requestedTargets: [params.target],
         rejectedTargets: params.rejectedTargets,
-        normalizedParameters: { targetItemId: 900, pageIndex: 1 },
+        normalizedParameters: annotationProposal.parameters,
         reasons: [],
         verifiedFacts: [],
         materialRef: undefined,
@@ -3154,7 +3180,7 @@ describe("Bespoke finalize-branch receipts", function () {
       const receipt = await receiptFor({
         harness: annotationHarness({}),
         proposal: annotationProposal,
-        content: { annotationId: 901 },
+        content: { annotationId: 901, expectedAnnotation },
       });
       assert.deepEqual(
         receipt,
@@ -3166,6 +3192,59 @@ describe("Bespoke finalize-branch receipts", function () {
           rejectedTargets: [],
         }),
       );
+    });
+
+    it("refuses wrong native content or geometry even under the correct attachment", async function () {
+      for (const [field, value] of Object.entries({
+        annotationText: "Wrong quotation",
+        annotationComment: "Wrong comment",
+        annotationColor: "#ff6666",
+        annotationPageLabel: "9",
+        annotationPosition: JSON.stringify({
+          pageIndex: 1,
+          rects: [[0, 0, 1, 1]],
+        }),
+      })) {
+        const harness = annotationHarness({});
+        harness.items.get(901)!.annotationFields![field] = value;
+        const receipt = await receiptFor({
+          harness,
+          proposal: annotationProposal,
+          content: { annotationId: 901, expectedAnnotation },
+        });
+        assert.equal(receipt.verification, "unverified", field);
+      }
+    });
+
+    it("round-trips annotation proof parameters including an empty comment", async function () {
+      const receipt = await receiptFor({
+        harness: annotationHarness({}),
+        proposal: annotationProposal,
+        content: { annotationId: 901, expectedAnnotation },
+      });
+      assert.equal(
+        decodeActionReceipt(JSON.parse(JSON.stringify(receipt)))
+          .normalizedParameters?.annotationComment,
+        expectedAnnotation.comment,
+      );
+      const emptyCommentReceipt = JSON.parse(JSON.stringify(receipt));
+      emptyCommentReceipt.normalizedParameters.annotationComment = "";
+      assert.equal(
+        decodeActionReceipt(emptyCommentReceipt).normalizedParameters
+          ?.annotationComment,
+        "",
+      );
+    });
+    it("credits an existing matching annotation as already satisfied", async function () {
+      const receipt = await receiptFor({
+        harness: annotationHarness({}),
+        proposal: annotationProposal,
+        content: { annotationId: 901, expectedAnnotation },
+        effect: "none",
+      });
+      assert.equal(receipt.status, "already_satisfied");
+      assert.deepEqual(receipt.alreadySatisfiedTargets, ["item:901"]);
+      assert.isEmpty(receipt.appliedTargets);
     });
 
     it("falls back to the requested attachment when no annotation ID came back", async function () {
@@ -3190,7 +3269,7 @@ describe("Bespoke finalize-branch receipts", function () {
       const receipt = await receiptFor({
         harness: annotationHarness({ annotationParent: 902 }),
         proposal: annotationProposal,
-        content: { annotationId: 901 },
+        content: { annotationId: 901, expectedAnnotation },
       });
       assert.deepEqual(
         receipt,
@@ -3208,7 +3287,7 @@ describe("Bespoke finalize-branch receipts", function () {
       const receipt = await receiptFor({
         harness: annotationHarness({ isAnnotation: false }),
         proposal: annotationProposal,
-        content: { annotationId: 901 },
+        content: { annotationId: 901, expectedAnnotation },
       });
       assert.deepEqual(
         receipt,

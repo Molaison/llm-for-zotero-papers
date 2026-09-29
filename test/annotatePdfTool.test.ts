@@ -16,6 +16,16 @@ import { ChangeJournalTestDb } from "./helpers/changeJournalTestDb";
  * before anything is written.
  */
 describe("annotate_pdf", function () {
+  it("accepts a quoted passage without asking the model for PDF coordinates", function () {
+    const tool = createAnnotatePdfTool({} as never);
+    const result = tool.validate({
+      attachmentId: 55,
+      text: "Representational drift reflects the stability-plasticity trade-off.",
+      comment: "Core conclusion",
+    });
+    assert.isTrue(result.ok, JSON.stringify(result));
+    assert.deepEqual(tool.spec.inputSchema.required, ["attachmentId", "text"]);
+  });
   const originalZotero = (
     globalThis as typeof globalThis & { Zotero?: unknown }
   ).Zotero;
@@ -56,16 +66,27 @@ describe("annotate_pdf", function () {
     return saved;
   }
 
+  const resolved = {
+    text: "A Title",
+    pageLabel: "3",
+    sortIndex: "00002|000000|00050",
+    position: { pageIndex: 2, rects: [[100, 730, 300, 742]] },
+    source: { documentFingerprint: "fixture", startChar: 0, endChar: 7 },
+  };
+  const resolve = async () => resolved;
   const gateway = {
-    getItem: (id: number) => ({ id, isAttachment: () => id === 55 }),
+    getItem: (id: number) => ({
+      id,
+      isAttachment: () => id === 55,
+      isPDFAttachment: () => id === 55,
+      getAnnotations: () => [],
+    }),
     trashItems: async () => ({ trashedCount: 1, items: [] }),
   } as never;
 
   const validArgs = {
     attachmentId: 55,
     pageIndex: 2,
-    pageHeightPoints: 792,
-    rects: [[100, 730, 300, 742]],
     color: "red",
     text: "A Title",
     comment: "Summary of the paper.",
@@ -73,7 +94,7 @@ describe("annotate_pdf", function () {
 
   it("writes a well-formed annotation with the type set first", async function () {
     const saved = install();
-    const tool = createAnnotatePdfTool(gateway);
+    const tool = createAnnotatePdfTool(gateway, resolve);
     const validated = tool.validate(validArgs);
     assert.isTrue(validated.ok, JSON.stringify(validated));
     if (!validated.ok) return;
@@ -104,6 +125,8 @@ describe("annotate_pdf", function () {
       id: 55,
       libraryID: 1,
       isAttachment: () => true,
+      isPDFAttachment: () => true,
+      getAnnotations: () => [],
     };
     let annotation: Record<string, any> | null = null;
     let trashCalls = 0;
@@ -151,7 +174,7 @@ describe("annotate_pdf", function () {
       ...context,
       journalFallbackApproved: undefined,
     };
-    const tool = createAnnotatePdfTool(gateway);
+    const tool = createAnnotatePdfTool(gateway, resolve);
     const validated = tool.validate(validArgs);
     assert.isTrue(validated.ok);
     if (!validated.ok) return;
@@ -186,7 +209,7 @@ describe("annotate_pdf", function () {
 
   it("refuses a parent paper, since annotations belong to the attachment", async function () {
     install();
-    const tool = createAnnotatePdfTool(gateway);
+    const tool = createAnnotatePdfTool(gateway, resolve);
     const validated = tool.validate({ ...validArgs, attachmentId: 44 });
     assert.isTrue(validated.ok);
     if (!validated.ok) return;
@@ -198,7 +221,7 @@ describe("annotate_pdf", function () {
     } catch (error) {
       message = error instanceof Error ? error.message : String(error);
     }
-    assert.include(message, "not an attachment");
+    assert.include(message, "not a PDF attachment");
     assert.include(
       message,
       "attachments",
@@ -207,52 +230,73 @@ describe("annotate_pdf", function () {
   });
 
   it("rejects a colour Zotero would throw on rather than losing the highlight", function () {
-    const tool = createAnnotatePdfTool(gateway);
+    const tool = createAnnotatePdfTool(gateway, resolve);
     const result = tool.validate({ ...validArgs, color: "crimson" });
     assert.isFalse(result.ok);
   });
 
-  it("normalizes a rect whose corners were given the wrong way round", function () {
-    const tool = createAnnotatePdfTool(gateway);
-    const result = tool.validate({
-      ...validArgs,
-      rects: [[300, 742, 100, 730]],
+  it("rejects raw coordinates and invalid page/occurrence selectors", function () {
+    const tool = createAnnotatePdfTool(gateway, resolve);
+    for (const args of [
+      { ...validArgs, rects: [[1, 2, 3, 4]] },
+      { ...validArgs, pageIndex: 1.2 },
+      { ...validArgs, occurrence: 0 },
+      { attachmentId: 55, text: "A Title", occurrence: 2 },
+    ])
+      assert.isFalse(tool.validate(args).ok);
+  });
+
+  it("does not save when native resolution fails", async function () {
+    const saved = install();
+    const tool = createAnnotatePdfTool(gateway, async () => {
+      throw new Error("No matching passage");
     });
-    assert.isTrue(result.ok);
-    if (!result.ok) return;
-    assert.deepEqual(
-      result.value.rects,
-      [[100, 730, 300, 742]],
-      "an inverted rect would otherwise be an invisible highlight",
+    const input = tool.validate(validArgs);
+    if (!input.ok) assert.fail(input.error);
+    try {
+      await tool.execute(input.value, context);
+      assert.fail("expected refusal");
+    } catch (error) {
+      assert.include(String(error), "No matching passage");
+    }
+    assert.isEmpty(saved);
+  });
+
+  it("reuses an identical native annotation on retry", async function () {
+    const saved = install();
+    const existing = {
+      id: 900,
+      parentID: 55,
+      isAnnotation: () => true,
+      annotationType: "highlight",
+      annotationText: resolved.text,
+      annotationComment: validArgs.comment,
+      annotationColor: "#ff6666",
+      annotationPageLabel: resolved.pageLabel,
+      annotationSortIndex: resolved.sortIndex,
+      annotationPosition: JSON.stringify(resolved.position),
+    };
+    const tool = createAnnotatePdfTool(
+      {
+        getItem: () => ({
+          id: 55,
+          isAttachment: () => true,
+          isPDFAttachment: () => true,
+          getAnnotations: () => [existing],
+        }),
+      } as never,
+      resolve,
     );
-  });
-
-  it("merges runs on one line and keeps a wrapped title as two", function () {
-    const tool = createAnnotatePdfTool(gateway);
-    const result = tool.validate({
-      ...validArgs,
-      rects: [
-        [100, 730, 200, 742],
-        [205, 730, 300, 742],
-        [100, 712, 220, 724],
-      ],
-    });
-    assert.isTrue(result.ok);
-    if (!result.ok) return;
-    assert.deepEqual(result.value.rects, [
-      [100, 730, 300, 742],
-      [100, 712, 220, 724],
-    ]);
-  });
-
-  it("requires the page height, which places the highlight", function () {
-    const tool = createAnnotatePdfTool(gateway);
-    const result = tool.validate({ ...validArgs, pageHeightPoints: 0 });
-    assert.isFalse(result.ok);
+    const input = tool.validate(validArgs);
+    if (!input.ok) assert.fail(input.error);
+    const result = (await tool.execute(input.value, context)) as any;
+    assert.equal(result.content.status, "already_exists");
+    assert.equal(result.effect, "none");
+    assert.isEmpty(saved);
   });
 
   it("honours an edited comment from the confirmation card", function () {
-    const tool = createAnnotatePdfTool(gateway);
+    const tool = createAnnotatePdfTool(gateway, resolve);
     const validated = tool.validate(validArgs);
     assert.isTrue(validated.ok);
     if (!validated.ok) return;

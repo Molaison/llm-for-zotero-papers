@@ -1,3 +1,8 @@
+import { annotationMatchesPayload } from "../../services/pdf/pdfAnnotationState";
+import {
+  buildQuoteTextIndex,
+  findQuoteSourceSpansAllowingLayoutArtifacts,
+} from "../../services/quotes/quoteTextNormalization";
 import { actionDependencies } from "./workflowDependencies";
 import { validatedWorkflowReuse } from "./workflowContinuation";
 import {
@@ -1473,10 +1478,28 @@ export class ActionContractService {
       const annotation = annotationId
         ? this.gateway.getItem(annotationId)
         : null;
+      const expected = result.expectedAnnotation as
+        | import("../../services/pdf/pdfAnnotationState").PdfHighlightPayload
+        | undefined;
+      const parameters = proposal.parameters;
       const verified = Boolean(
-        annotation &&
-        annotation.isAnnotation?.() === true &&
-        Number(annotation.parentID) === proposal.parameters?.targetItemId,
+        expected &&
+        parameters?.expectedText &&
+        expected.source?.documentFingerprint &&
+        expected.position &&
+        expected.color === parameters.annotationColor &&
+        expected.comment === parameters.annotationComment &&
+        (parameters.pageIndex === undefined ||
+          expected.position.pageIndex === parameters.pageIndex) &&
+        findQuoteSourceSpansAllowingLayoutArtifacts(
+          buildQuoteTextIndex(expected.text),
+          parameters.expectedText,
+        ).length === 1 &&
+        annotationMatchesPayload(
+          annotation,
+          Number(parameters.targetItemId),
+          expected,
+        ),
       );
       const target = annotationId
         ? `item:${annotationId}`
@@ -1484,10 +1507,15 @@ export class ActionContractService {
       return {
         ...base,
         verification: verified ? "verified" : "unverified",
-        status: verified ? "applied" : "unverified",
+        status: verified
+          ? params.effect === "none"
+            ? "already_satisfied"
+            : "applied"
+          : "unverified",
         requestedTargets: [target],
-        appliedTargets: verified ? [target] : [],
-        alreadySatisfiedTargets: [],
+        appliedTargets: verified && params.effect !== "none" ? [target] : [],
+        alreadySatisfiedTargets:
+          verified && params.effect === "none" ? [target] : [],
         rejectedTargets: verified ? [] : [target],
       };
     }

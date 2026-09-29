@@ -402,7 +402,7 @@ describe("note capability", function () {
         isAttachment: () => true,
         isPDFAttachment: () => true,
         attachmentContentType: "application/pdf",
-        getAnnotations: () => [10, 11, 12],
+        getAnnotations: () => [10, 11, 12].map((id) => items.get(id)),
       } as unknown as Record<string, unknown>);
       items.set(10, {
         id: 10,
@@ -449,7 +449,7 @@ describe("note capability", function () {
         isAttachment: () => true,
         isPDFAttachment: () => true,
         attachmentContentType: "application/pdf",
-        getAnnotations: () => [10],
+        getAnnotations: () => [items.get(10)],
       } as unknown as Record<string, unknown>);
       items.set(10, {
         id: 10,

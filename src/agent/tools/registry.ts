@@ -148,7 +148,7 @@ const MODEL_TOOL_DESCRIPTIONS: Readonly<Record<string, string>> = {
   revert_changes:
     "Inspect or revert durable actions; use dryRun for conflicts.",
   annotate_pdf:
-    "Add a PDF highlight and optional comment using PDF-space rectangles.",
+    "Highlight a quoted PDF passage with an optional comment; Zotero computes the placement.",
   file_io: "Read or write local files, including partial text and images.",
   run_command: "Run a host shell command and return its output and status.",
   zotero_script: "Run Zotero JavaScript with declared access and effect.",

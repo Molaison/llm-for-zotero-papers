@@ -101,7 +101,13 @@ describe("library_read unified metadata", function () {
         itemId ? items.get(itemId) || null : null,
       getItemCollectionIds: () => [],
       getPaperNotes: () => [],
-      getPaperAnnotations: () => [],
+      getPaperAnnotations: ({ item }: { item: Zotero.Item }) => [
+        {
+          annotationId: 999,
+          text: `Annotation of ${item.id}`,
+          type: "highlight",
+        },
+      ],
       getAllChildAttachmentInfos: async () => [],
       getCollectionSummary: () => null,
       getStandaloneNoteContent: ({ noteId }: { noteId: number }) => ({
@@ -138,6 +144,18 @@ describe("library_read unified metadata", function () {
     modelName: "test",
     currentAnswerText: "",
   } as never;
+
+  it("reads annotations on the requested attachment without replacing it with its parent", async function () {
+    const { tool } = makeTool();
+    const input = tool.validate({ itemIds: [701], sections: ["annotations"] });
+    if (!input.ok) assert.fail(input.error);
+    const result = (await tool.execute(input.value, context)) as any;
+    assert.isEmpty(result.warnings);
+    assert.equal(
+      result.results["701"].annotations[0].text,
+      "Annotation of 701",
+    );
+  });
 
   it("rejects explicitly supplied empty or malformed selectors", function () {
     const { tool } = makeTool();

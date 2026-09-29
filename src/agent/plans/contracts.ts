@@ -86,6 +86,11 @@ function decodeActionParameters(
 ): AgentActionParameters | undefined {
   if (value === undefined) return undefined;
   const input = record(value, label);
+  if (
+    input.annotationComment !== undefined &&
+    typeof input.annotationComment !== "string"
+  )
+    throw new Error(`${label}.annotationComment must be a string`);
   const allowed = new Set<keyof AgentActionParameters>([
     "semanticAction",
     "tags",
@@ -105,6 +110,8 @@ function decodeActionParameters(
     "targetNoteId",
     "targetItemId",
     "pageIndex",
+    "annotationColor",
+    "annotationComment",
     "revertCount",
     "expectedText",
     "newName",
@@ -227,6 +234,11 @@ function decodeActionParameters(
       input.pageIndex === undefined
         ? undefined
         : nonNegativeInteger(input.pageIndex, `${label}.pageIndex`),
+    annotationColor: optionalText(
+      input.annotationColor,
+      `${label}.annotationColor`,
+    ),
+    annotationComment: input.annotationComment as string | undefined,
     revertCount: positive("revertCount"),
     expectedText: optionalText(input.expectedText, `${label}.expectedText`),
     newName: optionalText(input.newName, `${label}.newName`),
