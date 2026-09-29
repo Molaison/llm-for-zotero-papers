@@ -33,6 +33,27 @@ const GUIDANCE_CAP_EXCEPTIONS: ReadonlyMap<string, number> = new Map([
   ["zotero_script", 5136],
 ]);
 
+/**
+ * The plan tools whose model-facing input schemas are capped. The cap measures
+ * what the model receives: the compacted schema from `registry.listTools()`.
+ */
+const PLAN_SCHEMA_CAP = 6000;
+const CAPPED_PLAN_TOOLS = [
+  "update_plan",
+  "amend_plan",
+  "prepare_plan_execution",
+  "research_update",
+] as const;
+
+/**
+ * Plan schemas allowed past the cap, pinned at their current size so they
+ * cannot grow. research_update carries the per-paper finding shape the model
+ * writes on every reading step; it embeds no other tool's schema.
+ */
+const PLAN_SCHEMA_CAP_EXCEPTIONS: ReadonlyMap<string, number> = new Map([
+  ["research_update", 7168],
+]);
+
 const stub: any = new Proxy(function () {}, {
   get: () => stub,
   apply: () => stub,
@@ -89,6 +110,55 @@ describe("agent tool vocabulary", function () {
       const length = registry.getTool(name)?.guidance?.instruction.length ?? 0;
       assert.isAbove(length, 2500, `${name} fits the cap; drop its exception`);
     }
+  });
+  it("no plan tool schema exceeds 6000 characters", function () {
+    const specs = new Map(registry.listTools().map((t) => [t.name, t]));
+    const over = CAPPED_PLAN_TOOLS.flatMap((name) => {
+      const spec = specs.get(name);
+      assert.exists(spec, `${name} is model-visible`);
+      const length = JSON.stringify(spec!.inputSchema).length;
+      const pinned = PLAN_SCHEMA_CAP_EXCEPTIONS.get(name);
+      return length > (pinned ?? PLAN_SCHEMA_CAP) ? [`${name}: ${length}`] : [];
+    });
+    assert.deepEqual(over, []);
+  });
+  it("every plan schema cap exception is still needed", function () {
+    const specs = new Map(registry.listTools().map((t) => [t.name, t]));
+    for (const [name] of PLAN_SCHEMA_CAP_EXCEPTIONS) {
+      const length = JSON.stringify(specs.get(name)?.inputSchema ?? {}).length;
+      assert.isAbove(
+        length,
+        PLAN_SCHEMA_CAP,
+        `${name} fits the cap; drop its exception`,
+      );
+    }
+  });
+  it("plan tool schemas name a property on every loosened object", function () {
+    // Gemini's sanitizer turns a nested object with no properties into a
+    // string parameter; a contract sent as a string never reaches the decoder
+    // as a contract. Objects that declare additionalProperties are open maps.
+    const specs = new Map(registry.listTools().map((t) => [t.name, t]));
+    const bare: string[] = [];
+    const walk = (node: unknown, path: string): void => {
+      if (Array.isArray(node)) {
+        node.forEach((entry, index) => walk(entry, `${path}[${index}]`));
+        return;
+      }
+      if (!node || typeof node !== "object") return;
+      const schema = node as Record<string, unknown>;
+      if (
+        path &&
+        schema.type === "object" &&
+        schema.properties === undefined &&
+        schema.additionalProperties === undefined
+      )
+        bare.push(path);
+      for (const [key, value] of Object.entries(schema))
+        walk(value, path ? `${path}.${key}` : key);
+    };
+    for (const name of ["update_plan", "amend_plan", "prepare_plan_execution"])
+      walk(specs.get(name)?.inputSchema, "");
+    assert.deepEqual(bare, []);
   });
   it("a retired name is unknown to the registry and the error names the facade", async function () {
     const prepared = await registry.prepareExecution(

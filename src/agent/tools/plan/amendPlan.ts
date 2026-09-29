@@ -20,12 +20,16 @@ import {
 import type { PlanStep } from "../../plans/types";
 import { freezePlanEffectSpecification } from "../../plans/effectSpecification";
 import {
-  createUpdatePlanTool,
   resolvePlanContract,
   type UpdatePlanInput,
   validateUpdatePlanInput,
 } from "./updatePlan";
 import { fail, ok, validateObject } from "../shared";
+import {
+  PLAN_CONTRACT_REFERENCE_SCHEMA,
+  PLAN_EFFECT_SPECIFICATION_REFERENCE_SCHEMA,
+  PLAN_STEPS_SCHEMA,
+} from "../../plans/contractSchema";
 
 type ResearchScopeInput = {
   kind: "research_scope";
@@ -109,9 +113,6 @@ export function createAmendPlanTool(
   gateway: ZoteroGateway,
   amendments: PlanAmendmentService,
 ): AgentToolDefinition<AmendPlanInput, unknown> {
-  const updateSchema = createUpdatePlanTool(gateway).spec.inputSchema as {
-    properties?: Record<string, unknown>;
-  };
   return {
     spec: {
       name: "amend_plan",
@@ -139,11 +140,12 @@ export function createAmendPlanTool(
               },
             },
           },
-          contract: updateSchema.properties?.contract || { type: "object" },
-          effectSpecification: updateSchema.properties?.effectSpecification || {
-            type: "object",
-          },
-          steps: updateSchema.properties?.steps || { type: "array" },
+          // A replacement contract is referenced, not re-embedded: validate()
+          // decodes the effect specification and execute() decodes the
+          // contract with the same decoders update_plan uses.
+          contract: PLAN_CONTRACT_REFERENCE_SCHEMA,
+          effectSpecification: PLAN_EFFECT_SPECIFICATION_REFERENCE_SCHEMA,
+          steps: PLAN_STEPS_SCHEMA,
         },
       },
       executionClass: "control",

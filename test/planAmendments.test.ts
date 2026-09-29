@@ -20,6 +20,7 @@ import { stateChangeInvocationPlan } from "../src/agent/authorization/invocation
 import type { AgentActionContract } from "../src/agent/contracts/types";
 import { createAmendPlanTool } from "../src/agent/tools/plan/amendPlan";
 import { createUpdatePlanTool } from "../src/agent/tools/plan/updatePlan";
+import { createPreparePlanExecutionTool } from "../src/agent/tools/plan/preparePlanExecution";
 import {
   ZOTERO_MCP_PLAN_TOOL_NAMES,
   ZOTERO_MCP_WRITE_TOOL_NAMES,
@@ -1802,5 +1803,211 @@ describe("autonomous Plan scope amendments", function () {
       '"review":{"type":"string","enum":["default","review","direct"]',
     );
     assert.notInclude(schema, '"reviewPreference"');
+  });
+});
+
+/**
+ * amend_plan and prepare_plan_execution no longer re-embed update_plan's
+ * contract schema (plans/contractSchema.ts owns it). The host's decoders are
+ * the validation: validate() still decodes the effect specification, and the
+ * contract is decoded when the tool resolves it, with the same messages.
+ */
+describe("plan tools decode a loosely advertised contract strictly", function () {
+  const originalZotero = globalThis.Zotero;
+
+  afterEach(function () {
+    globalThis.Zotero = originalZotero;
+  });
+
+  const step = {
+    content: "Answer the approved question",
+    activeForm: "Answering the approved question",
+    acceptanceCriteria: [
+      {
+        criterionId: "answer-1",
+        description: "The answer is complete",
+        verifier: "bounded_reasoning" as const,
+      },
+    ],
+    expectedEffect: "reasoning" as const,
+  };
+  const steps = [
+    { ...step, planStepId: "s1" },
+    { ...step, planStepId: "s2" },
+    { ...step, planStepId: "s3" },
+  ];
+  /** An investigation missing its required requiredEvidenceDepth. */
+  const contractMissingField = () => {
+    const contract = researchContract({ libraryID: 1, kind: "library" });
+    delete (contract.investigation as Record<string, unknown>)
+      .requiredEvidenceDepth;
+    return contract;
+  };
+  const effectSpecificationMissingEffects = {
+    version: 1,
+    constraints: [],
+    deferredEffects: [],
+  };
+  const DECODER_CONTRACT_ERROR =
+    "investigation.requiredEvidenceDepth is invalid";
+  const DECODER_EFFECT_ERROR = "effectSpecification effects must be arrays";
+
+  async function rejection(run: () => Promise<unknown>): Promise<string> {
+    try {
+      await run();
+    } catch (error) {
+      return (error as Error).message;
+    }
+    return assert.fail("expected the host to reject the contract");
+  }
+
+  it("update_plan rejects a contract missing a required field with the decoder's message", async function () {
+    const harness = installSqliteZotero();
+    try {
+      await initAgentPlanStore();
+      await initResearchStore();
+      const tool = createUpdatePlanTool();
+      const badEffects = tool.validate({
+        ready: true,
+        steps,
+        effectSpecification: effectSpecificationMissingEffects,
+      });
+      assert.isFalse(badEffects.ok);
+      if (!badEffects.ok) assert.equal(badEffects.error, DECODER_EFFECT_ERROR);
+
+      const input = tool.validate({
+        ready: false,
+        contract: contractMissingField(),
+        steps,
+      });
+      assert.isTrue(input.ok);
+      if (!input.ok) return;
+      const message = await rejection(() =>
+        tool.execute(input.value, {
+          request: resolvedAgentRequest({
+            conversationKey: 1,
+            planContext: {
+              phase: "planning",
+              provider: "original",
+              planId: "plan-loose-update",
+              revision: 1,
+            },
+          }),
+          runId: "run",
+        } as never),
+      );
+      assert.equal(message, DECODER_CONTRACT_ERROR);
+      assert.isNull(await loadPlanArtifact("plan-loose-update", 1));
+    } finally {
+      harness.db.close();
+    }
+  });
+
+  it("prepare_plan_execution rejects a contract missing a required field with the decoder's message", async function () {
+    const harness = installSqliteZotero();
+    try {
+      await initAgentPlanStore();
+      await initResearchStore();
+      const tool = createPreparePlanExecutionTool();
+      const badEffects = tool.validate({
+        contract: { deliverable: { kind: "answer" } },
+        steps,
+        effectSpecification: effectSpecificationMissingEffects,
+      });
+      assert.isFalse(badEffects.ok);
+      if (!badEffects.ok) assert.equal(badEffects.error, DECODER_EFFECT_ERROR);
+
+      const input = tool.validate({ contract: contractMissingField(), steps });
+      assert.isTrue(input.ok);
+      if (!input.ok) return;
+      const message = await rejection(() =>
+        tool.execute(input.value, {
+          request: resolvedAgentRequest({
+            conversationKey: 1,
+            planContext: {
+              phase: "planning",
+              provider: "codex",
+              planId: "plan-loose-native",
+              revision: 1,
+              nativePlanning: {
+                attemptId: "attempt",
+                threadId: "thread",
+                turnId: "turn",
+                ephemeral: false,
+              },
+            },
+          }),
+          runId: "run",
+        } as never),
+      );
+      assert.equal(message, DECODER_CONTRACT_ERROR);
+      assert.isNull(await loadPlanArtifact("plan-loose-native", 1));
+    } finally {
+      harness.db.close();
+    }
+  });
+
+  it("amend_plan contract_revision rejects a contract missing a required field with the decoder's message", async function () {
+    const harness = installSqliteZotero();
+    try {
+      await initAgentPlanStore();
+      await initResearchStore();
+      const coordinator = new PlanExecutionCoordinator();
+      const artifact = await coordinator.updateDraft({
+        planId: "plan-loose-amend",
+        conversationKey: 1,
+        provider: "original",
+        revision: 1,
+        steps: [{ ...step, planStepId: "plan-loose-amend:r1:s1" }],
+        contract: { deliverable: { kind: "answer" as const } },
+        ready: true,
+        now: 1,
+      });
+      const ledger = await coordinator.approve({
+        planId: "plan-loose-amend",
+        revision: 1,
+        conversationGeneration: 1,
+        now: 2,
+      });
+      const tool = createAmendPlanTool({} as never, new PlanAmendmentService());
+      const badEffects = tool.validate({
+        kind: "contract_revision",
+        rationale: "The deliverable changed.",
+        contract: { deliverable: { kind: "answer" } },
+        steps,
+        effectSpecification: effectSpecificationMissingEffects,
+      });
+      assert.isFalse(badEffects.ok);
+      if (!badEffects.ok) assert.equal(badEffects.error, DECODER_EFFECT_ERROR);
+
+      const input = tool.validate({
+        kind: "contract_revision",
+        rationale: "The question changed.",
+        contract: contractMissingField(),
+        steps,
+      });
+      assert.isTrue(input.ok);
+      if (!input.ok) return;
+      const message = await rejection(() =>
+        tool.execute(input.value, {
+          request: resolvedAgentRequest({
+            conversationKey: 1,
+            planContext: {
+              phase: "executing",
+              provider: "original",
+              planId: "plan-loose-amend",
+              revision: 1,
+              executionId: ledger.executionId,
+              approvedDigest: artifact.digest,
+            },
+          }),
+          runId: "run",
+        } as never),
+      );
+      assert.equal(message, DECODER_CONTRACT_ERROR);
+      assert.isNull(await loadPlanArtifact("plan-loose-amend", 2));
+    } finally {
+      harness.db.close();
+    }
   });
 });

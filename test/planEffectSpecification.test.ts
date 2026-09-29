@@ -289,6 +289,96 @@ describe("Plan v5 concrete effect specifications", function () {
     );
   });
 
+  it("names the accepted values the schema leaves to the decoder", function () {
+    // update_plan's schema leaves operation names, restriction kinds, and
+    // target domains to this decoder, so a rejection must say what is valid.
+    const reject = (mutate: (spec: any) => void): string => {
+      const specification: any = effectSpecification();
+      mutate(specification);
+      try {
+        decodePlanEffectSpecification(specification);
+      } catch (error) {
+        return (error as Error).message;
+      }
+      assert.fail("expected the decoder to reject the specification");
+    };
+    const operation = reject((spec) => {
+      spec.effects[0].operation = "add_tags";
+    });
+    assert.include(
+      operation,
+      "effectSpecification.effects[0].operation is invalid",
+    );
+    assert.include(operation, "apply_tags");
+    assert.include(operation, "zotero_script_execute");
+    const deferred = reject((spec) => {
+      spec.deferredEffects[0].operation = "tag_items";
+    });
+    assert.include(
+      deferred,
+      "effectSpecification.deferredEffects[0].operation is invalid",
+    );
+    assert.include(deferred, "apply_tags");
+    const kind = reject((spec) => {
+      spec.constraints = [{ kind: "no_write", description: "Read only" }];
+    });
+    assert.include(
+      kind,
+      "effectSpecification.constraints[0].kind is unsupported",
+    );
+    assert.include(kind, "deny_effects");
+    assert.include(kind, "deny_mechanisms");
+    const effects = reject((spec) => {
+      spec.constraints = [
+        {
+          kind: "deny_effects",
+          effects: ["write"],
+          domains: ["filesystem"],
+          description: "No writes",
+        },
+      ];
+    });
+    assert.include(
+      effects,
+      "effectSpecification.constraints[0].effects is invalid",
+    );
+    assert.include(effects, "egress");
+    const domains = reject((spec) => {
+      spec.constraints = [
+        {
+          kind: "deny_effects",
+          effects: ["create"],
+          domains: ["disk"],
+          description: "No writes",
+        },
+      ];
+    });
+    assert.include(
+      domains,
+      "effectSpecification.constraints[0].domains is invalid",
+    );
+    assert.include(domains, "privileged_zotero");
+    const mechanisms = reject((spec) => {
+      spec.constraints = [
+        { kind: "deny_mechanisms", mechanisms: ["python"], description: "x" },
+      ];
+    });
+    assert.include(
+      mechanisms,
+      "effectSpecification.constraints[0].mechanisms is invalid",
+    );
+    assert.include(mechanisms, "zotero_script");
+    const domain = reject((spec) => {
+      spec.effects[0].targets = [{ domain: "library", targetIds: ["item:1"] }];
+    });
+    assert.include(
+      domain,
+      "effectSpecification.effects[0].targets[0].domain is invalid",
+    );
+    assert.include(domain, "filesystem");
+    assert.include(domain, "execution");
+  });
+
   it("replaces a supplied Zotero scope digest with the host target digest", async function () {
     const input = effectSpecification();
     input.effects = [input.effects[0]];

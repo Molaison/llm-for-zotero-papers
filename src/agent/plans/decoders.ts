@@ -26,7 +26,10 @@ import type {
   ActionDomain,
   ActionEffect,
 } from "../authorization/types";
-import { operationCatalogEntry } from "../contracts/operationCatalog";
+import {
+  OPERATION_CATALOG,
+  operationCatalogEntry,
+} from "../contracts/operationCatalog";
 import {
   decodeActionContract,
   decodeActionReceipt,
@@ -120,26 +123,34 @@ function jsonRecord(value: unknown, label: string): Record<string, unknown> {
   return input;
 }
 
+/**
+ * update_plan's model-facing schema leaves these enumerations to the decoder
+ * (see plans/contractSchema.ts), so each rejection names the accepted values.
+ */
+const VALID_OPERATIONS_HINT = `; use one of: ${Object.keys(OPERATION_CATALOG).join(", ")}`;
+const VALID_RESTRICTION_EFFECTS = [
+  "read",
+  "create",
+  "modify",
+  "delete",
+  "execute",
+  "egress",
+] as const;
+const VALID_RESTRICTION_DOMAINS = [
+  "zotero_library",
+  "filesystem",
+  "local_execution",
+  "network",
+  "privileged_zotero",
+] as const;
+
 function decodeEffectRestrictions(
   value: unknown,
   label: string,
 ): ActionConstraint[] {
   if (!Array.isArray(value)) throw new Error(`${label} must be an array`);
-  const validEffects = new Set<ActionEffect>([
-    "read",
-    "create",
-    "modify",
-    "delete",
-    "execute",
-    "egress",
-  ]);
-  const validDomains = new Set<ActionDomain>([
-    "zotero_library",
-    "filesystem",
-    "local_execution",
-    "network",
-    "privileged_zotero",
-  ]);
+  const validEffects = new Set<ActionEffect>(VALID_RESTRICTION_EFFECTS);
+  const validDomains = new Set<ActionDomain>(VALID_RESTRICTION_DOMAINS);
   return value.map((entry, index) => {
     const input = requiredRecord(entry, `${label}[${index}]`);
     const description = requiredString(
@@ -157,7 +168,9 @@ function decodeEffectRestrictions(
           (mechanism) => mechanism !== "shell" && mechanism !== "zotero_script",
         )
       ) {
-        throw new Error(`${label}[${index}].mechanisms is invalid`);
+        throw new Error(
+          `${label}[${index}].mechanisms is invalid; use shell or zotero_script`,
+        );
       }
       return {
         kind: "deny_mechanisms",
@@ -166,7 +179,9 @@ function decodeEffectRestrictions(
       };
     }
     if (input.kind !== "deny_effects") {
-      throw new Error(`${label}[${index}].kind is unsupported`);
+      throw new Error(
+        `${label}[${index}].kind is unsupported; use deny_effects or deny_mechanisms`,
+      );
     }
     const effects = uniqueStringList(
       input.effects,
@@ -180,13 +195,17 @@ function decodeEffectRestrictions(
       !effects.length ||
       effects.some((effect) => !validEffects.has(effect))
     ) {
-      throw new Error(`${label}[${index}].effects is invalid`);
+      throw new Error(
+        `${label}[${index}].effects is invalid; use ${VALID_RESTRICTION_EFFECTS.join(", ")}`,
+      );
     }
     if (
       !domains.length ||
       domains.some((domain) => !validDomains.has(domain))
     ) {
-      throw new Error(`${label}[${index}].domains is invalid`);
+      throw new Error(
+        `${label}[${index}].domains is invalid; use ${VALID_RESTRICTION_DOMAINS.join(", ")}`,
+      );
     }
     return {
       kind: "deny_effects",
@@ -247,7 +266,9 @@ function decodeEffectTarget(value: unknown, label: string): PlanEffectTarget {
       fingerprints,
     };
   }
-  throw new Error(`${label}.domain is invalid`);
+  throw new Error(
+    `${label}.domain is invalid; use zotero, filesystem, or execution`,
+  );
 }
 
 function decodeMaterialBinding(
@@ -314,7 +335,7 @@ export function decodePlanEffectSpecification(
     const operation = requiredString(effect.operation, `${label}.operation`);
     const operationEntry = operationCatalogEntry(operation);
     if (!operationEntry) {
-      throw new Error(`${label}.operation is invalid`);
+      throw new Error(`${label}.operation is invalid${VALID_OPERATIONS_HINT}`);
     }
     if (effect.approval !== "initial" && effect.approval !== "after_research") {
       throw new Error(`${label}.approval is invalid`);
@@ -419,7 +440,7 @@ export function decodePlanEffectSpecification(
     }
     const operation = requiredString(effect.operation, `${label}.operation`);
     if (!operationCatalogEntry(operation)) {
-      throw new Error(`${label}.operation is invalid`);
+      throw new Error(`${label}.operation is invalid${VALID_OPERATIONS_HINT}`);
     }
     if (effect.approval !== "after_research") {
       throw new Error(`${label}.approval must be after_research`);

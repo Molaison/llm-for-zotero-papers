@@ -43,7 +43,15 @@ import {
 import { getCodexProfileSignature } from "../src/codexAppServer/constants";
 import { AgentToolRegistry } from "../src/agent/tools/registry";
 import { createResearchUpdateTool } from "../src/agent/tools/plan/researchUpdate";
-import { createUpdatePlanTool } from "../src/agent/tools/plan/updatePlan";
+import {
+  createUpdatePlanTool,
+  resolvePlanContract,
+} from "../src/agent/tools/plan/updatePlan";
+import {
+  BUILTIN_SKILL_FILES,
+  parseSkill,
+  setUserSkills,
+} from "../src/agent/skills";
 import { createFileIOTool } from "../src/agent/tools/write/fileIO";
 import { createRunCommandTool } from "../src/agent/tools/write/runCommand";
 import { assert } from "chai";
@@ -1787,6 +1795,154 @@ describe("transactional Plan task transitions", function () {
       destroyCachedCodexAppServerProcess("structured-plan-compatibility", proc);
       CodexAppServerProcess.spawn = spawn;
       restorePrefs();
+    }
+  });
+
+  it("executes an approved Codex investigation with the literature-review skill", async function () {
+    // The Codex path of withPlanInvestigationSkill: an approved plan with an
+    // investigation and no forced skills still activates literature-review.
+    setUserSkills([parseSkill(BUILTIN_SKILL_FILES["literature-review.md"])]);
+    const item = {
+      id: 1,
+      key: "AAAA1111",
+      libraryID: 1,
+      version: 1,
+      deleted: false,
+      getField: () => "",
+      getCreators: () => [],
+    };
+    globalScope.Zotero = {
+      ...(globalScope.Zotero as object),
+      Items: {
+        get: (id: number) => (id === 1 ? item : null),
+        getByLibraryAndKey: (libraryID: number, itemKey: string) =>
+          libraryID === 1 && itemKey === item.key ? item : false,
+      },
+    } as never;
+    const gateway = {
+      resolveLibraryScopeItemIds: async () => ({ itemIds: [1] }),
+      getBibliographicItemTargetsByItemIds: (ids: number[]) =>
+        ids.map((id) => ({
+          itemId: id,
+          title: `Paper ${id}`,
+          firstCreator: "Author",
+          year: "2026",
+          tags: [],
+          attachments: [],
+        })),
+      getItem: (id: number) => (id === 1 ? item : null),
+    } as never;
+    const steps = (
+      [
+        ["read", "Read every paper", "verified_read", "read"],
+        ["synthesize", "Relate the papers", "research_coverage", "reasoning"],
+        ["answer", "Answer the question", "bounded_reasoning", "reasoning"],
+      ] as const
+    ).map(([id, content, verifier, expectedEffect]) => ({
+      planStepId: `investigation-codex:r1:${id}`,
+      content,
+      activeForm: content,
+      acceptanceCriteria: [{ criterionId: id, description: content, verifier }],
+      expectedEffect,
+    }));
+    const contract = await resolvePlanContract({
+      raw: {
+        deliverable: { kind: "answer" },
+        investigation: {
+          question: "What do the papers report?",
+          subquestions: [{ id: "q1", question: "What was reported?" }],
+          criteria: [],
+          reviewMode: "narrative",
+          readingStrategy: "adaptive",
+          scope: { libraryID: 1, kind: "items", itemKeys: ["AAAA1111"] },
+          requiredEvidenceDepth: "body",
+          estimatedDeepReadPapers: 0,
+          approvedLargeCorpus: false,
+        },
+      },
+      steps,
+      ready: true,
+      gateway,
+      planId: "investigation-codex",
+      revision: 1,
+      conversationKey: 41,
+    });
+    const coordinator = new PlanExecutionCoordinator();
+    const artifact = await coordinator.updateDraft({
+      planId: "investigation-codex",
+      conversationKey: 41,
+      provider: "codex",
+      revision: 1,
+      ready: true,
+      contract,
+      steps,
+    });
+    assert.exists(artifact.contract?.investigation);
+    const ledger = await coordinator.approve({
+      planId: artifact.planId,
+      revision: 1,
+      conversationGeneration: 0,
+      providerContinuationId: "investigation-thread",
+    });
+    const restorePrefs = installDirectPathTestPrefs("native");
+    const requests: Array<{ method: string; params: Record<string, any> }> = [];
+    const skillPath = "/tmp/lfz-skills/literature-review/SKILL.md";
+    const proc = createNativeLifecycleTestProcess({
+      newThreadIds: [],
+      requests,
+      skillsListResult: {
+        data: [
+          {
+            cwd: "",
+            skills: [
+              { name: "literature-review", path: skillPath, enabled: true },
+            ],
+          },
+        ],
+      },
+      onTurn: ({ threadId, turnId, emit }) => {
+        emit({
+          method: "turn/completed",
+          params: { threadId, turn: { id: turnId, status: "interrupted" } },
+        });
+      },
+    });
+    const spawn = CodexAppServerProcess.spawn;
+    CodexAppServerProcess.spawn = async () => proc;
+    const activatedSkills: string[] = [];
+    try {
+      await runCodexAppServerNativeTurn({
+        scope: { conversationKey: 41, libraryID: 1, kind: "global" },
+        model: "gpt-5.6",
+        processKey: "investigation-skill-pin",
+        messages: [{ role: "user", content: "Continue the approved plan" }],
+        planContext: {
+          phase: "executing",
+          planId: artifact.planId,
+          revision: 1,
+          executionId: ledger.executionId,
+          approvedDigest: ledger.planDigest,
+          provider: "codex",
+        },
+        hooks: {
+          loadProviderSessionId: async () => "investigation-thread",
+          persistProviderSessionId: async () => {},
+        },
+        onSkillActivated: (skillId) => activatedSkills.push(skillId),
+      }).catch(() => undefined);
+      assert.include(activatedSkills, "literature-review");
+      const turn = requests.find((request) => request.method === "turn/start");
+      assert.exists(turn, "the executing turn must start");
+      assert.deepInclude(turn!.params.input, {
+        type: "skill",
+        name: "literature-review",
+        path: skillPath,
+      });
+    } finally {
+      destroyCachedCodexAppServerProcess("investigation-skill-pin", proc);
+      CodexAppServerProcess.spawn = spawn;
+      restorePrefs();
+      setUserSkills([]);
     }
   });
 
