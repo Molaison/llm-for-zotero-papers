@@ -9,6 +9,7 @@ export type ProviderQuota =
     }
   | {
       kind: "usage";
+      provider?: "codex" | "claude" | "glm" | "kimi";
       windows: Array<{
         usedPercent: number;
         durationMins?: number;
@@ -16,8 +17,32 @@ export type ProviderQuota =
       }>;
     };
 
+const API_QUOTA_ENDPOINTS = {
+  deepseek: "https://api.deepseek.com/user/balance",
+  openrouter: "https://openrouter.ai/api/v1/key",
+  kimi_cn: "https://api.moonshot.cn/v1/users/me/balance",
+  kimi_global: "https://api.moonshot.ai/v1/users/me/balance",
+  kimi_code: "https://api.kimi.com/coding/v1/usages",
+  glm_cn: "https://open.bigmodel.cn/api/monitor/usage/quota/limit",
+  glm_global: "https://api.z.ai/api/monitor/usage/quota/limit",
+} as const;
+
+export type ApiQuotaKind = keyof typeof API_QUOTA_ENDPOINTS;
+export type ApiQuotaTarget = { kind: ApiQuotaKind; apiKey: string };
+export type ClaudeQuotaTarget = {
+  kind: "claude";
+  bridgeUrl: string;
+  settingSources: string;
+  context: {
+    conversationKey: string | number;
+    scopeType: "paper" | "open";
+    scopeId: string;
+    scopeLabel?: string;
+  };
+};
 export type QuotaTarget =
-  | { kind: "deepseek" | "openrouter"; apiKey: string }
+  | ApiQuotaTarget
+  | ClaudeQuotaTarget
   | { kind: "codex"; codexPath: string };
 
 export type QuotaSnapshot = {
@@ -43,11 +68,18 @@ export function resolveQuotaTarget(
     // the selected model or preset has that provider's name.
     if (url.protocol !== "https:" || url.port || url.username || url.password)
       return null;
-    if (url.hostname === "api.deepseek.com") {
-      return { kind: "deepseek", apiKey: entry.apiKey };
-    }
-    if (url.hostname === "openrouter.ai") {
-      return { kind: "openrouter", apiKey: entry.apiKey };
+    for (const kind of Object.keys(API_QUOTA_ENDPOINTS) as ApiQuotaKind[]) {
+      if (url.origin === new URL(API_QUOTA_ENDPOINTS[kind]).origin) {
+        if (kind === "kimi_code" && !/^\/coding(\/|$)/.test(url.pathname))
+          return null;
+        // GLM plan allowance applies to Coding Plan routes, not PAYG requests.
+        if (
+          (kind === "glm_cn" || kind === "glm_global") &&
+          !/^\/api\/(anthropic|coding\/paas\/v4)(\/|$)/.test(url.pathname)
+        )
+          return null;
+        return { kind, apiKey: entry.apiKey };
+      }
     }
   } catch {
     // Unrecognized or local endpoints have no known balance contract.
@@ -71,12 +103,98 @@ function number(value: unknown): number | undefined {
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
-/** Schemas: api-docs.deepseek.com/api/get-user-balance and OpenRouter /key. */
+/** Provider contracts and their sources are recorded in src/providers/QUOTA.md. */
 export function parseApiQuota(
-  kind: "deepseek" | "openrouter",
+  kind: ApiQuotaKind,
   value: unknown,
 ): ProviderQuota | null {
   const payload = record(value);
+  if (kind === "kimi_code") {
+    const rows = [
+      { detail: payload.usage, durationMins: 10080 },
+      ...(Array.isArray(payload.limits) ? payload.limits : []).map((raw) => {
+        const row = record(raw);
+        const window = record(row.window);
+        const duration = number(window.duration);
+        const unit = typeof window.timeUnit === "string" ? window.timeUnit : "";
+        const factor = unit.includes("MINUTE")
+          ? 1
+          : unit.includes("HOUR")
+            ? 60
+            : unit.includes("DAY")
+              ? 1440
+              : undefined;
+        return {
+          detail: row.detail ?? row,
+          durationMins:
+            duration !== undefined && factor !== undefined
+              ? duration * factor
+              : undefined,
+        };
+      }),
+    ];
+    const windows = rows.flatMap(({ detail, durationMins }) => {
+      const row = record(detail);
+      const limit = number(row.limit);
+      const remaining = number(row.remaining);
+      const used =
+        number(row.used) ??
+        (limit !== undefined && remaining !== undefined
+          ? limit - remaining
+          : undefined);
+      // Missing counters and zero/unknown limits are unavailable, never 0% used.
+      if (limit === undefined || limit <= 0 || used === undefined || used < 0)
+        return [];
+      const reset =
+        row.resetTime ?? row.resetAt ?? row.reset_at ?? row.reset_time;
+      const resetsAt =
+        typeof reset === "string" ? Date.parse(reset) / 1000 : NaN;
+      return [
+        {
+          usedPercent: Math.min(100, (used / limit) * 100),
+          ...(durationMins !== undefined && durationMins > 0
+            ? { durationMins }
+            : {}),
+          ...(Number.isFinite(resetsAt) && resetsAt > 0 ? { resetsAt } : {}),
+        },
+      ];
+    });
+    return windows.length ? { kind: "usage", provider: "kimi", windows } : null;
+  }
+  if (kind === "glm_cn" || kind === "glm_global") {
+    if (
+      payload.success === false ||
+      (payload.code !== undefined && number(payload.code) !== 200)
+    )
+      return null;
+    const limits = record(payload.data).limits;
+    const windows = (Array.isArray(limits) ? limits : []).flatMap((raw) => {
+      const row = record(raw);
+      const usedPercent = number(row.percentage);
+      // TIME_LIMIT is the separate MCP allowance. Do not present it as chat usage.
+      if (
+        row.type !== "TOKENS_LIMIT" ||
+        usedPercent === undefined ||
+        usedPercent < 0
+      )
+        return [];
+      return [{ usedPercent: Math.min(100, usedPercent) }];
+    });
+    return windows.length ? { kind: "usage", provider: "glm", windows } : null;
+  }
+  if (kind === "kimi_cn" || kind === "kimi_global") {
+    // Kimi's regional keys and currencies are independent; never fall back
+    // across regions or reconstruct available_balance from cash/vouchers.
+    if (payload.status !== true || payload.code !== 0) return null;
+    const amount = number(record(payload.data).available_balance);
+    return amount === undefined
+      ? null
+      : {
+          kind: "balance",
+          scope: "account",
+          balances: [{ currency: kind === "kimi_cn" ? "CNY" : "USD", amount }],
+        };
+  }
   if (kind === "deepseek") {
     const balances = (
       Array.isArray(payload.balance_infos) ? payload.balance_infos : []
@@ -127,25 +245,23 @@ export function parseCodexQuota(value: unknown): ProviderQuota | null {
 }
 
 export async function readApiQuota(
-  target: Exclude<QuotaTarget, { kind: "codex" }>,
+  target: ApiQuotaTarget,
 ): Promise<ProviderQuota | null> {
   const controller = createAbortController();
   const timer = setTimeout(() => controller.abort(), 8000);
   try {
-    const response = await fetch(
-      target.kind === "deepseek"
-        ? "https://api.deepseek.com/user/balance"
-        : "https://openrouter.ai/api/v1/key",
-      {
-        headers: {
-          Authorization: `Bearer ${target.apiKey}`,
-          Accept: "application/json",
-        },
-        signal: controller.signal,
-        redirect: "error",
-        credentials: "omit",
+    const response = await fetch(API_QUOTA_ENDPOINTS[target.kind], {
+      headers: {
+        Authorization:
+          target.kind === "glm_cn" || target.kind === "glm_global"
+            ? target.apiKey
+            : `Bearer ${target.apiKey}`,
+        Accept: "application/json",
       },
-    );
+      signal: controller.signal,
+      redirect: "error",
+      credentials: "omit",
+    });
     if (!response.ok) return null;
     return parseApiQuota(target.kind, await response.json());
   } finally {

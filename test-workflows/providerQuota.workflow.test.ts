@@ -1,7 +1,7 @@
 import { assert } from "chai";
 import { buildUI } from "../src/modules/contextPanel/buildUI";
 import { attachFooterQuotaControl } from "../src/modules/contextPanel/footerQuotaControl";
-import type { QuotaSnapshot } from "../src/providers/quota";
+import { resolveQuotaTarget, type QuotaSnapshot } from "../src/providers/quota";
 
 describe("workflow: provider quota footer", function () {
   this.timeout(30000);
@@ -53,7 +53,7 @@ describe("workflow: provider quota footer", function () {
       const refreshes: boolean[] = [];
       control = attachFooterQuotaControl({
         button,
-        getEntry: () => entry,
+        getTarget: () => resolveQuotaTarget(entry),
         read: async (_target, refresh) => {
           refreshes.push(refresh === true);
           return snapshot;
@@ -63,49 +63,60 @@ describe("workflow: provider quota footer", function () {
       assert.equal(button.textContent, "$12.34");
       assert.include(button.getAttribute("aria-label")!, "Account balance");
 
-      for (const width of [280, 340, 550]) {
-        for (const scale of [1, 1.25]) {
-          root.style.width = `${width}px`;
-          panel.style.setProperty("--llm-font-scale", String(scale));
-          await Zotero.Promise.delay(50);
-          const quotaRect = button.getBoundingClientRect();
-          const gaugeRect = root
-            .querySelector(".llm-context-usage-control")!
-            .getBoundingClientRect();
-          const permissionRect = permission.getBoundingClientRect();
-          const statusRect = status.getBoundingClientRect();
-          assert.isAbove(quotaRect.width, 0, "quota label is visible");
-          assert.isAtLeast(
-            quotaRect.left,
-            gaugeRect.right - 1,
-            "quota follows context without overlap",
-          );
-          assert.isAtLeast(
-            gaugeRect.left,
-            permissionRect.right - 1,
-            "context follows permission control",
-          );
-          assert.isAtLeast(
-            permissionRect.left,
-            statusRect.right - 1,
-            "status wraps before the controls",
-          );
-          assert.isAtMost(
-            quotaRect.right,
-            root.getBoundingClientRect().right + 1,
-            "footer stays within the panel",
-          );
-          const hit = doc.elementFromPoint(
-            quotaRect.x + quotaRect.width / 2,
-            quotaRect.y + quotaRect.height / 2,
-          );
-          assert.isTrue(
-            hit === button || button.contains(hit),
-            "the quota control is reachable by a pointer",
-          );
+      // CNY labels are longer than USD; exercise both at narrow widths.
+      for (const currency of ["USD", "CNY"]) {
+        snapshot = {
+          checkedAt: Date.now(),
+          quota: {
+            kind: "balance",
+            scope: "account",
+            balances: [{ currency, amount: 1234.56 }],
+          },
+        };
+        await control.sync();
+        for (const width of [280, 340, 550]) {
+          for (const scale of [1, 1.25]) {
+            root.style.width = `${width}px`;
+            panel.style.setProperty("--llm-font-scale", String(scale));
+            await Zotero.Promise.delay(50);
+            const quotaRect = button.getBoundingClientRect();
+            const gaugeRect = root
+              .querySelector(".llm-context-usage-control")!
+              .getBoundingClientRect();
+            const permissionRect = permission.getBoundingClientRect();
+            const statusRect = status.getBoundingClientRect();
+            assert.isAbove(quotaRect.width, 0, "quota label is visible");
+            assert.isAtLeast(
+              quotaRect.left,
+              gaugeRect.right - 1,
+              "quota follows context without overlap",
+            );
+            assert.isAtLeast(
+              gaugeRect.left,
+              permissionRect.right - 1,
+              "context follows permission control",
+            );
+            assert.isAtLeast(
+              permissionRect.left,
+              statusRect.right - 1,
+              "status wraps before the controls",
+            );
+            assert.isAtMost(
+              quotaRect.right,
+              root.getBoundingClientRect().right + 1,
+              "footer stays within the panel",
+            );
+            const hit = doc.elementFromPoint(
+              quotaRect.x + quotaRect.width / 2,
+              quotaRect.y + quotaRect.height / 2,
+            );
+            assert.isTrue(
+              hit === button || button.contains(hit),
+              "the quota control is reachable by a pointer",
+            );
+          }
         }
       }
-
       snapshot = {
         checkedAt: Date.now(),
         quota: {

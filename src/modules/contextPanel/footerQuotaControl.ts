@@ -1,8 +1,4 @@
-import {
-  resolveQuotaTarget,
-  type QuotaSnapshot,
-  type QuotaTarget,
-} from "../../providers/quota";
+import { type QuotaSnapshot, type QuotaTarget } from "../../providers/quota";
 import { t } from "../../utils/i18n";
 
 function money(amount: number, currency: string): string {
@@ -49,7 +45,15 @@ export function buildQuotaPresentation(snapshot: QuotaSnapshot): {
       ...quota.windows.map((window) => window.usedPercent),
     );
     text = `${Math.round(highest)}% ${t("used")}`;
-    details.push(t("Codex account quota"));
+    const label =
+      quota.provider === "claude"
+        ? "Claude Code account quota"
+        : quota.provider === "kimi"
+          ? "Kimi Code quota"
+          : quota.provider === "glm"
+            ? "GLM Coding Plan quota"
+            : "Codex account quota";
+    details.push(t(label));
     if (quota.windows.length > 1)
       details.push(t("Shows the most-used quota window"));
     for (const window of quota.windows) {
@@ -71,7 +75,7 @@ export function buildQuotaPresentation(snapshot: QuotaSnapshot): {
 
 export function attachFooterQuotaControl(params: {
   button: HTMLButtonElement | null;
-  getEntry: () => Parameters<typeof resolveQuotaTarget>[0];
+  getTarget: () => QuotaTarget | null;
   read: (target: QuotaTarget, refresh?: boolean) => Promise<QuotaSnapshot>;
 }) {
   const { button } = params;
@@ -88,7 +92,7 @@ export function attachFooterQuotaControl(params: {
   };
   const sync = async (refresh = false) => {
     if (disposed || !button) return;
-    const target = resolveQuotaTarget(params.getEntry());
+    const target = params.getTarget();
     const key = target ? JSON.stringify(target) : "";
     const requestGeneration = ++generation;
     if (key !== selectedKey || !target) hide();

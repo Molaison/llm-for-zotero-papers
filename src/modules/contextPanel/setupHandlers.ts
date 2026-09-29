@@ -464,6 +464,7 @@ import { resolvePdfModeModelInputs } from "./setupHandlers/controllers/pdfPaperM
 import { attachFooterPermissionControl } from "./footerPermissionControl";
 import { attachFooterQuotaControl } from "./footerQuotaControl";
 import { readFooterQuota } from "./footerQuotaReader";
+import { resolveQuotaTarget } from "../../providers/quota";
 import { createWebChatHistoryController } from "./setupHandlers/controllers/webChatHistoryController";
 import {
   createHistoryLifecycleController,
@@ -4976,7 +4977,21 @@ export function setupHandlers(
 
   quotaControl = attachFooterQuotaControl({
     button: body.querySelector<HTMLButtonElement>("#llm-provider-quota"),
-    getEntry: () => getSelectedModelInfo().selectedEntry,
+    getTarget: () => {
+      if (!item) return null;
+      if (isClaudeConversationSystem()) {
+        const context = resolveClaudeModelCatalogContext();
+        return context
+          ? {
+              kind: "claude",
+              bridgeUrl: getClaudeBridgeUrl(),
+              settingSources: getClaudeSettingSourcesCsvByPref(),
+              context,
+            }
+          : null;
+      }
+      return resolveQuotaTarget(getSelectedModelInfo().selectedEntry);
+    },
     read: readFooterQuota,
   });
 

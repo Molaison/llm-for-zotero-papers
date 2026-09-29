@@ -3,7 +3,7 @@ import {
   attachFooterQuotaControl,
   buildQuotaPresentation,
 } from "../src/modules/contextPanel/footerQuotaControl";
-import type { QuotaSnapshot } from "../src/providers/quota";
+import { resolveQuotaTarget, type QuotaSnapshot } from "../src/providers/quota";
 
 const snapshot = (amount: number): QuotaSnapshot => ({
   checkedAt: 1000,
@@ -78,7 +78,7 @@ describe("footer provider quota", function () {
     const resolves: Array<(value: QuotaSnapshot) => void> = [];
     const control = attachFooterQuotaControl({
       button,
-      getEntry: () => entry,
+      getTarget: () => resolveQuotaTarget(entry),
       read: () => new Promise((resolve) => resolves.push(resolve)),
     });
     const first = control.sync();
@@ -107,11 +107,7 @@ describe("footer provider quota", function () {
     let available = true;
     const control = attachFooterQuotaControl({
       button,
-      getEntry: () => ({
-        authMode: "api_key",
-        apiBase: "https://api.deepseek.com",
-        apiKey: "a",
-      }),
+      getTarget: () => ({ kind: "deepseek", apiKey: "a" }),
       read: async () =>
         available ? snapshot(5) : { quota: null, checkedAt: 2000 },
     });
