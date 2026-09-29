@@ -639,6 +639,7 @@ export class AgentRuntime {
         request.actionProgress = undefined;
         request.actionPreparation = undefined;
         request.classifiedIntent = undefined;
+        request.userTextSignals = computeUserTextSignals(request.userText);
         request.skillRoutingReceipt = undefined;
         const started = this.now();
         const selected = adapter.supportsTools(request)
@@ -2504,4 +2505,19 @@ export class AgentRuntime {
       pathLease.release();
     }
   }
+}
+
+/**
+ * Cheap keyword signals from the user's text, computed once per ordinary
+ * turn. They only select which tool guidance is shown; never authority.
+ */
+export function computeUserTextSignals(
+  userText: string,
+): NonNullable<AgentRuntimeRequest["userTextSignals"]> {
+  return {
+    mentionsDuplicates: /duplicat|merge|重复|合并/i.test(userText),
+    mentionsTrash: /trash|restore|回收站|恢复/i.test(userText),
+    mentionsAttachment: /attachment|rename|relink|附件/i.test(userText),
+    mentionsImport: /import|导入|add .* to (my )?library/i.test(userText),
+  };
 }

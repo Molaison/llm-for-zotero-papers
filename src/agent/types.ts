@@ -962,6 +962,13 @@ export type AgentRuntimeRequestInput = AgentRequest & {
   loadedSkillRecords?: LoadedSkillRecord[];
   /** Legacy stored-artifact compatibility; absent on fresh ordinary turns. */
   classifiedIntent?: ClassifiedTurnIntent;
+  /** Cheap chat-path keyword signal for tool-guidance matching only; never grants authority. */
+  userTextSignals?: {
+    mentionsDuplicates: boolean;
+    mentionsTrash: boolean;
+    mentionsAttachment: boolean;
+    mentionsImport: boolean;
+  };
   /** Legacy or approved-Plan obligations; absent on fresh ordinary turns. */
   actionContract?: AgentActionContract;
   /** Mutable completion state kept separate from the immutable contract. */

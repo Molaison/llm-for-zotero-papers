@@ -7,6 +7,7 @@ import { assert } from "chai";
 import { readdirSync, readFileSync, statSync } from "fs";
 import { join, relative } from "path";
 import { createBuiltInToolRegistry } from "../src/agent/tools";
+import { computeUserTextSignals } from "../src/agent/runtime";
 import { AGENT_PERSONA_INSTRUCTIONS } from "../src/agent/model/agentPersona";
 import { DEFAULT_SYSTEM_PROMPT } from "../src/utils/llmDefaults";
 
@@ -393,6 +394,117 @@ describe("tool guidance contracts", function () {
       }),
     );
     assert.isFalse(tool.guidance!.matches(scope({}), { matchedSkillIds: [] }));
+  });
+
+  it("delivers library write guidance in chat from user-text signals", function () {
+    const registry = createBuiltInToolRegistry({
+      zoteroGateway: {} as never,
+      pdfService: {} as never,
+      pdfPageService: {} as never,
+      retrievalService: {} as never,
+    });
+    const guidanceFor = (name: string) => registry.getTool(name)!.guidance!;
+    const noSignals = {
+      mentionsDuplicates: false,
+      mentionsTrash: false,
+      mentionsAttachment: false,
+      mentionsImport: false,
+    };
+    const chat = (signals: Partial<typeof noSignals>) =>
+      ({
+        conversationKey: 1,
+        mode: "agent",
+        userTextSignals: { ...noSignals, ...signals },
+      }) as any;
+    const ctx = { matchedSkillIds: [] };
+
+    assert.isTrue(
+      guidanceFor("library_delete").matches(
+        chat({ mentionsDuplicates: true }),
+        ctx,
+      ),
+    );
+    assert.isTrue(
+      guidanceFor("library_delete").matches(chat({ mentionsTrash: true }), ctx),
+    );
+    assert.isFalse(guidanceFor("library_delete").matches(chat({}), ctx));
+    assert.isTrue(
+      guidanceFor("library_import").matches(
+        chat({ mentionsImport: true }),
+        ctx,
+      ),
+    );
+    assert.isFalse(guidanceFor("library_import").matches(chat({}), ctx));
+    assert.isTrue(
+      guidanceFor("attachment_update").matches(
+        chat({ mentionsAttachment: true }),
+        ctx,
+      ),
+    );
+    assert.isFalse(guidanceFor("attachment_update").matches(chat({}), ctx));
+    // library_update guidance is plan-specific; no chat signal reaches it.
+    assert.isFalse(
+      guidanceFor("library_update").matches(
+        chat({
+          mentionsDuplicates: true,
+          mentionsTrash: true,
+          mentionsAttachment: true,
+          mentionsImport: true,
+        }),
+        ctx,
+      ),
+    );
+  });
+
+  it("computes chat user-text signals for library write guidance", function () {
+    assert.deepEqual(
+      computeUserTextSignals("Merge the duplicates in this folder"),
+      {
+        mentionsDuplicates: true,
+        mentionsTrash: false,
+        mentionsAttachment: false,
+        mentionsImport: false,
+      },
+    );
+    assert.isTrue(computeUserTextSignals("把回收站里的论文恢复").mentionsTrash);
+    assert.isTrue(
+      computeUserTextSignals("Rename the PDF attachment").mentionsAttachment,
+    );
+    assert.isTrue(
+      computeUserTextSignals("add this paper to my library").mentionsImport,
+    );
+    assert.deepEqual(computeUserTextSignals("Explain the main result."), {
+      mentionsDuplicates: false,
+      mentionsTrash: false,
+      mentionsAttachment: false,
+      mentionsImport: false,
+    });
+  });
+
+  it("keeps plan-intent matching for library write guidance", function () {
+    const registry = createBuiltInToolRegistry({
+      zoteroGateway: {} as never,
+      pdfService: {} as never,
+      pdfPageService: {} as never,
+      retrievalService: {} as never,
+    });
+    const guidanceFor = (name: string) => registry.getTool(name)!.guidance!;
+    const planned = (operation: string) =>
+      ({
+        conversationKey: 1,
+        mode: "agent",
+        classifiedIntent: actionFixture(operation as never),
+      }) as any;
+    assert.isTrue(
+      guidanceFor("library_delete").matches(planned("merge_items")),
+    );
+    assert.isTrue(
+      guidanceFor("library_import").matches(planned("import_local_files")),
+    );
+    assert.isTrue(
+      guidanceFor("attachment_update").matches(planned("rename_attachment")),
+    );
+    assert.isTrue(guidanceFor("library_update").matches(planned("apply_tags")));
   });
 
   it("keeps library_search examples explicit about entity and mode", function () {

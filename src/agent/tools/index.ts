@@ -152,14 +152,38 @@ const LITERATURE_SEARCH_GUIDANCE: ToolGuidance = {
     "\n- Do NOT put author names in the 'query' parameter; use 'author' instead.",
 };
 
+type UserTextSignals = NonNullable<
+  Parameters<ToolGuidance["matches"]>[0]["userTextSignals"]
+>;
+
+/**
+ * Plan turns match on classified operations or capabilities; ordinary chat
+ * turns carry no classified intent, so they match on a cheap user-text signal.
+ */
+function intentOrSignal(
+  request: Parameters<ToolGuidance["matches"]>[0],
+  operations: readonly string[],
+  signal: (signals: UserTextSignals) => boolean,
+): boolean {
+  if (
+    request.classifiedIntent?.actionIntents.some(
+      (action) =>
+        operations.includes(action.operation) ||
+        operations.includes(action.capability),
+    )
+  ) {
+    return true;
+  }
+  return Boolean(request.userTextSignals && signal(request.userTextSignals));
+}
+
 const LIBRARY_UPDATE_GUIDANCE: ToolGuidance = {
+  // Plan-specific guidance: no chat signal reaches it.
   matches: (request) =>
-    Boolean(
-      request.classifiedIntent?.actionIntents.some((action) =>
-        ["zotero.tags", "zotero.metadata", "zotero.collections"].includes(
-          action.capability,
-        ),
-      ),
+    intentOrSignal(
+      request,
+      ["zotero.tags", "zotero.metadata", "zotero.collections"],
+      () => false,
     ),
   instruction:
     "Execute resolved library write obligations with library_update and report verified receipts. Central policy decides whether a review card is required. Use kind:'tags' for tag changes, kind:'collections' for collection membership, and kind:'metadata' for item metadata fields. Batch one uniform change across all applicable item IDs in a single call. For different per-item changes, use assignments when the schema supports them; A computation using zotero_script uses the same exact-effect authority; the mechanism alone adds no confirmation. Explicit script prohibitions remain binding. For metadata obligations with permitted external evidence discovery, use literature_search with workflow:'review' and mode:'metadata' to fetch canonical data, then continue through the exact review/update flow. Bind direct metadata updates to the field values in the resolved obligation or approved review.",
@@ -182,10 +206,10 @@ const NOTE_WRITE_GUIDANCE: ToolGuidance = {
 
 const LIBRARY_IMPORT_GUIDANCE: ToolGuidance = {
   matches: (request) =>
-    Boolean(
-      request.classifiedIntent?.actionIntents.some((action) =>
-        ["import_local_files"].includes(action.operation),
-      ),
+    intentOrSignal(
+      request,
+      ["import_local_files"],
+      (signals) => signals.mentionsImport,
     ),
   instruction:
     "Use library_import with kind:'files' to import local files from the user's filesystem into Zotero. Use only resolved paths within the contract's source boundary. Missing paths require preparation; this import obligation does not independently authorize command execution. A bibliography file (.ris, .bib, .enw, .nbib, RDF) has its references imported as real items; other files are attached, and PDFs go through Zotero's metadata lookup so they arrive with a title and authors. Optionally specify a targetCollectionId to file the results into a collection." +
@@ -194,12 +218,10 @@ const LIBRARY_IMPORT_GUIDANCE: ToolGuidance = {
 
 const LIBRARY_DELETE_GUIDANCE: ToolGuidance = {
   matches: (request) =>
-    Boolean(
-      request.classifiedIntent?.actionIntents.some((action) =>
-        ["merge_items", "trash_items", "restore_from_trash"].includes(
-          action.operation,
-        ),
-      ),
+    intentOrSignal(
+      request,
+      ["merge_items", "trash_items", "restore_from_trash"],
+      (signals) => signals.mentionsDuplicates || signals.mentionsTrash,
     ),
   instruction:
     "To merge duplicates: first use library_search({ entity:'items', mode:'duplicates' }) to find duplicate groups, then use library_read to compare metadata and decide which item is the best master, then call library_delete({ mode:'merge', ... }) with the master and the others. The master keeps all children (attachments, notes, tags, collections) from the merged items." +
@@ -208,14 +230,10 @@ const LIBRARY_DELETE_GUIDANCE: ToolGuidance = {
 
 const ATTACHMENT_UPDATE_GUIDANCE: ToolGuidance = {
   matches: (request) =>
-    Boolean(
-      request.classifiedIntent?.actionIntents.some((action) =>
-        [
-          "delete_attachment",
-          "rename_attachment",
-          "relink_attachment",
-        ].includes(action.operation),
-      ),
+    intentOrSignal(
+      request,
+      ["delete_attachment", "rename_attachment", "relink_attachment"],
+      (signals) => signals.mentionsAttachment,
     ),
   instruction:
     "Use attachment_update to delete, rename, or re-link a single attachment. To find attachments, use library_read with sections:['attachments'] first. Renaming renames the file on disk, not just the title. Re-linking repairs an attachment whose file has moved or gone missing, and works for stored attachments as well as linked files; only linked URLs cannot be re-linked. Batch renaming with computed filenames requires separately authorized computation and exact attachment targets.",
