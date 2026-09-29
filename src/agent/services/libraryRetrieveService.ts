@@ -75,6 +75,7 @@ import {
 } from "../../services/libraryTextIndex";
 import {
   INDEX_COVERAGE_SKIP_PROBES_RATIO,
+  INDEX_PLANNER_SOFT_DEADLINE_MS,
   MAX_UNINDEXED_FALLBACK_PAPERS,
 } from "../../services/libraryTextIndex/constants";
 import {
@@ -1465,6 +1466,13 @@ type LibraryRetrieveParams = LibraryRetrieveInput & {
   signal?: AbortSignal;
 };
 
+export type LibraryRetrieveServiceOptions = {
+  /** Planner wait cap while the index is on (default INDEX_PLANNER_SOFT_DEADLINE_MS). */
+  plannerSoftDeadlineMs?: number;
+  /** Query planner override (tests inject a fake). */
+  queryPlanner?: typeof resolveRetrievalQueryPlan;
+};
+
 export class LibraryRetrieveService {
   constructor(
     private readonly zoteroGateway: ZoteroGateway,
@@ -1474,6 +1482,7 @@ export class LibraryRetrieveService {
     private readonly triage: typeof triageCandidatesWithModel = triageCandidatesWithModel,
     private readonly textIndex: LibraryTextIndexFacade = libraryTextIndex,
     private readonly queryEmbedder: LibraryQueryEmbedder = defaultQueryEmbedder,
+    private readonly options: LibraryRetrieveServiceOptions = {},
   ) {}
 
   /**
@@ -1510,6 +1519,49 @@ export class LibraryRetrieveService {
     };
   }
 
+  /**
+   * Runs the query planner. While the index is on (retrieval is fast) and a
+   * model is configured, the planner gets a soft deadline: past it, the
+   * literal plan is used and the late plan is discarded.
+   */
+  private async planQuery(
+    params: LibraryRetrieveParams,
+    plannerParams: Parameters<typeof resolveRetrievalQueryPlan>[0],
+    hasModelConfig: boolean,
+    timer: RetrievalTimer,
+    warnings: string[],
+  ): Promise<RetrievalQueryPlan> {
+    const planner = this.options.queryPlanner ?? resolveRetrievalQueryPlan;
+    const plannerPromise = planner(plannerParams);
+    const softDeadline =
+      hasModelConfig && this.textIndex.isEnabled()
+        ? (this.options.plannerSoftDeadlineMs ?? INDEX_PLANNER_SOFT_DEADLINE_MS)
+        : null;
+    if (softDeadline === null) return plannerPromise;
+    // A late plan is discarded; swallow its rejection so it is never unhandled.
+    void plannerPromise.catch(() => undefined);
+    let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<RetrievalQueryPlan>((resolve) => {
+      deadlineTimer = setTimeout(() => {
+        timer.count("plannerTimedOut");
+        warnings.push(
+          `Query planner exceeded ${Math.round(softDeadline / 1000)} s; searched with the literal query.`,
+        );
+        resolve(
+          buildRetrievalQueryPlan({
+            query: params.query,
+            queryVariants: params.queryVariants,
+          }),
+        );
+      }, softDeadline);
+    });
+    try {
+      return await Promise.race([plannerPromise, deadline]);
+    } finally {
+      clearTimeout(deadlineTimer);
+    }
+  }
+
   async retrieve(
     params: LibraryRetrieveParams,
   ): Promise<LibraryRetrieveResult> {
@@ -1539,28 +1591,41 @@ export class LibraryRetrieveService {
     const scope = await timer.span("scope", () =>
       this.resolveScope(provisionalInput, params.request, params.item),
     );
+    const warnings: string[] = [];
+    const hasModelConfig = Boolean(
+      params.apiBase ||
+      params.apiKey ||
+      params.request?.apiBase ||
+      params.request?.apiKey,
+    );
     const queryPlan = await timer.span("plan", () =>
-      resolveRetrievalQueryPlan({
-        query: params.query,
-        queryVariants: params.queryVariants,
-        readIntent:
-          params.request?.classifiedIntent?.semantic?.reading.coverage ===
-          "exhaustive"
-            ? "full-once"
-            : "targeted",
-        hasRetrievalContext:
-          requestedDepth !== "verify" && requestedIntent !== "verify",
-        model: params.model || params.request?.model,
-        apiBase: params.apiBase || params.request?.apiBase,
-        apiKey: params.apiKey || params.request?.apiKey,
-        authMode: params.authMode || params.request?.authMode,
-        providerProtocol:
-          params.providerProtocol || params.request?.providerProtocol,
-        profileOverride:
-          params.profileOverride || params.request?.advanced?.profileOverride,
-        signal: params.signal,
-        sourceSamples: this.buildScopeSourceSamples(scope),
-      }),
+      this.planQuery(
+        params,
+        {
+          query: params.query,
+          queryVariants: params.queryVariants,
+          readIntent:
+            params.request?.classifiedIntent?.semantic?.reading.coverage ===
+            "exhaustive"
+              ? "full-once"
+              : "targeted",
+          hasRetrievalContext:
+            requestedDepth !== "verify" && requestedIntent !== "verify",
+          model: params.model || params.request?.model,
+          apiBase: params.apiBase || params.request?.apiBase,
+          apiKey: params.apiKey || params.request?.apiKey,
+          authMode: params.authMode || params.request?.authMode,
+          providerProtocol:
+            params.providerProtocol || params.request?.providerProtocol,
+          profileOverride:
+            params.profileOverride || params.request?.advanced?.profileOverride,
+          signal: params.signal,
+          sourceSamples: this.buildScopeSourceSamples(scope),
+        },
+        hasModelConfig,
+        timer,
+        warnings,
+      ),
     );
     queryPlan.retrievalPurpose =
       params.request?.classifiedIntent?.semantic?.retrievalPurpose;
@@ -1569,7 +1634,6 @@ export class LibraryRetrieveService {
         ? "verified"
         : "none";
     let input = normalizeInput(params, params.request, queryPlan);
-    const warnings: string[] = [];
     for (const note of new Set(input.queryPlan.notes)) {
       warnings.push(`Query planner: ${note}`);
     }
@@ -1684,12 +1748,6 @@ export class LibraryRetrieveService {
       buildQuicksearchProbes(input.queryPlan).map((probe) =>
         probe.toLowerCase(),
       ),
-    );
-    const hasModelConfig = Boolean(
-      params.apiBase ||
-      params.apiKey ||
-      params.request?.apiBase ||
-      params.request?.apiKey,
     );
     if (
       input.depth !== "pool" &&

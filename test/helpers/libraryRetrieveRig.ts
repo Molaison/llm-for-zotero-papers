@@ -4,6 +4,7 @@
  * later library-index tasks can build a service without importing that file.
  */
 import { LibraryRetrieveService as ResolvedLibraryRetrieveService } from "../../src/agent/services/libraryRetrieveService";
+import { buildRetrievalQueryPlan } from "../../src/services/retrieval/retrievalQueryPlan";
 import type {
   EditableArticleMetadataSnapshot,
   LibraryItemTarget,
@@ -360,6 +361,9 @@ type Triage = NonNullable<
 type QueryEmbedder = NonNullable<
   ConstructorParameters<typeof ResolvedLibraryRetrieveService>[6]
 >;
+type ServiceOptions = NonNullable<
+  ConstructorParameters<typeof ResolvedLibraryRetrieveService>[7]
+>;
 type CandidateBuildOptions = NonNullable<Parameters<CandidateBuilder>[4]>;
 type CandidateBuildApiOverrides = NonNullable<Parameters<CandidateBuilder>[3]>;
 
@@ -416,6 +420,14 @@ export type RetrieveServiceRigOptions = {
   quicksearchDelayMs?: number | ((query: string) => number);
   /** Item ids each fake quicksearch query matches (default none). */
   quicksearchItemIds?: (query: string | undefined) => number[];
+  /**
+   * Installs a fake query planner that answers after this delay with one
+   * model variant; the `modelConfigured` wrapper then leaves `queryVariants`
+   * alone so the planner actually runs.
+   */
+  plannerDelayMs?: number;
+  /** Planner soft deadline injected into the service. */
+  plannerDeadlineMs?: number;
 };
 
 const DISABLED_TEXT_INDEX: LibraryTextIndexFacade = {
@@ -529,6 +541,20 @@ export function createRetrieveServiceRig(
       inFlightQuicksearch -= 1;
     }
   };
+  const serviceOptions: ServiceOptions = {};
+  if (options.plannerDeadlineMs !== undefined) {
+    serviceOptions.plannerSoftDeadlineMs = options.plannerDeadlineMs;
+  }
+  const plannerDelayMs = options.plannerDelayMs;
+  if (plannerDelayMs !== undefined) {
+    serviceOptions.queryPlanner = async ({ query }) => {
+      await new Promise((resolve) => setTimeout(resolve, plannerDelayMs));
+      return buildRetrievalQueryPlan({
+        query,
+        queryVariants: [`${query} approach`],
+      });
+    };
+  }
   const service = new RigLibraryRetrieveService(
     gateway as any,
     {
@@ -545,19 +571,22 @@ export function createRetrieveServiceRig(
     triage,
     options.textIndex || DISABLED_TEXT_INDEX,
     queryEmbedder,
+    serviceOptions,
   );
   const modelConfigured = options.modelConfigured ?? reformulations.length > 0;
   if (modelConfigured) {
     const retrieve = service.retrieve.bind(service);
     // Caller variants keep the query planner off the network; the plan's
-    // effective queries stay the plain query.
+    // effective queries stay the plain query. A fake planner never reaches
+    // the network, so it is left to run.
     service.retrieve = (params) =>
       retrieve({
         apiKey: "test-key",
         ...params,
-        queryVariants: params.queryVariants?.length
-          ? params.queryVariants
-          : [params.query],
+        queryVariants:
+          params.queryVariants?.length || plannerDelayMs !== undefined
+            ? params.queryVariants
+            : [params.query],
       });
   }
   return {
