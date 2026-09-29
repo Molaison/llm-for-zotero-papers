@@ -586,29 +586,52 @@ describe("paper_read page rendering", function () {
       } as never,
     );
 
-    const onSuccess = tool.presentation?.summaries?.onSuccess;
+    // The trace summarizes a result without its call arguments, so the
+    // label must come from the result content alone.
+    const summarize = (content: Record<string, unknown>) => {
+      const onSuccess = tool.presentation?.summaries?.onSuccess;
+      return typeof onSuccess === "function"
+        ? onSuccess({ label: "Read Paper", content })
+        : "";
+    };
+    const target = { source: "library", title: "Paper One", itemId: 1 };
     assert.equal(
-      typeof onSuccess === "function"
-        ? onSuccess({
-            args: { mode: "visual" },
-            content: {
-              pageCount: 1,
-            },
-          } as never)
-        : "",
+      summarize({
+        target,
+        pageCount: 1,
+        results: [{ pageIndex: 2, pageLabel: "3" }],
+        pageTexts: ["Page three"],
+      }),
       "Prepared 1 PDF page image",
     );
     assert.equal(
-      typeof onSuccess === "function"
-        ? onSuccess({
-            args: { mode: "capture" },
-            content: {
-              capturedPageIndex: 3,
-              pageCount: 1,
-            },
-          } as never)
-        : "",
+      summarize({
+        target,
+        pageCount: 2,
+        results: [
+          { pageIndex: 2, pageLabel: "3" },
+          { pageIndex: 3, pageLabel: "4" },
+        ],
+        pageTexts: ["Page three", "Page four"],
+      }),
+      "Prepared 2 PDF page images",
+    );
+    assert.equal(
+      summarize({
+        target,
+        capturedPageIndex: 3,
+        pageLabel: "4",
+        pageCount: 1,
+        pageText: "Visible equation text",
+      }),
       "Captured the current reader page",
+    );
+    assert.equal(
+      summarize({
+        mode: "targeted",
+        results: [{ text: "Evidence 1" }, { text: "Evidence 2" }],
+      }),
+      "Read 2 passages",
     );
   });
 });

@@ -1214,7 +1214,7 @@ export function createPaperReadTool(
         onPending: "Waiting for your approval before sending document content",
         onApproved: "Approval received - sending document content",
         onDenied: "Paper reading cancelled",
-        onSuccess: ({ args, content }) => {
+        onSuccess: ({ content }) => {
           const c = content as Record<string, unknown> | null;
           const mode = typeof c?.mode === "string" ? c.mode : undefined;
           const results = Array.isArray(c?.results) ? c.results : undefined;
@@ -1279,11 +1279,18 @@ export function createPaperReadTool(
           if (mode === "visual" && c?.status === "use_figures_mode") {
             return "Use figure extraction for this figure request";
           }
-          const argMode = readPaperReadModeFromArgs(args);
-          if (argMode === "capture" || argMode === "visual") {
-            if (c?.capturedPageIndex !== undefined)
-              return "Captured the current reader page";
-            const count = typeof c?.pageCount === "number" ? c.pageCount : 0;
+          // Visual and capture results carry no mode: the page renderer's
+          // content shape identifies them, since trace rows summarize a
+          // result without its call arguments.
+          if (!mode && c?.capturedPageIndex !== undefined) {
+            return "Captured the current reader page";
+          }
+          if (
+            !mode &&
+            typeof c?.pageCount === "number" &&
+            (Array.isArray(c?.pageTexts) || Array.isArray(c?.results))
+          ) {
+            const count = c.pageCount;
             return count > 0
               ? `Prepared ${count} PDF page image${count === 1 ? "" : "s"}`
               : "Prepared PDF pages";

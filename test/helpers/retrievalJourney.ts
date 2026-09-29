@@ -162,7 +162,7 @@ export function createRetrievalJourneyRig(): RetrievalJourneyRig {
 }
 
 /** One scripted targeted `paper_read` call against one paper. */
-function searchPaperStep(callId: string, paper: PaperContextRef) {
+function targetedReadStep(callId: string, paper: PaperContextRef) {
   return toolCallStep(callId, "paper_read", {
     mode: "targeted",
     target: { itemId: paper.itemId, contextItemId: paper.contextItemId },
@@ -218,9 +218,9 @@ export async function runRetrievalTurn(params: {
     userText: "Check the method in both papers",
     sourceMessageTimestamp: 100,
     steps: [
-      searchPaperStep("search-paper-1", FIRST_PAPER),
-      searchPaperStep("search-paper-2", FIRST_PAPER),
-      searchPaperStep("search-paper-3", SECOND_PAPER),
+      targetedReadStep("targeted-read-1", FIRST_PAPER),
+      targetedReadStep("targeted-read-2", FIRST_PAPER),
+      targetedReadStep("targeted-read-3", SECOND_PAPER),
       finalStep("Both papers describe the same scripted method."),
     ],
   });
