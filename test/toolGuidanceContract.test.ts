@@ -351,6 +351,50 @@ describe("tool guidance contracts", function () {
     );
   });
 
+  it("library_search guidance is delivered when the turn has a library or collection scope", function () {
+    const registry = createBuiltInToolRegistry({
+      zoteroGateway: {} as never,
+      pdfService: {} as never,
+      pdfPageService: {} as never,
+      retrievalService: {} as never,
+    });
+    const tool = registry.getTool("library_search")!;
+    const scope = (overrides: Record<string, unknown>) =>
+      ({
+        conversationKey: 1,
+        mode: "agent",
+        turnPaperScope: {
+          libraryID: 1,
+          conversationKind: "paper",
+          papers: [{ itemId: 1 }],
+          collections: [],
+          tags: [],
+          selectedPassagePaperRefs: [],
+          ...overrides,
+        },
+      }) as any;
+    assert.isTrue(
+      tool.guidance!.matches(
+        scope({ collections: [{ collectionId: 7, name: "Memory" }] }),
+        { matchedSkillIds: [] },
+      ),
+    );
+    assert.isTrue(
+      tool.guidance!.matches(scope({ tags: [{ name: "to-read" }] }), {
+        matchedSkillIds: [],
+      }),
+    );
+    assert.isTrue(
+      tool.guidance!.matches(scope({ papers: [] }), { matchedSkillIds: [] }),
+    );
+    assert.isTrue(
+      tool.guidance!.matches(scope({ conversationKind: "global" }), {
+        matchedSkillIds: [],
+      }),
+    );
+    assert.isFalse(tool.guidance!.matches(scope({}), { matchedSkillIds: [] }));
+  });
+
   it("keeps library_search examples explicit about entity and mode", function () {
     const failures: string[] = [];
     const callPattern = /library_search\(([^)]*)\)/g;

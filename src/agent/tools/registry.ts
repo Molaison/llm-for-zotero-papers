@@ -376,18 +376,9 @@ export class AgentToolRegistry {
     }
     const validation = tool.validate(toolArguments);
     if (!validation.ok) {
-      const validationError =
-        call.name === "library_search" &&
-        (context.request.turnPaperScope.collections.length ||
-          context.request.turnPaperScope.tags.length) &&
-        validation.error.includes("entity and mode are required")
-          ? `${validation.error} For selected collection/tag scopes, use ` +
-            "{ entity:'items', mode:'list', filters:{ collectionId:<collectionId> } } or " +
-            "{ entity:'items', mode:'list', filters:{ tag:'<tag>' } }."
-          : validation.error;
       return createSyntheticErrorResult(
         call,
-        `Invalid tool input for ${call.name}: ${validationError}`,
+        `Invalid tool input for ${call.name}: ${validation.error}`,
         { inputRejected: true },
       );
     }
