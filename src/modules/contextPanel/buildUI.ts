@@ -1,6 +1,5 @@
 import { createElement } from "../../utils/domHelpers";
 import { t } from "../../utils/i18n";
-import { createDockedPanelTitle } from "./dockedPanelTitle";
 import {
   PREFERENCES_PANE_ID,
   getSelectTextExpandedLabel,
@@ -25,6 +24,10 @@ import {
 } from "./portalScope";
 import { getConversationKey } from "./conversationIdentity";
 import { createRuntimeSystemControls } from "./runtimeSystemControls";
+import {
+  resolveSidebarChatModeToggleState,
+  type SidebarChatModeTab,
+} from "./sidebarChatModeToggle";
 import { buildContextUsagePresentation } from "./textUtils";
 import { createChatLatestButton } from "./chatLatestButton";
 
@@ -158,6 +161,7 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
   historyToggle.style.display = "";
 
   const isStandaloneBody = (body as HTMLElement).dataset?.standalone === "true";
+  // Runtime systems follow the history button, after a thin divider.
   const headerRuntimeControls = createElement(
     doc,
     "div",
@@ -166,27 +170,12 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
       id: "llm-header-runtime-controls",
     },
   );
-
-  // Mode chip: single pill showing current mode
-  const modeSwitchWrap = createElement(doc, "div", "llm-mode-switch", {
-    id: "llm-mode-capsule",
-  });
-  modeSwitchWrap.dataset.mode = hasItem && isGlobalMode ? "global" : "paper";
-
-  const modeChipLabel = activeNoteSession
-    ? t("Note chat")
-    : isGlobalMode
-      ? t("Library chat")
-      : t("Paper chat");
-  const modeChipBtn = createElement(doc, "button", "llm-mode-chip", {
-    id: "llm-mode-chip",
-    type: "button",
-    textContent: modeChipLabel,
-    title: modeChipLabel,
-  });
-  modeChipBtn.setAttribute("aria-label", modeChipLabel);
-
-  modeSwitchWrap.append(modeChipBtn);
+  const runtimeDivider = createElement(
+    doc,
+    "span",
+    "llm-header-runtime-divider",
+  );
+  runtimeDivider.setAttribute("aria-hidden", "true");
 
   const runtimeSystemControls = createRuntimeSystemControls(doc, {
     groupId: "llm-runtime-system-controls",
@@ -197,12 +186,88 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
       claude_code: "llm-claude-system-toggle",
     },
   });
+  headerRuntimeControls.append(runtimeDivider, runtimeSystemControls.group);
 
-  headerRuntimeControls.append(modeSwitchWrap, runtimeSystemControls.group);
+  // Paper chat | Library chat, sharing the standalone window's segmented tabs.
+  const chatModeToggle = resolveSidebarChatModeToggleState({
+    isGlobalMode: hasItem && isGlobalMode,
+    isNoteSession: Boolean(activeNoteSession),
+    isWebChat: false,
+  });
+  const chatModeTabs = createElement(
+    doc,
+    "div",
+    "llm-standalone-tab-group llm-header-mode-tabs",
+    { id: "llm-chat-mode-tabs" },
+  );
+  chatModeTabs.dataset.mode = chatModeToggle.activeTab;
+  const createChatModeTab = (
+    tab: SidebarChatModeTab,
+    id: string,
+    label: string,
+  ): HTMLButtonElement => {
+    const button = createElement(
+      doc,
+      "button",
+      "llm-standalone-tab llm-header-mode-tab",
+      { id, type: "button", title: label },
+    );
+    button.dataset.tab = tab;
+    const labelEl = createElement(doc, "span", "llm-header-mode-tab-label", {
+      textContent: label,
+    });
+    button.appendChild(labelEl);
+    const active = chatModeToggle.activeTab === tab;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", active ? "true" : "false");
+    button.disabled = chatModeToggle.disabled;
+    if (chatModeToggle.disabled) button.setAttribute("aria-disabled", "true");
+    return button;
+  };
+  chatModeTabs.append(
+    createChatModeTab(
+      "paper",
+      "llm-paper-chat-tab",
+      t(chatModeToggle.paperTabLabel),
+    ),
+    createChatModeTab(
+      "library",
+      "llm-library-chat-tab",
+      t(chatModeToggle.libraryTabLabel),
+    ),
+  );
+
+  // Row 1: the mode toggle, centered. It is laid out whenever the history
+  // bar is, which CSS keeps always: no code path writes its display.
+  const toggleRow = createElement(doc, "div", "llm-header-toggle-row", {
+    id: "llm-header-toggle-row",
+  });
+  toggleRow.append(chatModeTabs);
+  // The Independent layout's full-pane chat closes from its own header, the
+  // same way its rail icon does (dedicatedChatPane owns the click). CSS shows
+  // it only in the Independent layout; the standalone window never gets it.
+  if (body.closest(".llm-dedicated-chat-pane")) {
+    const closeBtn = createElement(
+      doc,
+      "button",
+      "llm-btn-icon llm-dedicated-chat-close",
+      {
+        id: "llm-dedicated-chat-close",
+        type: "button",
+        title: t("Close chat"),
+      },
+    );
+    closeBtn.setAttribute("aria-label", t("Close chat"));
+    toggleRow.append(closeBtn);
+  }
+
   historyBar.append(historyNewBtn, historyToggle, headerRuntimeControls);
 
   headerInfo.append(title, historyBar);
-  headerTop.appendChild(headerInfo);
+  // Row 2: new chat, history, and runtime systems on the left, panel actions
+  // on the right.
+  const headerNavRow = createElement(doc, "div", "llm-header-nav-row");
+  headerNavRow.appendChild(headerInfo);
 
   const headerActions = createElement(doc, "div", "llm-header-actions");
   const popoutBtn = createElement(
@@ -247,9 +312,9 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
   });
   clearBtn.setAttribute("aria-label", t("Delete conversation"));
   headerActions.append(popoutBtn, settingsBtn, exportBtn, clearBtn);
-  headerTop.appendChild(headerActions);
+  headerNavRow.appendChild(headerActions);
+  headerTop.append(toggleRow, headerNavRow);
   if (body.closest(".llm-dedicated-chat-pane")) {
-    header.appendChild(createDockedPanelTitle(body));
     title.style.display = "none";
   }
   header.appendChild(headerTop);

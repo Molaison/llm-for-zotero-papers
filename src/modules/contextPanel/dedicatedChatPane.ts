@@ -61,9 +61,33 @@ export function installDedicatedChatPane(
   root.setAttribute("data-llm-pane-view", "details");
   const disposeLayout = installSidebarLayoutPreference(doc);
   const libraryPane = installPersistentLibraryChatPane(doc);
+  type ChatSidenav = Element & {
+    _collapsed: boolean;
+    container?: { getPane: (id: string) => Element | null };
+  };
+  // Close the full-pane chat without unmounting it: its conversation and
+  // draft stay with the native host, exactly as the rail icon leaves them.
+  const closeChatView = (event: Event, sidenav: ChatSidenav) => {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    root.setAttribute("data-llm-pane-view", "details");
+    sidenav._collapsed = true;
+  };
   const onClick = (event: Event) => {
     if ((event as MouseEvent).button !== 0) return;
     const target = event.target as Element | null;
+    const closeButton = target?.closest?.("#llm-dedicated-chat-close");
+    if (closeButton) {
+      const host = closeButton.closest("item-details") as
+        | (Element & { sidenav?: ChatSidenav })
+        | null;
+      if (
+        host?.sidenav &&
+        root.getAttribute("data-llm-sidebar-layout") === "independent"
+      )
+        closeChatView(event, host.sidenav);
+      return;
+    }
     const button = target?.closest?.("[data-pane]");
     const sidenav = button?.closest("item-pane-sidenav") as
       | (Element & {
@@ -89,10 +113,7 @@ export function installDedicatedChatPane(
     ) {
       // Native pane navigation always expands after scrolling. Intercept the
       // close click before it can reopen the retained conversation host.
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      root.setAttribute("data-llm-pane-view", "details");
-      sidenav._collapsed = true;
+      closeChatView(event, sidenav);
       return;
     }
     root.setAttribute("data-llm-pane-view", chatPane ? "chat" : "details");
@@ -129,17 +150,4 @@ export function installDedicatedChatPane(
     doc.removeEventListener("click", onClick, true);
     root.removeAttribute("data-llm-pane-view");
   };
-}
-
-/** Close presentation only; native hosts retain their conversation and draft. */
-export function closeDedicatedChatPane(body: Element): void {
-  const host = body.closest("item-details") as
-    | (Element & { sidenav?: { _collapsed: boolean } })
-    | null;
-  if (!host?.sidenav) return;
-  body.ownerDocument.documentElement.setAttribute(
-    "data-llm-pane-view",
-    "details",
-  );
-  host.sidenav._collapsed = true;
 }

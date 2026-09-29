@@ -1,77 +1,9 @@
 /* LLM Panel Styles */
 
-:root:not([data-llm-pane-view="stacked"]) .llm-dedicated-chat-pane .llm-panel {
-  padding-top: 0;
-}
-
 :root:not([data-llm-pane-view="stacked"]) .llm-dedicated-chat-pane .llm-header {
   padding: 0 8px 4px;
   gap: 10px;
   flex-shrink: 0;
-}
-
-.llm-docked-title-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  /* Match Zotero's reader toolbar, including its bottom separator. */
-  box-sizing: border-box;
-  height: 41px;
-  min-height: 41px;
-  margin-inline: -10px;
-  padding-inline: 10px;
-  border-bottom: var(--material-panedivider);
-}
-
-.llm-docked-brand {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  min-width: 0;
-  color: var(--fill-primary);
-  font-size: var(--llm-fs-12);
-  font-weight: 600;
-}
-
-.llm-docked-logo {
-  width: 24px;
-  height: 24px;
-  flex: 0 0 24px;
-}
-
-.llm-docked-close {
-  appearance: none;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: 0 0 26px;
-  width: 26px;
-  height: 26px;
-  padding: 5px;
-  border: 0;
-  border-radius: 5px;
-  color: var(--fill-secondary);
-  background: transparent;
-  cursor: pointer;
-}
-
-.llm-docked-close::before {
-  content: "";
-  width: 16px;
-  height: 16px;
-  background-color: currentColor;
-  mask: url("icons/action-close.svg") center / contain no-repeat;
-}
-
-.llm-docked-close:hover {
-  color: var(--fill-primary);
-  background: var(--fill-quinary);
-}
-
-.llm-docked-close:focus-visible {
-  outline: 2px solid var(--color-accent);
-  outline-offset: 2px;
 }
 
 /* Chat is a dedicated view of the native right pane. Keep its per-tab host
@@ -420,11 +352,95 @@
 }
 
 .llm-header-top {
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+/*
+ * Row 1: the Paper chat | Library chat toggle, centered, at the standalone
+ * window's own segmented-tab size. It flows with the header: no fixed height,
+ * no divider. No code writes its display, so it is laid out whenever the
+ * history bar below is (that bar's display is !important).
+ */
+.llm-header-toggle-row {
+  --llm-standalone-ui-font-size: var(--llm-fs-12);
+  --llm-standalone-ui-line-height: calc(20px * var(--llm-font-scale));
+  --llm-standalone-chrome-gap: 4px;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-width: 0;
+  padding: 6px 0 8px;
+}
+
+/* Independent row 1: the toggle stays centered between symmetric side
+   tracks, with the chat's close button at the right end. Stacked keeps its
+   native section chrome and never shows the button. */
+:root[data-llm-sidebar-layout="independent"]
+  .llm-dedicated-chat-pane
+  .llm-header-toggle-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+}
+
+:root[data-llm-sidebar-layout="independent"]
+  .llm-dedicated-chat-pane
+  .llm-header-toggle-row
+  > .llm-header-mode-tabs {
+  grid-column: 2;
+}
+
+.llm-dedicated-chat-pane .llm-dedicated-chat-close {
+  grid-column: 3;
+  justify-self: end;
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  min-height: 28px;
+  padding: 0;
+  font-size: 0;
+}
+
+:root:not([data-llm-sidebar-layout="independent"])
+  .llm-dedicated-chat-pane
+  .llm-dedicated-chat-close {
+  display: none;
+}
+
+.llm-dedicated-chat-pane .llm-dedicated-chat-close::before {
+  content: "";
+  display: block;
+  width: 16px;
+  height: 16px;
+  background-color: currentColor;
+  mask-image: url("icons/action-close.svg");
+  mask-repeat: no-repeat;
+  mask-position: center;
+  mask-size: 16px 16px;
+}
+
+/*
+ * Row 2: new chat, history, and runtime systems on the left, panel actions on
+ * the right, with the pane divider closing the header off from the chat. The
+ * negative inline margin runs the divider edge to edge past the panel's 2px
+ * padding (10px in the independent pane).
+ */
+.llm-header-nav-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   column-gap: 4px;
-  position: relative;
+  margin-inline: -2px;
+  padding: 0 2px 6px;
+  border-bottom: var(--material-panedivider);
+}
+
+:root:not([data-llm-pane-view="stacked"])
+  .llm-dedicated-chat-pane
+  .llm-header-nav-row {
+  margin-inline: -10px;
+  padding-inline: 10px;
 }
 
 .llm-header-info {
@@ -460,7 +476,7 @@
   flex-direction: row !important;
   flex-wrap: nowrap !important;
   align-items: center !important;
-  gap: 10px;
+  gap: 4px;
   min-height: 22px;
   min-width: 0;
 }
@@ -477,6 +493,7 @@
   line-height: 1.2;
   border-radius: 0;
   min-height: 22px;
+  margin: 0;
   padding: 0;
   cursor: pointer;
 }
@@ -486,12 +503,13 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 20px;
-  min-width: 20px;
-  height: 20px;
-  min-height: 20px;
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  min-height: 28px;
   font-size: 0;
   line-height: 0;
+  border-radius: 4px;
 }
 
 .llm-history-new::before {
@@ -516,15 +534,15 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 20px;
-  min-width: 20px;
-  height: 20px;
-  min-height: 20px;
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  min-height: 28px;
   font-size: 0;
   line-height: 0;
   padding: 0;
   border: none;
-  border-radius: 0;
+  border-radius: 4px;
   background: transparent;
 }
 
@@ -637,80 +655,60 @@
   outline-offset: 2px;
 }
 
-/* ---- Mode chip: single pill showing current mode ---- */
+/* ---- Runtime systems and the Paper chat | Library chat toggle ---- */
 
 .llm-header-runtime-controls {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  min-width: max-content;
-  flex: 0 0 auto;
-}
-
-.llm-mode-switch {
-  display: flex !important;
-  flex-direction: row !important;
-  flex-wrap: nowrap !important;
-  align-items: center !important;
-  justify-content: flex-start;
-  gap: 5px;
-  margin: 0 !important;
-  padding: 0 !important;
-  flex: 0 0 auto;
-  width: auto;
   min-width: 0;
-  height: 22px;
-}
-
-.llm-mode-chip {
-  appearance: none;
-  -moz-appearance: none;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  margin: 0 !important;
-  width: auto;
   flex: 0 0 auto;
-  border: 1px solid var(--stroke-secondary);
-  background: var(--fill-quinary);
-  cursor: pointer;
-  font: inherit;
-  font-size: var(--llm-fs-12);
-  font-weight: 600;
-  color: var(--fill-primary);
-  padding: 2px 9px;
-  border-radius: 999px;
+}
+
+/* A thin rule between the history button and the runtime systems. */
+.llm-header-runtime-divider {
+  box-sizing: border-box;
+  flex: 0 0 auto;
+  width: 1px;
+  height: 16px;
+  margin-inline: 2px;
+  border-inline-start: var(--material-panedivider);
+}
+
+/* The sidebar toggle reuses the standalone segmented tabs. It has no flyout
+ * to rise above, so header menus keep painting over it. */
+.llm-header-toggle-row .llm-header-mode-tabs {
+  z-index: auto;
+}
+
+/* Balanced tabs: equal minimum widths, labels that shrink only when the
+ * sidebar is too narrow for both. Scoped to the row to outrank the shared
+ * .llm-standalone-tab padding. */
+.llm-header-toggle-row .llm-header-mode-tab {
+  flex: 0 1 auto;
+  min-width: 64px;
+  padding-inline: 12px;
+}
+
+.llm-header-mode-tab-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
-  line-height: normal;
-  height: 22px;
-  min-height: 22px;
-  vertical-align: middle;
-  align-self: center;
-  transition:
-    background 0.15s,
-    border-color 0.15s;
 }
 
-/* Hover only in standalone window where the chip is interactive */
-[data-standalone="true"] .llm-mode-chip:hover {
-  background: var(--fill-secondary);
-  border-color: var(--stroke-secondary);
-}
-
-.llm-mode-chip:focus-visible {
+.llm-header-mode-tab:focus-visible {
   outline: 2px solid var(--color-accent);
   outline-offset: 2px;
 }
 
-.llm-mode-chip[data-webchat-static="true"],
-.llm-mode-chip:disabled[data-webchat-static="true"] {
+/* WebChat and note conversations hold the toggle static. */
+.llm-header-mode-tab:disabled {
   cursor: default;
-  opacity: 1;
 }
 
-[data-standalone="true"] .llm-mode-chip[data-webchat-static="true"]:hover {
-  background: var(--fill-quinary);
-  border-color: var(--stroke-secondary);
+.llm-header-mode-tab:disabled:not(.active):hover {
+  color: var(--fill-secondary);
 }
 
 .llm-runtime-system-controls {
@@ -1114,15 +1112,19 @@
   }
 
   /*
-   * Tighten the leading gaps when the trailing icons compact, so the space
-   * comes out of the chrome rather than out of the mode chip's label. The chip
-   * is the only element here that scales with --llm-font-scale, and it is
-   * pinned rigid, so every pixel reclaimed from these gaps is headroom the
-   * label can grow into before it reaches the action icons. The icons keep
-   * their own size — only the spacing between them closes up.
+   * Tighten the leading icons together with the trailing ones, so both ends
+   * of the actions row compact evenly.
    */
   .llm-history-bar {
-    gap: 4px;
+    gap: 0;
+  }
+
+  .llm-history-new,
+  .llm-history-toggle {
+    width: 24px;
+    min-width: 24px;
+    height: 24px;
+    min-height: 24px;
   }
 }
 
@@ -2565,7 +2567,10 @@
   gap: 2px;
   padding: 1px;
   border-radius: 10px;
-  background: color-mix(in srgb, var(--material-background) 80%, black 20%);
+  background: var(
+    --llm-standalone-tab-track-bg,
+    color-mix(in srgb, var(--material-background) 80%, black 20%)
+  );
   border: 1px solid color-mix(in srgb, var(--stroke-secondary) 60%, transparent);
   min-width: 0;
   max-width: 100%;
@@ -2599,38 +2604,43 @@
 }
 
 .llm-standalone-tab.active {
-  background: var(--fill-quinary);
+  background: var(--llm-standalone-tab-active-bg, var(--fill-quinary));
   color: var(--fill-primary);
   font-weight: 600;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
 }
 
-#llmforzotero-standalone-chat-root[data-standalone-theme="light"] {
-  --llm-standalone-tab-track-bg: color-mix(
+/* Light surfaces for the segmented tabs, shared by the standalone window and
+ * the sidebar header. Each surface opts in below with its own theme hook. */
+#llmforzotero-standalone-chat-root,
+.llm-header-toggle-row {
+  --llm-standalone-tab-light-track-bg: color-mix(
     in srgb,
     var(--material-background) 88%,
     var(--fill-primary) 12%
   );
-  --llm-standalone-tab-active-bg: color-mix(
+  --llm-standalone-tab-light-active-bg: color-mix(
     in srgb,
     var(--material-background) 78%,
     var(--fill-primary) 22%
   );
+}
+
+@media (prefers-color-scheme: light) {
+  .llm-header-toggle-row {
+    --llm-standalone-tab-track-bg: var(--llm-standalone-tab-light-track-bg);
+    --llm-standalone-tab-active-bg: var(--llm-standalone-tab-light-active-bg);
+  }
+}
+
+#llmforzotero-standalone-chat-root[data-standalone-theme="light"] {
+  --llm-standalone-tab-track-bg: var(--llm-standalone-tab-light-track-bg);
+  --llm-standalone-tab-active-bg: var(--llm-standalone-tab-light-active-bg);
   --llm-standalone-sidebar-surface-bg: color-mix(
     in srgb,
     var(--material-background) 90%,
     var(--fill-primary) 10%
   );
-}
-
-#llmforzotero-standalone-chat-root[data-standalone-theme="light"]
-  .llm-standalone-tab-group {
-  background: var(--llm-standalone-tab-track-bg);
-}
-
-#llmforzotero-standalone-chat-root[data-standalone-theme="light"]
-  .llm-standalone-tab.active {
-  background: var(--llm-standalone-tab-active-bg);
 }
 
 .llm-standalone-content-wrapper {
@@ -14828,9 +14838,4 @@ item-pane-sidenav .llm-persistent-rail-entry[hidden] {
   #zotero-item-pane-content
   > #zotero-item-details {
   visibility: visible;
-}
-
-/* Stacked mode restores the native collapsible section and classic toolbar. */
-:root[data-llm-pane-view="stacked"] .llm-docked-title-row {
-  display: none;
 }

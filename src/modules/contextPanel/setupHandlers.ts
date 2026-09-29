@@ -369,6 +369,7 @@ import {
   type RuntimeConversationSystem,
   type RuntimeSystemControls,
 } from "./runtimeSystemControls";
+import { resolveSidebarChatModeToggleState } from "./sidebarChatModeToggle";
 import { getPanelDomRefs } from "./setupHandlers/domRefs";
 import {
   chooseAutoLoadedContextPanelItem,
@@ -735,8 +736,9 @@ export function setupHandlers(
     historyToggleBtn,
     historyModeIndicator,
     historyMenu,
-    modeCapsule,
-    modeChipBtn,
+    chatModeTabs,
+    paperChatTabBtn,
+    libraryChatTabBtn,
     historyRowMenu,
     historyRowRenameBtn,
     historyUndo,
@@ -1334,13 +1336,20 @@ export function setupHandlers(
     },
   };
   let runtimeSystemSwitchInFlight = false;
+  const headerRuntimeControls = body.querySelector(
+    "#llm-header-runtime-controls",
+  ) as HTMLElement | null;
   const updateRuntimeSystemToggles = () => {
-    syncRuntimeSystemControls(panelRuntimeSystemControls, {
+    const state = syncRuntimeSystemControls(panelRuntimeSystemControls, {
       activeSystem: getConversationSystem(),
       codexEnabled: isCodexModeAvailable(),
       claudeEnabled: isClaudeModeAvailable(),
       busy: runtimeSystemSwitchInFlight,
     });
+    // The divider before the runtime systems goes when they do.
+    if (headerRuntimeControls) {
+      headerRuntimeControls.style.display = state.groupVisible ? "" : "none";
+    }
   };
   let claudeWarmupInFlight: Promise<void> | null = null;
   const warmClaudeModeCaches = () => {
@@ -1680,6 +1689,34 @@ export function setupHandlers(
   );
   const getTextContextConversationKey = (): number | null =>
     item ? getConversationKey(item) : null;
+  // WebChat owns the paper slot's tooltip while it is active.
+  let webChatModeTabTitle = "";
+  const syncChatModeTabs = () => {
+    if (!chatModeTabs || !paperChatTabBtn || !libraryChatTabBtn) return;
+    const state = resolveSidebarChatModeToggleState({
+      isGlobalMode: Boolean(item) && isGlobalMode(),
+      isNoteSession: isNoteSession(),
+      isWebChat: panelRoot.dataset.webchatMode === "true",
+    });
+    chatModeTabs.dataset.mode = state.activeTab;
+    const paperLabelEl = paperChatTabBtn.querySelector(
+      ".llm-header-mode-tab-label",
+    );
+    const paperLabel = t(state.paperTabLabel);
+    if (paperLabelEl) paperLabelEl.textContent = paperLabel;
+    paperChatTabBtn.title =
+      state.showWebChatDot && webChatModeTabTitle
+        ? webChatModeTabTitle
+        : paperLabel;
+    for (const tab of [paperChatTabBtn, libraryChatTabBtn]) {
+      const active = tab.dataset.tab === state.activeTab;
+      tab.classList.toggle("active", active);
+      tab.setAttribute("aria-pressed", active ? "true" : "false");
+      tab.disabled = state.disabled;
+      if (state.disabled) tab.setAttribute("aria-disabled", "true");
+      else tab.removeAttribute("aria-disabled");
+    }
+  };
   const syncConversationIdentity = () => {
     if (
       item &&
@@ -1819,34 +1856,7 @@ export function setupHandlers(
       // Keep historyModeIndicator (which is the clock history button) accessible.
       // Its label is static "Conversation history" — no text update needed.
     }
-    // Update mode capsule data-active state
-    if (modeCapsule) {
-      modeCapsule.dataset.mode = mode || "";
-    }
-    if (modeChipBtn) {
-      // [webchat] Don't overwrite — applyWebChatModeUI manages the chip in webchat mode
-      if (!modeChipBtn.querySelector(".llm-webchat-dot")) {
-        const currentLabel = noteSession
-          ? t("Note chat")
-          : mode === "global"
-            ? t("Library chat")
-            : t("Paper chat");
-        modeChipBtn.textContent = currentLabel;
-        modeChipBtn.title = noteSession
-          ? currentLabel
-          : mode === "global"
-            ? "Switch to paper chat"
-            : "Switch to library chat";
-        modeChipBtn.setAttribute(
-          "aria-label",
-          noteSession
-            ? currentLabel
-            : mode === "global"
-              ? "Switch to paper chat"
-              : "Switch to library chat",
-        );
-      }
-    }
+    syncChatModeTabs();
     if (inputBox && !noteSession) {
       inputBox.placeholder =
         mode === "global"
@@ -2327,7 +2337,12 @@ export function setupHandlers(
       if (panelWidth <= 0) return;
       withScrollGuard(chatBox, conversationKey, () => {
         applyResponsiveActionButtonsLayout();
-        updateHeaderSpacing(headerTop);
+        // The runtime systems share the actions row (row 2) with the panel
+        // actions; that row's gap is the one they compress against.
+        updateHeaderSpacing(
+          headerTop?.querySelector<HTMLElement>(".llm-header-nav-row") ||
+            headerTop,
+        );
         if (panelWidth !== lastUserContextAlignmentPanelWidth) {
           syncUserContextAlignmentWidths(body);
           lastUserContextAlignmentPanelWidth = panelWidth;
@@ -4728,7 +4743,8 @@ export function setupHandlers(
     historyUndoText,
     historyUndoBtn,
     topToast,
-    modeChipBtn,
+    paperChatTabBtn,
+    libraryChatTabBtn,
     getItem: () => item,
     setItem: (nextItem) => {
       if (
@@ -6321,61 +6337,44 @@ export function setupHandlers(
     panelRoot.dataset.webchatMode = isWebChat ? "true" : "false";
     syncQueuedFollowUpRegistration();
 
-    // Mode chip: show target site name with connection dot, or restore original
-    if (modeChipBtn) {
+    // Mode toggle: WebChat takes the paper slot, with its connection dot on
+    // that active tab, and the toggle stays static until WebChat exits.
+    if (paperChatTabBtn) {
       if (isWebChat) {
-        // Resolve the target label from the current model name
-        let webchatChipLabel = "chatgpt";
-        let webchatChipTitle = "WebChat Sync";
+        let webchatTabTitle = "WebChat Sync";
         try {
           const { currentModel } = getSelectedModelInfo();
           const { getWebChatTargetByModelName } =
             require("../../webchat/types") as typeof import("../../webchat/types");
           const entry = getWebChatTargetByModelName(currentModel || "");
           if (entry) {
-            webchatChipLabel = entry.displayName;
-            webchatChipTitle = `${entry.label} Web Sync (${entry.modelName})`;
+            webchatTabTitle = `${entry.label} Web Sync (${entry.modelName})`;
           }
         } catch {
           /* fallback to defaults */
         }
+        webChatModeTabTitle = webchatTabTitle;
 
-        let dot = modeChipBtn.querySelector(
+        let dot = paperChatTabBtn.querySelector(
           ".llm-webchat-dot",
         ) as HTMLElement | null;
         if (!dot) {
-          dot = (modeChipBtn.ownerDocument as Document).createElement("span");
+          dot = (paperChatTabBtn.ownerDocument as Document).createElement(
+            "span",
+          );
           dot.className = "llm-webchat-dot llm-webchat-dot-disconnected";
         }
-        modeChipBtn.textContent = "";
-        modeChipBtn.appendChild(dot);
-        modeChipBtn.appendChild(
-          (modeChipBtn.ownerDocument as Document).createTextNode(
-            ` ${webchatChipLabel}`,
-          ),
-        );
-        modeChipBtn.title = webchatChipTitle;
-        modeChipBtn.disabled = true;
-        modeChipBtn.setAttribute("aria-disabled", "true");
-        modeChipBtn.dataset.webchatStatic = "true";
-        modeChipBtn.style.cursor = "default";
+        paperChatTabBtn.prepend(dot);
+        syncChatModeTabs();
         webChatFeature.startConnectionCheck(dot);
       } else {
-        const oldDot = modeChipBtn.querySelector(".llm-webchat-dot");
+        webChatModeTabTitle = "";
+        const oldDot = paperChatTabBtn.querySelector(".llm-webchat-dot");
         if (oldDot) {
           oldDot.remove();
-          // Restore mode chip text — the normal render sync skips it while the dot is present
-          const chipLabel = isGlobalMode() ? "Library chat" : "Paper chat";
-          modeChipBtn.textContent = chipLabel;
-          modeChipBtn.title = isGlobalMode()
-            ? "Switch to paper chat"
-            : "Switch to library chat";
         }
         webChatFeature.stopConnectionCheck();
-        modeChipBtn.disabled = false;
-        modeChipBtn.removeAttribute("aria-disabled");
-        delete modeChipBtn.dataset.webchatStatic;
-        modeChipBtn.style.cursor = "";
+        syncChatModeTabs();
       }
     }
 
@@ -6485,7 +6484,7 @@ export function setupHandlers(
     if (headerTop) ro.observe(headerTop);
     for (const element of Array.from(
       headerTop?.querySelectorAll(
-        ".llm-mode-chip, .llm-runtime-system-controls",
+        ".llm-header-nav-row, .llm-runtime-system-controls",
       ) || [],
     ))
       ro.observe(element as Element);

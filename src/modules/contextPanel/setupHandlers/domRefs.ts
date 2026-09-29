@@ -27,8 +27,9 @@ export type PanelDomRefs = {
   historyToggleBtn: HTMLButtonElement | null;
   historyModeIndicator: HTMLButtonElement | null;
   historyMenu: HTMLDivElement | null;
-  modeCapsule: HTMLElement | null;
-  modeChipBtn: HTMLButtonElement | null;
+  chatModeTabs: HTMLDivElement | null;
+  paperChatTabBtn: HTMLButtonElement | null;
+  libraryChatTabBtn: HTMLButtonElement | null;
   historyRowMenu: HTMLDivElement | null;
   historyRowRenameBtn: HTMLButtonElement | null;
   historyUndo: HTMLDivElement | null;
@@ -158,9 +159,14 @@ export function getPanelDomRefs(body: Element): PanelDomRefs {
     historyModeIndicator: body.querySelector(
       "#llm-history-toggle",
     ) as HTMLButtonElement | null,
-    modeCapsule: body.querySelector("#llm-mode-capsule") as HTMLElement | null,
-    modeChipBtn: body.querySelector(
-      "#llm-mode-chip",
+    chatModeTabs: body.querySelector(
+      "#llm-chat-mode-tabs",
+    ) as HTMLDivElement | null,
+    paperChatTabBtn: body.querySelector(
+      "#llm-paper-chat-tab",
+    ) as HTMLButtonElement | null,
+    libraryChatTabBtn: body.querySelector(
+      "#llm-library-chat-tab",
     ) as HTMLButtonElement | null,
     historyMenu: body.querySelector(
       "#llm-history-menu",

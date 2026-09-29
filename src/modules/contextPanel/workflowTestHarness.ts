@@ -1687,7 +1687,13 @@ async function togglePanelConversationMode(
   assertWorkflowTestEnabled();
   const panel = getPanel(panelId);
   const before = await getDiagnostics(panelId);
-  dispatchWorkflowClick(panel.body, "#llm-mode-chip", "Chat mode button");
+  dispatchWorkflowClick(
+    panel.body,
+    before.conversationKind === "global"
+      ? "#llm-paper-chat-tab"
+      : "#llm-library-chat-tab",
+    "Chat mode tab",
+  );
   return waitForPanelConversationChange({
     panelId,
     previousConversationKind: before.conversationKind,
@@ -2183,8 +2189,14 @@ async function measurePanelRuntimeGeometry(
   const runtimeControls = panel.body.querySelector(
     ".llm-panel-runtime-system-controls",
   ) as HTMLElement | null;
-  const modeChip = panel.body.querySelector(
-    ".llm-mode-chip",
+  const modeRow = panel.body.querySelector(
+    ".llm-header-toggle-row",
+  ) as HTMLElement | null;
+  const modeTabs = panel.body.querySelector(
+    ".llm-header-mode-tabs",
+  ) as HTMLElement | null;
+  const historyToggle = panel.body.querySelector(
+    "#llm-history-toggle",
   ) as HTMLElement | null;
   const headerActions = panel.body.querySelector(
     ".llm-header-actions",
@@ -2196,7 +2208,9 @@ async function measurePanelRuntimeGeometry(
     !panelRoot ||
     !header ||
     !runtimeControls ||
-    !modeChip ||
+    !modeRow ||
+    !modeTabs ||
+    !historyToggle ||
     !headerActions ||
     !clearButton
   ) {
@@ -2214,7 +2228,8 @@ async function measurePanelRuntimeGeometry(
     const runtimeButtonWidths = getVisibleRuntimeButtonRects(
       runtimeControls,
     ).map((rect) => rect.width);
-    const modeChipRect = modeChip.getBoundingClientRect();
+    const modeTabsRect = modeTabs.getBoundingClientRect();
+    const modeRowRect = modeRow.getBoundingClientRect();
     const actionsRect = headerActions.getBoundingClientRect();
     const clearButtonRect = clearButton.getBoundingClientRect();
     const clearButtonStyle =
@@ -2224,9 +2239,10 @@ async function measurePanelRuntimeGeometry(
       fontScale: input.fontScale,
       runtimeWidth: runtimeRect.width,
       runtimeButtonWidths,
+      // Row 2 leads with new chat and history, then the runtime systems.
       runtimeIntersectsLeadingContent: rectsIntersect(
         runtimeRect,
-        modeChipRect,
+        historyToggle.getBoundingClientRect(),
       ),
       runtimeIntersectsTrailingContent: rectsIntersect(
         runtimeRect,
@@ -2244,7 +2260,11 @@ async function measurePanelRuntimeGeometry(
       deleteButtonIconOnly:
         clearButtonRect.width <= 28.5 &&
         Number.parseFloat(clearButtonStyle?.fontSize || "") === 0,
-      centeredContentOffset: 0,
+      centeredContentOffset: Math.abs(
+        modeTabsRect.left +
+          modeTabsRect.width / 2 -
+          (modeRowRect.left + modeRowRect.width / 2),
+      ),
     };
   } finally {
     panel.body.style.width = previousWidth;
@@ -3285,7 +3305,7 @@ async function waitForStandaloneReady(): Promise<Document> {
     const doc = win?.document;
     const root = doc?.getElementById("llmforzotero-standalone-chat-root");
     const paperTab = doc?.querySelector(
-      ".llm-standalone-tab[data-tab='paper']",
+      ".llm-standalone-tab-row .llm-standalone-tab[data-tab='paper']",
     );
     const panelRoot = doc?.querySelector(".llm-standalone-content #llm-main");
     if (doc && root && paperTab && panelRoot) {
@@ -3300,13 +3320,13 @@ function readStandaloneDiagnostics(): WorkflowTestStandaloneDiagnostics {
   const win = getStandaloneWindowForTest();
   const doc = win?.document || null;
   const activeTab = doc?.querySelector(
-    ".llm-standalone-tab.active",
+    ".llm-standalone-tab-row .llm-standalone-tab.active",
   ) as HTMLElement | null;
   const paperTab = doc?.querySelector(
-    ".llm-standalone-tab[data-tab='paper']",
+    ".llm-standalone-tab-row .llm-standalone-tab[data-tab='paper']",
   ) as HTMLElement | null;
   const openTab = doc?.querySelector(
-    ".llm-standalone-tab[data-tab='open']",
+    ".llm-standalone-tab-row .llm-standalone-tab[data-tab='open']",
   ) as HTMLElement | null;
   const contentArea = doc?.querySelector(
     ".llm-standalone-content",
@@ -3579,7 +3599,7 @@ async function clickStandaloneTab(
   assertWorkflowTestEnabled();
   const doc = await waitForStandaloneReady();
   const button = doc.querySelector(
-    `.llm-standalone-tab[data-tab='${tab}']`,
+    `.llm-standalone-tab-row .llm-standalone-tab[data-tab='${tab}']`,
   ) as HTMLButtonElement | null;
   if (!button) throw new Error(`Standalone ${tab} tab was not rendered`);
   button.click();
@@ -3735,7 +3755,7 @@ async function measureStandaloneRuntimeGeometry(input: {
     ".llm-standalone-runtime-system-controls",
   ) as HTMLElement | null;
   const tabGroup = doc.querySelector(
-    ".llm-standalone-tab-group",
+    ".llm-standalone-tab-row .llm-standalone-tab-group",
   ) as HTMLElement | null;
   if (!root || !tabRow || !runtimeControls || !tabGroup) {
     throw new Error("Standalone runtime geometry targets were not rendered");

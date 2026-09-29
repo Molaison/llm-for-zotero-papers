@@ -7,7 +7,6 @@ This folder implements the reader/library side-panel chat experience.
 - `index.ts`: registration entrypoint (panel section, style injection, reader popup selection tracking).
 - `dedicatedChatPane.ts`: mutually exclusive chat/details presentation in the native right pane, with a native lifecycle recheck when returning to a retained reader tab.
 - `sidebarLayout.ts`: persisted Independent/Stacked presentation choice and live native section updates.
-- `dockedPanelTitle.ts`: the plugin title row and native close control above the classic chat toolbar.
 - `buildUI.ts`: static panel DOM construction.
 - `setupHandlers.ts`: runtime orchestration and event wiring across panel features.
 - `chat.ts`: conversation load/render/send/retry/edit and streaming orchestration.
@@ -53,6 +52,7 @@ Presentation state belongs to the main window and survives tab changes without b
 Zotero namespaces registered pane IDs, so navigation identifies the registered host through its class rather than constructing an ID.
 Native tab selection can reuse a rendered section without calling plugin hooks, so the dedicated view requests `_forceRenderAll()` after the native deck selection to reconcile the active conversation through the existing lifecycle.
 The native workflow regression covers full-height geometry, returning to item details, reader tab context changes, and Library chat staying selected until the user switches to Paper chat.
+In the Independent layout the header's first row also carries a close button (×) at its right end; it closes the chat view exactly as the plugin's rail icon does, keeping the mounted conversation and draft. Stacked and the standalone window do not show it.
 
 Customization offers Independent and Stacked (default) layouts without rebuilding the mounted chat.
 Stacked restores native section headers, collapse controls, and the classic chat toolbar.
