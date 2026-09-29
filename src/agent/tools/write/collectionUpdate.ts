@@ -1,7 +1,8 @@
 /**
- * `collection_update`: create, delete, rename, or move Zotero collections
- * (folders). Deleting moves the collection to the Zotero trash, where the
- * user can restore it, and takes any subcollections with it.
+ * The collection delegate of library_update (kind:'collection'): create,
+ * delete, rename, or move Zotero collections (folders). Not registered on its
+ * own. Deleting moves the collection to the Zotero trash, where the user can
+ * restore it, and takes any subcollections with it.
  */
 import type { AgentWriteToolDefinition } from "../../types";
 import { describeLibraryMutationInput } from "../../contracts/actionContract";

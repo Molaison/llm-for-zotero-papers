@@ -26,6 +26,9 @@ const IDENTIFIER_NAMES = [
   "trash_items",
   "restore_from_trash",
   "merge_items",
+  "collection_update",
+  "attachment_update",
+  "saved_search_update",
 ];
 const RETIRED_TOOL_NAMES = [
   // grown by each retirement task

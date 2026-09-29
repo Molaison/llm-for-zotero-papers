@@ -1,5 +1,7 @@
 /**
- * `attachment_update`: delete, rename, or re-link a Zotero attachment.
+ * The attachment delegate of library_update (kind:'attachment'): delete,
+ * rename, or re-link a Zotero attachment. Not registered on its own; its
+ * guidance lives on library_update.
  */
 import type { AgentWriteToolDefinition } from "../../types";
 import { describeLibraryMutationInput } from "../../contracts/actionContract";
@@ -10,7 +12,6 @@ import {
   type RelinkAttachmentOperation,
 } from "../../services/libraryMutationService";
 import type { ZoteroGateway } from "../../services/zoteroGateway";
-import { intentOrSignal } from "../guidance";
 import { ok, fail, validateObject, normalizePositiveInt } from "../shared";
 import {
   executeAndRecordUndo,
@@ -67,17 +68,6 @@ export function createAttachmentUpdateTool(
       },
       executionClass: "external_effect",
       workCategory: "zotero_action",
-    },
-
-    guidance: {
-      matches: (request) =>
-        intentOrSignal(
-          request,
-          ["delete_attachment", "rename_attachment", "relink_attachment"],
-          (signals) => signals.mentionsAttachment,
-        ),
-      instruction:
-        "Use attachment_update to delete, rename, or re-link a single attachment. To find attachments, use library_read with sections:['attachments'] first. Renaming renames the file on disk, not just the title. Re-linking repairs an attachment whose file has moved or gone missing, and works for stored attachments as well as linked files; only linked URLs cannot be re-linked. Batch renaming with computed filenames requires separately authorized computation and exact attachment targets.",
     },
 
     presentation: {

@@ -119,7 +119,8 @@ describe("external MCP writes against native Zotero", function () {
       };
       try {
         setOriginalAgentPermissionMode(mode);
-        const collectionResult = await call("collection_update", {
+        const collectionResult = await call("library_update", {
+          kind: "collection",
           action: "create",
           name: suffix,
         });

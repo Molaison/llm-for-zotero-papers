@@ -80,10 +80,11 @@ describe("workflow: exact named library targets", function () {
       const registry = new AgentToolRegistry(
         new ActionContractService(new ZoteroGateway()),
       );
-      for (const name of ["collection_update", "library_update"])
-        registry.register(
-          (Zotero as any).LLMForZotero.api.agent.getToolDefinition(name),
-        );
+      registry.register(
+        (Zotero as any).LLMForZotero.api.agent.getToolDefinition(
+          "library_update",
+        ),
+      );
       const context: AgentToolContext = {
         request,
         item: null,
@@ -114,7 +115,8 @@ describe("workflow: exact named library targets", function () {
       };
       const destinationIds: number[] = [];
       for (const name of names) {
-        await execute("collection_update", {
+        await execute("library_update", {
+          kind: "collection",
           action: "create",
           libraryID,
           name,
@@ -168,7 +170,8 @@ describe("workflow: exact named library targets", function () {
       context.request = mergeRequest;
       context.runId = mergeRequest.executionContext!.executionId;
       setOriginalAgentPermissionMode("yolo");
-      await execute("collection_update", {
+      await execute("library_update", {
+        kind: "collection",
         action: "rename",
         libraryID,
         collectionId: destinationIds[0],
@@ -181,7 +184,8 @@ describe("workflow: exact named library targets", function () {
         targetCollectionId: destinationIds[0],
         itemIds: [items[1].id, items[2].id],
       });
-      await execute("collection_update", {
+      await execute("library_update", {
+        kind: "collection",
         action: "delete",
         libraryID,
         collectionId: destinationIds[1],

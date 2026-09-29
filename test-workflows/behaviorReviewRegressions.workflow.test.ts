@@ -72,14 +72,14 @@ describe("workflow: behavior audit shared-owner regressions", function () {
       );
       registry.register(
         (Zotero as any).LLMForZotero.api.agent.getToolDefinition(
-          "collection_update",
+          "library_update",
         ),
       );
       const execution = await registry.prepareExecution(
         {
           id: "collection-create",
-          name: "collection_update",
-          arguments: { action: "create", libraryID, name },
+          name: "library_update",
+          arguments: { kind: "collection", action: "create", libraryID, name },
         },
         context,
         { callerKind: "model" },

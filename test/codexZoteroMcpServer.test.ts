@@ -667,11 +667,9 @@ describe("Zotero MCP server", function () {
   for (const mode of ["safe", "auto", "yolo"]) {
     for (const integrated of [false, true]) {
       for (const name of [
-        "collection_update",
         "library_import",
         "library_update",
         "note_write",
-        "attachment_update",
         "library_delete",
         "zotero_script",
       ]) {
@@ -770,7 +768,7 @@ describe("Zotero MCP server", function () {
       const registry = new AgentToolRegistry(
         new ActionContractService({ getItem: () => null } as never),
       );
-      const tool = createWriteTool("collection_update");
+      const tool = createWriteTool("library_update");
       tool.planInvocation = async () => {
         assessments++;
         if (scenario === "aborted turn") scoped?.clear();
@@ -833,7 +831,7 @@ describe("Zotero MCP server", function () {
             jsonrpc: "2.0",
             id: 430,
             method: "tools/call",
-            params: { name: "collection_update", arguments: { libraryID: 1 } },
+            params: { name: "library_update", arguments: { libraryID: 1 } },
           },
         });
         const result = JSON.parse(response[2]).result;
@@ -870,7 +868,7 @@ describe("Zotero MCP server", function () {
       return { content: { childApplied: true }, effect: "applied" };
     };
     registry.register(child);
-    const outer = createWriteTool("collection_update");
+    const outer = createWriteTool("library_update");
     outer.execute = async (_input, context) => {
       const childResult = await registry.prepareExecution(
         { id: "child", name: "child_write", arguments: {} },
@@ -901,7 +899,7 @@ describe("Zotero MCP server", function () {
         jsonrpc: "2.0",
         id: 430,
         method: "tools/call",
-        params: { name: "collection_update", arguments: {} },
+        params: { name: "library_update", arguments: {} },
       },
     });
     const payload = JSON.parse(response[2]);
@@ -930,7 +928,7 @@ describe("Zotero MCP server", function () {
     const registry = new AgentToolRegistry(
       new ActionContractService({ getItem: () => null } as never),
     );
-    const tool = createWriteTool("collection_update");
+    const tool = createWriteTool("library_update");
     tool.execute = async (_input, context) => {
       contexts.push({
         runId: context.runId,
@@ -962,7 +960,7 @@ describe("Zotero MCP server", function () {
           jsonrpc: "2.0",
           id: 430,
           method: "tools/call",
-          params: { name: "collection_update", arguments: {} },
+          params: { name: "library_update", arguments: {} },
         },
       });
     try {
@@ -1141,7 +1139,7 @@ describe("Zotero MCP server", function () {
       new ActionContractService({ getItem: () => null } as never),
     );
     let executed = 0;
-    const tool = createWriteTool("collection_update");
+    const tool = createWriteTool("library_update");
     tool.execute = async () => {
       executed++;
       return { content: { applied: true }, effect: "applied" };
@@ -1155,7 +1153,7 @@ describe("Zotero MCP server", function () {
         id: 430,
         method: "tools/call",
         params: {
-          name: "collection_update",
+          name: "library_update",
           arguments: { libraryID: 1, action: "create", name: "Denied" },
         },
       },

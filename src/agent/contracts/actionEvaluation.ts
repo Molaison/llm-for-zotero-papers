@@ -131,14 +131,14 @@ const ACTION_CORRECTION_GUIDANCE: Partial<
   "zotero.metadata":
     "Use library_search to resolve IDs, then library_update with the exact metadata operation.",
   "zotero.collections":
-    "Use collection_update or library_update with the exact collection operation.",
+    "Use library_update with the exact collection operation (kind:'collections' for membership, kind:'collection' for the collection itself).",
   "zotero.notes":
     "Use note_write or note_write_batch with the requested edit mode.",
   "zotero.import": "Use library_import with the requested import mode.",
   "zotero.trash":
     "Use library_delete with the exact trash, restore, or merge operation.",
   "zotero.attachments":
-    "Use attachment_update with the exact attachment operation.",
+    "Use library_update kind:'attachment' with the exact attachment operation.",
   "zotero.read": "Use paper_read with mode:'full'.",
   "zotero.settings": "Use library_settings with the exact key and value.",
   "zotero.undo": "Use the requested undo or revert operation.",

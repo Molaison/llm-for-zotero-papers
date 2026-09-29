@@ -141,11 +141,12 @@ export function registerPreparedLibraryActions(
     },
   });
   registry.registerActionBinding("create_collection", {
-    toolName: "collection_update",
+    toolName: "library_update",
     bind: (o, request) => {
       if (!o.parameters?.collectionName) return null;
       return {
         arguments: {
+          kind: "collection",
           action: "create",
           name: o.parameters.collectionName,
           libraryID: request.libraryID,
@@ -158,11 +159,12 @@ export function registerPreparedLibraryActions(
     },
   });
   registry.registerActionBinding("delete_collection", {
-    toolName: "collection_update",
+    toolName: "library_update",
     bind: (o) => {
       if (!o.parameters?.collectionId) return null;
       return {
         arguments: {
+          kind: "collection",
           action: "delete",
           collectionId: o.parameters.collectionId,
           deleteItems: o.parameters.deleteItems === true,
@@ -173,13 +175,14 @@ export function registerPreparedLibraryActions(
     },
   });
   registry.registerActionBinding("update_collection", {
-    toolName: "collection_update",
+    toolName: "library_update",
     bind: (o) => {
       const p = o.parameters;
       if (!p?.collectionId) return null;
       if (p.collectionName)
         return {
           arguments: {
+            kind: "collection",
             action: "rename",
             collectionId: p.collectionId,
             newName: p.collectionName,
@@ -192,6 +195,7 @@ export function registerPreparedLibraryActions(
       if (p.parentCollectionId !== undefined)
         return {
           arguments: {
+            kind: "collection",
             action: "move",
             collectionId: p.collectionId,
             parentCollectionId: p.parentCollectionId,

@@ -301,10 +301,11 @@ describe("the trace's hidden tools are declared by the registry", function () {
     .sort();
 
   it("builds the registry the running plugin builds", function () {
-    // 39 once the write delegates stopped being registered (Task 2.6).
+    // 36 once library_update absorbed the collection, attachment, and
+    // saved-search tools (Task 3.1).
     assert.isAbove(
       definitions.length,
-      35,
+      30,
       "the production factory registered almost nothing; the assertions below would pass vacuously",
     );
   });

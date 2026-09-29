@@ -4,8 +4,6 @@
     "annotate_pdf",
     "approve_research_expansion",
     "approve_research_mutation",
-    "attachment_update",
-    "collection_update",
     "conversation_read",
     "file_io",
     "library_cite",
@@ -28,7 +26,6 @@
     "research_update",
     "revert_changes",
     "run_command",
-    "saved_search_update",
     "submit_document",
     "task_update",
     "tool_result_read",
@@ -37,5 +34,5 @@
     "zotero_script"
   ],
   "internal": ["submit_plan_document"],
-  "specBytes": 71617
+  "specBytes": 70893
 }

@@ -64,13 +64,10 @@ const EXPECTED_TOOL_CATEGORIES: Readonly<Record<string, AgentWorkCategory>> = {
   submit_plan_document: "generation",
   // Zotero library changes.
   library_update: "zotero_action",
-  collection_update: "zotero_action",
   note_write: "zotero_action",
   note_write_batch: "zotero_action",
-  saved_search_update: "zotero_action",
   library_settings: "zotero_action",
   library_delete: "zotero_action",
-  attachment_update: "zotero_action",
   annotate_pdf: "zotero_action",
   undo_last_action: "zotero_action",
   revert_changes: "zotero_action",

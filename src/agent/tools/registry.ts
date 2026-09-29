@@ -128,15 +128,13 @@ const MODEL_TOOL_DESCRIPTIONS: Readonly<Record<string, string>> = {
   literature_review:
     "Present ranked saved candidates for selection without import.",
   library_update:
-    "Change tags, metadata, memberships, parents, or Related links. Move removes its named source.",
-  collection_update: "Create or delete Zotero collections.",
+    "Change tags, metadata, memberships, parents, or Related links; kind:'collection' creates, renames, moves, or deletes a collection, kind:'attachment' renames, relinks, or deletes one, kind:'savedSearch' saves or deletes one. A membership move removes its named source.",
   conversation_read:
     "Read exact chat history. Omit messageId to list; set it to read. Continue with offset or textOffset=nextTextOffset.",
   note_write:
     "Write a Zotero note. sourceMessageId reuses an exact answer; documentId reuses finalized material. Markdown file:// images from paper_read figure crops are imported and verified as embedded images; do not reimplement embedding with scripts.",
   note_write_batch:
     "Write notes to explicitly identified items as one checkpointed batch; resumeBatchId continues an interrupted one.",
-  saved_search_update: "Create, replace, or delete a Zotero saved search.",
   library_cite:
     "Format Zotero CSL citations or bibliographies, or export with a translator.",
   library_settings: "Read or change supported Zotero settings and sync state.",
@@ -144,7 +142,6 @@ const MODEL_TOOL_DESCRIPTIONS: Readonly<Record<string, string>> = {
     "Add Zotero items from identifiers, local files, or explicit manual metadata.",
   library_delete:
     "Trash or restore Zotero objects, or merge duplicates into a named master.",
-  attachment_update: "Delete, rename, or relink Zotero attachments.",
   undo_last_action: "Undo the latest reversible journaled action in this chat.",
   revert_changes:
     "Inspect or revert durable actions; use dryRun for conflicts.",

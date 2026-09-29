@@ -310,7 +310,7 @@ describe("OpenAICompatibleAgentAdapter", function () {
       );
     }
 
-    for (const name of ["library_search", "saved_search_update"]) {
+    for (const name of ["library_search", "library_update"]) {
       const schema = serializedTools.find(
         (tool) => tool.function.name === name,
       )!.function.parameters as unknown as {

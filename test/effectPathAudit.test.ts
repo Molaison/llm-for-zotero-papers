@@ -140,17 +140,19 @@ const AUDIT: Readonly<Record<string, AuditRow>> = {
       "relate_items",
       "update_library_tag",
       "set_item_tags",
+      "create_collection",
+      "delete_collection",
+      "update_collection",
+      "delete_attachment",
+      "rename_attachment",
+      "relink_attachment",
+      "save_saved_search",
+      "delete_saved_search",
     ],
     verification: "verified",
     fixture: { kind: "tags", action: "add", itemIds: [1], tags: ["audit"] },
     // A validated operation carrying no changes plans read_only, but it also
     // describes no proposal, so nothing is authorized either way.
-    impact: "state_change",
-  },
-  collection_update: {
-    operations: ["create_collection", "delete_collection", "update_collection"],
-    verification: "verified",
-    fixture: { action: "create", name: "Audit" },
     impact: "state_change",
   },
   note_write: {
@@ -163,16 +165,6 @@ const AUDIT: Readonly<Record<string, AuditRow>> = {
     operations: ["save_notes_batch"],
     verification: "verified",
     fixture: NOTE_BATCH_FIXTURE,
-    impact: "state_change",
-  },
-  saved_search_update: {
-    operations: ["save_saved_search", "delete_saved_search"],
-    verification: "verified",
-    fixture: {
-      action: "save",
-      name: "Audit",
-      conditions: [{ condition: "title", operator: "contains", value: "x" }],
-    },
     impact: "state_change",
   },
   library_settings: {
@@ -192,12 +184,6 @@ const AUDIT: Readonly<Record<string, AuditRow>> = {
     operations: ["trash_items", "merge_items", "restore_from_trash"],
     verification: "verified",
     fixture: { mode: "trash", itemIds: [1] },
-    impact: "state_change",
-  },
-  attachment_update: {
-    operations: ["delete_attachment", "rename_attachment", "relink_attachment"],
-    verification: "verified",
-    fixture: { action: "rename", attachmentId: 1, newName: "Audit.pdf" },
     impact: "state_change",
   },
   undo_last_action: {
@@ -346,6 +332,31 @@ const DELEGATE_ROUTES: Readonly<
     facade: "library_update",
     operations: ["relate_items"],
     fixture: { kind: "related", itemId: 1, relatedItemIds: [2] },
+  },
+  collection_update: {
+    facade: "library_update",
+    operations: ["create_collection", "delete_collection", "update_collection"],
+    fixture: { kind: "collection", action: "create", name: "Audit" },
+  },
+  attachment_update: {
+    facade: "library_update",
+    operations: ["delete_attachment", "rename_attachment", "relink_attachment"],
+    fixture: {
+      kind: "attachment",
+      action: "rename",
+      attachmentId: 1,
+      newName: "Audit.pdf",
+    },
+  },
+  saved_search_update: {
+    facade: "library_update",
+    operations: ["save_saved_search", "delete_saved_search"],
+    fixture: {
+      kind: "savedSearch",
+      action: "save",
+      name: "Audit",
+      conditions: [{ condition: "title", operator: "contains", value: "x" }],
+    },
   },
   import_identifiers: {
     facade: "library_import",

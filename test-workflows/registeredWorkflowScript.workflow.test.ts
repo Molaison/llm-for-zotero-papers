@@ -76,8 +76,7 @@ describe("workflow: registered operation script", function () {
       request.actionPreparation = { state: "ready", issues: [] };
       const registry = new AgentToolRegistry(contracts);
       const agent = (Zotero as any).LLMForZotero.api.agent;
-      for (const tool of ["collection_update", "library_update"])
-        registry.register(agent.getToolDefinition(tool));
+      registry.register(agent.getToolDefinition("library_update"));
       await createAgentRun({
         runId,
         conversationKey: paper.id,
@@ -125,7 +124,7 @@ describe("workflow: registered operation script", function () {
         description:
           "Create destination and file the paper through registered operations",
         script: `if (typeof Zotero !== "undefined" || typeof globalThis.Components !== "undefined") throw new Error("Unexpected native globals");
-const creation = await env.invoke("collection_update", {action:"create",name:${JSON.stringify(name)},parentCollectionId:${source.id},libraryID:${libraryID}});
+const creation = await env.invoke("library_update", {kind:"collection",action:"create",name:${JSON.stringify(name)},parentCollectionId:${source.id},libraryID:${libraryID}});
 if (!creation.ok) throw new Error(JSON.stringify(creation.content));
 const receipt=creation.actionReceipts.find(entry=>entry.operation==="create_collection"&&entry.verification==="verified");
 const destinationId=Number(receipt.appliedTargets[0].split(":")[1]);

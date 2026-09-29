@@ -419,20 +419,20 @@ describe("tool guidance contracts", function () {
       ),
     );
     assert.isFalse(guidanceFor("library_import").matches(chat({}), ctx));
+    // library_update carries the attachment guidance; the attachment signal
+    // is the only chat signal that reaches it.
     assert.isTrue(
-      guidanceFor("attachment_update").matches(
+      guidanceFor("library_update").matches(
         chat({ mentionsAttachment: true }),
         ctx,
       ),
     );
-    assert.isFalse(guidanceFor("attachment_update").matches(chat({}), ctx));
-    // library_update guidance is plan-specific; no chat signal reaches it.
+    assert.isFalse(guidanceFor("library_update").matches(chat({}), ctx));
     assert.isFalse(
       guidanceFor("library_update").matches(
         chat({
           mentionsDuplicates: true,
           mentionsTrash: true,
-          mentionsAttachment: true,
           mentionsImport: true,
         }),
         ctx,
@@ -505,7 +505,7 @@ describe("tool guidance contracts", function () {
       guidanceFor("library_import").matches(planned("import_local_files")),
     );
     assert.isTrue(
-      guidanceFor("attachment_update").matches(planned("rename_attachment")),
+      guidanceFor("library_update").matches(planned("rename_attachment")),
     );
     assert.isTrue(guidanceFor("library_update").matches(planned("apply_tags")));
   });

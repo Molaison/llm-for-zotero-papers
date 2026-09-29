@@ -264,8 +264,6 @@ describe("semantic tool surface", function () {
 
     assert.deepEqual(names, [
       "annotate_pdf",
-      "attachment_update",
-      "collection_update",
       "conversation_read",
       "file_io",
       "library_cite",
@@ -286,7 +284,6 @@ describe("semantic tool surface", function () {
       "request_user_input",
       "revert_changes",
       "run_command",
-      "saved_search_update",
       "submit_document",
       "undo_last_action",
       "workflow_script",
@@ -306,7 +303,8 @@ describe("semantic tool surface", function () {
     ]);
     // Retired into the facades: no longer registered at all. The write
     // delegates live on only inside library_update, library_import, and
-    // library_delete.
+    // library_delete; collection, attachment, and saved-search updates are
+    // library_update kinds.
     for (const retiredName of [
       "read_paper",
       "search_paper",
@@ -331,6 +329,9 @@ describe("semantic tool surface", function () {
       "trash_items",
       "restore_from_trash",
       "merge_items",
+      "collection_update",
+      "attachment_update",
+      "saved_search_update",
     ]) {
       assert.notInclude(names, retiredName);
       assert.notExists(registry.getTool(retiredName), `${retiredName} retired`);
@@ -410,7 +411,7 @@ describe("semantic tool surface", function () {
     ]);
   });
 
-  it("collection_update and attachment_update name themselves in cards and guidance", async function () {
+  it("the collection and attachment delegates keep their own names and labels in cards", async function () {
     const collections = createCollectionUpdateTool({
       getCollectionSummary: () => null,
     } as never);
@@ -445,21 +446,13 @@ describe("semantic tool surface", function () {
       baseContext,
     );
     assert.equal(attachmentCard.toolName, "attachment_update");
+    // Delegate guidance never reaches the model; library_update carries it.
+    assert.notExists(attachments.guidance);
+    const libraryUpdate =
+      createTestBuiltInRegistry().getTool("library_update")!;
     assert.include(
-      attachments.guidance?.instruction || "",
-      "Use attachment_update to delete, rename, or re-link",
-    );
-    assert.isTrue(
-      attachments.guidance?.matches(
-        { userTextSignals: { mentionsAttachment: true } } as never,
-        { matchedSkillIds: [] },
-      ),
-    );
-    assert.isFalse(
-      attachments.guidance?.matches(
-        { userTextSignals: { mentionsAttachment: false } } as never,
-        { matchedSkillIds: [] },
-      ),
+      libraryUpdate.guidance?.instruction || "",
+      "Use kind:'attachment' to delete, rename, or re-link",
     );
   });
 
