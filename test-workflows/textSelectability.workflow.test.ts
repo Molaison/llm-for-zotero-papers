@@ -42,7 +42,7 @@ function effectiveUserSelect(win: Window, el: Element): string {
   while (node) {
     let value = "";
     try {
-      const cs = win.getComputedStyle(node as HTMLElement);
+      const cs = win.getComputedStyle(node as HTMLElement)!;
       value =
         (cs as CSSStyleDeclaration & { userSelect?: string }).userSelect ||
         cs.getPropertyValue("user-select") ||
@@ -95,10 +95,10 @@ function collectUnselectableTextOffenders(
   let skippedInteractive = 0;
   let skippedHidden = 0;
   let skippedZeroRect = 0;
-  const all = Array.from(root.querySelectorAll("*"));
+  const all = Array.from(root.querySelectorAll("*")) as Element[];
   for (const el of all) {
     const he = el as HTMLElement;
-    const hasDirectText = Array.from(he.childNodes).some(
+    const hasDirectText = (Array.from(he.childNodes) as ChildNode[]).some(
       (node) =>
         node.nodeType === 3 && (node.textContent || "").trim().length >= 2,
     );

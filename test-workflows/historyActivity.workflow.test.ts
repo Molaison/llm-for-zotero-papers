@@ -75,7 +75,7 @@ describe("workflow: background conversation activity", function () {
         const indicator = readSpinner(row)!;
         assert.isFalse(indicator.hidden);
         assert.equal(
-          win.getComputedStyle(indicator).animationName,
+          win.getComputedStyle(indicator)!.animationName,
           "llm-plan-progress-spin",
         );
         const otherRow = await waitFor(() =>
@@ -186,21 +186,21 @@ describe("workflow: background conversation activity", function () {
         "uses the run start rather than mount time",
       );
       assert.equal(
-        win.getComputedStyle(words).animationName,
+        win.getComputedStyle(words)!.animationName,
         "llm-planning-text-shimmer",
       );
       assert.equal(
-        win.getComputedStyle(summary, "::after").animationName,
+        win.getComputedStyle(summary, "::after")!.animationName,
         "none",
       );
       assert.notEqual(
-        win.getComputedStyle(summary, "::after").color,
+        win.getComputedStyle(summary, "::after")!.color,
         "rgba(0, 0, 0, 0)",
       );
       assert.isNull(summary.querySelector(".llm-at-planning-drive"));
-      assert.equal(win.getComputedStyle(elapsed).animationName, "none");
+      assert.equal(win.getComputedStyle(elapsed)!.animationName, "none");
       assert.include(
-        win.getComputedStyle(elapsed).fontVariantNumeric,
+        win.getComputedStyle(elapsed)!.fontVariantNumeric,
         "tabular-nums",
       );
       const height = summary.getBoundingClientRect().height;
@@ -239,7 +239,7 @@ describe("workflow: background conversation activity", function () {
         /^(Worked for|Planned in|Plan ran for) /,
       );
       assert.isNull(completed.querySelector(".llm-agent-activity-elapsed"));
-      assert.equal(win.getComputedStyle(completed).animationName, "none");
+      assert.equal(win.getComputedStyle(completed)!.animationName, "none");
       const completedText = completed.textContent;
       await Zotero.Promise.delay(200);
       assert.equal(completed.textContent, completedText);

@@ -46,7 +46,7 @@ async function withPrefs<T>(
   for (const [key, value] of Object.entries(prefs)) {
     const fullKey = `${PREF_PREFIX}.${key}`;
     previous.set(fullKey, Zotero.Prefs.get(fullKey, true));
-    Zotero.Prefs.set(fullKey, value, true);
+    Zotero.Prefs.set(fullKey, value as string | number | boolean, true);
   }
   try {
     return await task();
@@ -55,7 +55,7 @@ async function withPrefs<T>(
       if (value === undefined) {
         Zotero.Prefs.clear?.(fullKey, true);
       } else {
-        Zotero.Prefs.set(fullKey, value, true);
+        Zotero.Prefs.set(fullKey, value as string | number | boolean, true);
       }
     }
   }
@@ -86,7 +86,7 @@ function buildCodexNativeTraceEvents(
       stage: "write",
       status: "started",
       toolName: "zotero_tag",
-    } as import("../src/agent/types").AgentEvent),
+    } as unknown as import("../src/agent/types").AgentEvent),
     record(1, {
       type: "codex_tool_activity",
       itemId: "call-1",
@@ -96,7 +96,7 @@ function buildCodexNativeTraceEvents(
       args: { itemIds: [1], tag: "native-review" },
       workCategory: "write",
       mutability: "write",
-    } as import("../src/agent/types").AgentEvent),
+    } as unknown as import("../src/agent/types").AgentEvent),
     record(2, {
       type: "codex_tool_activity",
       itemId: "call-1",
@@ -107,13 +107,13 @@ function buildCodexNativeTraceEvents(
       text: "Tagged 1 item",
       workCategory: "write",
       mutability: "write",
-    } as import("../src/agent/types").AgentEvent),
+    } as unknown as import("../src/agent/types").AgentEvent),
     record(3, {
       type: "agent_stage",
       stage: "write",
       status: "completed",
       toolName: "zotero_tag",
-    } as import("../src/agent/types").AgentEvent),
+    } as unknown as import("../src/agent/types").AgentEvent),
   ];
 }
 

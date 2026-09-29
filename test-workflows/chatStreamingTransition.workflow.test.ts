@@ -38,7 +38,9 @@ describe("workflow: streaming transitions preserve the reading viewport", functi
     mode: string | undefined;
   };
   const view = (phase: string): View => {
-    const blocks = Array.from(answer.querySelectorAll("p"));
+    const blocks = Array.from(
+      answer.querySelectorAll("p"),
+    ) as HTMLParagraphElement[];
     const texts = blocks.map((block) => block.textContent || "");
     const reading = blocks.find((block) =>
       block.textContent?.startsWith(readingMarker),
@@ -58,9 +60,9 @@ describe("workflow: streaming transitions preserve the reading viewport", functi
     };
   };
   async function readMiddle() {
-    const reading = Array.from(answer.querySelectorAll("p")).find((block) =>
-      block.textContent?.startsWith(readingMarker),
-    )!;
+    const reading = (
+      Array.from(answer.querySelectorAll("p")) as HTMLParagraphElement[]
+    ).find((block) => block.textContent?.startsWith(readingMarker))!;
     assert.exists(reading);
     box.dispatchEvent(new win.WheelEvent("wheel", { deltaY: -30 }));
     box.scrollTop +=

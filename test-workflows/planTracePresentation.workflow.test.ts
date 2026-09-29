@@ -149,7 +149,7 @@ describe("workflow: Plan trace presentation", function () {
           "--fill-primary",
           `rgb(${foreground}, ${foreground}, ${foreground})`,
         );
-        const style = doc.defaultView!.getComputedStyle(card);
+        const style = doc.defaultView!.getComputedStyle(card)!;
         const canvas = doc.createElement("canvas");
         canvas.width = canvas.height = 1;
         const context = canvas.getContext("2d")!;
@@ -267,7 +267,7 @@ describe("workflow: Plan trace presentation", function () {
             1,
             `label vertically centered with the existing Plan optical offset at ${width}px`,
           );
-          const style = doc.defaultView!.getComputedStyle(button);
+          const style = doc.defaultView!.getComputedStyle(button)!;
           assert.closeTo(
             parseFloat(style.fontSize),
             11 * scale,
@@ -294,11 +294,11 @@ describe("workflow: Plan trace presentation", function () {
             "label retains horizontal button padding",
           );
           assert.equal(
-            doc.defaultView!.getComputedStyle(button).alignItems,
+            doc.defaultView!.getComputedStyle(button)!.alignItems,
             "center",
           );
           assert.equal(
-            doc.defaultView!.getComputedStyle(button).justifyContent,
+            doc.defaultView!.getComputedStyle(button)!.justifyContent,
             "center",
           );
           assert.isAtMost(

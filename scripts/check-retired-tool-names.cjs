@@ -1,8 +1,12 @@
 // scripts/check-retired-tool-names.cjs
 // Fails when a retired tool name appears in src (code, prompt prose, or skill
-// .md files) outside the effect-operation vocabulary files. Names that remain
-// internal identifiers (IDENTIFIER_NAMES) are allowed only as exact
-// double-quoted string literals or object keys.
+// .md files) outside the effect-operation vocabulary files, or anywhere in the
+// live workflow suite (test-workflows/**/*.ts), which drives the real tools by
+// name. Names that remain internal identifiers (IDENTIFIER_NAMES) are allowed
+// only as exact double-quoted string literals or object keys.
+//
+// test/ is deliberately NOT scanned: unit tests replay historical traces and
+// stored tool history, whose fixtures legitimately carry retired names.
 /* global __dirname -- CommonJS script; eslint config only declares console/process */
 const fs = require("fs");
 const path = require("path");
@@ -61,20 +65,28 @@ const ALLOWLIST = [
   "src/modules/contextPanel/agentTrace/noteReviewCard.ts", // accepts edit_current_note from stored review cards
 ];
 const REPO_ROOT = path.resolve(__dirname, "..");
-const SRC_ROOT = path.join(REPO_ROOT, "src");
+// Each root with the files it scans: src skips its co-located *.test.ts files;
+// every workflow file is a *.workflow.test.ts, so that root scans all .ts.
+const SCAN_ROOTS = [
+  { dir: path.join(REPO_ROOT, "src"), isScanned: isSrcScanned },
+  {
+    dir: path.join(REPO_ROOT, "test-workflows"),
+    isScanned: (file) => file.endsWith(".ts"),
+  },
+];
 function toRepoPath(absolute) {
   // Forward slashes on every platform so ALLOWLIST prefixes match on Windows.
   return path.relative(REPO_ROOT, absolute).split(path.sep).join("/");
 }
-function isScanned(file) {
+function isSrcScanned(file) {
   return (
     (file.endsWith(".ts") && !file.endsWith(".test.ts")) || file.endsWith(".md")
   );
 }
-function walk(dir, out = []) {
+function walk(dir, isScanned, out = []) {
   for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
     const p = path.join(dir, e.name);
-    if (e.isDirectory()) walk(p, out);
+    if (e.isDirectory()) walk(p, isScanned, out);
     else if (isScanned(p)) out.push(p);
   }
   return out;
@@ -100,7 +112,8 @@ const patterns = RETIRED_TOOL_NAMES.map((name) => ({
     : null,
 }));
 const hits = [];
-for (const absolute of walk(SRC_ROOT)) {
+const files = SCAN_ROOTS.flatMap(({ dir, isScanned }) => walk(dir, isScanned));
+for (const absolute of files) {
   const file = toRepoPath(absolute);
   if (ALLOWLIST.some((a) => file.startsWith(a))) continue;
   const text = fs.readFileSync(absolute, "utf8");
@@ -116,5 +129,5 @@ if (hits.length) {
   process.exit(1);
 }
 console.log(
-  `OK: no retired tool names in src (${RETIRED_TOOL_NAMES.length} names checked)`,
+  `OK: no retired tool names in src or test-workflows (${RETIRED_TOOL_NAMES.length} names checked, ${files.length} files)`,
 );

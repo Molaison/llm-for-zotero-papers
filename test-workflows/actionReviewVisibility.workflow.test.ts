@@ -35,6 +35,7 @@ describe("workflow: literature review action visibility", function () {
           callId: "visibility-search",
           name: "literature_search",
           ok: true,
+          actionReceipts: [],
           content: {
             mode: "search",
             source: "OpenAlex",
@@ -66,8 +67,8 @@ describe("workflow: literature review action visibility", function () {
       const reference = doc.createElement("div");
       reference.className = "llm-plan-container";
       card.parentElement!.appendChild(reference);
-      const cardStyle = doc.defaultView!.getComputedStyle(card);
-      const referenceStyle = doc.defaultView!.getComputedStyle(reference);
+      const cardStyle = doc.defaultView!.getComputedStyle(card)!;
+      const referenceStyle = doc.defaultView!.getComputedStyle(reference)!;
       for (const property of [
         "border-radius",
         "background-color",
@@ -82,12 +83,12 @@ describe("workflow: literature review action visibility", function () {
       reference.remove();
       const fields = Array.from(
         card.querySelectorAll<HTMLElement>(".llm-agent-hitl-field"),
-      );
+      ) as HTMLElement[];
       const visibleLabels = () =>
         fields
           .filter(
             (field) =>
-              doc.defaultView!.getComputedStyle(field).display !== "none",
+              doc.defaultView!.getComputedStyle(field)!.display !== "none",
           )
           .map(
             (field) =>
@@ -108,13 +109,13 @@ describe("workflow: literature review action visibility", function () {
       assert.equal(
         doc.defaultView!.getComputedStyle(
           card.querySelector(".llm-agent-hitl-actions")!,
-        ).justifyContent,
+        )!.justifyContent,
         "flex-end",
       );
       assert.equal(button.textContent, "Import 5 papers");
       const checkboxes = Array.from(
         card.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'),
-      );
+      ) as HTMLInputElement[];
       assert.lengthOf(checkboxes, 6);
       checkboxes[1].click();
       assert.equal(button.textContent, "Import 4 papers");

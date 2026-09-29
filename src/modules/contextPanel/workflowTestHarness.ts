@@ -908,7 +908,7 @@ function getPanel(panelId: string): PanelRecord {
 
 async function createPaperWithPdfFixture(input: {
   title: string;
-  pdfTitle: string;
+  pdfTitle?: string;
   pages?: string[];
 }): Promise<WorkflowTestFixture> {
   assertWorkflowTestEnabled();
@@ -921,7 +921,10 @@ async function createPaperWithPdfFixture(input: {
   if (!Number.isFinite(parentItemId) || parentItemId <= 0) {
     throw new Error("Failed to save workflow test parent item");
   }
-  const tempPdfPath = await writeTempPdf(input.pdfTitle, input.pages);
+  const tempPdfPath = await writeTempPdf(
+    input.pdfTitle ?? input.title,
+    input.pages,
+  );
   const attachment = await Zotero.Attachments.importFromFile({
     file: tempPdfPath,
     parentItemID: parentItemId,

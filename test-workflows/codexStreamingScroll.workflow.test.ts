@@ -27,9 +27,9 @@ describe("workflow: reading a full Codex panel during native streaming", functio
   const saved = new Map<string, unknown>();
   const delay = (ms: number) => Zotero.Promise.delay(ms);
   const findReading = (marker: string) => {
-    const node = Array.from(box.querySelectorAll<HTMLElement>("p, li")).find(
-      (node) => node.textContent?.trim().includes(marker),
-    );
+    const node = (
+      Array.from(box.querySelectorAll<HTMLElement>("p, li")) as HTMLElement[]
+    ).find((node) => node.textContent?.trim().includes(marker));
     // Measure the readable text after a tight list gains paragraph wrappers.
     return node?.querySelector<HTMLElement>(":scope > p") || node;
   };
@@ -202,7 +202,12 @@ describe("workflow: reading a full Codex panel during native streaming", functio
       fixture = undefined;
       for (const [name, value] of saved) {
         if (value === undefined) Zotero.Prefs.clear(prefix + name, true);
-        else Zotero.Prefs.set(prefix + name, value, true);
+        else
+          Zotero.Prefs.set(
+            prefix + name,
+            value as string | number | boolean,
+            true,
+          );
       }
       saved.clear();
     }

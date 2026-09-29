@@ -106,7 +106,9 @@ describe("workflow: document and chat quote parity", function () {
         root.textContent?.trim(),
         "Evidence (Alpha, 2020; Beta, 2021).",
       );
-      const anchors = Array.from(root.querySelectorAll("a"));
+      const anchors = Array.from(
+        root.querySelectorAll("a"),
+      ) as HTMLAnchorElement[];
       assert.deepEqual(
         anchors.map((node) => node.textContent),
         ["Alpha, 2020", "Beta, 2021"],

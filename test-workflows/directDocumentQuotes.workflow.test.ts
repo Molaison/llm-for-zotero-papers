@@ -1,4 +1,5 @@
 import { assert } from "chai";
+import { resolvedAgentRequest } from "../test/helpers/resolvedAgentRequest";
 import { loadPlanDocument } from "../src/agent/documents/store";
 import { normalizeExecutionOutput } from "../src/agent/tools/execution/results";
 import { collectReaderSelectionDocuments } from "../src/modules/contextPanel/readerSelection";
@@ -50,7 +51,7 @@ describe("workflow: direct document quote publication", function () {
         item: paper,
         currentAnswerText: "",
         modelName: "workflow",
-        request: {
+        request: resolvedAgentRequest({
           conversationKey: paper.id,
           mode: "agent",
           userText: "Publish a research document with an exact source quote.",
@@ -61,7 +62,7 @@ describe("workflow: direct document quote publication", function () {
             integrityPolicy: "authored",
             trigger: "document_intent",
           },
-        },
+        }),
         runId: `native-direct-quote:${paper.key}`,
       };
       // Exercise the actual paper-read output and host attestation, including

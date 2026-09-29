@@ -102,7 +102,7 @@ describe("workflow: quote acceptance from unique passage evidence", function () 
           const items = collectReaderSelectionDocuments(reader).flatMap((doc) =>
             Array.from(
               doc.querySelectorAll(".textLayer span"),
-              (node) => node.textContent,
+              (node) => node!.textContent,
             ),
           );
           assert.include(
@@ -141,7 +141,7 @@ describe("workflow: quote acceptance from unique passage evidence", function () 
           ],
         );
         const readStoredText = async () =>
-          Zotero.DB.columnQueryAsync(
+          Zotero.DB.columnQueryAsync<string>(
             "SELECT text FROM llm_for_zotero_chat_messages WHERE conversation_key = ? AND role = 'assistant' ORDER BY id",
             [conversationKey],
           );
@@ -157,7 +157,7 @@ describe("workflow: quote acceptance from unique passage evidence", function () 
         while (Date.now() < deadline) {
           const cards = Array.from(
             win.document.querySelectorAll<HTMLElement>(".llm-quote-card"),
-          );
+          ) as HTMLElement[];
           if (
             cards.length === (scenario.followingQuote ? 2 : 1) &&
             cards.every((node) => node.dataset.quoteStatus === "verified")
@@ -169,7 +169,7 @@ describe("workflow: quote acceptance from unique passage evidence", function () 
         }
         assert.isOk(
           card,
-          `stored quote should become verified; visibility=${win.document.visibilityState}; readers=${Zotero.Reader._readers.map((reader: any) => reader.itemID)}; ${diagnosticLog.join("\n")}; ${Array.from(win.document.querySelectorAll(".llm-quote-card"), (node) => node.outerHTML).join("\n")}`,
+          `stored quote should become verified; visibility=${win.document.visibilityState}; readers=${Zotero.Reader._readers.map((reader: any) => reader.itemID)}; ${diagnosticLog.join("\n")}; ${Array.from(win.document.querySelectorAll(".llm-quote-card"), (node) => (node as Element).outerHTML).join("\n")}`,
         );
         assert.lengthOf(
           win.document.querySelectorAll(".llm-quote-card"),
@@ -203,7 +203,7 @@ describe("workflow: quote acceptance from unique passage evidence", function () 
             .flatMap((doc) =>
               Array.from(
                 doc.querySelectorAll(".highlight"),
-                (node) => node.textContent || "",
+                (node) => node!.textContent || "",
               ),
             )
             .join("")
@@ -244,7 +244,7 @@ describe("workflow: quote acceptance from unique passage evidence", function () 
                   doc.querySelectorAll(
                     '.page[data-page-number="2"] .highlight',
                   ),
-                  (node) => node.textContent || "",
+                  (node) => node!.textContent || "",
                 ),
               )
               .join("")

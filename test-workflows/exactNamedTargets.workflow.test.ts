@@ -43,7 +43,7 @@ describe("workflow: exact named library targets", function () {
     const originalMode = getOriginalAgentPermissionMode();
     const libraryID = Zotero.Libraries.userLibraryID;
     const parent = new Zotero.Collection();
-    parent.libraryID = libraryID;
+    (parent as { libraryID: number }).libraryID = libraryID;
     parent.name = `Created destination workflow ${Date.now()}`;
     await parent.saveTx();
     const items: Zotero.Item[] = [];
@@ -58,7 +58,7 @@ describe("workflow: exact named library targets", function () {
         const item = new Zotero.Item("journalArticle");
         item.libraryID = libraryID;
         item.setField("title", label);
-        item.setTags([{ tag: "preserved" }]);
+        item.setTags([{ tag: "preserved", type: 0 }]);
         item.setCollections([parent.id]);
         await item.saveTx();
         items.push(item);
@@ -66,7 +66,7 @@ describe("workflow: exact named library targets", function () {
       const request = resolvedAgentRequest({
         conversationKey: items[0].id,
         mode: "agent",
-        conversationKind: "library",
+        conversationKind: "global",
         libraryID,
         userText: `Create Geometry and Memory under "${parent.name}" (${parent.id}). Add existing papers ${items[0].id} and ${items[2].id} to Geometry, and ${items[1].id} and ${items[2].id} to Memory. Preserve every pre-existing membership and tag. Do not create any papers or notes.`,
         executionContext: directExecutionContext(
@@ -136,7 +136,7 @@ describe("workflow: exact named library targets", function () {
           targetCollectionId,
           itemIds: [items[index].id, items[2].id],
         });
-      for (const item of items) await item.reload(undefined, true);
+      for (const item of items) await item.reload(undefined as never, true);
       assert.sameMembers(items[0].getCollections(), [
         parent.id,
         destinationIds[0],
@@ -158,7 +158,7 @@ describe("workflow: exact named library targets", function () {
       const mergeRequest = resolvedAgentRequest({
         conversationKey: items[0].id,
         mode: "agent",
-        conversationKind: "library",
+        conversationKind: "global",
         libraryID,
         userText: `Merge Geometry (${destinationIds[0]}) and Memory (${destinationIds[1]}) into geometry_memory under ${parent.id}. Preserve every paper, tag and unrelated membership; remove the old collection names.`,
         executionContext: directExecutionContext(
@@ -203,7 +203,7 @@ describe("workflow: exact named library targets", function () {
         items.slice(0, 3).map((item) => item.id),
       );
       for (const item of items) {
-        await item.reload(undefined, true);
+        await item.reload(undefined as never, true);
         assert.isFalse(Boolean(item.deleted));
         assert.include(item.getCollections(), parent.id);
         assert.deepEqual(
@@ -233,7 +233,7 @@ describe("workflow: exact named library targets", function () {
             "title",
             `${label} exact targets ${mode} ${Date.now()}`,
           );
-          item.setTags([{ tag: "original" }]);
+          item.setTags([{ tag: "original", type: 0 }]);
           await item.saveTx();
           items.push(item);
         }
@@ -241,7 +241,7 @@ describe("workflow: exact named library targets", function () {
         const request = resolvedAgentRequest({
           conversationKey: items[2].id,
           mode: "agent",
-          conversationKind: "library",
+          conversationKind: "global",
           libraryID: items[0].libraryID,
           userText:
             mode === "auto"
@@ -311,7 +311,7 @@ describe("workflow: exact named library targets", function () {
             (receipt) => receipt.status === "applied",
           ),
         );
-        for (const item of items) await item.reload(undefined, true);
+        for (const item of items) await item.reload(undefined as never, true);
         for (const item of targets)
           assert.sameMembers(
             item.getTags().map((tag) => tag.tag),
@@ -335,7 +335,8 @@ describe("workflow: exact named library targets", function () {
     try {
       for (const label of ["Source", "Destination", "Unrelated"]) {
         const collection = new Zotero.Collection();
-        collection.libraryID = Zotero.Libraries.userLibraryID;
+        (collection as { libraryID: number }).libraryID =
+          Zotero.Libraries.userLibraryID;
         collection.name = `${label} exact move ${Date.now()}`;
         await collection.saveTx();
         collections.push(collection);
@@ -351,7 +352,7 @@ describe("workflow: exact named library targets", function () {
       const request = resolvedAgentRequest({
         conversationKey: items[0].id,
         mode: "agent",
-        conversationKind: "library",
+        conversationKind: "global",
         libraryID: items[0].libraryID,
         userText: `Move the paper titled "${items[0].getField("title")}" from "${collections[0].name}" to "${collections[1].name}". Preserve all other memberships.`,
         executionContext: directExecutionContext(
@@ -403,7 +404,7 @@ describe("workflow: exact named library targets", function () {
           (receipt) => receipt.status === "applied",
         ),
       );
-      for (const item of items) await item.reload(undefined, true);
+      for (const item of items) await item.reload(undefined as never, true);
       assert.sameMembers(
         items[0].getCollections(),
         collections.slice(1).map((collection) => collection.id),

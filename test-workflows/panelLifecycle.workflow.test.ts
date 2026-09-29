@@ -32,7 +32,7 @@ async function withPrefs<T>(
   for (const [key, value] of Object.entries(prefs)) {
     const fullKey = `${PREF_PREFIX}.${key}`;
     previous.set(fullKey, Zotero.Prefs.get(fullKey, true));
-    Zotero.Prefs.set(fullKey, value, true);
+    Zotero.Prefs.set(fullKey, value as string | number | boolean, true);
   }
   try {
     return await task();
@@ -41,7 +41,7 @@ async function withPrefs<T>(
       if (value === undefined) {
         Zotero.Prefs.clear?.(fullKey, true);
       } else {
-        Zotero.Prefs.set(fullKey, value, true);
+        Zotero.Prefs.set(fullKey, value as string | number | boolean, true);
       }
     }
   }
@@ -95,7 +95,7 @@ describe("workflow: panel lifecycle", function () {
           await freshPaper.saveTx({ skipSelect: true });
           const paperID = freshPaper.id;
           const countChats = () =>
-            Zotero.DB.valueQueryAsync(
+            Zotero.DB.valueQueryAsync<number>(
               "SELECT COUNT(*) FROM llm_for_zotero_paper_conversations WHERE paper_item_id = ?",
               [paperID],
             );
@@ -143,13 +143,13 @@ describe("workflow: panel lifecycle", function () {
                WHERE p.paper_item_id = ?`,
               [paperID],
             );
-            assert.lengthOf(rows, 1);
-            assert.isNotEmpty(rows[0].paperInstance);
-            assert.equal(rows[0].paperInstance, rows[0].registryInstance);
-            assert.equal(rows[0].paperInstance, rows[0].ledgerInstance);
-            assert.equal(rows[0].valid, 1);
-            assert.equal(rows[0].marker, 1);
-            assert.isNull(rows[0].retired);
+            assert.lengthOf(rows!, 1);
+            assert.isNotEmpty(rows![0].paperInstance);
+            assert.equal(rows![0].paperInstance, rows![0].registryInstance);
+            assert.equal(rows![0].paperInstance, rows![0].ledgerInstance);
+            assert.equal(rows![0].valid, 1);
+            assert.equal(rows![0].marker, 1);
+            assert.isNull(rows![0].retired);
           } finally {
             db.executeTransaction = executeTransaction;
           }

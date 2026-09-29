@@ -48,7 +48,7 @@ function describeElement(el: Element): string {
 function collectVerticalScrollers(win: Window): ScrollerInfo[] {
   const doc = win.document;
   const out: ScrollerInfo[] = [];
-  const all = Array.from(doc.querySelectorAll("*"));
+  const all = Array.from(doc.querySelectorAll("*")) as Element[];
   for (const el of all) {
     const he = el as HTMLElement;
     if (typeof he.getBoundingClientRect !== "function") continue;
@@ -112,7 +112,7 @@ function collectTurnLevelScrollContainers(
     scope.querySelectorAll(
       "#llm-chat-box, .llm-message-wrapper, .llm-bubble, .llm-agent-activity, .llm-rendered-markdown",
     ),
-  );
+  ) as Element[];
   for (const el of turnLevel) {
     const he = el as HTMLElement;
     const cs = win.getComputedStyle(he);
@@ -154,7 +154,7 @@ function collectChainGeometry(win: Window): string[] {
       continue;
     }
     const rect = el.getBoundingClientRect();
-    const cs = win.getComputedStyle(el);
+    const cs = win.getComputedStyle(el)!;
     lines.push(
       `${selector}: rect=(${Math.round(rect.x)},${Math.round(rect.y)} ` +
         `${Math.round(rect.width)}x${Math.round(rect.height)}) ` +
@@ -236,7 +236,9 @@ describe("workflow: conversation view has a single scrollbar", function () {
       "standalone should mount the shared turn navigator",
     );
     assert.lengthOf(
-      Array.from(win.document.querySelectorAll(".llm-turn-navigator-marker")),
+      Array.from(
+        win.document.querySelectorAll(".llm-turn-navigator-marker"),
+      ) as Element[],
       3,
       "standalone should project one marker per query",
     );
@@ -283,7 +285,7 @@ describe("workflow: conversation view has a single scrollbar", function () {
     assert.equal(
       win.getComputedStyle(
         win.document.querySelector("#llm-chat-box") as HTMLElement,
-      ).overscrollBehaviorY,
+      )!.overscrollBehaviorY,
       "contain",
       "wheel input at the conversation boundary must not scroll an outer host",
     );
@@ -308,16 +310,20 @@ describe("workflow: conversation view has a single scrollbar", function () {
     ) as HTMLElement | null;
     assert.isOk(host, "workflow panel host should be mounted");
     assert.lengthOf(
-      Array.from(host?.querySelectorAll(".llm-turn-navigator") || []),
+      Array.from(
+        host?.querySelectorAll(".llm-turn-navigator") || [],
+      ) as Element[],
       1,
       "sidepanel should mount the same shared turn navigator",
     );
     assert.lengthOf(
-      Array.from(host?.querySelectorAll(".llm-turn-navigator-marker") || []),
+      Array.from(
+        host?.querySelectorAll(".llm-turn-navigator-marker") || [],
+      ) as Element[],
       1,
       "sidepanel should project its query into the shared navigator",
     );
-    const hostStyle = mainWin.getComputedStyle(host as HTMLElement);
+    const hostStyle = mainWin.getComputedStyle(host as HTMLElement)!;
     assert.notInclude(
       ["auto", "scroll"],
       hostStyle.overflowY,
@@ -331,7 +337,7 @@ describe("workflow: conversation view has a single scrollbar", function () {
     assert.equal(
       mainWin.getComputedStyle(
         host?.querySelector("#llm-chat-box") as HTMLElement,
-      ).overscrollBehaviorY,
+      )!.overscrollBehaviorY,
       "contain",
       "wheel input at the sidepanel conversation boundary must stay in chat",
     );

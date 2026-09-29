@@ -674,7 +674,9 @@ describe("workflow: dedicated native chat pane", function () {
 
   it("follows reader tabs and preserves an explicitly selected Library chat", async function () {
     for (const fixture of fixtures) {
-      const reader = await Zotero.Reader.open(fixture.pdfAttachmentId);
+      const reader = (await Zotero.Reader.open(
+        fixture.pdfAttachmentId,
+      )) as _ZoteroTypes.ReaderInstance;
       readers.push(reader);
       await reader._initPromise;
       await reader._waitForReader();

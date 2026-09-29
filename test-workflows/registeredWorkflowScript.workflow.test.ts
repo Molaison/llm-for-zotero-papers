@@ -29,7 +29,7 @@ describe("workflow: registered operation script", function () {
     const mode = getOriginalAgentPermissionMode();
     const libraryID = Zotero.Libraries.userLibraryID;
     const source = new Zotero.Collection();
-    source.libraryID = libraryID;
+    (source as { libraryID: number }).libraryID = libraryID;
     source.name = `Workflow script source ${Date.now()}`;
     await source.saveTx();
     const paper = new Zotero.Item("journalArticle");
@@ -81,7 +81,7 @@ describe("workflow: registered operation script", function () {
         runId,
         conversationKey: paper.id,
         mode: "agent",
-        modelName: "native-workflow",
+        model: "native-workflow",
         status: "running",
         createdAt: Date.now(),
       });
@@ -141,8 +141,8 @@ return destinationId;`,
       destination = Zotero.Collections.get(result.content.returnValue);
       assert.isOk(destination);
       assert.equal(destination!.name, name);
-      await paper.reload(undefined, true);
-      await sentinel.reload(undefined, true);
+      await paper.reload(undefined as never, true);
+      await sentinel.reload(undefined as never, true);
       assert.sameMembers(paper.getCollections(), [source.id, destination!.id]);
       assert.sameMembers(sentinel.getCollections(), [source.id]);
       assert.lengthOf(result.content.operations, 2);

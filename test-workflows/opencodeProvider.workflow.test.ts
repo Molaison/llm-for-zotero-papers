@@ -95,8 +95,10 @@ describe("workflow: OpenCode provider request contract", function () {
       const row = win!.document.querySelector(
         '[data-llm-provider-row="workflow-opencode"]',
       )!;
-      const button = Array.from(
-        row.querySelectorAll<HTMLButtonElement>("button"),
+      const button = (
+        Array.from(
+          row.querySelectorAll<HTMLButtonElement>("button"),
+        ) as HTMLButtonElement[]
       ).find((b) => b.textContent?.trim() === "Test")!;
       assert.isOk(button, "real settings Test button exists");
       button.click();

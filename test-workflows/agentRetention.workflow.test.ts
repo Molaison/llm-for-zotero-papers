@@ -28,7 +28,8 @@ describe("workflow: retained answer to native note", function () {
     );
     const mode = getOriginalAgentPermissionMode();
     const collection = new Zotero.Collection();
-    collection.libraryID = Zotero.Libraries.userLibraryID;
+    (collection as { libraryID: number }).libraryID =
+      Zotero.Libraries.userLibraryID;
     collection.name = `Retention acceptance ${Date.now()}`;
     await collection.saveTx();
     const key = 91814001;
@@ -100,11 +101,11 @@ describe("workflow: retained answer to native note", function () {
         result.execution.result.ok,
         JSON.stringify(result.execution.result.content),
       );
-      await collection.reload(undefined, true);
+      await collection.reload(undefined as never, true);
       const children = collection.getChildItems();
       assert.lengthOf(children, 1);
       note = children[0];
-      await note.reload(undefined, true);
+      await note.reload(undefined as never, true);
       assert.isTrue(note.isNote());
       assert.isFalse(Boolean(note.parentID));
       assert.deepEqual(note.getCollections(), [collection.id]);

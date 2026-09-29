@@ -1,4 +1,5 @@
 import "./hostSurfaceBootstrap";
+import { resolvedAgentRequest } from "../test/helpers/resolvedAgentRequest";
 import {
   semanticContractFixture,
   classifiedFixture,
@@ -25,7 +26,7 @@ describe("workflow: native source-note copy", function () {
     source.setNote("<h1>Original note</h1>");
     await source.saveTx();
     const destination = new Zotero.Collection();
-    destination.libraryID = source.libraryID;
+    (destination as { libraryID: number }).libraryID = source.libraryID;
     destination.name = "Native copy destination";
     await destination.saveTx();
     let copied: Zotero.Item | undefined;
@@ -45,7 +46,7 @@ describe("workflow: native source-note copy", function () {
         `<p><strong>Original provenance</strong></p><p><strong>Model response:</strong> original-model</p><div><h1>Original note</h1><p>The paper&#039;s preserved paragraph: &amp;lt;literal&amp;gt; and variable_name.</p><img data-attachment-key="${image.key}" alt="Fixture figure"></div><hr><p>Written by LLM-for-Zotero.</p>`,
       );
       await source.saveTx();
-      await source.reload(undefined, true);
+      await source.reload(undefined as never, true);
       const originalHtml = source.getNote();
       await initAgentChangeJournal();
       setOriginalAgentPermissionMode("auto");
@@ -73,14 +74,14 @@ describe("workflow: native source-note copy", function () {
         ],
       });
       const context: AgentToolContext = {
-        request: {
+        request: resolvedAgentRequest({
           conversationKey: source.id,
           mode: "agent",
           userText: `Create one standalone copy of note ${source.id}`,
           libraryID: source.libraryID,
           actionContract: contract,
           actionProgress: contracts.createProgress(contract),
-        },
+        }),
         item: null,
         modelName: "workflow",
         currentAnswerText: "",
@@ -115,7 +116,7 @@ describe("workflow: native source-note copy", function () {
         .filter((item) => item.isNote());
       assert.lengthOf(created, 1);
       copied = created[0];
-      await copied.reload(undefined, true);
+      await copied.reload(undefined as never, true);
       assert.isFalse(Boolean(copied.parentID));
       const images = copied.getAttachments().map((id) => Zotero.Items.get(id));
       assert.lengthOf(images, 1);
@@ -179,7 +180,7 @@ describe("workflow: native source-note copy", function () {
       const applied = edit;
       assert.equal(applied.kind, "result");
       if (applied.kind !== "result") return;
-      await copied.reload(undefined, true);
+      await copied.reload(undefined as never, true);
       assert.equal(
         copied.getNote(),
         copiedBefore.replace("preserved paragraph", "reviewed paragraph"),

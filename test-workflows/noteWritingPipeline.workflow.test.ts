@@ -52,7 +52,10 @@ describe("workflow: verified note writing pipeline", function () {
       };
       const appended = await executePreparedNoteChange(params);
       const retry = await executePreparedNoteChange(params);
-      assert.equal(appended.content.actionId, retry.content.actionId);
+      // The coordinator stamps the journal action id onto the content object.
+      const actionIdOf = (output: { content: object }) =>
+        (output.content as { actionId?: string }).actionId;
+      assert.equal(actionIdOf(appended), actionIdOf(retry));
       await note.reload(["note"], true);
       assert.equal((note.getNote().match(/Appended once/g) || []).length, 1);
       const before = note.getNote();
@@ -69,7 +72,7 @@ describe("workflow: verified note writing pipeline", function () {
       assert.equal(result.content.noteVerification.matches, true);
       assert.equal(result.content.noteChange?.state, "applied");
       const [action] = await listJournalActions({
-        actionId: result.content.actionId,
+        actionId: actionIdOf(result),
       });
       assert.equal(action.status, "applied");
       assert.include(action.steps[0].forwardJson, "Edited once.");
