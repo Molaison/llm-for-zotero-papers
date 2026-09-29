@@ -38,6 +38,7 @@ import {
   orderedGatewayPaperIds,
   orderedIndexIds,
   pageIds,
+  planSearchConditions,
   sortAndPageIndexIds,
   validateSearchConditions,
 } from "./internal/libraryIndex";
@@ -448,24 +449,12 @@ export class ItemCapability {
     }
 
     const search = new Zotero.Search({ libraryID });
-    if (params.joinMode === "any" || params.joinMode === "all") {
-      search.addCondition("joinMode", params.joinMode as never, "");
-    }
-    // Zotero excludes trashed items unless told otherwise, so listing the
-    // trash was impossible without this -- which in turn made restore
-    // unusable, because nothing could enumerate what was in there.
-    if (params.includeTrashed) {
-      search.addCondition("deleted", "true" as never, "");
-    }
-    for (const entry of params.conditions) {
-      const name = entry.mode
-        ? `${entry.condition}/${entry.mode}`
-        : entry.condition;
+    for (const step of planSearchConditions(params)) {
       search.addCondition(
-        name as never,
-        entry.operator as never,
-        entry.value === undefined ? "" : (entry.value as never),
-        entry.required,
+        step.condition as never,
+        step.operator as never,
+        step.value as never,
+        step.required,
       );
     }
 

@@ -2,7 +2,8 @@ import type { AgentSearchCondition } from "../services/zoteroGateway";
 import { validateObject } from "./shared";
 
 // Model-facing names must also be valid MFJS property names. Zotero's native
-// `required` flag is represented as `isRequired` in both search tools.
+// `required` flag is represented as `isRequired` in both search tools; on
+// Zotero 10 the gateway turns it into a condition group.
 export const SEARCH_CONDITION_SCHEMA = {
   type: "object",
   additionalProperties: false,

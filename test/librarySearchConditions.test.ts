@@ -9,10 +9,18 @@ import { createSavedSearchTool } from "../src/agent/tools/write/savedSearches";
  * `conditions[]` forwards the vocabulary instead of mirroring it.
  */
 describe("library_search advanced conditions", function () {
-  type Cond = { condition: string; operator: string; value: unknown };
+  type Cond = {
+    condition: string;
+    operator: string;
+    value: unknown;
+    required?: boolean;
+  };
   let added: Cond[];
   let searchIds: number[];
   let items: Map<number, Record<string, unknown>>;
+  // Zotero 10 replaced the `required` flag with groupStart/groupEnd markers
+  // and throws on the flag; 7-9 accept the flag and know no markers.
+  let groupsSupported: boolean;
 
   // A small slice of Zotero's real condition table, including the operator
   // sets that matter for the tests.
@@ -35,6 +43,13 @@ describe("library_search advanced conditions", function () {
     joinMode: { operators: { any: true, all: true } },
     deleted: { operators: { true: true, false: true } },
     blockStart: { operators: {} },
+  };
+  const GROUP_CONDITIONS: Record<
+    string,
+    { operators: Record<string, boolean> }
+  > = {
+    groupStart: { operators: { true: true } },
+    groupEnd: { operators: { true: true } },
   };
 
   function makeItem(
@@ -67,10 +82,36 @@ describe("library_search advanced conditions", function () {
       [3, makeItem(3, "Another paper")],
     ]);
     searchIds = [1, 3];
+    groupsSupported = false;
 
     class FakeSearch {
-      addCondition(condition: string, operator: string, value: unknown) {
-        added.push({ condition, operator, value });
+      id?: number;
+      libraryID = 0;
+      name = "";
+      addCondition(
+        condition: string,
+        operator: string,
+        value: unknown,
+        required?: boolean,
+      ) {
+        if (required && groupsSupported) {
+          throw new Error(
+            "The 'required' parameter is no longer supported; use a condition group",
+          );
+        }
+        added.push(
+          required
+            ? { condition, operator, value, required }
+            : { condition, operator, value },
+        );
+      }
+      getConditions() {
+        return {};
+      }
+      removeCondition() {}
+      async saveTx() {
+        this.id = 42;
+        return this.id;
       }
       async search() {
         return searchIds;
@@ -81,7 +122,9 @@ describe("library_search advanced conditions", function () {
       Search: FakeSearch,
       Items: { get: (id: number) => items.get(id) || null },
       SearchConditions: {
-        get: (name: string) => CONDITIONS[name],
+        get: (name: string) =>
+          CONDITIONS[name] ??
+          (groupsSupported ? GROUP_CONDITIONS[name] : undefined),
       },
       debug: () => undefined,
     };
@@ -272,6 +315,139 @@ describe("library_search advanced conditions", function () {
       ],
     });
     assert.isUndefined(result.nextOffset);
+  });
+
+  describe("required clauses across Zotero versions", function () {
+    const conditions = [
+      {
+        condition: "title",
+        operator: "contains",
+        value: "must",
+        required: true,
+      },
+      { condition: "title", operator: "contains", value: "may" },
+      { condition: "year", operator: "is", value: "2024" },
+    ];
+
+    it("forwards the native flag where Zotero still takes it", async function () {
+      await gateway().searchItemsByConditions({
+        libraryID: 1,
+        conditions,
+        joinMode: "any",
+      });
+      assert.deepEqual(added, [
+        { condition: "joinMode", operator: "any", value: "" },
+        {
+          condition: "title",
+          operator: "contains",
+          value: "must",
+          required: true,
+        },
+        { condition: "title", operator: "contains", value: "may" },
+        { condition: "year", operator: "is", value: "2024" },
+      ]);
+    });
+
+    it("nests the optional clauses in an OR group where the flag is gone", async function () {
+      groupsSupported = true;
+      await gateway().searchItemsByConditions({
+        libraryID: 1,
+        conditions,
+        joinMode: "any",
+        includeTrashed: true,
+      });
+      // Same meaning as 7-9: must AND (may OR 2024).
+      assert.deepEqual(added, [
+        { condition: "joinMode", operator: "all", value: "" },
+        { condition: "deleted", operator: "true", value: "" },
+        { condition: "title", operator: "contains", value: "must" },
+        { condition: "groupStart", operator: "true", value: "" },
+        { condition: "joinMode", operator: "any", value: "" },
+        { condition: "title", operator: "contains", value: "may" },
+        { condition: "year", operator: "is", value: "2024" },
+        { condition: "groupEnd", operator: "true", value: "" },
+      ]);
+    });
+
+    it("drops the flag under joinMode all, where it never changed anything", async function () {
+      groupsSupported = true;
+      await gateway().searchItemsByConditions({
+        libraryID: 1,
+        conditions,
+        joinMode: "all",
+      });
+      assert.deepEqual(added, [
+        { condition: "joinMode", operator: "all", value: "" },
+        { condition: "title", operator: "contains", value: "must" },
+        { condition: "title", operator: "contains", value: "may" },
+        { condition: "year", operator: "is", value: "2024" },
+      ]);
+    });
+
+    it("opens no group when every clause is required", async function () {
+      groupsSupported = true;
+      await gateway().searchItemsByConditions({
+        libraryID: 1,
+        conditions: conditions.slice(0, 1),
+        joinMode: "any",
+      });
+      assert.deepEqual(added, [
+        { condition: "joinMode", operator: "all", value: "" },
+        { condition: "title", operator: "contains", value: "must" },
+      ]);
+    });
+
+    it("leaves a plain OR search alone", async function () {
+      groupsSupported = true;
+      await gateway().searchItemsByConditions({
+        libraryID: 1,
+        conditions: conditions.slice(1),
+        joinMode: "any",
+      });
+      assert.deepEqual(added, [
+        { condition: "joinMode", operator: "any", value: "" },
+        { condition: "title", operator: "contains", value: "may" },
+        { condition: "year", operator: "is", value: "2024" },
+      ]);
+    });
+
+    it("persists a saved search with the same group shape", async function () {
+      groupsSupported = true;
+      const saved = await gateway().saveSavedSearch({
+        libraryID: 1,
+        name: "Required clause",
+        conditions: conditions.slice(0, 2),
+        joinMode: "any",
+      });
+      assert.equal(saved.status, "created");
+      assert.deepEqual(
+        added.map((entry) => `${entry.condition}:${entry.operator}`),
+        [
+          "joinMode:all",
+          "title:contains",
+          "groupStart:true",
+          "joinMode:any",
+          "title:contains",
+          "groupEnd:true",
+        ],
+      );
+    });
+
+    it("refuses raw group markers, which only the builder may place", async function () {
+      groupsSupported = true;
+      let message = "";
+      try {
+        await gateway().searchItemsByConditions({
+          libraryID: 1,
+          conditions: [{ condition: "groupStart", operator: "true" }],
+        });
+        assert.fail("markers must not be exposed");
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error);
+      }
+      assert.include(message, "isRequired");
+      assert.deepEqual(added, []);
+    });
   });
 
   describe("tool-level gating", function () {
