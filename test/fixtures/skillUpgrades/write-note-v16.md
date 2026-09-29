@@ -1,7 +1,7 @@
 ---
 id: write-note
 description: Create, save, or edit a Zotero note or Markdown note, including requested figures or an existing answer. Use only when the user explicitly requests a note.
-version: 17
+version: 16
 contexts: any
 activation: auto
 ---
@@ -153,7 +153,18 @@ Written by LLM-for-Zotero.
 
 Use the figure and table labels requested by the user or identified through inspected paper evidence.
 Include the selected assets when verified crops are available.
-Follow the analyze-figures skill for obtaining crops; embed the returned crop paths as `file://` links.
+For Zotero library PDFs, first call `paper_read({ mode:'figures', query:'<figure request>' })`.
+Treat `paper_read({ mode:'figures' })` as the authority for figure crop cache reuse/regeneration.
+Use its returned crop paths/artifacts as-is and do not inspect or validate `figure_crops` metadata before writing.
+Embed extracted PDF crop paths returned by that tool.
+Do not embed MinerU source image paths.
+Panel suffixes and captions are hints only; do not assume image order proves panel identity.
+If `paper_read({ mode:'figures' })` returns `no_figures`, `mineru_required`, `error`, zero figures, or no image artifact, switch to text-only mode when the user asked for a note.
+Do not include figure images, MinerU source images, rendered PDF page screenshots, or extracted-image placeholders in that failure state.
+Explicitly state that figure extraction failed or no extracted crops are available.
+Explicitly state that the explanations are based on captions, figure legends, and surrounding paper text.
+Text-only models may still copy/embed extracted crop paths into notes, but must not make unsupported visual claims beyond caption and surrounding-text evidence.
+This failure path does not restrict images the user manually attached or pasted; user-provided image inputs can still be used normally.
 
 #### For Zotero notes (`note_write`)
 

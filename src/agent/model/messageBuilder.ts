@@ -574,65 +574,15 @@ function buildTurnGuidanceBlock(instructions: string[]): string {
   return ["Current-turn dynamic agent guidance:", ...lines].join("\n\n");
 }
 
-function getInScopePaperContexts(request: AgentRuntimeRequest) {
-  return request.turnPaperScope.papers.map((entry) => entry.paper);
-}
-
-function hasFigureTaskIntent(request: AgentRuntimeRequest): boolean {
-  return (
-    request.classifiedIntent?.semantic?.visualMode === "figure" ||
-    Boolean(request.classifiedIntent?.semantic?.figures)
-  );
-}
-
-function buildFigureMineruInstruction(
-  request: AgentRuntimeRequest,
-  matchedSkillIds: ReadonlyArray<string>,
-): string {
-  if (!hasFigureTaskIntent(request)) return "";
-  const mineruPapers = getInScopePaperContexts(request).filter((entry) =>
-    Boolean(entry.mineruCacheDir),
-  );
-  if (!mineruPapers.length) return "";
-  const cacheHints = mineruPapers
-    .map((entry, index) => {
-      const label = entry.title?.trim() || `paper ${index + 1}`;
-      return `- ${label}: ${entry.mineruCacheDir}`;
-    })
-    .join("\n");
-  return (
-    "TURN RULE: This is a figure/table interpretation task and MinerU cache is available for at least one in-scope paper. " +
-    "For figure/image questions, call `paper_read({ mode:'figures', query:'<figure label or all figures>' })` first. This returns precise PDF crops plus captions/provenance. Treat that result as the authority for figure crop cache reuse/regeneration; use returned crop paths/artifacts as-is and do not inspect or validate `figure_crops` metadata before analysis or writing. " +
-    "If figure extraction fails or returns no crops, switch to text-only mode for analysis, note taking, and follow-up artifacts: do not include figure images, rendered PDF page screenshots, MinerU source images, or extracted-image placeholders; explicitly state that extraction failed or no extracted crops are available and base explanations on captions, figure legends, and surrounding paper text. Manual user-provided image inputs are unaffected. " +
-    "For table questions, call `paper_read({ mode:'targeted', query:'<table label and surrounding discussion>' })` because MinerU table evidence is text/structure, not figure crops. " +
-    "Use `full.md`/manifest text for captions and surrounding textual evidence, but do not read or embed MinerU image paths for ordinary figure interpretation. " +
-    "For explicit panel requests, inspect the whole extracted figure crop and treat panel suffixes as hints. " +
-    "Use `paper_read({ mode:'visual', query:'<page/layout request>' })` only when the user explicitly asks for rendered/raw PDF pages, page screenshots, page layout, exact pages, or visible-reader inspection.\n" +
-    `Available MinerU cache directories:\n${cacheHints}`
-  );
-}
-
 function buildRuntimePlatformSection(): string {
   return buildRuntimePlatformGuidanceText();
 }
 
-function buildTextOnlyModelInstruction(
-  request: AgentRuntimeRequest,
-  matchedSkillIds: ReadonlyArray<string>,
-): string {
+function buildTextOnlyModelInstruction(request: AgentRuntimeRequest): string {
   if (isMultimodalRequestSupported(request)) return "";
+  if (!request.screenshots?.length) return "";
   const modelLabel = (request.model || "selected model").trim();
-  if (!hasFigureTaskIntent(request)) {
-    return request.screenshots?.length
-      ? `MODEL LIMITATION: ${modelLabel} is text-only and cannot inspect the supplied screenshots.`
-      : "";
-  }
-  return (
-    `MODEL LIMITATION: ${modelLabel} is treated as text-only in this plugin. ` +
-    "Do not rely on screenshots, PDF page images, or image-file visual inspection. " +
-    "For MinerU-cached papers, prefer `manifest.json`, `full.md` section offsets, captions, tables, formulas, and surrounding extracted text. " +
-    "For figure workflows, you may still call `paper_read({ mode:'figures' })` to obtain extracted crop paths, captions, warnings, and provenance for note embedding. Treat that result as the authority for figure crop cache reuse/regeneration; do not inspect or validate `figure_crops` metadata before analysis or writing. Do not make unsupported visual claims unless an image-capable model inspected the crop."
-  );
+  return `MODEL LIMITATION: ${modelLabel} is text-only and cannot inspect the supplied screenshots.`;
 }
 
 export async function renderAgentPromptEnvelope(
@@ -645,14 +595,10 @@ export async function renderAgentPromptEnvelope(
   } = {},
 ): Promise<RenderedAgentPromptEnvelope> {
   const continuityNotes = await loadAgentTurnMemory(request.conversationKey);
-  const workflowParityInstructions = [
-    buildFigureMineruInstruction(request, matchedSkillIds),
-  ].filter(Boolean);
   const dynamicGuidanceInstructions = [
     request.workingDirectory
       ? `Command working directory retained from this conversation: ${request.workingDirectory}. run_command uses it when cwd is omitted; pass cwd explicitly to change it. This directory does not confer filesystem permission.`
       : "",
-    ...workflowParityInstructions,
     ...collectToolGuidanceInstructions(request, tools, matchedSkillIds),
   ];
   const matchedSkillInstructions = collectSkillGuidanceInstructions(
@@ -720,7 +666,7 @@ export async function renderAgentPromptEnvelope(
     },
     {
       id: "model-limitations",
-      lines: [buildTextOnlyModelInstruction(request, matchedSkillIds)],
+      lines: [buildTextOnlyModelInstruction(request)],
     },
     {
       id: "custom-instructions",

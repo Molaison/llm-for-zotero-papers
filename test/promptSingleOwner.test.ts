@@ -94,6 +94,16 @@ describe("prompt rules have a single owner", function () {
       marker: "discovery never imports",
       owner: "tool:literature_search",
     },
+    {
+      rule: "figure crops come only from paper_read figures mode",
+      marker: "figure_crops",
+      owner: "skill:analyze-figures.md",
+    },
+    {
+      rule: "failed figure extraction falls back to text",
+      marker: "extracted-image placeholders",
+      owner: "skill:analyze-figures.md",
+    },
   ];
 
   const owners = collectOwnerTexts();

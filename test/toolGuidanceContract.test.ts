@@ -290,22 +290,30 @@ describe("tool guidance contracts", function () {
     }
 
     assert.include(analyzeFigures!, "call `paper_read` in `figures` mode");
-    assert.include(messageBuilder!, "precise PDF crops");
+    assert.include(analyzeFigures!, "`figure_crops` metadata");
+    assert.include(analyzeFigures!, "switch to text-only mode");
+    assert.include(
+      analyzeFigures!,
+      "Do not read or embed MinerU source image paths",
+    );
     assert.include(paperRead!, "mode:'figures'");
     assert.include(writeNote!, "host-issued figure assets");
+    assert.include(
+      writeNote!,
+      "Follow the analyze-figures skill for obtaining crops",
+    );
+    assert.notInclude(writeNote!, "figure_crops");
     assert.notInclude(noteTools!, "returns no_figures");
     assert.notInclude(agentPersona!, "figure_crops");
-    assert.include(writeNote!, "switch to text-only mode");
+    // The figure turn rule and its text-only branch were removed; the rules
+    // live only in the analyze-figures skill.
+    assert.notInclude(messageBuilder!, "figure_crops");
+    assert.notInclude(messageBuilder!, "Available MinerU cache directories");
     assert.include(analyzeFigures!, "preserve the textual evidence");
     assert.include(
       analyzeFigures!,
       "User-provided images remain separate evidence inputs",
     );
-    assert.include(
-      messageBuilder!,
-      "user-provided image inputs are unaffected",
-    );
-    assert.include(writeNote!, "Do not embed MinerU source image paths");
   });
 
   it("does not expose hidden legacy call targets in model-visible guidance", function () {
