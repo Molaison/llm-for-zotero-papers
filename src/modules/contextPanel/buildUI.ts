@@ -1022,6 +1022,12 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
   tokenUsage.dataset.detail = contextUsagePresentation.detail;
   contextUsageControl.append(contextGauge, tokenUsage);
   footerControls.append(permissionControl, contextUsageControl);
+  const providerQuota = createElement(doc, "button", "llm-provider-quota", {
+    id: "llm-provider-quota",
+    type: "button",
+  });
+  providerQuota.style.display = "none";
+  footerControls.append(providerQuota);
   statusBar.append(statusLine, footerControls);
 
   actionsLeft.append(
