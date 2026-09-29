@@ -156,6 +156,22 @@ describe("workflow: provider quota footer", function () {
       await control.sync();
       assert.equal(button.textContent, "65% used");
       assert.include(button.title, "MiniMax Token Plan quota");
+      entry = { ...entry, apiBase: "https://opencode.ai/zen/go/v1" };
+      snapshot = {
+        checkedAt: Date.now(),
+        quota: parseApiQuota("opencode_go", {
+          usage: {
+            rolling: { status: "ok", percent: 10 },
+            weekly: { status: "ok", percent: 75 },
+            monthly: { status: "ok", percent: 40 },
+          },
+        }),
+      };
+      await control.sync();
+      assert.equal(button.textContent, "75% used");
+      assert.include(button.title, "OpenCode Go quota");
+      assert.include(button.title, "Weekly: 75% used");
+      assert.include(button.title, "Monthly: 40% used");
       if (Services.env.get("LLM_QUOTA_CAPTURE")) {
         root.style.width = "340px";
         panel.style.setProperty("--llm-font-scale", "1");
@@ -189,7 +205,7 @@ describe("workflow: provider quota footer", function () {
       entry = {
         ...entry,
         authMode: "api_key",
-        apiBase: "https://api.openai.com/v1",
+        apiBase: "https://opencode.ai/zen/v1",
       };
       await control.sync();
       assert.equal(button.style.display, "none");

@@ -51,13 +51,21 @@ export function buildQuotaPresentation(snapshot: QuotaSnapshot): {
       kimi: "Kimi Code quota",
       glm: "GLM Coding Plan quota",
       minimax: "MiniMax Token Plan quota",
+      opencode: "OpenCode Go quota",
     }[quota.provider ?? "codex"];
     details.push(t(label));
     if (quota.windows.length > 1)
       details.push(t("Shows the most-used quota window"));
     for (const window of quota.windows) {
+      const windowLabel = window.period
+        ? t(
+            { rolling: "Rolling window", weekly: "Weekly", monthly: "Monthly" }[
+              window.period
+            ],
+          )
+        : duration(window.durationMins);
       details.push(
-        `${duration(window.durationMins)}: ${Math.round(window.usedPercent)}% ${t("used")}`,
+        `${windowLabel}: ${Math.round(window.usedPercent)}% ${t("used")}`,
       );
       if (window.resetsAt)
         details.push(

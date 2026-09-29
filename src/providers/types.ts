@@ -9,9 +9,10 @@ export type ProviderQuota =
     }
   | {
       kind: "usage";
-      provider?: "codex" | "claude" | "glm" | "kimi" | "minimax";
+      provider?: "codex" | "claude" | "glm" | "kimi" | "minimax" | "opencode";
       windows: Array<{
         usedPercent: number;
+        period?: "rolling" | "weekly" | "monthly";
         durationMins?: number;
         resetsAt?: number;
       }>;

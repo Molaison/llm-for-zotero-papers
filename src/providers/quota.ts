@@ -15,6 +15,7 @@ const API_QUOTA_ENDPOINTS = {
   minimax_global: "https://api.minimax.io/v1/token_plan/remains",
   minimax_cn: "https://api.minimax.cn/v1/token_plan/remains",
   minimax_legacy_cn: "https://api.minimaxi.com/v1/token_plan/remains",
+  opencode_go: "https://opencode.ai/zen/go/v1/usage",
 } as const;
 
 export type ApiQuotaKind = keyof typeof API_QUOTA_ENDPOINTS;
@@ -67,6 +68,14 @@ export function resolveQuotaTarget(
       if (url.origin === new URL(API_QUOTA_ENDPOINTS[kind]).origin) {
         if (kind === "kimi_code" && !/^\/coding(\/|$)/.test(url.pathname))
           return null;
+        // Go's subscription quota does not describe Zen's prepaid balance.
+        if (
+          kind === "opencode_go" &&
+          !/^\/zen\/go\/v1(?:\/(?:chat\/completions|responses|messages))?\/?$/.test(
+            url.pathname,
+          )
+        )
+          return null;
         // GLM plan allowance applies to Coding Plan routes, not PAYG requests.
         if (
           (kind === "glm_cn" || kind === "glm_global") &&
@@ -118,6 +127,37 @@ export function parseApiQuota(
     );
   }
   const payload = record(value);
+  if (kind === "opencode_go") {
+    const usage = record(payload.usage);
+    const windows = (["rolling", "weekly", "monthly"] as const).flatMap(
+      (period) => {
+        const row = record(usage[period]);
+        const usedPercent = number(row.percent);
+        if (
+          (row.status !== "ok" && row.status !== "rate-limited") ||
+          usedPercent === undefined ||
+          usedPercent < 0 ||
+          usedPercent > 100
+        )
+          return [];
+        const resetsAt =
+          typeof row.resetsAt === "string"
+            ? Date.parse(row.resetsAt) / 1000
+            : NaN;
+        // The response names periods but supplies no window durations.
+        return [
+          {
+            period,
+            usedPercent,
+            ...(Number.isFinite(resetsAt) && resetsAt > 0 ? { resetsAt } : {}),
+          },
+        ];
+      },
+    );
+    return windows.length
+      ? { kind: "usage", provider: "opencode", windows }
+      : null;
+  }
   if (kind === "kimi_code") {
     const rows = [
       { detail: payload.usage, durationMins: 10080 },
