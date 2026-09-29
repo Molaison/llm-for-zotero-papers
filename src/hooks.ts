@@ -1,6 +1,7 @@
 import { appLogger } from "./core/logging";
 import { initLocale } from "./utils/locale";
 import { initI18n } from "./utils/i18n";
+import { initializeModelCapabilityRegistry } from "./modelCapabilities";
 import { registerPrefsScripts } from "./modules/preferenceScript";
 import { config, PREFERENCES_PANE_ID } from "./modules/contextPanel/constants";
 import {
@@ -392,6 +393,11 @@ async function onStartup() {
   initLocale();
   initI18n();
   initFontScale();
+
+  await measureStartupPhase(
+    "model capability cache",
+    initializeModelCapabilityRegistry,
+  );
 
   const conversationStoreReadiness =
     await initializeConversationStoresForStartup();
