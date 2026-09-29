@@ -3028,6 +3028,9 @@
 }
 
 .llm-chat-latest {
+  appearance: none;
+  -moz-appearance: none;
+  box-sizing: border-box;
   position: absolute;
   z-index: 7;
   left: 50%;
@@ -3038,7 +3041,10 @@
   justify-content: center;
   width: 32px;
   min-width: 32px;
+  max-width: 32px;
   height: 32px;
+  min-height: 32px;
+  max-height: 32px;
   margin: 0;
   padding: 0;
   border: 1px solid var(--stroke-secondary);
