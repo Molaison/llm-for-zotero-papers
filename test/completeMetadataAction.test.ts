@@ -128,7 +128,7 @@ for (const mode of ["safe", "auto", "yolo"] as const)
       registry.register(
         createStubTool(
           {
-            name: "read_library",
+            name: "library_read",
             description: "read",
             inputSchema: { type: "object" },
             executionClass: "read",
@@ -259,7 +259,7 @@ for (const mode of ["safe", "auto", "yolo"] as const)
       registry.register(
         createStubTool(
           {
-            name: "read_library",
+            name: "library_read",
             description: "read",
             inputSchema: { type: "object" },
             executionClass: "read",
@@ -356,7 +356,7 @@ for (const mode of ["safe", "auto", "yolo"] as const)
       registry.register(
         createStubTool(
           {
-            name: "read_library",
+            name: "library_read",
             description: "read",
             inputSchema: { type: "object" },
             executionClass: "read",
@@ -482,7 +482,7 @@ for (const mode of ["safe", "auto", "yolo"] as const)
       registry.register(
         createStubTool(
           {
-            name: "read_library",
+            name: "library_read",
             description: "read",
             inputSchema: { type: "object" },
             executionClass: "read",
@@ -578,7 +578,7 @@ for (const mode of ["safe", "auto", "yolo"] as const)
       registry.register(
         createStubTool(
           {
-            name: "read_library",
+            name: "library_read",
             description: "read",
             inputSchema: { type: "object" },
             executionClass: "read",
@@ -667,7 +667,7 @@ for (const mode of ["safe", "auto", "yolo"] as const)
       registry.register(
         createStubTool(
           {
-            name: "read_library",
+            name: "library_read",
             description: "read",
             inputSchema: { type: "object" },
             executionClass: "read",
@@ -771,7 +771,7 @@ for (const mode of ["safe", "auto", "yolo"] as const)
       registry.register(
         createStubTool(
           {
-            name: "read_library",
+            name: "library_read",
             description: "read",
             inputSchema: { type: "object" },
             executionClass: "read",
@@ -882,7 +882,7 @@ for (const mode of ["safe", "auto", "yolo"] as const)
       registry.register(
         createStubTool(
           {
-            name: "read_library",
+            name: "library_read",
             description: "read",
             inputSchema: { type: "object" },
             executionClass: "read",
@@ -967,7 +967,7 @@ for (const mode of ["safe", "auto", "yolo"] as const)
       registry.register(
         createStubTool(
           {
-            name: "read_library",
+            name: "library_read",
             description: "read",
             inputSchema: { type: "object" },
             executionClass: "read",

@@ -452,7 +452,7 @@ async function loadFreshUnfiledItems(
   }
 
   const queryResult = await callTool(
-    "query_library",
+    "library_search",
     {
       entity: "items",
       mode: "list",
@@ -493,7 +493,7 @@ async function loadFreshCollections(
   }
 
   const collectionsResult = await callTool(
-    "query_library",
+    "library_search",
     { entity: "collections", mode: "list" },
     ctx,
     "Loading collections",

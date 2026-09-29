@@ -517,7 +517,7 @@ async function loadFreshAuditRecords(
   }
 
   const queryResult = await callTool(
-    "query_library",
+    "library_search",
     queryArgs,
     ctx,
     "Scanning library items",

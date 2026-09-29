@@ -104,7 +104,7 @@ for (const mode of ["safe", "auto", "yolo"] as const)
       globalThis.Zotero = originalZotero;
     });
 
-    it("discover_related reads nested read_library results and uses nested import counts", async function () {
+    it("discover_related reads nested library_read results and uses nested import counts", async function () {
       const registry = new AgentToolRegistry();
       let searchArgs: Record<string, unknown> | null = null;
       let importArgs: Record<string, unknown> | null = null;
@@ -112,7 +112,7 @@ for (const mode of ["safe", "auto", "yolo"] as const)
       registry.register(
         createStubTool(
           {
-            name: "read_library",
+            name: "library_read",
             description: "read",
             inputSchema: { type: "object" },
             executionClass: "read",
@@ -219,7 +219,7 @@ for (const mode of ["safe", "auto", "yolo"] as const)
       registry.register(
         createStubTool(
           {
-            name: "query_library",
+            name: "library_search",
             description: "query",
             inputSchema: { type: "object" },
             executionClass: "read",
@@ -286,13 +286,13 @@ for (const mode of ["safe", "auto", "yolo"] as const)
       );
     });
 
-    it("auto_tag uses nested tag update counts from apply_tags", async function () {
+    it("auto_tag uses nested tag update counts from library_update", async function () {
       const registry = new AgentToolRegistry();
 
       registry.register(
         createStubTool(
           {
-            name: "apply_tags",
+            name: "library_update",
             description: "apply tags",
             inputSchema: { type: "object" },
             executionClass: "external_effect",
@@ -385,7 +385,7 @@ for (const mode of ["safe", "auto", "yolo"] as const)
       registry.register(
         createStubTool(
           {
-            name: "apply_tags",
+            name: "library_update",
             description: "apply tags",
             inputSchema: { type: "object" },
             executionClass: "external_effect",
@@ -401,8 +401,8 @@ for (const mode of ["safe", "auto", "yolo"] as const)
           }),
         ),
       );
-      registry.getTool("apply_tags")!.createPendingAction = () => ({
-        toolName: "apply_tags",
+      registry.getTool("library_update")!.createPendingAction = () => ({
+        toolName: "library_update",
         mode: "review",
         title: "Page 1 of 1: Add tags",
         fields: [],
@@ -464,7 +464,7 @@ for (const mode of ["safe", "auto", "yolo"] as const)
       registry.register(
         createStubTool(
           {
-            name: "query_library",
+            name: "library_search",
             description: "query",
             inputSchema: { type: "object" },
             executionClass: "read",
@@ -555,7 +555,7 @@ for (const mode of ["safe", "auto", "yolo"] as const)
       registry.register(
         createStubTool(
           {
-            name: "read_library",
+            name: "library_read",
             description: "read",
             inputSchema: { type: "object" },
             executionClass: "read",
@@ -609,7 +609,7 @@ for (const mode of ["safe", "auto", "yolo"] as const)
       registry.register(
         createStubTool(
           {
-            name: "read_library",
+            name: "library_read",
             description: "read",
             inputSchema: { type: "object" },
             executionClass: "read",
@@ -700,7 +700,7 @@ for (const mode of ["safe", "auto", "yolo"] as const)
       registry.register(
         createStubTool(
           {
-            name: "read_library",
+            name: "library_read",
             description: "read",
             inputSchema: { type: "object" },
             executionClass: "read",

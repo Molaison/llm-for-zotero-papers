@@ -405,7 +405,7 @@ async function readMetadataEntries(
   ctx: ActionExecutionContext,
 ): Promise<MetadataReadEntry[]> {
   const readResult = await callTool(
-    "read_library",
+    "library_read",
     {
       itemIds: targets.map((target) => target.itemId),
       sections: ["metadata", "tags", "attachments"],

@@ -95,7 +95,7 @@ export const discoverRelatedAction: AgentAction<
     });
 
     const readResult = await callTool(
-      "read_library",
+      "library_read",
       { itemIds: [input.itemId], sections: ["metadata"] },
       ctx,
       `Reading metadata for item ${input.itemId}`,
