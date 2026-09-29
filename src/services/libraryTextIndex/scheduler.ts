@@ -38,6 +38,13 @@ import {
   type IndexDocumentRow,
   type LibraryTextIndexStore,
 } from "./store";
+import {
+  currentVectorNamespace,
+  embedDocumentVectors,
+  loadVectorDims,
+  pruneVectorNamespaces,
+} from "./vectorIndexer";
+import { measureVectorBytes } from "./vectorStore";
 
 export type LibraryTextIndexStatus = {
   enabled: boolean;
@@ -75,6 +82,9 @@ export type SchedulerEnv = {
   hasMineruCache: (attachmentId: number) => Promise<boolean>;
   /** A queued attachment is extracted only if this holds (PDF context attachments). */
   isIndexable: (item: Zotero.Item) => boolean;
+  /** The active vector namespace; null keeps the vector stage off. */
+  currentVectorNamespace: typeof currentVectorNamespace;
+  embedOne: typeof embedDocumentVectors;
 };
 
 type Reason = keyof typeof INDEX_PRIORITY;
@@ -88,6 +98,8 @@ type ReconcileResult = {
 const ENABLED_PREF = `${config.prefsPrefix}.libraryTextIndexEnabled`;
 const BUDGET_PREF = `${config.prefsPrefix}.libraryTextIndexBudgetMB`;
 const EVICTION_BATCH = 20;
+/** Consecutive vector failures that pause the vector stage for the session. */
+const VECTOR_MAX_CONSECUTIVE_FAILURES = 3;
 
 type ZoteroLike = {
   Prefs?: { get?: (key: string, global?: boolean) => unknown };
@@ -175,6 +187,10 @@ export class LibraryTextIndexScheduler {
   private sessionSummaryLogged = false;
   private budgetNoticeLogged = false;
   private idleWaiters: Array<() => void> = [];
+  /** Documents whose vectors failed or were skipped this session. */
+  private vectorSkipped = new Set<number>();
+  private vectorFailuresInARow = 0;
+  private vectorPaused = false;
 
   constructor(env: Partial<SchedulerEnv> = {}) {
     this.env = {
@@ -200,6 +216,8 @@ export class LibraryTextIndexScheduler {
       readFileState: readAttachmentFileState,
       hasMineruCache: hasCachedMineruMd,
       isIndexable: (item) => isPdfContextAttachment(item),
+      currentVectorNamespace,
+      embedOne: embedDocumentVectors,
       ...env,
     };
   }
@@ -339,6 +357,7 @@ export class LibraryTextIndexScheduler {
     if (!this.env.isEnabled()) return empty;
     const store = await this.env.getStore();
     if (!store) return empty;
+    await this.pruneVectorNamespaces(store);
     const snapshot = await this.env.getSnapshot(libraryID);
     const eligible = new Set<number>();
     for (const attachmentIds of snapshot.pdfAttachmentIdsByItemId.values()) {
@@ -423,6 +442,29 @@ export class LibraryTextIndexScheduler {
       stale: staleRows.length,
       skippedForBudget,
     };
+  }
+
+  /**
+   * A provider or model switch starts a new, empty namespace; the old
+   * namespaces' rows and shard files go. Nothing is pruned while vectors are off.
+   */
+  private async pruneVectorNamespaces(
+    store: LibraryTextIndexStore,
+  ): Promise<void> {
+    try {
+      // Hydrate the recorded dimensions first: an `:auto` namespace must not
+      // be mistaken for a switch away from this provider's own namespace.
+      await loadVectorDims(store);
+      const current = this.env.currentVectorNamespace();
+      if (!current) return;
+      const removed = await pruneVectorNamespaces(store, current.namespace);
+      if (removed.length)
+        appLogger.info(
+          `LLM index: removed ${removed.length} stale vector namespace(s)`,
+        );
+    } catch (error) {
+      appLogger.debug("LLM index: vector namespace pruning failed", error);
+    }
   }
 
   private async staleReason(row: IndexDocumentRow): Promise<Reason | null> {
@@ -572,18 +614,27 @@ export class LibraryTextIndexScheduler {
         minPriority: INDEX_URGENT_MIN_PRIORITY,
       });
       let lane: "urgent" | "prefetch" = "urgent";
-      if (
+      const prefetchAllowed =
         !job &&
         this.env.isUserIdle() &&
         retrievalActivity === 0 &&
         (await store.sumByteEstimates()) <
-          this.env.budgetBytes() * INDEX_BUDGET_SOFT_RATIO
-      ) {
+          this.env.budgetBytes() * INDEX_BUDGET_SOFT_RATIO;
+      if (prefetchAllowed) {
         // Above the soft budget, prefetch would only index-then-evict.
         job = await store.dequeueNext({ now });
         lane = "prefetch";
       }
       if (!job) {
+        // Both text lanes are empty. The vector stage is prefetch work too.
+        if (prefetchAllowed && (await this.embedNextVector(store))) {
+          if (generation !== this.generation) return;
+          next =
+            retrievalActivity > 0
+              ? INDEX_DRAIN_GAP_BUSY_MS
+              : INDEX_DRAIN_GAP_MS;
+          return;
+        }
         next = await this.onQueueQuiet(store, now);
         return;
       }
@@ -627,6 +678,62 @@ export class LibraryTextIndexScheduler {
       if (generation === this.generation && this.running && next !== null)
         this.kick(next);
     }
+  }
+
+  /**
+   * Embeds one document missing vectors in the active namespace. Returns
+   * false when there is nothing to embed (or the stage is off or paused).
+   * A failure never propagates: it is recorded and the document is skipped
+   * for the rest of the session.
+   */
+  private async embedNextVector(
+    store: LibraryTextIndexStore,
+  ): Promise<boolean> {
+    if (this.vectorPaused) return false;
+    await loadVectorDims(store);
+    const current = this.env.currentVectorNamespace();
+    if (!current) return false;
+    let attachmentId: number | null = null;
+    for (const libraryID of this.env.listLibraryIds()) {
+      const missing = await store.listDocumentsMissingVectors(
+        libraryID,
+        current.namespace,
+      );
+      attachmentId = missing.find((id) => !this.vectorSkipped.has(id)) ?? null;
+      if (attachmentId !== null) break;
+    }
+    if (attachmentId === null) return false;
+    // The text lanes are empty: nobody else is waiting on this drain.
+    this.resolveIdle();
+    try {
+      const result = await this.env.embedOne({
+        store,
+        attachmentId,
+        namespace: current.namespace,
+      });
+      this.vectorFailuresInARow = 0;
+      // A skipped document would otherwise be listed as missing forever.
+      if (result.status === "skipped") this.vectorSkipped.add(attachmentId);
+      else
+        appLogger.debug(
+          `LLM index: vectors ${result.status} for ${attachmentId} (${result.chunkCount} chunks)`,
+        );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.lastError = message;
+      this.vectorSkipped.add(attachmentId);
+      this.vectorFailuresInARow += 1;
+      appLogger.debug(
+        `LLM index: vectors failed for ${attachmentId}: ${message}`,
+      );
+      if (this.vectorFailuresInARow >= VECTOR_MAX_CONSECUTIVE_FAILURES) {
+        this.vectorPaused = true;
+        appLogger.warn(
+          `LLM index: vector indexing paused for this session after ${this.vectorFailuresInARow} consecutive failures. Last error: ${message}`,
+        );
+      }
+    }
+    return true;
   }
 
   /**
@@ -693,6 +800,33 @@ export class LibraryTextIndexScheduler {
       building: this.draining || counts.queued > 0,
       dbBytes: await store.getDbBytes(),
       usedBytes: await store.sumByteEstimates(),
+      ...(await this.vectorStatus(store)),
+    };
+  }
+
+  private async vectorStatus(
+    store: LibraryTextIndexStore,
+  ): Promise<
+    Pick<
+      LibraryTextIndexStatus,
+      "vectorNamespace" | "vectorIndexed" | "vectorBytes"
+    >
+  > {
+    await loadVectorDims(store);
+    const current = this.env.currentVectorNamespace();
+    if (!current)
+      return { vectorNamespace: null, vectorIndexed: 0, vectorBytes: 0 };
+    let vectorBytes = 0;
+    try {
+      vectorBytes = await measureVectorBytes(current.namespace);
+    } catch {
+      // No data directory (tests, early startup): report zero.
+    }
+    return {
+      vectorNamespace: current.namespace,
+      vectorIndexed: (await store.listVectorDocuments(current.namespace))
+        .length,
+      vectorBytes,
     };
   }
 

@@ -75,6 +75,21 @@ export type CorpusStats = {
   avgTokens: number;
   documentCount: number;
 };
+export type VectorDocumentInput = {
+  attachmentId: number;
+  namespace: string;
+  dims: number;
+  chunkCount: number;
+  path: string;
+  sourceFingerprint: string;
+};
+export type VectorDocumentRow = {
+  attachmentId: number;
+  dims: number;
+  chunkCount: number;
+  path: string;
+  sourceFingerprint: string;
+};
 export type QueueRow = {
   attachmentId: number;
   libraryID: number;
@@ -451,6 +466,111 @@ export class LibraryTextIndexStore {
     return new Set(rows.map((row) => Number(row.attachment_id)));
   }
 
+  // ── Vector layer ───────────────────────────────────────────────────────────
+
+  async upsertVectorDocument(row: VectorDocumentInput): Promise<void> {
+    await this.q(
+      `INSERT OR REPLACE INTO vector_documents (attachment_id, namespace, dims, chunk_count, path, source_fingerprint, indexed_at) VALUES (?,?,?,?,?,?,?)`,
+      [
+        row.attachmentId,
+        row.namespace,
+        row.dims,
+        row.chunkCount,
+        row.path,
+        row.sourceFingerprint,
+        Date.now(),
+      ],
+    );
+  }
+
+  async getVectorDocument(
+    attachmentId: number,
+    namespace: string,
+  ): Promise<VectorDocumentRow | null> {
+    const rows = (await this.q(
+      `SELECT attachment_id, dims, chunk_count, path, source_fingerprint FROM vector_documents WHERE attachment_id = ? AND namespace = ?`,
+      [attachmentId, namespace],
+    )) as Array<Record<string, unknown>>;
+    return rows[0] ? toVectorDocumentRow(rows[0]) : null;
+  }
+
+  async listVectorDocuments(namespace: string): Promise<VectorDocumentRow[]> {
+    const rows = (await this.q(
+      `SELECT attachment_id, dims, chunk_count, path, source_fingerprint FROM vector_documents WHERE namespace = ? ORDER BY attachment_id`,
+      [namespace],
+    )) as Array<Record<string, unknown>>;
+    return rows.map(toVectorDocumentRow);
+  }
+
+  async deleteVectorDocument(
+    attachmentId: number,
+    namespace: string,
+  ): Promise<void> {
+    await this.q(
+      `DELETE FROM vector_documents WHERE attachment_id = ? AND namespace = ?`,
+      [attachmentId, namespace],
+    );
+  }
+
+  async listVectorNamespaces(): Promise<string[]> {
+    const rows = (await this.q(
+      `SELECT DISTINCT namespace FROM vector_documents ORDER BY namespace`,
+    )) as Array<{ namespace: string }>;
+    return rows.map((row) => String(row.namespace));
+  }
+
+  /** Deletes every other namespace's rows; returns the namespaces removed. */
+  async deleteVectorNamespacesExcept(namespace: string): Promise<string[]> {
+    const removed = (await this.listVectorNamespaces()).filter(
+      (ns) => ns !== namespace,
+    );
+    if (removed.length)
+      await this.q(`DELETE FROM vector_documents WHERE namespace <> ?`, [
+        namespace,
+      ]);
+    return removed;
+  }
+
+  /**
+   * Documents with text but no current vectors in `namespace`: never
+   * embedded there, or re-indexed since (fingerprint differs). Newest first.
+   */
+  async listDocumentsMissingVectors(
+    libraryID: number,
+    namespace: string,
+  ): Promise<number[]> {
+    const rows = (await this.q(
+      `SELECT d.attachment_id FROM documents d LEFT JOIN vector_documents v ON v.attachment_id = d.attachment_id AND v.namespace = ?
+       WHERE d.library_id = ? AND d.chunk_count > 0 AND (v.attachment_id IS NULL OR v.source_fingerprint <> d.source_fingerprint)
+       ORDER BY d.indexed_at DESC, d.attachment_id ASC`,
+      [namespace, libraryID],
+    )) as Array<{ attachment_id: number }>;
+    return rows.map((row) => Number(row.attachment_id));
+  }
+
+  async getIndexMeta(key: string): Promise<string | null> {
+    const rows = (await this.q(`SELECT value FROM index_meta WHERE key = ?`, [
+      key,
+    ])) as Array<{ value: string }>;
+    return rows[0] ? String(rows[0].value) : null;
+  }
+
+  async setIndexMeta(key: string, value: string): Promise<void> {
+    await this.q(
+      `INSERT OR REPLACE INTO index_meta (key, value) VALUES (?, ?)`,
+      [key, value],
+    );
+  }
+
+  /** Every index_meta row whose key starts with `prefix`. */
+  async listIndexMeta(prefix: string): Promise<Array<[string, string]>> {
+    const rows = (await this.q(
+      `SELECT key, value FROM index_meta WHERE substr(key, 1, ?) = ?`,
+      [prefix.length, prefix],
+    )) as Array<{ key: string; value: string }>;
+    return rows.map((row) => [String(row.key), String(row.value)]);
+  }
+
   async getDbBytes(): Promise<number> {
     const rows = (await this.q(
       `SELECT page_count * page_size AS bytes FROM pragma_page_count(), pragma_page_size()`,
@@ -490,6 +610,15 @@ function toStoredChunk(row: Record<string, unknown>): StoredChunk {
     parentItemId:
       row.parent_item_id === null ? null : Number(row.parent_item_id),
     sourceType: String(row.source_type),
+  };
+}
+function toVectorDocumentRow(row: Record<string, unknown>): VectorDocumentRow {
+  return {
+    attachmentId: Number(row.attachment_id),
+    dims: Number(row.dims),
+    chunkCount: Number(row.chunk_count),
+    path: String(row.path),
+    sourceFingerprint: String(row.source_fingerprint),
   };
 }
 function toQueueRow(row: Record<string, unknown>): QueueRow {

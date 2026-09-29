@@ -645,6 +645,181 @@ describe("library text index scheduler", function () {
     );
   });
 
+  describe("vector stage", function () {
+    let embedded: number[];
+    const withChunk = (id: number) =>
+      docRow(id, {
+        chunks: [
+          {
+            chunkIndex: 0,
+            text: `paper ${id}`,
+            tokenCount: 2,
+            meta: {},
+            tf: { paper: 1 },
+          },
+        ],
+      });
+    const env = () => (scheduler as any).env;
+
+    beforeEach(function () {
+      embedded = [];
+      env().indexOne = async ({ item, lane }: any) => {
+        indexed.push({ id: item.id, lane });
+        await store.upsertDocument(withChunk(item.id));
+        return {
+          status: "indexed",
+          attachmentId: item.id,
+          chunkCount: 1,
+          elapsedMs: 1,
+        };
+      };
+      env().currentVectorNamespace = () => ({ namespace: "t:4", dims: 4 });
+      env().embedOne = async ({ attachmentId, namespace }: any) => {
+        embedded.push(attachmentId);
+        const doc = (await store.getDocument(attachmentId))!;
+        await store.upsertVectorDocument({
+          attachmentId,
+          namespace,
+          dims: 4,
+          chunkCount: 1,
+          path: `/v/${attachmentId}.bin`,
+          sourceFingerprint: doc.sourceFingerprint,
+        });
+        return { status: "embedded", chunkCount: 1, dims: 4 };
+      };
+    });
+
+    it("embeds each indexed document once, after the text lanes drain", async function () {
+      await scheduler.enqueue([1, 2, 3], "prefetch");
+      scheduler.start();
+      await drainAll(10);
+      assert.sameMembers(embedded, [1, 2, 3]);
+      assert.lengthOf(embedded, 3, "each document is embedded exactly once");
+      assert.lengthOf(indexed, 3);
+      const status = await scheduler.getStatus(1);
+      assert.equal(status.vectorNamespace, "t:4");
+      assert.equal(status.vectorIndexed, 3);
+    });
+
+    it("never embeds while text work is runnable, the user is active or a retrieval is in flight", async function () {
+      await store.upsertDocument(withChunk(1));
+      await scheduler.enqueue([2], "added");
+      userIdle = false;
+      scheduler.start();
+      await drainAll(4);
+      assert.deepEqual(
+        indexed.map((i) => i.id),
+        [2],
+        "urgent text still runs",
+      );
+      assert.deepEqual(embedded, [], "the vector stage is prefetch-only");
+      userIdle = true;
+      const end = beginRetrievalActivity();
+      try {
+        scheduler.kick();
+        await drainAll(3);
+        assert.deepEqual(embedded, []);
+      } finally {
+        end();
+      }
+      await drainAll(4);
+      assert.sameMembers(embedded, [1, 2]);
+    });
+
+    it("does not embed above the soft budget", async function () {
+      budget = 1000; // soft limit 900
+      await store.upsertDocument({ ...withChunk(1), byteEstimate: 950 });
+      scheduler.start();
+      await drainAll(3);
+      assert.deepEqual(embedded, []);
+    });
+
+    it("never calls embedOne when no vector namespace is active", async function () {
+      env().currentVectorNamespace = () => null;
+      await scheduler.enqueue([1, 2], "prefetch");
+      scheduler.start();
+      await drainAll(6);
+      assert.lengthOf(indexed, 2);
+      assert.deepEqual(embedded, []);
+      const status = await scheduler.getStatus(1);
+      assert.isNull(status.vectorNamespace);
+      assert.equal(status.vectorIndexed, 0);
+    });
+
+    it("records a vector failure, skips that document for the session, and keeps going", async function () {
+      const ok = env().embedOne;
+      env().embedOne = async (params: any) => {
+        if (params.attachmentId === 1) {
+          embedded.push(1);
+          throw new Error("embedding 503");
+        }
+        return ok(params);
+      };
+      for (const id of [1, 2, 3]) await store.upsertDocument(withChunk(id));
+      scheduler.start();
+      await drainAll(8);
+      assert.equal(embedded.filter((id) => id === 1).length, 1);
+      assert.sameMembers(embedded, [1, 2, 3]);
+      assert.match((await scheduler.getStatus(1)).lastError || "", /503/);
+    });
+
+    it("pauses the vector stage for the session after consecutive failures", async function () {
+      let calls = 0;
+      env().embedOne = async () => {
+        calls += 1;
+        throw new Error("no embedding provider");
+      };
+      for (const id of [1, 2, 3, 4, 5, 6])
+        await store.upsertDocument(withChunk(id));
+      scheduler.start();
+      await drainAll(10);
+      assert.equal(calls, 3);
+    });
+
+    it("skips a document whose embed reports skipped instead of retrying it forever", async function () {
+      let calls = 0;
+      env().embedOne = async () => {
+        calls += 1;
+        return { status: "skipped", chunkCount: 0, dims: 0 };
+      };
+      await store.upsertDocument(withChunk(1));
+      scheduler.start();
+      await drainAll(6);
+      assert.equal(calls, 1);
+    });
+
+    it("reconcile prunes vector rows of other namespaces", async function () {
+      await store.upsertDocument(withChunk(1));
+      for (const namespace of ["old:4", "t:4"])
+        await store.upsertVectorDocument({
+          attachmentId: 1,
+          namespace,
+          dims: 4,
+          chunkCount: 1,
+          path: "/v/1.bin",
+          sourceFingerprint: "fp1",
+        });
+      snapshotIds = [1];
+      await scheduler.reconcile(1);
+      assert.deepEqual(await store.listVectorNamespaces(), ["t:4"]);
+      env().currentVectorNamespace = () => null;
+      await store.upsertVectorDocument({
+        attachmentId: 1,
+        namespace: "other:4",
+        dims: 4,
+        chunkCount: 1,
+        path: "/v/1.bin",
+        sourceFingerprint: "fp1",
+      });
+      await scheduler.reconcile(1);
+      assert.deepEqual(
+        await store.listVectorNamespaces(),
+        ["other:4", "t:4"],
+        "no pruning while vectors are off",
+      );
+    });
+  });
+
   it("waitForIdle resolves true once both lanes are drained and false on timeout", async function () {
     await scheduler.enqueue([1], "added");
     scheduler.start();
