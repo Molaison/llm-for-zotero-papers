@@ -1,7 +1,11 @@
 import { assert } from "chai";
 import { buildUI } from "../src/modules/contextPanel/buildUI";
 import { attachFooterQuotaControl } from "../src/modules/contextPanel/footerQuotaControl";
-import { resolveQuotaTarget, type QuotaSnapshot } from "../src/providers/quota";
+import {
+  parseApiQuota,
+  resolveQuotaTarget,
+  type QuotaSnapshot,
+} from "../src/providers/quota";
 
 describe("workflow: provider quota footer", function () {
   this.timeout(30000);
@@ -131,6 +135,27 @@ describe("workflow: provider quota footer", function () {
       await control.sync();
       assert.equal(button.textContent, "42% used");
       assert.include(button.title, "5h: 42% used");
+      entry = {
+        ...entry,
+        authMode: "api_key",
+        apiBase: "https://api.minimax.io/anthropic",
+      };
+      snapshot = {
+        checkedAt: Date.now(),
+        quota: parseApiQuota("minimax_global", {
+          base_resp: { status_code: 0 },
+          model_remains: [
+            {
+              model_name: "general",
+              current_interval_remaining_percent: 80,
+              current_weekly_remaining_percent: 35,
+            },
+          ],
+        }),
+      };
+      await control.sync();
+      assert.equal(button.textContent, "65% used");
+      assert.include(button.title, "MiniMax Token Plan quota");
       if (Services.env.get("LLM_QUOTA_CAPTURE")) {
         root.style.width = "340px";
         panel.style.setProperty("--llm-font-scale", "1");

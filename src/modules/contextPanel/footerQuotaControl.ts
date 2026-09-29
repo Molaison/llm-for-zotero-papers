@@ -45,14 +45,13 @@ export function buildQuotaPresentation(snapshot: QuotaSnapshot): {
       ...quota.windows.map((window) => window.usedPercent),
     );
     text = `${Math.round(highest)}% ${t("used")}`;
-    const label =
-      quota.provider === "claude"
-        ? "Claude Code account quota"
-        : quota.provider === "kimi"
-          ? "Kimi Code quota"
-          : quota.provider === "glm"
-            ? "GLM Coding Plan quota"
-            : "Codex account quota";
+    const label = {
+      codex: "Codex account quota",
+      claude: "Claude Code account quota",
+      kimi: "Kimi Code quota",
+      glm: "GLM Coding Plan quota",
+      minimax: "MiniMax Token Plan quota",
+    }[quota.provider ?? "codex"];
     details.push(t(label));
     if (quota.windows.length > 1)
       details.push(t("Shows the most-used quota window"));

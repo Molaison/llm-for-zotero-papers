@@ -72,6 +72,7 @@ const zhCN: Record<string, string> = {
   "Claude Code account quota": "Claude Code 账户额度",
   "GLM Coding Plan quota": "GLM 编程套餐额度",
   "Kimi Code quota": "Kimi Code 额度",
+  "MiniMax Token Plan quota": "MiniMax Token Plan 额度",
   "Shows the most-used quota window": "显示使用比例最高的额度周期",
   "Quota window": "额度周期",
   Resets: "重置时间",

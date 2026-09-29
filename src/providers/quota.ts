@@ -1,21 +1,8 @@
 import { createAbortController } from "../utils/apiHelpers";
+import { parseMiniMaxQuota } from "./minimaxQuota";
+import type { ProviderQuota } from "./types";
 
-/** Account allowance is independent of locally recorded conversation tokens. */
-export type ProviderQuota =
-  | {
-      kind: "balance";
-      scope: "account" | "key";
-      balances: Array<{ currency: string; amount: number }>;
-    }
-  | {
-      kind: "usage";
-      provider?: "codex" | "claude" | "glm" | "kimi";
-      windows: Array<{
-        usedPercent: number;
-        durationMins?: number;
-        resetsAt?: number;
-      }>;
-    };
+export type { ProviderQuota } from "./types";
 
 const API_QUOTA_ENDPOINTS = {
   deepseek: "https://api.deepseek.com/user/balance",
@@ -25,10 +12,17 @@ const API_QUOTA_ENDPOINTS = {
   kimi_code: "https://api.kimi.com/coding/v1/usages",
   glm_cn: "https://open.bigmodel.cn/api/monitor/usage/quota/limit",
   glm_global: "https://api.z.ai/api/monitor/usage/quota/limit",
+  minimax_global: "https://api.minimax.io/v1/token_plan/remains",
+  minimax_cn: "https://api.minimax.cn/v1/token_plan/remains",
+  minimax_legacy_cn: "https://api.minimaxi.com/v1/token_plan/remains",
 } as const;
 
 export type ApiQuotaKind = keyof typeof API_QUOTA_ENDPOINTS;
-export type ApiQuotaTarget = { kind: ApiQuotaKind; apiKey: string };
+export type ApiQuotaTarget = {
+  kind: ApiQuotaKind;
+  apiKey: string;
+  model?: string;
+};
 export type ClaudeQuotaTarget = {
   kind: "claude";
   bridgeUrl: string;
@@ -55,6 +49,7 @@ export function resolveQuotaTarget(
     authMode: string;
     apiBase: string;
     apiKey: string;
+    model?: string;
   } | null,
 ): QuotaTarget | null {
   if (!entry) return null;
@@ -78,7 +73,13 @@ export function resolveQuotaTarget(
           !/^\/api\/(anthropic|coding\/paas\/v4)(\/|$)/.test(url.pathname)
         )
           return null;
-        return { kind, apiKey: entry.apiKey };
+        return {
+          kind,
+          apiKey: entry.apiKey,
+          ...(kind.startsWith("minimax_") && entry.model?.trim()
+            ? { model: entry.model.trim() }
+            : {}),
+        };
       }
     }
   } catch {
@@ -107,7 +108,15 @@ function number(value: unknown): number | undefined {
 export function parseApiQuota(
   kind: ApiQuotaKind,
   value: unknown,
+  model?: string,
 ): ProviderQuota | null {
+  if (kind.startsWith("minimax_")) {
+    return parseMiniMaxQuota(
+      value,
+      kind === "minimax_global" ? "USD" : "CNY",
+      model,
+    );
+  }
   const payload = record(value);
   if (kind === "kimi_code") {
     const rows = [
@@ -250,7 +259,12 @@ export async function readApiQuota(
   const controller = createAbortController();
   const timer = setTimeout(() => controller.abort(), 8000);
   try {
-    const response = await fetch(API_QUOTA_ENDPOINTS[target.kind], {
+    const endpoint =
+      target.kind.startsWith("minimax_") && target.apiKey.startsWith("sk-api-")
+        ? new URL("/account/query_balance", API_QUOTA_ENDPOINTS[target.kind])
+            .href
+        : API_QUOTA_ENDPOINTS[target.kind];
+    const response = await fetch(endpoint, {
       headers: {
         Authorization:
           target.kind === "glm_cn" || target.kind === "glm_global"
@@ -263,7 +277,7 @@ export async function readApiQuota(
       credentials: "omit",
     });
     if (!response.ok) return null;
-    return parseApiQuota(target.kind, await response.json());
+    return parseApiQuota(target.kind, await response.json(), target.model);
   } finally {
     clearTimeout(timer);
   }

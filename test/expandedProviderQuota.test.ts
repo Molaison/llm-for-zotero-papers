@@ -30,7 +30,6 @@ describe("expanded provider quotas", function () {
       "http://api.moonshot.ai/v1",
       "https://api.moonshot.cn:8443/v1",
       "https://api.siliconflow.cn/v1",
-      "https://api.minimax.io/anthropic",
     ])
       assert.isNull(resolveQuotaTarget({ ...entry, apiBase }));
   });
