@@ -12,8 +12,20 @@ import {
 } from "./nativePlanReviewReplay";
 import { exercisePlanHistoryReplay } from "./planHistoryReplay";
 import { deliverPendingPlanDocumentMessage } from "../../agent/documents/publication";
-import { exerciseStreamingReplay } from "./streamingReplay";
+import {
+  exerciseStreamingReplay,
+  startTaskProgressReplay,
+} from "./streamingReplay";
+import { flushTaskProgressPanels } from "./taskProgress/panel";
+import { getTaskProgress } from "./taskProgress/store";
+import { resetTaskProgressDrawerHeight } from "./taskProgress/view";
 import { createCodexStreamingScrollReplay } from "./codexStreamingScrollReplay";
+import {
+  reopenTaskProgressConversation,
+  seedTaskProgressConversation,
+  startCodexTaskProgressReplay,
+  startTaskProgressAction,
+} from "./taskProgressReplay";
 import {
   createChatTurnPromptProbes,
   exerciseChatRenderingLifecycle,
@@ -4938,6 +4950,8 @@ async function reset(): Promise<void> {
   });
   forcePendingTurnFinalizeFailuresForTests(0);
   forceWebChatSessionAnchorFailuresForTests(0);
+  // The dragged drawer height lives for the session; a case starts without it.
+  resetTaskProgressDrawerHeight();
 }
 
 function disposeWorkflowPanels(): void {
@@ -5464,6 +5478,46 @@ async function cleanupFixture(
   }
 }
 
+/**
+ * The panel a Task progress replay runs in: a synthetic panel by id, or the
+ * visible native panel of the sidebar or the standalone window.
+ */
+async function resolveTaskProgressPanel(input: {
+  panelId?: string;
+  surface?: "embedded" | "standalone";
+}): Promise<{ body: HTMLElement; item: Zotero.Item }> {
+  assertWorkflowTestEnabled();
+  if (input.panelId) {
+    const panel = getPanel(input.panelId);
+    const item = activeContextPanels.get(panel.body)?.() || panel.item;
+    await ensureConversationLoaded(item);
+    return { body: panel.body, item };
+  }
+  const win =
+    input.surface === "standalone"
+      ? getStandaloneWindowForTest()
+      : Zotero.getMainWindow();
+  const doc = win?.document;
+  const host =
+    input.surface === "standalone"
+      ? doc?.querySelector(".llm-standalone-content")
+      : doc &&
+        (getReaderContextPanelForTab(
+          doc,
+          (win as Window & { Zotero_Tabs?: { selectedID?: string } })
+            ?.Zotero_Tabs?.selectedID,
+        ) ||
+          doc.getElementById("zotero-item-details"));
+  const root = host?.querySelector<HTMLElement>("#llm-main");
+  const body = root?.parentElement;
+  const item = body && activeContextPanels.get(body)?.();
+  if (!root?.isConnected || !body || !item) {
+    throw new Error("Task progress replay requires a mounted chat panel");
+  }
+  await ensureConversationLoaded(item);
+  return { body, item };
+}
+
 export function installWorkflowTestHarness(targetAddon: {
   api: { workflowTest?: WorkflowTestApi };
 }): void {
@@ -5690,6 +5744,60 @@ export function installWorkflowTestHarness(targetAddon: {
       }
       await ensureConversationLoaded(item);
       return exerciseStreamingReplay({ body, item }, input);
+    },
+    startTaskProgressReplay: async (input) => {
+      const panel = await resolveTaskProgressPanel(input);
+      return startTaskProgressReplay(panel, input);
+    },
+    startTaskProgressAction: async (input) => {
+      const panel = await resolveTaskProgressPanel(input);
+      return startTaskProgressAction(panel, input);
+    },
+    startCodexTaskProgressReplay: async (input) => {
+      const panel = await resolveTaskProgressPanel(input);
+      return startCodexTaskProgressReplay(panel, input);
+    },
+    seedTaskProgressConversation: async (input) => {
+      const panel = await resolveTaskProgressPanel(input);
+      return seedTaskProgressConversation(panel, input.turns);
+    },
+    reopenTaskProgressConversation: async (input) => {
+      const panel = await resolveTaskProgressPanel(input);
+      await reopenTaskProgressConversation(panel);
+    },
+    flushTaskProgress: () => {
+      assertWorkflowTestEnabled();
+      flushTaskProgressPanels();
+    },
+    getTaskProgressSnapshot: (conversationKey) => {
+      assertWorkflowTestEnabled();
+      const record = getTaskProgress(conversationKey);
+      if (!record) return null;
+      return {
+        runState: record.runState,
+        turnIndex: record.turnIndex,
+        label: record.scope?.label || "",
+        scopeKeys:
+          record.scope?.listing?.entries.map((entry) => entry.key) || [],
+        listingLoaded: Boolean(record.scope?.listing),
+        planSeen: record.planSeen,
+        hydrated: record.hydrated,
+        checklist: record.checklist
+          ? {
+              source: record.checklist.source,
+              title: record.checklist.title,
+              steps: record.checklist.steps.map((step) => ({ ...step })),
+              outcome: record.checklist.outcome,
+              detail: record.checklist.detail,
+            }
+          : null,
+        paperStates: Object.fromEntries(
+          Object.values(record.ledger.papers).map((entry) => [
+            entry.key,
+            entry.state,
+          ]),
+        ),
+      };
     },
     exerciseAgentDeliveryReplay: (input) =>
       exerciseAgentDeliveryReplay(

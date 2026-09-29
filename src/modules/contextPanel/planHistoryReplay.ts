@@ -292,8 +292,15 @@ export async function exercisePlanHistoryReplay(
       inputPreserved:
         doc.activeElement === composer &&
         composer.value === "History remains interactive",
-      progressNodes: box.querySelectorAll(".llm-plan-container-execution")
-        .length,
+      // Historical plans never show live steps, and no capsule exists.
+      progressNodes:
+        doc.querySelectorAll(
+          ".llm-plan-progress-floating, .llm-plan-container-execution",
+        ).length +
+        (body.querySelector<HTMLElement>(".llm-task-progress-steps")?.hidden ===
+        false
+          ? 1
+          : 0),
       warmOpenMs: 0,
       retainedOnOwnRefresh: false,
       staleDocumentLoadIgnored: false,

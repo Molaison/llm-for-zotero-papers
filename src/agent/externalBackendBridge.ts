@@ -38,6 +38,7 @@ import {
   type ExternalRuntimeEffect,
 } from "./contracts/externalRuntimeEffects";
 import type { AgentRuntime } from "./runtime";
+import { paperLedgerUpdateFromMcpActivity } from "./context/taskPaperLedgerRecorder";
 import {
   addZoteroMcpToolActivityObserver,
   registerScopedZoteroMcpScope,
@@ -3448,6 +3449,10 @@ export function createExternalBackendBridgeRuntime(options: {
                 }
                 const pending = (async () => {
                   await emitTurnEvent(buildClaudeMcpToolActivityEvent(event));
+                  // What the read read from each paper, persisted right after
+                  // its row like the in-plugin runtime's tool_result.
+                  const ledgerUpdate = paperLedgerUpdateFromMcpActivity(event);
+                  if (ledgerUpdate) await emitTurnEvent(ledgerUpdate);
                   if (
                     event.phase === "completed" &&
                     event.ok &&

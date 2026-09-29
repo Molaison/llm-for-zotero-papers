@@ -1,0 +1,441 @@
+/**
+ * One task-progress UI: a built-in action and Codex's own plan show in the
+ * Task progress row and its Steps block (no in-chat "Working" card, no
+ * checklist trace row); a stored conversation reopened after a restart gets
+ * its counts, paper states and steps back; deleting it clears the record.
+ */
+import { assert } from "chai";
+import { buildQuoteCitation } from "../src/services/quotes/quoteCitations";
+import type {
+  WorkflowTestApi,
+  WorkflowTestFixture,
+} from "../src/modules/contextPanel/workflowTestTypes";
+
+const TITLES = [
+  "Representational drift in hippocampal CA1",
+  "Synaptic turnover predicts place field drift",
+  "Drift scales with experience, not time",
+  "Homeostatic control of drifting assemblies",
+];
+
+describe("workflow: task progress unified", function () {
+  this.timeout(120000);
+  const prefs: Array<[string, unknown]> = [
+    ["extensions.zotero.llmforzotero.enableAgentMode", true],
+    ["extensions.zotero.llmforzotero.lastUsedRuntimeMode", "agent"],
+  ];
+  const saved = new Map<string, unknown>();
+  let api: WorkflowTestApi;
+  let win: any;
+  let libraryID: number;
+  let collection: Zotero.Collection;
+  const fixtures: WorkflowTestFixture[] = [];
+  const shots: string[] = [];
+
+  async function until(check: () => boolean, message: string | (() => string)) {
+    const deadline = Date.now() + 15000;
+    while (!check() && Date.now() < deadline) await Zotero.Promise.delay(40);
+    assert.isTrue(check(), typeof message === "function" ? message() : message);
+  }
+
+  function rootOf(panelId: string): HTMLElement {
+    return win.document.querySelector(
+      `[data-workflow-panel-id="${panelId}"]`,
+    ) as HTMLElement;
+  }
+
+  function view(panelId: string) {
+    const root = rootOf(panelId);
+    return {
+      root,
+      row: root.querySelector("#llm-task-progress") as HTMLButtonElement,
+      count: () =>
+        root.querySelector(".llm-task-progress-count")?.textContent || "",
+      drawer: root.querySelector("#llm-task-progress-drawer") as HTMLElement,
+      steps: root.querySelector(".llm-task-progress-steps") as HTMLElement,
+      head: () =>
+        root.querySelector(".llm-task-progress-head")?.textContent || "",
+      box: root.querySelector("#llm-chat-box") as HTMLElement,
+      items: () =>
+        Array.from(root.querySelectorAll(".llm-task-paper")) as HTMLElement[],
+    };
+  }
+
+  /** Bring the synthetic panel on screen, as a sidebar-sized column. */
+  function showOnScreen(panelId: string): () => void {
+    const host = rootOf(panelId).closest(
+      "[data-llm-workflow-test]",
+    ) as HTMLElement;
+    const previous = host.getAttribute("style");
+    host.style.left = "0";
+    host.style.width = "420px";
+    host.style.height = "760px";
+    host.style.zIndex = "99999";
+    host.style.background = "var(--material-background, #fff)";
+    return () => {
+      if (previous === null) host.removeAttribute("style");
+      else host.setAttribute("style", previous);
+    };
+  }
+
+  async function capture(panelId: string, filename: string) {
+    const rect = rootOf(panelId).getBoundingClientRect();
+    const canvas = win.document.createElementNS(
+      "http://www.w3.org/1999/xhtml",
+      "canvas",
+    );
+    const scale = win.devicePixelRatio || 1;
+    const width = Math.ceil(rect.width);
+    const height = Math.ceil(rect.height);
+    canvas.width = width * scale;
+    canvas.height = height * scale;
+    const context = canvas.getContext("2d");
+    context.scale(scale, scale);
+    context.drawWindow(win, rect.left, rect.top, width, height, "#ffffff");
+    const binary = win.atob(canvas.toDataURL("image/png").split(",")[1]);
+    const path = `${Zotero.DataDirectory.dir}/${filename}`;
+    await win.IOUtils.write(
+      path,
+      Uint8Array.from(binary, (char: any) => char.charCodeAt(0)),
+    );
+    shots.push(path);
+  }
+
+  function key(index: number): string {
+    return `${libraryID}:${fixtures[index].parentItemId}`;
+  }
+
+  function delta(
+    callId: string,
+    runId: string,
+    entries: Array<[number, "matched" | "skimmed" | "read"]>,
+  ) {
+    return {
+      version: 1 as const,
+      callId,
+      runId,
+      toolName: "library_retrieve",
+      papers: entries.map(([index, state]) => ({
+        key: key(index),
+        libraryID,
+        itemId: fixtures[index].parentItemId,
+        title: TITLES[index],
+        text: "pdf_text" as const,
+        state,
+      })),
+      reads: entries.map(([index, state]) => ({
+        key: key(index),
+        callId,
+        toolName: "library_retrieve",
+        granularity:
+          state === "read" ? ("passage" as const) : ("metadata" as const),
+        method: "bm25",
+        ...(state === "read"
+          ? { label: "Results", snippet: `${TITLES[index]} — key passage.` }
+          : {}),
+      })),
+    };
+  }
+
+  before(async function () {
+    assert.include(Zotero.DataDirectory.dir, ".scaffold/test/data");
+    api = (Zotero as any).LLMForZotero.api.workflowTest;
+    await api.reset();
+    win = Zotero.getMainWindow();
+    for (const [name, value] of prefs) {
+      saved.set(name, Zotero.Prefs.get(name, true));
+      Zotero.Prefs.set(name, value as never, true);
+    }
+    libraryID = Zotero.Libraries.userLibraryID;
+    collection = new Zotero.Collection();
+    collection.libraryID = libraryID;
+    collection.name = `Drift unified ${Date.now()}`;
+    await collection.saveTx();
+    for (const title of TITLES) {
+      const fixture = await api.createPaperWithPdfFixture({
+        title,
+        pdfTitle: title,
+        pages: [`${title} evidence.`],
+      });
+      fixtures.push(fixture);
+      const item = Zotero.Items.get(fixture.parentItemId);
+      item.setCollections([collection.id]);
+      await item.saveTx();
+    }
+  });
+
+  after(async function () {
+    await api.reset();
+    for (const fixture of fixtures) await api.cleanupFixture(fixture);
+    await collection?.eraseTx().catch(() => undefined);
+    for (const [name, value] of saved) {
+      if (value === undefined) Zotero.Prefs.clear(name, true);
+      else Zotero.Prefs.set(name, value as never, true);
+    }
+    Zotero.debug(`TASK_PROGRESS_M5_SCREENSHOTS ${JSON.stringify(shots)}`, 1);
+  });
+
+  it("shows a slash action's steps in the row of a one-paper chat, with no card", async function () {
+    const panel = await api.renderPanelForItem(fixtures[0].parentItemId);
+    const restore = showOnScreen(panel.panelId);
+    try {
+      const tp = () => view(panel.panelId);
+      api.flushTaskProgress();
+      assert.isTrue(tp().row.hidden, "a one-paper chat has no row at rest");
+
+      const action = await api.startTaskProgressAction({
+        panelId: panel.panelId,
+        actionName: "auto_tag",
+      });
+      action.step("Reading the paper", 1, 3);
+      action.summary("Reading the paper", "Read 1 paper");
+      action.step("Proposing tags", 2, 3);
+      await until(
+        () => {
+          api.flushTaskProgress();
+          return (
+            !tp().row.hidden && tp().count() === "1/3 steps · Proposing tags"
+          );
+        },
+        () =>
+          `the row shows the action: ${JSON.stringify({ hidden: tp().row.hidden, count: tp().count() })}`,
+      );
+      assert.equal(tp().row.dataset.state, "working");
+      assert.equal(action.chatCards(), 0, "no Working card in the chat");
+      assert.lengthOf(
+        win.document.querySelectorAll(".llm-action-progress-card"),
+        0,
+      );
+      tp().row.click();
+      assert.isFalse(tp().drawer.hidden);
+      await until(
+        () => {
+          api.flushTaskProgress();
+          return tp().items().length === 1;
+        },
+        () => `the one paper in scope lists: ${tp().head()}`,
+      );
+      assert.notInclude(tp().head(), "Preparing");
+      assert.isFalse(tp().steps.hidden, "the Steps block shows the action");
+      const stepsText = tp().steps.textContent || "";
+      assert.include(stepsText, "Auto Tag");
+      assert.include(stepsText, "Reading the paper");
+      assert.include(stepsText, "Proposing tags");
+      await until(
+        () => tp().drawer.dataset.state === "open",
+        "the drawer settles open",
+      );
+      await capture(panel.panelId, "tp-m5-slash-action.png");
+      tp().row.click();
+
+      await action.finish({ ok: true, output: { tagged: 2 } });
+      api.flushTaskProgress();
+      assert.equal(tp().row.dataset.state, "completed");
+      assert.equal(tp().count(), "3/3 steps · Tagged 2 items");
+      assert.isFalse(tp().row.hidden, "the row stays after the action");
+      assert.isOk(
+        tp().box.querySelector(".llm-action-inline-card-status"),
+        "the completion card still reports the result",
+      );
+
+      const failing = await api.startTaskProgressAction({
+        panelId: panel.panelId,
+        actionName: "auto_tag",
+      });
+      failing.step("Reading the paper", 1, 2);
+      await failing.finish({ ok: false, error: "offline" });
+      api.flushTaskProgress();
+      assert.equal(tp().row.dataset.state, "failed");
+      assert.equal(tp().count(), "0/2 steps · Auto Tag failed: offline");
+
+      const stopped = await api.startTaskProgressAction({
+        panelId: panel.panelId,
+        actionName: "auto_tag",
+      });
+      stopped.step("Reading the paper", 1, 2);
+      await stopped.stop();
+      api.flushTaskProgress();
+      assert.equal(tp().row.dataset.state, "cancelled");
+      assert.equal(action.chatCards(), 0);
+    } finally {
+      restore();
+    }
+  });
+
+  it("shows Codex's update_plan as the Steps, never as a trace row, and restores it", async function () {
+    const panel = await api.renderPanelForItem(fixtures[1].parentItemId);
+    const restore = showOnScreen(panel.panelId);
+    try {
+      const tp = () => view(panel.panelId);
+      const codex = await api.startCodexTaskProgressReplay({
+        panelId: panel.panelId,
+        user: { text: "Compare the methods of the drift papers" },
+      });
+      codex.planUpdated([
+        { content: "Inspect the scope", status: "completed" },
+        { content: "Read the methods sections", status: "in_progress" },
+        { content: "Compare the results", status: "pending" },
+      ]);
+      codex.read("mcp-1", delta("mcp-1", codex.runId, [[1, "read"]]));
+      await until(
+        () => {
+          api.flushTaskProgress();
+          return tp().count().startsWith("1/3 steps · ");
+        },
+        () => `the row counts Codex's steps: ${tp().count()}`,
+      );
+      assert.isFalse(tp().row.hidden, "a Codex plan shows the row");
+      assert.notInclude(
+        tp().box.textContent || "",
+        "Compare the results",
+        "no checklist row in the chat trace",
+      );
+      tp().row.click();
+      const lines = Array.from(
+        tp().steps.querySelectorAll(".llm-plan-task"),
+      ) as HTMLElement[];
+      assert.deepEqual(
+        lines.map((line) => line.className.replace("llm-plan-task ", "")),
+        [
+          "llm-plan-task-completed",
+          "llm-plan-task-in_progress",
+          "llm-plan-task-pending",
+        ],
+      );
+      await capture(panel.panelId, "tp-m5-codex-plan-steps.png");
+      tp().row.click();
+      codex.answer("The methods differ in imaging windows.");
+      await codex.finish();
+      api.flushTaskProgress();
+      assert.equal(tp().row.dataset.state, "completed");
+
+      // Reopened after a restart: the steps come back from the stored run,
+      // and the trace still renders no checklist row.
+      await api.reopenTaskProgressConversation({ panelId: panel.panelId });
+      const snapshot = api.getTaskProgressSnapshot(codex.conversationKey)!;
+      assert.isTrue(snapshot.hydrated);
+      assert.equal(snapshot.checklist?.source, "codex");
+      assert.deepEqual(
+        snapshot.checklist?.steps.map((step) => step.status),
+        ["completed", "in_progress", "pending"],
+      );
+      assert.equal(snapshot.paperStates[key(1)], "read");
+      await until(
+        () => (tp().box.textContent || "").includes("imaging windows"),
+        "the stored answer renders again",
+      );
+      assert.notInclude(tp().box.textContent || "", "Compare the results");
+      assert.isFalse(tp().row.hidden);
+      assert.isTrue(tp().count().startsWith("1/3 steps · "), tp().count());
+    } finally {
+      restore();
+    }
+  });
+
+  it("restores counts and paper states when a stored conversation is reopened, and deletion clears them", async function () {
+    const panel = await api.renderPanelForItem(fixtures[2].parentItemId);
+    const restore = showOnScreen(panel.panelId);
+    try {
+      const tp = () => view(panel.panelId);
+      const scope = {
+        selectedCollectionContexts: [
+          { collectionId: collection.id, name: collection.name, libraryID },
+        ],
+      };
+      const cite = buildQuoteCitation({
+        quoteText: `${TITLES[1]} — key passage.`,
+        citationLabel: "(Mau, 2021)",
+        itemId: fixtures[1].parentItemId,
+        contextItemId: fixtures[1].pdfAttachmentId,
+      })!;
+      const first = `tp-stored-1-${Date.now()}`;
+      const second = `tp-stored-2-${Date.now()}`;
+      const seeded = await api.seedTaskProgressConversation({
+        panelId: panel.panelId,
+        turns: [
+          {
+            runId: first,
+            user: { text: "Which papers measure drift?", ...scope },
+            answer: `Two measure it [[quote:${cite.id}]].`,
+            quoteCitations: [cite],
+            events: [
+              {
+                type: "paper_ledger_update",
+                callId: "c1",
+                delta: delta("c1", first, [
+                  [0, "read"],
+                  [1, "read"],
+                ]),
+              },
+            ],
+          },
+          {
+            runId: second,
+            user: { text: "And how do they explain it?", ...scope },
+            answer: "By experience.",
+            events: [
+              {
+                type: "paper_ledger_update",
+                callId: "c2",
+                delta: delta("c2", second, [
+                  [2, "read"],
+                  [3, "matched"],
+                ]),
+              },
+            ],
+          },
+        ],
+      });
+      await api.reopenTaskProgressConversation({ panelId: panel.panelId });
+      await until(() => {
+        api.flushTaskProgress();
+        const snapshot = api.getTaskProgressSnapshot(seeded.conversationKey);
+        return Boolean(snapshot?.hydrated && snapshot.listingLoaded);
+      }, "the conversation is rebuilt and its scope listed");
+      api.flushTaskProgress();
+      const snapshot = api.getTaskProgressSnapshot(seeded.conversationKey)!;
+      assert.equal(snapshot.runState, "completed");
+      assert.equal(snapshot.turnIndex, 2);
+      assert.deepEqual(
+        [0, 1, 2, 3].map((index) => snapshot.paperStates[key(index)]),
+        ["read", "cited", "read", "matched"],
+      );
+      assert.isFalse(tp().row.hidden);
+      assert.equal(tp().row.dataset.state, "completed");
+      assert.equal(
+        tp().count(),
+        "1 of 4 read",
+        "the row counts the latest question",
+      );
+      tp().row.click();
+      const stateOf = (index: number) =>
+        tp()
+          .items()
+          .find((item) => item.dataset.key === key(index))?.dataset.state;
+      assert.lengthOf(tp().items(), 4);
+      assert.deepEqual([0, 1, 2, 3].map(stateOf), [
+        "read",
+        "cited",
+        "read",
+        "matched",
+      ]);
+      assert.equal(tp().head(), "", "no summary line above the paper list");
+      await capture(panel.panelId, "tp-m5-reopened.png");
+      tp().row.click();
+
+      await api.clickPanelDelete(panel.panelId);
+      assert.isNull(
+        api.getTaskProgressSnapshot(seeded.conversationKey),
+        "deleting the conversation clears its record",
+      );
+      api.flushTaskProgress();
+      await Zotero.Promise.delay(200);
+      assert.isNull(
+        api.getTaskProgressSnapshot(seeded.conversationKey),
+        "and a conversation being deleted is never rebuilt",
+      );
+    } finally {
+      restore();
+    }
+  });
+});

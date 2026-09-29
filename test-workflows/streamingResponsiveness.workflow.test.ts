@@ -87,6 +87,7 @@ describe("workflow: streaming responsiveness", function () {
           result.singleExecutionProgress,
           "historical resumed turns cannot recreate task progress",
         );
+        assert.equal(result.floatingCapsuleNodes, 0, "no floating capsule");
       } finally {
         await api.reset();
         await api.cleanupFixture(fixture);

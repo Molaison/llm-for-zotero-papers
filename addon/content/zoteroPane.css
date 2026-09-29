@@ -9232,15 +9232,6 @@ label.llm-search-results-item:hover {
   color: var(--fill-primary);
 }
 
-.llm-plan-container-execution {
-  width: 100%;
-  padding: 0;
-  overflow: visible;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-}
-
 .llm-plan-recovery-card .llm-plan-action {
   appearance: none;
   display: inline-flex;
@@ -9671,157 +9662,9 @@ details.llm-agent-action-row[open] > summary .llm-agent-action-row-marker {
   margin-top: 16px;
 }
 
-.llm-plan-progress-trigger {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  box-sizing: border-box;
-  width: fit-content;
-  max-width: 100%;
-  min-height: 34px;
-  padding: 6px 11px;
-  border: 1px solid var(--stroke-secondary);
-  border-radius: 999px;
-  background: color-mix(
-    in srgb,
-    var(--material-background) 92%,
-    var(--fill-quinary)
-  );
-  color: var(--fill-primary);
-  box-shadow: 0 5px 18px color-mix(in srgb, #000 16%, transparent);
-  cursor: pointer;
-  font: inherit;
-  line-height: 1.2;
-  text-align: left;
-}
-
-.llm-plan-progress-trigger:hover,
-.llm-plan-progress-trigger:focus-visible {
-  border-color: color-mix(
-    in srgb,
-    var(--color-accent) 58%,
-    var(--stroke-secondary)
-  );
-}
-
-.llm-plan-progress-trigger:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--color-accent) 42%, transparent);
-  outline-offset: 2px;
-}
-
-.llm-plan-progress-trigger-dot {
-  flex: 0 0 auto;
-  width: 8px;
-  height: 8px;
-  border: 1.5px solid var(--color-accent);
-  border-radius: 50%;
-}
-
-.llm-plan-progress-trigger-dot[data-status="running"],
-.llm-plan-progress-trigger-dot[data-status="pending"] {
-  border-right-color: transparent;
-  animation: llm-plan-progress-spin 900ms linear infinite;
-  animation-delay: var(--llm-stable-animation-delay, 0ms);
-}
-
-.llm-plan-progress-trigger-dot[data-status="interrupted"],
-.llm-plan-progress-trigger-dot[data-status="blocked"],
-.llm-plan-progress-trigger-dot[data-status="waiting_for_user"] {
-  border-color: #d58a28;
-  background: color-mix(in srgb, #d58a28 24%, transparent);
-}
-
-.llm-plan-progress-trigger-dot[data-status="completed"],
-.llm-plan-progress-trigger-dot[data-status="completed_with_exceptions"] {
-  border-color: #2e9b55;
-  background: #2e9b55;
-}
-
 @keyframes llm-plan-progress-spin {
   to {
     transform: rotate(360deg);
-  }
-}
-
-.llm-plan-progress-trigger-label,
-.llm-plan-progress-trigger-count {
-  white-space: nowrap;
-}
-
-.llm-plan-progress-trigger-label {
-  font-size: var(--llm-fs-11);
-  font-weight: 600;
-}
-
-.llm-plan-progress-trigger-count {
-  color: var(--fill-secondary);
-  font-size: var(--llm-fs-10);
-  font-variant-numeric: tabular-nums;
-}
-
-.llm-plan-progress-trigger-chevron {
-  flex: 0 0 auto;
-  color: var(--fill-tertiary);
-  font-size: var(--llm-fs-10);
-  transition: transform 160ms ease;
-}
-
-.llm-plan-progress-popover {
-  display: none;
-  box-sizing: border-box;
-  width: 100%;
-  max-width: 420px;
-  max-height: min(50vh, 360px);
-  margin-top: 7px;
-  padding: 8px;
-  overflow: auto;
-  border: 1px solid var(--stroke-secondary);
-  border-radius: 10px;
-  background: var(--material-sidepane, var(--material-background));
-  color: var(--fill-primary);
-  box-shadow: 0 8px 24px color-mix(in srgb, #000 18%, transparent);
-}
-
-.llm-plan-progress-open > .llm-plan-progress-popover,
-.llm-plan-progress-hover > .llm-plan-progress-popover {
-  display: block;
-}
-
-.llm-plan-progress-open
-  > .llm-plan-progress-trigger
-  .llm-plan-progress-trigger-chevron {
-  transform: rotate(180deg);
-}
-
-.llm-plan-progress-floating {
-  position: sticky;
-  z-index: 30;
-  bottom: 10px;
-  display: flex;
-  align-self: center;
-  justify-content: center;
-  width: calc(100% - 12px);
-  max-width: 640px;
-  margin: 2px auto 0;
-  pointer-events: none;
-}
-
-.llm-plan-progress-floating > .llm-plan-progress-trigger,
-.llm-plan-progress-floating > .llm-plan-progress-popover {
-  pointer-events: auto;
-}
-
-.llm-plan-progress-floating > .llm-plan-progress-popover {
-  position: fixed;
-  margin: 0;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .llm-plan-progress-trigger-dot[data-status="running"],
-  .llm-plan-progress-trigger-dot[data-status="pending"] {
-    animation: none;
-    border-right-color: var(--color-accent);
-    background: color-mix(in srgb, var(--color-accent) 22%, transparent);
   }
 }
 
@@ -10630,83 +10473,83 @@ details.llm-agent-action-row[open] > summary .llm-agent-action-row-marker {
   color: #c84b4b;
 }
 
-.llm-plan-progress-popover .llm-plan-header {
+.llm-task-progress-steps .llm-plan-header {
   gap: 8px;
   min-height: 18px;
 }
 
-.llm-plan-progress-popover .llm-plan-heading {
+.llm-task-progress-steps .llm-plan-heading {
   gap: 5px;
 }
 
-.llm-plan-progress-popover .llm-plan-title {
+.llm-task-progress-steps .llm-plan-title {
   font-size: var(--llm-fs-11);
 }
 
-.llm-plan-progress-popover .llm-plan-status {
+.llm-task-progress-steps .llm-plan-status {
   padding: 1px 5px;
 }
 
-.llm-plan-progress-popover .llm-plan-progress {
+.llm-task-progress-steps .llm-plan-progress {
   gap: 0;
   margin-top: 6px;
 }
 
-.llm-plan-progress-popover .llm-plan-task-list {
+.llm-task-progress-steps .llm-plan-task-list {
   margin-top: 6px;
   border-radius: 8px;
 }
 
-.llm-plan-progress-popover .llm-plan-task-line {
+.llm-task-progress-steps .llm-plan-task-line {
   gap: 6px;
   min-height: 32px;
   padding: 5px 7px;
 }
 
-.llm-plan-progress-popover .llm-plan-task-badge {
+.llm-task-progress-steps .llm-plan-task-badge {
   flex-basis: 18px;
   width: 18px;
   height: 18px;
   border-width: 1px;
 }
 
-.llm-plan-progress-popover .llm-plan-task-badge-in_progress::after {
+.llm-task-progress-steps .llm-plan-task-badge-in_progress::after {
   inset: -1px;
   border-width: 1px;
 }
 
-.llm-plan-progress-popover .llm-plan-task-label {
+.llm-task-progress-steps .llm-plan-task-label {
   line-height: 1.3;
 }
 
-.llm-plan-progress-popover .llm-plan-task-original {
+.llm-task-progress-steps .llm-plan-task-original {
   line-height: 1.2;
 }
 
-.llm-plan-progress-popover .llm-plan-task-pill {
+.llm-task-progress-steps .llm-plan-task-pill {
   padding: 1px 5px;
 }
 
-.llm-plan-progress-popover .llm-plan-task-details {
+.llm-task-progress-steps .llm-plan-task-details {
   gap: 3px;
   margin: 0 7px 7px 31px;
   padding-left: 7px;
 }
 
-.llm-plan-progress-popover .llm-plan-task-details p {
+.llm-task-progress-steps .llm-plan-task-details p {
   line-height: 1.3;
 }
 
-.llm-plan-progress-popover .llm-plan-research-progress {
+.llm-task-progress-steps .llm-plan-research-progress {
   margin-top: 6px;
 }
 
-.llm-plan-progress-popover .llm-plan-actions {
+.llm-task-progress-steps .llm-plan-actions {
   gap: 4px;
   margin-top: 6px;
 }
 
-.llm-plan-progress-popover .llm-plan-action {
+.llm-task-progress-steps .llm-plan-action {
   min-height: 26px;
   padding: 3px 8px;
   font-size: var(--llm-fs-10);
@@ -12477,35 +12320,6 @@ details.llm-agent-action-row[open] > summary .llm-agent-action-row-marker {
 .llm-action-inline-card-review > .llm-agent-hitl-card,
 .llm-action-inline-card-status > .llm-agent-hitl-card {
   margin: 0;
-}
-
-/* ── Action progress indicator (in-thread "working" card) ─────────────── */
-
-.llm-action-progress-card {
-  margin: 8px 0 4px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  flex: 0 0 auto;
-}
-
-.llm-action-progress-typing {
-  padding: 0;
-}
-
-.llm-action-progress-step {
-  font-size: var(--llm-fs-11);
-  color: var(--fill-secondary);
-}
-
-.llm-action-progress-summary {
-  font-size: var(--llm-fs-10);
-  color: var(--fill-tertiary);
-  min-height: 0;
-}
-
-.llm-action-progress-summary:empty {
-  display: none;
 }
 
 /* ── Action launch form ─────────────────────────────────────────────────── */
@@ -14840,4 +14654,656 @@ item-pane-sidenav .llm-persistent-rail-entry[hidden] {
   #zotero-item-pane-content
   > #zotero-item-details {
   visibility: visible;
+}
+
+/* ── Task progress ────────────────────────────────────────────────────────
+   The one task-progress view: a row under the header and a drawer that
+   unrolls from it at the top of the chat shell. The drawer is in the flow:
+   the messages below shrink (never below a strip of chat) and stay mounted.
+   Theme tokens only; they follow Zotero's light and dark hooks. */
+
+/* The row is the separation under the header while it shows: the header's
+   divider gives way (it stays whenever the row is hidden). */
+.llm-panel[data-task-progress-row="shown"] > .llm-header .llm-header-nav-row {
+  border-bottom-color: transparent;
+}
+
+/* One container: a rounded card at the top of the chat shell. Collapsed it is
+   just its header; clicking the header unrolls the drawer inside the same
+   card. Its surface is the header's tint over the pane. */
+.llm-task-progress-card {
+  --llm-task-progress-ease: cubic-bezier(0.23, 1, 0.32, 1);
+  position: relative;
+  z-index: 8;
+  display: flex;
+  flex: 0 1 auto;
+  flex-direction: column;
+  box-sizing: border-box;
+  min-height: 0;
+  margin: 2px 2px 6px;
+  overflow: clip;
+  /* The plugin's popup-surface stroke: themed light and dark, in the panel
+     and the standalone window (--stroke-secondary is unset in Zotero 10). */
+  border: 1px solid var(--llm-popup-surface-border);
+  border-radius: 12px;
+  background:
+    linear-gradient(var(--fill-quinary), var(--fill-quinary)),
+    var(--material-sidepane, var(--material-background));
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.16);
+  color: var(--fill-primary);
+}
+
+.llm-task-progress-card[hidden] {
+  display: none;
+}
+
+/* The header: status ring, label, counts, status pill, chevron. */
+.llm-task-progress {
+  appearance: none;
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 9px;
+  box-sizing: border-box;
+  width: 100%;
+  height: 38px;
+  min-height: 38px;
+  margin: 0;
+  padding: 0 8px 0 9px;
+  border: 0;
+  border-radius: 0;
+  outline: none;
+  background: transparent;
+  color: var(--fill-primary);
+  font: inherit;
+  font-size: var(--llm-fs-12);
+  line-height: 1.2;
+  text-align: left;
+  cursor: pointer;
+  user-select: none;
+  transition: background-color 200ms ease;
+}
+
+.llm-task-progress[hidden] {
+  display: none !important;
+}
+
+.llm-task-progress:hover {
+  background: color-mix(in srgb, var(--fill-primary) 4%, transparent);
+}
+
+/* Keyboard focus tints the header; no outline box. */
+.llm-task-progress:focus-visible {
+  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+}
+
+.llm-task-progress-label {
+  flex: 0 0 auto;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.llm-task-progress-count {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fill-secondary);
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.llm-task-progress-ring {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 20px;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+}
+
+.llm-task-progress-ring-track {
+  position: absolute;
+  inset: 0;
+}
+
+.llm-task-progress-ring-base {
+  stroke: var(--llm-popup-surface-border);
+}
+
+.llm-task-progress-ring-arc {
+  display: none;
+  stroke: var(--fill-secondary);
+}
+
+.llm-task-progress[data-state="working"] .llm-task-progress-ring-arc,
+.llm-task-progress[data-state="answering"] .llm-task-progress-ring-arc {
+  display: inline;
+}
+
+.llm-task-progress[data-state="working"] .llm-task-progress-ring-track,
+.llm-task-progress[data-state="answering"] .llm-task-progress-ring-track {
+  animation: llm-plan-progress-spin 1.1s linear infinite;
+  animation-delay: var(--llm-stable-animation-delay, 0ms);
+}
+
+.llm-task-progress[data-state="cancelled"] .llm-task-progress-ring-base {
+  stroke-dasharray: 3 3;
+}
+
+.llm-task-progress-badge {
+  position: absolute;
+  inset: 1px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  color: var(--material-sidepane, var(--material-background));
+}
+
+.llm-task-progress-badge-done {
+  background: var(--llm-diff-add-fg);
+}
+
+.llm-task-progress-badge-failed {
+  background: var(--llm-diff-remove-fg);
+}
+
+.llm-task-progress[data-state="completed"] .llm-task-progress-badge-done,
+.llm-task-progress[data-state="failed"] .llm-task-progress-badge-failed {
+  display: inline-flex;
+  animation: llm-task-progress-pop 300ms var(--llm-task-progress-ease) both;
+}
+
+.llm-task-progress[data-state="completed"] .llm-task-progress-ring-track,
+.llm-task-progress[data-state="failed"] .llm-task-progress-ring-track {
+  display: none;
+}
+
+.llm-task-progress-pill {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  height: 20px;
+  padding: 0 8px;
+  border-radius: 999px;
+  color: var(--fill-secondary);
+  background: color-mix(in srgb, var(--fill-primary) 7%, transparent);
+  font-size: var(--llm-fs-11);
+  font-weight: 500;
+  white-space: nowrap;
+  animation: llm-task-progress-fade 200ms ease-out both;
+}
+
+.llm-task-progress-pill[hidden] {
+  display: none;
+}
+
+.llm-task-progress-pill[data-tone="completed"] {
+  color: var(--llm-diff-add-fg);
+  background: color-mix(in srgb, var(--llm-diff-add-fg) 16%, transparent);
+}
+
+.llm-task-progress-pill[data-tone="failed"] {
+  color: var(--llm-diff-remove-fg);
+  background: color-mix(in srgb, var(--llm-diff-remove-fg) 16%, transparent);
+}
+
+.llm-task-progress-chevron {
+  display: inline-flex;
+  flex: 0 0 24px;
+  align-items: center;
+  justify-content: center;
+  height: 24px;
+  color: var(--fill-tertiary);
+}
+
+.llm-task-progress-chevron svg {
+  transition: transform 300ms var(--llm-task-progress-ease);
+}
+
+.llm-task-progress[aria-expanded="true"] .llm-task-progress-chevron svg {
+  transform: rotate(180deg);
+}
+
+@keyframes llm-task-progress-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.4);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes llm-task-progress-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes llm-task-progress-rise {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .llm-task-progress-card,
+  .llm-task-progress-card * {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+
+/* While the card is in the shell, the shell stacks it over the messages; the
+   messages give up height, down to a strip of chat. */
+.llm-chat-shell.llm-task-progress-present {
+  --llm-task-progress-chat-strip: 96px;
+  display: flex;
+  flex-direction: column;
+}
+
+.llm-chat-shell.llm-task-progress-present > .llm-messages {
+  flex: 1 1 0;
+  height: auto;
+  min-height: var(--llm-task-progress-chat-strip);
+  max-height: none;
+}
+
+/* The turn rail stays centred on the chat below the open drawer. */
+.llm-chat-shell.llm-task-progress-shown > .llm-turn-navigator {
+  top: calc(
+    var(--llm-task-progress-inset, 0px) +
+      (100% - var(--llm-task-progress-inset, 0px)) / 2
+  );
+  height: calc(100% - var(--llm-task-progress-inset, 0px) - 24px);
+}
+
+/* The drawer unrolls inside the card, under a hairline. Its height is its
+   content, up to the dragged height and the space above the chat strip. */
+.llm-task-progress-drawer {
+  position: relative;
+  display: flex;
+  flex: 0 1 auto;
+  flex-direction: column;
+  box-sizing: border-box;
+  min-height: 0;
+  max-height: var(--llm-task-progress-drawer-max, none);
+  overflow: clip;
+  border-top: 1px solid
+    color-mix(in srgb, var(--llm-popup-surface-border) 80%, transparent);
+  font-size: var(--llm-fs-12);
+  user-select: text;
+  transition:
+    height 300ms var(--llm-task-progress-ease),
+    opacity 300ms var(--llm-task-progress-ease);
+}
+
+.llm-task-progress-drawer[hidden] {
+  display: none;
+}
+
+.llm-task-progress-drawer[data-state="opening"] {
+  opacity: 1;
+  animation: llm-task-progress-fade 300ms var(--llm-task-progress-ease) both;
+}
+
+.llm-task-progress-drawer[data-state="closing"] {
+  opacity: 0;
+}
+
+.llm-task-progress-drawer-body {
+  flex: 0 1 auto;
+  box-sizing: border-box;
+  min-height: 0;
+  padding: 6px 0 12px;
+  overflow-x: clip;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+}
+
+/* The drag handle: a thin strip on the bottom edge, drawn only on hover,
+   focus or while held. */
+.llm-task-progress-drawer-grip {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 8px;
+  cursor: ns-resize;
+  outline: none;
+  user-select: none;
+  touch-action: none;
+}
+
+.llm-task-progress-drawer-grip::before {
+  position: absolute;
+  bottom: 3px;
+  left: 50%;
+  width: 36px;
+  height: 3px;
+  margin-left: -18px;
+  border-radius: 2px;
+  background: var(--stroke-primary, var(--fill-secondary, #7a7a7a));
+  content: "";
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.llm-task-progress-drawer-grip:hover::before,
+.llm-task-progress-drawer-grip:focus-visible::before,
+.llm-task-progress-resizing .llm-task-progress-drawer-grip::before {
+  opacity: 1;
+}
+
+.llm-task-progress-resizing,
+.llm-task-progress-resizing * {
+  cursor: ns-resize !important;
+  user-select: none !important;
+}
+
+.llm-task-progress-head[hidden] {
+  display: none;
+}
+
+.llm-task-progress-head {
+  padding: 0 14px 8px;
+  color: var(--fill-secondary);
+  line-height: 1.4;
+}
+
+.llm-task-progress-scope {
+  color: var(--fill-primary);
+  font-weight: 600;
+}
+
+.llm-task-progress-note {
+  padding: 0 14px 8px;
+  color: var(--fill-tertiary);
+  font-size: var(--llm-fs-11);
+}
+
+.llm-task-progress-note[hidden],
+.llm-task-progress-steps[hidden],
+.llm-task-progress-more[hidden],
+.llm-task-paper-details[hidden],
+.llm-task-paper-source[hidden] {
+  display: none;
+}
+
+.llm-task-progress-steps {
+  margin: 2px 12px 8px 14px;
+  padding: 0 0 8px;
+  border-bottom: 1px solid
+    color-mix(in srgb, var(--llm-popup-surface-border) 80%, transparent);
+}
+
+.llm-task-progress-steps-title {
+  margin: 0;
+  color: var(--fill-secondary);
+  font-size: var(--llm-fs-11);
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+}
+
+.llm-task-progress-steps .llm-plan-task-list {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.llm-task-progress-steps .llm-plan-task {
+  border-bottom: 0;
+}
+
+.llm-task-progress-steps .llm-plan-task-line {
+  min-height: 26px;
+  padding: 2px 0;
+}
+
+.llm-task-progress-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.llm-task-paper {
+  margin: 0;
+  padding: 0;
+}
+
+.llm-task-paper-summary {
+  appearance: none;
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  height: auto;
+  min-height: 0;
+  max-height: none;
+  margin: 0;
+  padding: 7px 12px 7px 6px;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.llm-task-paper-grid {
+  display: grid;
+  grid-template-columns: 28px 12px minmax(0, 1fr) auto;
+  align-items: start;
+  column-gap: 8px;
+  row-gap: 1px;
+  width: 100%;
+  min-width: 0;
+  line-height: 1.35;
+}
+
+.llm-task-paper-summary:hover {
+  background: color-mix(in srgb, var(--fill-primary) 4%, transparent);
+}
+
+.llm-task-paper-summary:focus-visible {
+  outline: none;
+  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+}
+
+.llm-task-paper-index {
+  grid-row: 1;
+  grid-column: 1;
+  padding-top: 1px;
+  color: var(--fill-tertiary);
+  font-size: var(--llm-fs-11);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.llm-task-paper-dot {
+  grid-row: 1;
+  grid-column: 2;
+  box-sizing: border-box;
+  width: 9px;
+  height: 9px;
+  margin-top: 4px;
+  border: 1.5px solid var(--fill-tertiary);
+  border-radius: 50%;
+  opacity: 0.6;
+}
+
+.llm-task-paper[data-state="matched"] .llm-task-paper-dot {
+  border-color: var(--fill-secondary);
+  opacity: 1;
+}
+
+.llm-task-paper[data-state="skimmed"] .llm-task-paper-dot {
+  border-color: var(--color-accent);
+  background: linear-gradient(90deg, var(--color-accent) 50%, transparent 50%);
+  opacity: 1;
+}
+
+.llm-task-paper[data-state="read"] .llm-task-paper-dot {
+  border-color: var(--color-accent);
+  background: var(--color-accent);
+  opacity: 1;
+}
+
+.llm-task-paper[data-state="cited"] .llm-task-paper-dot {
+  border-color: var(--llm-context-icon-note-color);
+  background: var(--llm-context-icon-note-color);
+  opacity: 1;
+}
+
+.llm-task-paper-title {
+  grid-row: 1;
+  grid-column: 3;
+  min-width: 0;
+  overflow: hidden;
+  font-size: var(--llm-fs-12);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.llm-task-paper[data-state="listed"] .llm-task-paper-title {
+  color: var(--fill-secondary);
+}
+
+.llm-task-paper-tail {
+  grid-row: 1;
+  grid-column: 4;
+  padding-top: 2px;
+  color: var(--fill-secondary);
+  font-size: var(--llm-fs-10);
+  white-space: nowrap;
+}
+
+.llm-task-paper-meta {
+  grid-row: 2;
+  grid-column: 3 / 5;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fill-tertiary);
+  font-size: var(--llm-fs-10);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.llm-task-paper-source {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 0 4px;
+  border: 1px solid var(--stroke-secondary);
+  border-radius: 4px;
+  font-size: calc(9.5px * var(--llm-font-scale));
+}
+
+/* A paper's reads unroll under it along a thin guide line, one after
+   another. */
+.llm-task-paper-details {
+  margin: 0 14px 8px 44px;
+  padding: 0 0 2px 12px;
+  border-left: 1px solid var(--llm-popup-surface-border);
+  font-size: var(--llm-fs-12);
+  animation: llm-task-progress-fade 300ms
+    var(--llm-task-progress-ease, ease-out) both;
+}
+
+.llm-task-paper-details > * {
+  animation: llm-task-progress-rise 300ms
+    var(--llm-task-progress-ease, ease-out) both;
+}
+
+.llm-task-paper-details > :nth-child(2) {
+  animation-delay: 60ms;
+}
+
+.llm-task-paper-details > :nth-child(3) {
+  animation-delay: 120ms;
+}
+
+.llm-task-paper-details > :nth-child(n + 4) {
+  animation-delay: 180ms;
+}
+
+.llm-task-paper-empty {
+  color: var(--fill-tertiary);
+  font-style: italic;
+}
+
+.llm-task-paper-turn {
+  margin: 6px 0 4px;
+  color: var(--fill-tertiary);
+  font-size: var(--llm-fs-10);
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+}
+
+.llm-task-paper-read {
+  margin: 0 0 8px;
+}
+
+.llm-task-paper-how {
+  color: var(--fill-secondary);
+  font-size: var(--llm-fs-11);
+}
+
+.llm-task-paper-snippet {
+  margin: 3px 0 0;
+  padding: 5px 9px;
+  border: 0;
+  border-radius: 7px;
+  background: var(--fill-quinary);
+  color: var(--fill-primary);
+  font-size: var(--llm-fs-11);
+  line-height: 1.5;
+}
+
+.llm-task-paper-cited {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  margin-top: 6px;
+}
+
+.llm-task-paper-citation {
+  appearance: none;
+  min-height: 0;
+  margin: 0;
+  padding: 2px 0;
+  border: 0;
+  background: none;
+  color: var(--color-accent);
+  font: inherit;
+  font-size: var(--llm-fs-11);
+  text-align: left;
+  cursor: pointer;
+}
+
+.llm-task-paper-citation:hover {
+  text-decoration: underline;
+}
+
+.llm-task-progress-more {
+  padding: 8px 14px;
+  color: var(--fill-tertiary);
+  font-size: var(--llm-fs-11);
+}
+
+.llm-quote-card.llm-task-progress-flash {
+  box-shadow: 0 0 0 2px var(--color-accent);
+  transition: box-shadow 300ms ease;
 }

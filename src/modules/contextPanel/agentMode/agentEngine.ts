@@ -1,5 +1,13 @@
 import { scheduleChatContentScroll } from "../chatScrollSnapshots";
 import { getPendingRequestId, recordLivePlanExecution } from "../state";
+import {
+  applyTaskPaperUpdate,
+  beginTaskRun,
+  completeTaskRun,
+  endTaskRun,
+  markTaskAnswering,
+  taskTurnIndexFor,
+} from "../taskProgress/store";
 /**
  * Agent mode execution engine.
  *
@@ -287,7 +295,19 @@ export function createAgentTurnEventHandler(
     scheduleQueueDrain,
   } = ctx;
   const executionRequestId = getPendingRequestId(conversationKey);
+  // Task progress follows the run: working from its start, the paper ledger
+  // as reads land, answering at the first answer text, ✓ at final.
+  let taskRunBegun = false;
+  const ensureTaskRun = () => {
+    if (taskRunBegun || !assistantMessage.agentRunId) return;
+    taskRunBegun = true;
+    beginTaskRun(conversationKey, {
+      runId: assistantMessage.agentRunId,
+      turnIndex: taskTurnIndexFor(history, pairedUserMessage) || undefined,
+    });
+  };
   return async (event: AgentEvent): Promise<void> => {
+    ensureTaskRun();
     if (
       event.type === "plan_execution_updated" &&
       assistantMessage.agentRunId
@@ -501,9 +521,19 @@ export function createAgentTurnEventHandler(
         );
         return;
       case "message_delta": {
+        // The answer is streaming: the row says so and an open overlay
+        // collapses, back to the chat the answer arrives in.
+        markTaskAnswering(conversationKey, assistantMessage.agentRunId);
         messageDeltaCoalescer.pushText(deps.sanitizeText(event.text));
         return;
       }
+      case "paper_ledger_update":
+        applyTaskPaperUpdate(
+          conversationKey,
+          event.delta,
+          assistantMessage.agentRunId,
+        );
+        return;
       case "message_rollback":
         if (typeof event.length === "number" && event.length > 0) {
           assistantMessage.pendingFinalText = (
@@ -575,6 +605,14 @@ export function createAgentTurnEventHandler(
         assistantMessage.pendingFinalText = assistantMessage.text;
         assistantMessage.waitingAnimationStartedAt = undefined;
         assistantMessage.streaming = false;
+        completeTaskRun(conversationKey, {
+          runId: assistantMessage.agentRunId,
+          quoteCitations: selectUsedQuoteCitations({
+            text: assistantMessage.text,
+            quoteCitations: assistantMessage.quoteCitations,
+          }),
+          libraryID: runtimeRequest.libraryID,
+        });
         break;
       default:
         break;
@@ -659,6 +697,12 @@ async function finalizeAgentTurnOutcome(ctx: {
   assistantMessage.quoteCitations = selectUsedQuoteCitations({
     text: assistantMessage.text,
     quoteCitations: assistantMessage.quoteCitations,
+  });
+  // The row's citations are the chips the answer renders.
+  completeTaskRun(conversationKey, {
+    runId: assistantMessage.agentRunId,
+    quoteCitations: assistantMessage.quoteCitations,
+    libraryID: runtimeRequest.libraryID,
   });
   if (!skipAssistantPersist) {
     await persistAssistantOnce();
@@ -746,6 +790,8 @@ async function handleAgentTurnFailure(ctx: {
     await markCancelled();
     return;
   }
+  // The run failed; the row keeps the partial ledger and says so.
+  endTaskRun(conversationKey, "failed", assistantMessage.agentRunId);
   const errMsg = (err as Error).message || "Error";
   const userFacingError =
     errMsg.includes("[ede_diagnostic]") &&
@@ -1806,6 +1852,7 @@ export async function sendAgentTurn(
     assistantPersisted = true;
   };
   const markCancelled = async () => {
+    endTaskRun(conversationKey, "cancelled", assistantMessage.agentRunId);
     flushMessageDeltas("cancel");
     deps.finalizeCancelledAssistantMessage(assistantMessage);
     refreshChatSafely();
@@ -1837,6 +1884,10 @@ export async function sendAgentTurn(
       onStart: async (runId) => {
         assistantMessage.agentRunId = runId;
         userMessage.agentRunId = runId;
+        beginTaskRun(conversationKey, {
+          runId,
+          turnIndex: taskTurnIndexFor(historyForRun, userMessage) || undefined,
+        });
         deps.agentRunTraceCache.set(runId, []);
         refreshChatSafely();
         if (!isCompactCommand) {
@@ -2344,6 +2395,7 @@ export async function retryAgentTurn(
     assistantPersisted = true;
   };
   const markCancelled = async () => {
+    endTaskRun(conversationKey, "cancelled", assistantMessage.agentRunId);
     flushMessageDeltas("cancel");
     deps.finalizeCancelledAssistantMessage(assistantMessage);
     refreshChatSafely();
@@ -2378,6 +2430,11 @@ export async function retryAgentTurn(
       onStart: async (runId) => {
         assistantMessage.agentRunId = runId;
         retryPair.userMessage.agentRunId = runId;
+        beginTaskRun(conversationKey, {
+          runId,
+          turnIndex:
+            taskTurnIndexFor(history, retryPair.userMessage) || undefined,
+        });
         deps.agentRunTraceCache.set(runId, []);
         refreshChatSafely();
         await deps.updateStoredLatestUserMessage(

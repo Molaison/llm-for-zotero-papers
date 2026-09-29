@@ -20,6 +20,12 @@ import { persistChatScrollSnapshotForConversationKey } from "./chatScrollSnapsho
 import type { AgentEvent, AgentRunEventRecord } from "../../agent/types";
 import type { PlanExecutionLedger } from "../../agent/plans/types";
 import type { Message } from "./types";
+import {
+  beginTaskRun,
+  clearTaskProgress,
+  getTaskProgress,
+} from "./taskProgress/store";
+import { flushTaskProgressPanels } from "./taskProgress/panel";
 
 export type StreamingReplayResult = {
   historyTurns: number;
@@ -58,6 +64,13 @@ export type StreamingReplayResult = {
   pausedProgressNodes: number[];
   resumeStartsProgress: boolean;
   inactiveProgressReads: number;
+  /** Steps block shown in the Task progress drawer while the plan runs. */
+  stepsVisibleWhileRunning: boolean;
+  /** The Task progress row after the plan completed and the answer landed. */
+  rowVisibleAfterCompletion: boolean;
+  rowStateAfterCompletion: string;
+  /** Floating plan capsules seen anywhere in the document, ever. */
+  floatingCapsuleNodes: number;
 };
 
 export async function exerciseStreamingReplay(
@@ -218,14 +231,42 @@ export async function exerciseStreamingReplay(
   if (!tryBeginRequest(key, requestId, null))
     throw new Error("Fixture request is already busy");
   recordLivePlanExecution(key, requestId, runId, ledger);
+  // What the runtime's onStart does: the run is working from here on.
+  beginTaskRun(key, { runId, turnIndex: input.historyTurns + 1 });
   refreshConversationPanels(body, item);
   await Zotero.Promise.delay(100);
+  // The scope listing resolves asynchronously from the library index; let it
+  // land before measuring, so only text chunks run while mutations count.
+  for (
+    const deadline = Date.now() + 5000;
+    getTaskProgress(key)?.scope &&
+    !getTaskProgress(key)?.scope?.listing &&
+    Date.now() < deadline;
+  )
+    await Zotero.Promise.delay(20);
+  flushTaskProgressPanels();
   const findWrapper = () =>
     box.querySelector<HTMLElement>(
       `.llm-message-wrapper[data-message-timestamp="${message.timestamp}"]`,
     )!;
+  // Plan steps render only in the Task progress drawer; no capsule, ever.
+  const countFloating = () =>
+    doc.querySelectorAll(
+      ".llm-plan-progress-floating, .llm-plan-container-execution",
+    ).length;
+  let floatingCapsuleNodes = countFloating();
+  const stepsHost = body.querySelector<HTMLElement>(
+    ".llm-task-progress-steps",
+  )!;
   const findProgress = () =>
-    box.querySelector<HTMLElement>(".llm-plan-container-execution")!;
+    stepsHost.hidden
+      ? null
+      : stepsHost.querySelector<HTMLElement>(".llm-task-progress-steps-body");
+  const stepsShown = () => {
+    flushTaskProgressPanels();
+    floatingCapsuleNodes += countFloating();
+    return Boolean(findProgress());
+  };
   const thinkingSummary = box.querySelector<HTMLElement>(
     ".llm-agent-reasoning-summary",
   );
@@ -233,12 +274,11 @@ export async function exerciseStreamingReplay(
     new win.MouseEvent("mousedown", { bubbles: true, cancelable: true }),
   );
   await Zotero.Promise.delay(100);
-  const progress = findProgress();
-  const trigger = progress.querySelector<HTMLButtonElement>(
-    ".llm-plan-progress-trigger",
-  )!;
+  const trigger = body.querySelector<HTMLButtonElement>("#llm-task-progress")!;
   trigger.click();
   trigger.focus({ preventScroll: true });
+  const progress = findProgress()!;
+  const stepsVisibleWhileRunning = Boolean(progress) && !trigger.hidden;
   box.dispatchEvent(
     new win.WheelEvent("wheel", { deltaY: -100, bubbles: true }),
   );
@@ -246,7 +286,7 @@ export async function exerciseStreamingReplay(
   persistChatScrollSnapshotForConversationKey(key, box);
   const scrollTop = box.scrollTop;
   let wrapper = findWrapper();
-  let lastProgress = progress;
+  let lastProgress: HTMLElement | null = progress;
   const result: StreamingReplayResult = {
     ...input,
     runMode: "agent",
@@ -284,38 +324,24 @@ export async function exerciseStreamingReplay(
     resumeStartsProgress: true,
     inactiveProgressReads: 0,
     resumeVisibilityCorrect: !box.querySelector(".llm-plan-recovery-card"),
+    stepsVisibleWhileRunning,
+    rowVisibleAfterCompletion: false,
+    rowStateAfterCompletion: "",
+    floatingCapsuleNodes: 0,
   };
-  // Pointer hover state is not render churn: planProgressView toggles
-  // `llm-plan-progress-hover` from real mouseenter/mouseleave listeners, so a
-  // class change that differs only by that token merely reflects where the
-  // physical cursor happens to sit over the window and must not be counted.
-  const classTokens = (value: string | null): Set<string> =>
-    new Set((value ?? "").split(/\s+/).filter(Boolean));
-  const isHoverOnlyClassChange = (mutation: MutationRecord): boolean => {
-    if (mutation.type !== "attributes" || mutation.attributeName !== "class")
-      return false;
-    const before = classTokens(mutation.oldValue);
-    const after = classTokens(
-      (mutation.target as Element).getAttribute("class"),
-    );
-    const changed = [
-      ...Array.from(before).filter((token) => !after.has(token)),
-      ...Array.from(after).filter((token) => !before.has(token)),
-    ];
-    return changed.length === 1 && changed[0] === "llm-plan-progress-hover";
-  };
+  // Text chunks must do no Task progress work: neither the row nor the
+  // Steps block may change while only reasoning streams.
   const observer = new win.MutationObserver((mutations) => {
-    result.progressMutations += mutations.filter(
-      (mutation) => !isHoverOnlyClassChange(mutation),
-    ).length;
+    result.progressMutations += mutations.length;
   });
-  observer.observe(progress, {
-    childList: true,
-    subtree: true,
-    attributes: true,
-    attributeOldValue: true,
-    characterData: true,
-  });
+  for (const target of [stepsHost, trigger]) {
+    observer.observe(target, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      characterData: true,
+    });
+  }
   const query = Zotero.DB.queryAsync;
   Zotero.DB.queryAsync = async function (sql: string, ...args: unknown[]) {
     if (sql.includes("llm_for_zotero_plan_executions"))
@@ -417,6 +443,8 @@ export async function exerciseStreamingReplay(
     observer.disconnect();
     Zotero.DB.queryAsync = query;
     for (const restore of restoreGeometry) restore();
+    // Back to the chat: the overlay collapses and the messages resume.
+    trigger.click();
     requestChatScrollFollowBottom(body, item, box);
     const nextFrame = () =>
       new Promise<void>((resolve) =>
@@ -438,7 +466,7 @@ export async function exerciseStreamingReplay(
         box.scrollHeight - box.clientHeight - box.scrollTop,
       );
     }
-    const task = progress.querySelector(
+    const task = progress?.querySelector(
       ".llm-plan-task-list",
     )?.firstElementChild;
     const changed = {
@@ -451,9 +479,11 @@ export async function exerciseStreamingReplay(
       })),
     };
     await handle({ type: "plan_execution_updated", ledger: changed });
+    stepsShown();
     result.progressUpdatePreserved =
+      Boolean(progress) &&
       findProgress() === progress &&
-      progress.querySelector(".llm-plan-progress-trigger") === trigger &&
+      body.querySelector("#llm-task-progress") === trigger &&
       progress.querySelector(".llm-plan-task-list")?.firstElementChild ===
         task &&
       Boolean(progress.textContent?.includes("Checking corpus coverage"));
@@ -511,21 +541,19 @@ export async function exerciseStreamingReplay(
         type: "plan_execution_updated",
         ledger: { ...changed, status, updatedAt: nextUpdate++ },
       });
-      result.pausedProgressNodes.push(
-        box.querySelectorAll(".llm-plan-container-execution").length,
-      );
+      result.pausedProgressNodes.push(stepsShown() ? 1 : 0);
       await handle({
         type: "plan_execution_updated",
         ledger: { ...changed, status: "running", updatedAt: nextUpdate++ },
       });
-      result.resumeStartsProgress &&= Boolean(findProgress());
+      result.resumeStartsProgress &&= stepsShown();
     }
     await handle({
       type: "plan_execution_updated",
       ledger: { ...changed, status: "interrupted", updatedAt: nextUpdate++ },
     });
     result.resumeVisibilityCorrect &&=
-      !findProgress() &&
+      !stepsShown() &&
       Boolean(box.querySelector(".llm-plan-recovery-card button"));
     const quote =
       "The source quotation remains readable while the answer is still arriving.";
@@ -601,17 +629,14 @@ export async function exerciseStreamingReplay(
       },
     );
     refreshConversationPanels(body, item);
-    result.singleExecutionProgress =
-      box.querySelectorAll(".llm-plan-container-execution").length === 0;
+    result.singleExecutionProgress = !stepsShown() && countFloating() === 0;
     agentRunTraceCache.delete(resumedRunId);
     history.splice(-2);
     await handle({
       type: "plan_execution_updated",
       ledger: { ...changed, status: "completed", updatedAt: nextUpdate++ },
     });
-    result.completedProgressNodes = box.querySelectorAll(
-      ".llm-plan-container-execution",
-    ).length;
+    result.completedProgressNodes = stepsShown() ? 1 : 0;
     finishRequest(key, requestId);
     // A stale restored streaming flag and running snapshot are never live authority.
     message.streaming = true;
@@ -628,9 +653,11 @@ export async function exerciseStreamingReplay(
     } as typeof query;
     refreshConversationPanels(body, item);
     await Zotero.Promise.delay(100);
-    result.reopenedProgressNodes = box.querySelectorAll(
-      ".llm-plan-container-execution",
-    ).length;
+    result.reopenedProgressNodes = stepsShown() ? 1 : 0;
+    // The row outlives the plan and shows the run completed.
+    result.rowVisibleAfterCompletion = !trigger.hidden && trigger.isConnected;
+    result.rowStateAfterCompletion = trigger.dataset.state || "";
+    result.floatingCapsuleNodes = floatingCapsuleNodes + countFloating();
     return result;
   } finally {
     observer.disconnect();
@@ -749,6 +776,10 @@ async function exerciseChatStreamingReplay(
     pausedProgressNodes: [],
     resumeStartsProgress: true,
     inactiveProgressReads: 0,
+    stepsVisibleWhileRunning: true,
+    rowVisibleAfterCompletion: true,
+    rowStateAfterCompletion: "completed",
+    floatingCapsuleNodes: 0,
   };
   const deps = buildAgentEngineDepsForTests(
     item,
@@ -885,4 +916,173 @@ async function exerciseChatStreamingReplay(
       else body.setAttribute("style", previousStyle);
     }
   }
+}
+
+export type TaskProgressReplayInput = {
+  /** The contexts the turn's user message attached. */
+  user: Pick<
+    Message,
+    | "paperContexts"
+    | "fullTextPaperContexts"
+    | "selectedCollectionContexts"
+    | "selectedTagContexts"
+  >;
+  /** Earlier completed turns, so the chat has something to scroll. */
+  historyTurns?: number;
+};
+
+export type TaskProgressReplayHandle = {
+  conversationKey: number;
+  runId: string;
+  assistantTimestamp: number;
+  /** Deliver one run event through the real agent turn event handler. */
+  emit: (event: AgentEvent) => Promise<void>;
+  /** The completed turn's full re-render, as the outcome owner does it. */
+  refreshChat: () => void;
+  /** End the synthetic request and restore the host. */
+  finish: () => void;
+};
+
+/**
+ * A synthetic agent run for the Task progress view: a user message with the
+ * given scope, a streaming answer, and whatever events the test emits, all
+ * through `createAgentTurnEventHandler` as a real turn delivers them.
+ */
+export async function startTaskProgressReplay(
+  panel: { body: HTMLElement; item: Zotero.Item },
+  input: TaskProgressReplayInput,
+): Promise<TaskProgressReplayHandle> {
+  const { body, item } = panel;
+  const previousStyle = body.getAttribute("style");
+  const syntheticHost = body.hasAttribute("data-llm-workflow-test");
+  if (syntheticHost) {
+    body.style.left = "0";
+    body.style.zIndex = "99999";
+  }
+  const key = getConversationKey(item);
+  const runId = `task-progress-replay-${Date.now()}`;
+  const history: Message[] = [];
+  const earlier = Math.max(0, input.historyTurns ?? 3);
+  const base = Date.now() - 10_000;
+  for (let n = 0; n < earlier; n++) {
+    history.push({
+      role: "user",
+      text: `Earlier question ${n}`,
+      timestamp: base + n * 2 + 1,
+    });
+    history.push({
+      role: "assistant",
+      text: "An earlier completed answer with enough text to scroll.\n\n".repeat(
+        10,
+      ),
+      timestamp: base + n * 2 + 2,
+    });
+  }
+  const user: Message = {
+    role: "user",
+    text: "What is the commonality of drift across these papers?",
+    timestamp: Date.now(),
+    ...input.user,
+  };
+  const message: Message = {
+    role: "assistant",
+    text: "",
+    timestamp: user.timestamp + 1,
+    runMode: "agent",
+    agentRunId: runId,
+    streaming: true,
+  };
+  user.agentRunId = runId;
+  history.push(user, message);
+  chatHistory.set(key, history);
+  // The synthetic history replaces the conversation's, so does its ledger.
+  clearTaskProgress(key);
+  const requestId = nextRequestId();
+  if (!tryBeginRequest(key, requestId, null))
+    throw new Error("Fixture request is already busy");
+  beginTaskRun(key, { runId, turnIndex: earlier + 1 });
+  refreshConversationPanels(body, item);
+  await Zotero.Promise.delay(100);
+  flushTaskProgressPanels();
+  const deps = buildAgentEngineDepsForTests(
+    item,
+    "upstream",
+    getConversationWriteGeneration(key),
+  );
+  const ui = deps.getPanelRequestUI(body);
+  const helpers = deps.createPanelUpdateHelpers(body, item, key, ui);
+  const refresh = () => helpers.refreshAssistantMessageSafely(message);
+  const coalescer = createBlockStreamCoalescer({
+    onBlock: (text) => {
+      message.pendingFinalText = (message.pendingFinalText || "") + text;
+      message.text = message.pendingFinalText;
+      refresh();
+    },
+  });
+  const records: AgentRunEventRecord[] = [];
+  agentRunTraceCache.set(runId, records);
+  const handle = createAgentTurnEventHandler({
+    deps,
+    body,
+    ui,
+    conversationKey: key,
+    runtimeRequest: {
+      conversationKey: key,
+      mode: "agent",
+      userText: user.text,
+      libraryID: item.libraryID,
+    },
+    assistantMessage: message,
+    pairedUserMessage: user,
+    history,
+    isCompactCommand: false,
+    compactStyle: "replace-assistant",
+    messageDeltaCoalescer: coalescer,
+    flushMessageDeltas: coalescer.flushNow,
+    queueRefresh: refresh,
+    refreshAssistant: refresh,
+    refreshChatSafely: helpers.refreshChatSafely,
+    setStatusSafely: helpers.setStatusSafely,
+    pushTraceEvent: (_runId, event) =>
+      records.push({
+        runId,
+        seq: records.length + 1,
+        eventType: event.type,
+        payload: event,
+        createdAt: Date.now(),
+      }),
+    scheduleQueueDrain: () => {},
+  });
+  let finished = false;
+  return {
+    conversationKey: key,
+    runId,
+    assistantTimestamp: message.timestamp,
+    async emit(event) {
+      await handle(event);
+      // Deterministic delivery: the streamed text lands now, not at the
+      // coalescer's timer.
+      if (event.type === "message_delta") coalescer.flushNow("event");
+    },
+    refreshChat() {
+      message.streaming = false;
+      helpers.refreshChatSafely();
+    },
+    finish() {
+      if (finished) return;
+      finished = true;
+      coalescer.cancel();
+      finishRequest(key, requestId);
+      message.streaming = false;
+      agentRunTraceCache.delete(runId);
+      if (getTaskProgress(key)?.runState === "working") {
+        // Nothing settled the run: the request ended under it.
+        refreshConversationPanels(body, item);
+      }
+      if (syntheticHost) {
+        if (previousStyle === null) body.removeAttribute("style");
+        else body.setAttribute("style", previousStyle);
+      }
+    },
+  };
 }

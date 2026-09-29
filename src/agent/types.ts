@@ -30,6 +30,7 @@ import type {
   ActionRiskSignal,
 } from "./authorization/types";
 import type { MaterialRef } from "./documents/materialRef";
+import type { TaskPaperLedgerDelta } from "./context/taskPaperLedger";
 import type {
   ResolvedTurnSelectedTextAnchor,
   ResolvedTurnSelectedTextContext,
@@ -551,6 +552,12 @@ export type AgentEvent =
       text: string;
       status?: "running" | "completed";
       kind?: "assistant_message";
+      /**
+       * Codex's `update_plan` checklist, on the one event with the item id
+       * `codex-plan-checklist`: shown in the Task progress Steps block, never
+       * as a trace row.
+       */
+      steps?: Array<{ content: string; status?: string }>;
     }
   | {
       type: "codex_tool_activity";
@@ -627,6 +634,21 @@ export type AgentEvent =
        * undifferentiated stage instead of several invented ones.
        */
       undifferentiated?: boolean;
+    }
+  | {
+      /**
+       * What one successful read tool call read from each paper, for the
+       * Task progress view.
+       *
+       * Host-emitted immediately after the call's `tool_result`, by the one
+       * recorder that sits beside read attestation, and persisted and
+       * redacted like every other run event, so a conversation's ledger can
+       * be rebuilt from its trace. A connected runtime (Codex, Claude Code)
+       * gets the same event from the MCP activity's `paperLedgerDelta`.
+       */
+      type: "paper_ledger_update";
+      callId?: string;
+      delta: TaskPaperLedgerDelta;
     }
   | {
       type: "material_finalized";

@@ -68,7 +68,8 @@ import type {
   TrustedReadObservation,
   VerifiedReadSource,
 } from "../plans/types";
-import { createTrustedReadObservations } from "../plans/readObservation";
+import { attestAndRecordRead } from "../context/taskPaperLedgerRecorder";
+import type { TaskPaperLedgerDelta } from "../context/taskPaperLedger";
 import { resolveActiveLibraryID } from "../../utils/zoteroLibraryScope";
 import { resolveAgentToolCallWorkCategory } from "../workCategory";
 import { getNotesDirectoryConfig } from "../../utils/notesDirectoryConfig";
@@ -1734,6 +1735,7 @@ function buildMcpToolActivityEvent(params: {
   workCategory?: import("../types").AgentWorkCategory;
   verifiedReadSources?: VerifiedReadSource[];
   readObservations?: readonly TrustedReadObservation[];
+  paperLedgerDelta?: TaskPaperLedgerDelta;
   mutability?: "read" | "write";
   researchJobId?: string;
   scope: ZoteroMcpActiveScope | null;
@@ -1758,6 +1760,9 @@ function buildMcpToolActivityEvent(params: {
     quoteCitations: params.quoteCitations,
     verifiedReadSources: params.verifiedReadSources,
     readObservations: params.readObservations,
+    ...(params.paperLedgerDelta
+      ? { paperLedgerDelta: params.paperLedgerDelta }
+      : {}),
     profileSignature: params.scope?.profileSignature,
     conversationKey: params.scope?.conversationKey,
     libraryID: params.libraryID || undefined,
@@ -2246,6 +2251,7 @@ async function handleToolsCall(
     actionReceipts?: AgentActionReceipt[];
     verifiedReadSources?: VerifiedReadSource[];
     readObservations?: readonly TrustedReadObservation[];
+    paperLedgerDelta?: TaskPaperLedgerDelta | null;
     researchJobId?: string;
   }) => {
     emitZoteroMcpToolActivity(
@@ -2262,6 +2268,7 @@ async function handleToolsCall(
         workCategory,
         verifiedReadSources: result.verifiedReadSources,
         readObservations: result.readObservations,
+        paperLedgerDelta: result.paperLedgerDelta || undefined,
         researchJobId: result.researchJobId,
         mutability:
           tool?.spec.executionClass === "external_effect" ? "write" : "read",
@@ -2471,15 +2478,21 @@ async function handleToolsCall(
       scope.clarificationHistory = toolContext.request.clarificationHistory;
     }
     let result = formatToolResult(prepared.execution);
-    const readObservations =
+    // One attestation site, one recorder: the read's trusted observations and
+    // its Task progress delta come from the same call. Without a
+    // conversation there is nothing to record the delta in.
+    const { observations: readObservations, paperLedgerDelta } =
       tool.spec.executionClass === "read" && !result.isError
-        ? await createTrustedReadObservations({
+        ? await attestAndRecordRead({
             toolName: name,
             callId: prepared.execution.result.callId,
             input: prepared.execution.input,
             result: prepared.execution.result.content,
+            conversationKey: scopeConversationKey,
+            libraryID: callScope.libraryID,
+            runId: scope?.runId,
           })
-        : [];
+        : { observations: [], paperLedgerDelta: null };
     rememberDocumentReadObservations(headers, readObservations);
     rememberDocumentArtifacts(
       headers,
@@ -2511,6 +2524,7 @@ async function handleToolsCall(
         }),
       ),
       readObservations,
+      paperLedgerDelta,
     });
     clearMcpReadDedupeCacheAfterToolResult(tool.spec, result);
     rememberMcpReadResult(readDedupeKey, result, readObservations);

@@ -22,6 +22,7 @@ import {
 } from "../../services/paperContent/contextCache";
 import { TTLMap } from "../../utils/ttlMap";
 import { clearMermaidSvgCache } from "./mermaidSvgCache";
+import { clearAllTaskProgress, clearTaskProgress } from "./taskProgress/store";
 import type { ConversationForkLink } from "../../shared/conversationForkLinks";
 import type { WebSourceAnchor } from "../../webAccess/types";
 export {
@@ -375,6 +376,9 @@ export function clearConversationOwnedRuntimeState(
   bumpConversationWriteGeneration(key);
 
   chatHistory.delete(key);
+  // The Task progress record goes with the conversation; a conversation
+  // shown again rebuilds it from what it persisted.
+  clearTaskProgress(key);
   conversationForkLinks.delete(key);
   loadedConversationKeys.delete(key);
   loadingConversationTasks.delete(key);
@@ -671,6 +675,7 @@ export function setInlineEditSavedDraft(text: string): void {
  */
 export function clearAllState(): void {
   chatHistory.clear();
+  clearAllTaskProgress();
   conversationForkLinks.clear();
   loadedConversationKeys.clear();
   loadingConversationTasks.clear();

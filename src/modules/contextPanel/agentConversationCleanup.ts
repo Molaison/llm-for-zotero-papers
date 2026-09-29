@@ -20,6 +20,7 @@ import {
   JOURNAL_STEPS_TABLE,
 } from "../../agent/store/changeJournal";
 import { clearAgentRuntimeTraceState } from "./agentState";
+import { clearTaskProgress } from "./taskProgress/store";
 import { clearPlanConversationRowsInTransaction } from "../../agent/plans/store";
 import { clearResearchConversationRowsInTransaction } from "../../agent/research/store";
 import { clearPlanDocumentConversationRowsInTransaction } from "../../agent/documents/store";
@@ -78,6 +79,10 @@ export async function clearPersistedAgentConversationRowsInTransaction(
   conversationKey: number,
 ): Promise<void> {
   const key = Math.floor(Number(conversationKey));
+  // Every store's local row purge (conversation and turn deletion, edit
+  // truncation, the WebChat startup sweep) passes here: the Task progress
+  // built from these rows goes too, and is rebuilt from what remains.
+  if (Number.isFinite(key) && key > 0) clearTaskProgress(key);
   const db = getAgentDb();
   if (!db || !Number.isFinite(key) || key <= 0) return;
 
@@ -203,6 +208,7 @@ export async function clearAgentConversationState(
   conversationKey: number,
 ): Promise<void> {
   clearRememberedLocalDocumentPaths(conversationKey);
+  clearTaskProgress(conversationKey);
   let firstError: unknown;
   const capture = async (task: () => Promise<void>): Promise<void> => {
     try {

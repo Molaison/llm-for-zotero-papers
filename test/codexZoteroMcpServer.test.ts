@@ -2370,6 +2370,127 @@ describe("Zotero MCP server", function () {
     );
   });
 
+  it("carries a paper ledger delta on a completed read inside a conversation only", async function () {
+    const registry = new AgentToolRegistry(
+      new ActionContractService({ getItem: () => null } as never),
+    );
+    let fail = false;
+    registry.register({
+      spec: {
+        name: "library_retrieve",
+        description: "Retrieve library",
+        inputSchema: { type: "object", additionalProperties: true },
+        executionClass: "read",
+        workCategory: "retrieval",
+        requiresConfirmation: false,
+      },
+      validate: (args) => ({ ok: true, value: args ?? {} }),
+      execute: async () => {
+        if (fail) throw new Error("index unavailable");
+        return {
+          candidates: [1, 2, 3, 4, 5].map((itemId) => ({
+            itemId: String(itemId),
+            title: `Paper ${itemId}`,
+            queryState: ["matched_bm25"],
+          })),
+          snippets: [
+            {
+              itemId: "1",
+              sourceKind: "pdf_text",
+              matchMethod: "bm25",
+              sectionLabel: "Results",
+              snippet: "Drift grows with time.",
+            },
+          ],
+        };
+      },
+    } as AgentToolDefinition<unknown, unknown>);
+    registerMcpServer({
+      toolRegistry: registry,
+      zoteroGateway: {} as never,
+    });
+    const scoped = registerScopedZoteroMcpScope(
+      {
+        profileSignature: "profile-dev",
+        conversationKey: 791,
+        libraryID: 7,
+        kind: "global",
+        runId: "codex-turn-ledger",
+      },
+      { token: "ledger-scope-token" },
+    );
+    const events: Array<{
+      phase: "started" | "completed";
+      ok?: boolean;
+      paperLedgerDelta?: {
+        runId?: string;
+        papers: Array<{ key: string; state: string }>;
+      };
+    }> = [];
+    const unregister = addZoteroMcpToolActivityObserver((event) => {
+      events.push(event);
+    });
+    const call = (
+      id: string,
+      query: string,
+      headers?: Record<string, string>,
+    ) =>
+      invokeMcpEndpoint({
+        token: getOrCreateZoteroMcpBearerToken(),
+        headers,
+        body: {
+          jsonrpc: "2.0",
+          id,
+          method: "tools/call",
+          params: { name: "library_retrieve", arguments: { query } },
+        },
+      });
+    try {
+      await call("ledger-1", "drift", {
+        [ZOTERO_MCP_SCOPE_HEADER]: scoped.token,
+      });
+      // An MCP client without a conversation gets no ledger.
+      await call("ledger-2", "drift");
+      // A repeated scoped read is served from the dedupe cache: the first
+      // call's delta already recorded it, so the duplicate adds none.
+      await call("ledger-dup", "drift", {
+        [ZOTERO_MCP_SCOPE_HEADER]: scoped.token,
+      });
+      fail = true;
+      await call("ledger-3", "learning", {
+        [ZOTERO_MCP_SCOPE_HEADER]: scoped.token,
+      });
+    } finally {
+      unregister();
+      scoped.clear();
+    }
+    const completed = events.filter((event) => event.phase === "completed");
+    assert.lengthOf(completed, 4);
+    const delta = completed[0].paperLedgerDelta;
+    assert.isOk(delta, "the scoped read carries its delta");
+    assert.equal(delta!.runId, "codex-turn-ledger");
+    assert.deepEqual(
+      delta!.papers.map((paper) => [paper.key, paper.state]),
+      [
+        ["7:1", "read"],
+        ["7:2", "matched"],
+        ["7:3", "matched"],
+        ["7:4", "matched"],
+        ["7:5", "matched"],
+      ],
+    );
+    assert.notProperty(completed[1], "paperLedgerDelta");
+    assert.isTrue(completed[2].ok);
+    assert.notProperty(completed[2], "paperLedgerDelta");
+    assert.isFalse(completed[3].ok);
+    assert.notProperty(completed[3], "paperLedgerDelta");
+    assert.isTrue(
+      events
+        .filter((event) => event.phase === "started")
+        .every((event) => !("paperLedgerDelta" in event)),
+    );
+  });
+
   it("includes paper_read quote citations in completed MCP activity", async function () {
     const registry = new AgentToolRegistry(
       new ActionContractService({ getItem: () => null } as never),

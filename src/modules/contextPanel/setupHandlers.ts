@@ -1,5 +1,6 @@
 import { appLogger } from "../../core/logging";
 import { copyNoteEditingSelectedTextContext } from "./noteEditing/selectionController";
+import { syncTaskProgressPanel } from "./taskProgress/panel";
 import { createNoteConversationItem } from "../../services/notes/conversationItem";
 /* eslint-disable @typescript-eslint/no-require-imports */
 import { createElement } from "../../utils/domHelpers";
@@ -1245,6 +1246,11 @@ export function setupHandlers(
   let syncFooterPermissionControl = () => Promise.resolve();
   let disposeFooterPermissionControl: (() => void) | null = null;
   const updateRuntimeModeButton = () => {
+    updateRuntimeModeButtonState();
+    // Plain chat lists the scope only; Agent mode records reads.
+    syncTaskProgressPanel(body);
+  };
+  const updateRuntimeModeButtonState = () => {
     void syncFooterPermissionControl();
     if (!runtimeModeBtn) return;
     const indicator = runtimeModeBtn.querySelector(
@@ -1716,6 +1722,8 @@ export function setupHandlers(
       if (state.disabled) tab.setAttribute("aria-disabled", "true");
       else tab.removeAttribute("aria-disabled");
     }
+    // The Task progress row follows the conversation and mode shown.
+    syncTaskProgressPanel(body);
   };
   const syncConversationIdentity = () => {
     if (

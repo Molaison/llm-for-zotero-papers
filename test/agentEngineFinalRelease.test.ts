@@ -12,6 +12,11 @@ import type {
   AgentRuntimeRequest,
 } from "../src/agent/types";
 import { buildQuoteCitation } from "../src/services/quotes/quoteCitations";
+import {
+  clearAllTaskProgress,
+  getTaskProgress,
+} from "../src/modules/contextPanel/taskProgress/store";
+import { ledgerDelta } from "./helpers/taskProgressFixtures";
 
 function fakeItem(id: number): Zotero.Item {
   return {
@@ -1838,5 +1843,223 @@ describe("agent engine final UI release", function () {
 
     const assistant = stored.find((message) => message.role === "assistant");
     assert.deepEqual(assistant?.quoteCitations, [claimAnchor!]);
+  });
+
+  describe("Task progress wiring", function () {
+    afterEach(function () {
+      clearAllTaskProgress();
+    });
+
+    function runtimeWith(
+      body: (params: any) => Promise<AgentRuntimeOutcome>,
+    ): AgentRuntime {
+      return {
+        getCapabilities: () => ({
+          streaming: true,
+          toolCalls: true,
+          multimodal: false,
+        }),
+        runTurn: body,
+      } as unknown as AgentRuntime;
+    }
+
+    it("starts the run at onStart, records reads, answers, and completes with citations", async function () {
+      const conversationKey = 701;
+      const anchor = buildQuoteCitation({
+        quoteText: "Drift scales with experience rather than elapsed time.",
+        citationLabel: "(Geva, 2023)",
+        itemId: 3,
+        contextItemId: 30,
+      })!;
+      const seen: Array<{ state?: string; runId?: string; turn?: number }> = [];
+      const snap = () => {
+        const record = getTaskProgress(conversationKey);
+        seen.push({
+          state: record?.runState,
+          runId: record?.runId,
+          turn: record?.turnIndex,
+        });
+      };
+      const finalText = `Drift tracks experience [[quote:${anchor.id}]].`;
+      const deps = createDeps({
+        runtime: runtimeWith(async (params) => {
+          await params.onStart?.("run-tp");
+          snap();
+          await params.onEvent?.({
+            type: "paper_ledger_update",
+            callId: "c1",
+            delta: ledgerDelta("c1", [[3, "read", "Drift scales."]], "run-tp"),
+          });
+          await params.onEvent?.({ type: "message_delta", text: "Drift " });
+          snap();
+          await params.onEvent?.({
+            type: "final",
+            text: finalText,
+            quoteCitations: [anchor],
+          });
+          return {
+            kind: "completed",
+            runId: "run-tp",
+            text: finalText,
+            usedFallback: false,
+          };
+        }),
+        pendingWrites: [],
+        idleRestores: [],
+        statuses: [],
+      });
+      deps.chatHistory.set(conversationKey, [
+        { role: "user", text: "Earlier", timestamp: 1 },
+        { role: "assistant", text: "Earlier answer", timestamp: 2 },
+      ]);
+
+      await sendAgentTurn(
+        {
+          body: {} as Element,
+          item: fakeItem(conversationKey),
+          question: "What drives drift?",
+        },
+        deps,
+      );
+
+      assert.deepEqual(seen, [
+        { state: "working", runId: "run-tp", turn: 2 },
+        { state: "answering", runId: "run-tp", turn: 2 },
+      ]);
+      const record = getTaskProgress(conversationKey)!;
+      assert.equal(record.runState, "completed");
+      assert.equal(record.ledger.papers["1:3"].turns[2].state, "cited");
+      assert.lengthOf(record.ledger.papers["1:3"].turns[2].citations, 1);
+    });
+
+    it("marks the run failed when the runtime throws after onStart", async function () {
+      const conversationKey = 702;
+      const deps = createDeps({
+        runtime: runtimeWith(async (params) => {
+          await params.onStart?.("run-fail");
+          await params.onEvent?.({
+            type: "paper_ledger_update",
+            callId: "c1",
+            delta: ledgerDelta("c1", [[5, "read"]], "run-fail"),
+          });
+          throw new Error("provider down");
+        }),
+        pendingWrites: [],
+        idleRestores: [],
+        statuses: [],
+      });
+      deps.chatHistory.set(conversationKey, []);
+      await sendAgentTurn(
+        {
+          body: {} as Element,
+          item: fakeItem(conversationKey),
+          question: "q",
+        },
+        deps,
+      );
+      const record = getTaskProgress(conversationKey)!;
+      assert.equal(record.runState, "failed");
+      assert.equal(
+        record.ledger.papers["1:5"].state,
+        "read",
+        "the partial ledger stays",
+      );
+    });
+
+    it("marks the run cancelled when the user stopped it", async function () {
+      const conversationKey = 703;
+      let cancelled = false;
+      const deps = createDeps({
+        runtime: runtimeWith(async (params) => {
+          await params.onStart?.("run-cancel");
+          await params.onEvent?.({ type: "message_delta", text: "Partial" });
+          cancelled = true;
+          return {
+            kind: "completed",
+            runId: "run-cancel",
+            text: "Partial",
+            usedFallback: false,
+          };
+        }),
+        pendingWrites: [],
+        idleRestores: [],
+        statuses: [],
+      });
+      deps.cancelledRequestId = () => (cancelled ? 77 : 0);
+      deps.chatHistory.set(conversationKey, []);
+      await sendAgentTurn(
+        {
+          body: {} as Element,
+          item: fakeItem(conversationKey),
+          question: "q",
+        },
+        deps,
+      );
+      assert.equal(getTaskProgress(conversationKey)!.runState, "cancelled");
+    });
+
+    it("numbers a retried run by the question it retries", async function () {
+      const conversationKey = 704;
+      const userMessage = {
+        role: "user" as const,
+        text: "second question",
+        timestamp: 3,
+        runMode: "agent" as const,
+      };
+      const assistantMessage: any = {
+        role: "assistant" as const,
+        text: "previous",
+        timestamp: 4,
+        runMode: "agent" as const,
+      };
+      let turnAtStart = 0;
+      const deps = createDeps({
+        runtime: runtimeWith(async (params) => {
+          await params.onStart?.("run-retry");
+          turnAtStart = getTaskProgress(conversationKey)!.turnIndex;
+          throw new Error("stop");
+        }),
+        pendingWrites: [],
+        idleRestores: [],
+        statuses: [],
+      });
+      deps.chatHistory.set(conversationKey, [
+        { role: "user", text: "first", timestamp: 1 },
+        { role: "assistant", text: "one", timestamp: 2 },
+        userMessage,
+        assistantMessage,
+      ]);
+      deps.findLatestRetryPair = () => ({
+        userIndex: 2,
+        userMessage,
+        assistantMessage,
+      });
+      deps.reconstructRetryPayload = () => ({
+        question: userMessage.text,
+        screenshotImages: [],
+        paperContexts: [],
+        pdfPaperContexts: [],
+        fullTextPaperContexts: [],
+        selectedCollectionContexts: [],
+        selectedTagContexts: [],
+      });
+      await retryAgentTurn(
+        {} as Element,
+        fakeItem(conversationKey),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        deps,
+      );
+      assert.equal(turnAtStart, 2);
+      assert.equal(getTaskProgress(conversationKey)!.runState, "failed");
+    });
   });
 });

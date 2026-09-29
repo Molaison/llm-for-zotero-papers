@@ -30,6 +30,7 @@ import {
 } from "./sidebarChatModeToggle";
 import { buildContextUsagePresentation } from "./textUtils";
 import { createChatLatestButton } from "./chatLatestButton";
+import { createTaskProgressCard } from "./taskProgress/view";
 
 function createActionDropdown(doc: Document, spec: ActionDropdownSpec) {
   const slot = createElement(
@@ -378,7 +379,13 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
   const chatBox = createElement(doc, "div", "llm-messages", {
     id: "llm-chat-box",
   });
-  chatShell.append(chatBox, createChatLatestButton(doc));
+  // The Task progress card sits at the top of the shell: its header row, and
+  // the drawer that unrolls inside the same card. Hidden until a sync shows it.
+  chatShell.append(
+    createTaskProgressCard(doc),
+    chatBox,
+    createChatLatestButton(doc),
+  );
   if (isStandaloneBody) {
     const chatResizeHandle = createElement(
       doc,

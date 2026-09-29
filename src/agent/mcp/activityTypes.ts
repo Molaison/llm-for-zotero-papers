@@ -1,5 +1,6 @@
 import type { QuoteCitation } from "../../shared/types";
 import type { AgentActionReceipt } from "../contracts/types";
+import type { TaskPaperLedgerDelta } from "../context/taskPaperLedger";
 import type {
   TrustedReadObservation,
   VerifiedReadSource,
@@ -34,5 +35,10 @@ export type ZoteroMcpToolActivityEvent = {
   quoteCitations?: QuoteCitation[];
   verifiedReadSources?: VerifiedReadSource[];
   readObservations?: readonly TrustedReadObservation[];
+  /**
+   * What this successful read call read from each paper, for the Task
+   * progress view. Set only on a completed call inside a conversation.
+   */
+  paperLedgerDelta?: TaskPaperLedgerDelta;
   timestamp: number;
 };

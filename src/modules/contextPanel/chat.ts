@@ -6,9 +6,19 @@ import {
 } from "../../codexAppServer/nativeQuestions";
 import { createCoalescedFrameScheduler } from "./setupHandlers/controllers/uiSchedulingController";
 import {
-  disposePlanProgress,
-  renderPlanProgress,
-} from "./agentTrace/planProgressView";
+  syncTaskProgressPanel,
+  syncTaskProgressPlan,
+} from "./taskProgress/panel";
+import {
+  applyTaskPaperUpdate,
+  beginTaskRun,
+  completeTaskRun,
+  markTaskAnswering,
+  setTaskChecklist,
+  taskTurnIndexFor,
+} from "./taskProgress/store";
+import { codexPlanTaskSteps } from "./taskProgress/codexPlan";
+import { paperLedgerUpdateFromMcpActivity } from "../../agent/context/taskPaperLedgerRecorder";
 import { createProviderRequestScope } from "../../utils/providerTransport";
 import { renderMarkdownForNote } from "../../utils/markdown";
 import { HTML_NS } from "../../utils/domHelpers";
@@ -2848,9 +2858,7 @@ function getPanelRequestUI(body: Element): PanelRequestUI {
 function syncInlineActionCardAttr(body: Element): void {
   const panelRoot = body.querySelector("#llm-main") as HTMLElement | null;
   if (!panelRoot) return;
-  const hasCard = Boolean(
-    body.querySelector(".llm-action-inline-card, .llm-action-progress-card"),
-  );
+  const hasCard = Boolean(body.querySelector(".llm-action-inline-card"));
   if (hasCard) {
     panelRoot.dataset.hasActionCard = "true";
   } else {
@@ -2864,48 +2872,6 @@ function latestAssistantMessage(conversationKey: number): Message | undefined {
     if (history[index].role === "assistant") return history[index];
   }
   return undefined;
-}
-
-/** Progress belongs to the live request, never to a historical assistant trace. */
-function syncFloatingPlanProgress(
-  chatBox: HTMLElement,
-  conversationKey: number,
-): void {
-  const binding = getLivePlanExecution(conversationKey);
-  const latestMessage = binding && latestAssistantMessage(conversationKey);
-  const message =
-    latestMessage?.agentRunId === binding?.runId && latestMessage?.streaming
-      ? latestMessage
-      : undefined;
-  const cards = Array.from(
-    chatBox.querySelectorAll(".llm-plan-container-execution"),
-  ).filter(Boolean) as HTMLElement[];
-  const current =
-    binding && message
-      ? cards.find(
-          (card) =>
-            card.dataset.llmPlanExecutionId === binding.ledger.executionId &&
-            card.dataset.llmPlanRequestId === `${binding.requestId}` &&
-            card.dataset.llmPlanRunId === binding.runId,
-        )
-      : undefined;
-  for (const card of cards) {
-    if (card !== current) disposePlanProgress(card);
-  }
-  if (!binding || !message) return;
-  const progress = renderPlanProgress(
-    chatBox.ownerDocument,
-    binding.ledger,
-    message.pendingAgentTraceEvents || getCachedAgentRunEvents(binding.runId),
-    current,
-  );
-  if (progress.dataset.llmPlanRequestId !== `${binding.requestId}`)
-    progress.dataset.llmPlanRequestId = `${binding.requestId}`;
-  if (progress.dataset.llmPlanRunId !== binding.runId)
-    progress.dataset.llmPlanRunId = binding.runId;
-  if (!progress.classList.contains("llm-plan-progress-floating"))
-    progress.classList.add("llm-plan-progress-floating");
-  if (progress.parentElement !== chatBox) chatBox.appendChild(progress);
 }
 
 function findNativeMcpActionCard(
@@ -3413,8 +3379,8 @@ function syncRequestUIForConversation(
     primaryBody,
     primaryItem,
     (body) => {
-      const box = body.querySelector<HTMLElement>("#llm-chat-box");
-      if (box) syncFloatingPlanProgress(box, conversationKey);
+      // Plan steps render only in the Task progress drawer.
+      syncTaskProgressPlan(conversationKey);
       activeContextPanelStateSync.get(body)?.();
     },
   );
@@ -3771,6 +3737,20 @@ function buildCodexNativeTurnCallbacks(ctx: {
       ctx.conversationKey,
       ctx.conversationGeneration,
     );
+  // The Task progress row follows this turn: working now, answering at the
+  // first streamed text, and each MCP read's paper ledger delta as it lands.
+  {
+    const history = chatHistory.get(ctx.conversationKey) || [];
+    const position = history.indexOf(assistantMessage);
+    beginTaskRun(ctx.conversationKey, {
+      runId: assistantMessage.agentRunId,
+      turnIndex: taskTurnIndexFor(
+        position >= 0 ? history.slice(0, position) : history,
+      ),
+    });
+  }
+  const noteAnswering = () =>
+    markTaskAnswering(ctx.conversationKey, assistantMessage.agentRunId);
   if (ctx.planContext)
     codexActivityTrace?.appendPlanEvent({
       type: "provider_event",
@@ -3793,10 +3773,13 @@ function buildCodexNativeTurnCallbacks(ctx: {
       setStatusSafely(`Codex skill activated: ${skillId}`, "sending");
     },
     onDelta: (delta) => {
-      if (isLive()) handleDelta(delta);
+      if (!isLive()) return;
+      noteAnswering();
+      handleDelta(delta);
     },
     onAgentMessageDelta: (event) => {
       if (!isLive()) return;
+      noteAnswering();
       if (!codexActivityTrace?.appendAgentMessageDelta(event)) {
         handleDelta(event.delta);
       }
@@ -3842,7 +3825,16 @@ function buildCodexNativeTurnCallbacks(ctx: {
     },
     onPlanUpdated: (event) => {
       if (!isLive()) return;
+      // Codex's plan is the run's steps in Task progress; the trace keeps it
+      // as a persisted event and renders no row for it.
       codexActivityTrace?.appendNativePlanProgress(event.steps);
+      if (assistantMessage.agentRunId) {
+        setTaskChecklist(ctx.conversationKey, {
+          source: "codex",
+          runId: assistantMessage.agentRunId,
+          steps: codexPlanTaskSteps(event.steps),
+        });
+      }
     },
     onPlanExecutionUpdated: (ledger) => {
       if (!isLive()) return;
@@ -3868,6 +3860,14 @@ function buildCodexNativeTurnCallbacks(ctx: {
       if (!isLive()) return;
       flushResponseStream("event");
       codexActivityTrace?.noteMcpToolActivity(event);
+      const ledgerUpdate = paperLedgerUpdateFromMcpActivity(event);
+      if (ledgerUpdate) {
+        applyTaskPaperUpdate(
+          ctx.conversationKey,
+          ledgerUpdate.delta,
+          assistantMessage.agentRunId,
+        );
+      }
       assistantMessage.quoteCitations = mergeQuoteCitations(
         assistantMessage.quoteCitations,
         event.quoteCitations,
@@ -4779,11 +4779,6 @@ export function disposeChatRendering(body: Element): void {
     if (view.answer) disposeStreamingMarkdown(view.answer);
   }
   mountedAssistantViews.delete(box);
-  for (const root of Array.from(
-    box.querySelectorAll<HTMLElement>(".llm-plan-container-execution"),
-  )) {
-    if (root) disposePlanProgress(root as HTMLElement);
-  }
 }
 
 function waitForUiStep(): Promise<void> {
@@ -7040,6 +7035,12 @@ export async function retryLatestAssistantResponse(
       conversationKey,
     });
     codexActivityTrace?.finish(assistantMessage.text);
+    if (codexActivityTrace) {
+      completeTaskRun(conversationKey, {
+        runId: assistantMessage.agentRunId,
+        quoteCitations: assistantMessage.quoteCitations,
+      });
+    }
     await codexActivityTrace?.persist(conversationKey, conversationGeneration);
     assistantMessage.timestamp = Date.now();
     assistantMessage.modelName = effectiveRequestConfig.model;
@@ -10015,6 +10016,12 @@ export async function sendQuestion(
       conversationKey,
     });
     codexActivityTrace?.finish(assistantMessage.text);
+    if (codexActivityTrace) {
+      completeTaskRun(conversationKey, {
+        runId: assistantMessage.agentRunId,
+        quoteCitations: assistantMessage.quoteCitations,
+      });
+    }
     assistantMessage.runMode = isCodexNativeTurn
       ? "agent"
       : effectiveRuntimeMode;
@@ -10438,7 +10445,7 @@ function updateMountedAssistantViews(
     }
     if (view.answer) view.answer.hidden = interleaved;
   }
-  if (hasAgentTrace) syncFloatingPlanProgress(box, getConversationKey(item));
+  if (hasAgentTrace) syncTaskProgressPlan(getConversationKey(item));
   scheduleChatScrollReconciliation(getConversationKey(item), box);
   return true;
 }
@@ -10606,11 +10613,6 @@ export function refreshChat(
     }
   }
   if (!useTargetedRerender) {
-    for (const root of Array.from(
-      chatBox.querySelectorAll<HTMLElement>(".llm-plan-container-execution"),
-    )) {
-      if (root) disposePlanProgress(root as HTMLElement);
-    }
     for (const view of mountedAssistantViews.get(chatBox)?.values() || []) {
       if (view.trace) disposeAgentTrace(view.trace);
       if (view.answer) disposeStreamingMarkdown(view.answer);
@@ -12149,7 +12151,8 @@ export function refreshChat(
     }
   }
 
-  syncFloatingPlanProgress(chatBox, conversationKey);
+  syncTaskProgressPlan(conversationKey);
+  syncTaskProgressPanel(body);
   syncUserContextAlignmentWidths(body);
   syncConversationTurnNavigator(body, history, {
     conversationKey,

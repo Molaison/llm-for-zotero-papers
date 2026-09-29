@@ -455,11 +455,7 @@ export function createActionCommandController(
   };
 
   const syncHasActionCardAttr = () => {
-    const hasCard = Boolean(
-      chatBox?.querySelector(
-        ".llm-action-inline-card, .llm-action-progress-card",
-      ),
-    );
+    const hasCard = Boolean(chatBox?.querySelector(".llm-action-inline-card"));
     if (hasCard) {
       panelRoot.dataset.hasActionCard = "true";
     } else {
