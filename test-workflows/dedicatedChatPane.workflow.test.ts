@@ -356,6 +356,14 @@ describe("workflow: dedicated native chat pane", function () {
         "Library chat is the active tab",
       );
       assertHeaderRows(details, layout);
+      await until(
+        () => Boolean(panel().querySelector(".llm-standalone-start-page")),
+        "the fresh Library chat shows the Library start page",
+      );
+      assert.isNull(
+        panel().querySelector(".llm-start-page"),
+        `no Paper chat start page in a Library chat (${layout})`,
+      );
       const key = panel().dataset.itemId;
       assert.isNull(
         panel().querySelector(".llm-input-drop-active"),

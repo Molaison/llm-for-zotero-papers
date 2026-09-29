@@ -10575,14 +10575,13 @@ export function refreshChat(
       );
       if (panelRoot) panelRoot.dataset.startPageActive = "true";
     } else {
-      const isStandalone =
-        panelRoot?.dataset?.standalone === "true" ||
-        (body as HTMLElement).dataset?.standalone === "true";
       const isNoteEditing = !!resolveActiveNoteSession(item);
       if (isNoteEditing) {
         chatBox.innerHTML = getNoteEditingStartPageHtml();
         if (panelRoot) panelRoot.dataset.startPageActive = "true";
-      } else if (isStandalone && isGlobalConversation) {
+      } else if (isGlobalConversation) {
+        // Library chat has one start page on every surface; the paper page
+        // tells the user their paper is pre-loaded, which is false here.
         chatBox.innerHTML = getStandaloneLibraryChatStartPageHtml();
         if (panelRoot) panelRoot.dataset.startPageActive = "true";
       } else {

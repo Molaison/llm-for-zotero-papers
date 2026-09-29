@@ -2794,7 +2794,9 @@
    the messages flex-column with the card and the card shrinks to whatever
    space is left. Attribute toggled by setupHandlers (JS-based rather than
    :has() to stay compatible across Gecko versions). */
-[data-has-action-card="true"][data-start-page-active="true"] .llm-start-page {
+[data-has-action-card="true"][data-start-page-active="true"] .llm-start-page,
+[data-has-action-card="true"][data-start-page-active="true"]
+  .llm-standalone-start-page {
   display: none;
 }
 
