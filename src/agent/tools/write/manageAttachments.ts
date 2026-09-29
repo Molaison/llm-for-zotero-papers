@@ -82,7 +82,7 @@ export function createManageAttachmentsTool(
         ),
       instruction:
         "Use manage_attachments to delete, rename, or re-link a single attachment. " +
-        "To find attachments, use read_library with sections:['attachments'] first. " +
+        "To find attachments, use library_read with sections:['attachments'] first. " +
         "Re-linking works for stored attachments as well as linked files — use it to repair an attachment whose file has gone missing. Only linked URLs cannot be re-linked, having no file. " +
         "For batch renaming with computed filenames (e.g. '{author}_{year}_{title}.pdf'), use zotero_script instead.",
     },

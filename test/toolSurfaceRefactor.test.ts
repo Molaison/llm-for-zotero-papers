@@ -231,7 +231,7 @@ describe("semantic tool surface", function () {
     });
     registry.register({
       spec: {
-        name: "query_library",
+        name: "internal_search_delegate",
         description: "Internal legacy delegate",
         inputSchema: { type: "object" },
         executionClass: "read",
@@ -252,7 +252,7 @@ describe("semantic tool surface", function () {
         .map((tool) => tool.name),
       ["library_search"],
     );
-    assert.exists(registry.getTool("query_library"));
+    assert.exists(registry.getTool("internal_search_delegate"));
   });
 
   it("exposes the direct-agent built-in surface and hides legacy primitive names", function () {
@@ -280,6 +280,7 @@ describe("semantic tool surface", function () {
       "note_write",
       "note_write_batch",
       "paper_read",
+      "read_attachment",
       "request_user_input",
       "revert_changes",
       "run_command",
@@ -302,7 +303,6 @@ describe("semantic tool surface", function () {
       "review",
     ]);
     for (const legacyName of [
-      "query_library",
       "search_literature_online",
       "edit_current_note",
       "import_identifiers",
@@ -314,11 +314,14 @@ describe("semantic tool surface", function () {
         `${legacyName} remains internally callable`,
       );
     }
-    // Retired into paper_read: no longer registered at all.
+    // Retired into paper_read, library_search, and library_read: no longer
+    // registered at all.
     for (const retiredName of [
       "read_paper",
       "search_paper",
       "view_pdf_pages",
+      "query_library",
+      "read_library",
     ]) {
       assert.notInclude(names, retiredName);
       assert.notExists(registry.getTool(retiredName), `${retiredName} retired`);

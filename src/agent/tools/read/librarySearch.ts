@@ -20,6 +20,30 @@ import {
 } from "../searchConditions";
 import { readOnlyInvocationPlan } from "../../authorization/invocationPlan";
 
+type ToolGuidance = NonNullable<AgentToolDefinition["guidance"]>;
+
+export const LIBRARY_SEARCH_GUIDANCE: ToolGuidance = {
+  // Library-level turns: a global (library) conversation, a selected
+  // collection or tag scope, or no paper in scope at all.
+  matches: (request) => {
+    const scope = request.turnPaperScope;
+    if (!scope) return true;
+    return (
+      scope.conversationKind === "global" ||
+      scope.collections.length > 0 ||
+      scope.tags.length > 0 ||
+      scope.papers.length === 0
+    );
+  },
+  instruction:
+    "Use library_search to resolve named library targets. Bounded results supply native identities and metadata; they never grant permission. If a descriptive name still matches several candidates, ask the user instead of guessing." +
+    "\n\nFor anything the simple filters cannot express, pass conditions[] — Zotero's own advanced-search vocabulary. Each clause is {condition, operator, value}. Useful conditions: fulltextContent (the PDF text), abstractNote, DOI, ISBN, publisher, publicationTitle, dateAdded, dateModified, note, annotationText, citationKey, retracted, itemType, tag, collection. If a condition and operator do not pair up, the error lists the operators that condition accepts — read it and retry rather than falling back to a plain text search." +
+    "\n\nTwo rules that decide whether an advanced search works at all:" +
+    "\n- fulltextContent, annotationText and childNote match a child item (an attachment or a note), so pass resolveToParents:true or those matches are dropped and the search looks empty." +
+    "\n- joinMode:'all' is the default; use joinMode:'any' for an OR search. There are no grouping blocks, because opening one in Zotero flips every other condition in the query to OR." +
+    "\n\nTo see the trash, pass filters:{ deleted:true }. That is the only way to enumerate trashed items, and it is what you need before calling library_delete with mode:'restore'.",
+};
+
 type QueryLibraryInput = {
   entity: QueryLibraryEntity;
   mode: QueryLibraryMode;
@@ -258,17 +282,15 @@ function withResultCounts<T extends { results: unknown[] }>(
   };
 }
 
-export function createQueryLibraryTool(
+export function createLibrarySearchTool(
   zoteroGateway: ZoteroGateway,
 ): AgentToolDefinition<QueryLibraryInput, unknown> {
   const queryService = new LibraryQueryService(zoteroGateway);
   return {
     spec: {
-      name: "query_library",
+      name: "library_search",
       description:
-        "Discover Zotero items and collections. Every call must include entity and mode. Use text, not query, for search terms. Use it to search or list any item type (papers, books, notes, web pages, and more), filter by author/year/collection/itemType, browse the collection tree, find related papers, detect duplicates, or list standalone notes. By default returns all item types; use filters.hasPdf:true for PDF-backed papers only. For 'how many papers/items...' questions, use totalCount/returnedCount/limited instead of hand-counting the returned rows. " +
-        "Compact item rows already include itemId, itemKey, itemType, title, firstCreator, and year. Omit include when those catalog fields are sufficient; include metadata or abstract only when their full contents are actually needed. " +
-        "For anything the simple filters cannot express, pass conditions[] — Zotero's own advanced-search vocabulary, covering full text, abstract, DOI, publisher, dates added or modified, note and annotation text, citation key, retraction status and every other condition. Use filters.deleted:true to list the trash.",
+        "Discover, list, filter, and count Zotero items, collections, notes, tags, and libraries. Use this for finding library records; use library_read for detailed item state.",
       inputSchema: {
         type: "object",
         required: ["entity", "mode"],
@@ -410,16 +432,9 @@ export function createQueryLibraryTool(
       executionClass: "read",
       workCategory: "retrieval",
     },
-    guidance: {
-      matches: (request) =>
-        request.classifiedIntent?.actionIntents.some(
-          (action) => action.capability === "zotero.collections",
-        ) === true,
-      instruction:
-        "For library-organization requests, gather the item IDs first with library_search({ entity:'items', mode:'list', filters:{ unfiled:true } }) when needed. If the user wants you to file or move papers and the exact destination collection IDs are not known yet, resolve the destination with library_search or request clarification before proposing a library_update. Use library_search({ entity:'collections', mode:'list', view:'tree' }) when you need the collection hierarchy to prefill or explain choices.",
-    },
+    guidance: LIBRARY_SEARCH_GUIDANCE,
     presentation: {
-      label: "Query Library",
+      label: "Search Library",
       summaries: {
         onCall: ({ args }) => {
           const entity =

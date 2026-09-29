@@ -10,9 +10,9 @@ import { createLibraryRetrieveTool } from "./read/libraryRetrieve";
 import { createLoadSkillTool } from "./read/loadSkill";
 import { createPaperReadTool } from "./read/paperRead";
 import { clearPdfToolCaches } from "./read/pdfToolUtils";
-import { createQueryLibraryTool } from "./read/queryLibrary";
+import { createLibrarySearchTool } from "./read/librarySearch";
 import { createReadAttachmentTool } from "./read/readAttachment";
-import { createReadLibraryTool } from "./read/readLibrary";
+import { createLibraryReadTool } from "./read/libraryRead";
 import { createLiteratureReviewTool } from "./read/reviewLiterature";
 import {
   createSearchLiteratureOnlineTool,
@@ -112,28 +112,6 @@ const LIBRARY_UPDATE_OPERATION_SCHEMA = {
     metadata: METADATA_PATCH_SCHEMA,
     patch: METADATA_PATCH_SCHEMA,
   },
-};
-
-const LIBRARY_SEARCH_GUIDANCE: ToolGuidance = {
-  // Library-level turns: a global (library) conversation, a selected
-  // collection or tag scope, or no paper in scope at all.
-  matches: (request) => {
-    const scope = request.turnPaperScope;
-    if (!scope) return true;
-    return (
-      scope.conversationKind === "global" ||
-      scope.collections.length > 0 ||
-      scope.tags.length > 0 ||
-      scope.papers.length === 0
-    );
-  },
-  instruction:
-    "Use library_search to resolve named library targets. Bounded results supply native identities and metadata; they never grant permission. If a descriptive name still matches several candidates, ask the user instead of guessing." +
-    "\n\nFor anything the simple filters cannot express, pass conditions[] — Zotero's own advanced-search vocabulary. Each clause is {condition, operator, value}. Useful conditions: fulltextContent (the PDF text), abstractNote, DOI, ISBN, publisher, publicationTitle, dateAdded, dateModified, note, annotationText, citationKey, retracted, itemType, tag, collection. If a condition and operator do not pair up, the error lists the operators that condition accepts — read it and retry rather than falling back to a plain text search." +
-    "\n\nTwo rules that decide whether an advanced search works at all:" +
-    "\n- fulltextContent, annotationText and childNote match a child item (an attachment or a note), so pass resolveToParents:true or those matches are dropped and the search looks empty." +
-    "\n- joinMode:'all' is the default; use joinMode:'any' for an OR search. There are no grouping blocks, because opening one in Zotero flips every other condition in the query to OR." +
-    "\n\nTo see the trash, pass filters:{ deleted:true }. That is the only way to enumerate trashed items, and it is what you need before calling library_delete with mode:'restore'.",
 };
 
 const LITERATURE_SEARCH_GUIDANCE: ToolGuidance = {
@@ -606,8 +584,6 @@ export function createBuiltInToolRegistry(
       registry.listToolsForRequest(request),
     ),
   );
-  const queryLibrary = createQueryLibraryTool(deps.zoteroGateway);
-  const readLibrary = createReadLibraryTool(deps.zoteroGateway);
   const libraryRetrieve = createLibraryRetrieveTool(
     new LibraryRetrieveService(deps.zoteroGateway, deps.pdfService),
   );
@@ -642,27 +618,11 @@ export function createBuiltInToolRegistry(
   const zoteroScript = createZoteroScriptTool();
   const undoLastAction = createUndoLastActionTool(deps.zoteroGateway);
 
-  registry.register(
-    createRenamedTool({
-      tool: queryLibrary,
-      name: "library_search",
-      label: "Search Library",
-      description:
-        "Discover, list, filter, and count Zotero items, collections, notes, tags, and libraries. Use this for finding library records; use library_read for detailed item state.",
-      guidance: LIBRARY_SEARCH_GUIDANCE,
-    }),
-  );
+  registry.register(createLibrarySearchTool(deps.zoteroGateway));
   registry.register(createWebSearchTool());
   registry.register(createWebReadTool());
-  registry.register(
-    createRenamedTool({
-      tool: readLibrary,
-      name: "library_read",
-      label: "Read Library",
-      description:
-        "Read structured Zotero item state: metadata, notes, annotations, attachments, collection membership, and note content. Use paper_read for primary PDF/paper content. For explicit child-attachment requests, enumerate attachments then use read_attachment for Markdown/HTML/TXT/DOCX.",
-    }),
-  );
+  registry.register(createLibraryReadTool(deps.zoteroGateway));
+  registry.register(readAttachment);
   registry.register(libraryRetrieve);
   registry.register(
     createPaperReadTool(
@@ -765,9 +725,6 @@ export function createBuiltInToolRegistry(
   registry.register(createApproveResearchMutationTool());
 
   const legacyTools: AgentToolDefinition<any, any>[] = [
-    queryLibrary,
-    readLibrary,
-    readAttachment,
     searchLiterature,
     applyTags,
     moveToCollection,

@@ -1,6 +1,6 @@
 import { assert } from "chai";
 import { ZoteroGateway } from "../src/agent/services/zoteroGateway";
-import { createQueryLibraryTool } from "../src/agent/tools/read/queryLibrary";
+import { createLibrarySearchTool } from "../src/agent/tools/read/librarySearch";
 import { createSavedSearchTool } from "../src/agent/tools/write/savedSearches";
 
 /**
@@ -276,7 +276,7 @@ describe("library_search advanced conditions", function () {
 
   describe("tool-level gating", function () {
     function tool() {
-      return createQueryLibraryTool(gateway());
+      return createLibrarySearchTool(gateway());
     }
 
     for (const isRequired of [true, false, undefined]) {

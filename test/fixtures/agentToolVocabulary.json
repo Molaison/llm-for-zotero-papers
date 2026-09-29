@@ -23,6 +23,7 @@
     "note_write_batch",
     "paper_read",
     "prepare_plan_execution",
+    "read_attachment",
     "request_user_input",
     "research_update",
     "revert_changes",
@@ -45,9 +46,6 @@
     "manage_collections",
     "merge_items",
     "move_to_collection",
-    "query_library",
-    "read_attachment",
-    "read_library",
     "relate_items",
     "reparent_items",
     "restore_from_trash",
@@ -59,5 +57,5 @@
     "update_metadata",
     "write_notes_batch"
   ],
-  "specBytes": 71282
+  "specBytes": 71787
 }

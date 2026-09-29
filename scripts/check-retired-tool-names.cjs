@@ -9,6 +9,8 @@ const RETIRED_TOOL_NAMES = [
   "read_paper",
   "search_paper",
   "view_pdf_pages",
+  "query_library",
+  "read_library",
 ];
 // Repo-relative, forward-slash prefixes matched with startsWith.
 const ALLOWLIST = [

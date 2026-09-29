@@ -15,8 +15,8 @@ import { EDITABLE_ARTICLE_METADATA_FIELDS } from "../src/agent/services/zoteroGa
 import { AgentToolRegistry } from "../src/agent/tools/registry";
 import { PdfService } from "../src/agent/services/pdfService";
 import { RetrievalService } from "../src/agent/services/retrievalService";
-import { createQueryLibraryTool } from "../src/agent/tools/read/queryLibrary";
-import { createReadLibraryTool } from "../src/agent/tools/read/readLibrary";
+import { createLibrarySearchTool } from "../src/agent/tools/read/librarySearch";
+import { createLibraryReadTool } from "../src/agent/tools/read/libraryRead";
 import { createPaperReadTool } from "../src/agent/tools/read/paperRead";
 import { getPagedOperationId } from "../src/agent/actions/pagedWorkflow";
 import { createFileIOTool } from "../src/agent/tools/write/fileIO";
@@ -281,8 +281,8 @@ describe("primitive agent tools", function () {
     );
     assert.notInclude(text, "This is a figure/table interpretation task");
   });
-  it("query_library searches items and enriches requested fields", async function () {
-    const tool = createQueryLibraryTool({
+  it("library_search searches items and enriches requested fields", async function () {
+    const tool = createLibrarySearchTool({
       resolveLibraryID: () => 1,
       searchAllLibraryItems: async () =>
         ({
@@ -395,8 +395,8 @@ describe("primitive agent tools", function () {
     assert.notProperty(compactFirst, "metadata");
   });
 
-  it("query_library lists libraries without requiring an active library", async function () {
-    const tool = createQueryLibraryTool({
+  it("library_search lists libraries without requiring an active library", async function () {
+    const tool = createLibrarySearchTool({
       resolveLibraryID: () => 0,
       listAllLibraries: () => [
         { libraryID: 1, name: "My Library", editable: true },
@@ -418,9 +418,9 @@ describe("primitive agent tools", function () {
     );
   });
 
-  it("query_library related mode resolves the active paper from reader context", async function () {
+  it("library_search related mode resolves the active paper from reader context", async function () {
     let receivedReferenceItemId = 0;
-    const tool = createQueryLibraryTool({
+    const tool = createLibrarySearchTool({
       resolveLibraryID: () => 1,
       listPaperContexts: () => [
         {
@@ -497,9 +497,9 @@ describe("primitive agent tools", function () {
     assert.lengthOf((result as { results: unknown[] }).results, 1);
   });
 
-  it("query_library related mode refuses active-paper fallback in library chat", async function () {
+  it("library_search related mode refuses active-paper fallback in library chat", async function () {
     let relatedSearchCalled = false;
-    const tool = createQueryLibraryTool({
+    const tool = createLibrarySearchTool({
       resolveLibraryID: () => 1,
       listPaperContexts: () => [],
       getActivePaperContext: () => ({
@@ -561,12 +561,12 @@ describe("primitive agent tools", function () {
     assert.equal(relatedSearchCalled, false);
   });
 
-  it("read_library returns item state keyed by itemId", async function () {
+  it("library_read returns item state keyed by itemId", async function () {
     const fakeItem = {
       id: 7,
       getDisplayTitle: () => "Paper Seven",
     } as any;
-    const tool = createReadLibraryTool({
+    const tool = createLibraryReadTool({
       listPaperContexts: () => [],
       getItemCollectionIds: (itemId: number) => (itemId === 7 ? [12] : []),
       getPaperTargetsByItemIds: () => [
@@ -645,13 +645,13 @@ describe("primitive agent tools", function () {
     ]);
   });
 
-  it("read_library does not use active reader fallback in collection-scoped library chat", async function () {
+  it("library_read does not use active reader fallback in collection-scoped library chat", async function () {
     let requestedTargets: number[] = [];
     const fakeItem = {
       id: 99,
       getDisplayTitle: () => "Chandra Paper",
     } as any;
-    const tool = createReadLibraryTool({
+    const tool = createLibraryReadTool({
       listPaperContexts: () => [],
       getItemCollectionIds: (itemId: number) => (itemId === 7 ? [12] : []),
       getPaperTargetsByItemIds: (itemIds: number[]) => {
@@ -691,12 +691,12 @@ describe("primitive agent tools", function () {
     );
   });
 
-  it("read_library keeps explicit item IDs in collection-scoped library chat", async function () {
+  it("library_read keeps explicit item IDs in collection-scoped library chat", async function () {
     const fakeItem = {
       id: 7,
       getDisplayTitle: () => "Collection Paper",
     } as any;
-    const tool = createReadLibraryTool({
+    const tool = createLibraryReadTool({
       listPaperContexts: () => [],
       getItemCollectionIds: (itemId: number) => (itemId === 7 ? [12] : []),
       getPaperTargetsByItemIds: () => [],

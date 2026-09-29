@@ -3,11 +3,11 @@
  * read attestation, the MCP raw-PDF guard, and the Codex read ledger match
  * as strings.
  *
- * Facade names are what the model and MCP clients can call. The retired
- * primitive names are kept in separate LEGACY_* sets because the in-process
- * registry still executes an internal primitive when a model names it, and
- * stored conversation history written by older versions still carries those
- * names. Retired names: removed in Task 2.6.
+ * The unprefixed sets hold model-visible tool names; MCP exposes a curated
+ * subset. Retired primitive names are kept in separate LEGACY_* sets because
+ * the in-process registry still executes an internal primitive when a model
+ * names it, and stored conversation history written by older versions still
+ * carries those names. Retired names: removed in Task 2.6.
  */
 
 /** Facade tools that read one paper's own content. */

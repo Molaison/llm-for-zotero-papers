@@ -1,11 +1,11 @@
 import { assert } from "chai";
-import { createQueryLibraryTool } from "../src/agent/tools/read/queryLibrary";
+import { createLibrarySearchTool } from "../src/agent/tools/read/librarySearch";
 
 describe("library trash search scope", function () {
   for (const deleted of [true, false]) {
     it(`preserves explicit deleted:${deleted} through the public search tool`, async function () {
       let received: Record<string, any> | undefined;
-      const tool = createQueryLibraryTool({
+      const tool = createLibrarySearchTool({
         getActiveContextItem: () => null,
         searchAllLibraryItems: async (params: Record<string, any>) => {
           received = params;

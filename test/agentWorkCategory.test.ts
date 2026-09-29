@@ -38,9 +38,7 @@ const ALLOWED_WORK_CATEGORIES: readonly AgentWorkCategory[] = [
 const EXPECTED_TOOL_CATEGORIES: Readonly<Record<string, AgentWorkCategory>> = {
   // Reads: library, paper, PDF, and network lookups that never write.
   library_search: "retrieval",
-  query_library: "retrieval",
   library_read: "retrieval",
-  read_library: "retrieval",
   library_retrieve: "retrieval",
   library_cite: "retrieval",
   paper_read: "retrieval",

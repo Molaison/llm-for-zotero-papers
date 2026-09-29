@@ -78,17 +78,15 @@ function normalizeExplicitPaperContexts(
   return contexts.length === value.length ? contexts : null;
 }
 
-export function createReadLibraryTool(
+export function createLibraryReadTool(
   zoteroGateway: ZoteroGateway,
 ): AgentToolDefinition<ReadLibraryInput, unknown> {
   const readService = new LibraryReadService(zoteroGateway);
   return {
     spec: {
-      name: "read_library",
+      name: "library_read",
       description:
-        "Read structured Zotero item state for one or more items (papers, books, standalone notes, or any item type). Use sections to fetch metadata, notes (use 'content' or 'notes' for standalone notes), annotations, attachments (all types, not just PDFs), and collection membership keyed by item ID. " +
-        "For PDF attachments, the attachments section may include mineruCacheDir. Use paper_read for ordinary PDF paper content and mode:'figures' for figure crops; use file_io only for explicit MinerU cache metadata inspection such as manifest offsets or section slices. " +
-        "For explicit child-attachment requests, enumerate attachments here first, then use read_attachment for Markdown/HTML/TXT/DOCX child attachments or paper_read for explicit PDFs.",
+        "Read structured Zotero item state: metadata, notes, annotations, attachments, collection membership, and note content. Use paper_read for primary PDF/paper content. For explicit child-attachment requests, enumerate attachments then use read_attachment for Markdown/HTML/TXT/DOCX.",
       inputSchema: {
         type: "object",
         required: ["sections"],
