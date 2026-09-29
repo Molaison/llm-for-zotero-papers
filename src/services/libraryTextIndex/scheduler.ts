@@ -43,6 +43,7 @@ import {
   embedDocumentVectors,
   loadVectorDims,
   pruneVectorNamespaces,
+  removeDocumentVectors,
 } from "./vectorIndexer";
 import { measureVectorBytes } from "./vectorStore";
 
@@ -322,7 +323,23 @@ export class LibraryTextIndexScheduler {
   async remove(attachmentIds: number[]): Promise<void> {
     if (!attachmentIds.length || !this.env.isEnabled()) return;
     const store = await this.env.getStore();
-    if (store) await store.deleteDocuments(attachmentIds);
+    if (store) await this.deleteDocuments(store, attachmentIds);
+  }
+
+  /**
+   * The one way documents leave the index: rows first, then (best effort)
+   * their vector shard files and loaded-matrix rows, so a deleted or evicted
+   * paper leaks neither disk nor memory.
+   */
+  private async deleteDocuments(
+    store: LibraryTextIndexStore,
+    attachmentIds: number[],
+  ): Promise<void> {
+    if (!attachmentIds.length) return;
+    const vectorRows =
+      await store.listVectorDocumentsForAttachments(attachmentIds);
+    await store.deleteDocuments(attachmentIds);
+    if (vectorRows.length) await removeDocumentVectors(vectorRows);
   }
 
   private libraryFor(attachmentId: number): number {
@@ -370,7 +387,7 @@ export class LibraryTextIndexScheduler {
     const removed = documents
       .filter((d) => !eligible.has(d.attachmentId))
       .map((d) => d.attachmentId);
-    await store.deleteDocuments(removed);
+    await this.deleteDocuments(store, removed);
     const indexed = new Map(
       documents
         .filter((d) => eligible.has(d.attachmentId))
@@ -582,7 +599,7 @@ export class LibraryTextIndexScheduler {
         freed += victim.byteEstimate;
         if (used - freed <= budget) break;
       }
-      await store.deleteDocuments(ids);
+      await this.deleteDocuments(store, ids);
       evicted += ids.length;
       used -= freed;
     }

@@ -14,6 +14,18 @@ import {
   INDEX_STOP_GRACE_MS,
   INDEX_URGENT_ADD_BATCH_MAX,
 } from "../src/services/libraryTextIndex/constants";
+import {
+  embedDocumentVectors,
+  loadVectorMatrix,
+  resetVectorIndexerForTests,
+} from "../src/services/libraryTextIndex/vectorIndexer";
+import { getVectorShardPath } from "../src/services/libraryTextIndex/vectorStore";
+import {
+  restoreTestGlobals,
+  setupMemoryIO,
+  snapshotTestGlobals,
+  type TestGlobalSnapshot,
+} from "./helpers/retrievalCorpus";
 
 type Timer = { cb: () => void; at: number; cleared: boolean };
 
@@ -788,35 +800,104 @@ describe("library text index scheduler", function () {
       assert.equal(calls, 1);
     });
 
-    it("reconcile prunes vector rows of other namespaces", async function () {
-      await store.upsertDocument(withChunk(1));
-      for (const namespace of ["old:4", "t:4"])
-        await store.upsertVectorDocument({
-          attachmentId: 1,
-          namespace,
-          dims: 4,
-          chunkCount: 1,
-          path: "/v/1.bin",
-          sourceFingerprint: "fp1",
-        });
-      snapshotIds = [1];
-      await scheduler.reconcile(1);
-      assert.deepEqual(await store.listVectorNamespaces(), ["t:4"]);
-      env().currentVectorNamespace = () => null;
-      await store.upsertVectorDocument({
-        attachmentId: 1,
-        namespace: "other:4",
-        dims: 4,
-        chunkCount: 1,
-        path: "/v/1.bin",
-        sourceFingerprint: "fp1",
+    describe("with a data directory", function () {
+      let globals: TestGlobalSnapshot;
+      let files: Map<string, Uint8Array>;
+      beforeEach(function () {
+        globals = snapshotTestGlobals();
+        files = setupMemoryIO().files;
+        (globalThis as any).Zotero = { DataDirectory: { dir: "/tmp/zotero" } };
+        resetVectorIndexerForTests();
       });
-      await scheduler.reconcile(1);
-      assert.deepEqual(
-        await store.listVectorNamespaces(),
-        ["other:4", "t:4"],
-        "no pruning while vectors are off",
-      );
+      afterEach(function () {
+        resetVectorIndexerForTests();
+        restoreTestGlobals(globals);
+      });
+      const embedReal = (attachmentId: number, namespace = "t:4") =>
+        embedDocumentVectors({
+          store,
+          attachmentId,
+          namespace,
+          embed: async (texts) => texts.map(() => [1, 0, 0, 0]),
+        });
+
+      it("reconcile prunes the rows and shard files of other namespaces", async function () {
+        await store.upsertDocument(withChunk(1));
+        await embedReal(1, "old:4");
+        await embedReal(1, "t:4");
+        snapshotIds = [1];
+        await scheduler.reconcile(1);
+        assert.deepEqual(await store.listVectorNamespaces(), ["t:4"]);
+        assert.isFalse(files.has(getVectorShardPath("old:4", 1)));
+        assert.isTrue(files.has(getVectorShardPath("t:4", 1)));
+        env().currentVectorNamespace = () => null;
+        await embedReal(1, "other:4");
+        await scheduler.reconcile(1);
+        assert.deepEqual(
+          await store.listVectorNamespaces(),
+          ["other:4", "t:4"],
+          "no pruning while vectors are off",
+        );
+      });
+
+      it("keeps a namespace's rows when its files cannot be removed", async function () {
+        await store.upsertDocument(withChunk(1));
+        await embedReal(1, "old:4");
+        (globalThis as any).Zotero = {}; // no data directory: removal throws
+        snapshotIds = [1];
+        await scheduler.reconcile(1); // does not throw
+        assert.deepEqual(
+          await store.listVectorNamespaces(),
+          ["old:4"],
+          "rows survive so the next reconcile retries",
+        );
+      });
+
+      for (const [label, drop] of [
+        [
+          "budget eviction",
+          async () => {
+            budget = 1;
+            await store.touchDocuments([1], clock - 3 * 60 * 60 * 1000);
+            await scheduler.enforceBudget();
+          },
+        ],
+        [
+          "a notifier delete",
+          () =>
+            scheduler.handleChange({
+              event: "delete",
+              type: "item",
+              ids: [1],
+              extraData: {},
+              receivedAt: 0,
+            }),
+        ],
+        [
+          "reconcile removal",
+          async () => {
+            snapshotIds = [2];
+            await scheduler.reconcile(1);
+          },
+        ],
+      ] as Array<[string, () => Promise<unknown>]>) {
+        it(`${label} removes the paper's vector row, shard file and matrix rows`, async function () {
+          await store.upsertDocument(withChunk(1));
+          await store.upsertDocument(withChunk(2));
+          await store.touchDocuments([2], clock);
+          await embedReal(1);
+          await embedReal(2);
+          const matrix = (await loadVectorMatrix(store, "t:4"))!;
+          assert.equal(matrix.rows, 2);
+          await drop();
+          assert.isNull(await store.getDocument(1));
+          assert.isNull(await store.getVectorDocument(1, "t:4"));
+          assert.isFalse(files.has(getVectorShardPath("t:4", 1)));
+          assert.isTrue(files.has(getVectorShardPath("t:4", 2)));
+          assert.equal(matrix.rows, 1);
+          assert.isFalse(matrix.has(1));
+        });
+      }
     });
   });
 

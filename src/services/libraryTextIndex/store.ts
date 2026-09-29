@@ -512,6 +512,37 @@ export class LibraryTextIndexStore {
     );
   }
 
+  /** Every namespace's vector row for these documents (namespace and shard path). */
+  async listVectorDocumentsForAttachments(
+    attachmentIds: number[],
+  ): Promise<Array<{ attachmentId: number; namespace: string; path: string }>> {
+    const out: Array<{
+      attachmentId: number;
+      namespace: string;
+      path: string;
+    }> = [];
+    for (const batch of chunked([...new Set(attachmentIds)])) {
+      if (!batch.length) continue;
+      const rows = (await this.q(
+        `SELECT attachment_id, namespace, path FROM vector_documents WHERE attachment_id IN (${batch.map(() => "?").join(",")})`,
+        batch,
+      )) as Array<{ attachment_id: number; namespace: string; path: string }>;
+      for (const row of rows)
+        out.push({
+          attachmentId: Number(row.attachment_id),
+          namespace: String(row.namespace),
+          path: String(row.path),
+        });
+    }
+    return out;
+  }
+
+  async deleteVectorNamespace(namespace: string): Promise<void> {
+    await this.q(`DELETE FROM vector_documents WHERE namespace = ?`, [
+      namespace,
+    ]);
+  }
+
   async listVectorNamespaces(): Promise<string[]> {
     const rows = (await this.q(
       `SELECT DISTINCT namespace FROM vector_documents ORDER BY namespace`,

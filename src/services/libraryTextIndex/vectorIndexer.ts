@@ -13,6 +13,7 @@
  * semantic search being enabled with a resolvable embedding provider.
  */
 import { config } from "../../../package.json";
+import { appLogger } from "../../core/logging";
 import {
   callEmbeddings,
   getResolvedEmbeddingConfig,
@@ -52,6 +53,7 @@ const loading = new Map<string, Promise<LibraryVectorMatrix | null>>();
 /** Embedding dimensions per cache key, hydrated from index_meta. */
 const knownDims = new Map<string, number>();
 const hydratedStores = new WeakSet<LibraryTextIndexStore>();
+let pruneFailureLogged = false;
 
 function isVectorsPrefOn(): boolean {
   const value = (
@@ -266,23 +268,84 @@ export function getLoadedVectorMatrix(
 }
 
 /**
- * Removes the rows, shard directories and loaded matrices of every namespace
- * other than `keep`. Returns the namespaces removed.
+ * Removes the shard directories, rows and loaded matrices of every namespace
+ * other than `keep`. A namespace's rows go only after its directory is gone,
+ * so a failed removal (file lock, permissions) is retried at the next
+ * reconcile instead of orphaning the directory. Never throws for a failed
+ * directory; returns the namespaces actually removed.
  */
 export async function pruneVectorNamespaces(
   store: LibraryTextIndexStore,
   keep: string,
 ): Promise<string[]> {
-  const removed = await store.deleteVectorNamespacesExcept(keep);
-  for (const namespace of removed) {
+  const stale = (await store.listVectorNamespaces()).filter(
+    (namespace) => namespace !== keep,
+  );
+  const removed: string[] = [];
+  for (const namespace of stale) {
     matrices.delete(namespace);
-    await removeVectorNamespace(namespace);
+    try {
+      await removeVectorNamespace(namespace);
+    } catch (error) {
+      if (!pruneFailureLogged) {
+        pruneFailureLogged = true;
+        appLogger.warn(
+          `LLM index: could not remove vector namespace files; will retry at the next start`,
+          error,
+        );
+      }
+      continue;
+    }
+    await store.deleteVectorNamespace(namespace);
+    removed.push(namespace);
   }
   return removed;
+}
+
+type IOLike = {
+  remove?: (
+    path: string,
+    options?: { ignoreAbsent?: boolean },
+  ) => Promise<void>;
+};
+type OSFileRemoveLike = {
+  remove?: (
+    path: string,
+    options?: { ignoreAbsent?: boolean },
+  ) => Promise<void>;
+};
+
+async function removeShardFile(path: string): Promise<void> {
+  const io = (globalThis as { IOUtils?: IOLike }).IOUtils;
+  if (io?.remove) return io.remove(path, { ignoreAbsent: true });
+  const osFile = (globalThis as { OS?: { File?: OSFileRemoveLike } }).OS?.File;
+  if (osFile?.remove) return osFile.remove(path, { ignoreAbsent: true });
+}
+
+/**
+ * Best-effort cleanup after documents left the index: removes their shard
+ * files and their rows in the loaded matrices. The `vector_documents` rows
+ * must already be deleted (read them before deleting the documents).
+ */
+export async function removeDocumentVectors(
+  rows: Array<{ attachmentId: number; namespace: string; path: string }>,
+): Promise<void> {
+  for (const row of rows) {
+    matrices.get(row.namespace)?.removeDocument(row.attachmentId);
+    try {
+      await removeShardFile(row.path);
+    } catch (error) {
+      appLogger.debug(
+        `LLM index: could not remove vector shard ${row.path}`,
+        error,
+      );
+    }
+  }
 }
 
 export function resetVectorIndexerForTests(): void {
   matrices.clear();
   loading.clear();
   knownDims.clear();
+  pruneFailureLogged = false;
 }

@@ -21,7 +21,10 @@ import {
   pruneVectorNamespaces,
   resetVectorIndexerForTests,
 } from "../src/services/libraryTextIndex/vectorIndexer";
-import { getVectorShardPath } from "../src/services/libraryTextIndex/vectorStore";
+import {
+  getVectorShardPath,
+  namespaceHash,
+} from "../src/services/libraryTextIndex/vectorStore";
 import { pdfTextCache } from "../src/services/paperContent/contextCache";
 
 const PREFIX = "extensions.zotero.llmforzotero.";
@@ -194,6 +197,33 @@ describe("library vector indexer", function () {
     assert.isFalse(io.files.has(getVectorShardPath("old:4", 9001)));
     assert.isTrue(io.files.has(getVectorShardPath("new:4", 9001)));
     assert.isNull(getLoadedVectorMatrix("old:4"));
+  });
+
+  it("keeps a namespace's rows when its directory cannot be removed, and still prunes the others", async function () {
+    const embed = async (texts: string[]) => texts.map(() => [1, 0, 0, 0]);
+    for (const namespace of ["keep:4", "old1:4", "old2:4"])
+      await embedDocumentVectors({
+        store,
+        attachmentId: 9001,
+        namespace,
+        embed,
+      });
+    const ioUtils = (globalThis as any).IOUtils;
+    const remove = ioUtils.remove;
+    const locked = namespaceHash("old1:4");
+    ioUtils.remove = async (path: string, options: unknown) => {
+      if (path.includes(locked)) throw new Error("file is locked");
+      return remove(path, options);
+    };
+    const removed = await pruneVectorNamespaces(store, "keep:4");
+    assert.deepEqual(removed, ["old2:4"]);
+    assert.deepEqual(await store.listVectorNamespaces(), ["keep:4", "old1:4"]);
+    assert.isTrue(io.files.has(getVectorShardPath("old1:4", 9001)));
+    assert.isFalse(io.files.has(getVectorShardPath("old2:4", 9001)));
+    // Once the lock is gone, the next prune removes the survivor.
+    ioUtils.remove = remove;
+    assert.deepEqual(await pruneVectorNamespaces(store, "keep:4"), ["old1:4"]);
+    assert.deepEqual(await store.listVectorNamespaces(), ["keep:4"]);
   });
 
   it("deleteVectorNamespacesExcept returns the removed namespaces", async function () {
