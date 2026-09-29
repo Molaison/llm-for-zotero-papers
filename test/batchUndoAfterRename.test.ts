@@ -2,7 +2,7 @@ import { assert } from "chai";
 import {
   installBatchJournal,
   runAutoTagFixture,
-  undoLastActionFixture,
+  undoFixture,
 } from "./helpers/batchFixtures";
 
 /**
@@ -29,7 +29,7 @@ describe("auto-tag journals under library_update and remains undoable", function
     assert.equal(journal.steps[0].operation, "apply_tags");
     assert.isNotEmpty(gateway.tagsOf(1), "auto-tag wrote tags to paper 1");
 
-    const undo = await undoLastActionFixture(gateway);
+    const undo = await undoFixture(gateway);
 
     assert.equal(undo.status, "undone");
     assert.equal(undo.actionId, journal.actionId);
@@ -46,7 +46,7 @@ describe("auto-tag journals under library_update and remains undoable", function
     assert.equal(journal.toolName, "apply_tags");
     assert.isNotEmpty(gateway.tagsOf(1), "auto-tag wrote tags to paper 1");
 
-    const undo = await undoLastActionFixture(gateway);
+    const undo = await undoFixture(gateway);
 
     assert.equal(undo.status, "undone");
     assert.equal(undo.toolName, "apply_tags");

@@ -21,7 +21,7 @@ const root = process.cwd();
  * Spec literals the source guard must see. A drop means the scan stopped
  * inspecting sites, not that the sites became correct.
  */
-const EXPECTED_SPEC_LITERAL_SITES = 54;
+const EXPECTED_SPEC_LITERAL_SITES = 53;
 
 const ALLOWED_WORK_CATEGORIES: readonly AgentWorkCategory[] = [
   "retrieval",
@@ -69,8 +69,7 @@ const EXPECTED_TOOL_CATEGORIES: Readonly<Record<string, AgentWorkCategory>> = {
   library_settings: "zotero_action",
   library_delete: "zotero_action",
   annotate_pdf: "zotero_action",
-  undo_last_action: "zotero_action",
-  revert_changes: "zotero_action",
+  undo: "zotero_action",
   // The facade's own label; a files-mode call resolves to its delegate's
   // external_system instead.
   library_import: "zotero_action",

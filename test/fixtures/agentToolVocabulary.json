@@ -24,15 +24,14 @@
     "read_attachment",
     "request_user_input",
     "research_update",
-    "revert_changes",
     "run_command",
     "submit_document",
     "task_update",
     "tool_result_read",
-    "undo_last_action",
+    "undo",
     "update_plan",
     "zotero_script"
   ],
   "internal": ["submit_plan_document"],
-  "specBytes": 70893
+  "specBytes": 70706
 }

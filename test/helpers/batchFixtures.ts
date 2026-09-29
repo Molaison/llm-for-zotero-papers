@@ -8,7 +8,6 @@ import {
 } from "../../src/agent/store/changeJournal";
 import { createBuiltInToolRegistry } from "../../src/agent/tools";
 import type { AgentToolRegistry } from "../../src/agent/tools/registry";
-import { createUndoLastActionTool } from "../../src/agent/tools/write/undoLastAction";
 import type { AgentToolContext } from "../../src/agent/types";
 import { ChangeJournalTestDb } from "./changeJournalTestDb";
 
@@ -411,19 +410,36 @@ export async function runAutoTagFixture(options: {
   return { journal, gateway };
 }
 
-/** Undoes the newest reversible action in the fixture's conversation. */
-export async function undoLastActionFixture(
-  gateway: BatchLibrary,
-): Promise<Record<string, unknown>> {
-  const tool = createUndoLastActionTool(gateway.zoteroGateway as never);
-  const input = tool.validate({});
-  if (!input.ok) throw new Error(input.error);
+/** The production registry's `undo` tool and a context for this library. */
+export function builtInUndoTool(gateway: BatchLibrary) {
+  const registry = createBuiltInToolRegistry({
+    zoteroGateway: gateway.zoteroGateway as never,
+    pdfService: {} as never,
+    pdfPageService: {} as never,
+    retrievalService: {} as never,
+  });
+  const tool = registry.getTool("undo");
+  if (!tool) throw new Error("No registered tool named undo");
   const context = {
     request: { conversationKey: gateway.conversationKey, libraryID: 1 },
     item: null,
     currentAnswerText: "",
     modelName: "test-model",
   } as AgentToolContext;
+  return { registry, tool, context };
+}
+
+/**
+ * Runs `undo` in the fixture's conversation. With no arguments it undoes the
+ * newest reversible action.
+ */
+export async function undoFixture(
+  gateway: BatchLibrary,
+  args: Record<string, unknown> = {},
+): Promise<Record<string, unknown>> {
+  const { tool, context } = builtInUndoTool(gateway);
+  const input = tool.validate(args);
+  if (!input.ok) throw new Error(input.error);
   const result = await tool.execute(input.value, context);
   return result.content as Record<string, unknown>;
 }

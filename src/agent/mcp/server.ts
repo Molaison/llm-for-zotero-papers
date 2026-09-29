@@ -112,8 +112,7 @@ export const ZOTERO_MCP_WRITE_TOOL_NAMES = [
   "library_import",
   "library_delete",
   "zotero_script",
-  "undo_last_action",
-  "revert_changes",
+  "undo",
   "annotate_pdf",
   "file_io",
   "run_command",
@@ -1552,7 +1551,7 @@ function decorateMcpToolDescription(
     description,
     scopeGuidance,
     writeGuidance,
-    toolName === "undo_last_action" || toolName === "revert_changes"
+    toolName === "undo"
       ? "Standalone clients must supply explicit actionId/actionIds from write receipts; there is no shared external conversation history for relative undo."
       : "",
   ]

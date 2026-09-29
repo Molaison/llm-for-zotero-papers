@@ -1493,9 +1493,9 @@ export class ActionContractService {
     }
     if (proposal.operation === "undo" || proposal.operation === "revert") {
       const result = innermostToolResult(params.content);
-      // The actions this call actually tried to put back. `revert_changes`
-      // also discloses newer irreversible actions it never attempted, and
-      // those must not count against it either way.
+      // The actions this call actually tried to put back. The multi-revert
+      // form of `undo` also discloses newer irreversible actions it never
+      // attempted, and those must not count against it either way.
       const attempted = Array.isArray(result.actionIds)
         ? result.actionIds.length
         : 0;

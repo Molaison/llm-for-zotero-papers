@@ -42,6 +42,8 @@ const RETIRED_TOOL_NAMES = [
   "write_notes_batch",
   "manage_collections",
   "manage_attachments",
+  "undo_last_action",
+  "revert_changes",
   ...IDENTIFIER_NAMES,
 ];
 // Repo-relative, forward-slash prefixes matched with startsWith.

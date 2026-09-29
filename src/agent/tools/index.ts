@@ -57,7 +57,6 @@ import { createLibrarySettingsTool } from "./write/librarySettings";
 import { createMergeItemsTool } from "./write/mergeItems";
 import { createMoveToCollectionTool } from "./write/moveToCollection";
 import { createRestoreFromTrashTool } from "./write/restoreFromTrash";
-import { createRevertChangesTool } from "./write/revertChanges";
 import { createRunCommandTool } from "./write/runCommand";
 import { createSavedSearchTool } from "./write/savedSearches";
 import {
@@ -65,7 +64,7 @@ import {
   createUpdateLibraryTagTool,
 } from "./write/tagObjects";
 import { createTrashItemsTool } from "./write/trashItems";
-import { createUndoLastActionTool } from "./write/undoLastAction";
+import { createUndoTool } from "./write/undo";
 import { createUpdateMetadataTool } from "./write/updateMetadata";
 import { createNoteWriteTool } from "./write/noteWrite";
 import { createNoteWriteBatchTool } from "./write/noteWriteBatch";
@@ -644,7 +643,6 @@ export function createBuiltInToolRegistry(
   const importLocalFiles = createImportLocalFilesTool(deps.zoteroGateway);
   const fileIO = createFileIOTool();
   const zoteroScript = createZoteroScriptTool();
-  const undoLastAction = createUndoLastActionTool(deps.zoteroGateway);
 
   registry.register(createLibrarySearchTool(deps.zoteroGateway));
   registry.register(createWebSearchTool());
@@ -691,8 +689,7 @@ export function createBuiltInToolRegistry(
   registry.register(
     createLibraryDeleteTool({ trashItems, mergeItems, restoreFromTrash }),
   );
-  registry.register(undoLastAction);
-  registry.register(createRevertChangesTool(deps.zoteroGateway));
+  registry.register(createUndoTool(deps.zoteroGateway));
   registry.register(createAnnotatePdfTool(deps.zoteroGateway));
   registry.register(markToolTier(fileIO, "advanced"));
   registry.register(markToolTier(runCommand, "advanced"));

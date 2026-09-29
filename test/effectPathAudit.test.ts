@@ -72,7 +72,8 @@ import { actionContractFixture } from "./helpers/semanticIntent";
  * evidenced by its own per-tool test, which mints receipts from real tool
  * results: `test/runCommandTool.test.ts`, `test/fileIOTool.test.ts`,
  * `test/undoLastAction.test.ts` (a real journal, a real inverse replay and its
- * per-step native re-read), `test/revertChanges.test.ts` and
+ * per-step native re-read), `test/revertChanges.test.ts` (undo's multi-revert
+ * form) and
  * `test/zoteroScriptConfirmation.test.ts`, the whole-receipt characterizations
  * in `test/agentActionContract.test.ts`, and — for the effects a connected
  * client runs in its own runtime — `test/externalRuntimeEffectReceipts.test.ts`.
@@ -118,6 +119,12 @@ type AuditRow = {
     proposes: AgentActionOperation[];
   };
 };
+
+/**
+ * The multi-revert form of `undo`. The table holds one mutating fixture per
+ * tool, so this second mutating input is audited by its own test.
+ */
+const UNDO_MULTI_REVERT_FIXTURE = { count: 1 };
 
 /** One reversible pending action the undo and revert fixtures target. */
 const SEEDED_JOURNAL_ACTION = "audit-journal-action";
@@ -186,24 +193,21 @@ const AUDIT: Readonly<Record<string, AuditRow>> = {
     fixture: { mode: "trash", itemIds: [1] },
     impact: "state_change",
   },
-  undo_last_action: {
-    operations: ["undo"],
+  undo: {
+    operations: ["undo", "revert"],
     verification: "verified",
     verificationNote:
-      "Every replayed step re-reads its own target; the receipt is verified only when all of them read back as restored (test/undoLastAction.test.ts).",
+      "Every replayed step re-reads its own target; the receipt is verified only when all of them read back as restored (test/undoLastAction.test.ts), and for the multi-revert form only when nothing was skipped or left partial (test/revertChanges.test.ts).",
     fixture: { actionId: SEEDED_JOURNAL_ACTION },
     // With an empty journal there is nothing to undo: the plan is read_only
-    // and the execution is a no-op.
+    // and the execution is a no-op. The multi-revert form's mutating input is
+    // pinned in UNDO_MULTI_REVERT_FIXTURE below.
     impact: "state_change",
-  },
-  revert_changes: {
-    operations: ["revert"],
-    verification: "verified",
-    verificationNote:
-      "Same per-step native re-read as undo_last_action, plus nothing skipped or left partial (test/revertChanges.test.ts).",
-    fixture: { count: 1 },
-    // A dry run, or an empty journal, plans read_only and applies no inverse.
-    impact: "state_change",
+    readMode: {
+      fixture: { dryRun: true, count: 1 },
+      reason: "A dry run reads journal state without applying inverses.",
+      proposes: [],
+    },
   },
   annotate_pdf: {
     operations: ["annotation_write"],
@@ -553,7 +557,7 @@ describe("effect path audit", function () {
   const registry = auditRegistry();
 
   before(async function () {
-    // undo_last_action and revert_changes plan from the durable journal, so
+    // Both forms of undo plan from the durable journal, so
     // the audit seeds one reversible action: without it they correctly report
     // a read-only no-op and the mutating path would never be exercised.
     globalThis.Zotero = {
@@ -774,6 +778,7 @@ describe("effect path audit", function () {
     assert.deepEqual(covered.sort(), [
       "file_io",
       "run_command",
+      "undo",
       "zotero_script",
     ]);
   });
@@ -869,6 +874,24 @@ describe("effect path audit", function () {
         );
       }
     }
+  });
+
+  it("never plans undo's multi-revert form as a trusted read", async function () {
+    const undo = registry.getTool("undo")!;
+    const validated = undo.validate(UNDO_MULTI_REVERT_FIXTURE);
+    if (!validated.ok) throw new Error(validated.error);
+    const plan = await undo.planInvocation!(
+      validated.value as never,
+      auditContext(),
+    );
+    assert.equal(plan.impact, "state_change");
+    const described =
+      (await undo.describeAction!(validated.value as never, auditContext())) ||
+      [];
+    assert.deepEqual(
+      described.map((proposal) => proposal.operation),
+      ["revert"],
+    );
   });
 
   /**

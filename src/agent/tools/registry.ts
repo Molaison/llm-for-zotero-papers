@@ -142,9 +142,7 @@ const MODEL_TOOL_DESCRIPTIONS: Readonly<Record<string, string>> = {
     "Add Zotero items from identifiers, local files, or explicit manual metadata.",
   library_delete:
     "Trash or restore Zotero objects, or merge duplicates into a named master.",
-  undo_last_action: "Undo the latest reversible journaled action in this chat.",
-  revert_changes:
-    "Inspect or revert durable actions; use dryRun for conflicts.",
+  undo: "Undo the latest reversible journaled action in this chat; count or actionIds revert several, dryRun lists them with conflicts.",
   annotate_pdf:
     "Add a PDF highlight and optional comment using PDF-space rectangles.",
   file_io: "Read or write local files, including partial text and images.",

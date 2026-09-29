@@ -1197,7 +1197,7 @@ semantic tool or the library facade cannot perform the requested operation:
 5. Do NOT use \`eraseTx()\` — use Zotero trash instead (item.deleted = true; await item.saveTx())
 6. Do NOT create or edit Zotero notes here. Use note_write for all Zotero note creation, edits, and appends so note validation still runs.
 7. \`Zotero.DB\` is withheld from every arbitrary script facade: raw SQL emits no change notifications and cannot be confined or journalled safely, so use the item and collection APIs.
-8. Write straightforward code — no dry-run branching needed. The script runs directly, and undo_last_action uses durable snapshots and declarative inverses to revert covered effects.
+8. Write straightforward code — no dry-run branching needed. The script runs directly, and undo uses durable snapshots and declarative inverses to revert covered effects.
 9. In any loop over more than a few dozen items, check \`env.shouldStop()\` and return early when it is true. The timeout cannot interrupt a running script — it only stops *waiting* for it — so a script that ignores this keeps mutating the library after the tool has already reported failure, and those later changes cannot be undone. Return partial results; a partial answer you can undo beats a complete one you cannot.
    \`\`\`
    const done = [];

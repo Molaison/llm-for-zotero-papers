@@ -79,4 +79,6 @@ export const RETIRED_TOOL_HINTS: Readonly<Record<string, string>> = {
   search_literature_online: "literature_search",
   edit_current_note: "note_write",
   write_notes_batch: "note_write_batch",
+  undo_last_action: "undo",
+  revert_changes: "undo count:N or actionIds:[...]",
 };

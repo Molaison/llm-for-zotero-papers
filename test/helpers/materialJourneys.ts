@@ -5,7 +5,7 @@ import { createRenamedTool } from "../../src/agent/tools/facade";
 import { createSubmitDocumentTool } from "../../src/agent/tools/plan/submitPlanDocument";
 import { createNoteWriteTool } from "../../src/agent/tools/write/noteWrite";
 import { createNoteWriteBatchTool } from "../../src/agent/tools/write/noteWriteBatch";
-import { createUndoLastActionTool } from "../../src/agent/tools/write/undoLastAction";
+import { createUndoTool } from "../../src/agent/tools/write/undo";
 import { initPlanDocumentStore } from "../../src/agent/documents/store";
 import { clearAgentTranscriptStore } from "../../src/agent/store/transcriptStore";
 import { initAgentChangeJournal } from "../../src/agent/store/changeJournal";
@@ -609,7 +609,7 @@ function createBatchJourneyRegistry(
         "Write a note onto each of many items in one checkpointed batch operation.",
     }),
   );
-  registry.register(createUndoLastActionTool(gateway));
+  registry.register(createUndoTool(gateway));
   return registry;
 }
 
@@ -681,7 +681,7 @@ export function beginBatchMaterialJourney(
     },
     async undoThem() {
       return runTurn("Undo that", [
-        toolCallStep("undo-1", "undo_last_action", {}),
+        toolCallStep("undo-1", "undo", {}),
         finalStep("I removed all three notes."),
       ]);
     },

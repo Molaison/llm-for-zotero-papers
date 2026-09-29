@@ -282,10 +282,9 @@ describe("semantic tool surface", function () {
       "paper_read",
       "read_attachment",
       "request_user_input",
-      "revert_changes",
       "run_command",
       "submit_document",
-      "undo_last_action",
+      "undo",
       "workflow_script",
       "zotero_script",
     ]);
@@ -304,7 +303,7 @@ describe("semantic tool surface", function () {
     // Retired into the facades: no longer registered at all. The write
     // delegates live on only inside library_update, library_import, and
     // library_delete; collection, attachment, and saved-search updates are
-    // library_update kinds.
+    // library_update kinds; the single and multi-revert undos are one `undo`.
     for (const retiredName of [
       "read_paper",
       "search_paper",
@@ -332,6 +331,8 @@ describe("semantic tool surface", function () {
       "collection_update",
       "attachment_update",
       "saved_search_update",
+      "undo_last_action",
+      "revert_changes",
     ]) {
       assert.notInclude(names, retiredName);
       assert.notExists(registry.getTool(retiredName), `${retiredName} retired`);

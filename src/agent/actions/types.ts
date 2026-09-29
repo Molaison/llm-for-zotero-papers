@@ -90,7 +90,7 @@ export type ActionExecutionContext = {
    * `buildToolContext` used to hard-code `0` here, so every tool an action
    * invoked wrote its undo entry and its journal row under conversation 0 —
    * a key nothing ever queries. A batch job's changes were therefore
-   * unrecoverable by both `undo_last_action` and `revert_changes`, while the
+   * unrecoverable by `undo` (single or multi-revert), while the
    * confirmation card promised the run "can be reverted".
    */
   conversationKey?: number;
