@@ -2515,9 +2515,16 @@ export function computeUserTextSignals(
   userText: string,
 ): NonNullable<AgentRuntimeRequest["userTextSignals"]> {
   return {
-    mentionsDuplicates: /duplicat|merge|重复|合并/i.test(userText),
-    mentionsTrash: /trash|restore|回收站|恢复/i.test(userText),
-    mentionsAttachment: /attachment|rename|relink|附件/i.test(userText),
-    mentionsImport: /import|导入|add .* to (my )?library/i.test(userText),
+    mentionsDuplicates: /\bduplicat|\bmerg(e|ed|es|ing)\b|重复|合并/i.test(
+      userText,
+    ),
+    mentionsTrash: /\btrash\b|\brestor(e|ed|ing)\b|回收站|恢复/i.test(userText),
+    mentionsAttachment:
+      /\battachments?\b|\brenam(e|ed|ing)\b|\brelink(ed|ing)?\b|附件/i.test(
+        userText,
+      ),
+    mentionsImport: /\bimport(s|ed|ing)?\b|导入|add .* to (my )?library/i.test(
+      userText,
+    ),
   };
 }

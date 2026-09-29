@@ -13,6 +13,15 @@ import { DEFAULT_SYSTEM_PROMPT } from "../src/utils/llmDefaults";
 
 const root = process.cwd();
 
+function stubRegistry() {
+  return createBuiltInToolRegistry({
+    zoteroGateway: {} as never,
+    pdfService: {} as never,
+    pdfPageService: {} as never,
+    retrievalService: {} as never,
+  });
+}
+
 function collectFiles(
   dir: string,
   predicate: (path: string) => boolean,
@@ -56,12 +65,7 @@ function readSourceFiles(): Array<{ path: string; content: string }> {
 
 describe("tool guidance contracts", function () {
   it("resolves collection identities without treating search results as authority", function () {
-    const registry = createBuiltInToolRegistry({
-      zoteroGateway: {} as never,
-      pdfService: {} as never,
-      pdfPageService: {} as never,
-      retrievalService: {} as never,
-    });
+    const registry = stubRegistry();
     const guidance = registry
       .listToolDefinitions()
       .find((tool) => tool.spec.name === "library_search")!.guidance!
@@ -300,12 +304,7 @@ describe("tool guidance contracts", function () {
   });
 
   it("does not expose hidden legacy call targets in model-visible guidance", function () {
-    const registry = createBuiltInToolRegistry({
-      zoteroGateway: {} as never,
-      pdfService: {} as never,
-      pdfPageService: {} as never,
-      retrievalService: {} as never,
-    });
+    const registry = stubRegistry();
     const hiddenCallTarget =
       /\b(edit_current_note|search_literature_online|manage_attachments|import_local_files|update_metadata)\b/;
     const failures = registry
@@ -321,12 +320,7 @@ describe("tool guidance contracts", function () {
   });
 
   it("injects note-write tool guidance only for note intent or the matched note skill", function () {
-    const registry = createBuiltInToolRegistry({
-      zoteroGateway: {} as never,
-      pdfService: {} as never,
-      pdfPageService: {} as never,
-      retrievalService: {} as never,
-    });
+    const registry = stubRegistry();
     const noteWrite = registry
       .listToolDefinitions()
       .find((tool) => tool.spec.name === "note_write");
@@ -353,12 +347,7 @@ describe("tool guidance contracts", function () {
   });
 
   it("library_search guidance is delivered when the turn has a library or collection scope", function () {
-    const registry = createBuiltInToolRegistry({
-      zoteroGateway: {} as never,
-      pdfService: {} as never,
-      pdfPageService: {} as never,
-      retrievalService: {} as never,
-    });
+    const registry = stubRegistry();
     const tool = registry.getTool("library_search")!;
     const scope = (overrides: Record<string, unknown>) =>
       ({
@@ -397,12 +386,7 @@ describe("tool guidance contracts", function () {
   });
 
   it("delivers library write guidance in chat from user-text signals", function () {
-    const registry = createBuiltInToolRegistry({
-      zoteroGateway: {} as never,
-      pdfService: {} as never,
-      pdfPageService: {} as never,
-      retrievalService: {} as never,
-    });
+    const registry = stubRegistry();
     const guidanceFor = (name: string) => registry.getTool(name)!.guidance!;
     const noSignals = {
       mentionsDuplicates: false,
@@ -473,21 +457,40 @@ describe("tool guidance contracts", function () {
     assert.isTrue(
       computeUserTextSignals("add this paper to my library").mentionsImport,
     );
-    assert.deepEqual(computeUserTextSignals("Explain the main result."), {
+    assert.isTrue(
+      computeUserTextSignals("merge these duplicates").mentionsDuplicates,
+    );
+    assert.isTrue(
+      computeUserTextSignals("restore it from the trash").mentionsTrash,
+    );
+    assert.isTrue(computeUserTextSignals("import ref 5").mentionsImport);
+    assert.isTrue(
+      computeUserTextSignals("rename the attachment").mentionsAttachment,
+    );
+    const none = {
       mentionsDuplicates: false,
       mentionsTrash: false,
       mentionsAttachment: false,
       mentionsImport: false,
+    };
+    for (const prose of [
+      "Explain the main result.",
+      "What is the importance of this finding?",
+      "This is an important paper",
+      "Emergent properties of the network",
+    ]) {
+      assert.deepEqual(computeUserTextSignals(prose), none, prose);
+    }
+    // 恢复 is kept as a zh-CN restore term, so recovery prose still sets
+    // mentionsTrash; every other signal stays off.
+    assert.deepEqual(computeUserTextSignals("恢复正常后的神经元活动"), {
+      ...none,
+      mentionsTrash: true,
     });
   });
 
   it("keeps plan-intent matching for library write guidance", function () {
-    const registry = createBuiltInToolRegistry({
-      zoteroGateway: {} as never,
-      pdfService: {} as never,
-      pdfPageService: {} as never,
-      retrievalService: {} as never,
-    });
+    const registry = stubRegistry();
     const guidanceFor = (name: string) => registry.getTool(name)!.guidance!;
     const planned = (operation: string) =>
       ({
