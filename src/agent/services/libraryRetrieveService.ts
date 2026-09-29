@@ -77,6 +77,10 @@ import {
   INDEX_COVERAGE_SKIP_PROBES_RATIO,
   MAX_UNINDEXED_FALLBACK_PAPERS,
 } from "../../services/libraryTextIndex/constants";
+import {
+  callEmbeddings,
+  resolveSemanticSearchState,
+} from "../../utils/llmClient";
 
 export type LibraryRetrieveDepth = "pool" | "metadata" | "evidence" | "verify";
 export type LibraryRetrieveIntent = "enumerate" | "verify" | "summarize";
@@ -435,6 +439,60 @@ type IndexedTextScanResult = {
 };
 
 type CandidateBuilder = typeof buildPaperRetrievalCandidates;
+
+/** Embeds retrieval queries; injectable so tests need no provider. */
+export type LibraryQueryEmbedder = {
+  /** Whether semantic search is on (an explicit user "off" always wins). */
+  isEnabled: () => boolean;
+  embed: (text: string, signal?: AbortSignal) => Promise<number[] | undefined>;
+};
+
+const defaultQueryEmbedder: LibraryQueryEmbedder = {
+  isEnabled: () => resolveSemanticSearchState().enabled,
+  embed: async (text, signal) => (await callEmbeddings([text], { signal }))[0],
+};
+
+/** Embeds a query text at most once per retrieve. */
+type QueryEmbeddingMemo = (text: string) => Promise<number[]>;
+
+const QUICKSEARCH_CONCURRENCY = 4;
+
+/**
+ * Runs `fn` over `items` with at most `limit` calls in flight. After the first
+ * failure no new item starts; `failedAt` is the lowest failed index (-1 when
+ * all succeeded) so callers can keep exactly the results a sequential loop
+ * would have kept.
+ */
+async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<{
+  results: Array<R | undefined>;
+  failedAt: number;
+  error: unknown;
+}> {
+  const results = new Array<R | undefined>(items.length);
+  let next = 0;
+  let failedAt = -1;
+  let error: unknown;
+  const worker = async () => {
+    while (failedAt < 0 && next < items.length) {
+      const index = next++;
+      try {
+        results[index] = await fn(items[index]);
+      } catch (caught) {
+        if (failedAt < 0 || index < failedAt) {
+          failedAt = index;
+          error = caught;
+        }
+      }
+    }
+  };
+  const workers = Math.max(0, Math.min(limit, items.length));
+  await Promise.all(Array.from({ length: workers }, worker));
+  return { results, failedAt, error };
+}
 
 const DEFAULT_METHODS: LibraryRetrieveMethod[] = [
   "metadata",
@@ -1415,7 +1473,42 @@ export class LibraryRetrieveService {
     private readonly probeReformulator: typeof generateRetrievalProbeReformulation = generateRetrievalProbeReformulation,
     private readonly triage: typeof triageCandidatesWithModel = triageCandidatesWithModel,
     private readonly textIndex: LibraryTextIndexFacade = libraryTextIndex,
+    private readonly queryEmbedder: LibraryQueryEmbedder = defaultQueryEmbedder,
   ) {}
+
+  /**
+   * One query embedding per distinct semantic query text for the whole
+   * retrieve, instead of one per paper inside the candidate builder. Returns
+   * undefined when semantic retrieval is off, so no embedding is ever spent.
+   * A failed or empty embedding resolves to `[]`, which the builder reads as
+   * "rank without embeddings" — the same outcome as its own per-paper failure,
+   * without retrying the provider for every paper.
+   */
+  private createQueryEmbeddingMemo(
+    input: NormalizedLibraryRetrieveInput,
+    signal?: AbortSignal,
+  ): QueryEmbeddingMemo | undefined {
+    if (!input.methods.includes("semantic")) return undefined;
+    let enabled = false;
+    try {
+      enabled = this.queryEmbedder.isEnabled();
+    } catch {
+      enabled = false;
+    }
+    if (!enabled) return undefined;
+    const memo = new Map<string, Promise<number[]>>();
+    return (text) => {
+      let pending = memo.get(text);
+      if (!pending) {
+        pending = this.queryEmbedder
+          .embed(text, signal)
+          .then((vector) => (Array.isArray(vector) ? vector : []))
+          .catch(() => []);
+        memo.set(text, pending);
+      }
+      return pending;
+    };
+  }
 
   async retrieve(
     params: LibraryRetrieveParams,
@@ -1493,6 +1586,9 @@ export class LibraryRetrieveService {
       explicitPaperScope: Boolean(scope.explicitItemIds.length),
     });
     input = applyReadStrategyBudgets(input, readStrategyBase, scope);
+    // Later input rebuilds (probe rounds) keep `methods`, so one memo serves
+    // every paper; it is keyed by the exact text the builder would embed.
+    const embedQuery = this.createQueryEmbeddingMemo(input, params.signal);
     warnings.push(...scope.warnings);
     const metadataComplete = scope.totalItems <= scope.items.length;
     if (scope.totalItems > scope.items.length) {
@@ -1989,6 +2085,7 @@ export class LibraryRetrieveService {
                   triagePerPaperQueries?.[String(record.target.itemId)],
                 apiBase: params.apiBase,
                 apiKey: params.apiKey,
+                embedQuery,
                 methodsUsed,
                 warnings,
               }),
@@ -2626,19 +2723,13 @@ export class LibraryRetrieveService {
         ? records.length
         : input.maxCandidatePapers;
     try {
-      const runQuicksearch = async (
-        query: string,
-        allowedItemIds?: number[],
-      ): Promise<void> => {
-        const result = await this.zoteroGateway.searchAllLibraryItems({
+      const runQuicksearch = (query: string, allowedItemIds?: number[]) =>
+        this.zoteroGateway.searchAllLibraryItems({
           libraryID: scope.libraryID,
           query,
           allowedItemIds,
           limit: scanLimit,
         });
-        if (result.totalCount > result.items.length) scan.truncated = true;
-        result.items.forEach((target) => mark(target.itemId, query));
-      };
 
       const scoped = Boolean(
         scope.collectionIds.length ||
@@ -2646,9 +2737,21 @@ export class LibraryRetrieveService {
         scope.explicitItemIds.length,
       );
       const allowedItemIds = scoped ? Array.from(byItemId.keys()) : undefined;
-      for (const query of probes) {
-        await runQuicksearch(query, allowedItemIds);
+      // Probes run in parallel but merge in probe order, so matched-variant
+      // order and the kept results equal the sequential loop's.
+      const run = await mapWithConcurrency(
+        probes,
+        QUICKSEARCH_CONCURRENCY,
+        (query) => runQuicksearch(query, allowedItemIds),
+      );
+      const kept = run.failedAt < 0 ? probes.length : run.failedAt;
+      for (let index = 0; index < kept; index += 1) {
+        const result = run.results[index];
+        if (!result) continue;
+        if (result.totalCount > result.items.length) scan.truncated = true;
+        result.items.forEach((target) => mark(target.itemId, probes[index]));
       }
+      if (run.failedAt >= 0) throw run.error;
       scan.matched = matchedIds.size;
       return scan;
     } catch (error) {
@@ -2673,6 +2776,8 @@ export class LibraryRetrieveService {
     queryOverride?: string;
     apiBase?: string;
     apiKey?: string;
+    /** Shared query embedding for this retrieve; absent when semantic is off. */
+    embedQuery?: QueryEmbeddingMemo;
     methodsUsed: Set<LibraryRetrieveMethod>;
     warnings: string[];
   }): Promise<LibraryRetrieveSnippet[]> {
@@ -2727,6 +2832,15 @@ export class LibraryRetrieveService {
             readIntent: params.input.queryPlan.readIntent,
           })
         : params.input.queryPlan;
+      // The builder embeds `semanticQuery || question`; embed that same text.
+      const semanticText = paperQueryPlan.semanticQuery || retrievalQuestion;
+      const precomputedQueryEmbedding =
+        params.embedQuery && semanticText.trim()
+          ? await params.embedQuery(semanticText)
+          : undefined;
+      const sharedEmbedding = precomputedQueryEmbedding
+        ? { precomputedQueryEmbedding }
+        : {};
       const candidates = await this.candidateBuilder(
         paperContext,
         pdfContext,
@@ -2736,12 +2850,14 @@ export class LibraryRetrieveService {
           apiKey: params.apiKey,
           disableEmbeddings: !params.input.methods.includes("semantic"),
           queryPlan: paperQueryPlan,
+          ...sharedEmbedding,
         },
         {
           topK: candidateTopK,
           mode: "evidence",
           disableEmbeddings: !params.input.methods.includes("semantic"),
           queryPlan: paperQueryPlan,
+          ...sharedEmbedding,
         },
       ).then((rows) =>
         params.preferBodyEvidence

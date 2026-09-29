@@ -16,6 +16,7 @@ import {
 import {
   CHUNK_OVERLAP,
   EMBEDDING_BATCH_SIZE,
+  EMBEDDING_BATCH_TIMEOUT_MS,
   CHUNK_TARGET_LENGTH,
   RETRIEVAL_TOP_K_PER_PAPER,
   RRF_K,
@@ -1834,11 +1835,21 @@ function cosineSimilarity(a: number[], b: number[]): number {
   return dot / (Math.sqrt(normA) * Math.sqrt(normB));
 }
 
-async function embedTexts(texts: string[]): Promise<number[][]> {
+/**
+ * Embeds a paper's chunks in batches. Each batch gets the longer batch timeout,
+ * not the query default: a slow local provider may need well over 30 s for
+ * 16 chunks. `embed` is injectable for tests.
+ */
+export async function embedTexts(
+  texts: string[],
+  embed: typeof callEmbeddings = callEmbeddings,
+): Promise<number[][]> {
   const all: number[][] = [];
   for (let i = 0; i < texts.length; i += EMBEDDING_BATCH_SIZE) {
     const batch = texts.slice(i, i + EMBEDDING_BATCH_SIZE);
-    const batchEmbeddings = await callEmbeddings(batch);
+    const batchEmbeddings = await embed(batch, {
+      timeoutMs: EMBEDDING_BATCH_TIMEOUT_MS,
+    });
     all.push(...batchEmbeddings);
   }
   return all;

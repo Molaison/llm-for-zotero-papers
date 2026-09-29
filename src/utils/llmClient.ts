@@ -6,7 +6,10 @@
 
 import { appLogger } from "../core/logging";
 import { config } from "../../package.json";
-import { DEFAULT_SYSTEM_PROMPT } from "./llmDefaults";
+import {
+  DEFAULT_SYSTEM_PROMPT,
+  EMBEDDING_REQUEST_TIMEOUT_MS,
+} from "./llmDefaults";
 import {
   getAnthropicReasoningProfileForModel,
   getDeepseekReasoningProfileForModel,
@@ -4700,7 +4703,13 @@ export class EmbeddingUnsupportedError extends Error {
   }
 }
 
-export async function callEmbeddings(input: string[]): Promise<number[][]> {
+export async function callEmbeddings(
+  input: string[],
+  options: { timeoutMs?: number; signal?: AbortSignal } = {},
+): Promise<number[][]> {
+  const timeoutMs = Number.isFinite(options.timeoutMs)
+    ? Math.max(1, Math.floor(options.timeoutMs as number))
+    : EMBEDDING_REQUEST_TIMEOUT_MS;
   const resolvedEmbedding = getResolvedEmbeddingConfig();
 
   const apiBase = resolvedEmbedding.apiBase;
@@ -4724,18 +4733,56 @@ export async function callEmbeddings(input: string[]): Promise<number[][]> {
   };
 
   const url = resolveEndpoint(apiBase, EMBEDDINGS_ENDPOINT);
-  const res = await getFetch()(url, {
-    method: "POST",
-    headers: buildAuthHeaders(apiKey),
-    body: JSON.stringify(payload),
+  // The race below enforces the deadline; the controller only releases the
+  // socket where the runtime has one (Gecko chrome may lack AbortController).
+  const controller =
+    typeof AbortController === "function" ? new AbortController() : null;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onCallerAbort: (() => void) | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      controller?.abort();
+      reject(new Error(`Embedding request timed out after ${timeoutMs} ms`));
+    }, timeoutMs);
+    if (options.signal) {
+      onCallerAbort = () => {
+        controller?.abort();
+        reject(new Error("Embedding request aborted"));
+      };
+      if (options.signal.aborted) onCallerAbort();
+      else options.signal.addEventListener("abort", onCallerAbort);
+    }
   });
+  try {
+    const res = await Promise.race([
+      getFetch()(url, {
+        method: "POST",
+        headers: buildAuthHeaders(apiKey),
+        body: JSON.stringify(payload),
+        ...(controller ? { signal: controller.signal } : {}),
+      }),
+      deadline,
+    ]);
 
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`${res.status} ${res.statusText} - ${text}`);
+    if (!res.ok) {
+      const text = await Promise.race([res.text(), deadline]);
+      throw new Error(`${res.status} ${res.statusText} - ${text}`);
+    }
+
+    const data = (await Promise.race([
+      res.json(),
+      deadline,
+    ])) as EmbeddingResponse;
+    return orderEmbeddingResponse(data);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    if (onCallerAbort) {
+      options.signal?.removeEventListener("abort", onCallerAbort);
+    }
   }
+}
 
-  const data = (await res.json()) as EmbeddingResponse;
+function orderEmbeddingResponse(data: EmbeddingResponse): number[][] {
   const embeddings = data?.data || [];
   // Only sort by index when all items carry valid indices; otherwise
   // preserve the original order to avoid misaligning embeddings with inputs.

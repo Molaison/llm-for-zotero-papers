@@ -357,6 +357,18 @@ type ProbeReformulator = NonNullable<
 type Triage = NonNullable<
   ConstructorParameters<typeof ResolvedLibraryRetrieveService>[4]
 >;
+type QueryEmbedder = NonNullable<
+  ConstructorParameters<typeof ResolvedLibraryRetrieveService>[6]
+>;
+type CandidateBuildOptions = NonNullable<Parameters<CandidateBuilder>[4]>;
+type CandidateBuildApiOverrides = NonNullable<Parameters<CandidateBuilder>[3]>;
+
+export type CandidateBuildCall = {
+  itemId: number;
+  question: string;
+  apiOverrides: CandidateBuildApiOverrides;
+  options: CandidateBuildOptions;
+};
 
 export type RetrieveServiceRig = {
   service: RigLibraryRetrieveService;
@@ -366,6 +378,14 @@ export type RetrieveServiceRig = {
   ensurePaperContextCalls: () => number;
   triageCalls: () => number;
   reformulationCalls: () => number;
+  /** Query-embedding requests the fake embedder answered. */
+  embeddingCalls: () => number;
+  /** Every candidate-builder call with both of its option objects. */
+  candidateBuildCalls: () => CandidateBuildCall[];
+  /** Highest number of quicksearch calls in flight at once. */
+  maxConcurrentQuicksearch: () => number;
+  /** Quicksearch queries in the order they were issued. */
+  quicksearchQueries: () => string[];
 };
 
 export type RetrieveServiceRigOptions = {
@@ -386,6 +406,16 @@ export type RetrieveServiceRigOptions = {
   unmatchedMetadata?: boolean;
   /** What the fake triage returns (default null: keep lexical ranking). */
   triageResult?: Awaited<ReturnType<Triage>>;
+  /** Whether the fake embedder reports semantic search on (default false). */
+  semantic?: boolean;
+  /** Vector the fake embedder returns for the query (default [1, 0]). */
+  queryEmbedding?: number[];
+  /** Makes the fake embedder reject, like a provider that times out. */
+  queryEmbeddingFails?: boolean;
+  /** Delay before each fake quicksearch answers, fixed or per query. */
+  quicksearchDelayMs?: number | ((query: string) => number);
+  /** Item ids each fake quicksearch query matches (default none). */
+  quicksearchItemIds?: (query: string | undefined) => number[];
 };
 
 const DISABLED_TEXT_INDEX: LibraryTextIndexFacade = {
@@ -418,10 +448,21 @@ export function createRetrieveServiceRig(
     );
   });
   const candidateBuilderCalls: number[] = [];
+  const candidateBuildCalls: CandidateBuildCall[] = [];
   const candidateBuilder: CandidateBuilder = async (
     paperContext,
+    _pdfContext,
+    question,
+    apiOverrides,
+    buildOptions,
   ): Promise<PaperContextCandidate[]> => {
     candidateBuilderCalls.push(paperContext.itemId);
+    candidateBuildCalls.push({
+      itemId: paperContext.itemId,
+      question,
+      apiOverrides: (apiOverrides || {}) as CandidateBuildApiOverrides,
+      options: (buildOptions || {}) as CandidateBuildOptions,
+    });
     return [0, 1].map((index) => ({
       paperKey: `${paperContext.itemId}:${paperContext.contextItemId}`,
       itemId: paperContext.itemId,
@@ -451,10 +492,45 @@ export function createRetrieveServiceRig(
     triageCount += 1;
     return options.triageResult ?? null;
   };
+  let embeddingCount = 0;
+  const queryEmbedder: QueryEmbedder = {
+    isEnabled: () => options.semantic === true,
+    embed: async () => {
+      embeddingCount += 1;
+      if (options.queryEmbeddingFails) {
+        throw new Error("Embedding request timed out after 30000 ms");
+      }
+      return options.queryEmbedding || [1, 0];
+    },
+  };
+  const gateway = makeGateway(entries, {
+    quicksearchCalls: gatewayQuicksearchCalls as Array<{ query?: string }>,
+    quicksearchItemIds: options.quicksearchItemIds,
+  });
+  let inFlightQuicksearch = 0;
+  let maxInFlightQuicksearch = 0;
+  const searchAllLibraryItems = gateway.searchAllLibraryItems;
+  gateway.searchAllLibraryItems = async (params) => {
+    inFlightQuicksearch += 1;
+    maxInFlightQuicksearch = Math.max(
+      maxInFlightQuicksearch,
+      inFlightQuicksearch,
+    );
+    try {
+      const delay =
+        typeof options.quicksearchDelayMs === "function"
+          ? options.quicksearchDelayMs(params.query || "")
+          : options.quicksearchDelayMs || 0;
+      if (delay > 0) {
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+      return await searchAllLibraryItems(params);
+    } finally {
+      inFlightQuicksearch -= 1;
+    }
+  };
   const service = new RigLibraryRetrieveService(
-    makeGateway(entries, {
-      quicksearchCalls: gatewayQuicksearchCalls as Array<{ query?: string }>,
-    }) as any,
+    gateway as any,
     {
       ensurePaperContext: async () => {
         ensurePaperContextCount += 1;
@@ -468,6 +544,7 @@ export function createRetrieveServiceRig(
     probeReformulator,
     triage,
     options.textIndex || DISABLED_TEXT_INDEX,
+    queryEmbedder,
   );
   const modelConfigured = options.modelConfigured ?? reformulations.length > 0;
   if (modelConfigured) {
@@ -491,5 +568,12 @@ export function createRetrieveServiceRig(
     ensurePaperContextCalls: () => ensurePaperContextCount,
     triageCalls: () => triageCount,
     reformulationCalls: () => reformulationCount,
+    embeddingCalls: () => embeddingCount,
+    candidateBuildCalls: () => candidateBuildCalls,
+    maxConcurrentQuicksearch: () => maxInFlightQuicksearch,
+    quicksearchQueries: () =>
+      (gatewayQuicksearchCalls as Array<{ query?: string }>).map(
+        (call) => call.query || "",
+      ),
   };
 }
