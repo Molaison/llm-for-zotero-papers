@@ -1,25 +1,22 @@
-import type { AgentToolDefinition } from "../../types";
+import type {
+  AgentPendingAction,
+  AgentToolContext,
+  AgentToolExecutionOutput,
+  AgentToolInputValidation,
+} from "../../types";
 import type { PdfPageService } from "../../services/pdfPageService";
 import { parsePageSelectionValue } from "../../services/pdfPageService";
 import type { ZoteroGateway } from "../../services/zoteroGateway";
-import { readOnlyInvocationPlan } from "../../authorization/invocationPlan";
-import {
-  fail,
-  normalizePositiveInt,
-  ok,
-  PAPER_CONTEXT_REF_SCHEMA,
-  validateObject,
-} from "../shared";
+import { fail, normalizePositiveInt, ok, validateObject } from "../shared";
 import {
   normalizeTarget,
   semanticPdfMode,
   setPreparedCache,
   setCapturedCache,
-  buildCaptureFollowupMessage,
 } from "./pdfToolUtils";
 import type { PdfTarget } from "./pdfToolUtils";
 
-type ViewPdfPagesInput = {
+export type PdfPageRenderInput = {
   target?: PdfTarget;
   question?: string;
   pages?: number[];
@@ -33,102 +30,38 @@ function normalizePages(value: unknown): number[] | undefined {
   return parsed?.pageIndexes;
 }
 
-export function createViewPdfPagesTool(
+/**
+ * Page rendering behind paper_read's `visual` and `capture` modes.
+ *
+ * Not a registered tool: paper_read owns the spec, presentation, invocation
+ * plan, and follow-up message, and delegates these four steps here.
+ */
+export type PdfPageRenderer = {
+  validate: (args: unknown) => AgentToolInputValidation<PdfPageRenderInput>;
+  execute: (
+    input: PdfPageRenderInput,
+    context: AgentToolContext,
+  ) => Promise<AgentToolExecutionOutput<unknown>>;
+  createPendingAction: (
+    input: PdfPageRenderInput,
+    context: AgentToolContext,
+  ) => Promise<AgentPendingAction>;
+  applyConfirmation: (
+    input: PdfPageRenderInput,
+    resolutionData: unknown,
+  ) => AgentToolInputValidation<PdfPageRenderInput>;
+};
+
+export function createPdfPageRenderer(
   pdfPageService: PdfPageService,
   zoteroGateway: ZoteroGateway,
-): AgentToolDefinition<ViewPdfPagesInput, unknown> {
+): PdfPageRenderer {
   return {
-    spec: {
-      name: "view_pdf_pages",
-      description:
-        "Find and render PDF pages as images for visual analysis. " +
-        "Provide a question to search for relevant pages, specific page " +
-        "numbers to render, or set capture to true to screenshot the " +
-        "currently visible page in the reader. For ordinary summaries or text Q&A, use paper_read. Use view_pdf_pages only when visual page layout/image inspection is needed.",
-      inputSchema: {
-        type: "object",
-        additionalProperties: false,
-        properties: {
-          target: {
-            type: "object",
-            description: "Target paper.",
-            properties: {
-              contextItemId: {
-                type: "number",
-                description: "Zotero attachment item ID",
-              },
-              itemId: {
-                type: "number",
-                description: "Zotero parent item ID",
-              },
-              paperContext: PAPER_CONTEXT_REF_SCHEMA,
-              attachmentId: {
-                type: "string",
-                description: "Uploaded attachment ID",
-              },
-              name: {
-                type: "string",
-                description: "Uploaded attachment name",
-              },
-            },
-            additionalProperties: false,
-          },
-          question: {
-            type: "string",
-            description: "Search for relevant pages matching this question.",
-          },
-          pages: {
-            anyOf: [
-              { type: "string" },
-              { type: "number" },
-              { type: "array", items: { type: "number" } },
-            ],
-            description: "Specific page numbers to render.",
-          },
-          capture: {
-            type: "boolean",
-            description: "Capture the currently visible page in the reader.",
-          },
-          neighborPages: {
-            type: "number",
-            description: "Include adjacent pages (0 or 1).",
-          },
-          scope: {
-            type: "string",
-            enum: ["whole_document"],
-            description: "Render all pages in the document.",
-          },
-        },
-      },
-      executionClass: "read",
-      workCategory: "retrieval",
-    },
-    presentation: {
-      label: "View PDF Pages",
-      summaries: {
-        onCall: ({ args }) => {
-          const a = args as Record<string, unknown> | null;
-          if (a?.capture) return "Capturing current reader page";
-          if (a?.question) return "Searching for relevant pages";
-          return "Preparing PDF pages";
-        },
-        onDenied: "PDF page viewing cancelled",
-        onSuccess: ({ content }) => {
-          const c = content as Record<string, unknown> | null;
-          if (c?.capturedPageIndex !== undefined)
-            return "Captured the current reader page";
-          const count = typeof c?.pageCount === "number" ? c.pageCount : 0;
-          return count > 0
-            ? `Prepared ${count} PDF page image${count === 1 ? "" : "s"}`
-            : "Prepared PDF pages";
-        },
-      },
-    },
     validate: (args) => {
       if (!validateObject<Record<string, unknown>>(args)) {
         return fail("Expected an object");
       }
-      const input: ViewPdfPagesInput = {
+      const input: PdfPageRenderInput = {
         target: normalizeTarget(args.target),
         question:
           typeof args.question === "string" && args.question.trim()
@@ -178,7 +111,7 @@ export function createViewPdfPagesTool(
             title: artifact.title || preview.target.title,
           }));
         return {
-          toolName: "view_pdf_pages",
+          toolName: "paper_read",
           title: `${preview.target.title} - page ${preview.capturedPage.pageLabel}`,
           description:
             'Review the captured page below. Click "Send to model" to let the model inspect it.',
@@ -238,7 +171,7 @@ export function createViewPdfPagesTool(
 
       if (!previewPages.length) {
         return {
-          toolName: "view_pdf_pages",
+          toolName: "paper_read",
           title: "No pages to render",
           description: "No matching pages found.",
           confirmLabel: "OK",
@@ -258,7 +191,7 @@ export function createViewPdfPagesTool(
         neighborPages: 0,
       });
       return {
-        toolName: "view_pdf_pages",
+        toolName: "paper_read",
         title:
           pages.length === 1
             ? `${preview.target.title} - p${pages[0] + 1}`
@@ -306,13 +239,6 @@ export function createViewPdfPagesTool(
       }
       return ok(input);
     },
-    planInvocation: () =>
-      readOnlyInvocationPlan({
-        domains: ["zotero_library", "filesystem", "network"],
-        effects: ["read", "egress"],
-        reason:
-          "The host renders PDF pages and sends the reviewed images to the model.",
-      }),
     execute: async (input, context) => {
       // Capture active view
       if (input.capture) {
@@ -407,16 +333,6 @@ export function createViewPdfPagesTool(
         },
         artifacts: prepared.artifacts,
       };
-    },
-    buildFollowupMessage: async (result) => {
-      const content =
-        result.content && typeof result.content === "object"
-          ? (result.content as { capturedPageIndex?: unknown })
-          : null;
-      if (content?.capturedPageIndex !== undefined) {
-        return buildCaptureFollowupMessage(result);
-      }
-      return null;
     },
   };
 }

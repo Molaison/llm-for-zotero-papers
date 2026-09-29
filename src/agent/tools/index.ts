@@ -13,17 +13,14 @@ import { clearPdfToolCaches } from "./read/pdfToolUtils";
 import { createQueryLibraryTool } from "./read/queryLibrary";
 import { createReadAttachmentTool } from "./read/readAttachment";
 import { createReadLibraryTool } from "./read/readLibrary";
-import { createReadPaperTool } from "./read/readPaper";
 import { createLiteratureReviewTool } from "./read/reviewLiterature";
 import {
   createSearchLiteratureOnlineTool,
   LITERATURE_WORKFLOW_GUIDANCE,
   matchesLiteratureSearchGuidance,
 } from "./read/searchLiteratureOnline";
-import { createSearchPaperTool } from "./read/searchPaper";
 import { createToolResultReadTool } from "./read/toolResultRead";
 import { createConversationReadTool } from "./read/conversationRead";
-import { createViewPdfPagesTool } from "./read/viewPdfPages";
 import { createWebReadTool } from "./read/webRead";
 import { createWebSearchTool } from "./read/webSearch";
 import { AgentToolRegistry } from "./registry";
@@ -617,16 +614,6 @@ export function createBuiltInToolRegistry(
   const figureExtractionService = new PdfFigureExtractionService(
     deps.pdfPageService,
   );
-  const readPaper = createReadPaperTool(deps.pdfService, deps.zoteroGateway);
-  const searchPaper = createSearchPaperTool(
-    deps.retrievalService,
-    deps.pdfService,
-    deps.zoteroGateway,
-  );
-  const viewPdfPages = createViewPdfPagesTool(
-    deps.pdfPageService,
-    deps.zoteroGateway,
-  );
   const readAttachment = createReadAttachmentTool(
     deps.zoteroGateway,
     deps.pdfPageService,
@@ -780,9 +767,6 @@ export function createBuiltInToolRegistry(
   const legacyTools: AgentToolDefinition<any, any>[] = [
     queryLibrary,
     readLibrary,
-    readPaper,
-    searchPaper,
-    viewPdfPages,
     readAttachment,
     searchLiterature,
     applyTags,

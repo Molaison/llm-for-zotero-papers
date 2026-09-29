@@ -4,7 +4,12 @@
 /* global __dirname -- CommonJS script; eslint config only declares console/process */
 const fs = require("fs");
 const path = require("path");
-const RETIRED_TOOL_NAMES = []; // grown by each retirement task
+const RETIRED_TOOL_NAMES = [
+  // grown by each retirement task
+  "read_paper",
+  "search_paper",
+  "view_pdf_pages",
+];
 // Repo-relative, forward-slash prefixes matched with startsWith.
 const ALLOWLIST = [
   "src/agent/model/actionIntent.ts", // OPERATION_CATALOG keys are operations, not tools
@@ -13,6 +18,8 @@ const ALLOWLIST = [
   "src/agent/contracts/actionScope.ts",
   "src/agent/plans/",
   "src/modules/contextPanel/agentTrace/actionCardModel.ts",
+  "src/agent/context/toolNames.ts", // LEGACY_* name sets, until Task 2.6
+  "src/agent/context/cacheManagement.ts", // retired-name branches, until Task 2.6
 ];
 const REPO_ROOT = path.resolve(__dirname, "..");
 const SRC_ROOT = path.join(REPO_ROOT, "src");

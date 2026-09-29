@@ -53,7 +53,7 @@ import {
   resolveDefaultTargets,
 } from "./pdfToolUtils";
 import type { PdfTarget } from "./pdfToolUtils";
-import { createViewPdfPagesTool } from "./viewPdfPages";
+import { createPdfPageRenderer } from "./pdfPageRenderer";
 import {
   readDocumentsExhaustively,
   type ExhaustiveBatchAnalyzer,
@@ -1090,7 +1090,7 @@ export function createPaperReadTool(
   figureExtractionService?: PaperReadFigureExtractionService,
   fullReadAnalyzer?: ExhaustiveBatchAnalyzer,
 ): AgentToolDefinition<PaperReadInput, unknown> {
-  const visualTool = createViewPdfPagesTool(pdfPageService, zoteroGateway);
+  const pageRenderer = createPdfPageRenderer(pdfPageService, zoteroGateway);
   return {
     spec: {
       name: "paper_read",
@@ -1214,7 +1214,7 @@ export function createPaperReadTool(
         onPending: "Waiting for your approval before sending document content",
         onApproved: "Approval received - sending document content",
         onDenied: "Paper reading cancelled",
-        onSuccess: ({ content }) => {
+        onSuccess: ({ args, content }) => {
           const c = content as Record<string, unknown> | null;
           const mode = typeof c?.mode === "string" ? c.mode : undefined;
           const results = Array.isArray(c?.results) ? c.results : undefined;
@@ -1278,6 +1278,15 @@ export function createPaperReadTool(
           }
           if (mode === "visual" && c?.status === "use_figures_mode") {
             return "Use figure extraction for this figure request";
+          }
+          const argMode = readPaperReadModeFromArgs(args);
+          if (argMode === "capture" || argMode === "visual") {
+            if (c?.capturedPageIndex !== undefined)
+              return "Captured the current reader page";
+            const count = typeof c?.pageCount === "number" ? c.pageCount : 0;
+            return count > 0
+              ? `Prepared ${count} PDF page image${count === 1 ? "" : "s"}`
+              : "Prepared PDF pages";
           }
           if (mode === "figures") {
             const figures = Array.isArray(c?.figures) ? c.figures : [];
@@ -1366,26 +1375,24 @@ export function createPaperReadTool(
         topK: normalizePositiveInt(args.topK),
       };
       if (mode === "visual" || mode === "capture") {
-        const visualValidation = visualTool.validate(targetForPageTool(input));
+        const visualValidation = pageRenderer.validate(
+          targetForPageTool(input),
+        );
         if (!visualValidation.ok) return fail(visualValidation.error);
         input.visualInput = visualValidation.value;
       }
       return ok(input);
     },
-    async shouldRequireConfirmation(input, context) {
-      if (input.mode !== "visual" && input.mode !== "capture") return false;
-      return Boolean(
-        await visualTool.shouldRequireConfirmation?.(
-          input.visualInput as never,
-          context,
-        ),
-      );
+    // No paper_read mode asks for approval up front; the page renderer has no
+    // approval hook of its own.
+    async shouldRequireConfirmation() {
+      return false;
     },
     async createPendingAction(input, context) {
       if (input.mode !== "visual" && input.mode !== "capture") {
         throw new Error("Only visual and capture paper_read modes need review");
       }
-      const action = await visualTool.createPendingAction!(
+      const action = await pageRenderer.createPendingAction(
         input.visualInput as never,
         context,
       );
@@ -1394,14 +1401,12 @@ export function createPaperReadTool(
         toolName: "paper_read",
       };
     },
-    applyConfirmation(input, resolutionData, context) {
+    applyConfirmation(input, resolutionData) {
       if (input.mode !== "visual" && input.mode !== "capture") return ok(input);
-      const resolved = visualTool.applyConfirmation?.(
+      const resolved = pageRenderer.applyConfirmation(
         input.visualInput as never,
         resolutionData,
-        context,
       );
-      if (!resolved) return ok(input);
       if (!resolved.ok) return fail(resolved.error);
       return ok({
         ...input,
@@ -1433,7 +1438,7 @@ export function createPaperReadTool(
           });
           if (mineruRedirect) return mineruRedirect;
         }
-        return visualTool.execute(input.visualInput as never, context);
+        return pageRenderer.execute(input.visualInput as never, context);
       }
       // Inside an approved research plan the host manifest owns reading
       // depth: overview already delivers each paper's host-sized text at the

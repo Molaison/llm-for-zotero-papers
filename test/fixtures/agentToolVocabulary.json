@@ -48,18 +48,15 @@
     "query_library",
     "read_attachment",
     "read_library",
-    "read_paper",
     "relate_items",
     "reparent_items",
     "restore_from_trash",
     "search_literature_online",
-    "search_paper",
     "set_item_tags",
     "submit_plan_document",
     "tag_update",
     "trash_items",
     "update_metadata",
-    "view_pdf_pages",
     "write_notes_batch"
   ],
   "specBytes": 71282

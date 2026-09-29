@@ -303,9 +303,6 @@ describe("semantic tool surface", function () {
     ]);
     for (const legacyName of [
       "query_library",
-      "read_paper",
-      "search_paper",
-      "view_pdf_pages",
       "search_literature_online",
       "edit_current_note",
       "import_identifiers",
@@ -316,6 +313,15 @@ describe("semantic tool surface", function () {
         registry.getTool(legacyName),
         `${legacyName} remains internally callable`,
       );
+    }
+    // Retired into paper_read: no longer registered at all.
+    for (const retiredName of [
+      "read_paper",
+      "search_paper",
+      "view_pdf_pages",
+    ]) {
+      assert.notInclude(names, retiredName);
+      assert.notExists(registry.getTool(retiredName), `${retiredName} retired`);
     }
     assert.exists(registry.getTool("web_search"));
     assert.exists(registry.getTool("web_read"));

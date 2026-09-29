@@ -17,8 +17,7 @@ import { PdfService } from "../src/agent/services/pdfService";
 import { RetrievalService } from "../src/agent/services/retrievalService";
 import { createQueryLibraryTool } from "../src/agent/tools/read/queryLibrary";
 import { createReadLibraryTool } from "../src/agent/tools/read/readLibrary";
-import { createReadPaperTool } from "../src/agent/tools/read/readPaper";
-import { createSearchPaperTool } from "../src/agent/tools/read/searchPaper";
+import { createPaperReadTool } from "../src/agent/tools/read/paperRead";
 import { getPagedOperationId } from "../src/agent/actions/pagedWorkflow";
 import { createFileIOTool } from "../src/agent/tools/write/fileIO";
 import { createBuiltInToolRegistry } from "../src/agent/tools";
@@ -28,7 +27,6 @@ import { createUpdateMetadataTool } from "../src/agent/tools/write/updateMetadat
 import { createRunCommandTool } from "../src/agent/tools/write/runCommand";
 import { createZoteroScriptTool } from "../src/agent/tools/write/zoteroScript";
 import { createReadAttachmentTool } from "../src/agent/tools/read/readAttachment";
-import { createViewPdfPagesTool } from "../src/agent/tools/read/viewPdfPages";
 import { getNotesDirectoryConfig } from "../src/utils/notesDirectoryConfig";
 import type {
   AgentModelMessage,
@@ -198,6 +196,16 @@ class FakePdfService extends PdfService {
   ): Promise<PdfContext> {
     return this.context;
   }
+}
+
+/** Former read_paper(pdf, gateway) construction, now the paper_read facade. */
+function readPaperViaPaperRead(pdfService: PdfService, zoteroGateway: unknown) {
+  return createPaperReadTool(
+    pdfService,
+    new RetrievalService(pdfService),
+    {} as never,
+    zoteroGateway as never,
+  );
 }
 
 const globalScope = globalThis as typeof globalThis & {
@@ -2311,7 +2319,7 @@ describe("primitive agent tools", function () {
     }
   });
 
-  it("read_paper returns citation and source labels", async function () {
+  it("paper_read overview returns citation and source labels", async function () {
     const paperContext: PaperContextRef = {
       itemId: 30,
       contextItemId: 31,
@@ -2319,14 +2327,15 @@ describe("primitive agent tools", function () {
       firstCreator: "Nguyen",
       year: "2023",
     };
-    const tool = createReadPaperTool(
+    const tool = readPaperViaPaperRead(
       new FakePdfService(
         makePdfContext(["Abstract text.", "Introduction text."]),
       ),
       { resolvePaperContextTarget: () => paperContext } as never,
     );
     const validated = tool.validate({
-      target: { paperContext },
+      mode: "overview",
+      target: { itemId: 30, contextItemId: 31 },
     });
     assert.isTrue(validated.ok);
     if (!validated.ok) return;
@@ -2338,7 +2347,7 @@ describe("primitive agent tools", function () {
     assert.equal(first.sourceLabel, "(Nguyen, 2023)");
   });
 
-  it("read_paper resolves explicit item and attachment IDs", async function () {
+  it("paper_read overview resolves explicit item and attachment IDs", async function () {
     const hydrated: PaperContextRef = {
       itemId: 30,
       contextItemId: 31,
@@ -2346,7 +2355,7 @@ describe("primitive agent tools", function () {
       firstCreator: "Nguyen",
       year: "2023",
     };
-    const tool = createReadPaperTool(
+    const tool = readPaperViaPaperRead(
       new FakePdfService(makePdfContext(["Abstract text."])),
       {
         resolvePaperContextTarget: () => hydrated,
@@ -2354,6 +2363,7 @@ describe("primitive agent tools", function () {
       } as never,
     );
     const validated = tool.validate({
+      mode: "overview",
       target: { itemId: 30, contextItemId: 31 },
     });
     assert.isTrue(validated.ok);
@@ -2366,12 +2376,12 @@ describe("primitive agent tools", function () {
     assert.equal(first.sourceLabel, "(Nguyen, 2023)");
   });
 
-  it("read_paper resolves multiple explicit item and attachment ID targets", async function () {
+  it("paper_read overview resolves multiple explicit item and attachment ID targets", async function () {
     const contexts: Record<number, PaperContextRef> = {
       31: { itemId: 30, contextItemId: 31, title: "Paper A" },
       41: { itemId: 40, contextItemId: 41, title: "Paper B" },
     };
-    const tool = createReadPaperTool(
+    const tool = readPaperViaPaperRead(
       new FakePdfService(makePdfContext(["Abstract text."])),
       {
         resolvePaperContextTarget: ({
@@ -2383,6 +2393,7 @@ describe("primitive agent tools", function () {
       } as never,
     );
     const validated = tool.validate({
+      mode: "overview",
       targets: [
         { itemId: 30, contextItemId: 31 },
         { itemId: 40, contextItemId: 41 },
@@ -2398,40 +2409,58 @@ describe("primitive agent tools", function () {
     assert.deepEqual(paperContexts, [contexts[31], contexts[41]]);
   });
 
-  it("read_paper resolves chunk reads from explicit item and attachment IDs", async function () {
+  it("paper_read reads a section picked from its outline", async function () {
     const hydrated: PaperContextRef = {
       itemId: 30,
       contextItemId: 31,
       title: "Chunk Paper",
     };
-    const tool = createReadPaperTool(
-      new FakePdfService(makePdfContext(["Abstract text.", "Method text."])),
-      {
-        resolvePaperContextTarget: () => hydrated,
-        listPaperContexts: () => [],
-      } as never,
+    const context = makePdfContext(["Abstract text.", "Method text."]);
+    context.chunkMeta = context.chunkMeta!.map((meta, index) => ({
+      ...meta,
+      sectionIndex: index,
+      sectionLabel: index ? "Methods" : "Abstract",
+    }));
+    const tool = readPaperViaPaperRead(new FakePdfService(context), {
+      resolvePaperContextTarget: () => hydrated,
+      listPaperContexts: () => [],
+    } as never);
+    const target = { itemId: 30, contextItemId: 31 };
+    const outlineInput = tool.validate({ mode: "outline", target });
+    assert.isTrue(outlineInput.ok);
+    if (!outlineInput.ok) return;
+    const outline = (await tool.execute(outlineInput.value, baseContext)) as {
+      papers: Array<{
+        outline: { sections: Array<{ sectionId: string; title: string }> };
+      }>;
+    };
+    const methods = outline.papers[0].outline.sections.find(
+      (section) => section.title === "Methods",
     );
+    assert.exists(methods);
+
     const validated = tool.validate({
-      target: { itemId: 30, contextItemId: 31 },
-      chunkIndexes: [1],
+      mode: "targeted",
+      target,
+      query: "method",
+      sectionIds: [methods!.sectionId],
     });
     assert.isTrue(validated.ok);
     if (!validated.ok) return;
-
     const result = await tool.execute(validated.value, baseContext);
-    const first = (result as { results: Array<Record<string, unknown>> })
-      .results[0];
-    assert.equal(first.text, "Method text.");
-    assert.deepEqual(first.paperContext, hydrated);
+    const texts = (
+      result as { results: Array<Record<string, unknown>> }
+    ).results.map((entry) => entry.text);
+    assert.deepEqual(texts, ["Method text."]);
   });
 
-  it("read_paper does not fall back to ambient paper context for invalid explicit targets", async function () {
+  it("paper_read overview does not fall back to ambient paper context for invalid explicit targets", async function () {
     const ambient: PaperContextRef = {
       itemId: 99,
       contextItemId: 199,
       title: "Ambient Paper",
     };
-    const tool = createReadPaperTool(
+    const tool = readPaperViaPaperRead(
       new FakePdfService(makePdfContext(["Ambient abstract."])),
       {
         resolvePaperContextTarget: () => null,
@@ -2439,6 +2468,7 @@ describe("primitive agent tools", function () {
       } as never,
     );
     const validated = tool.validate({
+      mode: "overview",
       target: { itemId: 30, contextItemId: 31 },
     });
     assert.isTrue(validated.ok);
@@ -2461,7 +2491,7 @@ describe("primitive agent tools", function () {
     }
   });
 
-  it("search_paper returns citation and source labels", async function () {
+  it("paper_read targeted returns citation and source labels", async function () {
     const paperContext: PaperContextRef = {
       itemId: 40,
       contextItemId: 41,
@@ -2491,12 +2521,18 @@ describe("primitive agent tools", function () {
           },
         ] as never,
     );
-    const tool = createSearchPaperTool(retrievalService, pdfService, {
-      resolvePaperContextTarget: () => paperContext,
-    } as never);
+    const tool = createPaperReadTool(
+      pdfService,
+      retrievalService,
+      {} as never,
+      {
+        resolvePaperContextTarget: () => paperContext,
+      } as never,
+    );
     const validated = tool.validate({
-      target: { paperContext },
-      question: "evidence",
+      mode: "targeted",
+      target: { itemId: 40, contextItemId: 41 },
+      query: "evidence",
     });
     assert.isTrue(validated.ok);
     if (!validated.ok) return;
@@ -4093,10 +4129,7 @@ await note.saveTx();
   });
 
   it("does not promise an approval step that read tools never perform", function () {
-    const tools = [
-      createReadAttachmentTool({} as never, {} as never),
-      createViewPdfPagesTool({} as never, {} as never),
-    ];
+    const tools = [createReadAttachmentTool({} as never, {} as never)];
     for (const tool of tools) {
       const name = tool.spec.name;
       assert.notProperty(tool.spec, "requiresConfirmation", `${name} flag`);
@@ -4105,5 +4138,21 @@ await note.saveTx();
       assert.notProperty(summaries, "onPending", `${name} onPending`);
       assert.notProperty(summaries, "onApproved", `${name} onApproved`);
     }
+  });
+
+  it("paper_read does not require confirmation for a targeted read", async function () {
+    const tool = createPaperReadTool(
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+    );
+    assert.notProperty(tool.spec, "requiresConfirmation");
+    const validated = tool.validate({ mode: "targeted", query: "method" });
+    assert.isTrue(validated.ok);
+    if (!validated.ok) return;
+    assert.isFalse(
+      await tool.shouldRequireConfirmation!(validated.value, baseContext),
+    );
   });
 });

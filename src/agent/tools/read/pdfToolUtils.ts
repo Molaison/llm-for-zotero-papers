@@ -1,6 +1,5 @@
 /**
- * Shared utilities for PDF-related tools (read_paper, search_paper,
- * view_pdf_pages, read_attachment).
+ * Shared utilities for PDF-related tools (paper_read, read_attachment).
  *
  * Extracted from the former monolithic inspect_pdf tool so that each
  * focused tool can reuse target resolution, caching, and multimodal
@@ -552,7 +551,7 @@ export function encodeBase64(bytes: Uint8Array): string {
 }
 
 // ---------------------------------------------------------------------------
-// Page caches (used by view_pdf_pages)
+// Page caches (used by paper_read visual/capture page rendering)
 // ---------------------------------------------------------------------------
 
 type PreparedPdfCache = {
