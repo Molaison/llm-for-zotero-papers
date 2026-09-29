@@ -281,8 +281,8 @@ export const auditLibraryAction: AgentAction<
       }));
 
       const mutateResult = await callTool(
-        "update_metadata",
-        { operations },
+        "library_update",
+        { kind: "metadata", operations },
         ctx,
         `${pageLabel}: Updating metadata`,
       );
@@ -442,7 +442,7 @@ export const auditLibraryAction: AgentAction<
       ];
 
       const saveResult = await callTool(
-        "edit_current_note",
+        "note_write",
         {
           mode: "create",
           content: reportLines.join("\n"),
@@ -643,7 +643,7 @@ async function fetchCanonicalPatchForRecord(
   }
 
   const metaResult = await callTool(
-    "search_literature_online",
+    "literature_search",
     searchArgs,
     ctx,
     `Fetching metadata for ${label}`,

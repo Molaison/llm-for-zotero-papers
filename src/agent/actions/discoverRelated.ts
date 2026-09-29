@@ -162,7 +162,7 @@ export const discoverRelatedAction: AgentAction<
       limit: number,
     ): Promise<FetchModeResult> => {
       const result = await callTool(
-        "search_literature_online",
+        "literature_search",
         {
           mode,
           itemId: input.itemId,
@@ -181,7 +181,7 @@ export const discoverRelatedAction: AgentAction<
         const errMsg =
           errContent && typeof errContent.error === "string"
             ? errContent.error
-            : `search_literature_online failed for mode "${mode}"`;
+            : `literature_search failed for mode "${mode}"`;
         return { rows: [], failed: true, error: errMsg };
       }
       const content = result.content as Record<string, unknown>;
@@ -367,8 +367,9 @@ export const discoverRelatedAction: AgentAction<
         ),
       ].slice(0, count);
       const result = await callTool(
-        "import_identifiers",
+        "library_import",
         {
+          kind: "identifiers",
           identifiers,
           libraryID: ctx.libraryID,
           ...(importIntent.parameters?.destinationCollectionId
@@ -563,22 +564,22 @@ export const discoverRelatedAction: AgentAction<
       };
     }
 
+    // The inherited approval is bound to this exact call, name included.
+    const importArgs = {
+      kind: "identifiers",
+      identifiers,
+      libraryID: ctx.libraryID,
+    };
     const importResult = await callTool(
-      "import_identifiers",
-      {
-        identifiers,
-        libraryID: ctx.libraryID,
-      },
+      "library_import",
+      importArgs,
       ctx,
       "Importing selected papers",
       {
         sourceToolName: "discover_related",
         sourceActionId: "import",
         sourceMode: "approval",
-        approvedCallDigest: buildActionCallDigest("import_identifiers", {
-          identifiers,
-          libraryID: ctx.libraryID,
-        }),
+        approvedCallDigest: buildActionCallDigest("library_import", importArgs),
       },
     );
 

@@ -292,8 +292,9 @@ export const organizeUnfiledAction: AgentAction<
       }
 
       const mutateResult = await callTool(
-        "move_to_collection",
+        "library_update",
         {
+          kind: "collections",
           action: "add",
           id: getPagedOperationId("organize_unfiled", page, {
             pageSize: options.pageSize,

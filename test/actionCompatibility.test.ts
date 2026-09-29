@@ -25,7 +25,7 @@ function createStubTool<TInput extends Record<string, unknown>, TResult>(
     spec,
     validate,
     acceptInheritedApproval: (_input, approval) =>
-      spec.name === "import_identifiers" &&
+      spec.name === "library_import" &&
       approval.sourceToolName === "discover_related" &&
       approval.sourceActionId === "import",
     execute: async (input, context) => {
@@ -138,7 +138,7 @@ for (const mode of ["safe", "auto", "yolo"] as const)
       registry.register(
         createStubTool(
           {
-            name: "search_literature_online",
+            name: "literature_search",
             description: "search",
             inputSchema: { type: "object" },
             executionClass: "read",
@@ -170,7 +170,7 @@ for (const mode of ["safe", "auto", "yolo"] as const)
       registry.register(
         createStubTool(
           {
-            name: "import_identifiers",
+            name: "library_import",
             description: "import",
             inputSchema: { type: "object" },
             executionClass: "external_effect",
@@ -246,7 +246,7 @@ for (const mode of ["safe", "auto", "yolo"] as const)
       registry.register(
         createStubTool(
           {
-            name: "move_to_collection",
+            name: "library_update",
             description: "move",
             inputSchema: { type: "object" },
             executionClass: "external_effect",
@@ -496,7 +496,7 @@ for (const mode of ["safe", "auto", "yolo"] as const)
       registry.register(
         createStubTool(
           {
-            name: "edit_current_note",
+            name: "note_write",
             description: "edit note",
             inputSchema: { type: "object" },
             executionClass: "external_effect",
@@ -580,7 +580,7 @@ for (const mode of ["safe", "auto", "yolo"] as const)
       registry.register(
         createStubTool(
           {
-            name: "search_literature_online",
+            name: "literature_search",
             description: "search",
             inputSchema: { type: "object" },
             executionClass: "read",
@@ -633,7 +633,7 @@ for (const mode of ["safe", "auto", "yolo"] as const)
       registry.register(
         createStubTool(
           {
-            name: "search_literature_online",
+            name: "literature_search",
             description: "search",
             inputSchema: { type: "object" },
             executionClass: "read",
@@ -724,7 +724,7 @@ for (const mode of ["safe", "auto", "yolo"] as const)
       registry.register(
         createStubTool(
           {
-            name: "search_literature_online",
+            name: "literature_search",
             description: "search",
             inputSchema: { type: "object" },
             executionClass: "read",
@@ -742,7 +742,7 @@ for (const mode of ["safe", "auto", "yolo"] as const)
       registry.register(
         createStubTool(
           {
-            name: "import_identifiers",
+            name: "library_import",
             description: "import",
             inputSchema: { type: "object" },
             executionClass: "external_effect",
@@ -778,7 +778,7 @@ for (const mode of ["safe", "auto", "yolo"] as const)
       assert.equal(
         importCalls,
         0,
-        "import_identifiers must not be called when cap is hit",
+        "library_import must not be called when cap is hit",
       );
     });
   });
