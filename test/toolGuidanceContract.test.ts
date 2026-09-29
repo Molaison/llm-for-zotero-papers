@@ -240,7 +240,7 @@ describe("tool guidance contracts", function () {
     }
     assert.include(
       agentPersona,
-      "Use paper_read overview for a broad single-paper understanding",
+      "Use supplied paper text directly when it supports the answer",
     );
     assert.include(
       fileIoTool,

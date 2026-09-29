@@ -56,6 +56,7 @@ export type AgentResourceContextPlan = {
   contextCache?: ContextCachePlan;
   resourceSignature: string;
   stableContextBlock: string;
+  paperContext?: import("./paperPromptContext").PaperPromptContext;
   resourceSnapshot: AgentResourceSnapshot;
   priorReadBlock?: string;
 };
@@ -617,9 +618,9 @@ export function buildAgentStableResourceContextBlock(
   ];
   if (retrievalOnlyPapers.length) {
     lines.push(
-      "Retrieval-only paper refs:",
+      "Selected paper refs (text coverage is reported in the paper source blocks):",
       ...retrievalOnlyPapers.map((entry) =>
-        formatPaperResourceLine("Retrieval paper", entry),
+        formatPaperResourceLine("Selected paper", entry),
       ),
     );
   }

@@ -1,6 +1,10 @@
 import { assert } from "chai";
 import { buildAssistantDisplayMarkdownForRender } from "../src/modules/contextPanel/chat";
 import {
+  buildQuoteRenderPlan,
+  getMessageQuoteDisplay,
+} from "../src/modules/contextPanel/quoteRenderPlan";
+import {
   getQuoteValidationDecisionCacheStatsForTests,
   resetQuoteValidationDecisionCacheForTests,
 } from "../src/modules/contextPanel/quoteValidation/caches";
@@ -102,6 +106,59 @@ describe("minimal source-match quote gate workflow", function () {
     resetQuoteValidationDecisionCacheForTests();
     resetQuoteValidationActivityForTests();
   });
+
+  for (const sourceMatches of [true, false]) {
+    it(`retains paragraph footers while independently reviewing a card (${sourceMatches ? "matching" : "absent"} source)`, async function () {
+      const quote =
+        "The experiment tracked cortical neural activity over twelve recording sessions in five adult animals.";
+      const source = installPdfSource(
+        contextItemId,
+        sourceMatches
+          ? quote
+          : "This source discusses optical instrumentation and contains no experiment involving animals or repeated recording sessions.",
+      );
+      restoreSource = source.restore;
+      const citation = buildQuoteCitation({
+        quoteText: quote,
+        citationLabel: "(Eppler et al., 2026)",
+        itemId: paper.itemId,
+        contextItemId,
+        sourceMatchText: quote,
+        sourceMatchKind: "exact",
+        sourceMatchSource: "context-text",
+      })!;
+      const user: Message = {
+        role: "user",
+        text: "Explain the recording protocol",
+        timestamp: 1,
+        paperContexts: [paper],
+      };
+      const assistant: Message = {
+        role: "assistant",
+        text: `The protocol used repeated recordings. [[cite:${citation.id}]]\n\nFor the protocol, read this passage:\n\n[[quote:${citation.id}]]`,
+        quoteCitations: [citation],
+        timestamp: 2,
+      };
+      chatHistory.set(conversationKey, [user, assistant]);
+      finalizeAssistantMessageQuoteCitationsForTests(assistant, {
+        pairedUserMessage: user,
+        conversationKey,
+      });
+      await waitForAssistantQuoteValidationForTests(conversationKey);
+      const display = getMessageQuoteDisplay(assistant);
+      const plan = buildQuoteRenderPlan(display);
+      assert.lengthOf(plan.paragraphCitations, 1);
+      assert.equal(plan.paragraphCitations[0][0].id, citation.id);
+      assert.equal(plan.paragraphCitations[0][0].quoteText, quote);
+      assert.lengthOf(plan.occurrences, 1);
+      if (!sourceMatches)
+        assert.equal(
+          plan.occurrences[0].trust,
+          "not-source-quote",
+          "paragraph metadata must not certify the separate card",
+        );
+    });
+  }
 
   it("keeps a fully certified Eppler anchor trusted without source I/O", async function () {
     const source = installPdfSource(contextItemId, "Unneeded PDF text.");

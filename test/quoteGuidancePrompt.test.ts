@@ -35,9 +35,9 @@ import type { PaperContextRef } from "../src/shared/types";
 import { resolvedAgentRequest } from "./helpers/resolvedAgentRequest";
 
 const BALANCED_EVIDENCE_PHRASES = [
-  "important paper-specific claims checkable",
-  "not to decorate every paragraph",
-  "quote or anchor 1-3 high-signal snippets",
+  "Support paper-specific explanations with paragraph-end citations",
+  "Paragraph citations mean this explanation is supported by these passages",
+  "Introduce a recommended passage with why the reader should read it",
   "After a direct quote, do not merely paraphrase it",
   "source labels on their own line belong only after direct blockquotes",
   "Paper titles, headings, author lists, journal names, DOI blocks, and source labels are metadata, not direct evidence",
@@ -54,15 +54,6 @@ const DIRECT_QUOTE_SAFETY_PHRASES = [
 function countOccurrences(text: string, needle: string): number {
   if (!needle) return 0;
   return text.split(needle).length - 1;
-}
-
-function fingerprintText(text: string): string {
-  let hash = 2166136261;
-  for (let index = 0; index < text.length; index += 1) {
-    hash ^= text.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
-  }
-  return `fnv1a32-${(hash >>> 0).toString(16).padStart(8, "0")}`;
 }
 
 function assertCanonicalCitationContract(text: string): void {
@@ -136,9 +127,9 @@ describe("quote guidance prompts", function () {
       "your very first action MUST be",
     );
   });
-  it("preserves the proven evidence wording inside one canonical contract", function () {
+  it("defines paragraph support and reading recommendations in one canonical contract", function () {
     assert.include(PAPER_CITATION_CONTRACT, BALANCED_EVIDENCE_GUIDANCE);
-    assert.equal(fingerprintText(PAPER_CITATION_CONTRACT), "fnv1a32-4be434bd");
+    assert.include(PAPER_CITATION_CONTRACT, "[[cite:ID1,ID2]]");
     assertCanonicalCitationContract(PAPER_CITATION_CONTRACT);
   });
 

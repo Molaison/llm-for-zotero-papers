@@ -494,7 +494,7 @@ describe("AnthropicMessagesAgentAdapter", function () {
     });
   });
 
-  it("places cache_control on the last stable system block", async function () {
+  it("preserves the first paper and final stable prefix as cache breakpoints", async function () {
     const adapter = new AnthropicMessagesAgentAdapter();
     let capturedBody: Record<string, unknown> | null = null;
     (
@@ -554,7 +554,7 @@ describe("AnthropicMessagesAgentAdapter", function () {
     });
 
     const system = capturedBody?.system as Array<Record<string, unknown>>;
-    assert.notProperty(system[1] || {}, "cache_control");
+    assert.deepEqual(system[1]?.cache_control, { type: "ephemeral" });
     assert.deepEqual(system[2]?.cache_control, { type: "ephemeral" });
   });
 

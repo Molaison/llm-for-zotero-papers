@@ -461,7 +461,7 @@ describe("quoteCitations", function () {
     assert.notInclude(prompt, "citationLabel");
   });
 
-  it("frames prompt quote anchors as verified exact-wording affordances", function () {
+  it("distinguishes paragraph support from reading recommendations", function () {
     const citation = buildQuoteCitation({
       quoteText:
         "Representational drift changed the neural response pattern across repeated sessions.",
@@ -475,7 +475,8 @@ describe("quoteCitations", function () {
     const prompt = buildQuoteAnchorPromptBlock([citation!]).join("\n");
 
     assert.include(prompt, "Verified quote anchors");
-    assert.include(prompt, "only when exact wording");
+    assert.include(prompt, "At the end of an explanatory paragraph");
+    assert.include(prompt, "recommend a passage the reader should read");
     assert.notInclude(prompt, "Quote anchors for direct evidence:");
   });
 

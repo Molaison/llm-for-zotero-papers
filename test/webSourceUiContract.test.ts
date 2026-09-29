@@ -77,11 +77,7 @@ describe("web source UI contract", function () {
         join(root, "src/modules/contextPanel/webSourceIndicators.ts"),
         "utf8",
       );
-      for (const label of [
-        't("View web sources")',
-        't("Web sources")',
-        't("Open web source")',
-      ]) {
+      for (const label of ['t("View web sources")', 't("Open web source")']) {
         assert.include(sourceIndicators, label);
       }
     } finally {
@@ -175,10 +171,15 @@ describe("web source UI contract", function () {
   });
 
   it("implements hover, focus, pin, Escape, outside-click, clamp, and URL launch behavior", function () {
-    const source = readFileSync(
-      join(root, "src/modules/contextPanel/webSourceIndicators.ts"),
-      "utf8",
-    );
+    const source =
+      readFileSync(
+        join(root, "src/modules/contextPanel/webSourceIndicators.ts"),
+        "utf8",
+      ) +
+      readFileSync(
+        join(root, "src/modules/contextPanel/sourcePopover.ts"),
+        "utf8",
+      );
     for (const required of [
       'addEventListener("mouseenter"',
       'addEventListener("focusin"',

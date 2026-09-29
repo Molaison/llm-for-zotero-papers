@@ -1,3 +1,4 @@
+import { PdfService } from "../src/agent/services/pdfService";
 import { AgentRunContinuationSession } from "../src/agent/continuation/runContinuationSession";
 import { loadWorkflowCheckpoint } from "../src/agent/contracts/workflowCheckpoint";
 import {
@@ -221,6 +222,145 @@ describe("AgentRuntime", function () {
     clearAgentCoverageLedger();
     clearAgentTranscriptStore();
     clearAgentToolResultHandleStore();
+  });
+
+  it("keeps default paper text across retrieval and follow-ups and resumes auto skills after adding a paper", async function () {
+    const restore = installMockDb();
+    const originalLoad = PdfService.prototype.ensurePaperContext;
+    const methods =
+      "The protocol tracked the activity of individual neurons across twelve recording sessions in five animals.";
+    const results =
+      "The results demonstrate stable population decoding despite changing individual neuronal responses.";
+    PdfService.prototype.ensurePaperContext = async () =>
+      ({
+        title: "Paper",
+        chunks: [methods, results],
+        chunkMeta: [],
+        fullLength: methods.length + results.length,
+      }) as any;
+    const paper = {
+      libraryID: 1,
+      itemId: 20,
+      contextItemId: 21,
+      title: "Paper",
+      firstCreator: "Kim",
+      year: "2026",
+    };
+    const registry = new AgentToolRegistry();
+    registry.register({
+      spec: {
+        name: "paper_read",
+        description: "Read another snippet",
+        inputSchema: { type: "object" },
+        executionClass: "read",
+        requiresConfirmation: false,
+      },
+      validate: () => ({ ok: true, value: {} }),
+      execute: async () => ({ text: "Additional snippet" }),
+    });
+    let routingCalls = 0;
+    let step = 0;
+    const prefixes: string[][] = [];
+    try {
+      const runtime = new AgentRuntime({
+        registry,
+        skillSelector: async () => {
+          routingCalls++;
+          return { status: "selected", skillIds: [] };
+        },
+        adapterFactory: () => ({
+          getCapabilities: () => ({
+            streaming: false,
+            toolCalls: true,
+            multimodal: false,
+          }),
+          supportsTools: () => true,
+          runStep: async (params): Promise<AgentModelStep> => {
+            const prefix = params.messages
+              .filter((message) => message.role === "system")
+              .map((message) => String(message.content));
+            prefixes.push(prefix);
+            const source = prefix.find((text) =>
+              text.includes("Paper source data"),
+            )!;
+            assert.include(source, methods);
+            assert.include(source, results);
+            assert.isEmpty(params.request.loadedSkillRecords || []);
+            step++;
+            if (step === 1) {
+              const call = {
+                id: "extra-snippet",
+                name: "paper_read",
+                arguments: { mode: "targeted" },
+              };
+              return {
+                kind: "tool_calls",
+                calls: [call],
+                assistantMessage: {
+                  role: "assistant",
+                  content: "",
+                  tool_calls: [call],
+                },
+              };
+            }
+            const id = /\[passage ([^\]]+)\]/.exec(source)![1];
+            const text = `The protocol used repeated recordings. [[cite:${id}]]`;
+            return {
+              kind: "final",
+              text,
+              assistantMessage: { role: "assistant", content: text },
+            };
+          },
+        }),
+      });
+      const request = {
+        conversationKey: 900459,
+        mode: "agent" as const,
+        libraryID: 1,
+        model: "test",
+        apiBase: "",
+        apiKey: "test",
+        userText: "Explain the paper and inspect another snippet",
+        activePaperContext: paper,
+        conversationKind: "paper" as const,
+      };
+      const outcome = await runtime.runTurn({ request });
+      assert.equal(outcome.kind, "completed");
+      if (outcome.kind === "completed")
+        assert.isNotEmpty(outcome.quoteCitations || []);
+      assert.deepEqual(
+        prefixes[0],
+        prefixes[1],
+        "a targeted read must not change the paper prefix",
+      );
+      await runtime.runTurn({
+        request: { ...request, userText: "Explain the result now" },
+      });
+      assert.deepEqual(
+        prefixes[0],
+        prefixes[2],
+        "a follow-up must retain the source prefix",
+      );
+      assert.equal(routingCalls, 0);
+      await runtime.runTurn({
+        request: {
+          ...request,
+          userText: "Compare the added paper",
+          selectedPaperContexts: [
+            { ...paper, itemId: 30, contextItemId: 31, title: "Added paper" },
+          ],
+        },
+      });
+      assert.equal(routingCalls, 1);
+      assert.equal(
+        prefixes[0][1],
+        prefixes[3][1],
+        "adding context keeps the original paper block intact",
+      );
+    } finally {
+      PdfService.prototype.ensurePaperContext = originalLoad;
+      restore();
+    }
   });
 
   for (const nativeCallback of [false, true]) {
@@ -1042,7 +1182,7 @@ describe("AgentRuntime", function () {
     }
   });
 
-  it("loads semantic skill choices before the first main-model step without creating action authority", async function () {
+  it("loads semantic skill choices for expanded scope without creating action authority", async function () {
     const restoreDb = installMockDb();
     setUserSkills(
       Object.values(BUILTIN_SKILL_FILES).map((raw) => parseSkill(raw)),
@@ -1092,6 +1232,9 @@ describe("AgentRuntime", function () {
       await runtime.runTurn({
         request: {
           conversationKey: 90012,
+          selectedCollectionContexts: [
+            { libraryID: 1, collectionId: 3, name: "Research" },
+          ],
           libraryID: 1,
           mode: "agent",
           userText: "Save a crop in a note",
@@ -8305,7 +8448,7 @@ describe("shallow guard round-limit safety", function () {
 });
 
 describe("AgentRuntime evidence stop policy", function () {
-  it("tells a targeted question to answer now after a repeated paper read", async function () {
+  it("allows the model to choose missing evidence after a repeated paper read", async function () {
     const restoreDb = installMockDb();
     const toolMessages: string[] = [];
     let steps = 0;
@@ -8400,10 +8543,13 @@ describe("AgentRuntime evidence stop policy", function () {
       ) as {
         paperEvidenceProgress?: { recommendation?: string; reason?: string };
       };
-      assert.equal(last.paperEvidenceProgress?.recommendation, "answer_now");
+      assert.equal(
+        last.paperEvidenceProgress?.recommendation,
+        "name_a_specific_missing_dimension",
+      );
       assert.include(
         last.paperEvidenceProgress?.reason || "",
-        "read one unread section by sectionId from the outline",
+        "choose another passage or section",
       );
     } finally {
       restoreDb();

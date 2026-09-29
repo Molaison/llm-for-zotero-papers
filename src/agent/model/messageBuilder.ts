@@ -1,3 +1,4 @@
+import { isSinglePaperConversation } from "../context/requestTurnPaperScope";
 import { renderLibraryOverviewSection } from "../context/libraryOverview";
 
 import type {
@@ -645,6 +646,9 @@ export async function renderAgentPromptEnvelope(
     buildFigureMineruInstruction(request, matchedSkillIds),
   ].filter(Boolean);
   const dynamicGuidanceInstructions = [
+    isSinglePaperConversation(request)
+      ? "Single-paper chat: no automatic skills are active. Answer directly using the supplied paper context. Do not load simple-paper-qa or evidence-based-qa automatically; apply skills the user explicitly selected with slash. You may freely choose additional snippet, section, full, figure, or search reads when useful. For whole-paper explanations, consider the argument, methods, results, and limitations throughout the available source."
+      : "",
     request.workingDirectory
       ? `Command working directory retained from this conversation: ${request.workingDirectory}. run_command uses it when cwd is omitted; pass cwd explicitly to change it. This directory does not confer filesystem permission.`
       : "",
@@ -735,6 +739,13 @@ export async function renderAgentPromptEnvelope(
       role: "system",
       content: fixedPrompt,
     }),
+    ...(resourceContextPlan?.paperContext?.blocks || []).map((content) =>
+      freezeEnvelopeMessage<AgentSystemMessage>({
+        role: "system",
+        content,
+        cachePolicy: "stable-prefix",
+      }),
+    ),
     ...(stableResourceBlock
       ? [
           freezeEnvelopeMessage<AgentSystemMessage>({

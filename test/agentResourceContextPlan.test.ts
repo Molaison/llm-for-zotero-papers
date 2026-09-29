@@ -322,12 +322,18 @@ describe("agent resource context plan", function () {
 
     assert.include(stableText, "Stable Zotero resource context:");
     assert.include(stableText, "Current Zotero context summary:");
-    assert.include(stableText, "Retrieval-only paper refs:");
+    assert.include(
+      stableText,
+      "Selected paper refs (text coverage is reported in the paper source blocks):",
+    );
     assert.include(stableText, "Baseline Paper");
     assert.include(userText, "Zotero context for this turn:");
     assert.include(userText, "Paper 1:");
     assert.include(userText, 'title="Baseline Paper"');
-    assert.notInclude(userText, "Retrieval-only paper refs:");
+    assert.notInclude(
+      userText,
+      "Selected paper refs (text coverage is reported in the paper source blocks):",
+    );
     assert.include(userText, "User request:\nWhat should I do next?");
   });
 

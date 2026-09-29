@@ -216,6 +216,8 @@ export function isCanonicalSourceCitationLabel(value: string): boolean {
   const inner = citationInnerText(label);
   if (!inner || inner.includes(";")) return false;
   if (/\battachment\s+under\b/i.test(inner)) return true;
+  // Zotero uses a title or author plus n.d. when the publication date is absent.
+  if (/^.+,\s*n\.d\.?$/i.test(inner)) return true;
   if (/\b(?:19|20)\d{2}[a-z]?\b/i.test(inner)) return true;
   if (/\bet\s+al\.?\b/i.test(inner)) return true;
   if (/\[[^\]]+\]/.test(inner)) return true;
@@ -349,7 +351,9 @@ export function parseStandaloneCitationLabel(
         /^(.*?)(?:\s+\[([^\]]+)\])?(?:\s*,?\s*page\s+([^,;]+))?\.?$/i,
       );
       if (!innerParts) return null;
-      const citationLabel = normalizeCitationText(innerParts[1] || "");
+      let citationLabel = normalizeCitationText(innerParts[1] || "");
+      if (/,\s*n\.d\.$/i.test(inner) && /n\.d$/i.test(citationLabel))
+        citationLabel += ".";
       if (!citationLabel || citationLabel.length < 4) return null;
       if (isNonSourceCitationLabel(citationLabel)) return null;
       return parseCitationParts(citationLabel, innerParts[2], innerParts[3]);
