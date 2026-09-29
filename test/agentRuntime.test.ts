@@ -1205,8 +1205,14 @@ describe("AgentRuntime", function () {
         assert.isUndefined(params.request.classifiedIntent);
         assert.isUndefined(params.request.actionContract);
         const prompt = JSON.stringify(params);
-        assert.include(prompt, "bundled Python source-PDF extractor");
-        assert.include(prompt, "narrowly scoped note");
+        for (const filename of ["analyze-figures.md", "write-note.md"]) {
+          assert.include(
+            prompt,
+            JSON.stringify(
+              parseSkill(BUILTIN_SKILL_FILES[filename]).instruction,
+            ).slice(1, -1),
+          );
+        }
         assert.includeMembers(
           events.filter((e) => e.type === "status").map((e) => e.text),
           ["Skill activated: analyze-figures", "Skill activated: write-note"],
