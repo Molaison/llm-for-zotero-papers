@@ -76,6 +76,7 @@ import {
   renderAgentPromptEnvelope,
 } from "./model/messageBuilder";
 import { resolvePlanSkillRoutingReceipt } from "./model/semanticSkillRouting";
+import { withPlanInvestigationSkill } from "./skills/planBindings";
 import {
   buildAdapterToolCallResult,
   type ToolWorkflowOutcome,
@@ -658,7 +659,11 @@ export class AgentRuntime {
       }
       request.classifiedIntent = turnIntent.classifiedIntent || undefined;
       request.skillRoutingReceipt = turnIntent.routingReceipt;
-      const matchedSkills = getMatchedSkillIds(request, turnIntent.skillIds);
+      const matchedSkills = withPlanInvestigationSkill(
+        getMatchedSkillIds(request, turnIntent.skillIds),
+        approvedPlanArtifact?.contract,
+        getAllSkills(),
+      );
       if (request.planContext?.phase !== "executing") {
         const forcedSkillIds = new Set(request.forcedSkillIds || []);
         request.loadedSkillRecords = (

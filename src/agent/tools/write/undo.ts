@@ -562,6 +562,8 @@ export function createUndoTool(
         return fail("Undo expects an object, for example {} or { count: 2 }");
       }
       const record = (args || {}) as Record<string, unknown>;
+      if (record.dryRun !== undefined && typeof record.dryRun !== "boolean")
+        return fail("dryRun must be a boolean");
       // An explicit dryRun:false asks for nothing a single undo lacks.
       const wantsMany =
         record.count !== undefined ||

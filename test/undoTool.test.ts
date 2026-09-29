@@ -133,6 +133,17 @@ describe("undo tool", function () {
     assert.isNotEmpty(library.tagsOf(2));
   });
 
+  it("rejects a dryRun that is not a boolean", function () {
+    const { tool } = builtInUndoTool(library);
+    const stringy = tool.validate({ dryRun: "true" });
+    assert.isFalse(stringy.ok);
+    assert.include(
+      (stringy as { error: string }).error,
+      "dryRun must be a boolean",
+    );
+    assert.isFalse(tool.validate({ count: 2, dryRun: 1 }).ok);
+  });
+
   it("refuses to mix a single actionId with the multi-revert arguments", function () {
     const { tool } = builtInUndoTool(library);
     const mixed = tool.validate({ actionId: "a", count: 2 });
