@@ -1,5 +1,6 @@
 import { assert } from "chai";
 import { createRetrieveServiceRig } from "./helpers/libraryRetrieveRig";
+import { setAppLogSinkForTests, type AppLogLevel } from "../src/core/logging";
 
 describe("library retrieve fallback cheap wins", function () {
   it("passes one precomputed query embedding to every candidate build", async function () {
@@ -27,11 +28,20 @@ describe("library retrieve fallback cheap wins", function () {
       semantic: true,
       queryEmbeddingFails: true,
     });
-    await rig.service.retrieve({
-      query: "method",
-      depth: "evidence",
-      methods: ["metadata", "fts", "semantic"],
-    });
+    const emitted: Array<{ level: AppLogLevel; args: readonly unknown[] }> = [];
+    setAppLogSinkForTests((level, args) => emitted.push({ level, args }));
+    try {
+      await rig.service.retrieve({
+        query: "method",
+        depth: "evidence",
+        methods: ["metadata", "fts", "semantic"],
+      });
+    } finally {
+      setAppLogSinkForTests(null);
+    }
+    const warns = emitted.filter((entry) => entry.level === "warn");
+    assert.lengthOf(warns, 1, "one warning for the failed query embedding");
+    assert.match(String(warns[0].args[0]), /Query embedding failed/);
     assert.equal(rig.embeddingCalls(), 1);
     assert.isAbove(rig.candidateBuildCalls().length, 1);
     for (const call of rig.candidateBuildCalls()) {
@@ -93,8 +103,8 @@ describe("library retrieve fallback cheap wins", function () {
       depth: "evidence",
     });
     assert.isAbove(rig.quicksearchCalls(), 4);
-    assert.isAtMost(rig.maxConcurrentQuicksearch(), 4);
-    assert.isAbove(rig.maxConcurrentQuicksearch(), 1);
+    // Eight probes, limit four, uniform delay: exactly four in flight.
+    assert.equal(rig.maxConcurrentQuicksearch(), 4);
   });
 
   it("merges parallel probe matches in probe order, whatever order they answer in", async function () {

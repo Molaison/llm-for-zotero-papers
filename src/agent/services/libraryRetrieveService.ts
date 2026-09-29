@@ -1512,7 +1512,13 @@ export class LibraryRetrieveService {
         pending = this.queryEmbedder
           .embed(text, signal)
           .then((vector) => (Array.isArray(vector) ? vector : []))
-          .catch(() => []);
+          .catch((error) => {
+            appLogger.warn(
+              "Query embedding failed; ranking without embeddings:",
+              error,
+            );
+            return [];
+          });
         memo.set(text, pending);
       }
       return pending;

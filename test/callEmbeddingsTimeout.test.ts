@@ -23,7 +23,10 @@ describe("callEmbeddings timeout", function () {
    * mirroring the Zotero prefs and ztoolkit fetch fakes in
    * test/llmClient.prepareChatRequest.test.ts.
    */
-  function installEmbeddingFakes(options: { fetch: FetchFake }) {
+  function installEmbeddingFakes(options: {
+    fetch: FetchFake;
+    abortController?: unknown;
+  }) {
     const prefStore = new Map<string, unknown>([
       [`${PREFIX}.embeddingProvider`, "custom"],
       [`${PREFIX}.embeddingApiBase`, "http://localhost:11434/v1"],
@@ -46,7 +49,12 @@ describe("callEmbeddings timeout", function () {
         ztoolkit: { getGlobal: (name: string) => unknown; log: () => void };
       }
     ).ztoolkit = {
-      getGlobal: (name: string) => (name === "fetch" ? fetchFake : undefined),
+      getGlobal: (name: string) =>
+        name === "fetch"
+          ? fetchFake
+          : name === "AbortController"
+            ? options.abortController
+            : undefined,
       log: () => undefined,
     };
   }
@@ -83,6 +91,39 @@ describe("callEmbeddings timeout", function () {
     const signal = fetchInits[0]?.signal;
     assert.isOk(signal, "the request carries an abort signal");
     assert.isTrue(signal?.aborted);
+  });
+
+  it("aborts through the controller the Zotero globals provide", async function () {
+    const scope = globalThis as { AbortController?: typeof AbortController };
+    const originalController = scope.AbortController;
+    let aborts = 0;
+    class FakeAbortController {
+      readonly signal = { aborted: false } as AbortSignal;
+      abort() {
+        aborts += 1;
+        (this.signal as { aborted: boolean }).aborted = true;
+      }
+    }
+    // Chrome scope may have no global AbortController; apiHelpers then
+    // resolves it through ztoolkit.getGlobal, like fetch.
+    scope.AbortController = undefined;
+    try {
+      installEmbeddingFakes({
+        fetch: () => new Promise(() => undefined),
+        abortController: FakeAbortController,
+      });
+      let error: unknown;
+      try {
+        await callEmbeddings(["x"], { timeoutMs: 20 });
+      } catch (e) {
+        error = e;
+      }
+      assert.match(String(error), /timed out after 20 ms/);
+      assert.equal(aborts, 1, "the timed-out request is aborted");
+      assert.isTrue(fetchInits[0]?.signal?.aborted);
+    } finally {
+      scope.AbortController = originalController;
+    }
   });
 
   it("keeps the single-argument call answering normally", async function () {

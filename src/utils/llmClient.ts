@@ -64,6 +64,7 @@ export type {
 import {
   EMBEDDINGS_ENDPOINT,
   FILES_ENDPOINT,
+  getAbortController,
   resolveEndpoint,
   usesMaxCompletionTokens,
 } from "./apiHelpers";
@@ -4733,10 +4734,11 @@ export async function callEmbeddings(
   };
 
   const url = resolveEndpoint(apiBase, EMBEDDINGS_ENDPOINT);
-  // The race below enforces the deadline; the controller only releases the
-  // socket where the runtime has one (Gecko chrome may lack AbortController).
-  const controller =
-    typeof AbortController === "function" ? new AbortController() : null;
+  // The race below enforces the deadline; the controller cancels the request
+  // so a slow provider stops computing. Chrome scope may lack a global
+  // AbortController, so resolve it the way `fetch` is resolved.
+  const Controller = getAbortController();
+  const controller = Controller ? new Controller() : null;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let onCallerAbort: (() => void) | undefined;
   const deadline = new Promise<never>((_, reject) => {
