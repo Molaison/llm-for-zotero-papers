@@ -61,12 +61,13 @@ function positionSourceCard(wrapper: HTMLElement, popover: HTMLElement): void {
   )}px`;
 }
 
-/** Shared hover, focus, pinning and portal lifetime for source footers. */
+/** Shared activation, pinning and portal lifetime for source footers. */
 export function createSourcePopover(
   doc: Document,
   options: {
     label: string;
     icon: Node;
+    activation?: "hover" | "click";
     populate: (popover: HTMLElement, close: () => void) => void;
   },
 ): HTMLElement {
@@ -197,7 +198,7 @@ export function createSourcePopover(
   };
   wrapper.addEventListener("mouseenter", () => {
     indicatorHovered = true;
-    open();
+    if (options.activation !== "click") open();
   });
   wrapper.addEventListener("mouseleave", () => {
     indicatorHovered = false;
@@ -211,8 +212,10 @@ export function createSourcePopover(
     popoverHovered = false;
     scheduleClose();
   });
-  wrapper.addEventListener("focusin", open);
-  popover.addEventListener("focusin", open);
+  if (options.activation !== "click") {
+    wrapper.addEventListener("focusin", open);
+    popover.addEventListener("focusin", open);
+  }
   wrapper.addEventListener("focusout", handleFocusOut);
   popover.addEventListener("focusout", handleFocusOut);
   wrapper.addEventListener("keydown", handleEscape);
@@ -220,6 +223,10 @@ export function createSourcePopover(
   chip.addEventListener("keydown", (event: KeyboardEvent) => {
     if (event.key !== "ArrowDown") return;
     event.preventDefault();
+    if (options.activation === "click") {
+      pinned = true;
+      wrapper.classList.add("expanded");
+    }
     open();
     popover.querySelector<HTMLElement>("button, [tabindex='0']")?.focus();
   });

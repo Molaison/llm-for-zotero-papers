@@ -4709,13 +4709,13 @@ function createParagraphCitationFooter(params: {
   );
   const count = params.ownerDoc.createElement("span");
   count.className = "llm-paper-source-count";
-  count.textContent = t("Quote {number}").replace(
-    "{number}",
-    String(params.citations.length),
-  );
+  count.textContent = t(
+    params.citations.length === 1 ? "{number} Quote" : "{number} Quotes",
+  ).replace("{number}", String(params.citations.length));
   const content = params.ownerDoc.createDocumentFragment();
   content.append(icon, count);
   const footer = createSourcePopover(params.ownerDoc, {
+    activation: "click",
     label: `${count.textContent}: ${t("Supporting passages")}`,
     icon: content,
     populate: (popover) => {

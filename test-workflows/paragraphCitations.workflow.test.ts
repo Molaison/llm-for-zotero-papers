@@ -5,6 +5,7 @@ import { resolveAgentRuntimeRequest } from "../src/agent/context/resolvedAgentRe
 import { renderAssistantRichText } from "../src/modules/contextPanel/assistantRichText";
 import { collectReaderSelectionDocuments } from "../src/modules/contextPanel/readerSelection";
 import { waitForAssistantQuoteValidationForTests } from "../src/modules/contextPanel/quoteValidation/scheduling";
+import { createSourcePopover } from "../src/modules/contextPanel/sourcePopover";
 
 describe("workflow: paragraph source footers", function () {
   this.timeout(120000);
@@ -95,6 +96,19 @@ describe("workflow: paragraph source footers", function () {
         ".llm-paper-source-indicator .llm-web-source-chip",
       );
       assert.isOk(chip, "the footer survives background quote validation");
+      const indicator = chip!.closest(".llm-paper-source-indicator")!;
+      indicator.dispatchEvent(new (win as any).MouseEvent("mouseenter"));
+      assert.equal(
+        chip!.getAttribute("aria-expanded"),
+        "false",
+        "hover alone must not open the quote container",
+      );
+      chip!.focus();
+      assert.equal(
+        chip!.getAttribute("aria-expanded"),
+        "false",
+        "keyboard focus alone must not open the quote container",
+      );
       const footerIcon = chip!.querySelector<HTMLElement>(
         ".llm-paper-source-icon",
       )!;
@@ -105,8 +119,28 @@ describe("workflow: paragraph source footers", function () {
       assert.isAbove(Number.parseFloat(chipStyle.borderTopWidth), 0);
       assert.equal(
         chip!.querySelector(".llm-paper-source-count")?.textContent,
-        "Quote 2",
+        "2 Quotes",
       );
+      const paragraph = chip!.closest("p")!;
+      const originalFontSize = paragraph.style.fontSize;
+      for (const fontSize of ["11px", "16px", "22px"]) {
+        paragraph.style.fontSize = fontSize;
+        assert.isAtMost(
+          chip!.getBoundingClientRect().height,
+          Number.parseFloat(win.getComputedStyle(paragraph).fontSize),
+          "the whole chip including its border fits within the paragraph text size",
+        );
+        assert.isBelow(
+          Number.parseFloat(
+            win.getComputedStyle(
+              chip!.querySelector(".llm-paper-source-count")!,
+            ).fontSize,
+          ),
+          Number.parseFloat(fontSize),
+          "the label leaves room for the wrapping inside the text-sized chip",
+        );
+      }
+      paragraph.style.fontSize = originalFontSize;
       assert.lengthOf(
         doc.querySelectorAll(".llm-paper-source-indicator"),
         1,
@@ -130,11 +164,43 @@ describe("workflow: paragraph source footers", function () {
       await api.captureStandaloneScreenshot(
         `${Zotero.DataDirectory.dir}/paragraph-source-footer-collapsed.png`,
       );
-      chip!.dispatchEvent(
-        new (win as any).MouseEvent("mouseenter", { bubbles: true }),
-      );
       chip!.click();
       assert.equal(chip!.getAttribute("aria-expanded"), "true");
+      indicator.dispatchEvent(new (win as any).MouseEvent("mouseleave"));
+      await Zotero.Promise.delay(150);
+      assert.equal(chip!.getAttribute("aria-expanded"), "true");
+      chip!.click();
+      assert.isNull(doc.querySelector(".llm-paper-source-popover"));
+      chip!.click();
+      chip!.dispatchEvent(
+        new (win as any).KeyboardEvent("keydown", {
+          key: "Escape",
+          bubbles: true,
+        }),
+      );
+      assert.equal(chip!.getAttribute("aria-expanded"), "false");
+      assert.equal(doc.activeElement, chip);
+      chip!.click();
+      doc.documentElement.dispatchEvent(
+        new (win as any).MouseEvent("mousedown", { bubbles: true }),
+      );
+      assert.equal(chip!.getAttribute("aria-expanded"), "false");
+      chip!.dispatchEvent(
+        new (win as any).KeyboardEvent("keydown", {
+          key: "ArrowDown",
+          bubbles: true,
+        }),
+      );
+      assert.equal(chip!.getAttribute("aria-expanded"), "true");
+      assert.isTrue(
+        doc
+          .querySelector(".llm-paper-source-popover")!
+          .contains(doc.activeElement),
+        "explicit keyboard activation moves focus into the quote container",
+      );
+      chip!.click();
+      assert.equal(chip!.getAttribute("aria-expanded"), "false");
+      chip!.click();
       const popover = doc.querySelector<HTMLElement>(
         ".llm-paper-source-popover",
       )!;
@@ -193,6 +259,21 @@ describe("workflow: paragraph source footers", function () {
         panelItem: item,
         assistantMessage: {
           role: "assistant",
+          text: `One supporting passage. [[cite:${firstCitation.id}]]`,
+          quoteCitations: [firstCitation],
+          timestamp: Date.now(),
+        },
+      });
+      assert.equal(
+        bubble.querySelector(".llm-paper-source-count")?.textContent,
+        "1 Quote",
+      );
+      renderAssistantRichText({
+        body: host,
+        bubble,
+        panelItem: item,
+        assistantMessage: {
+          role: "assistant",
           text: "Example `[[cite:unknown]]` and unknown evidence. [[cite:unknown]]",
           timestamp: Date.now(),
         },
@@ -203,6 +284,22 @@ describe("workflow: paragraph source footers", function () {
       );
       assert.isNull(bubble.querySelector(".llm-paper-source-indicator"));
       bubble.remove();
+
+      const webSource = createSourcePopover(doc, {
+        label: "Web sources",
+        icon: doc.createElement("span"),
+        populate: () => {},
+      });
+      host.appendChild(webSource);
+      webSource.dispatchEvent(new (win as any).MouseEvent("mouseenter"));
+      assert.equal(
+        webSource.querySelector("button")!.getAttribute("aria-expanded"),
+        "true",
+        "web sources retain their existing hover behavior",
+      );
+      webSource.remove();
+      await Zotero.Promise.delay(30);
+      assert.isNull(doc.querySelector(".llm-web-source-popover"));
     } finally {
       reader?.close?.();
       await api.reset();

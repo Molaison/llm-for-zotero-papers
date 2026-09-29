@@ -447,6 +447,8 @@ const zhCN: Record<string, string> = {
   "Web sources": "网页来源",
   "Supporting passages": "支持段落",
   "Quote {number}": "引文 {number}",
+  "{number} Quote": "{number} 条引文",
+  "{number} Quotes": "{number} 条引文",
   "Open web source": "打开网页来源",
   "MinerU PDF Parsing": "MinerU PDF 解析",
   "Extract high-quality structured text from PDFs with preserved math formulas, tables, and figures. MinerU dramatically improves how the AI understands your papers.":

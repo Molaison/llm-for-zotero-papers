@@ -14865,18 +14865,19 @@ item-pane-sidenav .llm-persistent-rail-entry[hidden] {
 
 /* Paragraph evidence uses the shared source footer and its accessible popover. */
 .llm-paper-source-icon {
-  width: 14px;
-  height: 14px;
+  width: 1em;
+  height: 1em;
   color: inherit;
 }
 .llm-paper-source-count {
-  font-size: var(--llm-fs-12);
+  font-size: inherit;
   font-variant-numeric: tabular-nums;
   line-height: 1;
   white-space: nowrap;
 }
 .llm-paper-source-indicator {
   margin-inline-start: 4px;
+  vertical-align: baseline;
 }
 .llm-paper-source-popover {
   gap: 0;
@@ -14929,13 +14930,15 @@ item-pane-sidenav .llm-persistent-rail-entry[hidden] {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 5px;
+  gap: 0.25em;
+  font: inherit;
+  font-size: 0.75em;
+  line-height: 1;
   width: auto;
-  min-width: 34px;
-  height: 24px;
-  padding: 0 9px;
+  height: 1.25em;
+  padding: 0 0.4em;
   border: 1px solid var(--stroke-secondary, var(--llm-popup-surface-border));
-  border-radius: 12px;
+  border-radius: 999px;
   background: color-mix(in srgb, var(--fill-secondary) 8%, transparent);
 }
 .llm-paper-source-indicator .llm-web-source-chip:hover,
