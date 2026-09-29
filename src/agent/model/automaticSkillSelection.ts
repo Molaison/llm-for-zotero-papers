@@ -1,3 +1,4 @@
+import { isSinglePaperConversation } from "../context/requestTurnPaperScope";
 import { callUtilityLLM } from "../../utils/utilityLLM";
 import type { AgentRuntimeRequest } from "../types";
 import type { AgentSkill } from "../skills/skillLoader";
@@ -20,6 +21,8 @@ export async function selectAutomaticSkills(
   signal?: AbortSignal,
   call: typeof callUtilityLLM = callUtilityLLM,
 ): Promise<AutomaticSkillSelection> {
+  if (isSinglePaperConversation(request))
+    return { skillIds: [], status: "selected" };
   const candidates = skills.filter(
     (skill) =>
       skill.activation !== "manual" &&

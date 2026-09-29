@@ -14834,3 +14834,89 @@ item-pane-sidenav .llm-persistent-rail-entry[hidden] {
 :root[data-llm-pane-view="stacked"] .llm-docked-title-row {
   display: none;
 }
+
+/* Paragraph evidence uses the shared source footer and its accessible popover. */
+.llm-paper-source-icon {
+  width: 14px;
+  height: 14px;
+  color: inherit;
+}
+.llm-paper-source-count {
+  font-size: var(--llm-fs-12);
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  white-space: nowrap;
+}
+.llm-paper-source-indicator {
+  margin-inline-start: 4px;
+}
+.llm-paper-source-popover {
+  gap: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--llm-popup-surface-border, rgba(128, 128, 128, 0.3));
+  border-radius: 9px;
+  font-size: var(--llm-fs-12);
+  line-height: 1.55;
+}
+.llm-paper-source-title {
+  margin-bottom: 10px;
+  font-weight: 500;
+}
+.llm-paper-source-passage {
+  flex: 0 0 auto;
+}
+.llm-paper-source-passage + .llm-paper-source-passage {
+  margin-top: 12px;
+}
+.llm-paper-source-heading {
+  display: block;
+  color: var(--fill-secondary);
+  margin-bottom: 4px;
+}
+.llm-paper-source-popover .llm-quote-card {
+  margin: 0;
+  border-radius: 0;
+  background: transparent;
+  font-size: inherit;
+}
+.llm-paper-source-popover .llm-quote-card-content {
+  padding: 0;
+}
+.llm-paper-source-popover .llm-quote-card-preview {
+  display: none;
+}
+.llm-paper-source-popover .llm-quote-card-body {
+  display: block;
+  border-left: 2px solid
+    var(--llm-popup-surface-border, rgba(128, 128, 128, 0.3));
+  color: var(--fill-primary);
+  font-style: normal;
+  line-height: inherit;
+}
+.llm-paper-source-popover .llm-quote-card-citation {
+  padding: 4px 0 0 12px;
+}
+
+.llm-paper-source-indicator .llm-web-source-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  width: auto;
+  min-width: 34px;
+  height: 24px;
+  padding: 0 9px;
+  border: 1px solid var(--stroke-secondary, var(--llm-popup-surface-border));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--fill-secondary) 8%, transparent);
+}
+.llm-paper-source-indicator .llm-web-source-chip:hover,
+.llm-paper-source-indicator .llm-web-source-chip:focus-visible,
+.llm-paper-source-indicator.expanded .llm-web-source-chip {
+  border-color: var(--fill-secondary);
+  color: var(--fill-secondary);
+  background: color-mix(in srgb, var(--fill-secondary) 12%, transparent);
+}
+.llm-paper-source-indicator .llm-web-source-chip:focus-visible {
+  outline-color: currentColor;
+}

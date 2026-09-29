@@ -2443,7 +2443,10 @@ describe("Codex app-server native client", function () {
     assert.include(manifest, "facts or actions absent from context");
     assert.include(manifest, PAPER_CITATION_CONTRACT);
     assert.equal(manifest.split(PAPER_CITATION_CONTRACT).length - 1, 1);
-    assert.include(manifest, "verified quote anchors like [[quote:Q_x7a2]]");
+    assert.include(
+      manifest,
+      "cite supporting passages at paragraph ends with [[cite:Q_x7a2]]",
+    );
     assert.include(
       manifest,
       "Do not call additional tools solely to discover quotes or page numbers",

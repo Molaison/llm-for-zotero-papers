@@ -1,3 +1,4 @@
+import { paragraphCitationIds } from "./paragraphCitations";
 import type { QuoteCitation } from "../../shared/types";
 import { tokenizeRetrievalText } from "../retrieval/retrievalTokenizer";
 import { buildQuoteCitation } from "./quoteCitations";
@@ -291,11 +292,15 @@ export function reanchorQuoteCitationsToClaims(params: {
   quoteCitations: readonly QuoteCitation[];
   passageTextByCitationId: ReadonlyMap<string, string>;
 }): { quoteCitations: QuoteCitation[]; decisions: ClaimAnchorDecision[] } {
+  const paragraphIds = paragraphCitationIds(params.text);
   const claims = extractClaimSentences(params.text);
   const cited = citedTokenIds(params.text);
   const decisions: ClaimAnchorDecision[] = [];
   const quoteCitations = params.quoteCitations.map(
     (citation): QuoteCitation => {
+      // Paragraph footers disclose the exact source passage the model chose.
+      // A separate quote card must not silently change that shared evidence.
+      if (paragraphIds.has(citation.id)) return citation;
       const claim = claims.get(citation.id);
       const passage = params.passageTextByCitationId.get(citation.id);
       if (!claim) {

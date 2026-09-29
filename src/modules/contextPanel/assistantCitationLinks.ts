@@ -1,3 +1,7 @@
+import { t } from "../../utils/i18n";
+import { createSourcePopover } from "./sourcePopover";
+import { createContextIcon } from "./contextIcons";
+import { PARAGRAPH_CITATION_TOKEN_PATTERN } from "./quoteRenderPlan";
 import { appLogger } from "../../core/logging";
 import { setStatus } from "./textUtils";
 import { sanitizeText } from "../../utils/textSanitization";
@@ -342,6 +346,7 @@ export const INLINE_CITATION_SKIP_SELECTOR = [
   ".llm-citation-icon",
   ".llm-quote-citation-anchor",
   ".llm-quote-card",
+  ".llm-paper-source-indicator",
 ].join(", ");
 
 const INLINE_CITATION_PATTERN =
@@ -4690,6 +4695,68 @@ function createFallbackQuoteCardElement(params: {
   });
 }
 
+function createParagraphCitationFooter(params: {
+  ownerDoc: Document;
+  body: Element;
+  panelItem: Zotero.Item;
+  candidates: AssistantCitationPaperCandidate[];
+  citations: QuoteCitation[];
+}): HTMLElement {
+  const icon = createContextIcon(
+    params.ownerDoc,
+    "text",
+    "llm-paper-source-icon",
+  );
+  const count = params.ownerDoc.createElement("span");
+  count.className = "llm-paper-source-count";
+  count.textContent = t("Quote {number}").replace(
+    "{number}",
+    String(params.citations.length),
+  );
+  const content = params.ownerDoc.createDocumentFragment();
+  content.append(icon, count);
+  const footer = createSourcePopover(params.ownerDoc, {
+    label: `${count.textContent}: ${t("Supporting passages")}`,
+    icon: content,
+    populate: (popover) => {
+      popover.classList.add("llm-paper-source-popover");
+      const title = params.ownerDoc.createElement("div");
+      title.className = "llm-paper-source-title";
+      title.textContent = t("Supporting passages");
+      popover.appendChild(title);
+      for (const [index, citation] of params.citations.entries()) {
+        const row = params.ownerDoc.createElement("div");
+        row.className = "llm-paper-source-passage";
+        const heading = params.ownerDoc.createElement("span");
+        heading.className = "llm-paper-source-heading";
+        heading.textContent = t("Quote {number}").replace(
+          "{number}",
+          String(index + 1),
+        );
+        const sectionLabel = sanitizeText(
+          citation.sourceSectionLabel || "",
+        ).trim();
+        if (sectionLabel) heading.append(` · ${sectionLabel}`);
+        const card = createQuoteCitationAnchorElement({
+          ...params,
+          quoteCitation: citation,
+        });
+        // The passage is already inside a disclosure; show it without another toggle.
+        quoteCardExpansionControls.get(card)?.(true);
+        card.dataset.quoteInteractive = "false";
+        const content = card.querySelector(".llm-quote-card-content");
+        content?.removeAttribute("role");
+        content?.removeAttribute("tabindex");
+        content?.removeAttribute("aria-expanded");
+        row.append(heading, card);
+        popover.appendChild(row);
+      }
+    },
+  });
+  footer.classList.add("llm-paper-source-indicator");
+  return footer;
+}
+
 function createQuoteCitationAnchorElement(params: {
   ownerDoc: Document;
   body: Element;
@@ -4974,12 +5041,16 @@ export function renderQuoteCitationPlaceholders(params: {
 }): void {
   const display = getMessageQuoteDisplay(params.assistantMessage);
   const plan = buildQuoteRenderPlan(display);
+  const hasParagraphCitation = /LLMPAPERCITE\d+END/.test(
+    params.bubble.textContent || "",
+  );
   QUOTE_RENDER_OCCURRENCE_PATTERN.lastIndex = 0;
   const hasQuoteOccurrence = QUOTE_RENDER_OCCURRENCE_PATTERN.test(
     params.bubble.textContent || "",
   );
   QUOTE_RENDER_OCCURRENCE_PATTERN.lastIndex = 0;
   if (
+    !hasParagraphCitation &&
     !hasQuoteOccurrence &&
     !textContainsQuoteCitationPlaceholder(params.bubble.textContent || "")
   ) {
@@ -5015,7 +5086,11 @@ export function renderQuoteCitationPlaceholders(params: {
       QUOTE_RENDER_OCCURRENCE_PATTERN.lastIndex = 0;
       const hasOccurrence = QUOTE_RENDER_OCCURRENCE_PATTERN.test(text);
       QUOTE_RENDER_OCCURRENCE_PATTERN.lastIndex = 0;
-      if (hasOccurrence || textContainsQuoteCitationPlaceholder(text)) {
+      if (
+        hasOccurrence ||
+        /LLMPAPERCITE\d+END/.test(text) ||
+        textContainsQuoteCitationPlaceholder(text)
+      ) {
         targets.push(textNode);
       }
       return;
@@ -5026,6 +5101,7 @@ export function renderQuoteCitationPlaceholders(params: {
   };
   walk(params.bubble);
 
+  const paragraphSources = new Map<HTMLElement, QuoteCitation[]>();
   for (const textNode of targets) {
     const text = textNode.nodeValue || "";
     QUOTE_RENDER_OCCURRENCE_PATTERN.lastIndex = 0;
@@ -5036,10 +5112,24 @@ export function renderQuoteCitationPlaceholders(params: {
     QUOTE_CITATION_PATTERN.lastIndex = 0;
     const matches = Array.from(text.matchAll(QUOTE_CITATION_PATTERN));
     QUOTE_CITATION_PATTERN.lastIndex = 0;
-    if (!occurrenceMatches.length && !matches.length) continue;
+    const paragraphMatches = Array.from(
+      text.matchAll(PARAGRAPH_CITATION_TOKEN_PATTERN),
+    );
+    if (
+      !occurrenceMatches.length &&
+      !matches.length &&
+      !paragraphMatches.length
+    )
+      continue;
     const fragment = ownerDoc.createDocumentFragment();
     let cursor = 0;
     const allMatches = [
+      ...paragraphMatches.map((match) => ({
+        kind: "paragraph" as const,
+        index: match.index || 0,
+        token: match[0],
+        id: match[1],
+      })),
       ...occurrenceMatches.map((match) => ({
         kind: "occurrence" as const,
         index: match.index || 0,
@@ -5061,7 +5151,20 @@ export function renderQuoteCitationPlaceholders(params: {
           ownerDoc.createTextNode(text.slice(cursor, start)),
         );
       }
-      if (match.kind === "occurrence") {
+      if (match.kind === "paragraph") {
+        const citations = plan.paragraphCitations[Number(match.id)] || [];
+        const container =
+          textNode.parentElement?.closest<HTMLElement>("p, li, td, th") ||
+          textNode.parentElement;
+        if (container && citations.length) {
+          const held = paragraphSources.get(container) || [];
+          const ids = new Set(held.map((citation) => citation.id));
+          paragraphSources.set(container, [
+            ...held,
+            ...citations.filter((citation) => !ids.has(citation.id)),
+          ]);
+        }
+      } else if (match.kind === "occurrence") {
         const occurrence = occurrencesById.get(match.id);
         if (occurrence) {
           fragment.appendChild(
@@ -5104,6 +5207,7 @@ export function renderQuoteCitationPlaceholders(params: {
       parent?.tagName.toLowerCase() === "p" &&
       parent.childNodes.length === 1 &&
       allMatches.length === 1 &&
+      allMatches[0].kind !== "paragraph" &&
       trimmed === allMatches[0].token
     ) {
       parent.replaceWith(fragment);
@@ -5113,6 +5217,17 @@ export function renderQuoteCitationPlaceholders(params: {
         liftQuoteCardsOutOfParagraph(parent);
       }
     }
+  }
+  for (const [container, citations] of paragraphSources) {
+    container.appendChild(
+      createParagraphCitationFooter({
+        ownerDoc,
+        body: params.body,
+        panelItem: params.panelItem,
+        candidates,
+        citations,
+      }),
+    );
   }
 }
 

@@ -147,7 +147,7 @@ const OBSOLETE_SKILL_IDS = new Set([
 const BUILTIN_BOOTSTRAP_RAW_HASHES: Partial<
   Record<string, ReadonlyArray<string>>
 > = {
-  "library-analysis.md": ["ftq8b2"],
+  "library-analysis.md": ["ftq8b2", "qttubn", "i2f8xa"],
   "compare-papers.md": [
     "i0j6yq",
     "1yreksb",
@@ -159,9 +159,11 @@ const BUILTIN_BOOTSTRAP_RAW_HASHES: Partial<
     "1w3ytrp",
     "1krlubq",
     "6upxur",
+    "qs8z4b",
+    "ulypcf",
   ],
-  "analyze-figures.md": ["msvqtf", "17o1bpl"],
-  "simple-paper-qa.md": ["yu43tj", "1r2ban6", "1181x3a"],
+  "analyze-figures.md": ["msvqtf", "17o1bpl", "gdr4uu", "1kjl8up"],
+  "simple-paper-qa.md": ["yu43tj", "1r2ban6", "1181x3a", "12lfm6n", "13ehjz6"],
   "evidence-based-qa.md": [
     "en0khz",
     "vyeyap",
@@ -173,10 +175,19 @@ const BUILTIN_BOOTSTRAP_RAW_HASHES: Partial<
     "1k39b46",
     "1xglfq0",
     "qdqcm0",
+    "90zxig",
+    "5iibf",
   ],
-  "write-note.md": ["172xn8t", "nvca0f"],
-  "literature-review.md": ["kbrknh", "nxpr5d", "1cnjf9i", "3tk61l"],
-  "import-cited-reference.md": ["19bomz1"],
+  "write-note.md": ["172xn8t", "nvca0f", "17lvl1z", "u1ej3e"],
+  "literature-review.md": [
+    "kbrknh",
+    "nxpr5d",
+    "1cnjf9i",
+    "3tk61l",
+    "1ptwzpw",
+    "pefrjt",
+  ],
+  "import-cited-reference.md": ["19bomz1", "e9tjej", "145es7h"],
 };
 
 const BUILTIN_BOOTSTRAP_BODY_HASHES: Partial<
@@ -192,6 +203,7 @@ const BUILTIN_BOOTSTRAP_BODY_HASHES: Partial<
     "6r67g8",
     "1j5fq18",
     "1t8gyg9",
+    "7cp6rj",
   ],
   "evidence-based-qa.md": [
     "41yh3d",
@@ -202,6 +214,7 @@ const BUILTIN_BOOTSTRAP_BODY_HASHES: Partial<
     "bgr2hf",
     "zjwar9",
     "49orr",
+    "13yvvl6",
   ],
 };
 

@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import { assert } from "chai";
 import { AGENT_PERSONA_INSTRUCTIONS } from "../src/agent/model/agentPersona";
 import { buildInstructionInventory } from "../src/agent/model/instructionInventory";
@@ -11,57 +10,14 @@ import {
 } from "../src/shared/instructionContracts";
 import { DEFAULT_SYSTEM_PROMPT } from "../src/utils/llmDefaults";
 import { estimateTextTokens } from "../src/utils/modelInputCap";
-
-const STOCK_SKILL_WORKFLOW_MARKERS: Record<string, string[]> = {
-  "analyze-figures.md": [
-    "direct tool loop",
-    "When crop extraction fails",
-    "Requested persistence",
-  ],
-  "compare-papers.md": [
-    "targeted first when the dimension is known",
-    "selected-paper evidence ledger",
-    "coverage frontier",
-  ],
-  "evidence-based-qa.md": [
-    "scoped acquisition, then answer",
-    "Targeted retrieval",
-    "Use the evidence frontier rather than a call count",
-  ],
-  "import-cited-reference.md": [
-    "Identify what the user gave you",
-    "Reading the references section from a paper",
-    "Resolving DOIs",
-  ],
-  "library-analysis.md": [
-    "### Strategy",
-    'Example: "give me an overview of my library"',
-    "Zotero.Items.getAll",
-  ],
-  "literature-review.md": [
-    "central ResearchPolicy owns capacity measurement",
-    "one durable paper understanding for every item",
-    "Finish with `submit_document`",
-  ],
-  "simple-paper-qa.md": [
-    "Follow `paperEvidenceProgress`",
-    "contentStatus:'no_pdf_attachment'",
-    "contentStatus:'no_extractable_pdf_text'",
-  ],
-  "write-note.md": [
-    "## Note template",
-    "Checklist before writing the note",
-    "host exports verified assets",
-    "USER CUSTOMIZATIONS COME FIRST",
-  ],
-};
-
-function readSkill(filename: string): string {
-  return readFileSync(
-    new URL(`../src/agent/skills/${filename}`, import.meta.url),
-    "utf8",
-  );
-}
+import {
+  BUILTIN_SKILL_FILES,
+  getAllSkills,
+  parseSkill,
+  setUserSkills,
+} from "../src/agent/skills";
+import { buildAgentInitialMessages } from "../src/agent/model/messageBuilder";
+import { resolvedAgentRequest } from "./helpers/resolvedAgentRequest";
 
 describe("instruction harness inventory", function () {
   it("requires a numerical grounding check across the shared research routes", function () {
@@ -141,15 +97,60 @@ describe("instruction harness inventory", function () {
     );
   });
 
-  it("preserves stock skill workflows without imposing a size ceiling", function () {
-    for (const [filename, markers] of Object.entries(
-      STOCK_SKILL_WORKFLOW_MARKERS,
-    )) {
-      const skill = readSkill(filename);
-      assert.isAbove(estimateTextTokens(skill), 0, `${filename} is empty`);
-      for (const marker of markers) {
-        assert.include(skill, marker, `${filename} lost ${marker}`);
+  it("keeps default skill bodies below half the previous instruction budget", function () {
+    const bodies = Object.values(BUILTIN_SKILL_FILES).map(
+      (raw) => parseSkill(raw).instruction,
+    );
+    const previousBodyTokens = 10355;
+    assert.isBelow(
+      bodies.reduce((total, body) => total + estimateTextTokens(body), 0),
+      previousBodyTokens / 2,
+    );
+  });
+
+  it("sends complete selected guidance without loading other skill bodies", async function () {
+    const previous = getAllSkills();
+    const skills = Object.values(BUILTIN_SKILL_FILES).map(parseSkill);
+    setUserSkills(skills);
+    try {
+      for (const ids of [
+        [],
+        ["write-note"],
+        ["write-note", "analyze-figures"],
+        ["literature-review"],
+      ]) {
+        let skillTokens = 0;
+        const messages = await buildAgentInitialMessages(
+          resolvedAgentRequest({
+            conversationKey: 918271,
+            mode: "agent",
+            libraryID: 1,
+            model: "test-model",
+            userText: "Use the supplied evidence",
+            conversationKind: "global",
+          }),
+          [],
+          ids,
+          undefined,
+          {
+            onInstructionInventory: (inventory) => {
+              skillTokens = inventory.matchedSkillTokens;
+            },
+          },
+        );
+        const text = messages.map((message) => message.content).join("\n");
+        for (const skill of skills) {
+          assert.equal(
+            text.includes(skill.instruction),
+            ids.includes(skill.id),
+            skill.id,
+          );
+        }
+        if (ids.length) assert.isAbove(skillTokens, 0);
+        else assert.equal(skillTokens, 0);
       }
+    } finally {
+      setUserSkills(previous);
     }
   });
 

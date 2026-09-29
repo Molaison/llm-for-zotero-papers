@@ -7,6 +7,7 @@
  * reading of the caches.
  */
 import { appLogger } from "../../../core/logging";
+import { paragraphCitationIds } from "../../../services/quotes/paragraphCitations";
 import type { AgentRuntimeRequestInput as AgentRuntimeRequest } from "../../../agent/types";
 import {
   getActiveReaderForSelectedTab,
@@ -446,6 +447,7 @@ export function registeredQuoteCitationsForReview(
       (match) => match[1],
     ),
   );
+  for (const id of paragraphCitationIds(markdown)) anchoredIds.add(id);
   return (quoteCitations || []).filter(
     (citation) =>
       anchoredIds.has(citation.id) ||

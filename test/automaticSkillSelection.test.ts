@@ -20,6 +20,9 @@ const request = resolveAgentRuntimeRequest({
   mode: "agent",
   userText: "Put the experimental diagram into my reading notes",
   selectedPaperContexts: [{ itemId: 1, contextItemId: 2, title: "Paper" }],
+  selectedCollectionContexts: [
+    { libraryID: 1, collectionId: 3, name: "Research" },
+  ],
   model: "test",
   apiKey: "fixture",
   apiBase: "https://example.invalid",

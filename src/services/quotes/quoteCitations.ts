@@ -1,3 +1,7 @@
+import {
+  paragraphCitationIds,
+  normalizeParagraphCitations,
+} from "./paragraphCitations";
 import type {
   PaperContextRef,
   QuoteCitation,
@@ -1165,6 +1169,7 @@ export function selectUsedQuoteCitations(input: {
     Array.from(text.matchAll(QUOTE_CITATION_PATTERN)).map((match) => match[1]),
   );
   QUOTE_CITATION_PATTERN.lastIndex = 0;
+  for (const id of paragraphCitationIds(text)) referencedIds.add(id);
   const blockquoteTexts = collectBlockquoteTextsForMatch(text);
   return citations.filter(
     (citation) =>
@@ -4308,8 +4313,11 @@ function* finalizeAssistantQuoteCitationSteps(
       sanitizeSourceBackedBlocks: !params.quoteSourceReview,
     },
   );
-  const cleanedMarkdown = cleanupRemovedMetadataQuoteArtifacts(
-    cleanupEmptyCitationParentheticals(finalizedMarkdown),
+  const cleanedMarkdown = normalizeParagraphCitations(
+    cleanupRemovedMetadataQuoteArtifacts(
+      cleanupEmptyCitationParentheticals(finalizedMarkdown),
+    ),
+    new Set(quoteCitations.map((citation) => citation.id)),
   );
   QUOTE_CITATION_PATTERN.lastIndex = 0;
   const referencedCitationIds = new Set(
@@ -4318,6 +4326,8 @@ function* finalizeAssistantQuoteCitationSteps(
     ),
   );
   QUOTE_CITATION_PATTERN.lastIndex = 0;
+  for (const id of paragraphCitationIds(cleanedMarkdown))
+    referencedCitationIds.add(id);
   return {
     markdown: cleanedMarkdown,
     quoteCitations: filterMetadataQuoteCitations(
@@ -4382,7 +4392,8 @@ export function buildQuoteAnchorPromptBlock(
   if (!normalized.length) return [];
   const lines = [
     "Verified quote anchors:",
-    "- Use a quote anchor only when exact wording is useful for the answer; otherwise cite the paper in normal prose.",
+    "- At the end of an explanatory paragraph, use [[cite:ID]] or [[cite:ID1,ID2]] for the exact passages supporting its claims. The app shows a small source footer with the original passages and PDF links. Cite at paragraph boundaries, not after every sentence.",
+    "- Use [[quote:ID]] on its own line only to recommend a passage the reader should read to address the question, or when showing exact wording helps. Avoid displaying the same passage as a card merely because it backs a paragraph.",
     "- When you need to include one of these exact quotes, write only the matching token, e.g. [[quote:Q_x7a2]].",
     "- Do not manually copy the quote or sourceLabel when a quote anchor is available; the app will render the quote and clickable citation.",
     "- Quote text is provenance-locked source text: never translate or paraphrase it to match the user's language.",
@@ -4396,7 +4407,7 @@ export function buildQuoteAnchorPromptBlock(
       `- Quote anchor ${citation.id}:`,
       `  quoteText: ${jsonEscape(truncateForPrompt(citation.quoteText))}`,
       `  sourceLabel: ${jsonEscape(citation.citationLabel)}`,
-      `  To include this quote, write: [[quote:${citation.id}]]`,
+      `  Paragraph support: [[cite:${citation.id}]]. Reading recommendation: [[quote:${citation.id}]].`,
     );
   }
   return lines;

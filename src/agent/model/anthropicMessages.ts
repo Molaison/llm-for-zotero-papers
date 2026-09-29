@@ -407,10 +407,17 @@ function buildAnthropicSystemPayload(
   }
   const stableIndex = findLastStableSystemBlockIndex(blocks);
   const targetIndex = stableIndex >= 0 ? stableIndex : blocks.length - 1;
+  // Keep the first paper reusable when later papers or resource refs change.
+  // At most two system breakpoints leave room for tools and conversation caching.
+  const firstStableIndex = blocks.findIndex(
+    (block) => block.cachePolicy === "stable-prefix",
+  );
   return blocks.map((block, index) => ({
     type: "text",
     text: block.text,
-    ...(index === targetIndex ? { cache_control: cacheControl } : {}),
+    ...(index === targetIndex || index === firstStableIndex
+      ? { cache_control: cacheControl }
+      : {}),
   }));
 }
 

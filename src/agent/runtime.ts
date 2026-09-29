@@ -26,13 +26,17 @@ import {
 } from "./context/coverageLedger";
 import { validateLocalPdfDocumentBatch } from "./context/localDocumentBatch";
 import { PaperEvidenceFrontier } from "./context/paperEvidenceFrontier";
+import { preparePaperPromptContext } from "./context/paperPromptContext";
 import { PassageCitationCollector } from "./context/passageCitationCollector";
 import {
   AgentPromptBudgetError,
   enforceAgentPromptBudget,
   resolveAgentPromptBudgetLimits,
 } from "./context/promptBudget";
-import { getTurnPapersWithRoles } from "./context/requestTurnPaperScope";
+import {
+  getTurnPapersWithRoles,
+  isSinglePaperConversation,
+} from "./context/requestTurnPaperScope";
 import {
   resolveAgentRuntimeRequest,
   type AgentRequestPaperContextResolver,
@@ -641,9 +645,10 @@ export class AgentRuntime {
         request.classifiedIntent = undefined;
         request.skillRoutingReceipt = undefined;
         const started = this.now();
-        const selected = adapter.supportsTools(request)
-          ? await this.skillSelector(request, getAllSkills(), params.signal)
-          : { skillIds: [], status: "selected" as const };
+        const selected =
+          adapter.supportsTools(request) && !isSinglePaperConversation(request)
+            ? await this.skillSelector(request, getAllSkills(), params.signal)
+            : { skillIds: [], status: "selected" as const };
         if (adapter.supportsTools(request))
           await emit({
             type: "provider_event",
@@ -722,6 +727,13 @@ export class AgentRuntime {
         request,
       });
       const resourceContextPlan = buildAgentResourceContextPlan(request);
+      resourceContextPlan.paperContext = await preparePaperPromptContext(
+        request,
+        { signal: params.signal },
+      );
+      passageCitations.collect({
+        quoteCitations: resourceContextPlan.paperContext.quoteCitations,
+      });
       context.resourceSignature = resourceContextPlan.resourceSignature;
       request.contextCache = resourceContextPlan.contextCache;
       const paperEvidenceFrontier = new PaperEvidenceFrontier({

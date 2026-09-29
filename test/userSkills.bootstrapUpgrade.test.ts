@@ -3,6 +3,7 @@ import { assert } from "chai";
 import { BUILTIN_SKILL_FILES } from "../src/agent/skills";
 import { patchSkillFrontmatter } from "../src/agent/skills/frontmatterPatcher";
 import {
+  extractManagedBlock,
   hashSkillForUpgrade,
   spliceManagedBlock,
 } from "../src/agent/skills/managedBlock";
@@ -373,21 +374,66 @@ describe("user skill bootstrap upgrades", function () {
 
     const canonicalWriteNote = files[writeNotePath];
     assert.notInclude(canonicalWriteNote, "OLD MANAGED CONTENT");
-    assert.include(
-      canonicalWriteNote,
-      "USER CUSTOMIZATIONS COME FIRST among formatting defaults.",
+    assert.equal(
+      extractManagedBlock(canonicalWriteNote).block,
+      extractManagedBlock(shipped).block,
     );
     assert.include(canonicalWriteNote, "## Your customizations");
     assert.include(
       canonicalWriteNote,
       "Path pattern: `{papertitle}/{papertitle}.md`",
     );
-    // Version 15 also preserves narrow figure-only note requests.
-    assert.equal(parseSkill(canonicalWriteNote).version, 15);
-    assert.include(canonicalWriteNote, "narrowly scoped note");
-    assert.include(canonicalWriteNote, "`sourceMessageId`");
-    assert.include(canonicalWriteNote, "returned `documentId`");
+    assert.equal(
+      parseSkill(canonicalWriteNote).version,
+      parseSkill(shipped).version,
+    );
   });
+
+  for (const [name, version] of [
+    ["compare-papers", 7],
+    ["evidence-based-qa", 8],
+  ] as const) {
+    for (const mode of ["tracked", "untracked-native", "customized"] as const) {
+      it(`preserves upgrade ownership for ${name} (${mode})`, async function () {
+        const baseDir = `/tmp/llm-for-zotero-skill-upgrade-${name}-${mode}`;
+        const raw = readFileSync(
+          new URL(
+            `./fixtures/skillUpgrade/${name}-v${version}.md`,
+            import.meta.url,
+          ),
+          "utf8",
+        );
+        const files: Record<string, string> = {};
+        const prefs = new Map<string, string>();
+        installMockSkillEnvironment(baseDir, files, prefs);
+        const filePath = getCanonicalSkillFilePath(name);
+        const native = raw.replace("---\n", `---\nname: ${name}\n`);
+        files[filePath] =
+          mode === "customized"
+            ? native + "\nKeep my private research workflow.\n"
+            : native;
+        if (mode !== "untracked-native") {
+          prefs.set(
+            BODY_HASH_PREF_KEY,
+            JSON.stringify({
+              [`${name}.md`]: hashSkillForUpgrade(
+                raw,
+                parseSkill(raw).instruction,
+              ),
+            }),
+          );
+        }
+        const before = parseSkill(files[filePath]).instruction;
+        await initUserSkills();
+        assert.equal(
+          parseSkill(files[filePath]).instruction,
+          mode === "customized"
+            ? before
+            : parseSkill(BUILTIN_SKILL_FILES[`${name}.md`]).instruction,
+        );
+      });
+    }
+  }
 
   it("migrates declarative supersession without replacing legacy match metadata", function () {
     const old = BUILTIN_SKILL_FILES["evidence-based-qa.md"]
@@ -420,8 +466,10 @@ describe("user skill bootstrap upgrades", function () {
       const filePath = getCanonicalSkillFilePath(name);
       files[filePath] = raw;
       await initUserSkills();
-      assert.equal(parseSkill(files[filePath]).version, version + 1);
-      assert.include(files[filePath], "supplied text");
+      assert.equal(
+        parseSkill(files[filePath]).instruction,
+        parseSkill(BUILTIN_SKILL_FILES[`${name}.md`]).instruction,
+      );
     });
     it(`upgrades the tracked untouched baseline ${name} body`, async function () {
       const baseDir = `/tmp/llm-for-zotero-tracked-${name}-upgrade`;

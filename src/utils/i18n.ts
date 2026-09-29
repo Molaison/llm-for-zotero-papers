@@ -429,6 +429,8 @@ const zhCN: Record<string, string> = {
     "Tavily 暂时不可用。请稍后重试。",
   "View web sources": "查看网页来源",
   "Web sources": "网页来源",
+  "Supporting passages": "支持段落",
+  "Quote {number}": "引文 {number}",
   "Open web source": "打开网页来源",
   "MinerU PDF Parsing": "MinerU PDF 解析",
   "Extract high-quality structured text from PDFs with preserved math formulas, tables, and figures. MinerU dramatically improves how the AI understands your papers.":

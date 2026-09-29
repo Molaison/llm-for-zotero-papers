@@ -179,7 +179,7 @@ describe("Codex native skills", function () {
     assert.deepEqual(resolved.matchedSkillIds, ["compare-papers"]);
     assert.include(
       resolved.instructionBlock,
-      "A selected Zotero collection/folder is also a valid comparison corpus",
+      parseSkill(BUILTIN_SKILL_FILES["compare-papers.md"]).instruction,
     );
   });
 
@@ -210,9 +210,8 @@ describe("Codex native skills", function () {
     assert.deepEqual(resolved.matchedSkillIds, ["evidence-based-qa"]);
     assert.include(
       resolved.instructionBlock,
-      "For a selected collection/folder or whole-library evidence question",
+      parseSkill(BUILTIN_SKILL_FILES["evidence-based-qa.md"]).instruction,
     );
-    assert.include(resolved.instructionBlock, "for exact presence/absence");
   });
 
   it("builds native request context from scope and UI context", function () {

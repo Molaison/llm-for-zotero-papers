@@ -1,3 +1,4 @@
+import { transformParagraphCitations } from "../../services/quotes/paragraphCitations";
 import type { QuoteCitation } from "../../shared/types";
 import type { Message } from "./types";
 import {
@@ -16,6 +17,8 @@ import {
   parseStandaloneCitationLabel,
 } from "../../services/quotes/citationLabelParser";
 import { resolveQuoteCitationLookupText } from "./quoteNavigationText";
+
+export const PARAGRAPH_CITATION_TOKEN_PATTERN = /LLMPAPERCITE(\d+)END/g;
 
 export const QUOTE_RENDER_OCCURRENCE_PATTERN =
   /\[\[quote-occurrence:([A-Za-z0-9_-]+)\]\]/g;
@@ -69,6 +72,7 @@ export type QuoteRenderPlan = {
   displayMarkdown: string;
   occurrences: QuoteRenderOccurrence[];
   diagnostics: QuoteRenderDiagnostic[];
+  paragraphCitations: QuoteCitation[][];
 };
 
 export type BuildQuoteRenderPlanInput = {
@@ -407,8 +411,20 @@ export function buildQuoteRenderPlan(
     return replaced;
   };
 
+  const paragraphCitations: QuoteCitation[][] = [];
+  const inlineMarkdown = transformParagraphCitations(
+    input.markdown || "",
+    (ids) => {
+      const citations = ids.flatMap((id) =>
+        citationsById.get(id) ? [citationsById.get(id)!] : [],
+      );
+      if (!citations.length) return "";
+      paragraphCitations.push(citations);
+      return `LLMPAPERCITE${paragraphCitations.length - 1}END`;
+    },
+  );
   const markdown = normalizeMarkdownLineEndings(
-    sanitizeInvalidStructuredSourceMarkers(input.markdown || ""),
+    sanitizeInvalidStructuredSourceMarkers(inlineMarkdown || ""),
   );
   const lines = markdown.split("\n");
   const out: string[] = [];
@@ -617,10 +633,14 @@ export function buildQuoteRenderPlan(
   return {
     ...normalizeQuoteRenderOccurrences(out.join("\n"), occurrences),
     diagnostics,
+    paragraphCitations,
   };
 }
 
-export function expandQuoteRenderPlanToMarkdown(plan: QuoteRenderPlan): string {
+export function expandQuoteRenderPlanToMarkdown(
+  plan: QuoteRenderPlan,
+  options: { preserveParagraphCitations?: boolean } = {},
+): string {
   const byId = new Map(
     plan.occurrences.map((occurrence) => [occurrence.occurrenceId, occurrence]),
   );
@@ -638,7 +658,19 @@ export function expandQuoteRenderPlanToMarkdown(plan: QuoteRenderPlan): string {
     },
   );
   QUOTE_RENDER_OCCURRENCE_PATTERN.lastIndex = 0;
-  return expanded;
+  return expanded.replace(
+    PARAGRAPH_CITATION_TOKEN_PATTERN,
+    (_token, index: string) => {
+      const citations = plan.paragraphCitations[Number(index)] || [];
+      if (options.preserveParagraphCitations)
+        return citations.length
+          ? `[[cite:${citations.map((citation) => citation.id).join(",")}]]`
+          : "";
+      return [
+        ...new Set(citations.map((citation) => citation.citationLabel)),
+      ].join("; ");
+    },
+  );
 }
 
 export function buildQuoteDisplayMarkdown(
@@ -649,6 +681,7 @@ export function buildQuoteDisplayMarkdown(
 
 export function buildQuoteExpandedMarkdown(
   input: BuildQuoteRenderPlanInput,
+  options: { preserveParagraphCitations?: boolean } = {},
 ): string {
-  return expandQuoteRenderPlanToMarkdown(buildQuoteRenderPlan(input));
+  return expandQuoteRenderPlanToMarkdown(buildQuoteRenderPlan(input), options);
 }

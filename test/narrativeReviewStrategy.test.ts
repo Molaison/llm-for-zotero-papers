@@ -1,6 +1,4 @@
 import { assert } from "chai";
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { decodePlanContract } from "../src/agent/plans/contracts";
 import {
   resolveAdaptiveReadingBudget,
@@ -114,34 +112,25 @@ describe("narrative literature-review strategy", function () {
     );
   });
 
-  it("teaches the default review skill to understand every paper and reserve screening for systematic reviews", function () {
-    const skillPath = fileURLToPath(
-      new URL("../src/agent/skills/literature-review.md", import.meta.url),
-    );
-    const skill = readFileSync(skillPath, "utf8");
-    assert.include(skill, "read → understand → connect → write");
-    assert.include(skill, "Do not choose a fixed number of papers");
-    assert.include(skill, "Only use formal inclusion/exclusion screening");
-    assert.include(skill, "read one capacity-sized group");
-    assert.include(skill, "immediately persist");
+  it("offers the research execution protocol only inside an approved Plan", async function () {
+    const { createResearchUpdateTool } =
+      await import("../src/agent/tools/plan/researchUpdate");
+    const tool = createResearchUpdateTool({} as never);
+    const ordinary = {} as never;
+    const approved = { planContext: { phase: "executing" } } as never;
+    assert.isFalse(tool.isAvailable!(ordinary));
+    assert.isFalse(tool.guidance!.matches(ordinary));
+    assert.isTrue(tool.isAvailable!(approved));
+    assert.isTrue(tool.guidance!.matches(approved));
     assert.include(
-      skill,
-      "Never accumulate multiple unrecorded reading groups",
-    );
-    assert.include(
-      skill,
-      "When the checkpoint says all papers are durable, do not call inventory_scope again",
+      tool.guidance!.instruction,
+      "immediately record a claim-based node",
     );
     assert.include(
-      skill,
-      "When a checkpoint supplies the remaining manifest, do not call inventory_scope again",
+      tool.guidance!.instruction,
+      "do not call inventory_scope between durable groups",
     );
-    assert.include(skill, "SANRA");
-    assert.include(
-      skill,
-      "`finalize` with `outcome:'complete'`",
-      "finalize needs an explicit outcome; a bare finalize costs a rejected round",
-    );
+    assert.include(tool.guidance!.instruction, "For a systematic review only");
   });
 
   it("names the finalize outcome in the research_update guidance", async function () {

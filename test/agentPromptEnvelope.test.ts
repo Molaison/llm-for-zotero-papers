@@ -847,11 +847,11 @@ describe("agent prompt envelope evidence sufficiency", function () {
     }
   });
 
-  it("explains the answer_now retrieval state in the stable persona", async function () {
+  it("keeps retrieval choices advisory in the stable persona", async function () {
     const messages = await buildAgentInitialMessages(request(false), [], []);
     const prompt = messages.map(messageText).join("\n");
-    assert.include(prompt, "answer_now");
-    assert.include(prompt, "answer_or_self_check");
+    assert.include(prompt, "recommendations are advisory");
+    assert.include(prompt, "freely retrieve missing methods, results");
     assert.notInclude(
       prompt,
       "when unchanged, do not repeat the read and retrieve again only for a specifically named missing dimension",

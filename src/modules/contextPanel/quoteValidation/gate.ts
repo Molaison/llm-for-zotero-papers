@@ -14,6 +14,7 @@ import {
   type QuoteSecondaryEvidence,
 } from "../../../services/quotes/quoteCitations";
 import type { QuoteCitation } from "../../../shared/types";
+import { paragraphCitationIds } from "../../../services/quotes/paragraphCitations";
 import { verifyCompleteQuoteInLivePdfJs } from "../livePdfSelectionLocator";
 import type { Message } from "../types";
 import { buildQuoteExpandedMarkdown } from "../quoteRenderPlan";
@@ -121,10 +122,16 @@ export async function applyAssistantMessageQuoteGate(
     // Registered anchors identify what to review; their own text is never
     // evidence for that review. Expand the same deduplicated occurrences the
     // user sees so bare anchors and handwritten quotes take one path.
-    const reviewMarkdown = buildQuoteExpandedMarkdown({
-      markdown,
-      quoteCitations,
-    });
+    const reviewMarkdown = buildQuoteExpandedMarkdown(
+      { markdown, quoteCitations },
+      { preserveParagraphCitations: true },
+    );
+    // Preserve paragraph source bindings while reviewing the separate cards.
+    // These records never enter the independent evidence sources below.
+    const paragraphIds = paragraphCitationIds(markdown);
+    const paragraphCitations = quoteCitations?.filter((citation) =>
+      paragraphIds.has(citation.id),
+    );
     const independentIndex =
       preparedSourceIndex ||
       (evidenceSignature
@@ -144,6 +151,7 @@ export async function applyAssistantMessageQuoteGate(
       ? await finalizeAssistantQuoteCitationsCooperatively(
           {
             markdown: reviewMarkdown,
+            quoteCitations: paragraphCitations,
             sourceIndex,
             requireBodyEvidenceQuotes,
             quoteSourceReview: {
@@ -155,6 +163,7 @@ export async function applyAssistantMessageQuoteGate(
         )
       : finalizeAssistantQuoteCitations({
           markdown: reviewMarkdown,
+          quoteCitations: paragraphCitations,
           sourceIndex,
           requireBodyEvidenceQuotes,
           quoteSourceReview: {
