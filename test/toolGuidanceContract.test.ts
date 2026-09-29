@@ -399,6 +399,7 @@ describe("tool guidance contracts", function () {
       mentionsTrash: false,
       mentionsAttachment: false,
       mentionsImport: false,
+      mentionsLiteratureSearch: false,
     };
     const chat = (signals: Partial<typeof noSignals>) =>
       ({
@@ -425,6 +426,21 @@ describe("tool guidance contracts", function () {
       ),
     );
     assert.isFalse(guidanceFor("library_import").matches(chat({}), ctx));
+    // Discovery-versus-import rules reach chat on a discovery or import
+    // signal; ordinary paper questions do not carry them.
+    assert.isTrue(
+      guidanceFor("literature_search").matches(
+        chat({ mentionsLiteratureSearch: true }),
+        ctx,
+      ),
+    );
+    assert.isTrue(
+      guidanceFor("literature_search").matches(
+        chat({ mentionsImport: true }),
+        ctx,
+      ),
+    );
+    assert.isFalse(guidanceFor("literature_search").matches(chat({}), ctx));
     // library_update carries the attachment guidance; the attachment signal
     // is the only chat signal that reaches it.
     assert.isTrue(
@@ -454,6 +470,7 @@ describe("tool guidance contracts", function () {
         mentionsTrash: false,
         mentionsAttachment: false,
         mentionsImport: false,
+        mentionsLiteratureSearch: false,
       },
     );
     assert.isTrue(computeUserTextSignals("把回收站里的论文恢复").mentionsTrash);
@@ -470,6 +487,19 @@ describe("tool guidance contracts", function () {
       computeUserTextSignals("restore it from the trash").mentionsTrash,
     );
     assert.isTrue(computeUserTextSignals("import ref 5").mentionsImport);
+    for (const discovery of [
+      "can you find related papers from internet to me",
+      "Recommend five recent studies on grid cells",
+      "search for literature on head-direction cells",
+      "which papers are citing this one?",
+      "帮我找一些相关论文",
+      "推荐几篇关于海马的文献",
+    ]) {
+      assert.isTrue(
+        computeUserTextSignals(discovery).mentionsLiteratureSearch,
+        discovery,
+      );
+    }
     assert.isTrue(
       computeUserTextSignals("rename the attachment").mentionsAttachment,
     );
@@ -478,12 +508,15 @@ describe("tool guidance contracts", function () {
       mentionsTrash: false,
       mentionsAttachment: false,
       mentionsImport: false,
+      mentionsLiteratureSearch: false,
     };
     for (const prose of [
       "Explain the main result.",
       "What is the importance of this finding?",
       "This is an important paper",
       "Emergent properties of the network",
+      "Find the sample size in this paper",
+      "Search this paper for the decoding accuracy",
     ]) {
       assert.deepEqual(computeUserTextSignals(prose), none, prose);
     }

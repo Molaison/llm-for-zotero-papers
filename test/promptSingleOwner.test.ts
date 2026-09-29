@@ -89,6 +89,11 @@ describe("prompt rules have a single owner", function () {
       marker: "papersBodyRead",
       owner: "tool:library_retrieve",
     },
+    {
+      rule: "literature discovery never imports",
+      marker: "discovery never imports",
+      owner: "tool:literature_search",
+    },
   ];
 
   const owners = collectOwnerTexts();

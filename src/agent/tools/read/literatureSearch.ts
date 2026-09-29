@@ -53,14 +53,22 @@ type LiteratureSearchInput = {
   libraryID?: number;
 };
 
+/**
+ * Plan turns carry a classified external-search intent. Ordinary chat turns
+ * carry none, so a cheap user-text signal for paper discovery or import
+ * delivers the discovery-versus-import rules there.
+ */
 export function matchesLiteratureSearchGuidance(
-  request: Pick<AgentRuntimeRequest, "classifiedIntent">,
+  request: Pick<AgentRuntimeRequest, "classifiedIntent" | "userTextSignals">,
 ): boolean {
   const intent = request.classifiedIntent?.externalSearchIntent;
   if (intent !== undefined) {
     return intent === "literature" || intent === "both";
   }
-  return false;
+  const signals = request.userTextSignals;
+  return Boolean(
+    signals && (signals.mentionsLiteratureSearch || signals.mentionsImport),
+  );
 }
 
 export const LITERATURE_SEARCH_GUIDANCE: NonNullable<

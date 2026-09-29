@@ -22,7 +22,7 @@ export function createLiteratureReviewTool(
     spec: {
       name: "literature_review",
       description:
-        "Show a ranked paper-only import-selection card after literature_search. Select the requested number using saved candidate references and evidence-based relevance reasons. Use this card when the user requests selection or review. Ordinary discovery returns ranked results without importing. Explicit import requests use library_import directly instead.",
+        "Present ranked saved candidates for selection without import.",
       executionClass: "read",
       workCategory: "retrieval",
       inputSchema: {

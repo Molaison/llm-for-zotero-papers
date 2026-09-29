@@ -797,7 +797,8 @@ describe("primitive agent tools", function () {
       "Tool descriptions and guidance are the source of truth for how to read papers and search the library.",
     );
     assert.notInclude(systemText, "paperEvidenceProgress");
-    assert.include(systemText, "workflow:'answer'");
+    // Discovery-versus-import rules live in literature_search guidance.
+    assert.notInclude(systemText, "workflow:'answer'");
     assert.include(systemText, "web_search");
     assert.include(systemText, "web_read");
     assert.include(systemText, "Use actual tools for requested effects");

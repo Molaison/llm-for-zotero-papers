@@ -125,8 +125,6 @@ const MODEL_TOOL_DESCRIPTIONS: Readonly<Record<string, string>> = {
     "Read papers by overview, targeted, full, figures, visual, or visible-page mode. For figure crops use mode:figures and figureLabels (e.g. ['Figure 1']); extracts from the source PDF without requiring MinerU. Preserve the active attachment; a sibling PDF's cache is not the same source.",
   literature_search:
     "Search scholarly sources and save candidates; import only on request.",
-  literature_review:
-    "Present ranked saved candidates for selection without import.",
   library_update:
     "Change tags, metadata, memberships, parents, or Related links; kind:'collection' creates, renames, moves, or deletes a collection, kind:'attachment' renames, relinks, or deletes one, kind:'savedSearch' saves or deletes one. A membership move removes its named source.",
   context_read:

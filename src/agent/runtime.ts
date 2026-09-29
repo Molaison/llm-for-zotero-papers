@@ -2527,5 +2527,9 @@ export function computeUserTextSignals(
     mentionsImport: /\bimport(s|ed|ing)?\b|导入|add .* to (my )?library/i.test(
       userText,
     ),
+    mentionsLiteratureSearch:
+      /\b(find|search|look\s+for|recommend|suggest|discover)\b.{0,60}\b(papers|articles|literature|studies|publications|preprints)\b|\brelated\s+(work|papers?|literature|studies)\b|\bcit(ing|ed\s+by)\b|文献|相关论文|推荐.{0,20}论文|(找|搜索|查找).{0,20}论文/i.test(
+        userText,
+      ),
   };
 }
