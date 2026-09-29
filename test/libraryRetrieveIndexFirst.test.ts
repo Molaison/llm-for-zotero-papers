@@ -382,4 +382,64 @@ describe("library retrieve, index first (v2 rules)", function () {
       [4],
     );
   });
+
+  it("windows an index snippet around the matched term deep in its chunk", async function () {
+    const filler = (n: number) =>
+      "Background sentence about other things. ".repeat(n);
+    const head = filler(40).slice(0, 1400);
+    const planted = "Place cells in the hippocampus remap after training.";
+    const text = (head + planted + " " + filler(20)).slice(0, 2000);
+    const termAt = text.indexOf("hippocampus");
+    assert.isAtLeast(termAt, 1300);
+    const deepHit = {
+      ...hit(11, 10, 5, 1, text),
+      matchedTerms: ["hippocampus"],
+    };
+    const index = fakeIndex(() => ({
+      chunks: [deepHit],
+      papers: [paper(11, 10, 9, 1)],
+    }));
+    const rig = createRetrieveServiceRig({ papers: 1, textIndex: index });
+    const result = await rig.service.retrieve({
+      query: "hippocampus remapping",
+      depth: "evidence",
+    });
+    const snippet = result.snippets.find(
+      (s) => s.itemId === "10" && s.chunkIndex === 5,
+    );
+    assert.isOk(snippet);
+    assert.include(snippet!.snippet, planted);
+    // snippetTextAround: 360 characters either side plus the term and ellipses.
+    assert.isAtMost(
+      snippet!.snippet.length,
+      360 * 2 + "hippocampus".length + 6,
+    );
+    assert.equal(snippet!.matchMethod, "bm25");
+  });
+
+  it("falls back to the query's tokens when a hit carries no matched terms, and to the chunk head when none occur", async function () {
+    const text = `${"Unrelated opening words. ".repeat(60)}The entorhinal grid fires here. ${"Tail words. ".repeat(20)}`;
+    const noTerms = {
+      ...hit(11, 10, 2, 1, text),
+      matchedTerms: [] as string[],
+    };
+    const headOnly = {
+      ...hit(21, 20, 3, 2, `${"Plain words only. ".repeat(80)}`),
+      matchedTerms: [] as string[],
+    };
+    const index = fakeIndex(() => ({
+      chunks: [noTerms, headOnly],
+      papers: [paper(11, 10, 9, 1), paper(21, 20, 8, 2)],
+    }));
+    const rig = createRetrieveServiceRig({ papers: 2, textIndex: index });
+    const result = await rig.service.retrieve({
+      query: "entorhinal grid",
+      depth: "evidence",
+    });
+    const windowed = result.snippets.find((s) => s.itemId === "10");
+    assert.include(windowed!.snippet, "The entorhinal grid fires here.");
+    const head = result.snippets.find((s) => s.itemId === "20");
+    assert.match(head!.snippet, /^Plain words only\./);
+    assert.isAtMost(head!.snippet.length, 900);
+  });
 });

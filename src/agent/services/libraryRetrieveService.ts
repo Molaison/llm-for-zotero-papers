@@ -909,6 +909,29 @@ function snippetTextAround(
   return `${prefix}${text.slice(left, right).replace(/\s+/g, " ").trim()}${suffix}`;
 }
 
+/**
+ * An index chunk's snippet: a window around the earliest occurrence of any
+ * matched term (a chunk head would cut passages deep in the chunk), or the
+ * chunk head when no term occurs, as for zero-score leading chunks.
+ */
+function indexSnippetText(text: string, terms: string[]): string {
+  const lower = text.toLowerCase();
+  let start = -1;
+  let end = -1;
+  for (const term of terms) {
+    const needle = term.trim().toLowerCase();
+    if (!needle) continue;
+    const at = lower.indexOf(needle);
+    if (at >= 0 && (start < 0 || at < start)) {
+      start = at;
+      end = at + needle.length;
+    }
+  }
+  return start >= 0
+    ? snippetTextAround(text, start, end)
+    : truncateText(text, 900);
+}
+
 function truncateText(text: string, maxChars: number): string {
   const normalized = normalizeText(text);
   if (normalized.length <= maxChars) return normalized;
@@ -2123,6 +2146,7 @@ export class LibraryRetrieveService {
             hits,
             maxSnippets,
             preferBodyEvidence,
+            fallbackTerms: input.queryPlan.lexicalTerms,
           });
           // Loaded only when the index actually served text for the paper.
           if (hits.length) record.queryState.add("content_loaded");
@@ -2420,6 +2444,8 @@ export class LibraryRetrieveService {
     hits: IndexedChunkHit[];
     maxSnippets: number;
     preferBodyEvidence: boolean;
+    /** Query tokens to window on when a hit carries no matched terms. */
+    fallbackTerms: string[];
   }): LibraryRetrieveSnippet[] {
     const paperContext = params.record.paperContext;
     if (!paperContext || params.maxSnippets <= 0) return [];
@@ -2452,7 +2478,10 @@ export class LibraryRetrieveService {
         // Same convention as the direct path's BM25 snippets: no
         // charStart/charEnd/pageLabel (exact snippets carry chunk-relative
         // offsets; document offsets from the index would mean something else).
-        snippet: truncateText(hit.text, 900),
+        snippet: indexSnippetText(
+          hit.text,
+          hit.matchedTerms.length ? hit.matchedTerms : params.fallbackTerms,
+        ),
         surroundingText: truncateText(hit.text, 1200),
         score: Number(
           (params.record.score + hit.evidenceScore * 10).toFixed(3),
