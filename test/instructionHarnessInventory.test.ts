@@ -25,8 +25,8 @@ const STOCK_SKILL_WORKFLOW_MARKERS: Record<string, string[]> = {
   ],
   "evidence-based-qa.md": [
     "scoped acquisition, then answer",
-    "Targeted retrieval",
-    "Use the evidence frontier rather than a call count",
+    "Answer from the evidence",
+    "just to decorate the answer",
   ],
   "import-cited-reference.md": [
     "Identify what the user gave you",
@@ -44,9 +44,9 @@ const STOCK_SKILL_WORKFLOW_MARKERS: Record<string, string[]> = {
     "Finish with `submit_document`",
   ],
   "simple-paper-qa.md": [
-    "Follow `paperEvidenceProgress`",
-    "contentStatus:'no_pdf_attachment'",
-    "contentStatus:'no_extractable_pdf_text'",
+    "retrieve evidence, then answer",
+    "clarification of supplied text",
+    "citation anchors",
   ],
   "write-note.md": [
     "## Note template",

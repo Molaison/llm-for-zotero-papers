@@ -22,19 +22,25 @@ import { readOnlyInvocationPlan } from "../../authorization/invocationPlan";
 
 type ToolGuidance = NonNullable<AgentToolDefinition["guidance"]>;
 
+/**
+ * Library-level turns: a global (library) conversation, a selected
+ * collection or tag scope, or no paper in scope at all.
+ */
+export function matchesLibraryLevelTurn(
+  request: Parameters<ToolGuidance["matches"]>[0],
+): boolean {
+  const scope = request.turnPaperScope;
+  if (!scope) return true;
+  return (
+    scope.conversationKind === "global" ||
+    scope.collections.length > 0 ||
+    scope.tags.length > 0 ||
+    scope.papers.length === 0
+  );
+}
+
 export const LIBRARY_SEARCH_GUIDANCE: ToolGuidance = {
-  // Library-level turns: a global (library) conversation, a selected
-  // collection or tag scope, or no paper in scope at all.
-  matches: (request) => {
-    const scope = request.turnPaperScope;
-    if (!scope) return true;
-    return (
-      scope.conversationKind === "global" ||
-      scope.collections.length > 0 ||
-      scope.tags.length > 0 ||
-      scope.papers.length === 0
-    );
-  },
+  matches: matchesLibraryLevelTurn,
   instruction:
     "Use library_search to resolve named library targets. Bounded results supply native identities and metadata; they never grant permission. If a descriptive name still matches several candidates, ask the user instead of guessing." +
     "\n\nFor anything the simple filters cannot express, pass conditions[] — Zotero's own advanced-search vocabulary. Each clause is {condition, operator, value}. Useful conditions: fulltextContent (the PDF text), abstractNote, DOI, ISBN, publisher, publicationTitle, dateAdded, dateModified, note, annotationText, citationKey, retracted, itemType, tag, collection. If a condition and operator do not pair up, the error lists the operators that condition accepts — read it and retry rather than falling back to a plain text search." +

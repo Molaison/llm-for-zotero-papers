@@ -1,4 +1,5 @@
 import type { AgentToolDefinition } from "../../types";
+import { matchesLibraryLevelTurn } from "./librarySearch";
 import {
   LIBRARY_RETRIEVE_DEFAULT_BUDGETS,
   LIBRARY_RETRIEVE_HARD_CAPS,
@@ -158,6 +159,19 @@ export function normalizeLibraryRetrieveArgs(
   return input;
 }
 
+/** The single owner of library-evidence routing and coverage rules. */
+export const LIBRARY_RETRIEVE_GUIDANCE: NonNullable<
+  AgentToolDefinition["guidance"]
+> = {
+  matches: matchesLibraryLevelTurn,
+  instruction: [
+    "Use library_search for catalog discovery, library_read for structured item state, library_retrieve for evidence search and synthesis across a collection or library, and paper_read for close reading known papers.",
+    "For library_retrieve, preserve the returned coverage boundary and use paperMatches plus the synthesis digest as the paper ledger. Query variants improve recall but are not evidence. Do not turn sampled, metadata-only, abstract-only, partial, or unreadable coverage into exhaustive claims.",
+    "For bounded collection or tag synthesis, require body evidence when readable papers are available (coverage papersBodyRead > 0), or answer by naming what is missing. Do not silently substitute titles or abstracts for requested paper-level synthesis.",
+    "If a references or bibliography section follows library_retrieve, either include all planned papers, or label the list as body-evidence references and separately identify metadata or abstract-only papers from the coverage frontier.",
+  ].join("\n"),
+};
+
 export function createLibraryRetrieveTool(
   libraryRetrieveService: LibraryRetrieveService,
 ): AgentToolDefinition<LibraryRetrieveInput, LibraryRetrieveResult> {
@@ -265,6 +279,7 @@ export function createLibraryRetrieveTool(
       workCategory: "retrieval",
       exposure: "model",
     },
+    guidance: LIBRARY_RETRIEVE_GUIDANCE,
     presentation: {
       label: "Retrieve Library",
       summaries: {

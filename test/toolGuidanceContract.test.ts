@@ -86,7 +86,8 @@ describe("tool guidance contracts", function () {
   });
 
   it("keeps library retrieve reference lists aligned with coverage wording", function () {
-    const prompt = AGENT_PERSONA_INSTRUCTIONS.join("\n");
+    const prompt =
+      stubRegistry().getTool("library_retrieve")!.guidance!.instruction;
 
     assert.include(
       prompt,
@@ -244,9 +245,11 @@ describe("tool guidance contracts", function () {
     if (typeof agentPersona !== "string" || typeof fileIoTool !== "string") {
       return;
     }
+    const paperReadGuidance =
+      stubRegistry().getTool("paper_read")!.guidance!.instruction;
     assert.include(
-      agentPersona,
-      "Use paper_read overview for a broad single-paper understanding",
+      paperReadGuidance,
+      "mode:'overview' for a broad single-paper understanding",
     );
     assert.include(
       fileIoTool,
@@ -254,7 +257,10 @@ describe("tool guidance contracts", function () {
     );
     assert.notInclude(agentPersona, "mineruCacheDir}/manifest.json");
     assert.notInclude(agentPersona, "mineruCacheDir}/full.md");
-    assert.include(agentPersona, "figures for extracted figure crops");
+    assert.include(
+      paperReadGuidance,
+      "mode:'figures' for extracted figure crops",
+    );
   });
 
   it("requires extracted PDF crop inspection and note embedding", function () {
@@ -526,13 +532,70 @@ describe("tool guidance contracts", function () {
 });
 
 describe("persona reading strategy contract", function () {
-  it("keeps the collection-scope evidence floor and drops the global answer-immediately rule", function () {
+  it("keeps the collection-scope evidence floor in library_retrieve guidance and drops the global answer-immediately rule", function () {
     const persona = AGENT_PERSONA_INSTRUCTIONS.join("\n");
+    const retrieve =
+      stubRegistry().getTool("library_retrieve")!.guidance!.instruction;
 
-    assert.include(persona, "For bounded collection or tag synthesis");
-    assert.include(persona, "papersBodyRead > 0");
-    assert.include(persona, "naming what is missing");
+    assert.include(retrieve, "For bounded collection or tag synthesis");
+    assert.include(retrieve, "papersBodyRead > 0");
+    assert.include(retrieve, "naming what is missing");
+    assert.notInclude(persona, "papersBodyRead");
     assert.notInclude(persona, "If yes, answer immediately.");
+    assert.include(
+      persona,
+      "Tool descriptions and guidance are the source of truth for how to read papers and search the library.",
+    );
+  });
+
+  it("delivers paper-reading guidance whenever a paper, passage, collection, or tag is in scope", function () {
+    const registry = stubRegistry();
+    const paperRead = registry.getTool("paper_read")!.guidance!;
+    const retrieve = registry.getTool("library_retrieve")!.guidance!;
+    const scope = (overrides: Record<string, unknown>) =>
+      ({
+        conversationKey: 1,
+        mode: "agent",
+        turnPaperScope: {
+          libraryID: 1,
+          conversationKind: "global",
+          papers: [],
+          collections: [],
+          tags: [],
+          selectedPassagePaperRefs: [],
+          ...overrides,
+        },
+      }) as any;
+    const ctx = { matchedSkillIds: [] };
+    const paper = { paper: { itemId: 1, contextItemId: 2 } };
+    // Zero-context library chat: no paper-reading guidance.
+    assert.isFalse(paperRead.matches(scope({}), ctx));
+    assert.isFalse(paperRead.matches({ conversationKey: 1 } as any, ctx));
+    assert.isTrue(
+      paperRead.matches(
+        scope({ conversationKind: "paper", papers: [paper] }),
+        ctx,
+      ),
+    );
+    assert.isTrue(
+      paperRead.matches(scope({ selectedPassagePaperRefs: [paper] }), ctx),
+    );
+    assert.isTrue(
+      paperRead.matches(scope({ collections: [{ collectionId: 3 }] }), ctx),
+    );
+    assert.isTrue(paperRead.matches(scope({ tags: [{ name: "x" }] }), ctx));
+    // Library evidence rules follow library-level turns, including a
+    // zero-context library chat, and stay out of a single-paper chat.
+    assert.isTrue(retrieve.matches(scope({}), ctx));
+    assert.isTrue(
+      retrieve.matches(scope({ collections: [{ collectionId: 3 }] }), ctx),
+    );
+    assert.isFalse(
+      retrieve.matches(
+        scope({ conversationKind: "paper", papers: [paper] }),
+        ctx,
+      ),
+    );
   });
 
   it("organizes the persona into titled sections", function () {

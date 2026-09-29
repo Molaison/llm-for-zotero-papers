@@ -1,4 +1,5 @@
 import { assert } from "chai";
+import { createPaperReadTool } from "../src/agent/tools/read/paperRead";
 import {
   buildAgentInitialMessages,
   buildAgentPromptInstructionInventory,
@@ -847,8 +848,20 @@ describe("agent prompt envelope evidence sufficiency", function () {
     }
   });
 
-  it("explains the answer_now retrieval state in the stable persona", async function () {
-    const messages = await buildAgentInitialMessages(request(false), [], []);
+  it("explains the answer_now retrieval state in paper-scoped paper_read guidance", async function () {
+    const paperRead = createPaperReadTool(
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+    );
+    const withoutTool = await buildAgentInitialMessages(request(false), [], []);
+    assert.notInclude(withoutTool.map(messageText).join("\n"), "answer_now");
+    const messages = await buildAgentInitialMessages(
+      request(false),
+      [paperRead],
+      [],
+    );
     const prompt = messages.map(messageText).join("\n");
     assert.include(prompt, "answer_now");
     assert.include(prompt, "answer_or_self_check");

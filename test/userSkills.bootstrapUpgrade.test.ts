@@ -449,7 +449,10 @@ describe("user skill bootstrap upgrades", function () {
       const filePath = getCanonicalSkillFilePath(name);
       files[filePath] = raw;
       await initUserSkills();
-      assert.equal(parseSkill(files[filePath]).version, version + 1);
+      assert.equal(
+        parseSkill(files[filePath]).version,
+        parseSkill(BUILTIN_SKILL_FILES[`${name}.md`]).version,
+      );
       assert.include(files[filePath], "supplied text");
     });
     it(`upgrades the tracked untouched baseline ${name} body`, async function () {
@@ -477,6 +480,59 @@ describe("user skill bootstrap upgrades", function () {
         parseSkill(files[filePath]).instruction,
         parseSkill(BUILTIN_SKILL_FILES[`${name}.md`]).instruction,
       );
+    });
+  }
+  function assertUpgradedToShipped(upgraded: string, name: string) {
+    const shipped = parseSkill(BUILTIN_SKILL_FILES[`${name}.md`]);
+    assert.equal(parseSkill(upgraded).version, shipped.version);
+    assert.equal(parseSkill(upgraded).instruction, shipped.instruction);
+  }
+  // Exact pre-edit copies of the previously shipped version of every skill
+  // whose rules moved to a single owner. An unmodified install must upgrade
+  // both without a stored hash (bootstrap raw hash) and with one (tracked
+  // body hash); a missing hash leaves the user on the stale copy.
+  for (const fixture of [
+    "simple-paper-qa-v9",
+    "evidence-based-qa-v8",
+    "compare-papers-v7",
+  ] as const) {
+    const name = fixture.replace(/-v\d+$/, "");
+    const readFixture = () =>
+      readFileSync(
+        new URL(`./fixtures/skillUpgrades/${fixture}.md`, import.meta.url),
+        "utf8",
+      );
+    it(`bootstrap-upgrades the unmodified previous ${fixture} without a stored hash`, async function () {
+      const files: Record<string, string> = {};
+      installMockSkillEnvironment(
+        `/tmp/llm-for-zotero-previous-${fixture}`,
+        files,
+        new Map<string, string>(),
+      );
+      const filePath = getCanonicalSkillFilePath(name);
+      files[filePath] = readFixture();
+      await initUserSkills();
+      assertUpgradedToShipped(files[filePath], name);
+    });
+    it(`upgrades the tracked unmodified previous ${fixture}`, async function () {
+      const raw = readFixture();
+      const files: Record<string, string> = {};
+      const prefs = new Map<string, string>();
+      installMockSkillEnvironment(
+        `/tmp/llm-for-zotero-tracked-previous-${fixture}`,
+        files,
+        prefs,
+      );
+      const filePath = getCanonicalSkillFilePath(name);
+      files[filePath] = raw;
+      prefs.set(
+        BODY_HASH_PREF_KEY,
+        JSON.stringify({
+          [`${name}.md`]: hashSkillForUpgrade(raw, parseSkill(raw).instruction),
+        }),
+      );
+      await initUserSkills();
+      assertUpgradedToShipped(files[filePath], name);
     });
   }
 });

@@ -790,10 +790,13 @@ describe("primitive agent tools", function () {
     const systemText =
       typeof messages[0]?.content === "string" ? messages[0].content : "";
     assert.include(systemText, "literature_search");
-    assert.include(systemText, "library_search");
-    assert.include(systemText, "library_retrieve");
-    assert.include(systemText, "library_read");
-    assert.include(systemText, "paper_read");
+    // Zotero reading and library routing lives in paper_read and
+    // library_retrieve guidance; the fixed persona only points at it.
+    assert.include(
+      systemText,
+      "Tool descriptions and guidance are the source of truth for how to read papers and search the library.",
+    );
+    assert.notInclude(systemText, "paperEvidenceProgress");
     assert.include(systemText, "workflow:'answer'");
     assert.include(systemText, "web_search");
     assert.include(systemText, "web_read");

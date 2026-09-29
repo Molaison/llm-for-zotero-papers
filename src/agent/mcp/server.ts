@@ -150,6 +150,16 @@ const CURATED_READ_TOOL_NAMES = new Set<string>([
   ...ZOTERO_MCP_PLAN_TOOL_NAMES,
 ]);
 const CURATED_PLAN_TOOL_NAMES = new Set<string>(ZOTERO_MCP_PLAN_TOOL_NAMES);
+/**
+ * Tools whose turn guidance is the single owner of a rule an external agent
+ * also needs. The in-plugin agent receives it only on matching turns; an MCP
+ * catalog is static, so it carries the guidance on the tool description.
+ */
+const MCP_GUIDANCE_TOOL_NAMES = new Set<string>([
+  ...ZOTERO_MCP_PLAN_TOOL_NAMES,
+  "paper_read",
+  "library_retrieve",
+]);
 const CURATED_WRITE_TOOL_NAMES = new Set<string>(ZOTERO_MCP_WRITE_TOOL_NAMES);
 /**
  * External agents never see the envelope's plan-phase sections, so the MCP
@@ -1423,7 +1433,7 @@ function handleToolsList(
           name,
           [
             description,
-            CURATED_PLAN_TOOL_NAMES.has(name)
+            MCP_GUIDANCE_TOOL_NAMES.has(name)
               ? toolRegistry.getTool(name)?.guidance?.instruction
               : undefined,
             MCP_PLAN_PHASE_GUIDANCE.get(name),

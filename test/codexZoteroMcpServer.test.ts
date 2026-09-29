@@ -24,6 +24,7 @@ import type {
   AgentToolDefinition,
 } from "../src/agent/types";
 import { createPaperReadTool } from "../src/agent/tools/read/paperRead";
+import { createLibraryRetrieveTool } from "../src/agent/tools/read/libraryRetrieve";
 import { createFileIOTool } from "../src/agent/tools/write/fileIO";
 import { createResearchUpdateTool } from "../src/agent/tools/plan/researchUpdate";
 import { createAmendPlanTool } from "../src/agent/tools/plan/amendPlan";
@@ -1437,6 +1438,47 @@ describe("Zotero MCP server", function () {
     const amendPlan = native.find((entry) => entry.name === "amend_plan");
     assert.include(amendPlan!.description, EXECUTING_PHASE_GUIDANCE);
     assert.notInclude(amendPlan!.description, PLANNING_PHASE_GUIDANCE);
+  });
+
+  it("carries single-owner reading guidance on the paper_read and library_retrieve descriptions", async function () {
+    const registry = new AgentToolRegistry();
+    const paperRead = createPaperReadTool(
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+    );
+    const retrieve = createLibraryRetrieveTool({} as never);
+    registry.register(paperRead);
+    registry.register(retrieve);
+    registerMcpServer({ toolRegistry: registry, zoteroGateway: {} as never });
+    const scope = registerScopedZoteroMcpScope({
+      conversationKey: 7007,
+      libraryID: 1,
+      kind: "global",
+    });
+    try {
+      const response = await invokeMcpEndpoint({
+        token: getOrCreateZoteroMcpBearerToken(),
+        headers: { [ZOTERO_MCP_SCOPE_HEADER]: scope.token },
+        body: { jsonrpc: "2.0", id: 1, method: "tools/list" },
+      });
+      const tools = JSON.parse(response[2]).result.tools as Array<{
+        name: string;
+        description: string;
+      }>;
+      const described = (name: string) =>
+        tools.find((entry) => entry.name === name)!.description;
+      assert.include(described("paper_read"), paperRead.guidance!.instruction);
+      assert.include(described("paper_read"), "paperEvidenceProgress");
+      assert.include(
+        described("library_retrieve"),
+        retrieve.guidance!.instruction,
+      );
+      assert.include(described("library_retrieve"), "papersBodyRead > 0");
+    } finally {
+      scope.clear();
+    }
   });
 
   it("keeps Codex direct-path PDF turns on the metadata/write MCP surface", async function () {

@@ -21,13 +21,7 @@ export const AGENT_PERSONA_INSTRUCTIONS: string[] = [
   RUNTIME_CAPABILITY_CONTEXT,
   [
     "## Zotero evidence routing",
-    "Use paper_read overview for a broad single-paper understanding, targeted with sections for a known section name or query for a specific missing claim; use outline for section addresses only when needed, full only for an explicit exhaustive-read request, figures for extracted figure crops, and visual or capture only for explicit page, layout, or current-reader inspection. An overview or targeted read never satisfies an explicit full-read request.",
-    "For eligible textual paper_read results, use paperEvidenceProgress as factual retrieval state and follow its recommendation: answer_now means answer from the held and delivered evidence without another read; answer_or_self_check means answer unless one specifically named claim in your draft is unsupported; name_a_specific_missing_dimension means retrieve again only for a named unresolved dimension; answer_with_source_limitation means answer and disclose the limitation.",
-    "If overview falls back to Zotero metadata or an abstract, answer from that evidence when sufficient and state the limitation. If there is no PDF attachment and the user needs more than local metadata or abstract evidence, use a specifically targeted external lookup when necessary and label it separately.",
-    "Use library_search for catalog discovery, library_read for structured item state, library_retrieve for evidence search and synthesis across a collection or library, and paper_read for close reading known papers.",
-    "For library_retrieve, preserve the returned coverage boundary and use paperMatches plus the synthesis digest as the paper ledger. Query variants improve recall but are not evidence. Do not turn sampled, metadata-only, abstract-only, partial, or unreadable coverage into exhaustive claims.",
-    "For bounded collection or tag synthesis, require body evidence when readable papers are available (coverage papersBodyRead > 0), or answer by naming what is missing. Do not silently substitute titles or abstracts for requested paper-level synthesis.",
-    "If a references or bibliography section follows library_retrieve, either include all planned papers, or label the list as body-evidence references and separately identify metadata or abstract-only papers from the coverage frontier.",
+    "Tool descriptions and guidance are the source of truth for how to read papers and search the library.",
   ].join("\n"),
   [
     "## External evidence routing",

@@ -1082,6 +1082,37 @@ function readPaperReadModeFromArgs(args: unknown): string {
   return typeof mode === "string" ? mode.trim() : "";
 }
 
+type PaperReadGuidance = NonNullable<AgentToolDefinition["guidance"]>;
+
+/**
+ * Paper reading has a turn scope whenever a paper, a selected passage, a
+ * collection, or a tag is in context. A zero-context library chat has none,
+ * so the reading rules stay out of that turn until a paper is scoped.
+ */
+export function matchesPaperReadGuidance(
+  request: Parameters<PaperReadGuidance["matches"]>[0],
+): boolean {
+  const scope = request.turnPaperScope;
+  if (!scope) return false;
+  return (
+    scope.papers.length > 0 ||
+    scope.selectedPassagePaperRefs.length > 0 ||
+    scope.collections.length > 0 ||
+    scope.tags.length > 0
+  );
+}
+
+/** The single owner of paper-reading rules (mode choice, depth, progress). */
+export const PAPER_READ_GUIDANCE: PaperReadGuidance = {
+  matches: matchesPaperReadGuidance,
+  instruction: [
+    "Choose the paper_read mode from the evidence the answer needs: mode:'overview' for a broad single-paper understanding; mode:'targeted' with sections for a known section name, or with query for a specific missing claim (for a single factual lookup start with topK:3 and widen only for several requested facts or comparison dimensions); mode:'outline' only when section addresses are needed; mode:'full' only for an explicit exhaustive-read request; mode:'figures' for extracted figure crops; mode:'visual' or mode:'capture' only for explicit page, layout, or current-reader inspection. An overview or targeted read never satisfies an explicit full-read request.",
+    "In collection, tag, or library scope the active-reader paper is never an implicit target: pass explicit targets, batching several papers in one call.",
+    "For eligible textual paper_read results, use paperEvidenceProgress as factual retrieval state and follow its recommendation: answer_now means answer from the held and delivered evidence without another read; answer_or_self_check means answer unless one specifically named claim in your draft is unsupported; name_a_specific_missing_dimension means retrieve again only for a named unresolved dimension; answer_with_source_limitation means answer and disclose the limitation.",
+    "If overview falls back to Zotero metadata or an abstract, answer from that evidence when sufficient and state the limitation. If there is no PDF attachment and the user needs more than local metadata or abstract evidence, use a specifically targeted external lookup when necessary and label it separately.",
+  ].join("\n"),
+};
+
 export function createPaperReadTool(
   pdfService: PdfService,
   retrievalService: RetrievalService,
@@ -1175,6 +1206,7 @@ export function createPaperReadTool(
       exposure: "model",
       tier: "normal",
     },
+    guidance: PAPER_READ_GUIDANCE,
     presentation: {
       label: "Read Paper",
       /**
