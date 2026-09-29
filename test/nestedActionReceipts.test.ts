@@ -24,7 +24,7 @@ describe("shared action execution results", function () {
       execute: async (_input, context) => {
         context.recordChildExecution?.({
           callId: "child-call",
-          name: "apply_tags",
+          name: "library_update",
           ok: true,
           effect: "applied",
           actionReceipts: [receipt],

@@ -189,7 +189,7 @@ function createLibraryUpdateTool(tools: {
             "setColor",
           ],
           description:
-            "For kind:'tags' and kind:'collections': 'add' or 'remove'. For kind:'tags', 'set' replaces each item's tags with exactly the ones given and serves only an obligation with operation 'set_item_tags'; add/remove serve 'apply_tags'/'remove_tags'. For kind:'tag' (the tag object itself): 'rename', 'merge', 'delete' or 'setColor'.",
+            "For kind:'tags' and kind:'collections': 'add' or 'remove'. For kind:'tags', 'set' replaces each item's tags with exactly the ones given and serves only a set-tags obligation; add/remove serve add-tags and remove-tags obligations. For kind:'tag' (the tag object itself): 'rename', 'merge', 'delete' or 'setColor'.",
         },
         itemIds: {
           ...NUMBER_ARRAY_SCHEMA,

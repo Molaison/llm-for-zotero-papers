@@ -1,14 +1,14 @@
 // scripts/check-retired-tool-names.cjs
 // Fails when a retired tool name appears in src (code, prompt prose, or skill
 // .md files) outside the effect-operation vocabulary files. Names that remain
-// internal identifiers (IDENTIFIER_NAMES) are allowed only as exact string
-// literals or object keys.
+// internal identifiers (IDENTIFIER_NAMES) are allowed only as exact
+// double-quoted string literals or object keys.
 /* global __dirname -- CommonJS script; eslint config only declares console/process */
 const fs = require("fs");
 const path = require("path");
 // Retired tool names that live on as internal identifiers: each is the
 // spec.name of a facade delegate (journaling, presentation) and most are also
-// effect-operation names. As an exact string literal ("apply_tags") or an
+// effect-operation names. As an exact double-quoted literal ("apply_tags") or an
 // object key (apply_tags: ...) they are that identifier; anywhere else -- in
 // prose, a comment, or a skill file -- they read as a tool the model cannot
 // call, and are hits.
@@ -78,12 +78,14 @@ function escapeRegExp(text) {
 const patterns = RETIRED_TOOL_NAMES.map((name) => ({
   name,
   re: new RegExp("\\b" + escapeRegExp(name) + "\\b", "g"),
-  // An exact quoted literal, or a bare object key (line start, "{" or ",").
+  // An exact double-quoted literal, or a bare object key (line start, "{" or
+  // ","). Prettier writes every code string double-quoted, so a single-quoted
+  // or backtick form can only be prose or a comment, and stays a hit.
   identifier: IDENTIFIER_NAMES.includes(name)
     ? new RegExp(
-        "([\"'`])" +
+        '"' +
           escapeRegExp(name) +
-          "\\1|(^|[{,])[ \\t]*" +
+          '"|(^|[{,])[ \\t]*' +
           escapeRegExp(name) +
           "[ \\t]*:",
         "gm",

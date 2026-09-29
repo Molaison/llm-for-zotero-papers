@@ -9972,7 +9972,7 @@ describe("agent trace stage grouping", function () {
       event(seq + 1, {
         type: "tool_result",
         callId,
-        name: "apply_tags",
+        name: "library_update",
         ok: true,
         actionReceipts: receipts,
         content: { tagged: 1 },
@@ -9982,7 +9982,7 @@ describe("agent trace stage grouping", function () {
     ];
 
     const tagPresentation = {
-      apply_tags: {
+      library_update: {
         label: "Apply Tags",
         summaries: { onSuccess: "Tags applied" },
       },
