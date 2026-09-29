@@ -70,3 +70,73 @@ export function installLibraryTextIndexSqlite() {
     },
   };
 }
+
+/**
+ * `Zotero.DBConnection` stand-in over `node:sqlite` with Zotero's close
+ * semantics (xpcom/db.js): `closeDatabase()` without `permanent` sets the
+ * connection to null and the next query silently reopens it;
+ * `closeDatabase(true)` makes every later query throw
+ * "Database permanently closed; not re-opening".
+ */
+export function installZoteroDbConnectionFake(
+  options: { beforeQuery?: (sql: string) => Promise<void> } = {},
+) {
+  const instances: Array<{
+    closes: unknown[];
+    reopens: number;
+    permanentlyClosed: boolean;
+  }> = [];
+  class FakeZoteroDBConnection {
+    private db: DatabaseSync | null = new DatabaseSync(":memory:");
+    private readonly state = {
+      closes: [] as unknown[],
+      reopens: 0,
+      permanentlyClosed: false,
+    };
+    constructor(_path: string) {
+      instances.push(this.state);
+    }
+    private connection(): DatabaseSync {
+      if (this.state.permanentlyClosed)
+        throw new Error("Database permanently closed; not re-opening");
+      if (!this.db) {
+        this.state.reopens += 1;
+        this.db = new DatabaseSync(":memory:");
+      }
+      return this.db;
+    }
+    async queryAsync(sql: string, params?: unknown[]) {
+      await options.beforeQuery?.(sql);
+      const db = this.connection();
+      const bound = (params || []).map((v) =>
+        v === undefined ? null : v,
+      ) as never[];
+      const stmt = db.prepare(sql);
+      if (/^\s*(SELECT|PRAGMA|WITH)/i.test(sql))
+        return (stmt.all(...bound) as Record<string, unknown>[]).map(
+          toZoteroRow,
+        );
+      stmt.run(...bound);
+      return [];
+    }
+    async executeTransaction<T>(fn: () => Promise<T>): Promise<T> {
+      const db = this.connection();
+      db.exec("BEGIN");
+      try {
+        const out = await fn();
+        db.exec("COMMIT");
+        return out;
+      } catch (error) {
+        db.exec("ROLLBACK");
+        throw error;
+      }
+    }
+    async closeDatabase(permanent?: boolean) {
+      this.state.closes.push(permanent);
+      this.db?.close();
+      this.db = null;
+      if (permanent) this.state.permanentlyClosed = true;
+    }
+  }
+  return { FakeZoteroDBConnection, instances };
+}

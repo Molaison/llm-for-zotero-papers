@@ -144,6 +144,8 @@ describe("library text index management", function () {
     );
     io.files.set(`${dbPath}-wal`, new Uint8Array([2]));
     io.files.set(`${dbPath}-shm`, new Uint8Array([3]));
+    // External databases use a rollback journal, not WAL.
+    io.files.set(`${dbPath}-journal`, new Uint8Array([5]));
     io.files.set(`${VECTORS_DIR}/abc123/7.bin`, new Uint8Array([4]));
     io.dirs.add(`${VECTORS_DIR}/abc123`);
     const remove = (
@@ -162,19 +164,21 @@ describe("library text index management", function () {
 
     await clearLibraryTextIndex();
 
-    assert.deepEqual(log.slice(0, 5), [
+    assert.deepEqual(log.slice(0, 6), [
       "close",
       `remove:${dbPath}`,
       `remove:${dbPath}-wal`,
       `remove:${dbPath}-shm`,
+      `remove:${dbPath}-journal`,
       `remove:${VECTORS_DIR}`,
     ]);
     assert.isFalse(io.files.has(`${dbPath}-wal`));
     assert.isFalse(io.files.has(`${dbPath}-shm`));
+    assert.isFalse(io.files.has(`${dbPath}-journal`));
     assert.isFalse(await (scope.IOUtils as any).exists(VECTORS_DIR));
     assert.isFalse(io.files.has(`${VECTORS_DIR}/abc123/7.bin`));
     // The index was enabled, so it restarted and reopened a new database.
-    assert.include(log.slice(5), "open");
+    assert.include(log.slice(6), "open");
     assert.isTrue(io.files.has(dbPath), "the restarted index recreated it");
     const db = await openLibraryTextIndexDb();
     const marker = (await db!.queryAsync(
@@ -384,6 +388,7 @@ describe("library text index management", function () {
       `remove:${dbPath}`,
       `remove:${dbPath}-wal`,
       `remove:${dbPath}-shm`,
+      `remove:${dbPath}-journal`,
       `remove:${VECTORS_DIR}`,
       "open",
     ];

@@ -17,7 +17,11 @@ import {
   estimateDocumentBytes,
   indexAttachment,
 } from "../src/services/libraryTextIndex/indexer";
-import { LIBRARY_TEXT_INDEX_CHUNKER_VERSION } from "../src/services/libraryTextIndex/constants";
+import {
+  INDEX_PRIORITY,
+  LIBRARY_TEXT_INDEX_CHUNKER_VERSION,
+} from "../src/services/libraryTextIndex/constants";
+import { LibraryTextIndexScheduler } from "../src/services/libraryTextIndex/scheduler";
 import {
   onPdfContextLoaded,
   pdfTextCache,
@@ -70,6 +74,25 @@ describe("library text indexer", function () {
     assert.equal(doc.sourceSize, 4096);
     assert.equal(doc.byteEstimate, estimateDocumentBytes(doc));
     assert.isAbove(doc.byteEstimate, ctx.chunks.join("").length);
+  });
+
+  it("estimates document bytes as UTF-8, so CJK text counts three bytes per character", function () {
+    const bytes = (text: string) =>
+      estimateDocumentBytes({
+        chunks: [
+          {
+            chunkIndex: 0,
+            text,
+            tokenCount: 0,
+            meta: {} as never,
+            tf: {},
+          },
+        ],
+      });
+    assert.equal(bytes("abc"), 3);
+    assert.equal(bytes("神经元"), 9);
+    assert.equal(bytes("é"), 2);
+    assert.equal(bytes("𝜶"), 4, "a surrogate pair is one 4-byte code point");
   });
 
   it("indexes an attachment in the urgent lane, persists it, evicts only what it loaded, and skips an unchanged rewrite", async function () {
@@ -189,8 +212,101 @@ describe("library text indexer", function () {
     assert.deepEqual(host.pdfWorkerCalls, [9002]);
   });
 
-  it("reports no_text for an attachment with no extractable text", async function () {
+  it("persists nothing for an attachment with no local file (not downloaded yet)", async function () {
+    // No getFilePathAsync: the file is not on disk (sync before download).
     const item = mockPdfAttachment(9999);
+    const result = await indexAttachment({
+      item,
+      libraryID: 1,
+      store,
+      lane: "prefetch",
+    });
+    assert.equal(result.status, "skipped");
+    assert.isNull(await store.getDocument(9999));
+    assert.deepEqual((await store.getCoverage([9999])).missing, [9999]);
+  });
+
+  it("indexes a paper synced before its file downloaded once the file arrives (no permanent no-text row)", async function () {
+    // Sync adds the item before the file exists: nothing to extract.
+    let fileOnDisk = false;
+    const item = Object.assign(mockPdfAttachment(9003), {
+      key: "K9003",
+      libraryID: 1,
+      getFilePathAsync: async () =>
+        fileOnDisk ? "/storage/K9003/paper.pdf" : false,
+    }) as unknown as Zotero.Item;
+    const timers: Array<() => void> = [];
+    const scheduler = new LibraryTextIndexScheduler({
+      setTimer: (cb) => {
+        timers.push(cb);
+        return cb;
+      },
+      clearTimer: () => undefined,
+      getStore: async () => store,
+      getItem: (id) => (id === 9003 ? item : null),
+      listLibraryIds: () => [1],
+      isEnabled: () => true,
+      isUserIdle: () => true,
+      isIndexable: () => true,
+      hasMineruCache: async () => false,
+      currentVectorNamespace: () => null,
+    });
+    const drain = async () => {
+      for (let i = 0; i < 6 && timers.length; i += 1) {
+        timers.shift()!();
+        await new Promise((r) => setTimeout(r, 5));
+      }
+    };
+    const change = (event: "add" | "modify") =>
+      scheduler.handleChange({
+        event,
+        type: "item",
+        ids: [9003],
+        extraData: {},
+        receivedAt: 0,
+      });
+    scheduler.start();
+    try {
+      await change("add");
+      await drain();
+      assert.isNull(
+        await store.getDocument(9003),
+        "a missing file must not become a permanent no-text row",
+      );
+      assert.equal((await store.countQueue(1)).queued, 0, "job removed");
+      assert.deepEqual((await store.getCoverage([9003])).missing, [9003]);
+
+      // The file arrives: Zotero fires modify on the attachment.
+      await buildFixturePdfContext("bioSingleHash", 9003);
+      pdfTextCache.clear();
+      fileOnDisk = true;
+      (globalThis as any).IOUtils.stat = async () => ({
+        size: 4096,
+        lastModified: 5000,
+      });
+      await change("modify");
+      assert.equal(
+        (await store.dequeueNext({ now: Date.now() }))?.priority,
+        INDEX_PRIORITY.modified,
+        "re-queued in the urgent lane",
+      );
+      await drain();
+      const row = await store.getDocument(9003);
+      assert.isAbove(row?.chunkCount ?? 0, 3);
+      assert.equal(row?.sourceSize, 4096);
+    } finally {
+      await scheduler.stop();
+    }
+  });
+
+  it("reports no_text and writes a zero-chunk row for a readable file with no extractable text", async function () {
+    const item = Object.assign(mockPdfAttachment(9999), {
+      getFilePathAsync: async () => "/storage/K9999/scan.pdf",
+    }) as unknown as Zotero.Item;
+    (globalThis as any).IOUtils.stat = async () => ({
+      size: 777,
+      lastModified: 4242,
+    });
     const result = await indexAttachment({
       item,
       libraryID: 1,

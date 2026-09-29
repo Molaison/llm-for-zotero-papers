@@ -94,7 +94,7 @@ function fakeIndex(
 }
 
 describe("library retrieve, index first (v2 rules)", function () {
-  it("serves evidence from the index, skips quicksearch probes at full coverage, and never loads paper text for indexed papers", async function () {
+  it("serves evidence from the index at full coverage, still runs the first quicksearch pass, and never loads paper text for indexed papers", async function () {
     // rig papers: itemIds 10,20,30 with attachments 11,21,31
     const index = fakeIndex(() => ({
       chunks: [
@@ -108,7 +108,11 @@ describe("library retrieve, index first (v2 rules)", function () {
       query: "method",
       depth: "evidence",
     });
-    assert.equal(rig.quicksearchCalls(), 0);
+    assert.isAbove(
+      rig.quicksearchCalls(),
+      0,
+      "the first quicksearch pass always runs (notes, annotations, second PDFs)",
+    );
     assert.equal(rig.ensurePaperContextCalls(), 0);
     assert.lengthOf(index.calls, 1);
     assert.deepEqual(
@@ -127,7 +131,7 @@ describe("library retrieve, index first (v2 rules)", function () {
     );
   });
 
-  it("runs probe reformulations against the index when the first pass is weak, without quicksearch", async function () {
+  it("runs probe reformulations against the index when the first pass is weak, without quicksearch rescans", async function () {
     const index = fakeIndex((queries) =>
       queries.includes("scripted procedure")
         ? {
@@ -151,9 +155,10 @@ describe("library retrieve, index first (v2 rules)", function () {
       2,
       "round 2 asks again because one match is still weak, gets no variants and stops",
     );
-    assert.equal(
-      rig.quicksearchCalls(),
-      0,
+    assert.isAbove(rig.quicksearchCalls(), 0, "the first pass ran");
+    assert.notInclude(
+      rig.quicksearchQueries(),
+      "scripted procedure",
       "variants go to the index, not to Zotero quicksearch",
     );
     assert.deepEqual(index.calls, [["method"], ["scripted procedure"]]);
@@ -341,6 +346,14 @@ describe("library retrieve, index first (v2 rules)", function () {
       ["10", "20"],
     );
     assert.isTrue(result.snippets.every((s) => s.matchMethod === "bm25"));
+    assert.isTrue(
+      result.snippets.every(
+        (s) =>
+          s.whyMatched ===
+          "Leading passage of an indexed paper (no direct match)",
+      ),
+      "a zero-score leading chunk never claims a BM25 match",
+    );
     assert.equal(rig.ensurePaperContextCalls(), 0);
     assert.equal(result.answerContract.indexedTextCoverage, "complete");
     assert.sameMembers(
@@ -441,5 +454,142 @@ describe("library retrieve, index first (v2 rules)", function () {
     const head = result.snippets.find((s) => s.itemId === "20");
     assert.match(head!.snippet, /^Plain words only\./);
     assert.isAtMost(head!.snippet.length, 900);
+  });
+  it("still shortlists a paper that only quicksearch matches (e.g. in a child note) at full coverage", async function () {
+    const index = fakeIndex(() => ({
+      chunks: [hit(11, 10, 1, 1, "The method is scripted.")],
+      papers: [paper(11, 10, 9, 1)],
+    }));
+    const rig = createRetrieveServiceRig({
+      papers: 3,
+      textIndex: index,
+      unmatchedMetadata: true,
+      quicksearchItemIds: () => [30],
+    });
+    const result = await rig.service.retrieve({
+      query: "method",
+      depth: "evidence",
+    });
+    assert.isAbove(rig.quicksearchCalls(), 0);
+    const ids = result.candidates.map((c) => c.itemId);
+    assert.include(ids, "30", "the note-only match reaches the shortlist");
+    assert.include(
+      result.candidates.find((c) => c.itemId === "30")!.whyMatched,
+      "quicksearch",
+    );
+  });
+
+  it("asks the index for every paper in scope for a comprehensive intent and reports every match (all 350 of 3,000)", async function () {
+    const maxPapersAsked: number[] = [];
+    const matching = (scope: number[]) => scope.slice(0, 350);
+    const index = fakeIndex((_queries, scope) => {
+      const all = matching(scope);
+      const limit = maxPapersAsked[maxPapersAsked.length - 1];
+      const papers = all
+        .slice(0, limit)
+        .map((attachmentId, i) =>
+          paper(attachmentId, attachmentId - 1, 9 - i * 0.001, i + 1),
+        );
+      return { papers, totalMatchingPapers: all.length };
+    });
+    const search = index.search.bind(index);
+    index.search = async (params) => {
+      maxPapersAsked.push(params.maxPapers);
+      return search(params);
+    };
+    const rig = createRetrieveServiceRig({ papers: 3000, textIndex: index });
+    const result = await rig.service.retrieve({
+      query: "method",
+      intent: "enumerate",
+      depth: "evidence",
+    });
+    assert.equal(maxPapersAsked[0], 3000, "mirrors quicksearch's scan limit");
+    assert.equal(result.resourcePool.queryCoverage.indexedTextMatched, 350);
+    assert.equal(result.answerContract.indexedTextCoverage, "complete");
+  });
+
+  it("reports partial coverage and the true match count when the index cut its matches (200 of 350 returned)", async function () {
+    const index = fakeIndex((_queries, scope) => ({
+      papers: scope
+        .slice(0, 200)
+        .map((attachmentId, i) =>
+          paper(attachmentId, attachmentId - 1, 9 - i * 0.001, i + 1),
+        ),
+      totalMatchingPapers: 350,
+    }));
+    const rig = createRetrieveServiceRig({ papers: 3000, textIndex: index });
+    const result = await rig.service.retrieve({
+      query: "method",
+      depth: "evidence",
+    });
+    assert.equal(result.resourcePool.queryCoverage.indexedTextMatched, 350);
+    assert.equal(result.answerContract.indexedTextCoverage, "partial");
+  });
+
+  it("never caps direct reads of unindexed papers in verify mode", async function () {
+    const index = fakeIndex((_queries, scope) => ({
+      coverage: {
+        scopeAttachments: scope.length,
+        indexed: 0,
+        unindexed: [...scope],
+        failed: [],
+        stale: [],
+      },
+    }));
+    const rig = createRetrieveServiceRig({ papers: 12, textIndex: index });
+    const result = await rig.service.retrieve({
+      query: "method",
+      depth: "verify",
+      requireExact: true,
+      maxFullTextPapers: 12,
+    });
+    assert.equal(
+      rig.ensurePaperContextCalls(),
+      12,
+      "verify scans every shortlisted paper, indexed or not",
+    );
+    assert.notEqual(result.answerContract.indexedTextCoverage, "none");
+  });
+
+  it("orders merged pass hits by score before taking a paper's snippet slots", async function () {
+    const index = fakeIndex((queries) =>
+      queries.includes("scripted procedure")
+        ? {
+            chunks: [
+              {
+                ...hit(11, 10, 5, 1, "A scripted procedure was followed."),
+                bm25Score: 9,
+                hybridScore: 9,
+              },
+            ],
+            papers: [paper(11, 10, 9, 1)],
+          }
+        : {
+            chunks: [
+              {
+                ...hit(11, 10, 1, 1, "Weak mention of it."),
+                bm25Score: 1,
+                hybridScore: 1,
+              },
+            ],
+            papers: [paper(11, 10, 1, 1)],
+          },
+    );
+    const rig = createRetrieveServiceRig({
+      papers: 3,
+      textIndex: index,
+      reformulations: [["scripted procedure"]],
+      unmatchedMetadata: true,
+    });
+    const result = await rig.service.retrieve({
+      query: "method",
+      depth: "evidence",
+      perPaperTopK: 1,
+    });
+    assert.deepEqual(
+      result.snippets.filter((s) => s.itemId === "10").map((s) => s.chunkIndex),
+      [5],
+      "the better round-2 hit wins the paper's single slot",
+    );
   });
 });

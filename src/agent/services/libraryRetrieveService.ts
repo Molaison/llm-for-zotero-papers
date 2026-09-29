@@ -1549,21 +1549,27 @@ export class LibraryRetrieveService {
   }
 
   /**
-   * Runs the query planner. While the index is on (retrieval is fast) and a
-   * model is configured, the planner gets a soft deadline: past it, the
-   * literal plan is used and the late plan is discarded.
+   * Runs the query planner. While the index serves this retrieve (index on,
+   * a depth that searches text) and a model is configured, the planner gets
+   * a soft deadline: past it, the literal plan is used and the late plan is
+   * discarded. Pool and metadata depths never search the index, so they
+   * wait for the planner as before.
    */
   private async planQuery(
     params: LibraryRetrieveParams,
     plannerParams: Parameters<typeof resolveRetrievalQueryPlan>[0],
     hasModelConfig: boolean,
+    depth: LibraryRetrieveDepth,
     timer: RetrievalTimer,
     warnings: string[],
   ): Promise<RetrievalQueryPlan> {
     const planner = this.options.queryPlanner ?? resolveRetrievalQueryPlan;
     const plannerPromise = planner(plannerParams);
     const softDeadline =
-      hasModelConfig && this.textIndex.isEnabled()
+      hasModelConfig &&
+      depth !== "pool" &&
+      depth !== "metadata" &&
+      this.textIndex.isEnabled()
         ? (this.options.plannerSoftDeadlineMs ?? INDEX_PLANNER_SOFT_DEADLINE_MS)
         : null;
     if (softDeadline === null) return plannerPromise;
@@ -1580,6 +1586,7 @@ export class LibraryRetrieveService {
           buildRetrievalQueryPlan({
             query: params.query,
             queryVariants: params.queryVariants,
+            readIntent: plannerParams.readIntent,
           }),
         );
       }, softDeadline);
@@ -1652,6 +1659,7 @@ export class LibraryRetrieveService {
           sourceSamples: this.buildScopeSourceSamples(scope),
         },
         hasModelConfig,
+        provisionalInput.depth,
         timer,
         warnings,
       ),
@@ -1727,13 +1735,33 @@ export class LibraryRetrieveService {
     const scopeAttachmentIds = records
       .map((record) => record.paperContext?.contextItemId)
       .filter((id): id is number => typeof id === "number");
-    const searchIndex = (queries: string[]) =>
-      this.textIndex.search({
+    // Same reach as quicksearch's scan limit: a comprehensive intent ranks
+    // every paper in scope, so the match count is the whole scope's. Chunk
+    // rows are read only for the papers that can reach the shortlist.
+    const indexScansScope =
+      input.intent === "enumerate" ||
+      input.intent === "verify" ||
+      input.intent === "summarize";
+    let indexTotalMatching = 0;
+    let indexTruncated = false;
+    const searchIndex = async (queries: string[]) => {
+      const result = await this.textIndex.search({
         scopeAttachmentIds,
         queries: queries.length ? queries : [input.query],
-        maxPapers: input.maxCandidatePapers,
+        maxPapers: indexScansScope
+          ? Math.max(scopeAttachmentIds.length, 1)
+          : input.maxCandidatePapers,
         perPaperTopK: Math.max(input.perPaperTopK, 5),
+        chunkPapers: input.maxCandidatePapers,
       });
+      if (result) {
+        const total = result.totalMatchingPapers ?? result.papers.length;
+        indexTotalMatching = Math.max(indexTotalMatching, total);
+        // Matches past maxPapers were never seen: the scan is not complete.
+        if (total > result.papers.length) indexTruncated = true;
+      }
+      return result;
+    };
     const indexResult =
       input.depth === "pool" ||
       input.depth === "metadata" ||
@@ -1768,8 +1796,10 @@ export class LibraryRetrieveService {
         indexResult.coverage.indexed / indexResult.coverage.scopeAttachments >=
           INDEX_COVERAGE_SKIP_PROBES_RATIO;
     }
-    // Only the quicksearch passes are skipped; below the ratio they are the
-    // only way to discover papers the index does not hold yet.
+    // At full coverage only the reformulation-round quicksearch rescans are
+    // skipped (variants go to the index). The first pass always runs: it is
+    // the only path to matches in child notes, annotations and second PDFs,
+    // and below the ratio to papers the index does not hold yet.
     const skipProbes = indexCoversScope;
 
     let probeRounds = 0;
@@ -1783,11 +1813,9 @@ export class LibraryRetrieveService {
       input.depth !== "metadata" &&
       (input.methods.includes("fts") || input.methods.includes("exact"))
     ) {
-      if (!skipProbes) {
-        indexedScan = await timer.span("quicksearch", () =>
-          this.addQuicksearchMatches(scope, records, input, warnings),
-        );
-      }
+      indexedScan = await timer.span("quicksearch", () =>
+        this.addQuicksearchMatches(scope, records, input, warnings),
+      );
       if (input.methods.includes("fts")) methodsUsed.add("fts");
 
       const probeDeadline = Date.now() + PROBE_LOOP_DEADLINE_MS;
@@ -2152,7 +2180,12 @@ export class LibraryRetrieveService {
           if (hits.length) record.queryState.add("content_loaded");
         } else {
           if (indexResult && !record.indexed) {
-            if (fallbackRead >= MAX_UNINDEXED_FALLBACK_PAPERS) {
+            // Capped only where the index serves evidence; verify/exact
+            // scans every shortlisted paper, as without the index.
+            if (
+              useIndexSnippets &&
+              fallbackRead >= MAX_UNINDEXED_FALLBACK_PAPERS
+            ) {
               fallbackSkipped += 1;
               continue;
             }
@@ -2206,19 +2239,32 @@ export class LibraryRetrieveService {
       );
     }
     if (indexResult && indexCoversScope) {
-      // Coverage comes from the index, not from a quicksearch scan.
+      // Coverage comes from the index, not from a quicksearch scan. Matches
+      // count every paper the index matched, not only those it returned.
       indexedScan = {
         available: indexedTextAvailable,
         scanned: indexResult.coverage.indexed + fallbackRead,
-        matched: records.filter((record) => record.indexMatched).length,
+        matched: Math.max(
+          indexTotalMatching,
+          records.filter(
+            (record) => record.indexMatched || record.quicksearchMatched,
+          ).length,
+        ),
         truncated:
+          indexTruncated ||
           fallbackSkipped > 0 ||
           indexResult.coverage.unindexed.length > fallbackRead,
       };
-    } else if (indexResult && fallbackSkipped > 0) {
-      // Quicksearch scanned the scope, but shortlisted papers outside the
-      // index went unread past the fallback cap: the scan is not complete.
-      indexedScan = { ...indexedScan, truncated: true };
+    } else if (indexResult) {
+      // Quicksearch scanned the scope. Shortlisted papers outside the index
+      // left unread past the fallback cap, or index matches cut at maxPapers,
+      // mean the scan is not complete.
+      indexedScan = {
+        ...indexedScan,
+        matched: Math.max(indexedScan.matched, indexTotalMatching),
+        truncated:
+          indexedScan.truncated || indexTruncated || fallbackSkipped > 0,
+      };
     }
 
     const snippetQuotePack = timer.spanSync("rank", () =>
@@ -2426,7 +2472,17 @@ export class LibraryRetrieveService {
       });
       if (own?.chunks.length) return own.chunks;
     }
-    if (params.passHits?.length) return params.passHits;
+    // Pass hits merge across the first pass and the reformulation rounds;
+    // the best-scoring ones take the paper's slots.
+    if (params.passHits?.length)
+      return params.passHits
+        .slice()
+        .sort(
+          (a, b) =>
+            b.hybridScore - a.hybridScore ||
+            b.bm25Score - a.bm25Score ||
+            a.chunkIndex - b.chunkIndex,
+        );
     return (
       (await this.textIndex.leadingChunks(
         params.attachmentId,
@@ -2486,7 +2542,11 @@ export class LibraryRetrieveService {
         score: Number(
           (params.record.score + hit.evidenceScore * 10).toFixed(3),
         ),
-        whyMatched: "Library index BM25 ranked this passage highly",
+        // A leading chunk served for an unranked paper matched nothing.
+        whyMatched:
+          hit.hybridScore > 0 || hit.bm25Score > 0
+            ? "Library index BM25 ranked this passage highly"
+            : "Leading passage of an indexed paper (no direct match)",
       });
     }
     return snippets;

@@ -47,13 +47,35 @@ const META_KEYS: Array<keyof StoredChunkMeta> = [
 ];
 const POSTING_ROW_BYTES = 24;
 
+/** UTF-8 length without allocating an encoded copy. */
+function utf8ByteLength(text: string): number {
+  let bytes = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    const code = text.charCodeAt(i);
+    if (code < 0x80) bytes += 1;
+    else if (code < 0x800) bytes += 2;
+    else if (
+      code >= 0xd800 &&
+      code <= 0xdbff &&
+      i + 1 < text.length &&
+      (text.charCodeAt(i + 1) & 0xfc00) === 0xdc00
+    ) {
+      bytes += 4; // a surrogate pair is one 4-byte code point
+      i += 1;
+    } else bytes += 3;
+  }
+  return bytes;
+}
+
+/** Stored text as UTF-8 plus a fixed cost per posting row (the byte budget's unit). */
 export function estimateDocumentBytes(
   doc: Pick<IndexDocumentInput, "chunks">,
 ): number {
   let bytes = 0;
   for (const chunk of doc.chunks) {
     bytes +=
-      chunk.text.length + Object.keys(chunk.tf).length * POSTING_ROW_BYTES;
+      utf8ByteLength(chunk.text) +
+      Object.keys(chunk.tf).length * POSTING_ROW_BYTES;
   }
   return bytes;
 }
@@ -138,10 +160,22 @@ export async function indexAttachment(params: {
     );
     const ctx = pdfTextCache.get(attachmentId);
     if (!ctx || !ctx.chunks.length) {
-      // Persist a zero-chunk row: a scanned PDF is then not re-extracted every
-      // session, and reconcile still re-queues it when the file changes or a
-      // MinerU cache appears (its sourceType is not "mineru").
       const fileState = await readAttachmentFileState(params.item);
+      if (!fileState) {
+        // No local file (not downloaded yet, or unreadable): nothing was
+        // really extracted. Leave the paper unindexed; the notifier's
+        // add/modify or the next reconcile queues it again once it exists.
+        return {
+          status: "skipped",
+          attachmentId,
+          chunkCount: 0,
+          elapsedMs: now() - started,
+        };
+      }
+      // The file exists but yields no text (e.g. a scan): persist a zero-chunk
+      // row, so it is not re-extracted every session. Reconcile still
+      // re-queues it when the file changes or a MinerU cache appears (its
+      // sourceType is not "mineru").
       await params.store.upsertDocument({
         attachmentId,
         attachmentKey: String(
@@ -155,8 +189,8 @@ export async function indexAttachment(params: {
         title: "",
         sourceType: NO_TEXT_SOURCE_TYPE,
         sourceFingerprint: NO_TEXT_SOURCE_TYPE,
-        sourceMtime: fileState?.mtime ?? null,
-        sourceSize: fileState?.size ?? null,
+        sourceMtime: fileState.mtime,
+        sourceSize: fileState.size,
         chunkerVersion: LIBRARY_TEXT_INDEX_CHUNKER_VERSION,
         byteEstimate: 0,
         chunks: [],

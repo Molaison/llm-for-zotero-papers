@@ -169,6 +169,76 @@ describe("library text index search", function () {
     }
   });
 
+  it("reports how many papers matched in total when maxPapers cuts the shortlist", async function () {
+    const doc = (
+      attachmentId: number,
+      text: string,
+      tf: Record<string, number>,
+    ) => ({
+      attachmentId,
+      attachmentKey: `K${attachmentId}`,
+      libraryID: 1,
+      parentItemId: attachmentId * 10,
+      title: `Paper ${attachmentId}`,
+      sourceType: "mineru",
+      sourceFingerprint: `fp${attachmentId}`,
+      sourceMtime: null,
+      sourceSize: null,
+      chunkerVersion: 1,
+      byteEstimate: 10,
+      chunks: [
+        {
+          chunkIndex: 0,
+          text,
+          tokenCount: 3,
+          meta: { chunkKind: "body" } as never,
+          tf,
+        },
+      ],
+    });
+    const scope: number[] = [];
+    for (let id = 1; id <= 60; id += 1) {
+      scope.push(id);
+      await store.upsertDocument(
+        id <= 35
+          ? doc(id, "hippocampal replay sleep", {
+              hippocampal: 1,
+              replay: 1,
+              sleep: 1,
+            })
+          : doc(id, "cortical oscillation spindle", {
+              cortical: 1,
+              oscillation: 1,
+              spindle: 1,
+            }),
+      );
+    }
+    const result = await searchLibraryTextIndex({
+      store,
+      scopeAttachmentIds: scope,
+      queries: ["hippocampal replay"],
+      maxPapers: 20,
+      perPaperTopK: 1,
+    });
+    assert.lengthOf(result.papers, 20);
+    assert.equal(result.totalMatchingPapers, 35);
+    // Ranking every paper must not read every paper's chunks.
+    const ranked = await searchLibraryTextIndex({
+      store,
+      scopeAttachmentIds: scope,
+      queries: ["hippocampal replay"],
+      maxPapers: scope.length,
+      perPaperTopK: 1,
+      chunkPapers: 5,
+    });
+    assert.lengthOf(ranked.papers, 35);
+    assert.equal(ranked.totalMatchingPapers, 35);
+    assert.sameMembers(
+      [...new Set(ranked.chunks.map((c) => c.attachmentId))],
+      ranked.papers.slice(0, 5).map((p) => p.attachmentId),
+    );
+  });
+
   it("unions terms across query variants, caps them, and returns nothing for an empty query", async function () {
     const bio = await buildFixturePdfContext("bioSingleHash", 9001);
     await store.upsertDocument(

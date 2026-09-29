@@ -33,6 +33,7 @@ import {
   INDEX_URGENT_MIN_PRIORITY,
   LIBRARY_TEXT_INDEX_CHUNKER_VERSION,
 } from "./constants";
+import { isLibraryTextIndexClosedError } from "./db";
 import { indexAttachment } from "./indexer";
 import {
   getLibraryTextIndexStore,
@@ -76,6 +77,8 @@ export type SchedulerEnv = {
   getSnapshot: (libraryID: number) => Promise<LibraryIndexSnapshot>;
   /** User library first. */
   listLibraryIds: () => number[];
+  /** Zotero has already loaded this library's items (no load is forced). */
+  isLibraryDataLoaded: (libraryID: number) => boolean;
   indexOne: typeof indexAttachment;
   isEnabled: () => boolean;
   isUserIdle: () => boolean;
@@ -108,6 +111,9 @@ type ZoteroLike = {
   Libraries?: {
     userLibraryID?: number;
     getAll?: () => Array<{ libraryID: number; libraryType?: string }>;
+    get?: (
+      libraryID: number,
+    ) => { getDataLoaded?: (objectType: string) => boolean | null } | false;
   };
   Items?: { get?: (id: number) => Zotero.Item | false | undefined };
 };
@@ -214,6 +220,14 @@ export class LibraryTextIndexScheduler {
           .map((l) => l.libraryID)
           .filter((id) => id !== user);
         return [user, ...groups];
+      },
+      isLibraryDataLoaded: (libraryID) => {
+        try {
+          const library = zotero()?.Libraries?.get?.(libraryID);
+          return Boolean(library && library.getDataLoaded?.("item"));
+        } catch {
+          return false;
+        }
       },
       indexOne: indexAttachment,
       isEnabled: isLibraryTextIndexEnabled,
@@ -354,12 +368,40 @@ export class LibraryTextIndexScheduler {
       : userLibraryID();
   }
 
+  /**
+   * Startup reconcile. The user library always; a group library only when
+   * Zotero has already loaded it or the index already holds some of its
+   * papers, because reading a group's snapshot would otherwise load every
+   * item of every group at startup. Write-through still indexes any group
+   * paper a question reads.
+   */
   async reconcileAll(): Promise<void> {
     if (!this.env.isEnabled()) return;
-    for (const libraryID of this.env.listLibraryIds()) {
+    const [userLibrary, ...groups] = this.env.listLibraryIds();
+    const libraries = userLibrary === undefined ? [] : [userLibrary];
+    for (const libraryID of groups) {
+      try {
+        if (
+          this.env.isLibraryDataLoaded(libraryID) ||
+          (await this.hasIndexedDocuments(libraryID))
+        )
+          libraries.push(libraryID);
+      } catch (error) {
+        appLogger.debug(
+          `LLM index: could not check library ${libraryID} for reconcile`,
+          error,
+        );
+      }
+    }
+    for (const libraryID of libraries) {
       try {
         await this.reconcile(libraryID);
       } catch (error) {
+        // Closed under the reconcile (stop, Clear): the rest would fail too.
+        if (isLibraryTextIndexClosedError(error)) {
+          appLogger.debug("LLM index: reconcile stopped; index closed");
+          return;
+        }
         appLogger.warn(
           `LLM index: reconcile failed for library ${libraryID}`,
           error,
@@ -372,6 +414,11 @@ export class LibraryTextIndexScheduler {
     } catch (error) {
       appLogger.debug("LLM index: budget check failed", error);
     }
+  }
+
+  private async hasIndexedDocuments(libraryID: number): Promise<boolean> {
+    const store = await this.env.getStore();
+    return Boolean(store && (await store.listDocuments(libraryID)).length);
   }
 
   async reconcile(libraryID: number): Promise<ReconcileResult> {
@@ -501,6 +548,11 @@ export class LibraryTextIndexScheduler {
       this.env.getItem(row.attachmentId),
     );
     if (!state) return null; // no local file: leave the row alone
+    // Recorded without a stat (written before the file was on disk): the file
+    // exists now, so what was indexed may not be its text.
+    const statRecorded = row.sourceSize !== null || row.sourceMtime !== null;
+    const statNow = state.size !== null || state.mtime !== null;
+    if (!statRecorded && statNow) return "stale";
     const sizeChanged =
       row.sourceSize !== null &&
       state.size !== null &&
@@ -529,13 +581,7 @@ export class LibraryTextIndexScheduler {
     if (change.event !== "add" && change.event !== "modify") return;
     const attachmentIds = this.expandToAttachments(ids, false);
     if (change.event === "add") {
-      // An initial sync adds thousands of items at once: those wait for idle.
-      await this.enqueue(
-        attachmentIds,
-        attachmentIds.length > INDEX_URGENT_ADD_BATCH_MAX
-          ? "prefetch"
-          : "added",
-      );
+      await this.enqueueNotifierBatch(attachmentIds, "added");
       return;
     }
     // Metadata edits and sync touches fire `modify` on every item. Re-extract
@@ -546,6 +592,7 @@ export class LibraryTextIndexScheduler {
     if (!store) return;
     const queuedByLibrary = new Map<number, Set<number>>();
     const changed: number[] = [];
+    const unseen: number[] = [];
     for (const attachmentId of attachmentIds) {
       const row = await store.getDocument(attachmentId);
       if (row) {
@@ -558,9 +605,34 @@ export class LibraryTextIndexScheduler {
         queued = await store.listQueuedAttachmentIds(libraryID);
         queuedByLibrary.set(libraryID, queued);
       }
-      if (!queued.has(attachmentId)) changed.push(attachmentId);
+      if (!queued.has(attachmentId)) unseen.push(attachmentId);
     }
     await this.enqueue(changed, "modified");
+    // Never indexed and never queued: a sync touching many such papers is
+    // routed like a large add.
+    await this.enqueueNotifierBatch(unseen, "modified");
+  }
+
+  /**
+   * An initial sync adds (or touches) thousands of items at once: a batch
+   * over INDEX_URGENT_ADD_BATCH_MAX waits for idle in the prefetch lane, and
+   * at or above the soft budget it is not queued at all (reconcile picks it
+   * up, as it does for every other prefetch candidate).
+   */
+  private async enqueueNotifierBatch(
+    attachmentIds: number[],
+    urgentReason: "added" | "modified",
+  ): Promise<void> {
+    if (!attachmentIds.length) return;
+    if (attachmentIds.length <= INDEX_URGENT_ADD_BATCH_MAX) {
+      await this.enqueue(attachmentIds, urgentReason);
+      return;
+    }
+    const store = await this.env.getStore();
+    if (!store) return;
+    const softLimit = this.env.budgetBytes() * INDEX_BUDGET_SOFT_RATIO;
+    if ((await store.sumByteEstimates()) >= softLimit) return;
+    await this.enqueue(attachmentIds, "prefetch");
   }
 
   private expandToAttachments(

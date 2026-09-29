@@ -52,4 +52,47 @@ describe("library retrieve planner deadline", function () {
     assert.notMatch(result.warnings.join("\n"), /Query planner exceeded/);
     assert.lengthOf(result.queryPlan.variants, 1, "the model plan was used");
   });
+
+  it("waits for the planner at pool depth even with the index on (pool never searches the index)", async function () {
+    const rig = createRetrieveServiceRig({
+      papers: 2,
+      textIndex: {
+        isEnabled: () => true,
+        search: async () => null,
+        leadingChunks: async () => null,
+      },
+      plannerDelayMs: 50,
+      plannerDeadlineMs: 10,
+      modelConfigured: true,
+    });
+    const result = await rig.service.retrieve({
+      query: "method",
+      depth: "pool",
+    });
+    assert.notMatch(result.warnings.join("\n"), /Query planner exceeded/);
+    assert.lengthOf(result.queryPlan.variants, 1, "the model plan was used");
+  });
+
+  it("keeps the requested read intent in the literal plan used after the deadline", async function () {
+    const rig = createRetrieveServiceRig({
+      papers: 1,
+      textIndex: {
+        isEnabled: () => true,
+        search: async () => null,
+        leadingChunks: async () => null,
+      },
+      plannerDelayMs: 50,
+      plannerDeadlineMs: 10,
+    });
+    const plan = await (rig.service as any).planQuery(
+      { query: "method" },
+      { query: "method", readIntent: "full-once" },
+      true,
+      "evidence",
+      { count: () => undefined },
+      [],
+    );
+    assert.deepEqual(plan.variants, [], "the literal plan");
+    assert.equal(plan.readIntent, "full-once");
+  });
 });

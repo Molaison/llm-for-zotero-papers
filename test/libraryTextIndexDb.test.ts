@@ -1,9 +1,13 @@
 import { assert } from "chai";
-import { installLibraryTextIndexSqlite } from "./helpers/libraryTextIndexDb";
+import {
+  installLibraryTextIndexSqlite,
+  installZoteroDbConnectionFake,
+} from "./helpers/libraryTextIndexDb";
 import {
   closeLibraryTextIndexDb,
   ensureLibraryTextIndexSchema,
   getLibraryTextIndexDbPath,
+  isLibraryTextIndexClosedError,
   openLibraryTextIndexDb,
   setLibraryTextIndexDbForTests,
 } from "../src/services/libraryTextIndex/db";
@@ -142,11 +146,54 @@ describe("library text index db", function () {
       assert.isOk(await opening);
       await closing;
       assert.lengthOf(closes, 1, "the handle opened during shutdown is closed");
-      assert.notEqual(closes[0][0], true, "never close with permanent=true");
+      assert.equal(
+        closes[0][0],
+        true,
+        "closed permanently, so a late query cannot silently reopen it",
+      );
     } finally {
       (globalThis as any).Zotero = previous;
     }
   });
+  it("closes permanently: a late query on the old handle throws, and the next open builds a fresh connection", async function () {
+    const previous = (globalThis as any).Zotero;
+    const fake = installZoteroDbConnectionFake();
+    (globalThis as any).Zotero = {
+      DBConnection: fake.FakeZoteroDBConnection,
+      DataDirectory: { dir: "/tmp" },
+    };
+    try {
+      const first = await openLibraryTextIndexDb();
+      assert.isOk(first);
+      await closeLibraryTextIndexDb();
+      assert.deepEqual(fake.instances[0].closes, [true]);
+      let lateError: unknown = null;
+      try {
+        await first!.queryAsync("SELECT 1 AS one");
+      } catch (error) {
+        lateError = error;
+      }
+      assert.isTrue(
+        isLibraryTextIndexClosedError(lateError),
+        "a late query throws instead of reopening an untracked handle",
+      );
+      assert.equal(fake.instances[0].reopens, 0);
+      const second = await openLibraryTextIndexDb();
+      assert.isOk(second);
+      assert.notStrictEqual(second, first);
+      assert.lengthOf(fake.instances, 2, "a fresh DBConnection after close");
+      assert.deepEqual(
+        await second!
+          .queryAsync("SELECT 1 AS one")
+          .then((rows: any) => rows.map((r: any) => r.one)),
+        [1],
+      );
+    } finally {
+      await closeLibraryTextIndexDb();
+      (globalThis as any).Zotero = previous;
+    }
+  });
+
   it("opens the index by absolute path, so Zotero treats it as an external database", async function () {
     // A bare name makes Zotero run its main-database routine on open: after an
     // unclean shutdown it shows the pane-wide "checking database integrity"

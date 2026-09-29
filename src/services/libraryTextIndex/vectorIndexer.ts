@@ -26,6 +26,7 @@ import {
 import { EMBEDDING_CONCURRENCY } from "./constants";
 import type { LibraryTextIndexStore } from "./store";
 import {
+  getVectorShardPath,
   LibraryVectorMatrix,
   quantizeVector,
   readVectorShard,
@@ -325,18 +326,22 @@ async function removeShardFile(path: string): Promise<void> {
 /**
  * Best-effort cleanup after documents left the index: removes their shard
  * files and their rows in the loaded matrices. The `vector_documents` rows
- * must already be deleted (read them before deleting the documents).
+ * must already be deleted (read them before deleting the documents). The
+ * file removed is the one derived from namespace + attachment id, never the
+ * row's stored path, so a corrupted row cannot delete a file elsewhere.
  */
 export async function removeDocumentVectors(
   rows: Array<{ attachmentId: number; namespace: string; path: string }>,
 ): Promise<void> {
   for (const row of rows) {
     matrices.get(row.namespace)?.removeDocument(row.attachmentId);
+    let path = "";
     try {
-      await removeShardFile(row.path);
+      path = getVectorShardPath(row.namespace, row.attachmentId);
+      await removeShardFile(path);
     } catch (error) {
       appLogger.debug(
-        `LLM index: could not remove vector shard ${row.path}`,
+        `LLM index: could not remove vector shard ${path || row.attachmentId}`,
         error,
       );
     }

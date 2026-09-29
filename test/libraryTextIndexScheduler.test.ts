@@ -26,6 +26,21 @@ import {
   snapshotTestGlobals,
   type TestGlobalSnapshot,
 } from "./helpers/retrievalCorpus";
+import { setAppLogSinkForTests, type AppLogLevel } from "../src/core/logging";
+
+/** Runs `fn` with the app logger captured; returns the warn messages. */
+async function captureWarns(fn: () => Promise<void>): Promise<string[]> {
+  const warns: string[] = [];
+  setAppLogSinkForTests((level: AppLogLevel, args) => {
+    if (level === "warn") warns.push(args.map(String).join(" "));
+  });
+  try {
+    await fn();
+  } finally {
+    setAppLogSinkForTests(null);
+  }
+  return warns;
+}
 
 type Timer = { cb: () => void; at: number; cleared: boolean };
 
@@ -168,6 +183,22 @@ describe("library text index scheduler", function () {
     );
   });
 
+  it("startup reconcile never loads a group library Zotero has not loaded and the index does not hold", async function () {
+    const snapshotCalls: number[] = [];
+    const env = (scheduler as any).env;
+    env.listLibraryIds = () => [1, 2, 3, 4];
+    env.getSnapshot = async (libraryID: number) => {
+      snapshotCalls.push(libraryID);
+      return fakeSnapshot([]);
+    };
+    // Group 2 is loaded; group 3 is not loaded but has index rows (a paper
+    // read by an earlier question); group 4 is neither.
+    env.isLibraryDataLoaded = (libraryID: number) => libraryID === 2;
+    await store.upsertDocument(docRow(30, { libraryID: 3 }));
+    await scheduler.reconcileAll();
+    assert.deepEqual(snapshotCalls, [1, 2, 3]);
+  });
+
   it("reconcile re-queues a document whose file size or mtime changed and resets attempts", async function () {
     await store.upsertDocument(docRow(1));
     await store.enqueue([
@@ -202,6 +233,22 @@ describe("library text index scheduler", function () {
       skippedForBudget: 0,
     });
     assert.isNull(await store.dequeueNext({ now: clock }));
+  });
+
+  it("reconcile re-queues a row recorded without a file stat once the file exists", async function () {
+    // Written before its file was on disk (e.g. a no-text row from a sync
+    // that ran ahead of the download): no recorded size or mtime.
+    await store.upsertDocument(
+      docRow(1, {
+        sourceType: "none",
+        sourceMtime: null,
+        sourceSize: null,
+      }),
+    );
+    snapshotIds = [1];
+    const result = await scheduler.reconcile(1);
+    assert.equal(result.stale, 1);
+    assert.equal((await store.dequeueNext({ now: clock }))?.reason, "stale");
   });
 
   it("reconcile re-queues a pdf.js-indexed paper that gained a MinerU cache", async function () {
@@ -332,17 +379,21 @@ describe("library text index scheduler", function () {
     };
     await scheduler.enqueue([1], "added");
     scheduler.start();
-    await drainAll(2);
-    assert.equal(calls, 1, "no immediate retry");
-    clock += INDEX_RETRY_BACKOFF_MS[0];
-    await drainAll(2);
-    assert.equal(calls, 2);
-    clock += INDEX_RETRY_BACKOFF_MS[1];
-    await drainAll(2);
-    assert.equal(calls, 3);
-    clock += INDEX_RETRY_BACKOFF_MS[2];
-    await drainAll(2);
-    assert.equal(calls, 3, "parked after the cap");
+    const warns = await captureWarns(async () => {
+      await drainAll(2);
+      assert.equal(calls, 1, "no immediate retry");
+      clock += INDEX_RETRY_BACKOFF_MS[0];
+      await drainAll(2);
+      assert.equal(calls, 2);
+      clock += INDEX_RETRY_BACKOFF_MS[1];
+      await drainAll(2);
+      assert.equal(calls, 3);
+      clock += INDEX_RETRY_BACKOFF_MS[2];
+      await drainAll(2);
+      assert.equal(calls, 3, "parked after the cap");
+    });
+    assert.lengthOf(warns, 1, "one session summary");
+    assert.match(warns[0], /1 attachment\(s\) could not be indexed/);
     const status = await scheduler.getStatus(1);
     assert.equal(status.failed, 1);
     assert.match(status.lastError || "", /extract failed/);
@@ -618,6 +669,57 @@ describe("library text index scheduler", function () {
     );
   });
 
+  it("routes a large modify batch of never-indexed papers like a large add: prefetch, and none above the soft budget", async function () {
+    const big = Array.from(
+      { length: INDEX_URGENT_ADD_BATCH_MAX + 1 },
+      (_, i) => 100 + i,
+    );
+    const modify = (ids: number[]) =>
+      scheduler.handleChange({
+        event: "modify",
+        type: "item",
+        ids,
+        extraData: {},
+        receivedAt: 0,
+      });
+    await modify(big);
+    assert.deepEqual(
+      harness
+        .rows("SELECT DISTINCT priority FROM queue")
+        .map((r) => r.priority),
+      [INDEX_PRIORITY.prefetch],
+      "a sync touching thousands of unindexed papers must not flood the urgent lane",
+    );
+    assert.lengthOf(harness.rows("SELECT * FROM queue"), big.length);
+    // A small batch is still urgent.
+    await modify([500, 501]);
+    assert.lengthOf(
+      harness.rows("SELECT * FROM queue WHERE priority = ?", [
+        INDEX_PRIORITY.modified,
+      ]),
+      2,
+    );
+    // At the soft budget, a large batch is left to reconcile.
+    await store.removeFromQueue(
+      harness
+        .rows("SELECT attachment_id FROM queue")
+        .map((r) => r.attachment_id),
+    );
+    budget = 1000; // soft limit 900
+    await store.upsertDocument(docRow(9, { byteEstimate: 950 }));
+    await modify(big.map((id) => id + 1000));
+    assert.lengthOf(harness.rows("SELECT * FROM queue"), 0);
+    // The same rule for add.
+    await scheduler.handleChange({
+      event: "add",
+      type: "item",
+      ids: big.map((id) => id + 2000),
+      extraData: {},
+      receivedAt: 0,
+    });
+    assert.lengthOf(harness.rows("SELECT * FROM queue"), 0);
+  });
+
   it("takes no prefetch job above the soft budget, but still runs urgent jobs", async function () {
     budget = 1000; // soft limit 900
     await store.upsertDocument(docRow(9, { byteEstimate: 950 }));
@@ -784,8 +886,10 @@ describe("library text index scheduler", function () {
       for (const id of [1, 2, 3, 4, 5, 6])
         await store.upsertDocument(withChunk(id));
       scheduler.start();
-      await drainAll(10);
+      const warns = await captureWarns(() => drainAll(10));
       assert.equal(calls, 3);
+      assert.lengthOf(warns, 1);
+      assert.match(warns[0], /vector indexing paused for this session/);
     });
 
     it("skips a document whose embed reports skipped instead of retrying it forever", async function () {
@@ -845,7 +949,11 @@ describe("library text index scheduler", function () {
         await embedReal(1, "old:4");
         (globalThis as any).Zotero = {}; // no data directory: removal throws
         snapshotIds = [1];
-        await scheduler.reconcile(1); // does not throw
+        const warns = await captureWarns(async () => {
+          await scheduler.reconcile(1); // does not throw
+        });
+        assert.lengthOf(warns, 1);
+        assert.match(warns[0], /could not remove vector namespace files/);
         assert.deepEqual(
           await store.listVectorNamespaces(),
           ["old:4"],

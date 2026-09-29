@@ -211,11 +211,26 @@ export async function closeLibraryTextIndexDb(): Promise<void> {
   openPromise = null;
   if (db?.closeDatabase) {
     try {
-      await db.closeDatabase();
+      // Permanent: Zotero's non-permanent close lets the next query on this
+      // object silently reopen an untracked handle (a late fire-and-forget
+      // write, an abandoned job). Late queries now throw
+      // (isLibraryTextIndexClosedError); the next open builds a new connection.
+      await db.closeDatabase(true);
     } catch (error) {
       appLogger.debug("LLM index: close failed", error);
     }
   }
+}
+
+/**
+ * The error a query on a permanently closed connection throws (Zotero's
+ * "Database permanently closed; not re-opening"). Late work that races a
+ * stop or a Clear hits it; callers treat it as "the index went away", not as
+ * a failure worth a warning.
+ */
+export function isLibraryTextIndexClosedError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return /permanently closed/i.test(message);
 }
 
 type FileRemover = {
@@ -226,10 +241,11 @@ type FileRemover = {
 };
 
 /**
- * Deletes the index database file and its `-wal`/`-shm` companions; absent
- * files are fine. Stop the scheduler first (a job mid-write must finish).
- * Opens are refused until the delete ends, and any connection opened since
- * the caller's close is closed here, so no handle survives on an unlinked file.
+ * Deletes the index database file and its `-wal`/`-shm`/`-journal`
+ * companions; absent files are fine. Stop the scheduler first (a job
+ * mid-write must finish). Opens are refused until the delete ends, and any
+ * connection opened since the caller's close is closed here, so no handle
+ * survives on an unlinked file.
  */
 export async function deleteLibraryTextIndexDatabaseFiles(): Promise<void> {
   deletingFiles = true;
@@ -253,7 +269,8 @@ async function removeDatabaseFiles(): Promise<void> {
       ? scope.OS.File
       : null;
   if (!remover?.remove) return;
-  for (const file of [path, `${path}-wal`, `${path}-shm`]) {
+  // WAL companions, and the rollback journal external databases use.
+  for (const file of [path, `${path}-wal`, `${path}-shm`, `${path}-journal`]) {
     await remover.remove(file, { ignoreAbsent: true });
   }
 }

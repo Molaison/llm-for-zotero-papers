@@ -14,6 +14,7 @@ import { libraryIndexService } from "../libraryIndexService";
 import {
   closeLibraryTextIndexDb,
   deleteLibraryTextIndexDatabaseFiles,
+  isLibraryTextIndexClosedError,
 } from "./db";
 import { libraryTextIndexScheduler, type SchedulerEnv } from "./scheduler";
 import { createUserIdleTracker, type UserIdleTracker } from "./userIdle";
@@ -73,7 +74,8 @@ export const libraryTextIndex: LibraryTextIndexFacade = {
       const store = await getLibraryTextIndexStore();
       return store ? await searchLibraryTextIndex({ ...params, store }) : null;
     } catch (error) {
-      appLogger.warn(
+      // Closed under a running search (stop, Clear): not a failure.
+      (isLibraryTextIndexClosedError(error) ? appLogger.debug : appLogger.warn)(
         "LLM index: search failed; falling back to the direct path",
         error,
       );
@@ -88,7 +90,10 @@ export const libraryTextIndex: LibraryTextIndexFacade = {
         ? await readLeadingIndexChunks(store, attachmentId, k)
         : null;
     } catch (error) {
-      appLogger.warn("LLM index: leading-chunk read failed", error);
+      (isLibraryTextIndexClosedError(error) ? appLogger.debug : appLogger.warn)(
+        "LLM index: leading-chunk read failed",
+        error,
+      );
       return null;
     }
   },
@@ -103,8 +108,11 @@ let lastEnvOverride: Partial<SchedulerEnv> = {};
 
 /**
  * Starts the background fill. Deferred startup work: it never opens a
- * transaction on or queries `Zotero.DB` (#485); all index SQL goes through the
- * separate index connection.
+ * transaction on `Zotero.DB` (#485), and all index SQL goes through the
+ * separate index connection. Reconcile does read the library through the
+ * shared library snapshot (`Zotero.Items.getAll`, read-only): for the user
+ * library, and for a group library only when Zotero has already loaded it or
+ * the index already holds some of its papers.
  */
 export async function startLibraryTextIndex(
   envOverride: Partial<SchedulerEnv> = {},

@@ -19,6 +19,7 @@ import {
   loadVectorDims,
   loadVectorMatrix,
   pruneVectorNamespaces,
+  removeDocumentVectors,
   resetVectorIndexerForTests,
 } from "../src/services/libraryTextIndex/vectorIndexer";
 import {
@@ -26,6 +27,7 @@ import {
   namespaceHash,
 } from "../src/services/libraryTextIndex/vectorStore";
 import { pdfTextCache } from "../src/services/paperContent/contextCache";
+import { setAppLogSinkForTests, type AppLogLevel } from "../src/core/logging";
 
 const PREFIX = "extensions.zotero.llmforzotero.";
 
@@ -215,7 +217,18 @@ describe("library vector indexer", function () {
       if (path.includes(locked)) throw new Error("file is locked");
       return remove(path, options);
     };
-    const removed = await pruneVectorNamespaces(store, "keep:4");
+    const warns: string[] = [];
+    setAppLogSinkForTests((level: AppLogLevel, args) => {
+      if (level === "warn") warns.push(args.map(String).join(" "));
+    });
+    let removed: string[];
+    try {
+      removed = await pruneVectorNamespaces(store, "keep:4");
+    } finally {
+      setAppLogSinkForTests(null);
+    }
+    assert.lengthOf(warns, 1);
+    assert.match(warns[0], /could not remove vector namespace files/);
     assert.deepEqual(removed, ["old2:4"]);
     assert.deepEqual(await store.listVectorNamespaces(), ["keep:4", "old1:4"]);
     assert.isTrue(io.files.has(getVectorShardPath("old1:4", 9001)));
@@ -224,6 +237,25 @@ describe("library vector indexer", function () {
     ioUtils.remove = remove;
     assert.deepEqual(await pruneVectorNamespaces(store, "keep:4"), ["old1:4"]);
     assert.deepEqual(await store.listVectorNamespaces(), ["keep:4"]);
+  });
+
+  it("removes a document's shard at the path derived from its namespace, never at a stored path elsewhere", async function () {
+    const embed = async (texts: string[]) => texts.map(() => [1, 0, 0, 0]);
+    await embedDocumentVectors({
+      store,
+      attachmentId: 9001,
+      namespace: "t:4",
+      embed,
+    });
+    const shard = getVectorShardPath("t:4", 9001);
+    const outside = "/tmp/zotero/storage/ABCD1234/paper.pdf";
+    io.files.set(outside, new Uint8Array([1]));
+    // A corrupted or tampered row: its path points outside the vectors root.
+    await removeDocumentVectors([
+      { attachmentId: 9001, namespace: "t:4", path: outside },
+    ]);
+    assert.isTrue(io.files.has(outside), "a stored path is never trusted");
+    assert.isFalse(io.files.has(shard), "the derived shard path is removed");
   });
 
   it("deleteVectorNamespacesExcept returns the removed namespaces", async function () {

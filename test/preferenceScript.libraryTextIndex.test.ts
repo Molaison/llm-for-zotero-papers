@@ -4,8 +4,10 @@ import { config } from "../package.json";
 import {
   bindLibraryTextIndexSettings,
   formatLibraryTextIndexStatus,
+  testEmbeddingConnection,
   type LibraryTextIndexSettingsDeps,
 } from "../src/modules/preferenceScript";
+import { EMBEDDING_BATCH_TIMEOUT_MS } from "../src/services/retrieval/constants";
 import type { LibraryTextIndexOverview } from "../src/services/libraryTextIndex";
 import { initI18n, t } from "../src/utils/i18n";
 import { setAppLogSinkForTests } from "../src/core/logging";
@@ -495,5 +497,18 @@ describe("formatLibraryTextIndexStatus", function () {
       assert.deepEqual(missing, []);
       assert.isAtLeast(new Set(asked).size, 10);
     });
+  });
+});
+
+describe("settings Test embedding button", function () {
+  it("allows a cold local model the batch timeout, not the query timeout", async function () {
+    const calls: Array<[string[], { timeoutMs?: number } | undefined]> = [];
+    await testEmbeddingConnection(async (input, options) => {
+      calls.push([input, options]);
+      return [[1]];
+    });
+    assert.deepEqual(calls, [
+      [["test"], { timeoutMs: EMBEDDING_BATCH_TIMEOUT_MS }],
+    ]);
   });
 });

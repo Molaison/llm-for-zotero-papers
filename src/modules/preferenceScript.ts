@@ -305,6 +305,7 @@ import {
   INDEX_BUDGET_MB_DEFAULT,
   INDEX_BUDGET_MB_MIN,
 } from "../services/libraryTextIndex/constants";
+import { EMBEDDING_BATCH_TIMEOUT_MS } from "../services/retrieval/constants";
 import {
   getDefaultClaudeManagedInstructionBlock,
   readClaudeProjectManagedInstructionBlock,
@@ -961,6 +962,17 @@ function formatIndexMegabytes(bytes: number): string {
  * queued · 2 could not be indexed · 41 MB of 500 MB", "Building… · " first
  * while it fills, "Index is off" when disabled. Embeddings are not shown.
  */
+/**
+ * The settings "Test" button for embeddings. A local model's first call
+ * loads it cold, so the button allows the batch timeout rather than the
+ * 30 s query default.
+ */
+export async function testEmbeddingConnection(
+  call: typeof callEmbeddings = callEmbeddings,
+): Promise<void> {
+  await call(["test"], { timeoutMs: EMBEDDING_BATCH_TIMEOUT_MS });
+}
+
 export function formatLibraryTextIndexStatus(
   overview: LibraryTextIndexOverview,
   translate: (en: string) => string,
@@ -5361,7 +5373,7 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
         testStatus.textContent = t("Testing…");
         testStatus.style.color = "var(--fill-secondary, #888)";
         try {
-          await callEmbeddings(["test"]);
+          await testEmbeddingConnection();
           testStatus.textContent = t("✓ Connection successful");
           testStatus.style.color = "green";
         } catch (error) {

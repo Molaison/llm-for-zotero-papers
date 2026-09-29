@@ -43,10 +43,18 @@ export type LibraryTextIndexSearchParams = {
   maxPapers: number;
   perPaperTopK: number;
   maxChunks?: number;
+  /**
+   * Only the top this-many papers get chunk rows (and an LRU touch); the
+   * rest are ranked and counted only. Defaults to every returned paper.
+   */
+  chunkPapers?: number;
 };
 export type LibraryTextIndexSearchResult = {
   chunks: IndexedChunkHit[];
+  /** The top `maxPapers` matching papers. */
   papers: IndexedPaperHit[];
+  /** Every in-scope paper with a match, before the `maxPapers` cut. */
+  totalMatchingPapers: number;
   coverage: IndexCoverage;
   queryTerms: string[];
   timings: Record<string, number>;
@@ -127,7 +135,14 @@ export async function searchLibraryTextIndex(
   const queryTerms = collectQueryTerms(params.queries);
   if (!queryTerms.length || !coverage.indexed) {
     timings.total = Date.now() - started;
-    return { chunks: [], papers: [], coverage, queryTerms, timings };
+    return {
+      chunks: [],
+      papers: [],
+      totalMatchingPapers: 0,
+      coverage,
+      queryTerms,
+      timings,
+    };
   }
   const [postings, df, stats] = await mark("postings", () =>
     Promise.all([
@@ -201,7 +216,11 @@ export async function searchLibraryTextIndex(
     score: number;
     terms: string[];
   }> = [];
-  for (const paper of papers) {
+  const chunkPapers = papers.slice(
+    0,
+    Math.max(1, params.chunkPapers ?? papers.length),
+  );
+  for (const paper of chunkPapers) {
     const rows = byPaper
       .get(paper.attachmentId)!
       .chunks.sort((a, b) => b.score - a.score || a.chunkIndex - b.chunkIndex)
@@ -226,7 +245,7 @@ export async function searchLibraryTextIndex(
       attachmentId: s.attachmentId,
       chunkIndex: s.chunkIndex,
     });
-  for (const p of papers)
+  for (const p of chunkPapers)
     refs.set(`${p.attachmentId}:${p.bestChunkIndex}`, {
       attachmentId: p.attachmentId,
       chunkIndex: p.bestChunkIndex,
@@ -257,6 +276,7 @@ export async function searchLibraryTextIndex(
       matchedTerms: s.terms,
     });
   }
+  // Papers past `chunkPapers` have no chunk read: their parent stays null.
   for (const paper of papers)
     paper.parentItemId =
       storedByKey.get(`${paper.attachmentId}:${paper.bestChunkIndex}`)
@@ -264,11 +284,18 @@ export async function searchLibraryTextIndex(
   timings.total = Date.now() - started;
   // LRU bookkeeping for the byte budget (Task 7 eviction): fire-and-forget,
   // never on the answer path.
-  if (papers.length)
+  if (chunkPapers.length)
     void params.store
-      .touchDocuments(papers.map((p) => p.attachmentId))
+      .touchDocuments(chunkPapers.map((p) => p.attachmentId))
       .catch(() => undefined);
-  return { chunks, papers, coverage, queryTerms, timings };
+  return {
+    chunks,
+    papers,
+    totalMatchingPapers: byPaper.size,
+    coverage,
+    queryTerms,
+    timings,
+  };
 }
 
 /**
