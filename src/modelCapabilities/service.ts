@@ -14,6 +14,10 @@ import { MAX_ALLOWED_TOKENS } from "../utils/llmDefaults";
 import { isTextOnlyModel } from "../providers/modelChecks";
 import { BUNDLED_MODEL_CAPABILITY_REGISTRY } from "./bundled";
 import {
+  readModelCapabilityRegistryCache,
+  writeModelCapabilityRegistryCache,
+} from "./registryCache";
+import {
   inferProviderFromApiBase,
   inferProviderFromModelName,
 } from "./providerInference";
@@ -56,10 +60,6 @@ import type {
   ResolvedModelCapabilities,
 } from "./types";
 
-const REGISTRY_PREF_KEY =
-  "extensions.zotero.llmforzotero.modelCapabilitiesRegistry";
-const REGISTRY_TIMESTAMP_PREF_KEY =
-  "extensions.zotero.llmforzotero.modelCapabilitiesRegistryFetchedAt";
 const REGISTRY_REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const PROVIDER_CATALOG_TTL_MS = 60 * 1000;
 const DEFAULT_REFRESH_TIMEOUT_MS = 10_000;
@@ -82,7 +82,8 @@ type CapabilityRuntime = {
 let runtime: CapabilityRuntime = {};
 let activeRegistry = cloneRegistry(BUNDLED_MODEL_CAPABILITY_REGISTRY);
 let activeRegistrySource: CapabilitySource = "bundled";
-let persistedRegistryLoaded = false;
+let registryLoadTask: Promise<void> | null = null;
+let registryFetchedAt = 0;
 let registryRefreshTask: Promise<boolean> | null = null;
 const capabilityPreflightTasks = new Map<string, Promise<void>>();
 const catalogRefreshTasks = new Map<string, Promise<DiscoveredModel[]>>();
@@ -95,24 +96,6 @@ function now(): number {
 
 function normalize(value: unknown): string {
   return typeof value === "string" ? value.trim().toLowerCase() : "";
-}
-
-function getZoteroPrefs(): {
-  get?: (key: string, global?: boolean) => unknown;
-  set?: (key: string, value: unknown, global?: boolean) => void;
-} | null {
-  return (
-    (
-      globalThis as unknown as {
-        Zotero?: {
-          Prefs?: {
-            get?: (key: string, global?: boolean) => unknown;
-            set?: (key: string, value: unknown, global?: boolean) => void;
-          };
-        };
-      }
-    ).Zotero?.Prefs || null
-  );
 }
 
 function getFetch(): typeof fetch | undefined {
@@ -426,21 +409,21 @@ function defaultSampling(): ModelSamplingCapability {
   };
 }
 
-function loadPersistedRegistry(): void {
-  if (persistedRegistryLoaded) return;
-  persistedRegistryLoaded = true;
-  const prefs = getZoteroPrefs();
-  const raw = prefs?.get?.(REGISTRY_PREF_KEY, true);
-  if (typeof raw !== "string" || !raw.trim()) return;
-  try {
-    const parsed = validateRegistry(JSON.parse(raw));
-    if (parsed && parsed.revision >= activeRegistry.revision) {
-      activeRegistry = parsed;
-      activeRegistrySource = "remote";
-    }
-  } catch {
-    // Ignore corrupt cached data and keep the bundled registry.
+/** Load local metadata before mounting model controls; never fetches remotely. */
+export function initializeModelCapabilityRegistry(): Promise<void> {
+  if (!registryLoadTask) {
+    registryLoadTask = (async () => {
+      const cached = await readModelCapabilityRegistryCache(now());
+      if (!cached) return;
+      registryFetchedAt = cached.fetchedAt;
+      if (cached.registry.revision >= activeRegistry.revision) {
+        activeRegistry = cached.registry;
+        activeRegistrySource = "remote";
+        notify();
+      }
+    })();
   }
+  return registryLoadTask;
 }
 
 export function configureModelCapabilityRuntime(next: CapabilityRuntime): void {
@@ -496,18 +479,20 @@ export async function ensureModelCapabilities(
       : FIRST_USE_PREFLIGHT_TIMEOUT_MS,
   );
   const key = buildCatalogKey(identity);
-  loadPersistedRegistry();
-  const registryProbe = !findRegistryEntry(
-    activeRegistry,
-    providerFromIdentity(identity),
-    identity.model,
-  );
   let task = capabilityPreflightTasks.get(key);
   if (!task) {
-    task = Promise.allSettled([
-      refreshModelCapabilityRegistry({ timeoutMs, force: registryProbe }),
-      refreshModelCatalog(identity, { timeoutMs }),
-    ]).then(() => undefined);
+    task = (async () => {
+      await initializeModelCapabilityRegistry();
+      const registryProbe = !findRegistryEntry(
+        activeRegistry,
+        providerFromIdentity(identity),
+        identity.model,
+      );
+      await Promise.allSettled([
+        refreshModelCapabilityRegistry({ timeoutMs, force: registryProbe }),
+        refreshModelCatalog(identity, { timeoutMs }),
+      ]);
+    })();
     capabilityPreflightTasks.set(key, task);
     void task.then(
       () => {
@@ -537,7 +522,6 @@ export async function ensureModelCapabilities(
 export function getModelCapabilities(
   identity: ModelCapabilityIdentity,
 ): ResolvedModelCapabilities {
-  loadPersistedRegistry();
   const provider = providerFromIdentity(identity);
   const model = identity.model.trim();
   const entry = findRegistryEntry(activeRegistry, provider, model);
@@ -802,30 +786,24 @@ export function publishModelCapabilityCatalog(
   notify();
 }
 
-function getRegistryFetchedAt(): number {
-  const value = getZoteroPrefs()?.get?.(REGISTRY_TIMESTAMP_PREF_KEY, true);
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : 0;
-}
-
-function persistRegistry(registry: typeof activeRegistry): void {
-  try {
-    const prefs = getZoteroPrefs();
-    prefs?.set?.(REGISTRY_PREF_KEY, JSON.stringify(registry), true);
-    prefs?.set?.(REGISTRY_TIMESTAMP_PREF_KEY, now(), true);
-  } catch {
-    // Persistence is an optimization; an unavailable preference service must
-    // not discard a valid in-memory registry update.
-  }
+async function persistRegistry(): Promise<void> {
+  // Retain freshness in memory even if the disk is temporarily unwritable.
+  registryFetchedAt = now();
+  await writeModelCapabilityRegistryCache({
+    schemaVersion: 1,
+    registry: activeRegistry,
+    fetchedAt: registryFetchedAt,
+  });
 }
 
 export async function refreshModelCapabilityRegistry(
   options: ModelCapabilityRefreshOptions = {},
 ): Promise<boolean> {
-  loadPersistedRegistry();
+  await initializeModelCapabilityRegistry();
   if (
     !options.force &&
-    now() - getRegistryFetchedAt() < REGISTRY_REFRESH_INTERVAL_MS
+    registryFetchedAt > 0 &&
+    now() - registryFetchedAt < REGISTRY_REFRESH_INTERVAL_MS
   ) {
     return false;
   }
@@ -852,13 +830,14 @@ export async function refreshModelCapabilityRegistry(
       const text = await response.text();
       if (text.length > MODEL_CAPABILITY_REGISTRY_MAX_BYTES) return false;
       const parsed = validateRegistry(JSON.parse(text));
-      if (!parsed || parsed.revision <= activeRegistry.revision) {
-        persistRegistry(activeRegistry);
+      if (!parsed) return false;
+      if (parsed.revision <= activeRegistry.revision) {
+        await persistRegistry();
         return false;
       }
       activeRegistry = parsed;
       activeRegistrySource = "remote";
-      persistRegistry(parsed);
+      await persistRegistry();
       notify();
       return true;
     } catch {
@@ -1157,7 +1136,8 @@ export async function refreshConfiguredModelCatalogs(
 export function resetModelCapabilityStateForTests(): void {
   activeRegistry = cloneRegistry(BUNDLED_MODEL_CAPABILITY_REGISTRY);
   activeRegistrySource = "bundled";
-  persistedRegistryLoaded = false;
+  registryLoadTask = null;
+  registryFetchedAt = 0;
   registryRefreshTask = null;
   capabilityPreflightTasks.clear();
   catalogRefreshTasks.clear();
