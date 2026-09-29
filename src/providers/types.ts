@@ -1,5 +1,23 @@
 import type { ModelInputMode } from "../shared/types";
 
+/** Account allowance is independent of locally recorded conversation tokens. */
+export type ProviderQuota =
+  | {
+      kind: "balance";
+      scope: "account" | "key";
+      balances: Array<{ currency: string; amount: number }>;
+    }
+  | {
+      kind: "usage";
+      provider?: "codex" | "claude" | "glm" | "kimi" | "minimax" | "opencode";
+      windows: Array<{
+        usedPercent: number;
+        period?: "rolling" | "weekly" | "monthly";
+        durationMins?: number;
+        resetsAt?: number;
+      }>;
+    };
+
 export type PdfSupport = "native" | "local_path" | "upload" | "vision" | "none";
 
 export type ProviderTier =

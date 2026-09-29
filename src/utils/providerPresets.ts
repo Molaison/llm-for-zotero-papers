@@ -336,7 +336,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     helperText:
       "Preset uses MiniMax's recommended Anthropic-compatible endpoint.",
     matches: makeHostAndPathMatcher(
-      ["api.minimax.io", "api.minimaxi.com"],
+      ["api.minimax.io", "api.minimax.cn", "api.minimaxi.com"],
       MINIMAX_PATHS,
     ),
     supportsEmbeddings: false,

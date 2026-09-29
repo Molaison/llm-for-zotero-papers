@@ -462,6 +462,9 @@ import { createLocalPdfResourceResolver } from "./setupHandlers/controllers/loca
 import { isZoteroPdfAttachmentCandidate } from "./setupHandlers/controllers/pdfAttachmentPolicy";
 import { resolvePdfModeModelInputs } from "./setupHandlers/controllers/pdfPaperModelInputController";
 import { attachFooterPermissionControl } from "./footerPermissionControl";
+import { attachFooterQuotaControl } from "./footerQuotaControl";
+import { readFooterQuota } from "./footerQuotaReader";
+import { resolveQuotaTarget } from "../../providers/quota";
 import { createWebChatHistoryController } from "./setupHandlers/controllers/webChatHistoryController";
 import {
   createHistoryLifecycleController,
@@ -891,6 +894,9 @@ export function setupHandlers(
   let isQueuedFollowUpSendAvailable: () => boolean = () => false;
   let queueFollowUpInput: (text: string) => void = () => {};
 
+  let quotaControl: ReturnType<typeof attachFooterQuotaControl> | null = null;
+  let quotaPendingConversationKey: number | null = null;
+  let quotaRequestWasPending = false;
   const syncRequestUiForCurrentConversation = () => {
     const activeConversationKey = item ? getConversationKey(item) : null;
     const isWebChatActive = isWebChatModeActive();
@@ -898,6 +904,15 @@ export function setupHandlers(
       activeConversationKey !== null &&
       Number.isFinite(activeConversationKey) &&
       isRequestPending(activeConversationKey);
+    if (
+      quotaRequestWasPending &&
+      !isCurrentConversationPending &&
+      quotaPendingConversationKey === activeConversationKey
+    ) {
+      void quotaControl?.sync(true);
+    }
+    quotaPendingConversationKey = activeConversationKey;
+    quotaRequestWasPending = isCurrentConversationPending;
     if (sendBtn) {
       sendBtn.style.display = isCurrentConversationPending ? "none" : "";
       sendBtn.disabled = !item;
@@ -4960,7 +4975,28 @@ export function setupHandlers(
     };
   };
 
+  quotaControl = attachFooterQuotaControl({
+    button: body.querySelector<HTMLButtonElement>("#llm-provider-quota"),
+    getTarget: () => {
+      if (!item) return null;
+      if (isClaudeConversationSystem()) {
+        const context = resolveClaudeModelCatalogContext();
+        return context
+          ? {
+              kind: "claude",
+              bridgeUrl: getClaudeBridgeUrl(),
+              settingSources: getClaudeSettingSourcesCsvByPref(),
+              context,
+            }
+          : null;
+      }
+      return resolveQuotaTarget(getSelectedModelInfo().selectedEntry);
+    },
+    read: readFooterQuota,
+  });
+
   updateModelButton = (onlyIfChanged = false) => {
+    void quotaControl?.sync();
     if (!item || !modelBtn) return;
     const { choices, currentModel, currentModelDisplay, currentModelHint } =
       getSelectedModelInfo();
@@ -8224,6 +8260,8 @@ export function setupHandlers(
     disconnectObserverCleanup?.();
     disconnectObserverCleanup = null;
     cleanupPrefObservers?.();
+    quotaControl?.dispose();
+    quotaControl = null;
     disposeFooterPermissionControl?.();
     disposeFooterPermissionControl = null;
     cleanupMineruPaperSourceObservers?.();
