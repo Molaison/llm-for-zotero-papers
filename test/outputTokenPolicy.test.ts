@@ -1,4 +1,5 @@
 import { assert } from "chai";
+import { MAX_ALLOWED_TOKENS } from "../src/utils/llmDefaults";
 import {
   AUTO_REQUIRED_OUTPUT_TOKEN_SEED,
   DEFAULT_OUTPUT_RESERVE_TOKENS,
@@ -87,6 +88,15 @@ describe("output token policy", function () {
   });
 
   it("honors and defensively clamps custom limits", function () {
+    assert.deepEqual(
+      resolveOutputRequestPolicy({
+        setting: { mode: "custom", tokens: MAX_ALLOWED_TOKENS + 99 },
+        model: "custom-model",
+        protocol: "openai_chat_compat",
+        authMode: "api_key",
+      }),
+      { mode: "numeric", tokens: MAX_ALLOWED_TOKENS, source: "custom" },
+    );
     assert.deepEqual(
       resolveOutputRequestPolicy({
         setting: { mode: "custom", tokens: 200_000 },

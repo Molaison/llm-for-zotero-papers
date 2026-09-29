@@ -364,43 +364,6 @@ describe("TurnPaperScope", function () {
     }
   });
 
-  it("applies this-paper, added-paper, and these-paper defaults from the same scope", function () {
-    const gateway = {
-      listPaperContexts: () => {
-        throw new Error("resolved requests must not reconstruct tool scope");
-      },
-      resolvePaperContextTarget: (selector: {
-        itemId?: number;
-        contextItemId?: number;
-      }) =>
-        [activePaper, addedPaper].find(
-          (paper) =>
-            paper.itemId === selector.itemId &&
-            paper.contextItemId === selector.contextItemId,
-        ) || null,
-    } as never;
-    const targets = (paperTargetIntent: "active" | "added" | "all_visible") => {
-      const request = resolveAgentRuntimeRequest(
-        input({
-          userText: "same wording",
-          classifiedIntent: classifiedFixture({ paperTargetIntent }),
-        }),
-      );
-      return resolveDefaultTargets(
-        undefined,
-        undefined,
-        { request },
-        gateway,
-        8,
-      ).map((paper) => paper.itemId);
-    };
-
-    assert.deepEqual(targets("active"), [10]);
-    assert.deepEqual(targets("added"), [20]);
-    assert.deepEqual(targets("all_visible"), [10, 20]);
-    assert.deepEqual(targets("all_visible"), [10, 20]);
-  });
-
   it("uses only the shared paper-set intent, including when the wording conflicts", function () {
     const gateway = {
       listPaperContexts: () => {

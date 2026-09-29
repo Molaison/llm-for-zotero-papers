@@ -198,6 +198,16 @@ describe("agent resource context plan", function () {
       buildAgentResourceSignatureFromSnapshot(first),
       buildAgentResourceSignatureFromSnapshot(second),
     );
+    assert.notEqual(
+      buildAgentResourceSignatureFromSnapshot(first),
+      buildAgentResourceSignatureFromSnapshot({
+        ...first,
+        resources: {
+          ...first.resources,
+          selectedPapers: first.resources.selectedPapers.slice(0, 1),
+        },
+      }),
+    );
   });
 
   it("includes available sibling attachments as metadata-only lifecycle resources", async function () {

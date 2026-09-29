@@ -437,6 +437,7 @@ describe("paper_read outline mode and section ids", function () {
       { mode: "targeted", query, sectionIds: [sectionId] },
       tool,
     )) as TargetedResult;
+    assert.isNotEmpty(filtered.papers[0].passages);
     for (const passage of filtered.papers[0].passages) {
       assert.match(
         passage.sectionPath || "",

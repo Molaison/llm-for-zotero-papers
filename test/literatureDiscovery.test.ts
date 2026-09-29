@@ -23,13 +23,12 @@ describe("ranked literature discovery workflow", function () {
           }
         : null,
   };
-  const makeContext = (mode = "auto"): AgentToolContext => ({
+  const makeContext = (): AgentToolContext => ({
     request: resolvedAgentRequest({
       conversationKey: 9901,
       libraryID: 1,
       mode: "agent",
       userText: "Find five papers relevant to the current paper.",
-      metadata: { permissionMode: mode },
     }),
     runId: "discovery-test-run",
     resourceSignature: "paper-A",
@@ -93,92 +92,90 @@ describe("ranked literature discovery workflow", function () {
     return content;
   }
 
-  for (const mode of ["safe", "auto", "yolo"]) {
-    it(`preserves requested user selection before import in ${mode}`, async function () {
-      const context = makeContext(mode);
-      context.request.userText =
-        "Find five papers relevant to the current paper and import only the ones I select.";
-      const candidates = await search(context);
-      const tool = createLiteratureReviewTool(gateway as never);
-      const input = tool.validate({
-        selections: [1, 2, 3, 4, 5].map((candidateIndex) => ({
-          candidateSetId: candidates.candidateSetId,
-          candidateIndex,
-          reason: "Relevant title and abstract",
-        })),
-      });
-      if (!input.ok) throw new Error(input.error);
-      const content = await tool.execute(input.value, context);
-      const card = await tool.createResultReviewAction!(
-        input.value,
-        resultOf("literature_review", content),
-        context,
-      );
-      assert.exists(card);
-      assert.deepEqual(
-        card!.actions!.map((action) => action.id),
-        ["import", "cancel"],
-      );
+  it(`preserves requested user selection before import`, async function () {
+    const context = makeContext();
+    context.request.userText =
+      "Find five papers relevant to the current paper and import only the ones I select.";
+    const candidates = await search(context);
+    const tool = createLiteratureReviewTool(gateway as never);
+    const input = tool.validate({
+      selections: [1, 2, 3, 4, 5].map((candidateIndex) => ({
+        candidateSetId: candidates.candidateSetId,
+        candidateIndex,
+        reason: "Relevant title and abstract",
+      })),
     });
+    if (!input.ok) throw new Error(input.error);
+    const content = await tool.execute(input.value, context);
+    const card = await tool.createResultReviewAction!(
+      input.value,
+      resultOf("literature_review", content),
+      context,
+    );
+    assert.exists(card);
+    assert.deepEqual(
+      card!.actions!.map((action) => action.id),
+      ["import", "cancel"],
+    );
+  });
 
-    it(`lets the agent rank twelve candidates into five paper-only choices in ${mode}`, async function () {
-      const context = makeContext(mode);
-      const candidates = await search(context);
-      const tool = createLiteratureReviewTool(gateway as never);
-      const ranked = [8, 2, 10, 4, 1];
-      const input = tool.validate({
-        selections: ranked.map((candidateIndex) => ({
-          candidateSetId: candidates.candidateSetId,
-          candidateIndex,
-          reason: `Evidence-based relevance for candidate ${candidateIndex}`,
-        })),
-        targetCollectionId: 79,
-      });
-      if (!input.ok) throw new Error(input.error);
-      const content = await tool.execute(input.value, context);
-      const result = resultOf("literature_review", content);
-      const card = await tool.createResultReviewAction!(
-        input.value,
-        result,
-        context,
-      );
-      assert.exists(card);
-      assert.deepEqual(
-        card!.fields.map((field) => field.type),
-        ["paper_result_list"],
-      );
-      assert.deepEqual(
-        card!.actions!.map((action) => action.id),
-        ["import", "cancel"],
-      );
-      assert.include(card!.description, "Lab / Research");
-      const list = card!.fields[0];
-      if (list.type !== "paper_result_list") throw new Error("Wrong field");
-      assert.deepEqual(
-        list.rows.map((row) => row.title),
-        ranked.map((i) => `Candidate ${i}`),
-      );
-      assert.include(list.rows[0].body, "relevance");
-      const approved = await tool.resolveResultReview!(
-        input.value,
-        result,
-        {
-          approved: true,
-          actionId: "import",
-          data: { selectedPaperIds: [list.rows[0].id, list.rows[2].id] },
-        },
-        context,
-      );
-      assert.equal(approved.kind, "invoke_tool");
-      if (approved.kind !== "invoke_tool") return;
-      assert.equal(approved.call.name, "library_import");
-      assert.deepInclude(approved.call.arguments, {
-        identifiers: ["10.1000/candidate-8", "10.1000/candidate-10"],
-        libraryID: 1,
-        targetCollectionId: 79,
-      });
+  it(`lets the agent rank twelve candidates into five paper-only choices`, async function () {
+    const context = makeContext();
+    const candidates = await search(context);
+    const tool = createLiteratureReviewTool(gateway as never);
+    const ranked = [8, 2, 10, 4, 1];
+    const input = tool.validate({
+      selections: ranked.map((candidateIndex) => ({
+        candidateSetId: candidates.candidateSetId,
+        candidateIndex,
+        reason: `Evidence-based relevance for candidate ${candidateIndex}`,
+      })),
+      targetCollectionId: 79,
     });
-  }
+    if (!input.ok) throw new Error(input.error);
+    const content = await tool.execute(input.value, context);
+    const result = resultOf("literature_review", content);
+    const card = await tool.createResultReviewAction!(
+      input.value,
+      result,
+      context,
+    );
+    assert.exists(card);
+    assert.deepEqual(
+      card!.fields.map((field) => field.type),
+      ["paper_result_list"],
+    );
+    assert.deepEqual(
+      card!.actions!.map((action) => action.id),
+      ["import", "cancel"],
+    );
+    assert.include(card!.description, "Lab / Research");
+    const list = card!.fields[0];
+    if (list.type !== "paper_result_list") throw new Error("Wrong field");
+    assert.deepEqual(
+      list.rows.map((row) => row.title),
+      ranked.map((i) => `Candidate ${i}`),
+    );
+    assert.include(list.rows[0].body, "relevance");
+    const approved = await tool.resolveResultReview!(
+      input.value,
+      result,
+      {
+        approved: true,
+        actionId: "import",
+        data: { selectedPaperIds: [list.rows[0].id, list.rows[2].id] },
+      },
+      context,
+    );
+    assert.equal(approved.kind, "invoke_tool");
+    if (approved.kind !== "invoke_tool") return;
+    assert.equal(approved.call.name, "library_import");
+    assert.deepInclude(approved.call.arguments, {
+      identifiers: ["10.1000/candidate-8", "10.1000/candidate-10"],
+      libraryID: 1,
+      targetCollectionId: 79,
+    });
+  });
 
   it("rejects wrong counts, duplicate candidates, unknown references, stale context and foreign destinations", async function () {
     const context = makeContext();

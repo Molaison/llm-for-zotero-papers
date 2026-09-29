@@ -35,6 +35,11 @@ describe("mineruZip", function () {
     }
 
     assert.equal(result.mdContent, "compressed markdown");
+    assert.deepEqual(
+      result.files.find((file) => file.relativePath === "images/fig1.png")
+        ?.data,
+      new Uint8Array([1, 2, 3, 4]),
+    );
     assert.sameMembers(
       result.files.map((file) => file.relativePath),
       ["full.md", "images/fig1.png"],

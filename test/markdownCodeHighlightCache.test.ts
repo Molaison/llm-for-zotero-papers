@@ -38,7 +38,7 @@ describe("code highlight memoization", function () {
   it("keeps distinct entries for different code and for different languages", function () {
     renderMarkdown(fence("javascript", "const a = 1;"));
     renderMarkdown(fence("javascript", "const b = 2;")); // different code
-    renderMarkdown(fence("python", "a = 1")); // different language
+    renderMarkdown(fence("python", "const a = 1;")); // same code, different language
 
     const stats = __getCodeHighlightCacheStatsForTest();
     assert.equal(stats.misses, 3, "each distinct (lang, code) is a miss");
@@ -59,21 +59,23 @@ describe("code highlight memoization", function () {
   });
 
   it("bounds the cache with LRU eviction", function () {
-    const overflow = CODE_HIGHLIGHT_CACHE_MAX_ENTRIES + 25;
-    for (let i = 0; i < overflow; i += 1) {
-      renderMarkdown(fence("javascript", `const unique_${i} = ${i};`));
-    }
-
-    const stats = __getCodeHighlightCacheStatsForTest();
-    assert.isAtMost(
-      stats.size,
-      CODE_HIGHLIGHT_CACHE_MAX_ENTRIES,
-      "cache must not exceed its entry bound",
-    );
-    assert.equal(
-      stats.misses,
-      overflow,
-      "every distinct block was computed once",
-    );
+    const render = (index: number) =>
+      renderMarkdown(fence("javascript", `const unique_${index} = ${index};`));
+    for (let index = 0; index < CODE_HIGHLIGHT_CACHE_MAX_ENTRIES; index += 1)
+      render(index);
+    render(0); // Refresh the oldest entry before overflowing the cache.
+    render(CODE_HIGHLIGHT_CACHE_MAX_ENTRIES);
+    render(0);
+    assert.deepEqual(__getCodeHighlightCacheStatsForTest(), {
+      size: CODE_HIGHLIGHT_CACHE_MAX_ENTRIES,
+      hits: 2,
+      misses: CODE_HIGHLIGHT_CACHE_MAX_ENTRIES + 1,
+    });
+    render(1); // The untouched second entry, not entry 0, must have been evicted.
+    assert.deepEqual(__getCodeHighlightCacheStatsForTest(), {
+      size: CODE_HIGHLIGHT_CACHE_MAX_ENTRIES,
+      hits: 2,
+      misses: CODE_HIGHLIGHT_CACHE_MAX_ENTRIES + 2,
+    });
   });
 });

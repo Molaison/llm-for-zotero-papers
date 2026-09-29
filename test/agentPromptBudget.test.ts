@@ -232,6 +232,10 @@ describe("agent prompt budget", function () {
       inputTokenCap: 4_000,
     });
     assert.isTrue(result.changed);
+    assert.deepEqual(
+      result.messages.map((message) => message.role),
+      ["system", "user", "assistant", "tool"],
+    );
     const assistant = result.messages.find(
       (message) => message.role === "assistant",
     );

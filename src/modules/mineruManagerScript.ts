@@ -141,17 +141,6 @@ const MINERU_STATUS_DOT_COLORS: Record<MineruStatus, string> = {
 export const MINERU_PARSE_FILTERS_CHANGED_EVENT =
   "llmforzotero:mineru-parse-filters-changed";
 
-export type MineruManagerVisibilityInput = Pick<
-  MineruItemEntry,
-  "availability" | "excluded"
->;
-
-export function shouldShowMineruManagerItem(
-  _item: MineruManagerVisibilityInput,
-): boolean {
-  return true;
-}
-
 export type MineruManagerSearchInput = Pick<
   MineruItemEntry,
   "title" | "pdfTitle" | "firstCreator" | "year" | "dateAdded"
@@ -365,7 +354,7 @@ export async function registerMineruManagerScript(
   }
 
   function getManagerVisibleSourceItems(): MineruItemEntry[] {
-    return allItems.filter(shouldShowMineruManagerItem);
+    return [...allItems];
   }
 
   function pruneSelectedIdsToVisibleItems(): void {

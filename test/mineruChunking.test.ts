@@ -87,6 +87,8 @@ describe("mineruChunking", function () {
       ],
     );
 
+    assert.equal(decoder.decode(merged.files[0].data), "first image");
+    assert.equal(decoder.decode(merged.files[1].data), "second image");
     const contentList = JSON.parse(
       decoder.decode(
         merged.files.find((item) => item.relativePath === "content_list.json")

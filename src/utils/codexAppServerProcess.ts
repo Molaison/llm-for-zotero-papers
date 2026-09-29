@@ -2347,7 +2347,7 @@ export async function listNvmCodexCandidates(params: {
     .map((entry) =>
       resolveListedChildPath(params.separator, versionsDir, entry),
     )
-    .sort((a, b) => b.localeCompare(a))
+    .sort((a, b) => b.localeCompare(a, undefined, { numeric: true }))
     .map((versionDir) =>
       joinRuntimePath(params.separator, versionDir, "bin", "codex"),
     );

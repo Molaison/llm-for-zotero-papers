@@ -139,6 +139,6 @@ describe("pathFileUrl", function () {
   });
 
   it("pathToFileUrl should alias toFileUrl", function () {
-    assert.equal(pathToFileUrl("/tmp/x"), toFileUrl("/tmp/x"));
+    assert.strictEqual(pathToFileUrl, toFileUrl);
   });
 });

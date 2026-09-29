@@ -172,7 +172,11 @@ describe("mineruConfig", function () {
       const matcher = buildMineruFilenameMatcher([
         "x".repeat(MAX_MINERU_FILENAME_PATTERN_LENGTH + 1),
       ]);
-      assert.isFalse(matcher.matches("x".repeat(20)));
+      assert.isFalse(
+        matcher.matches("x".repeat(MAX_MINERU_FILENAME_PATTERN_LENGTH + 1)),
+      );
+      const boundary = "x".repeat(MAX_MINERU_FILENAME_PATTERN_LENGTH);
+      assert.isTrue(buildMineruFilenameMatcher([boundary]).matches(boundary));
     });
   });
 });

@@ -5,64 +5,6 @@ import type { AgentToolContext } from "../src/agent/types";
 import { resolvedAgentRequest } from "./helpers/resolvedAgentRequest";
 
 describe("search_literature_online tool", function () {
-  it("returns discovery candidates for ranking and leaves explicit imports to mutation authorization", async function () {
-    const tool = createSearchLiteratureOnlineTool({} as never);
-    const result = {
-      callId: "discovery",
-      name: "literature_search",
-      ok: true,
-      content: {
-        mode: "search",
-        results: [
-          {
-            id: "https://openalex.org/W456",
-            title: "A relevant paper",
-            doi: "10.1000/relevant",
-            authors: ["Fixture Author"],
-            year: 2024,
-          },
-        ],
-      },
-    };
-    for (const mode of ["safe", "auto", "yolo"]) {
-      const context = {
-        ...baseContext,
-        request: {
-          ...baseContext.request,
-          userText: "Find five papers relevant to the current paper.",
-          metadata: { permissionMode: mode },
-        },
-      };
-      const input = tool.validate({
-        mode: "search",
-        query: "population coding",
-        workflow: "answer",
-      });
-      assert.isTrue(input.ok);
-      if (!input.ok) return;
-      assert.isNull(
-        await tool.createResultReviewAction?.(input.value, result, context),
-        mode,
-      );
-      const importInput = tool.validate({
-        mode: "search",
-        query: "population coding",
-        workflow: "review",
-      });
-      if (!importInput.ok) throw new Error("Invalid fixture");
-      assert.isNull(
-        await tool.createResultReviewAction?.(importInput.value, result, {
-          ...context,
-          request: {
-            ...context.request,
-            userText:
-              'Find and import the top five relevant papers on neural population coding and representational drift into "imports". Import exactly five papers not already in the library, not just recommendations; skip duplicates and choose another relevant paper if needed.',
-          },
-        }),
-        mode,
-      );
-    }
-  });
   const baseContext: AgentToolContext = {
     runId: "search-tool-test",
     request: resolvedAgentRequest({

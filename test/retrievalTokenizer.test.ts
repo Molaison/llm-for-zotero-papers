@@ -209,7 +209,7 @@ describe("quicksearch probe helpers", function () {
       3,
     );
 
-    assert.isAtMost(probes.length, 3);
+    assert.lengthOf(probes, 3);
   });
 });
 

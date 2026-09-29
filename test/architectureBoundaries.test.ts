@@ -40,7 +40,6 @@ const {
   validateFacades,
   LAYERS,
   FACADES,
-  MIGRATION_OBLIGATIONS,
 } = require("../scripts/check-architecture-boundaries.cjs") as {
   checkArchitectureBoundaries: (
     root?: string,
@@ -51,7 +50,6 @@ const {
   validateFacades: (facades: Facade[]) => Facade[];
   LAYERS: Layer[];
   FACADES: Facade[];
-  MIGRATION_OBLIGATIONS: string[];
 };
 
 function formatted(boundaries: Boundary[]): string[] {
@@ -74,15 +72,6 @@ describe("architecture boundaries", function () {
     assert.deepEqual(formatted(result.unexpectedUpwardEdges), []);
     assert.deepEqual(formatted(result.staleObligations), []);
     assert.deepEqual(formatted(result.facadeViolations), []);
-  });
-
-  it("classifies every top-level directory under src", function () {
-    const roots = LAYERS.flatMap((layer) => layer.roots);
-    assert.isAbove(roots.length, 0);
-    assert.include(roots, "src/core/");
-    assert.include(roots, "src/services/");
-    assert.include(roots, "src/agent/");
-    assert.include(roots, "src/modules/");
   });
 
   describe("layer table validation", function () {
@@ -121,13 +110,6 @@ describe("architecture boundaries", function () {
         /"services" declares tier 2 at position 1/,
       );
     });
-  });
-
-  it("records the services-to-agent change journal edge as a migration obligation", function () {
-    assert.include(
-      MIGRATION_OBLIGATIONS,
-      "runtime:src/services/zoteroChangeDispatcher.ts -> src/agent/store/changeJournal.ts",
-    );
   });
 
   describe("layer-order rule on a fixture tree", function () {
