@@ -512,11 +512,31 @@ describe("library operations against real Zotero", function () {
         libraryID: libraryID(),
       });
       created.searches.push(saved.savedSearchId);
-      const required = await Zotero.DB.valueQueryAsync(
-        "SELECT required FROM savedSearchConditions WHERE savedSearchID=? AND condition=? AND value=?",
-        [saved.savedSearchId, "title", "RequiredClause"],
-      );
-      assert.equal(Number(required), 1, "the mandatory clause must persist");
+      if (Zotero.SearchConditions.get("groupStart")) {
+        // Zotero 10 dropped the `required` column; the mandatory clause is
+        // the one left outside the nested OR group.
+        const rows = await Zotero.DB.queryAsync(
+          "SELECT condition, operator, value FROM savedSearchConditions WHERE savedSearchID=? ORDER BY searchConditionID",
+          [saved.savedSearchId],
+        );
+        assert.deepEqual(
+          rows.map((row: any) => [row.condition, row.operator, row.value]),
+          [
+            ["joinMode", "all", null],
+            ["title", "contains", "RequiredClause"],
+            ["groupStart", "true", null],
+            ["joinMode", "any", null],
+            ["title", "contains", `SharedClause-${SUFFIX}`],
+            ["groupEnd", "true", null],
+          ],
+        );
+      } else {
+        const required = await Zotero.DB.valueQueryAsync(
+          "SELECT required FROM savedSearchConditions WHERE savedSearchID=? AND condition=? AND value=?",
+          [saved.savedSearchId, "title", "RequiredClause"],
+        );
+        assert.equal(Number(required), 1, "the mandatory clause must persist");
+      }
       const savedIds = (
         await Zotero.Searches.get(saved.savedSearchId).search()
       ).map(Number);
