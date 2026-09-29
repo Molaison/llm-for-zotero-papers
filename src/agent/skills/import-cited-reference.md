@@ -1,7 +1,7 @@
 ---
 id: import-to-library
 description: Import cited papers into your Zotero library by DOI
-version: 3
+version: 4
 contexts: any
 activation: auto
 ---
@@ -27,12 +27,13 @@ When the user wants to add one or more papers to their library — whether from 
 
 ### Identify what the user gave you
 
-| User provides                                                                             | How to resolve                                                                                            |
-| ----------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| **Reference number(s)** from a paper in context (e.g. "add ref 5, 12, 23")                | Read the References section from the paper (see below), extract each cited reference, then resolve DOIs   |
-| **Pasted title or citation text** (e.g. a line like "Smith et al. 2020, Neural Networks") | Extract the title, then resolve the DOI                                                                   |
-| **DOI, arXiv ID, ISBN, or URL**                                                           | Pass directly to `library_import({ kind:'identifiers', identifiers:[...] })` — no resolution needed       |
-| **Vague description** (e.g. "that hippocampal replay paper by Buzsaki")                   | Use `literature_search({ workflow:'answer', mode:'search', query:'...', author:'...' })` to find it first |
+| User provides                                                                             | How to resolve                                                                                                           |
+| ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| **Reference number(s)** from a paper in context (e.g. "add ref 5, 12, 23")                | Read the References section from the paper (see below), extract each cited reference, then resolve DOIs                  |
+| **Pasted title or citation text** (e.g. a line like "Smith et al. 2020, Neural Networks") | Extract the title, then resolve the DOI                                                                                  |
+| **DOI, arXiv ID, ISBN**                                                                   | Pass directly to `library_import({ kind:'identifiers', identifiers:[...] })` — no resolution needed                      |
+| **Page URL**                                                                              | Never pass a URL. Open it with `web_read` if needed, take the DOI or arXiv ID from the page, then import that identifier |
+| **Vague description** (e.g. "that hippocampal replay paper by Buzsaki")                   | Use `literature_search({ workflow:'answer', mode:'search', query:'...', author:'...' })` to find it first                |
 
 ### Reading the references section from a paper
 

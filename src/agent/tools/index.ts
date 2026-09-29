@@ -437,7 +437,7 @@ function createLibraryImportTool(tools: {
         identifiers: {
           ...STRING_ARRAY_SCHEMA,
           description:
-            "DOIs, ISBNs, arXiv IDs, or URLs to import when kind:'identifiers'.",
+            "DOI, ISBN, arXiv ID, PMID, or ADS bibcode values to import when kind:'identifiers'.",
         },
         filePaths: {
           ...STRING_ARRAY_SCHEMA,
