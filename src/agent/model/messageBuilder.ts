@@ -41,6 +41,10 @@ import { buildVisibleTurnContextBlock } from "../context/turnContextEnvelope";
 import { getSelectedPassagePaper } from "../context/turnPaperScope";
 import { buildApprovedPlanExecutionInstructions } from "../plans/executionInstructions";
 import {
+  EXECUTING_PHASE_GUIDANCE,
+  PLANNING_PHASE_GUIDANCE,
+} from "../plans/planningGuidance";
+import {
   hasAgentContentInputs,
   normalizeAgentContentInputs,
 } from "./contentCapabilities";
@@ -684,6 +688,22 @@ export async function renderAgentPromptEnvelope(
           "Natural-language restrictions in the current request and clarifications remain binding. Tool calls do not grant their own permission; the host validates each concrete proposal, applies permission policy, journals effects, and verifies native state.",
           "Resolve named targets from supplied identities or bounded search results. If several candidates remain, use request_user_input rather than guessing.",
         ].join("\n"),
+      ],
+    },
+    {
+      id: "planning-phase",
+      lines: [
+        request.planContext?.phase === "planning"
+          ? PLANNING_PHASE_GUIDANCE
+          : "",
+      ],
+    },
+    {
+      id: "executing-phase",
+      lines: [
+        request.planContext?.phase === "executing"
+          ? EXECUTING_PHASE_GUIDANCE
+          : "",
       ],
     },
     {

@@ -23,6 +23,16 @@ const fixture = JSON.parse(
   ),
 ) as ToolVocabularyFixture;
 
+/**
+ * Guidance allowed past the cap, pinned at its current size so it cannot grow.
+ * zotero_script's guidance is its sandbox API reference plus the undo-safety
+ * rules (snapshot before mutating, shouldStop in long loops); it is not plan
+ * workflow prose and has no other owner yet.
+ */
+const GUIDANCE_CAP_EXCEPTIONS: ReadonlyMap<string, number> = new Map([
+  ["zotero_script", 5136],
+]);
+
 const stub: any = new Proxy(function () {}, {
   get: () => stub,
   apply: () => stub,
@@ -55,6 +65,30 @@ describe("agent tool vocabulary", function () {
       .listTools()
       .reduce((n, t) => n + JSON.stringify(t).length, 0);
     assert.isAtMost(bytes, fixture.specBytes);
+  });
+  it("no tool description exceeds 1200 characters", function () {
+    const over = registry
+      .listToolDefinitions()
+      .filter((t) => t.spec.description.length > 1200)
+      .map((t) => `${t.spec.name}: ${t.spec.description.length}`);
+    assert.deepEqual(over, []);
+  });
+  it("no tool guidance exceeds 2500 characters", function () {
+    const over = registry
+      .listToolDefinitions()
+      .filter((t) => {
+        const length = t.guidance?.instruction.length ?? 0;
+        const pinned = GUIDANCE_CAP_EXCEPTIONS.get(t.spec.name);
+        return pinned === undefined ? length > 2500 : length > pinned;
+      })
+      .map((t) => `${t.spec.name}: ${t.guidance!.instruction.length}`);
+    assert.deepEqual(over, []);
+  });
+  it("every guidance cap exception is still needed", function () {
+    for (const [name] of GUIDANCE_CAP_EXCEPTIONS) {
+      const length = registry.getTool(name)?.guidance?.instruction.length ?? 0;
+      assert.isAbove(length, 2500, `${name} fits the cap; drop its exception`);
+    }
   });
   it("a retired name is unknown to the registry and the error names the facade", async function () {
     const prepared = await registry.prepareExecution(

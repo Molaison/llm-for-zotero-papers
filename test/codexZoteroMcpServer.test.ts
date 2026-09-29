@@ -26,6 +26,12 @@ import type {
 import { createPaperReadTool } from "../src/agent/tools/read/paperRead";
 import { createFileIOTool } from "../src/agent/tools/write/fileIO";
 import { createResearchUpdateTool } from "../src/agent/tools/plan/researchUpdate";
+import { createAmendPlanTool } from "../src/agent/tools/plan/amendPlan";
+import { createUpdatePlanTool } from "../src/agent/tools/plan/updatePlan";
+import {
+  EXECUTING_PHASE_GUIDANCE,
+  PLANNING_PHASE_GUIDANCE,
+} from "../src/agent/plans/planningGuidance";
 import { ChangeJournalTestDb } from "./helpers/changeJournalTestDb";
 import {
   readOnlyInvocationPlan,
@@ -1387,6 +1393,50 @@ describe("Zotero MCP server", function () {
     } finally {
       scope.clear();
     }
+  });
+
+  it("carries each plan-phase section on that phase's anchor tool", async function () {
+    const registry = new AgentToolRegistry();
+    registry.register(createUpdatePlanTool());
+    registry.register(createAmendPlanTool({} as never, {} as never));
+    registerMcpServer({ toolRegistry: registry, zoteroGateway: {} as never });
+    async function listed(nativePlanning: boolean, conversationKey: number) {
+      const scope = registerScopedZoteroMcpScope({
+        conversationKey,
+        libraryID: 1,
+        kind: "global",
+        planContext: {
+          phase: "planning",
+          planId: "procedure",
+          revision: 1,
+          ...(nativePlanning
+            ? { nativePlanning: { attemptId: "attempt" } }
+            : {}),
+        } as any,
+      });
+      try {
+        const response = await invokeMcpEndpoint({
+          token: getOrCreateZoteroMcpBearerToken(),
+          headers: { [ZOTERO_MCP_SCOPE_HEADER]: scope.token },
+          body: { jsonrpc: "2.0", id: 1, method: "tools/list" },
+        });
+        return JSON.parse(response[2]).result.tools as Array<{
+          name: string;
+          description: string;
+        }>;
+      } finally {
+        scope.clear();
+      }
+    }
+    const planning = await listed(false, 7005);
+    const updatePlan = planning.find((entry) => entry.name === "update_plan");
+    assert.include(updatePlan!.description, PLANNING_PHASE_GUIDANCE);
+    assert.notInclude(updatePlan!.description, EXECUTING_PHASE_GUIDANCE);
+    // Native planning advertises the execution tools up front.
+    const native = await listed(true, 7006);
+    const amendPlan = native.find((entry) => entry.name === "amend_plan");
+    assert.include(amendPlan!.description, EXECUTING_PHASE_GUIDANCE);
+    assert.notInclude(amendPlan!.description, PLANNING_PHASE_GUIDANCE);
   });
 
   it("keeps Codex direct-path PDF turns on the metadata/write MCP surface", async function () {

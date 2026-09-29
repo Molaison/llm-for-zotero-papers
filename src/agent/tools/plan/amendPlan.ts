@@ -158,11 +158,7 @@ export function createAmendPlanTool(
      */
     presentation: { hiddenInTrace: true },
     isAvailable: (request) => request.planContext?.phase === "executing",
-    guidance: {
-      matches: (request) => request.planContext?.phase === "executing",
-      instruction:
-        "Use amend_plan research_scope when newly discovered papers are host-provably inside the approved source. Use contract_revision for a changed question, source boundary, deliverable, operation, or parameters. Never describe imports or Zotero mutations as research-scope amendments.",
-    },
+    // Workflow rules: EXECUTING_PHASE_GUIDANCE (plans/planningGuidance.ts).
     validate: validateInput,
     planInvocation: () =>
       readOnlyInvocationPlan({

@@ -486,7 +486,7 @@ function revertMany(zoteroGateway: ZoteroGateway): UndoBranch<RevertManyInput> {
 }
 
 /**
- * The one recovery tool. No `count`, `actionIds`, or `dryRun` undoes one
+ * The one recovery tool. No `count`, `actionIds`, or `dryRun:true` undoes one
  * action (the single-undo card); any of them reverts several newest-first
  * (the multi-revert card). Each branch keeps its own approval semantics.
  */
@@ -562,10 +562,11 @@ export function createUndoTool(
         return fail("Undo expects an object, for example {} or { count: 2 }");
       }
       const record = (args || {}) as Record<string, unknown>;
+      // An explicit dryRun:false asks for nothing a single undo lacks.
       const wantsMany =
         record.count !== undefined ||
         record.actionIds !== undefined ||
-        record.dryRun !== undefined;
+        record.dryRun === true;
       if (record.actionId !== undefined && wantsMany)
         return fail(
           "actionId undoes one exact action and cannot be combined with actionIds, count, or dryRun; use actionIds:[id] to revert or dry-run named actions.",

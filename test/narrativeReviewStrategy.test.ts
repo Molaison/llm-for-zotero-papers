@@ -150,7 +150,7 @@ describe("narrative literature-review strategy", function () {
     const tool = createResearchUpdateTool({} as never);
     assert.include(
       tool.guidance?.instruction ?? "",
-      "then finalize with outcome complete",
+      "finalize {outcome:'complete'|'partial'|'failed'}",
     );
   });
 

@@ -119,6 +119,20 @@ describe("undo tool", function () {
     assert.equal(manyCard.title, "Undo 2 changes");
   });
 
+  it("treats an explicit dryRun:false with nothing else as a single undo", async function () {
+    const { tool } = builtInUndoTool(library);
+    const validated = tool.validate({ dryRun: false });
+    if (!validated.ok) throw new Error("validation failed");
+    assert.deepEqual(validated.value, {});
+
+    const result = await undoFixture(library, { dryRun: false });
+    assert.equal(result.status, "undone");
+    assert.equal(result.actionId, actions[2].actionId);
+    assert.deepEqual(library.tagsOf(3), []);
+    assert.isNotEmpty(library.tagsOf(1));
+    assert.isNotEmpty(library.tagsOf(2));
+  });
+
   it("refuses to mix a single actionId with the multi-revert arguments", function () {
     const { tool } = builtInUndoTool(library);
     const mixed = tool.validate({ actionId: "a", count: 2 });

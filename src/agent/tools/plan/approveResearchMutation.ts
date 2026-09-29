@@ -351,11 +351,7 @@ export function createApproveResearchMutationTool(): AgentToolDefinition<
      */
     presentation: { hiddenInTrace: true },
     isAvailable: (request) => request.planContext?.phase === "executing",
-    guidance: {
-      matches: (request) => request.planContext?.phase === "executing",
-      instruction:
-        "If the approved Plan has deferredEffects, do not call a Zotero write tool until research is terminal and approve_research_mutation has frozen and authorized the exact operations, targets, and derived effect IDs under central mode policy. Targets use stable libraryID/itemKey pairs from paper findings. After authorization, use only write calls covered by those derived effects. If the user skips the changes, mark only the mutation task skipped and preserve the research document.",
-    },
+    // Workflow rules: EXECUTING_PHASE_GUIDANCE (plans/planningGuidance.ts).
     validate: validateInput,
     planInvocation: () =>
       readOnlyInvocationPlan({

@@ -73,6 +73,10 @@ import { isRawPdfRetrievalTool } from "../context/toolNames";
 import { resolveActiveLibraryID } from "../../utils/zoteroLibraryScope";
 import { resolveAgentToolCallWorkCategory } from "../workCategory";
 import { getNotesDirectoryConfig } from "../../utils/notesDirectoryConfig";
+import {
+  EXECUTING_PHASE_GUIDANCE,
+  PLANNING_PHASE_GUIDANCE,
+} from "../plans/planningGuidance";
 
 export const ZOTERO_MCP_SERVER_NAME = "llm_for_zotero";
 export const ZOTERO_MCP_ENDPOINT_PATH = "/llm-for-zotero/mcp";
@@ -147,6 +151,15 @@ const CURATED_READ_TOOL_NAMES = new Set<string>([
 ]);
 const CURATED_PLAN_TOOL_NAMES = new Set<string>(ZOTERO_MCP_PLAN_TOOL_NAMES);
 const CURATED_WRITE_TOOL_NAMES = new Set<string>(ZOTERO_MCP_WRITE_TOOL_NAMES);
+/**
+ * External agents never see the envelope's plan-phase sections, so the MCP
+ * catalog carries each one on the phase's anchor tool instead: update_plan
+ * while planning, amend_plan (visible for every approved plan) while executing.
+ */
+const MCP_PLAN_PHASE_GUIDANCE: ReadonlyMap<string, string> = new Map([
+  ["update_plan", PLANNING_PHASE_GUIDANCE],
+  ["amend_plan", EXECUTING_PHASE_GUIDANCE],
+]);
 const READ_ONLY_TOOL_ANNOTATIONS = {
   readOnlyHint: true,
   openWorldHint: false,
@@ -1413,6 +1426,7 @@ function handleToolsList(
             CURATED_PLAN_TOOL_NAMES.has(name)
               ? toolRegistry.getTool(name)?.guidance?.instruction
               : undefined,
+            MCP_PLAN_PHASE_GUIDANCE.get(name),
             describeMcpHostAccess(name),
             // Codex code-mode discovery renders deeply nested input types as
             // `unknown`. Keep the complete contract discoverable there too;
