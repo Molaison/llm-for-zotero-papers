@@ -31,6 +31,8 @@ type ZoteroWithConnection = {
 let connection: LibraryTextIndexDb | null = null;
 let testOverride: LibraryTextIndexDb | null = null;
 let openPromise: Promise<LibraryTextIndexDb | null> | null = null;
+/** True while the files are being deleted; opens are refused meanwhile. */
+let deletingFiles = false;
 
 const SCHEMA_SQL = [
   `CREATE TABLE IF NOT EXISTS index_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
@@ -143,6 +145,9 @@ export function setLibraryTextIndexDbForTests(
 }
 
 export async function openLibraryTextIndexDb(): Promise<LibraryTextIndexDb | null> {
+  // A connection opened mid-delete would keep writing to an unlinked file,
+  // and SQLite's shared cache would make the next open of the path read-only.
+  if (deletingFiles) return null;
   if (testOverride) {
     await ensureLibraryTextIndexSchema(testOverride);
     return testOverride;
@@ -210,5 +215,45 @@ export async function closeLibraryTextIndexDb(): Promise<void> {
     } catch (error) {
       appLogger.debug("LLM index: close failed", error);
     }
+  }
+}
+
+type FileRemover = {
+  remove?: (
+    path: string,
+    options?: { ignoreAbsent?: boolean },
+  ) => Promise<void>;
+};
+
+/**
+ * Deletes the index database file and its `-wal`/`-shm` companions; absent
+ * files are fine. Stop the scheduler first (a job mid-write must finish).
+ * Opens are refused until the delete ends, and any connection opened since
+ * the caller's close is closed here, so no handle survives on an unlinked file.
+ */
+export async function deleteLibraryTextIndexDatabaseFiles(): Promise<void> {
+  deletingFiles = true;
+  try {
+    await closeLibraryTextIndexDb();
+    await removeDatabaseFiles();
+  } finally {
+    deletingFiles = false;
+  }
+}
+
+async function removeDatabaseFiles(): Promise<void> {
+  const path = getLibraryTextIndexDbPath();
+  const scope = globalThis as {
+    IOUtils?: FileRemover;
+    OS?: { File?: FileRemover };
+  };
+  const remover = scope.IOUtils?.remove
+    ? scope.IOUtils
+    : scope.OS?.File?.remove
+      ? scope.OS.File
+      : null;
+  if (!remover?.remove) return;
+  for (const file of [path, `${path}-wal`, `${path}-shm`]) {
+    await remover.remove(file, { ignoreAbsent: true });
   }
 }

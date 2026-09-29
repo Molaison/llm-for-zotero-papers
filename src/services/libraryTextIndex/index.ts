@@ -7,10 +7,19 @@ import { appLogger } from "../../core/logging";
 import { onPdfContextLoaded } from "../paperContent/contextCache";
 import { zoteroChangeDispatcher } from "../zoteroChangeDispatcher";
 import { INDEX_USER_IDLE_SECONDS } from "./constants";
-import { closeLibraryTextIndexDb } from "./db";
+import { resolveSemanticSearchState } from "../../utils/llmClient";
+import type { LibraryIndexSnapshot } from "../libraryIndex/contracts";
+import { libraryIndexService } from "../libraryIndexService";
+import {
+  closeLibraryTextIndexDb,
+  deleteLibraryTextIndexDatabaseFiles,
+} from "./db";
 import { libraryTextIndexScheduler, type SchedulerEnv } from "./scheduler";
 import { createUserIdleTracker, type UserIdleTracker } from "./userIdle";
-import { isLibraryTextIndexEnabled } from "./scheduler";
+import {
+  getLibraryTextIndexBudgetBytes,
+  isLibraryTextIndexEnabled,
+} from "./scheduler";
 import {
   readLeadingIndexChunks,
   searchLibraryTextIndex,
@@ -18,7 +27,9 @@ import {
   type LibraryTextIndexSearchParams,
   type LibraryTextIndexSearchResult,
 } from "./search";
-import { getLibraryTextIndexStore } from "./store";
+import { getLibraryTextIndexStore, resetLibraryTextIndexStore } from "./store";
+import { clearLoadedVectorState, isVectorsPrefOn } from "./vectorIndexer";
+import { removeAllVectorNamespaces } from "./vectorStore";
 
 export {
   libraryTextIndexScheduler,
@@ -86,6 +97,8 @@ let unsubscribeChanges: (() => void) | null = null;
 let unsubscribeContexts: (() => void) | null = null;
 let idleTracker: UserIdleTracker | null = null;
 let restoreEnv: Partial<SchedulerEnv> | null = null;
+/** The last start's overrides, so a clear restarts the index the same way. */
+let lastEnvOverride: Partial<SchedulerEnv> = {};
 
 /**
  * Starts the background fill. Deferred startup work: it never opens a
@@ -96,6 +109,7 @@ export async function startLibraryTextIndex(
   envOverride: Partial<SchedulerEnv> = {},
 ): Promise<void> {
   if (idleTracker) await stopLibraryTextIndex();
+  lastEnvOverride = envOverride;
   const scheduler = libraryTextIndexScheduler as unknown as {
     env: SchedulerEnv;
   };
@@ -152,4 +166,156 @@ export async function stopLibraryTextIndex(): Promise<void> {
   }
   // Awaits an open still in flight so its handle cannot leak past shutdown.
   await closeLibraryTextIndexDb();
+}
+
+// ── Management (the Customization tab's "Library index" section) ───────────
+
+export type LibraryTextIndexOverview = {
+  enabled: boolean;
+  vectorsEnabled: boolean;
+  semanticAvailable: boolean;
+  indexed: number;
+  /** Context-eligible PDF attachments in the user library. */
+  eligible: number;
+  queued: number;
+  failed: number;
+  building: boolean;
+  usedBytes: number;
+  budgetBytes: number;
+  dbBytes: number;
+  vectorBytes: number;
+  vectorNamespace: string | null;
+};
+
+export type LibraryTextIndexOverviewOptions = {
+  getSnapshot?: (libraryID: number) => Promise<LibraryIndexSnapshot>;
+};
+
+function managedLibraryID(): number {
+  return (
+    (globalThis as { Zotero?: { Libraries?: { userLibraryID?: number } } })
+      .Zotero?.Libraries?.userLibraryID ?? 1
+  );
+}
+
+function isSemanticSearchAvailable(): boolean {
+  try {
+    return resolveSemanticSearchState().enabled;
+  } catch {
+    return false;
+  }
+}
+
+function countEligible(snapshot: LibraryIndexSnapshot): number {
+  let eligible = 0;
+  for (const attachmentIds of snapshot.pdfAttachmentIdsByItemId.values()) {
+    for (const attachmentId of attachmentIds) {
+      if (snapshot.attachmentById.get(attachmentId)?.isContextEligiblePdf)
+        eligible += 1;
+    }
+  }
+  return eligible;
+}
+
+/**
+ * What the settings pane shows for the user library. Never throws (a failed
+ * part reads as zero) and, with the index off, never opens the database.
+ */
+export async function getLibraryTextIndexOverview(
+  options: LibraryTextIndexOverviewOptions = {},
+): Promise<LibraryTextIndexOverview> {
+  const enabled = isLibraryTextIndexEnabled();
+  const overview: LibraryTextIndexOverview = {
+    enabled,
+    vectorsEnabled: isVectorsPrefOn(),
+    semanticAvailable: isSemanticSearchAvailable(),
+    indexed: 0,
+    eligible: 0,
+    queued: 0,
+    failed: 0,
+    building: false,
+    usedBytes: 0,
+    budgetBytes: getLibraryTextIndexBudgetBytes(),
+    dbBytes: 0,
+    vectorBytes: 0,
+    vectorNamespace: null,
+  };
+  if (!enabled) return overview;
+  const libraryID = managedLibraryID();
+  const getSnapshot =
+    options.getSnapshot ||
+    ((id: number) => libraryIndexService.getSnapshot(id));
+  try {
+    overview.eligible = countEligible(await getSnapshot(libraryID));
+  } catch (error) {
+    appLogger.debug("LLM index: overview could not read the library", error);
+  }
+  try {
+    const status = await libraryTextIndexScheduler.getStatus(libraryID);
+    Object.assign(overview, {
+      indexed: status.indexed,
+      queued: status.queued,
+      failed: status.failed,
+      building: status.building,
+      usedBytes: status.usedBytes,
+      budgetBytes: status.budgetBytes,
+      dbBytes: status.dbBytes,
+      vectorBytes: status.vectorBytes,
+      vectorNamespace: status.vectorNamespace,
+    });
+  } catch (error) {
+    appLogger.debug("LLM index: overview could not read the index", error);
+  }
+  return overview;
+}
+
+let managementTail: Promise<void> = Promise.resolve();
+let clearFailureLogged = false;
+
+/** Runs management actions one at a time: a second call awaits the first. */
+function serialized(action: () => Promise<void>): Promise<void> {
+  const run = managementTail.then(action, action);
+  managementTail = run.catch(() => undefined);
+  return run;
+}
+
+async function clearNow(): Promise<void> {
+  // Stop first: stop() lets a job mid-write finish (bounded by the grace
+  // period) and closes the connection, so nothing races the delete.
+  await stopLibraryTextIndex();
+  // Best effort, each independently: a locked file must not keep the other.
+  for (const remove of [
+    deleteLibraryTextIndexDatabaseFiles,
+    removeAllVectorNamespaces,
+  ]) {
+    try {
+      await remove();
+    } catch (error) {
+      if (!clearFailureLogged) {
+        clearFailureLogged = true;
+        appLogger.warn("LLM index: could not delete all index files", error);
+      }
+    }
+  }
+  resetLibraryTextIndexStore();
+  clearLoadedVectorState();
+  appLogger.info("LLM index: cleared");
+  if (isLibraryTextIndexEnabled()) await startLibraryTextIndex(lastEnvOverride);
+}
+
+/**
+ * Deletes the index database and every embedding file, then (when the index
+ * is enabled) starts it again, which reconciles the library and refills.
+ * Idempotent and safe when the index was never created.
+ */
+export function clearLibraryTextIndex(): Promise<void> {
+  return serialized(clearNow);
+}
+
+/**
+ * Starts the index over. A fresh start reconciles every eligible paper, and
+ * write-through from questions plus idle prefetch refill it.
+ */
+export function rebuildLibraryTextIndex(): Promise<void> {
+  return serialized(clearNow);
 }

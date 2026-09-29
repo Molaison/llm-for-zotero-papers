@@ -270,6 +270,20 @@ export async function removeVectorNamespace(namespace: string): Promise<void> {
   }
 }
 
+/** Removes every namespace: the whole `{dataDir}/llm-for-zotero-index/vectors` directory. */
+export async function removeAllVectorNamespaces(): Promise<void> {
+  const dir = joinLocalPath(getBaseDir(), VECTOR_DIR, "vectors");
+  const io = getIOUtils();
+  if (io?.remove) {
+    await io.remove(dir, { recursive: true, ignoreAbsent: true });
+    return;
+  }
+  const osFile = getOSFile();
+  if (osFile?.removeDir) {
+    await osFile.removeDir(dir, { ignoreAbsent: true });
+  }
+}
+
 /** Total bytes of the shard files in one namespace directory. */
 export async function measureVectorBytes(namespace: string): Promise<number> {
   const io = getIOUtils();

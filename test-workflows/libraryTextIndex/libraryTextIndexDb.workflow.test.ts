@@ -48,5 +48,8 @@ describe("library text index database in the real Zotero runtime", function () {
     await closeLibraryTextIndexDb();
     const again = await openLibraryTextIndexDb();
     assert.isOk(again, "reopens after close");
+    // Never leave this bundle's second connection open: with SQLite's shared
+    // cache it would pin the file, and a later Clear index would reopen it read-only.
+    await closeLibraryTextIndexDb();
   });
 });

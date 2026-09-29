@@ -294,6 +294,12 @@ import { applyClaudeCodeModePreferenceChange } from "../claudeCode/bootstrapGate
 import { getTavilyApiKey, setTavilyApiKey } from "../webAccess/prefs";
 import { TavilyClient } from "../webAccess/tavilyClient";
 import {
+  clearLibraryTextIndex,
+  getLibraryTextIndexOverview,
+  rebuildLibraryTextIndex,
+  type LibraryTextIndexOverview,
+} from "../services/libraryTextIndex";
+import {
   getDefaultClaudeManagedInstructionBlock,
   readClaudeProjectManagedInstructionBlock,
   updateClaudeProjectManagedInstructionBlock,
@@ -928,6 +934,220 @@ async function confirmCodexFullAccess(): Promise<boolean> {
     unregisterDialog();
   }
   return (dialogData as { _lastButtonId?: string })._lastButtonId === "enable";
+}
+
+// ── Library index section (Customization tab) ─────────────────────
+
+const LIBRARY_TEXT_INDEX_MIN_BUDGET_MB = 50;
+const LIBRARY_TEXT_INDEX_DEFAULT_BUDGET_MB = 500;
+const LIBRARY_TEXT_INDEX_REFRESH_MS = 5000;
+
+function formatIndexMegabytes(bytes: number): string {
+  const mb = Math.max(0, bytes) / (1024 * 1024);
+  const shown = mb > 0 && mb < 10 ? mb.toFixed(1) : String(Math.round(mb));
+  return `${shown.replace(/\.0$/, "")} MB`;
+}
+
+/**
+ * One status line for the library index: "Indexed 587 of 600 papers · 13
+ * queued · 2 could not be indexed · 41 MB of 500 MB", "Building… · " first
+ * while it fills, "Index is off" when disabled. Embeddings are not shown.
+ */
+export function formatLibraryTextIndexStatus(
+  overview: LibraryTextIndexOverview,
+  translate: (en: string) => string,
+): string {
+  if (!overview.enabled) return translate("Index is off");
+  const parts = [
+    translate("Indexed {indexed} of {eligible} papers")
+      .replace("{indexed}", String(overview.indexed))
+      .replace("{eligible}", String(overview.eligible)),
+  ];
+  if (overview.queued > 0) {
+    parts.push(
+      translate("{count} queued").replace("{count}", String(overview.queued)),
+    );
+  }
+  if (overview.failed > 0) {
+    parts.push(
+      translate("{count} could not be indexed").replace(
+        "{count}",
+        String(overview.failed),
+      ),
+    );
+  }
+  parts.push(
+    translate("{used} of {budget}")
+      .replace("{used}", formatIndexMegabytes(overview.usedBytes))
+      .replace("{budget}", formatIndexMegabytes(overview.budgetBytes)),
+  );
+  if (overview.building) parts.unshift(translate("Building…"));
+  return parts.join(" · ");
+}
+
+type LibraryTextIndexPrefKey =
+  | "libraryTextIndexEnabled"
+  | "libraryTextIndexBudgetMB";
+
+export type LibraryTextIndexSettingsDeps = {
+  doc: Document;
+  addonRef: string;
+  t: (en: string) => string;
+  getPref: (key: LibraryTextIndexPrefKey) => unknown;
+  setPref: (key: LibraryTextIndexPrefKey, value: boolean | number) => void;
+  getOverview: () => Promise<LibraryTextIndexOverview>;
+  rebuild: () => Promise<void>;
+  clear: () => Promise<void>;
+  /** A modal yes/no; `Services.prompt.confirm` in Zotero. */
+  confirm: (title: string, text: string) => boolean;
+  setInterval: (cb: () => void, ms: number) => unknown;
+  clearInterval: (handle: unknown) => void;
+  /** Whether the Customization panel is showing; the refresh skips otherwise. */
+  isVisible: () => boolean;
+};
+
+function readIndexBudgetMb(value: unknown): number {
+  const mb = Number(value);
+  return Number.isFinite(mb) && mb >= LIBRARY_TEXT_INDEX_MIN_BUDGET_MB
+    ? Math.floor(mb)
+    : LIBRARY_TEXT_INDEX_DEFAULT_BUDGET_MB;
+}
+
+/**
+ * Binds the "Library index" block: the index toggle, the size limit, the
+ * status line (refreshed on bind, every 5 s while visible, and after each
+ * action) and the Rebuild/Clear buttons. Returns `dispose` for pane unload.
+ */
+export function bindLibraryTextIndexSettings(
+  deps: LibraryTextIndexSettingsDeps,
+): { refresh: () => Promise<void>; dispose: () => void } {
+  const { doc, t: tr } = deps;
+  const byId = <T extends Element>(suffix: string) =>
+    doc.querySelector(
+      `#${deps.addonRef}-library-text-index${suffix}`,
+    ) as T | null;
+  const setText = (suffix: string, text: string) => {
+    const element = byId<HTMLElement>(suffix);
+    if (element) element.textContent = tr(text);
+  };
+  setText("-label", "Library index");
+  setText(
+    "-hint",
+    "Keep a local full-text index of your library so library-wide questions answer from the index instead of re-reading PDFs. Fills from the questions you ask and, while Zotero is idle, in the background.",
+  );
+  setText("-budget-label", "Index size limit (MB)");
+  setText(
+    "-budget-hint",
+    "Least-recently-searched papers are dropped from the index above this size.",
+  );
+  setText("-rebuild", "Rebuild index");
+  setText("-clear", "Clear index");
+
+  const enabledInput = byId<HTMLInputElement>("-enabled");
+  const budgetInput = byId<HTMLInputElement>("-budget");
+  const status = byId<HTMLElement>("-status");
+  const rebuildButton = byId<HTMLButtonElement>("-rebuild");
+  const clearButton = byId<HTMLButtonElement>("-clear");
+
+  let busy = false;
+  let disposed = false;
+  let refreshSeq = 0;
+
+  const refresh = async () => {
+    if (disposed || busy) return;
+    const seq = ++refreshSeq;
+    let text: string;
+    try {
+      text = formatLibraryTextIndexStatus(await deps.getOverview(), tr);
+    } catch (error) {
+      appLogger.debug("LLM index: settings status failed", error);
+      return;
+    }
+    // A newer refresh or an action that started meanwhile owns the line.
+    if (disposed || busy || seq !== refreshSeq || !status) return;
+    status.textContent = text;
+  };
+
+  if (enabledInput) {
+    const value = deps.getPref("libraryTextIndexEnabled");
+    enabledInput.checked =
+      value !== false && `${value ?? ""}`.toLowerCase() !== "false";
+    enabledInput.addEventListener("change", () => {
+      deps.setPref("libraryTextIndexEnabled", enabledInput.checked);
+      void refresh();
+    });
+  }
+
+  if (budgetInput) {
+    budgetInput.value = String(
+      readIndexBudgetMb(deps.getPref("libraryTextIndexBudgetMB")),
+    );
+    budgetInput.addEventListener("change", () => {
+      const stored = readIndexBudgetMb(
+        deps.getPref("libraryTextIndexBudgetMB"),
+      );
+      const raw = `${budgetInput.value ?? ""}`.trim();
+      const next = raw ? Number(raw) : NaN;
+      if (!Number.isFinite(next) || next < LIBRARY_TEXT_INDEX_MIN_BUDGET_MB) {
+        budgetInput.value = String(stored);
+        return;
+      }
+      const mb = Math.floor(next);
+      budgetInput.value = String(mb);
+      if (mb !== stored) deps.setPref("libraryTextIndexBudgetMB", mb);
+      void refresh();
+    });
+  }
+
+  const setButtonsDisabled = (disabled: boolean) => {
+    if (rebuildButton) rebuildButton.disabled = disabled;
+    if (clearButton) clearButton.disabled = disabled;
+  };
+  const runAction = async (action: () => Promise<void>) => {
+    if (busy || disposed) return;
+    busy = true;
+    refreshSeq += 1;
+    setButtonsDisabled(true);
+    if (status) status.textContent = tr("Working…");
+    try {
+      await action();
+    } catch (error) {
+      appLogger.warn("LLM index: settings action failed", error);
+    } finally {
+      busy = false;
+      if (!disposed) setButtonsDisabled(false);
+    }
+    await refresh();
+  };
+
+  rebuildButton?.addEventListener("click", () => {
+    if (busy) return;
+    void runAction(deps.rebuild);
+  });
+  clearButton?.addEventListener("click", () => {
+    if (busy) return;
+    const confirmed = deps.confirm(
+      tr("Clear library index"),
+      tr(
+        "This deletes the local index database and all embedding files. Your library and PDFs are not touched. Library questions will be slower until the index refills.",
+      ),
+    );
+    if (confirmed) void runAction(deps.clear);
+  });
+
+  const interval = deps.setInterval(() => {
+    if (deps.isVisible()) void refresh();
+  }, LIBRARY_TEXT_INDEX_REFRESH_MS);
+  void refresh();
+
+  return {
+    refresh,
+    dispose: () => {
+      if (disposed) return;
+      disposed = true;
+      deps.clearInterval(interval);
+    },
+  };
 }
 
 // ── Main export ────────────────────────────────────────────────────
@@ -2732,6 +2952,45 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
         popupAddTextEnabledInput.checked,
         true,
       );
+    });
+  }
+
+  if (doc.querySelector(`#${config.addonRef}-library-text-index-section`)) {
+    const customizationPanel = doc.querySelector(
+      `#${config.addonRef}-pref-panel-customization`,
+    ) as HTMLElement | null;
+    const libraryTextIndexSettings = bindLibraryTextIndexSettings({
+      doc,
+      addonRef: config.addonRef,
+      t,
+      getPref: (key) => Zotero.Prefs.get(`${config.prefsPrefix}.${key}`, true),
+      setPref: (key, value) =>
+        Zotero.Prefs.set(`${config.prefsPrefix}.${key}`, value, true),
+      getOverview: () => getLibraryTextIndexOverview(),
+      rebuild: () => rebuildLibraryTextIndex(),
+      clear: () => clearLibraryTextIndex(),
+      confirm: (title, text) => {
+        const prompt = (
+          globalThis as {
+            Services?: {
+              prompt?: {
+                confirm?: (win: Window, title: string, text: string) => boolean;
+              };
+            };
+          }
+        ).Services?.prompt;
+        return prompt?.confirm
+          ? prompt.confirm(_window, title, text)
+          : _window.confirm(text);
+      },
+      setInterval: (cb, ms) => _window.setInterval(cb, ms),
+      clearInterval: (handle) => _window.clearInterval(handle as number),
+      isVisible: () =>
+        !_window.closed &&
+        (!customizationPanel || customizationPanel.style.display !== "none"),
+    });
+    _window.addEventListener("unload", libraryTextIndexSettings.dispose, {
+      once: true,
     });
   }
 

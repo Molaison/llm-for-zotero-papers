@@ -675,6 +675,10 @@ export async function getLibraryTextIndexStore(): Promise<LibraryTextIndexStore 
   if (shared?.db !== db) shared = { db, store: new LibraryTextIndexStore(db) };
   return shared.store;
 }
-export function resetLibraryTextIndexStoreForTests(): void {
+/** Drops the shared store, so the next `getLibraryTextIndexStore` builds a new one. */
+export function resetLibraryTextIndexStore(): void {
   shared = null;
+}
+export function resetLibraryTextIndexStoreForTests(): void {
+  resetLibraryTextIndexStore();
 }

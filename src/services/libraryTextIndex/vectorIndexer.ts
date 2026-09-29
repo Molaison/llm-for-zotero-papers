@@ -55,7 +55,7 @@ const knownDims = new Map<string, number>();
 const hydratedStores = new WeakSet<LibraryTextIndexStore>();
 let pruneFailureLogged = false;
 
-function isVectorsPrefOn(): boolean {
+export function isVectorsPrefOn(): boolean {
   const value = (
     globalThis as {
       Zotero?: { Prefs?: { get?: (key: string, global?: boolean) => unknown } };
@@ -343,9 +343,17 @@ export async function removeDocumentVectors(
   }
 }
 
-export function resetVectorIndexerForTests(): void {
+/**
+ * Forgets every loaded matrix and recorded dimension count, for when the
+ * index files are deleted underneath them (clear/rebuild).
+ */
+export function clearLoadedVectorState(): void {
   matrices.clear();
   loading.clear();
   knownDims.clear();
+}
+
+export function resetVectorIndexerForTests(): void {
+  clearLoadedVectorState();
   pruneFailureLogged = false;
 }
