@@ -5,6 +5,12 @@ import {
 } from "../../shared/conversationKeyLedger";
 import type { AgentRuntimeRequest } from "../types";
 import type { AgentCacheEvidenceActivity } from "./cacheManagement";
+import {
+  isCatalogToolName,
+  LEGACY_LIBRARY_READ_TOOL_NAMES,
+  LEGACY_PAPER_TEXT_TOOL_NAMES,
+  LEGACY_PAPER_VISUAL_TOOL_NAMES,
+} from "./toolNames";
 
 export type AgentCoverageSourceKind =
   | "zotero_metadata"
@@ -1114,13 +1120,12 @@ export function buildAgentCoverageEntriesForActivity(
   if (activity.toolName === "paper_read") {
     return buildPaperReadCoverageEntries(activity);
   }
-  if (
-    activity.toolName === "search_paper" ||
-    activity.toolName === "read_paper"
-  ) {
+  // Retired names: removed in Task 2.6. The registry still runs an internal
+  // primitive a model names, so its reads keep counting as coverage until then.
+  if (LEGACY_PAPER_TEXT_TOOL_NAMES.has(activity.toolName)) {
     return buildSearchPaperCoverageEntries(activity);
   }
-  if (activity.toolName === "view_pdf_pages") {
+  if (LEGACY_PAPER_VISUAL_TOOL_NAMES.has(activity.toolName)) {
     return buildVisualCoverageEntries(activity);
   }
   if (activity.toolName === "file_io") {
@@ -1129,15 +1134,12 @@ export function buildAgentCoverageEntriesForActivity(
   if (activity.toolName === "read_attachment") {
     return buildReadAttachmentCoverageEntries(activity);
   }
-  if (
-    activity.toolName === "library_search" ||
-    activity.toolName === "query_library"
-  ) {
+  if (isCatalogToolName(activity.toolName)) {
     return buildLibrarySearchCoverageEntries(activity);
   }
   if (
     activity.toolName === "library_read" ||
-    activity.toolName === "read_library"
+    LEGACY_LIBRARY_READ_TOOL_NAMES.has(activity.toolName)
   ) {
     return buildLibraryReadCoverageEntries(activity);
   }

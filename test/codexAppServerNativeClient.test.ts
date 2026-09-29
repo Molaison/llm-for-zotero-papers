@@ -3780,9 +3780,9 @@ describe("Codex app-server native client", function () {
       scope,
       event: {
         ...baseEvent,
-        toolName: "read_paper",
+        toolName: "paper_read",
         toolLabel: "Read Paper",
-        arguments: {},
+        arguments: { mode: "targeted", query: "method" },
         ok: true,
       },
     });
@@ -3792,11 +3792,25 @@ describe("Codex app-server native client", function () {
       event: {
         ...baseEvent,
         requestId: "read-2",
-        toolName: "read_paper",
+        toolName: "paper_read",
         toolLabel: "Read Paper",
-        arguments: {},
+        arguments: { mode: "targeted", query: "method" },
         ok: true,
         timestamp: 1100,
+      },
+    });
+    // MCP never exposes a retired primitive, so a retired name is not a read.
+    recordCodexNativeReadActivity({
+      threadId: "thread-ledger",
+      scope,
+      event: {
+        ...baseEvent,
+        requestId: "retired-read",
+        toolName: "view_pdf_pages",
+        toolLabel: "Retired View",
+        arguments: { pages: [3] },
+        ok: true,
+        timestamp: 1150,
       },
     });
     recordCodexNativeReadActivity({
@@ -3855,7 +3869,10 @@ describe("Codex app-server native client", function () {
     assert.include(block, "Already inspected in this Codex thread");
     assert.include(block, "Ledger Paper");
     assert.include(block, "Read Paper");
+    assert.include(block, "mode=targeted");
+    assert.include(block, 'query="method"');
     assert.include(block, "2x");
+    assert.notInclude(block, "Retired View");
     assert.include(block, "Read MinerU full.md");
     assert.include(block, "offset=25");
     assert.notInclude(block, "failed search");

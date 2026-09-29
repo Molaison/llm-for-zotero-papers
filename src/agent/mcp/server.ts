@@ -69,6 +69,7 @@ import type {
   VerifiedReadSource,
 } from "../plans/types";
 import { createTrustedReadObservations } from "../plans/readObservation";
+import { isRawPdfRetrievalTool } from "../context/toolNames";
 import { resolveActiveLibraryID } from "../../utils/zoteroLibraryScope";
 import { resolveAgentToolCallWorkCategory } from "../workCategory";
 import { getNotesDirectoryConfig } from "../../utils/notesDirectoryConfig";
@@ -179,15 +180,6 @@ const MCP_READ_DEDUPE_TOOL_NAMES = new Set([
   "library_read",
   "library_retrieve",
   "paper_read",
-]);
-const RAW_PDF_RETRIEVAL_TOOL_NAMES = new Set([
-  "paper_read",
-  "read_paper",
-  "search_paper",
-  "view_pdf_pages",
-  "read_attachment",
-  "library_read",
-  "library_retrieve",
 ]);
 const RAW_PDF_HIDDEN_NATIVE_TOOL_NAMES = new Set([
   "run_command",
@@ -1174,7 +1166,7 @@ function shouldBlockRawPdfRetrieval(params: {
   rawArgs: unknown;
   scope: ZoteroMcpActiveScope | null;
 }): boolean {
-  if (!RAW_PDF_RETRIEVAL_TOOL_NAMES.has(params.toolName)) return false;
+  if (!isRawPdfRetrievalTool(params.toolName)) return false;
   const rawPdfs = getMcpScopePapers(params.scope, ["raw_pdf"]);
   if (!rawPdfs.length) return false;
   const isLibraryAttachmentEnumeration =

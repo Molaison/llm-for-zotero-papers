@@ -209,6 +209,77 @@ describe("agent prompt budget", function () {
     assert.notInclude(JSON.stringify(modelFacing), "A".repeat(200));
   });
 
+  for (const toolName of ["library_search", "query_library"]) {
+    it(`compacts ${toolName} catalog rows as catalog results`, function () {
+      const catalog = buildCatalogToolMessage(160);
+      catalog.name = toolName;
+      const result = enforceAgentPromptBudget({
+        messages: [
+          { role: "system", content: "Use tools." },
+          { role: "user", content: "Search my library." },
+          {
+            role: "assistant",
+            content: "",
+            tool_calls: [
+              {
+                id: "call-1",
+                name: toolName,
+                arguments: { entity: "items", mode: "list" },
+              },
+            ],
+          },
+          catalog,
+        ],
+        model: "claude-haiku-4-5",
+        inputTokenCap: 8_000,
+        conversationKey: 1,
+        resourceSignature: "scope-a",
+      });
+      assert.deepInclude(result.reductions, {
+        kind: "catalog_compacted",
+        count: 1,
+      });
+    });
+  }
+
+  // paper_read is the facade; read_paper/search_paper/view_pdf_pages are
+  // retired names that stored history written by older versions still carries.
+  for (const [toolName, args] of [
+    ["paper_read", { mode: "targeted", query: "method" }],
+    ["read_attachment", { attachmentId: 30_000 }],
+    ["read_paper", { chunkIndexes: [1] }],
+    ["search_paper", { question: "method" }],
+    ["view_pdf_pages", { pages: [1] }],
+  ] as const) {
+    it(`prunes ${toolName} results under context pressure as paper evidence`, function () {
+      const evidence = buildEvidenceToolMessage(80);
+      evidence.name = toolName;
+      const messages: AgentModelMessage[] = [
+        { role: "system", content: "Use paper evidence." },
+        { role: "user", content: "Answer from the paper." },
+        {
+          role: "assistant",
+          content: "",
+          tool_calls: [{ id: "call-1", name: toolName, arguments: args }],
+        },
+        evidence,
+      ];
+      const result = enforceAgentPromptBudget({
+        messages,
+        model: "claude-haiku-4-5",
+        inputTokenCap: 10_000,
+        conversationKey: 1,
+        resourceSignature: "scope-a",
+      });
+      assert.isTrue(result.changed);
+      assert.isBelow(result.estimatedAfterTokens, result.estimatedBeforeTokens);
+      assert.deepInclude(result.reductions, {
+        kind: "evidence_compacted",
+        count: 1,
+      });
+    });
+  }
+
   it("preserves assistant tool-call and tool-result ordering while reducing", function () {
     const messages: AgentModelMessage[] = [
       { role: "system", content: "Use tools." },

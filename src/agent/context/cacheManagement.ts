@@ -13,6 +13,7 @@ import {
 } from "../../shared/conversationWriteFence";
 import type { PaperContextRef } from "../../shared/types";
 import type { AgentRuntimeRequest, AgentToolArtifact } from "../types";
+import { isPaperEvidenceToolName } from "./toolNames";
 
 export type AgentCacheEvidenceActivity = {
   toolName: string;
@@ -59,14 +60,6 @@ type ZoteroDb = {
   queryAsync: (sql: string, params?: unknown[]) => Promise<unknown>;
 };
 
-const READ_TOOL_NAMES = new Set([
-  "paper_read",
-  "read_paper",
-  "search_paper",
-  "library_retrieve",
-  "view_pdf_pages",
-  "read_attachment",
-]);
 const MAX_EVIDENCE_ENTRIES = 12;
 const MAX_RENDERED_EVIDENCE_ENTRIES = 8;
 const MAX_SNIPPETS_PER_ENTRY = 4;
@@ -364,6 +357,8 @@ function buildReadDetail(toolName: string, args: unknown): string | undefined {
     }
     return pieces.join(", ");
   }
+  // Retired names: removed in Task 2.6. The registry still runs an internal
+  // primitive a model names, so its evidence keeps its detail until then.
   if (toolName === "search_paper") {
     const question = normalizeText(record.question, 120);
     return question ? `question="${question}"` : undefined;
@@ -600,7 +595,7 @@ function buildFileIoEvidenceEntry(
 function buildGenericReadEvidenceEntries(
   activity: AgentCacheEvidenceActivity,
 ): AgentEvidenceEntry[] {
-  if (!READ_TOOL_NAMES.has(activity.toolName)) return [];
+  if (!isPaperEvidenceToolName(activity.toolName)) return [];
   const detail = buildReadDetail(activity.toolName, activity.input);
   const targets = extractTargets(activity.input, activity.request);
   const effectiveTargets = targets.length

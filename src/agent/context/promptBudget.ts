@@ -22,6 +22,7 @@ import {
 } from "../../utils/outputTokenPolicy";
 import { normalizeProviderProtocol } from "../../utils/providerProtocol";
 import { durableTranscriptMessages } from "./transcriptCompactor";
+import { isCatalogToolName, isPaperEvidenceToolName } from "./toolNames";
 
 const HISTORY_CHECKPOINT_MAX_TOKENS = 1_200;
 const TOOL_HANDLE_MAX_TOKENS = 768;
@@ -244,21 +245,14 @@ function existingToolResultHandle(content: unknown): string | undefined {
     : undefined;
 }
 
+// Retired names stay recognised: stored history from older versions carries
+// them. Retired names: removed in Task 2.6.
 function isLibrarySearchTool(toolName: string): boolean {
-  const normalized = toolName.trim().toLowerCase();
-  return normalized === "query_library" || normalized === "library_search";
+  return isCatalogToolName(toolName.trim().toLowerCase());
 }
 
 function isEvidenceTool(toolName: string): boolean {
-  const normalized = toolName.trim().toLowerCase();
-  return (
-    normalized === "library_retrieve" ||
-    normalized === "paper_read" ||
-    normalized === "read_paper" ||
-    normalized === "search_paper" ||
-    normalized === "read_attachment" ||
-    normalized === "view_pdf_pages"
-  );
+  return isPaperEvidenceToolName(toolName.trim().toLowerCase());
 }
 
 function simpleDigest(value: unknown): string {

@@ -8,6 +8,11 @@ import {
   hydrateAgentCoverageLedger,
 } from "../src/agent/context/coverageLedger";
 import { buildAgentResourceContextPlan } from "../src/agent/context/resourceContextPlan";
+import {
+  isRawPdfRetrievalTool,
+  LEGACY_PAPER_RETRIEVAL_TOOL_NAMES,
+  PAPER_RETRIEVAL_TOOL_NAMES,
+} from "../src/agent/context/toolNames";
 import { buildAgentInitialMessages } from "../src/agent/model/messageBuilder";
 import type {
   AgentModelMessage,
@@ -441,5 +446,26 @@ describe("agent coverage ledger", function () {
     assert.include(userText, "Known coverage from prior agent reads");
     assert.include(userText, "source=zotero_metadata");
     assert.notInclude(stableText, "Known coverage from prior agent reads");
+  });
+});
+
+describe("agent tool names", function () {
+  it("classifies paper_read activity as raw PDF retrieval and ignores retired names", function () {
+    assert.isTrue(isRawPdfRetrievalTool("paper_read"));
+    assert.isFalse(isRawPdfRetrievalTool("read_paper"));
+  });
+
+  it("keeps facade and retired paper retrieval names disjoint", function () {
+    assert.sameMembers(
+      [...PAPER_RETRIEVAL_TOOL_NAMES],
+      ["paper_read", "read_attachment", "library_read", "library_retrieve"],
+    );
+    assert.sameMembers(
+      [...LEGACY_PAPER_RETRIEVAL_TOOL_NAMES],
+      ["read_paper", "search_paper", "view_pdf_pages"],
+    );
+    for (const name of LEGACY_PAPER_RETRIEVAL_TOOL_NAMES) {
+      assert.isFalse(PAPER_RETRIEVAL_TOOL_NAMES.has(name), name);
+    }
   });
 });
