@@ -1,4 +1,5 @@
 import { defaultInvocationPlan } from "../authorization/invocationPlan";
+import { RETIRED_TOOL_HINTS } from "../context/toolNames";
 import type { ActionContractService } from "../contracts/actionContract";
 import { operationCatalogEntry } from "../contracts/operationCatalog";
 import type { PlanAmendmentService } from "../plans/amendments";
@@ -336,7 +337,18 @@ export class AgentToolRegistry {
   ): Promise<PreparedToolExecution> {
     const tool = this.tools.get(call.name);
     if (!tool) {
-      return createSyntheticErrorResult(call, `Unknown tool: ${call.name}`);
+      const replacement = Object.prototype.hasOwnProperty.call(
+        RETIRED_TOOL_HINTS,
+        call.name,
+      )
+        ? RETIRED_TOOL_HINTS[call.name]
+        : undefined;
+      return createSyntheticErrorResult(
+        call,
+        replacement
+          ? `Unknown tool: ${call.name}. This tool was renamed; call ${replacement} instead.`
+          : `Unknown tool: ${call.name}`,
+      );
     }
     if (tool.isAvailable?.(context.request) === false) {
       return createSyntheticErrorResult(

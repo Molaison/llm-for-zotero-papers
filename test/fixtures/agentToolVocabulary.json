@@ -36,23 +36,6 @@
     "update_plan",
     "zotero_script"
   ],
-  "internal": [
-    "apply_tags",
-    "create_items",
-    "import_identifiers",
-    "import_local_files",
-    "manage_attachments",
-    "manage_collections",
-    "merge_items",
-    "move_to_collection",
-    "relate_items",
-    "reparent_items",
-    "restore_from_trash",
-    "set_item_tags",
-    "submit_plan_document",
-    "tag_update",
-    "trash_items",
-    "update_metadata"
-  ],
-  "specBytes": 71687
+  "internal": ["submit_plan_document"],
+  "specBytes": 71617
 }

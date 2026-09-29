@@ -72,6 +72,9 @@ function validateDelegate(
     return fail(validated.error);
   }
   return ok({
+    // A delegate's spec.name is an internal identifier used for journaling
+    // and presentation. Delegates are never registered, so the model cannot
+    // call them by this name; only the facade that owns them is a tool.
     delegateName: choice.tool.spec.name,
     delegateTool: choice.tool,
     delegateInput: validated.value,

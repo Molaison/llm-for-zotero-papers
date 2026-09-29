@@ -598,7 +598,7 @@ export async function executeAndRecordUndo(
 /**
  * Execute multiple operations via the mutation service and register a single
  * grouped undo entry. Used by facade tools that support batching (e.g.
- * update_metadata with multiple items).
+ * a metadata update across multiple items).
  */
 export async function executeAndRecordUndoBatch(
   mutationService: LibraryMutationService,

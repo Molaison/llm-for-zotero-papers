@@ -2564,7 +2564,9 @@ describe("primitive agent tools", function () {
     const turnText = messageText(messages[messages.length - 1]);
     assert.include(turnText, "library_update");
     assert.include(turnText, "collection membership");
-    assert.include(turnText, "confirmation card is the deliverable");
+    // The write delegates are not registered, so their own guidance never
+    // reaches the model; library_update's guidance is the only write guidance.
+    assert.notInclude(turnText, "confirmation card is the deliverable");
   });
 
   it("note_write confirms and updates the active note", async function () {

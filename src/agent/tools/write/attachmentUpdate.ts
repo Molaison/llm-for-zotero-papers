@@ -1,5 +1,5 @@
 /**
- * Tool for managing Zotero attachments — delete, rename, or re-link.
+ * `attachment_update`: delete, rename, or re-link a Zotero attachment.
  */
 import type { AgentWriteToolDefinition } from "../../types";
 import { describeLibraryMutationInput } from "../../contracts/actionContract";
@@ -10,22 +10,23 @@ import {
   type RelinkAttachmentOperation,
 } from "../../services/libraryMutationService";
 import type { ZoteroGateway } from "../../services/zoteroGateway";
+import { intentOrSignal } from "../guidance";
 import { ok, fail, validateObject, normalizePositiveInt } from "../shared";
 import {
   executeAndRecordUndo,
   planLibraryMutations,
 } from "./mutateLibraryShared";
 
-type ManageAttachmentsInput = {
+type AttachmentUpdateInput = {
   operation:
     | DeleteAttachmentOperation
     | RenameAttachmentOperation
     | RelinkAttachmentOperation;
 };
 
-export function createManageAttachmentsTool(
+export function createAttachmentUpdateTool(
   zoteroGateway: ZoteroGateway,
-): AgentWriteToolDefinition<ManageAttachmentsInput, unknown> {
+): AgentWriteToolDefinition<AttachmentUpdateInput, unknown> {
   const mutationService = new LibraryMutationService(zoteroGateway);
 
   return {
@@ -36,9 +37,8 @@ export function createManageAttachmentsTool(
       "relink_attachment",
     ],
     spec: {
-      name: "manage_attachments",
-      description:
-        "Manage Zotero attachments: delete, rename, or re-link broken file paths.",
+      name: "attachment_update",
+      description: "Delete, rename, or re-link Zotero attachments.",
       inputSchema: {
         type: "object",
         additionalProperties: false,
@@ -71,24 +71,17 @@ export function createManageAttachmentsTool(
 
     guidance: {
       matches: (request) =>
-        Boolean(
-          request.classifiedIntent?.actionIntents.some((action) =>
-            [
-              "delete_attachment",
-              "rename_attachment",
-              "relink_attachment",
-            ].includes(action.operation),
-          ),
+        intentOrSignal(
+          request,
+          ["delete_attachment", "rename_attachment", "relink_attachment"],
+          (signals) => signals.mentionsAttachment,
         ),
       instruction:
-        "Use manage_attachments to delete, rename, or re-link a single attachment. " +
-        "To find attachments, use library_read with sections:['attachments'] first. " +
-        "Re-linking works for stored attachments as well as linked files — use it to repair an attachment whose file has gone missing. Only linked URLs cannot be re-linked, having no file. " +
-        "For batch renaming with computed filenames (e.g. '{author}_{year}_{title}.pdf'), use zotero_script instead.",
+        "Use attachment_update to delete, rename, or re-link a single attachment. To find attachments, use library_read with sections:['attachments'] first. Renaming renames the file on disk, not just the title. Re-linking repairs an attachment whose file has moved or gone missing, and works for stored attachments as well as linked files; only linked URLs cannot be re-linked. Batch renaming with computed filenames requires separately authorized computation and exact attachment targets.",
     },
 
     presentation: {
-      label: "Manage Attachments",
+      label: "Update Attachments",
       summaries: {
         onCall: ({ args }) => {
           const a =
@@ -120,7 +113,7 @@ export function createManageAttachmentsTool(
           type: "delete_attachment",
           attachmentId,
         };
-        return ok<ManageAttachmentsInput>({ operation });
+        return ok<AttachmentUpdateInput>({ operation });
       }
 
       if (action === "rename") {
@@ -132,7 +125,7 @@ export function createManageAttachmentsTool(
           attachmentId,
           newName: args.newName.trim(),
         };
-        return ok<ManageAttachmentsInput>({ operation });
+        return ok<AttachmentUpdateInput>({ operation });
       }
 
       if (action === "relink") {
@@ -144,7 +137,7 @@ export function createManageAttachmentsTool(
           attachmentId,
           newPath: args.newPath.trim(),
         };
-        return ok<ManageAttachmentsInput>({ operation });
+        return ok<AttachmentUpdateInput>({ operation });
       }
 
       return fail("action must be one of: 'delete', 'rename', 'relink'");
@@ -159,7 +152,7 @@ export function createManageAttachmentsTool(
 
       if (operation.type === "delete_attachment") {
         return {
-          toolName: "manage_attachments",
+          toolName: "attachment_update",
           title: "Delete attachment",
           description: `Move "${title}" to the Zotero trash. This can be undone.`,
           confirmLabel: "Delete",
@@ -177,7 +170,7 @@ export function createManageAttachmentsTool(
 
       if (operation.type === "rename_attachment") {
         return {
-          toolName: "manage_attachments",
+          toolName: "attachment_update",
           title: "Rename attachment",
           description: `Rename "${title}" to "${operation.newName}".`,
           confirmLabel: "Rename",
@@ -201,7 +194,7 @@ export function createManageAttachmentsTool(
 
       // relink_attachment
       return {
-        toolName: "manage_attachments",
+        toolName: "attachment_update",
         title: "Re-link attachment",
         description: `Update the file path for "${title}".`,
         confirmLabel: "Re-link",
@@ -272,7 +265,7 @@ export function createManageAttachmentsTool(
         mutationService,
         input.operation,
         context,
-        "manage_attachments",
+        "attachment_update",
       );
     },
   };

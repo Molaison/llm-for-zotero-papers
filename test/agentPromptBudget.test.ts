@@ -27,7 +27,7 @@ function buildCatalogToolMessage(rowCount = 80): AgentModelMessage {
   return {
     role: "tool",
     tool_call_id: "call-1",
-    name: "query_library",
+    name: "library_search",
     content: JSON.stringify({
       entity: "items",
       mode: "list",
@@ -141,7 +141,7 @@ describe("agent prompt budget", function () {
         tool_calls: [
           {
             id: "call-1",
-            name: "query_library",
+            name: "library_search",
             arguments: { entity: "items", mode: "list" },
           },
         ],
@@ -170,7 +170,7 @@ describe("agent prompt budget", function () {
         tool_calls: [
           {
             id: "call-1",
-            name: "query_library",
+            name: "library_search",
             arguments: { entity: "items", mode: "list" },
           },
         ],
@@ -201,7 +201,7 @@ describe("agent prompt budget", function () {
     assert.lengthOf(result.handleRecords, 1);
     assert.equal(result.handleRecords[0].handle, modelFacing.toolResultHandle);
     assert.equal(result.handleRecords[0].conversationKey, 1);
-    assert.equal(result.handleRecords[0].toolName, "query_library");
+    assert.equal(result.handleRecords[0].toolName, "library_search");
     assert.lengthOf(
       (result.handleRecords[0].content as { results: unknown[] }).results,
       160,
@@ -209,7 +209,7 @@ describe("agent prompt budget", function () {
     assert.notInclude(JSON.stringify(modelFacing), "A".repeat(200));
   });
 
-  for (const toolName of ["library_search", "query_library"]) {
+  for (const toolName of ["library_search"]) {
     it(`compacts ${toolName} catalog rows as catalog results`, function () {
       const catalog = buildCatalogToolMessage(160);
       catalog.name = toolName;
@@ -242,14 +242,9 @@ describe("agent prompt budget", function () {
     });
   }
 
-  // paper_read is the facade; read_paper/search_paper/view_pdf_pages are
-  // retired names that stored history written by older versions still carries.
   for (const [toolName, args] of [
     ["paper_read", { mode: "targeted", query: "method" }],
     ["read_attachment", { attachmentId: 30_000 }],
-    ["read_paper", { chunkIndexes: [1] }],
-    ["search_paper", { question: "method" }],
-    ["view_pdf_pages", { pages: [1] }],
   ] as const) {
     it(`prunes ${toolName} results under context pressure as paper evidence`, function () {
       const evidence = buildEvidenceToolMessage(80);
@@ -280,6 +275,67 @@ describe("agent prompt budget", function () {
     });
   }
 
+  // Stored history written by older versions can still carry a retired tool
+  // name. It is no longer recognised as paper evidence: it is compacted like
+  // any other tool result, and never breaks the budget pass.
+  it("compacts a retired read_paper result generically without throwing", function () {
+    const retired = buildEvidenceToolMessage(80);
+    retired.name = "read_paper";
+    retired.tool_call_id = "call-old";
+    const messages: AgentModelMessage[] = [
+      { role: "system", content: "Use paper evidence." },
+      { role: "user", content: "Answer from the paper." },
+      {
+        role: "assistant",
+        content: "",
+        tool_calls: [
+          {
+            id: "call-old",
+            name: "read_paper",
+            arguments: { chunkIndexes: [1] },
+          },
+        ],
+      },
+      retired,
+      {
+        role: "assistant",
+        content: "",
+        tool_calls: [
+          {
+            id: "call-new",
+            name: "paper_read",
+            arguments: { mode: "targeted", query: "method" },
+          },
+        ],
+      },
+      {
+        role: "tool",
+        tool_call_id: "call-new",
+        name: "paper_read",
+        content: JSON.stringify({ passages: [{ text: "Short passage." }] }),
+      },
+    ];
+    let result: ReturnType<typeof enforceAgentPromptBudget> | undefined;
+    assert.doesNotThrow(() => {
+      result = enforceAgentPromptBudget({
+        messages,
+        model: "claude-haiku-4-5",
+        inputTokenCap: 10_000,
+        conversationKey: 1,
+        resourceSignature: "scope-a",
+      });
+    });
+    assert.isTrue(result!.changed);
+    assert.isBelow(result!.estimatedAfterTokens, result!.estimatedBeforeTokens);
+    const kinds = result!.reductions.map((reduction) => reduction.kind);
+    assert.notInclude(kinds, "evidence_compacted");
+    assert.isTrue(
+      kinds.includes("tool_result_cleared") ||
+        kinds.includes("generic_compacted"),
+      `expected generic compaction, got ${kinds.join(", ")}`,
+    );
+  });
+
   it("preserves assistant tool-call and tool-result ordering while reducing", function () {
     const messages: AgentModelMessage[] = [
       { role: "system", content: "Use tools." },
@@ -290,7 +346,7 @@ describe("agent prompt budget", function () {
         tool_calls: [
           {
             id: "call-1",
-            name: "query_library",
+            name: "library_search",
             arguments: { entity: "items", mode: "list" },
           },
         ],
@@ -325,7 +381,7 @@ describe("agent prompt budget", function () {
         tool_calls: [
           {
             id: "call-1",
-            name: "query_library",
+            name: "library_search",
             arguments: { entity: "items", mode: "list" },
           },
         ],
@@ -600,7 +656,7 @@ describe("agent prompt budget", function () {
         tool_calls: [
           {
             id: "old-call",
-            name: "query_library",
+            name: "library_search",
             arguments: { entity: "items", mode: "list" },
           },
         ],
@@ -650,7 +706,7 @@ describe("agent prompt budget", function () {
         tool_calls: [
           {
             id: "call-library",
-            name: "query_library",
+            name: "library_search",
             arguments: { entity: "items", mode: "list" },
           },
         ],

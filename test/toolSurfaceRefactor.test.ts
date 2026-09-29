@@ -13,6 +13,8 @@ import {
   setUserSkills,
 } from "../src/agent/skills";
 import { AgentToolRegistry } from "../src/agent/tools/registry";
+import { createAttachmentUpdateTool } from "../src/agent/tools/write/attachmentUpdate";
+import { createCollectionUpdateTool } from "../src/agent/tools/write/collectionUpdate";
 import {
   createPaperReadTool as createResolvedPaperReadTool,
   resolveMetadataOverviewTitleForTests,
@@ -302,16 +304,9 @@ describe("semantic tool surface", function () {
       "answer",
       "review",
     ]);
-    for (const legacyName of ["import_identifiers", "update_metadata"]) {
-      assert.notInclude(names, legacyName);
-      assert.exists(
-        registry.getTool(legacyName),
-        `${legacyName} remains internally callable`,
-      );
-    }
-    // Retired into paper_read, library_search, library_read,
-    // literature_search, note_write, and note_write_batch: no longer
-    // registered at all.
+    // Retired into the facades: no longer registered at all. The write
+    // delegates live on only inside library_update, library_import, and
+    // library_delete.
     for (const retiredName of [
       "read_paper",
       "search_paper",
@@ -321,6 +316,21 @@ describe("semantic tool surface", function () {
       "search_literature_online",
       "edit_current_note",
       "write_notes_batch",
+      "apply_tags",
+      "set_item_tags",
+      "tag_update",
+      "move_to_collection",
+      "update_metadata",
+      "reparent_items",
+      "relate_items",
+      "manage_collections",
+      "manage_attachments",
+      "import_identifiers",
+      "import_local_files",
+      "create_items",
+      "trash_items",
+      "restore_from_trash",
+      "merge_items",
     ]) {
       assert.notInclude(names, retiredName);
       assert.notExists(registry.getTool(retiredName), `${retiredName} retired`);
@@ -400,8 +410,61 @@ describe("semantic tool surface", function () {
     ]);
   });
 
-  it("exposes batch metadata operations in the update_metadata schema", function () {
-    assert.containsAllKeys(schemaProperties("update_metadata"), [
+  it("collection_update and attachment_update name themselves in cards and guidance", async function () {
+    const collections = createCollectionUpdateTool({
+      getCollectionSummary: () => null,
+    } as never);
+    assert.equal(collections.spec.name, "collection_update");
+    assert.equal(collections.presentation?.label, "Update Collections");
+    const collectionInput = collections.validate({
+      action: "create",
+      name: "Audit",
+    });
+    assert.isTrue(collectionInput.ok);
+    if (!collectionInput.ok) return;
+    const collectionCard = await collections.createPendingAction!(
+      collectionInput.value,
+      baseContext,
+    );
+    assert.equal(collectionCard.toolName, "collection_update");
+
+    const attachments = createAttachmentUpdateTool({
+      getAttachmentInfo: () => ({ title: "paper.pdf" }),
+    } as never);
+    assert.equal(attachments.spec.name, "attachment_update");
+    assert.equal(attachments.presentation?.label, "Update Attachments");
+    const attachmentInput = attachments.validate({
+      action: "rename",
+      attachmentId: 5,
+      newName: "renamed.pdf",
+    });
+    assert.isTrue(attachmentInput.ok);
+    if (!attachmentInput.ok) return;
+    const attachmentCard = await attachments.createPendingAction!(
+      attachmentInput.value,
+      baseContext,
+    );
+    assert.equal(attachmentCard.toolName, "attachment_update");
+    assert.include(
+      attachments.guidance?.instruction || "",
+      "Use attachment_update to delete, rename, or re-link",
+    );
+    assert.isTrue(
+      attachments.guidance?.matches(
+        { userTextSignals: { mentionsAttachment: true } } as never,
+        { matchedSkillIds: [] },
+      ),
+    );
+    assert.isFalse(
+      attachments.guidance?.matches(
+        { userTextSignals: { mentionsAttachment: false } } as never,
+        { matchedSkillIds: [] },
+      ),
+    );
+  });
+
+  it("exposes batch metadata operations in the library_update schema", function () {
+    assert.containsAllKeys(schemaProperties("library_update"), [
       "metadata",
       "operations",
       "paperContext",

@@ -245,8 +245,7 @@ function existingToolResultHandle(content: unknown): string | undefined {
     : undefined;
 }
 
-// Retired names stay recognised: stored history from older versions carries
-// them. Retired names: removed in Task 2.6.
+// Stored history that carries a retired tool name gets generic compaction.
 function isLibrarySearchTool(toolName: string): boolean {
   return isCatalogToolName(toolName.trim().toLowerCase());
 }

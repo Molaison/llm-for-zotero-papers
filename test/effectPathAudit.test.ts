@@ -290,102 +290,95 @@ const AUDIT: Readonly<Record<string, AuditRow>> = {
       proposes: [],
     },
   },
+};
 
-  // ── Internal legacy primitives ────────────────────────────────────────────
-  // Registered so prepared slash actions and migration delegates can still
-  // invoke them directly. They are the same definitions the facades above
-  // delegate to, so they carry the same six properties.
+/**
+ * The write delegates are not registered tools: each is reachable only as a
+ * route through the facade that owns it. One row per delegate, keyed by the
+ * delegate's internal name (the facade's `delegateName`), with a mutating
+ * input expressed in the facade's own kind/mode vocabulary.
+ */
+const DELEGATE_ROUTES: Readonly<
+  Record<
+    string,
+    {
+      facade: string;
+      operations: AgentActionOperation[];
+      fixture: Record<string, unknown>;
+    }
+  >
+> = {
   apply_tags: {
+    facade: "library_update",
     operations: ["apply_tags", "remove_tags"],
-    verification: "verified",
-    fixture: { action: "add", itemIds: [1], tags: ["audit"] },
-    impact: "state_change",
-  },
-  move_to_collection: {
-    operations: ["move_to_collection", "remove_from_collection"],
-    verification: "verified",
-    fixture: { itemIds: [1], targetCollectionId: 2 },
-    impact: "state_change",
-  },
-  update_metadata: {
-    operations: ["update_metadata"],
-    verification: "verified",
-    fixture: { itemId: 1, metadata: { title: "Audit" } },
-    impact: "state_change",
-  },
-  reparent_items: {
-    operations: ["reparent_items"],
-    verification: "verified",
-    fixture: { assignments: [{ itemId: 1, parentItemId: 2 }] },
-    impact: "state_change",
-  },
-  relate_items: {
-    operations: ["relate_items"],
-    verification: "verified",
-    fixture: { itemId: 1, relatedItemIds: [2] },
-    impact: "state_change",
-  },
-  create_items: {
-    operations: ["create_items"],
-    verification: "verified",
-    fixture: {
-      items: [{ itemType: "journalArticle", title: "Audit" }],
-    },
-    impact: "state_change",
-  },
-  tag_update: {
-    operations: ["update_library_tag"],
-    verification: "verified",
-    fixture: { action: "rename", tag: "audit", newTag: "audited" },
-    impact: "state_change",
+    fixture: { kind: "tags", action: "add", itemIds: [1], tags: ["audit"] },
   },
   set_item_tags: {
+    facade: "library_update",
     operations: ["set_item_tags"],
-    verification: "verified",
-    fixture: { assignments: [{ itemId: 1, tags: ["audit"] }] },
-    impact: "state_change",
+    fixture: {
+      kind: "tags",
+      action: "set",
+      assignments: [{ itemId: 1, tags: ["audit"] }],
+    },
   },
-  manage_collections: {
-    operations: ["create_collection", "delete_collection", "update_collection"],
-    verification: "verified",
-    fixture: { action: "create", name: "Audit" },
-    impact: "state_change",
+  tag_update: {
+    facade: "library_update",
+    operations: ["update_library_tag"],
+    fixture: { kind: "tag", action: "rename", tag: "audit", newTag: "audited" },
   },
-  trash_items: {
-    operations: ["trash_items"],
-    verification: "verified",
-    fixture: { itemIds: [1] },
-    impact: "state_change",
+  move_to_collection: {
+    facade: "library_update",
+    operations: ["move_to_collection", "remove_from_collection"],
+    fixture: { kind: "collections", itemIds: [1], targetCollectionId: 2 },
   },
-  restore_from_trash: {
-    operations: ["restore_from_trash"],
-    verification: "verified",
-    fixture: { itemIds: [1] },
-    impact: "state_change",
+  update_metadata: {
+    facade: "library_update",
+    operations: ["update_metadata"],
+    fixture: { kind: "metadata", itemId: 1, metadata: { title: "Audit" } },
   },
-  merge_items: {
-    operations: ["merge_items"],
-    verification: "verified",
-    fixture: { masterItemId: 1, otherItemIds: [2] },
-    impact: "state_change",
+  reparent_items: {
+    facade: "library_update",
+    operations: ["reparent_items"],
+    fixture: { kind: "parent", assignments: [{ itemId: 1, parentItemId: 2 }] },
   },
-  manage_attachments: {
-    operations: ["delete_attachment", "rename_attachment", "relink_attachment"],
-    verification: "verified",
-    fixture: { action: "rename", attachmentId: 1, newName: "Audit.pdf" },
-    impact: "state_change",
+  relate_items: {
+    facade: "library_update",
+    operations: ["relate_items"],
+    fixture: { kind: "related", itemId: 1, relatedItemIds: [2] },
   },
   import_identifiers: {
+    facade: "library_import",
     operations: ["import_identifiers"],
-    verification: "verified",
-    fixture: { identifiers: ["10.1000/audit"] },
-    impact: "state_change",
+    fixture: { kind: "identifiers", identifiers: ["10.1000/audit"] },
   },
   import_local_files: {
+    facade: "library_import",
     operations: ["import_local_files"],
-    verification: "verified",
-    fixture: { filePaths: ["/tmp/audit.pdf"] },
-    impact: "state_change",
+    fixture: { kind: "files", filePaths: ["/tmp/audit.pdf"] },
+  },
+  create_items: {
+    facade: "library_import",
+    operations: ["create_items"],
+    fixture: {
+      kind: "manual",
+      items: [{ itemType: "journalArticle", title: "Audit" }],
+    },
+  },
+  trash_items: {
+    facade: "library_delete",
+    operations: ["trash_items"],
+    fixture: { mode: "trash", itemIds: [1] },
+  },
+  restore_from_trash: {
+    facade: "library_delete",
+    operations: ["restore_from_trash"],
+    fixture: { mode: "restore", itemIds: [1] },
+  },
+  merge_items: {
+    facade: "library_delete",
+    operations: ["merge_items"],
+    fixture: { mode: "merge", masterItemId: 1, otherItemIds: [2] },
   },
 };
 
@@ -795,6 +788,76 @@ describe("effect path audit", function () {
         Object.entries(AUDIT).map(([name, row]) => [name, row.impact]),
       ),
     );
+  });
+
+  it("routes every write delegate through its facade, and only there", function () {
+    const operationsByFacade: Record<string, Set<string>> = {};
+    for (const [delegateName, route] of Object.entries(DELEGATE_ROUTES)) {
+      assert.notExists(
+        registry.getTool(delegateName),
+        `${delegateName} is a delegate, not a registered tool`,
+      );
+      const facade = registry.getTool(route.facade)!;
+      const validated = facade.validate(route.fixture);
+      assert.isTrue(
+        validated.ok,
+        `${delegateName} route fixture is invalid: ${
+          validated.ok ? "" : validated.error
+        }`,
+      );
+      if (!validated.ok) continue;
+      assert.equal(validated.value.delegateName, delegateName);
+      assert.sameMembers(
+        [...(validated.value.delegateTool.effectOperations || [])],
+        route.operations,
+        `${delegateName} declares other operations than its route`,
+      );
+      for (const operation of route.operations) {
+        (operationsByFacade[route.facade] ||= new Set()).add(operation);
+      }
+    }
+    // The routes together reach exactly what each delegating facade declares.
+    for (const facade of [
+      "library_update",
+      "library_import",
+      "library_delete",
+    ]) {
+      assert.sameMembers(
+        [...(operationsByFacade[facade] || [])],
+        AUDIT[facade].operations,
+        `${facade} declares an operation no audited route reaches`,
+      );
+    }
+  });
+
+  it("never plans a mutating delegate route as a trusted read", async function () {
+    for (const [delegateName, route] of Object.entries(DELEGATE_ROUTES)) {
+      const facade = registry.getTool(route.facade)!;
+      const validated = facade.validate(route.fixture);
+      if (!validated.ok) throw new Error(validated.error);
+      const plan = await facade.planInvocation!(
+        validated.value as never,
+        auditContext(),
+      );
+      assert.equal(
+        plan.impact,
+        "state_change",
+        `${route.facade} → ${delegateName} planned ${plan.impact}`,
+      );
+      const described =
+        (await facade.describeAction!(
+          validated.value as never,
+          auditContext(),
+        )) || [];
+      assert.isNotEmpty(described, `${delegateName} described no proposal`);
+      for (const proposal of described) {
+        assert.include(
+          route.operations,
+          proposal.operation,
+          `${delegateName} described an operation it never declared`,
+        );
+      }
+    }
   });
 
   /**

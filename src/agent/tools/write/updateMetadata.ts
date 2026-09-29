@@ -178,7 +178,7 @@ export function createUpdateMetadataTool(
         "When the user asks to fix, correct, or enrich metadata from external sources, " +
         "use literature_search with workflow:'review' and mode:'metadata' first to fetch canonical data, " +
         "then let the review card handle the update. " +
-        "Only call update_metadata directly when the user provides specific field values to set " +
+        "Only call library_update kind:'metadata' directly when the user provides specific field values to set " +
         "(e.g. 'change the title to XYZ').",
     },
 

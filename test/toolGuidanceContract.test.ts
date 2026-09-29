@@ -7,6 +7,7 @@ import { assert } from "chai";
 import { readdirSync, readFileSync, statSync } from "fs";
 import { join, relative } from "path";
 import { createBuiltInToolRegistry } from "../src/agent/tools";
+import { RETIRED_TOOL_HINTS } from "../src/agent/context/toolNames";
 import { computeUserTextSignals } from "../src/agent/runtime";
 import { AGENT_PERSONA_INSTRUCTIONS } from "../src/agent/model/agentPersona";
 import { DEFAULT_SYSTEM_PROMPT } from "../src/utils/llmDefaults";
@@ -303,8 +304,9 @@ describe("tool guidance contracts", function () {
 
   it("does not expose hidden legacy call targets in model-visible guidance", function () {
     const registry = stubRegistry();
-    const hiddenCallTarget =
-      /\b(edit_current_note|search_literature_online|manage_attachments|import_local_files|update_metadata)\b/;
+    const hiddenCallTarget = new RegExp(
+      `\\b(${Object.keys(RETIRED_TOOL_HINTS).join("|")})\\b`,
+    );
     const failures = registry
       .listToolDefinitions()
       .filter((tool) => tool.spec.exposure !== "internal")

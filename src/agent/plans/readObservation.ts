@@ -4,10 +4,7 @@ import type {
   ReadObservationCapability,
   TrustedReadObservation,
 } from "./types";
-import {
-  isCatalogToolName,
-  LEGACY_PAPER_VISUAL_TOOL_NAMES,
-} from "../context/toolNames";
+import { isCatalogToolName } from "../context/toolNames";
 
 type Candidate = {
   itemId?: number;
@@ -139,10 +136,7 @@ function observationSeeds(
 ): ObservationSeed[] {
   const args = record(input) || {};
   const output = record(result) || {};
-  // Retired names (search_paper, view_pdf_pages, read_paper) keep their
-  // existing attestation: the registry still runs an internal primitive a
-  // model names. Retired names: removed in Task 2.6.
-  if (isCatalogToolName(toolName) || toolName === "search_paper") {
+  if (isCatalogToolName(toolName)) {
     return seedRows(directRows(result), () => ["metadata"]);
   }
   if (toolName === "library_read") {
@@ -239,16 +233,7 @@ function observationSeeds(
       return capabilities;
     });
   }
-  if (LEGACY_PAPER_VISUAL_TOOL_NAMES.has(toolName)) {
-    return seedRows(sources, (row) =>
-      (mayUseAggregatePayload &&
-        hasRows(output, ["pages", "images", "artifacts"])) ||
-      hasRows(row, ["pages", "images", "artifacts"])
-        ? ["figure"]
-        : [],
-    );
-  }
-  if (toolName === "read_attachment" || toolName === "read_paper") {
+  if (toolName === "read_attachment") {
     const aggregateHasBody = hasText(output, ["content", "text", "body"]);
     return seedRows(sources, (row) =>
       (mayUseAggregatePayload && aggregateHasBody) ||

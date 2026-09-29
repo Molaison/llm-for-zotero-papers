@@ -3,7 +3,8 @@ import { PdfService } from "../services/pdfService";
 import { RetrievalService } from "../services/retrievalService";
 import { ZoteroGateway } from "../services/zoteroGateway";
 import { createWorkflowScriptTool } from "./control/workflowScript";
-import { createDelegatingTool, createRenamedTool } from "./facade";
+import { createDelegatingTool } from "./facade";
+import { intentOrSignal } from "./guidance";
 import { registerPreparedLibraryActions } from "./preparedLibraryActions";
 import { createCiteExportTool } from "./read/citeExport";
 import { createLibraryRetrieveTool } from "./read/libraryRetrieve";
@@ -41,6 +42,8 @@ import { createUpdatePlanTool } from "./plan/updatePlan";
 import { fail, ok, PAPER_CONTEXT_REF_SCHEMA, validateObject } from "./shared";
 import { createAnnotatePdfTool } from "./write/annotatePdf";
 import { createApplyTagsTool } from "./write/applyTags";
+import { createAttachmentUpdateTool } from "./write/attachmentUpdate";
+import { createCollectionUpdateTool } from "./write/collectionUpdate";
 import { createFileIOTool } from "./write/fileIO";
 import { createImportIdentifiersTool } from "./write/importIdentifiers";
 import { createImportLocalFilesTool } from "./write/importLocalFiles";
@@ -50,8 +53,6 @@ import {
   createReparentItemsTool,
 } from "./write/itemStructure";
 import { createLibrarySettingsTool } from "./write/librarySettings";
-import { createManageAttachmentsTool } from "./write/manageAttachments";
-import { createManageCollectionsTool } from "./write/manageCollections";
 import { createMergeItemsTool } from "./write/mergeItems";
 import { createMoveToCollectionTool } from "./write/moveToCollection";
 import { createRestoreFromTrashTool } from "./write/restoreFromTrash";
@@ -106,31 +107,6 @@ const LIBRARY_UPDATE_OPERATION_SCHEMA = {
   },
 };
 
-type UserTextSignals = NonNullable<
-  Parameters<ToolGuidance["matches"]>[0]["userTextSignals"]
->;
-
-/**
- * Plan turns match on classified operations or capabilities; ordinary chat
- * turns carry no classified intent, so they match on a cheap user-text signal.
- */
-function intentOrSignal(
-  request: Parameters<ToolGuidance["matches"]>[0],
-  operations: readonly string[],
-  signal: (signals: UserTextSignals) => boolean,
-): boolean {
-  if (
-    request.classifiedIntent?.actionIntents.some(
-      (action) =>
-        operations.includes(action.operation) ||
-        operations.includes(action.capability),
-    )
-  ) {
-    return true;
-  }
-  return Boolean(request.userTextSignals && signal(request.userTextSignals));
-}
-
 const LIBRARY_UPDATE_GUIDANCE: ToolGuidance = {
   // Plan-specific guidance: no chat signal reaches it.
   matches: (request) =>
@@ -166,25 +142,6 @@ const LIBRARY_DELETE_GUIDANCE: ToolGuidance = {
     "To merge duplicates: first use library_search({ entity:'items', mode:'duplicates' }) to find duplicate groups, then use library_read to compare metadata and decide which item is the best master, then call library_delete({ mode:'merge', ... }) with the master and the others. The master keeps all children (attachments, notes, tags, collections) from the merged items." +
     "\n\nTo bring something back from the trash, call library_delete with mode:'restore' and itemIds, collectionIds, or savedSearchIds. Restoring a collection restores its subcollections too. Deleting a collection trashes it rather than erasing it, so a collection the user deleted earlier can still be restored this way.",
 };
-
-const ATTACHMENT_UPDATE_GUIDANCE: ToolGuidance = {
-  matches: (request) =>
-    intentOrSignal(
-      request,
-      ["delete_attachment", "rename_attachment", "relink_attachment"],
-      (signals) => signals.mentionsAttachment,
-    ),
-  instruction:
-    "Use attachment_update to delete, rename, or re-link a single attachment. To find attachments, use library_read with sections:['attachments'] first. Renaming renames the file on disk, not just the title. Re-linking repairs an attachment whose file has moved or gone missing, and works for stored attachments as well as linked files; only linked URLs cannot be re-linked. Batch renaming with computed filenames requires separately authorized computation and exact attachment targets.",
-};
-
-function markInternalTool<TInput, TResult>(
-  tool: AgentToolDefinition<TInput, TResult>,
-): AgentToolDefinition<TInput, TResult> {
-  tool.spec.exposure = "internal";
-  tool.spec.description = `Legacy internal primitive. Prefer the concrete facade tools in model-visible workflows. ${tool.spec.description}`;
-  return tool;
-}
 
 function markToolTier<TInput, TResult>(
   tool: AgentToolDefinition<TInput, TResult>,
@@ -232,7 +189,7 @@ function createLibraryUpdateTool(tools: {
             "setColor",
           ],
           description:
-            "For kind:'tags' and kind:'collections': 'add' or 'remove'. For kind:'tags', 'set' replaces each item's tags with exactly the ones given and corresponds only to a set_item_tags obligation; add/remove correspond to apply_tags/remove_tags. For kind:'tag' (the tag object itself): 'rename', 'merge', 'delete' or 'setColor'.",
+            "For kind:'tags' and kind:'collections': 'add' or 'remove'. For kind:'tags', 'set' replaces each item's tags with exactly the ones given and serves only an obligation with operation 'set_item_tags'; add/remove serve 'apply_tags'/'remove_tags'. For kind:'tag' (the tag object itself): 'rename', 'merge', 'delete' or 'setColor'.",
         },
         itemIds: {
           ...NUMBER_ARRAY_SCHEMA,
@@ -389,7 +346,7 @@ function createLibraryImportTool(tools: {
     label: "Import to Library",
     description:
       "Add items to Zotero. kind:'identifiers' for DOI/ISBN/arXiv lookups, kind:'files' for local files, kind:'manual' to create items from scratch when neither applies (a book with no DOI, a thesis, a dataset).",
-    // Adding items to Zotero. A files-mode call resolves to import_local_files
+    // Adding items to Zotero. A files-mode call resolves to the local-files delegate
     // and is labelled external_system for that call.
     executionClass: "external_effect",
     workCategory: "zotero_action",
@@ -561,7 +518,6 @@ export function createBuiltInToolRegistry(
   const applyTags = createApplyTagsTool(deps.zoteroGateway);
   const moveToCollection = createMoveToCollectionTool(deps.zoteroGateway);
   const updateMetadata = createUpdateMetadataTool(deps.zoteroGateway);
-  const manageCollections = createManageCollectionsTool(deps.zoteroGateway);
   const importIdentifiers = createImportIdentifiersTool(deps.zoteroGateway);
   const trashItems = createTrashItemsTool(deps.zoteroGateway);
   const restoreFromTrash = createRestoreFromTrashTool(deps.zoteroGateway);
@@ -572,7 +528,6 @@ export function createBuiltInToolRegistry(
   const setItemTags = createSetItemTagsTool(deps.zoteroGateway);
   const savedSearchUpdate = createSavedSearchTool(deps.zoteroGateway);
   const mergeItems = createMergeItemsTool(deps.zoteroGateway);
-  const manageAttachments = createManageAttachmentsTool(deps.zoteroGateway);
   const runCommand = createRunCommandTool();
   const importLocalFiles = createImportLocalFilesTool(deps.zoteroGateway);
   const fileIO = createFileIOTool();
@@ -607,14 +562,7 @@ export function createBuiltInToolRegistry(
       setItemTags,
     }),
   );
-  registry.register(
-    createRenamedTool({
-      tool: manageCollections,
-      name: "collection_update",
-      label: "Update Collections",
-      description: "Create or delete Zotero collections.",
-    }),
-  );
+  registry.register(createCollectionUpdateTool(deps.zoteroGateway));
   registry.register(createNoteWriteTool(deps.zoteroGateway));
   registry.register(createNoteWriteBatchTool(deps.zoteroGateway));
   registry.register(savedSearchUpdate);
@@ -630,15 +578,7 @@ export function createBuiltInToolRegistry(
   registry.register(
     createLibraryDeleteTool({ trashItems, mergeItems, restoreFromTrash }),
   );
-  registry.register(
-    createRenamedTool({
-      tool: manageAttachments,
-      name: "attachment_update",
-      label: "Update Attachments",
-      description: "Delete, rename, or re-link Zotero attachments.",
-      guidance: ATTACHMENT_UPDATE_GUIDANCE,
-    }),
-  );
+  registry.register(createAttachmentUpdateTool(deps.zoteroGateway));
   registry.register(undoLastAction);
   registry.register(createRevertChangesTool(deps.zoteroGateway));
   registry.register(createAnnotatePdfTool(deps.zoteroGateway));
@@ -659,26 +599,6 @@ export function createBuiltInToolRegistry(
   registry.register(createAmendPlanTool(deps.zoteroGateway, planAmendments));
   registry.register(createApproveResearchMutationTool());
 
-  const legacyTools: AgentToolDefinition<any, any>[] = [
-    applyTags,
-    moveToCollection,
-    updateMetadata,
-    manageCollections,
-    importIdentifiers,
-    trashItems,
-    restoreFromTrash,
-    createItems,
-    reparentItems,
-    relateItems,
-    updateLibraryTag,
-    setItemTags,
-    mergeItems,
-    manageAttachments,
-    importLocalFiles,
-  ];
-  for (const tool of legacyTools) {
-    registry.register(markInternalTool(tool));
-  }
   registerPreparedLibraryActions(registry, deps.zoteroGateway);
   return registry;
 }

@@ -6066,7 +6066,7 @@ describe("AgentRuntime", function () {
       };
       registry.register({
         spec: {
-          name: "query_library",
+          name: "library_search",
           description: "query",
           inputSchema: { type: "object" },
           executionClass: "read",
@@ -6097,7 +6097,7 @@ describe("AgentRuntime", function () {
               calls: [
                 {
                   id: "call-library",
-                  name: "query_library",
+                  name: "library_search",
                   arguments: { entity: "items", mode: "list" },
                 },
               ],
@@ -6107,7 +6107,7 @@ describe("AgentRuntime", function () {
                 tool_calls: [
                   {
                     id: "call-library",
-                    name: "query_library",
+                    name: "library_search",
                     arguments: { entity: "items", mode: "list" },
                   },
                 ],
@@ -6176,7 +6176,7 @@ describe("AgentRuntime", function () {
       );
       assert.equal(checkpoint?.role, "user");
       const checkpointText = String(checkpoint?.content || "");
-      assert.include(checkpointText, "query_library");
+      assert.include(checkpointText, "library_search");
       assert.match(checkpointText, /handle=trh_[a-z0-9]+/i);
       assert.isAtLeast(toolNamesByStep.length, 2);
       assert.notInclude(toolNamesByStep[0], "tool_result_read");
@@ -6208,7 +6208,7 @@ describe("AgentRuntime", function () {
       };
       registry.register({
         spec: {
-          name: "query_library",
+          name: "library_search",
           description: "query",
           inputSchema: { type: "object" },
           executionClass: "read",
@@ -6247,7 +6247,7 @@ describe("AgentRuntime", function () {
               calls: [
                 {
                   id: "call-library",
-                  name: "query_library",
+                  name: "library_search",
                   arguments: { entity: "items", mode: "list" },
                 },
               ],
@@ -6257,7 +6257,7 @@ describe("AgentRuntime", function () {
                 tool_calls: [
                   {
                     id: "call-library",
-                    name: "query_library",
+                    name: "library_search",
                     arguments: { entity: "items", mode: "list" },
                   },
                 ],
@@ -6573,7 +6573,7 @@ describe("AgentRuntime", function () {
       const registry = new AgentToolRegistry();
       registry.register({
         spec: {
-          name: "query_library",
+          name: "library_search",
           description: "read",
           inputSchema: { type: "object" },
           executionClass: "read",
@@ -6612,7 +6612,7 @@ describe("AgentRuntime", function () {
             initialMessages = structuredClone(params.messages);
             const call = {
               id: "large-read-call",
-              name: "query_library",
+              name: "library_search",
               arguments: { entity: "items", mode: "list" },
             };
             return {

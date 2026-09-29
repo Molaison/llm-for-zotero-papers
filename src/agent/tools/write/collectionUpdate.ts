@@ -1,6 +1,7 @@
 /**
- * Focused facade tool for creating and deleting Zotero collections (folders).
- * Provides a self-describing schema for managing Zotero collections.
+ * `collection_update`: create, delete, rename, or move Zotero collections
+ * (folders). Deleting moves the collection to the Zotero trash, where the
+ * user can restore it, and takes any subcollections with it.
  */
 import type { AgentWriteToolDefinition } from "../../types";
 import { describeLibraryMutationInput } from "../../contracts/actionContract";
@@ -17,16 +18,16 @@ import {
   planLibraryMutations,
 } from "./mutateLibraryShared";
 
-type ManageCollectionsInput = {
+type CollectionUpdateInput = {
   operation:
     | CreateCollectionOperation
     | DeleteCollectionOperation
     | UpdateCollectionOperation;
 };
 
-export function createManageCollectionsTool(
+export function createCollectionUpdateTool(
   zoteroGateway: ZoteroGateway,
-): AgentWriteToolDefinition<ManageCollectionsInput, unknown> {
+): AgentWriteToolDefinition<CollectionUpdateInput, unknown> {
   const mutationService = new LibraryMutationService(zoteroGateway);
 
   return {
@@ -37,9 +38,8 @@ export function createManageCollectionsTool(
       "update_collection",
     ],
     spec: {
-      name: "manage_collections",
-      description:
-        "Create or delete Zotero collections (folders). Deleting moves the collection to the Zotero trash, where the user can restore it, and takes any subcollections with it.",
+      name: "collection_update",
+      description: "Create or delete Zotero collections.",
       inputSchema: {
         type: "object",
         additionalProperties: false,
@@ -89,7 +89,7 @@ export function createManageCollectionsTool(
     },
 
     presentation: {
-      label: "Manage Collections",
+      label: "Update Collections",
       summaries: {
         onCall: "Preparing collection changes",
         onPending: "Waiting for confirmation on collection changes",
@@ -214,7 +214,7 @@ export function createManageCollectionsTool(
           : `Create top-level collection "${operation.name}".`;
 
         return {
-          toolName: "manage_collections",
+          toolName: "collection_update",
           title: "Create collection",
           description,
           confirmLabel: "Create",
@@ -256,7 +256,7 @@ export function createManageCollectionsTool(
         }
         const description = `For "${collectionLabel}": ${parts.join(" and ")}. Items stay where they are, and this can be undone.`;
         return {
-          toolName: "manage_collections",
+          toolName: "collection_update",
           title: operation.name ? "Rename collection" : "Move collection",
           description,
           confirmLabel: operation.name ? "Rename" : "Move",
@@ -291,7 +291,7 @@ export function createManageCollectionsTool(
         : `Move collection "${collectionLabel}" to the Zotero trash.${subcollectionNote}${itemsNote} You can restore it from the trash, or undo this.`;
 
       return {
-        toolName: "manage_collections",
+        toolName: "collection_update",
         title: operation.permanent
           ? "Permanently erase collection"
           : "Delete collection",
@@ -322,7 +322,7 @@ export function createManageCollectionsTool(
         mutationService,
         input.operation,
         context,
-        "manage_collections",
+        "collection_update",
       );
     },
   };

@@ -357,27 +357,6 @@ function buildReadDetail(toolName: string, args: unknown): string | undefined {
     }
     return pieces.join(", ");
   }
-  // Retired names: removed in Task 2.6. The registry still runs an internal
-  // primitive a model names, so its evidence keeps its detail until then.
-  if (toolName === "search_paper") {
-    const question = normalizeText(record.question, 120);
-    return question ? `question="${question}"` : undefined;
-  }
-  if (toolName === "read_paper" && Array.isArray(record.chunkIndexes)) {
-    const chunks = record.chunkIndexes
-      .map((value) => normalizePositiveInt(value))
-      .filter(Boolean)
-      .join(", ");
-    return chunks ? `chunks=${chunks}` : undefined;
-  }
-  if (toolName === "view_pdf_pages") {
-    if (record.capture === true) return "captured current page";
-    if (Array.isArray(record.pages) && record.pages.length) {
-      return `pages=${record.pages.join(", ")}`;
-    }
-    const question = normalizeText(record.question, 120);
-    return question ? `question="${question}"` : undefined;
-  }
   if (toolName === "read_attachment") {
     return record.attachFile === true ? "attached full file" : undefined;
   }

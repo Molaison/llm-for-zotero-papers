@@ -56,4 +56,22 @@ describe("agent tool vocabulary", function () {
       .reduce((n, t) => n + JSON.stringify(t).length, 0);
     assert.isAtMost(bytes, fixture.specBytes);
   });
+  it("a retired name is unknown to the registry and the error names the facade", async function () {
+    const prepared = await registry.prepareExecution(
+      { id: "c1", name: "apply_tags", arguments: {} } as any,
+      {} as any,
+    );
+    const text = JSON.stringify(prepared);
+    assert.match(text, /Unknown tool: apply_tags/);
+    assert.include(text, "library_update kind:'tags'");
+  });
+  it("an unknown name that was never a tool gets no hint", async function () {
+    const prepared = await registry.prepareExecution(
+      { id: "c2", name: "no_such_tool", arguments: {} } as any,
+      {} as any,
+    );
+    const text = JSON.stringify(prepared);
+    assert.match(text, /Unknown tool: no_such_tool/);
+    assert.notInclude(text, "renamed");
+  });
 });
