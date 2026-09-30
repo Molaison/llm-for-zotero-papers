@@ -639,29 +639,9 @@ describe("Plan Mode research architecture v3", function () {
     assert.isUndefined(
       (researchUpdate.spec.inputSchema as any).properties.papers.maxItems,
     );
-    // The research loop narrative lives in the literature-review skill; the
-    // tool guidance keeps the operation catalog and points at the skill.
+    // The tool guidance keeps the operation catalog. The literature-review
+    // skill no longer describes this plan-only loop (plan mode is retired).
     const researchInstruction = researchUpdate.guidance?.instruction || "";
-    const reviewSkill = readFileSync(
-      fileURLToPath(
-        new URL("../src/agent/skills/literature-review.md", import.meta.url),
-      ),
-      "utf8",
-    );
-    assert.include(reviewSkill, "authoritative scope check");
-    assert.include(reviewSkill, "Read every accessible paper");
-    assert.include(reviewSkill, "host binds internal evidence and finding IDs");
-    assert.include(reviewSkill, "list_themes");
-    assert.include(reviewSkill, "do not recover old tool handles");
-    assert.include(
-      reviewSkill,
-      "Treat that manifest as authoritative and call `paper_read` for the next group directly",
-    );
-    assert.include(
-      reviewSkill,
-      "never re-enumerate or re-verify it with `library_search`",
-    );
-    assert.include(reviewSkill, "`next_screen_batch`");
     assert.include(researchInstruction, "literature-review skill");
     for (const operation of (researchUpdate.spec.inputSchema as any).properties
       .operation.enum as string[]) {

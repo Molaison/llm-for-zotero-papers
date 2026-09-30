@@ -254,6 +254,20 @@ const BUILTIN_BOOTSTRAP_RAW_HASHES: Partial<
     "pefrjt",
     "fptven",
     "10fqwsh",
+    // Released texts the list missed, from each release tag's copy
+    // (v3.7.18 to v3.9.5).
+    "1gbl57m",
+    "n96aqu",
+    "w18p0a",
+    "1dbaw6y",
+    "1ymizha",
+    "1mwckog",
+    "au1hm1",
+    "y7vpt5",
+    "q3t63g",
+    "fjgktb",
+    // v10, the investigation-loop text the ordinary v11 replaces.
+    "liv5sv",
   ],
   "import-cited-reference.md": [
     "19bomz1",

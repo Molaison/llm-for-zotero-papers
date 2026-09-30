@@ -1,102 +1,67 @@
 ---
 id: literature-review
 description: Structured scientific review with thematic synthesis and citations
-version: 10
+version: 11
 contexts: paper-set,library-corpus
 activation: auto
 ---
 
-## Literature Review — intent and document structure
+## Literature Review — read the papers, then write one cited document
 
-This skill declares the literature-review intent and preferred structure.
-The ordinary workflow is **read → understand → connect → write**, run as a network loop: frame → map → nodes → links → verify → structure → write.
-A review is an argument about a body of work, not a catalog of it: faithful nodes, true links between specific papers, structure that emerges from the links, and honest calibration about what was read and verified.
-The central ResearchPolicy owns capacity measurement, recovery, and evidence requirements.
-Do not invent a paper cap or tool-call budget here.
+A review is an argument about a body of work, not a catalog of it: a faithful account of each paper, true relationships between specific papers, a structure that emerges from those relationships, and honest calibration about what was read.
+`paper_read` owns reading capacity; do not invent a paper cap, a group size, or a tool-call budget.
 
-### Scope and investigation
+### Workflow
 
-- Treat an explicitly selected Zotero corpus as the evidence pool, not as a sample.
-- For an ordinary review, expand the user's question into explicit subquestions without turning them into eligibility criteria.
-  Each subquestion becomes a comparison-frame slot that every core node fills.
-- Default to `reviewMode:'narrative'` and `readingStrategy:'adaptive'`.
-- Do not choose a fixed number of papers to deep-read.
-  The host proposes tiers (core, supporting, peripheral) from relevance and from how many nodes fit in the link view; confirm or override them with `research_update({operation:'set_tiers'})` and a reason.
-  Read every accessible paper at the depth its tier buys, and report the actual per-paper coverage.
-- Only use formal inclusion/exclusion screening when the user explicitly requests a systematic-review method, PRISMA-style selection, reproducible eligibility decisions, or an equivalent protocol.
-  For a systematic review only, use `next_screen_batch`, explicit criterion decisions, recall probes (`record_probes`), and ordered screening stages (`set_stage`).
-- Use `reviewMode:'scoping'` when the goal is to map the breadth, concepts, methods, and gaps in a field rather than construct a focused explanatory argument.
-- Missing abstracts, unindexed PDFs, OCR failures, and unreadable files remain unresolved unless metadata is enough to exclude them clearly.
-  Report the depth actually reached for missing or inaccessible evidence honestly.
+1. **Scope.** The host states the turn's papers or collection in the context.
+   If only a collection or a search is named, list its papers once with `library_search` and work from that list.
+   Treat an explicitly selected corpus as the evidence pool, not as a sample.
+2. **Parts.** In your first step, declare the parts with `task_update`: read the papers (`expectedEffect:'read'`), write the review (`expectedEffect:'artifact'`), and, only when the user asked to save it, save it as a note (`expectedEffect:'mutation'`, `expectedCapability:'zotero.notes'`).
+   The host marks each part done from the tools' results.
+3. **Read.** Read the scope's papers with `paper_read`, passing them as `targets` and grouping related papers in one call.
+   The host fits each paper's text to the remaining context, and each result reports which papers came back complete, sampled, abstract only, or metadata only.
+   When papers come back sampled, read fewer at a time or read their missing sections rather than moving on.
+   As you go, note each paper's main claims, methods, and evidence, and its role in the argument: central, supporting, contradictory, theoretical, methodological, or context.
+   Use `paper_read({ mode:'targeted', query:'...' })` only to check a decisive claim, test an apparent contradiction against both papers, or find a precise location.
+4. **Write.** Write one cited document and finish with `submit_document`, as described under Document.
+5. **Save.** Save it with `note_write` and the returned `documentId` only when the user asked; do not offer afterward, because the document card owns Copy Markdown, Save Note, Export, and Expand.
+
+### Scope and method
+
+- Expand the question into explicit subquestions and read every paper against them; they are not eligibility criteria.
+- Write a narrative review by default; write a scoping review when the goal is to map the breadth, concepts, methods, and gaps of a field.
+- Use formal inclusion and exclusion screening only when the user asks for a systematic-review method, PRISMA-style selection, or reproducible eligibility decisions, and then report each paper's decision and its reason.
+- Missing abstracts, unindexed PDFs, OCR failures, and unreadable files stay unresolved unless metadata alone clearly excludes the paper; report the depth actually reached.
 - Preserve contradictions and negative evidence rather than forcing agreement.
 
-### Frame and map
+### Synthesis
 
-- The host has frozen and fingerprinted the exact scope, so never re-enumerate or re-verify it with `library_search`.
-- After Plan approval, call `research_update({operation:'inventory_scope'})` once.
-  This authoritative scope check returns the comparison frame (identity slots `question`, `approach`, `system` plus one slot per subquestion), every paper's tier and read mode, proposed read groups, the corpus map, and the unread reading manifest.
-  It is safe to repeat only after an actual interruption when no continuation manifest is available.
-- Refine the frame with `set_frame` only before the first link pass, adding comparison slots the corpus needs; identity slots are fixed.
-- The corpus map (one line per paper) travels in every checkpoint so each node is written with the corpus in view.
+- Organize by ideas, methods, or findings, not paper by paper.
+- A sentence that relates two papers rests on what you read in both: state what the text supports as established, and hedge what you could not verify.
+- Every paper-specific claim traces to that paper's text.
+- Turn what the reading left open (isolated papers, thinly covered subquestions, unresolved contradictions, open questions) into the research gaps.
+- Use `paper_read({ mode:'figures', ... })` only when a figure materially improves the synthesis; a generated figure is never source evidence.
 
-### Nodes (reading)
+### Quality checks
 
-- Persist durable understanding instead of administering workflow state in model context.
-- At each step, read one capacity-sized group (a proposed group, or your own regrouping of the manifest) with `paper_read` in each entry's `readMode`, then immediately persist a claim-based node for every identity in that group with `research_update({operation:'record_papers', ...})` before reading more.
-  The group size must follow the actual input and output capacity and the semantic relationships among the papers, never a fixed paper-count threshold.
-- Never accumulate multiple unrecorded reading groups in the model transcript.
-  After each durable reduction, the host checkpoints away the raw PDF text, the host binds internal evidence and finding IDs, and it supplies the exact remaining reading manifest with the corpus map for the next group.
-- When a checkpoint supplies the remaining manifest, do not call inventory_scope again.
-  Treat that manifest as authoritative and call `paper_read` for the next group directly.
-- When the checkpoint says all papers are durable, do not call inventory_scope again.
-  Continue directly with the link pass: call `list_findings`, or `list_themes` when themes are already durable; do not recover old tool handles or reread completed papers.
-- Build one durable paper understanding for every item as a node: `mainMessage`, `relevance`, `confidence`, every frame slot (write `not_reported` when the paper is silent), `claims[]` each with its kind, the subquestions it answers and the evidence it rests on (never deeper than the read the host verified), `hooks` (constructs, methods, datasets, populations, key quantities), and either `candidateLinks[]` to other corpus papers or `noLinkSeen` with a reason.
-  A core node carries at least three claims; supporting and peripheral nodes carry the identity slots and at least one claim.
-- Assign one or more descriptive roles such as central evidence, supporting evidence, contradictory evidence, theoretical foundation, methodological contribution, historical context, or tangential context.
-- Use `paper_read({ mode:'figures', ... })` only when a figure materially improves the synthesis. A generated figure is never source evidence.
-- If the complete source text cannot fit, preserve coverage by allocating less text per paper or by using capacity-sized semantic groups, then synthesize across the durable nodes.
-
-### Links, verification, and structure
-
-- Links phase: call `research_update({operation:'list_findings'})` (compact view) to see every node, then record the explicit typed edge list with `record_edges`: source, target, type (`extends`, `contradicts`, `replicates`, `shares_method`, `shares_construct`, `supplies_theory`, `motivates`, `applies_to`, `refines`), the claim ids the edge rests on, a one-sentence statement, and confidence.
-  Candidate links from the node pass are suggestions, not edges.
-  Every core node touches an edge or keeps its `noLinkSeen`.
-- Verification phase: `advance_phase` to `verification`, then follow `next_work`.
-  Contradictions are always verified, and first: read the pair with `paper_read({mode:'targeted', ...})` and a specific query, then decide with `update_edges` (`verified`, `refuted`, or `tentative` with a note).
-  Record the questions the corpus raises with `record_questions`; answer or abandon them with `resolve_questions`.
-- Structure phase: `advance_phase` to `structure`, call `list_graph`, and record themes with `record_themes` using `paperIdentities` such as `1:ABCD1234` plus the `edgeIds` and `communityId` each theme rests on; the host derives finding and evidence IDs.
-  Themes are communities in the graph; synthesize from the edges, not from juxtaposed summaries.
-  Turn the host's structural gaps (isolated nodes, thin subquestions, unresolved contradictions, tentative edges, open questions) into the gaps section.
-- Then `advance_phase` to `writing` and call `finalize` with `outcome:'complete'` (`partial` when accessible papers stayed unread).
-  Use targeted reads at any phase only to verify an edge, resolve an important uncertainty, check a decisive claim, or obtain a precise location.
-
-### Evidence-based quality checks
-
-- Apply SANRA-style narrative-review checks: explain importance and aims, describe the reviewed scope, support key claims with references, reason from the strength and type of evidence, and present relevant outcome data accurately.
+- Apply SANRA-style narrative-review checks: explain importance and aims, describe the reviewed scope, support key claims with references, reason from the strength and type of evidence, and present outcome data accurately.
 - For scoping reviews, map the breadth, concepts, evidence types, and gaps in line with JBI's purpose for scoping evidence synthesis.
-- Keep PRISMA-style eligibility screening and exclusion accounting exclusive to systematic-review requests.
+- Keep PRISMA-style eligibility screening and exclusion accounting to systematic-review requests.
 
-### Document structure
+### Document
 
-Prefer these sections unless the approved document contract says otherwise:
+Prefer these sections unless the user asks for another structure:
 
 1. Introduction and review question
 2. Scope and method
-3. Thematic synthesis (organized by ideas or methods, not a paper-by-paper list)
+3. Thematic synthesis
 4. Agreements, contradictions, and limitations
 5. Research gaps and future directions
 6. Conclusion
 7. Scope and limitations
 
-Write the synthesis from `list_graph`: every sentence that relates two papers rests on a recorded edge, verified edges are stated as established and tentative ones with hedged wording, and every paper-specific claim traces to a node claim.
-The host audits cross-paper paragraphs against the edge list and appends a verification-and-coverage paragraph from its own records.
-
-In Agent mode, the literature-review outcome is always a document. Finish with `submit_document` whether or not Plan mode is active:
-
-- Write internal citation tokens such as `[[cite:C1]]` and provide item-key/evidence mappings.
-- Satisfy the coverage disclosure exactly as the approved contract states it.
-- Never hand-format author-year citations or References. Zotero's centralized CSL service resolves both with the approved style and locale.
-- Cite only frozen-corpus items backed by persisted evidence. Direct quotations also require strict quote verification.
-- Do not ask afterward whether to save a note. The finalized document card owns Copy Markdown, Save Note, Export, and Expand actions.
-
-Outside Plan mode, use the ordinary ResearchPolicy profile, copy the host-issued evidence IDs returned by read tools into every citation mapping, and state the actual coverage frontier and limitations. Never imply exhaustive review from sampled snippets.
+- Put `[[cite:C1]]` tokens at supported claims and identify each citation source by `libraryID` and `itemKey`; the host binds the evidence your reads produced.
+- Cite only papers you read for this review; a direct quotation uses a `[[quote:Q1]]` token whose mapping carries the verbatim text and the evidence IDs the read returned.
+- Never hand-format author-year citations or a References section; Zotero's CSL service formats both.
+- In Scope and limitations, state the coverage: how many papers were read in full, in part, and from metadata only, as `paper_read` reported them, and name any paper that stayed unread.
+- State the actual coverage frontier and its limitations, and never imply an exhaustive review from sampled text.

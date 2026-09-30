@@ -605,6 +605,7 @@ describe("user skill bootstrap upgrades", function () {
     "analyze-figures-v10",
     "import-cited-reference-v3",
     "import-cited-reference-v4",
+    "literature-review-v10",
     // The simplified texts main shipped at the same version numbers
     // (ad2c0fec) before the tool consolidation merged.
     "simplified/analyze-figures-v10",

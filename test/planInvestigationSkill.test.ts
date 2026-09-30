@@ -133,14 +133,6 @@ describe("plan investigation skill binding", function () {
         .join("\n");
       assert.isNotEmpty(prompt, "the model was called");
       assert.include(prompt, "### Skill: literature-review");
-      assert.include(
-        prompt,
-        "When a checkpoint supplies the remaining manifest, do not call inventory_scope again",
-      );
-      assert.include(
-        prompt,
-        "never re-enumerate or re-verify it with `library_search`",
-      );
       assert.include(prompt, EXECUTING_PHASE_GUIDANCE);
     });
   });
