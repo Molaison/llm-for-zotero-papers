@@ -27,7 +27,7 @@ import {
 } from "../src/agent/mcp/server";
 import { buildResearchScopeSuccessorSnapshot } from "../src/agent/research/scopeSnapshot";
 import { decodeResearchJob } from "../src/agent/research/decoders";
-import { resolveResearchPolicy } from "../src/agent/research/policy";
+import { resolveResearchPolicy } from "../src/agent/context/researchPolicy";
 import { decodePlanAmendmentGrant } from "../src/agent/plans/planAmendmentTypes";
 import {
   initAgentPlanStore,

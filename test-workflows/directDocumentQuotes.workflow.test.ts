@@ -3,7 +3,7 @@ import { resolvedAgentRequest } from "../test/helpers/resolvedAgentRequest";
 import { loadPlanDocument } from "../src/agent/documents/store";
 import { normalizeExecutionOutput } from "../src/agent/tools/execution/results";
 import { collectReaderSelectionDocuments } from "../src/modules/contextPanel/readerSelection";
-import { createTrustedReadObservations } from "../src/agent/plans/readObservation";
+import { createTrustedReadObservations } from "../src/agent/context/readObservation";
 import type { AgentToolContext } from "../src/agent/types";
 import type { WorkflowTestApi } from "../src/modules/contextPanel/workflowTestTypes";
 

@@ -12,7 +12,7 @@ import type { AgentActionReceipt } from "../src/agent/contracts/types";
 import {
   buildReasoningAssertionEvidence,
   createTaskUpdateTool,
-} from "../src/agent/tools/plan/taskUpdate";
+} from "../src/agent/tools/control/taskUpdate";
 import { hasApprovedFullReadAuthorization } from "../src/agent/tools/read/paperRead";
 import type { AgentToolContext } from "../src/agent/types";
 

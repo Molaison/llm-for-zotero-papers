@@ -1,7 +1,7 @@
 import { assert } from "chai";
 import { AgentRuntime } from "../../src/agent/runtime";
 import { AgentToolRegistry } from "../../src/agent/tools/registry";
-import { createSubmitDocumentTool } from "../../src/agent/tools/plan/submitPlanDocument";
+import { createSubmitDocumentTool } from "../../src/agent/tools/control/submitDocument";
 import { createNoteWriteTool } from "../../src/agent/tools/write/noteWrite";
 import { createNoteWriteBatchTool } from "../../src/agent/tools/write/noteWriteBatch";
 import { createUndoTool } from "../../src/agent/tools/write/undo";

@@ -9,7 +9,7 @@ import {
 } from "../src/agent/loop/outcomes";
 import { renderExecutionCheckpointBlock } from "../src/agent/model/messageBuilder";
 import { ToolInputRejection } from "../src/agent/tools/execution/failure";
-import { createTaskUpdateTool } from "../src/agent/tools/plan/taskUpdate";
+import { createTaskUpdateTool } from "../src/agent/tools/control/taskUpdate";
 import type {
   AgentExecutionContext,
   AgentToolContext,

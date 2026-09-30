@@ -3,8 +3,8 @@ import { sha256Text } from "../store/journalRecoveryBlobStore";
 import type {
   ReadObservationCapability,
   TrustedReadObservation,
-} from "./types";
-import { isCatalogToolName } from "../context/toolNames";
+} from "./readObservationTypes";
+import { isCatalogToolName } from "./toolNames";
 
 type Candidate = {
   itemId?: number;

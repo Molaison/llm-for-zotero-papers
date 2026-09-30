@@ -4,8 +4,8 @@ import type {
   AgentActionReceipt,
 } from "../contracts/types";
 import { buildDefaultResearchFrame } from "../research/frame";
-import { resolveResearchPolicy } from "../research/policy";
-import { resolvePlannedReadingPapers } from "../research/readingBudget";
+import { resolveResearchPolicy } from "../context/researchPolicy";
+import { resolvePlannedReadingPapers } from "../context/readingBudget";
 import {
   listScopeSnapshotItems,
   saveResearchCorpusItem,

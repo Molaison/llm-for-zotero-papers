@@ -18,10 +18,8 @@ import {
   loadResearchJobForExecution,
   saveResearchJob,
 } from "../research/store";
-import type {
-  ResearchCorpusItem,
-  ResearchEvidenceRecord,
-} from "../research/types";
+import type { ResearchCorpusItem } from "../research/types";
+import type { ResearchEvidenceRecord } from "./coverageTypes";
 import type { ZoteroGateway } from "../services/zoteroGateway";
 import { finalizeDocument, persistFinalizedDocument } from "./finalizer";
 import {

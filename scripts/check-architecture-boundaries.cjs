@@ -240,7 +240,7 @@ const MIGRATION_OBLIGATIONS = [
   // The Zotero change dispatcher writes straight into the agent change journal.
   "runtime:src/services/zoteroChangeDispatcher.ts -> src/agent/store/changeJournal.ts",
   // Library-chat read strategy reads the agent research policy.
-  "runtime:src/shared/libraryChatReadStrategy.ts -> src/agent/research/policy.ts",
+  "runtime:src/shared/libraryChatReadStrategy.ts -> src/agent/context/researchPolicy.ts",
   // src/utils holds application code (chat store, LLM client, provider probes)
   // that belongs above the services layer.
   "runtime:src/utils/attachmentRefStore.ts -> src/services/attachmentStorage.ts",

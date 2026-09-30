@@ -10,18 +10,20 @@ import {
   RESEARCH_PAPER_TIERS,
   RESEARCH_SYNTHESIS_PHASES,
 } from "./graphSchema";
-import { decodeResearchPolicySnapshot } from "./policy";
+import { decodeResearchPolicySnapshot } from "../context/researchPolicy";
 import type {
   PaperFinding,
   ResearchCorpusItem,
-  ResearchEvidenceRecord,
   ResearchJob,
   ResearchMutationApprovalGrant,
   ResearchRecallProbe,
-  ResearchScopeSnapshotItem,
   ResearchWorkItem,
   ThemeFinding,
 } from "./types";
+import type {
+  ResearchEvidenceRecord,
+  ResearchScopeSnapshotItem,
+} from "../documents/coverageTypes";
 
 type Row = Record<string, unknown>;
 

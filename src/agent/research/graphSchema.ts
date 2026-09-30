@@ -11,9 +11,9 @@ import type {
   ResearchNodeHooks,
   ResearchOpenQuestion,
   ResearchPaperTier,
-  ResearchQualityReport,
   ResearchSynthesisPhase,
 } from "./types";
+import type { ResearchQualityReport } from "../documents/coverageTypes";
 
 /**
  * Vocabulary and decoders of the research network: edges, open questions,

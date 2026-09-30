@@ -9,8 +9,8 @@ import type {
   ExecutionTask,
   PlanExecutionLedger,
   TaskEvidence,
-  TrustedReadObservation,
 } from "../../src/agent/plans/types";
+import type { TrustedReadObservation } from "../../src/agent/context/readObservationTypes";
 import { initResearchStore } from "../../src/agent/research/store";
 import type { ResearchContract } from "../../src/agent/research/types";
 import { createResearchUpdateTool } from "../../src/agent/tools/plan/researchUpdate";

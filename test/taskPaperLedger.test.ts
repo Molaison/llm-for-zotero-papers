@@ -12,7 +12,7 @@ import {
   deriveTaskPaperLedgerDelta,
   type TaskPaperLedgerDelta,
 } from "../src/agent/context/taskPaperLedger";
-import { createTrustedReadObservations } from "../src/agent/plans/readObservation";
+import { createTrustedReadObservations } from "../src/agent/context/readObservation";
 import type { QuoteCitation } from "../src/shared/types";
 
 function derive(

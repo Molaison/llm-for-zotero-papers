@@ -4,7 +4,7 @@ import type { AgentToolContext } from "../types";
 import { refineResearchFrame } from "./frame";
 import { decodeResearchFrameSlot, RESEARCH_PAPER_TIERS } from "./graphSchema";
 import type { ReadingManifestEntry } from "./reading";
-import { resolveAdaptiveReadingBudget } from "./readingBudget";
+import { resolveAdaptiveReadingBudget } from "../context/readingBudget";
 import { rankCorpusRelevance } from "./relevance";
 import { assertResearchCorpusUnchanged, commitResearchRecords } from "./stages";
 import {

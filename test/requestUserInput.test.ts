@@ -1,5 +1,5 @@
 import { assert } from "chai";
-import { createRequestUserInputTool } from "../src/agent/tools/plan/requestUserInput";
+import { createRequestUserInputTool } from "../src/agent/tools/control/requestUserInput";
 import type { AgentToolContext } from "../src/agent/types";
 
 const context = {} as AgentToolContext;

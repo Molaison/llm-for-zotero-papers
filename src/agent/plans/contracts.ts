@@ -24,7 +24,7 @@ import { decodeStoredSemanticIntent } from "../model/semanticIntentSchema";
 import {
   decodeResearchPolicySnapshot,
   resolveResearchPolicy,
-} from "../research/policy";
+} from "../context/researchPolicy";
 import type {
   ResearchContract,
   ResearchCriterion,

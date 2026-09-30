@@ -1,5 +1,5 @@
 import { ToolInputRejection } from "../tools/execution/failure";
-import { RESEARCH_STAGES, type ResearchStage } from "./policy";
+import { RESEARCH_STAGES, type ResearchStage } from "../context/researchPolicy";
 import {
   listPaperFindings,
   listResearchCorpusItems,

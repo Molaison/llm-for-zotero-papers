@@ -9,7 +9,7 @@ import type {
   DocumentOutcomePolicy,
   PlanCitationCluster,
 } from "../src/agent/documents/types";
-import type { TrustedReadObservation } from "../src/agent/plans/types";
+import type { TrustedReadObservation } from "../src/agent/context/readObservationTypes";
 import type { ZoteroGateway } from "../src/agent/services/zoteroGateway";
 import type { AgentRuntimeRequest } from "../src/agent/types";
 import { clearPageTextCache } from "../src/modules/contextPanel/livePdfSelectionLocator";

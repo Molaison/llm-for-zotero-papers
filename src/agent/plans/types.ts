@@ -7,10 +7,14 @@ import type { PlanSkillRoutingReceipt } from "../skills/routingTypes";
 import type { DocumentSpec, PlanDocument } from "../documents/types";
 import type { MaterialRef } from "../documents/materialRef";
 import type { ResearchContract, ResearchProgress } from "../research/types";
-import type { ResearchPolicySnapshot } from "../research/policy";
+import type { ResearchPolicySnapshot } from "../context/researchPolicy";
 import type { ActionConstraint } from "../authorization/types";
 import type { AgentActionOperation } from "../contracts/types";
 import type { ExecutionTaskStatus } from "../execution/types";
+import type {
+  TrustedReadObservation,
+  VerifiedReadSource,
+} from "../context/readObservationTypes";
 
 export type PlanProvider = "original" | "codex" | "claude";
 
@@ -304,41 +308,6 @@ export type TaskEvidencePayload =
       actionId: string;
       decidedAt: number;
     }>;
-
-export type VerifiedReadSource = Readonly<{
-  libraryID: number;
-  itemKey: string;
-  attachmentItemKey?: string;
-  pageIndex?: number;
-  sourceFingerprint?: string;
-}>;
-
-export type ReadObservationCapability =
-  | "metadata"
-  | "abstract"
-  | "body"
-  | "figure"
-  | "quote";
-
-export type TrustedReadObservation = Readonly<{
-  version: 1;
-  observationId: string;
-  issuer: "zotero_host";
-  toolName: string;
-  callDigest: string;
-  inputDigest: string;
-  resultDigest: string;
-  libraryID: number;
-  itemKey: string;
-  capabilities: readonly ReadObservationCapability[];
-  attachmentItemKey?: string;
-  pageIndex?: number;
-  sourceFingerprint?: string;
-  /** The paper_read mode that issued this observation (overview, targeted, full, ...). */
-  readMode?: string;
-  quoteCertificate?: string;
-  certificateDigest: string;
-}>;
 
 export type TaskEvidence = Readonly<{
   version: 1 | 2 | 3;

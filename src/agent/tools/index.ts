@@ -30,13 +30,11 @@ import { createAmendPlanTool } from "./plan/amendPlan";
 import { createApproveResearchExpansionTool } from "./plan/approveResearchExpansion";
 import { createApproveResearchMutationTool } from "./plan/approveResearchMutation";
 import { createPreparePlanExecutionTool } from "./plan/preparePlanExecution";
-import { createRequestUserInputTool } from "./plan/requestUserInput";
+import { createRequestUserInputTool } from "./control/requestUserInput";
 import { createResearchUpdateTool } from "./plan/researchUpdate";
-import {
-  createSubmitDocumentTool,
-  createSubmitPlanDocumentTool,
-} from "./plan/submitPlanDocument";
-import { createTaskUpdateTool } from "./plan/taskUpdate";
+import { createSubmitDocumentTool } from "./control/submitDocument";
+import { createSubmitPlanDocumentTool } from "./plan/submitPlanDocument";
+import { createTaskUpdateTool } from "./control/taskUpdate";
 import { createUpdatePlanTool } from "./plan/updatePlan";
 import { SEARCH_CONDITION_SCHEMA } from "./searchConditions";
 import { fail, ok, PAPER_CONTEXT_REF_SCHEMA, validateObject } from "./shared";

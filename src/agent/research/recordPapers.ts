@@ -1,5 +1,6 @@
 import { ToolInputRejection } from "../tools/execution/failure";
-import type { TaskEvidence, TrustedReadObservation } from "../plans/types";
+import type { TaskEvidence } from "../plans/types";
+import type { TrustedReadObservation } from "../context/readObservationTypes";
 import { canonicalJson } from "../services/libraryMutation/canonicalJson";
 import type { ZoteroGateway } from "../services/zoteroGateway";
 import { validateObject } from "../tools/shared";
@@ -28,14 +29,11 @@ import {
   saveResearchCorpusItem,
   saveResearchEvidence,
 } from "./store";
-import type {
-  PaperFinding,
-  ResearchCorpusItem,
-  ResearchEvidenceRecord,
-  ResearchJob,
-} from "./types";
+import type { PaperFinding, ResearchCorpusItem, ResearchJob } from "./types";
+import type { ResearchEvidenceRecord } from "../documents/coverageTypes";
 
-import type { ResearchContract, ResearchScopeSnapshotItem } from "./types";
+import type { ResearchContract } from "./types";
+import type { ResearchScopeSnapshotItem } from "../documents/coverageTypes";
 import type { CompleteResearchWorkItem } from "./work";
 
 export async function recordResearchPapers(params: {

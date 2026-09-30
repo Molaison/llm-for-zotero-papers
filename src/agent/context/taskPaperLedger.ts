@@ -5,7 +5,7 @@
  * This is a UI ledger, not model memory. `coverageLedger.ts` remembers a
  * capped, hashed digest for the model; this ledger keeps a bounded, readable
  * record for the Task progress view, fed from the same tool payloads the host
- * attests in `plans/readObservation.ts`. The two switches below and there
+ * attests in `readObservation.ts`. The two switches below and there
  * cover the same tools; a unit test fails when they drift apart.
  *
  * Everything here is pure: no DOM, no Zotero globals. A host that can resolve

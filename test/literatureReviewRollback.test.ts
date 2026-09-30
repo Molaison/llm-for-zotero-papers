@@ -1,7 +1,7 @@
 import { assert } from "chai";
 import { AgentToolRegistry } from "../src/agent/tools/registry";
 import { createResearchUpdateTool } from "../src/agent/tools/plan/researchUpdate";
-import { createSubmitDocumentTool } from "../src/agent/tools/plan/submitPlanDocument";
+import { createSubmitDocumentTool } from "../src/agent/tools/control/submitDocument";
 import { resolvedAgentRequest } from "./helpers/resolvedAgentRequest";
 
 describe("literature review without the experimental workflow", function () {

@@ -1,4 +1,4 @@
-import type { VerifiedReadSource } from "./types";
+import type { VerifiedReadSource } from "./readObservationTypes";
 
 type RecordValue = Record<string, unknown>;
 

@@ -9,7 +9,7 @@ import {
   RESEARCH_EDGE_TYPES,
   RESEARCH_PAPER_TIERS,
 } from "../../research/graphSchema";
-import { RESEARCH_STAGES as STAGES } from "../../research/policy";
+import { RESEARCH_STAGES as STAGES } from "../../context/researchPolicy";
 import { NARRATIVE_ROLES } from "../../research/recordValidation";
 import type { ZoteroGateway } from "../../services/zoteroGateway";
 import type { AgentToolDefinition } from "../../types";

@@ -1,4 +1,4 @@
-import type { TrustedReadObservation } from "../plans/types";
+import type { TrustedReadObservation } from "../context/readObservationTypes";
 import type { ZoteroGateway } from "../services/zoteroGateway";
 import type { AgentRuntimeRequest, AgentToolArtifact } from "../types";
 import type { DocumentCitationEvidence } from "./citationService";

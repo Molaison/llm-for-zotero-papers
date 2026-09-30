@@ -8,8 +8,8 @@
  * attested and recorded, to file plan evidence; it deliberately does not
  * record a second time.)
  */
-import { createTrustedReadObservations } from "../plans/readObservation";
-import type { TrustedReadObservation } from "../plans/types";
+import { createTrustedReadObservations } from "./readObservation";
+import type { TrustedReadObservation } from "./readObservationTypes";
 import type { ZoteroMcpToolActivityEvent } from "../mcp/activityTypes";
 import type { AgentEvent } from "../types";
 import {

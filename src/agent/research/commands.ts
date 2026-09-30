@@ -1,6 +1,9 @@
 import { fail, ok, validateObject } from "../tools/shared";
 import type { AgentToolInputValidation } from "../types";
-import { RESEARCH_STAGES as STAGES, type ResearchStage } from "./policy";
+import {
+  RESEARCH_STAGES as STAGES,
+  type ResearchStage,
+} from "../context/researchPolicy";
 import {
   normalizeRecordPaperInput,
   type NormalizedRecordPaper,

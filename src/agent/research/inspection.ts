@@ -12,8 +12,8 @@ import type {
   ResearchJob,
   ResearchContract,
   ResearchCorpusItem,
-  ResearchScopeSnapshotItem,
 } from "./types";
+import type { ResearchScopeSnapshotItem } from "../documents/coverageTypes";
 
 export async function inspectResearch(params: {
   input: ResearchUpdateInput;

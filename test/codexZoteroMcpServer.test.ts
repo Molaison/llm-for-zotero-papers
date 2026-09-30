@@ -2,7 +2,7 @@ import { ActionContractService } from "../src/agent/contracts/actionContract";
 import { actionContractFixture } from "./helpers/semanticIntent";
 import { assert } from "chai";
 import { DatabaseSync } from "node:sqlite";
-import { createSubmitDocumentTool } from "../src/agent/tools/plan/submitPlanDocument";
+import { createSubmitDocumentTool } from "../src/agent/tools/control/submitDocument";
 import { initPlanDocumentStore } from "../src/agent/documents/store";
 import {
   addZoteroMcpToolActivityObserver,

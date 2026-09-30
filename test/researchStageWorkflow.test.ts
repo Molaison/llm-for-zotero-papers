@@ -9,7 +9,7 @@ import type {
   ExecutionTask,
   PlanExecutionLedger,
 } from "../src/agent/plans/types";
-import { resolveResearchPolicy } from "../src/agent/research/policy";
+import { resolveResearchPolicy } from "../src/agent/context/researchPolicy";
 import {
   initResearchStore,
   loadResearchJobForExecution,

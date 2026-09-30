@@ -69,7 +69,7 @@ import type {
   ZoteroMetadataResolver,
 } from "../../../services/zoteroMetadata/types";
 import { resolveOutputReserve } from "../../../utils/outputTokenPolicy";
-import { resolveAdaptiveReadingBudget } from "../../research/readingBudget";
+import { resolveAdaptiveReadingBudget } from "../../context/readingBudget";
 
 type PaperReadMode =
   | "overview"

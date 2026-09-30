@@ -1,9 +1,7 @@
 import type {
   PaperFinding,
   ResearchCorpusItem,
-  ResearchEvidenceRecord,
   ResearchJob,
-  ResearchScopeSnapshotItem,
   ResearchScopeSnapshotRef,
   ResearchWorkItem,
   ThemeFinding,
@@ -12,6 +10,10 @@ import type {
   ResearchEdge,
   ResearchOpenQuestion,
 } from "./types";
+import type {
+  ResearchEvidenceRecord,
+  ResearchScopeSnapshotItem,
+} from "../documents/coverageTypes";
 import { decodeResearchEdge, decodeResearchOpenQuestion } from "./graphSchema";
 import {
   decodePaperFinding,

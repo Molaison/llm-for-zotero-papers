@@ -23,17 +23,14 @@ import {
   decodePlanArtifact,
   decodeTaskEvidence,
 } from "../src/agent/plans/decoders";
-import { extractVerifiedReadSources } from "../src/agent/plans/readEvidence";
+import { extractVerifiedReadSources } from "../src/agent/context/readEvidence";
 import {
   buildPlanFinalCorrection,
   shouldOfferPlanFinalCorrection,
 } from "../src/agent/plans/runSession";
 import { listExecutionTaskEvidence } from "../src/agent/plans/store";
-import type {
-  ExecutionTask,
-  TaskEvidence,
-  TrustedReadObservation,
-} from "../src/agent/plans/types";
+import type { ExecutionTask, TaskEvidence } from "../src/agent/plans/types";
+import type { TrustedReadObservation } from "../src/agent/context/readObservationTypes";
 import {
   decodePaperFinding,
   decodeResearchCorpusItem,
@@ -46,7 +43,7 @@ import {
 import {
   resolveResearchPolicy,
   shouldCheckpointResearchExpansion,
-} from "../src/agent/research/policy";
+} from "../src/agent/context/researchPolicy";
 import {
   buildAdaptiveScreeningBatch,
   buildExcludedScreeningFinding,
@@ -63,7 +60,7 @@ import {
   selectPreferredVerifiedReads,
 } from "../src/agent/tools/plan/researchUpdate";
 import { createSubmitPlanDocumentTool } from "../src/agent/tools/plan/submitPlanDocument";
-import { createTaskUpdateTool } from "../src/agent/tools/plan/taskUpdate";
+import { createTaskUpdateTool } from "../src/agent/tools/control/taskUpdate";
 import { createUpdatePlanTool } from "../src/agent/tools/plan/updatePlan";
 import { resolvedAgentRequest } from "./helpers/resolvedAgentRequest";
 

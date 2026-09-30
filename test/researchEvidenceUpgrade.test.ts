@@ -1,5 +1,5 @@
 import { assert } from "chai";
-import { resolveRecordBatchCap } from "../src/agent/research/readingBudget";
+import { resolveRecordBatchCap } from "../src/agent/context/readingBudget";
 import {
   listResearchEvidence,
   listPaperFindings,

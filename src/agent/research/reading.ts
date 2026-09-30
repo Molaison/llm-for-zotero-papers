@@ -1,14 +1,15 @@
 import { buildPaperDisplayLabels } from "../../shared/paperDisplayLabels";
+import type { TaskEvidence } from "../plans/types";
 import type {
-  TaskEvidence,
   TrustedReadObservation,
   VerifiedReadSource,
-} from "../plans/types";
+} from "../context/readObservationTypes";
 import type {
   LibraryItemTargetAttachment,
   ZoteroGateway,
 } from "../services/zoteroGateway";
-import type { ResearchCorpusItem, ResearchEvidenceRecord } from "./types";
+import type { ResearchCorpusItem } from "./types";
+import type { ResearchEvidenceRecord } from "../documents/coverageTypes";
 
 export function selectPreferredReadingAttachment(
   attachments: readonly LibraryItemTargetAttachment[],

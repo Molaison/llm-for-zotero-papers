@@ -14,10 +14,10 @@ import {
 import type {
   ResearchJob,
   ResearchCorpusItem,
-  ResearchEvidenceRecord,
   ResearchRecallProbe,
   ThemeFinding,
 } from "./types";
+import type { ResearchEvidenceRecord } from "../documents/coverageTypes";
 
 export async function recordResearchReductions(params: {
   input: ResearchUpdateInput;

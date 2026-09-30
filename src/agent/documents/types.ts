@@ -1,4 +1,4 @@
-import type { ResearchCoverageStatus } from "../research/types";
+import type { ResearchCoverageStatus } from "./coverageTypes";
 import type { SkillRoutingReceipt } from "../skills/routingTypes";
 
 export const PLAN_DOCUMENT_MARKDOWN_MAX_BYTES = 2 * 1024 * 1024;

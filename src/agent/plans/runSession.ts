@@ -22,7 +22,7 @@ import {
   loadLatestPlanDocumentForExecution,
   loadPlanDocumentOutbox,
 } from "../documents/store";
-import { createTrustedReadObservations } from "./readObservation";
+import { createTrustedReadObservations } from "../context/readObservation";
 import { planRequiresModelTaskUpdates } from "./taskOwnership";
 import { projectLegacyPlanArtifactV5 } from "./effectSpecification";
 import type { PlanArtifact, PlanEffectSpecification } from "./types";

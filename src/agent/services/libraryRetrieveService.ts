@@ -21,7 +21,7 @@ import type {
   PdfChunkKind,
 } from "../../services/paperContent/types";
 import type { AgentRuntimeRequest } from "../types";
-import { resolveResearchPolicy } from "../research/policy";
+import { resolveResearchPolicy } from "../context/researchPolicy";
 import { getTurnPaperScopeFromRequest } from "../context/requestTurnPaperScope";
 import type {
   PaperContextRef,

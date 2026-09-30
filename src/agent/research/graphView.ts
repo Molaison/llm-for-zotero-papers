@@ -14,8 +14,8 @@ import type {
   ResearchContract,
   ResearchCorpusItem,
   ResearchJob,
-  ResearchScopeSnapshotItem,
 } from "./types";
+import type { ResearchScopeSnapshotItem } from "../documents/coverageTypes";
 
 /**
  * The synthesis view: every node in one line, the edge list, host-computed

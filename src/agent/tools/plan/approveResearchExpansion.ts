@@ -12,7 +12,7 @@ import {
   planAmendmentService,
   type PlanAmendmentService,
 } from "../../plans/amendments";
-import { shouldCheckpointResearchExpansion } from "../../research/policy";
+import { shouldCheckpointResearchExpansion } from "../../context/researchPolicy";
 import {
   loadResearchJobForExecution,
   saveResearchJob,

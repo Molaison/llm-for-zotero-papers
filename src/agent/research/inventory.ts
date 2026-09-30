@@ -14,7 +14,8 @@ import {
 } from "./store";
 import type { ResearchCorpusItem, ResearchJob } from "./types";
 
-import type { ResearchContract, ResearchScopeSnapshotItem } from "./types";
+import type { ResearchContract } from "./types";
+import type { ResearchScopeSnapshotItem } from "../documents/coverageTypes";
 import type { CompleteResearchWorkItem } from "./work";
 
 export async function inventoryResearchScope(params: {

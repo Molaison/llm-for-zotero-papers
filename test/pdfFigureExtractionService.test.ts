@@ -8,8 +8,8 @@ import {
   buildPdfFigureCropPdfFingerprint,
 } from "../src/services/pdf/pdfFigureCropCache";
 import type { AgentToolContext } from "../src/agent/types";
-import { createSubmitDocumentTool } from "../src/agent/tools/plan/submitPlanDocument";
-import { createTrustedReadObservations } from "../src/agent/plans/readObservation";
+import { createSubmitDocumentTool } from "../src/agent/tools/control/submitDocument";
+import { createTrustedReadObservations } from "../src/agent/context/readObservation";
 
 describe("PdfFigureExtractionService", function () {
   const encoder = new TextEncoder();

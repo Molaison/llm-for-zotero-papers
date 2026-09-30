@@ -1,5 +1,5 @@
 import { assert } from "chai";
-import { createTrustedReadObservations } from "../src/agent/plans/readObservation";
+import { createTrustedReadObservations } from "../src/agent/context/readObservation";
 
 describe("trusted read observations", function () {
   const priorZotero = (globalThis as { Zotero?: unknown }).Zotero;

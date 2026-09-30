@@ -1,4 +1,4 @@
-import type { ResearchQualityReport } from "../research/types";
+import type { ResearchQualityReport } from "./coverageTypes";
 import type { DocumentCoverageItem } from "./types";
 
 /**

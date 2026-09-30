@@ -1,5 +1,5 @@
 import { assert } from "chai";
-import { createTaskUpdateTool } from "../src/agent/tools/plan/taskUpdate";
+import { createTaskUpdateTool } from "../src/agent/tools/control/taskUpdate";
 import {
   DOCUMENT_TITLE,
   PARENT_ITEM_ID,

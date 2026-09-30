@@ -3,10 +3,10 @@ import type {
   ResearchCorpusItem,
   ResearchEdge,
   ResearchOpenQuestion,
-  ResearchQualityReport,
   ResearchSubquestion,
   ThemeFinding,
 } from "./types";
+import type { ResearchQualityReport } from "../documents/coverageTypes";
 
 /**
  * The quality rubric every flight is measured against. It counts what the

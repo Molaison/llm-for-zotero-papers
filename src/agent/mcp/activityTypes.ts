@@ -4,7 +4,7 @@ import type { TaskPaperLedgerDelta } from "../context/taskPaperLedger";
 import type {
   TrustedReadObservation,
   VerifiedReadSource,
-} from "../plans/types";
+} from "../context/readObservationTypes";
 import type { AgentToolArtifact, AgentWorkCategory } from "../types";
 
 export type ZoteroMcpToolActivityEvent = {

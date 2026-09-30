@@ -11,13 +11,13 @@ import {
 import type { ZoteroGateway } from "../services/zoteroGateway";
 import { validateObject } from "../tools/shared";
 import { type ResearchUpdateInput } from "./commands";
-import { shouldCheckpointResearchExpansion } from "./policy";
+import { shouldCheckpointResearchExpansion } from "../context/researchPolicy";
 import { progress, recomputeJob, reconcileResearchStage } from "./progress";
 import { buildReadingManifest, type ReadingManifestEntry } from "./reading";
 import {
   PROJECTED_PAPER_RECORD_TOKENS,
   resolveRecordBatchCap,
-} from "./readingBudget";
+} from "../context/readingBudget";
 import { resolveOutputReserve } from "../../utils/outputTokenPolicy";
 import {
   applyFrameRevision,

@@ -1,11 +1,12 @@
 import type { AgentActionContract } from "../contracts/types";
-import type { ResearchPolicySnapshot, ResearchStage } from "./policy";
-
-export type ResearchCoverageStatus =
-  | "complete"
-  | "complete_with_limitations"
-  | "partial"
-  | "failed";
+import type {
+  ResearchCoverageStatus,
+  ResearchQualityReport,
+} from "../documents/coverageTypes";
+import type {
+  ResearchPolicySnapshot,
+  ResearchStage,
+} from "../context/researchPolicy";
 
 export type ResearchScopeSpec = Readonly<{
   libraryID: number;
@@ -66,20 +67,6 @@ export type ResearchScopeSnapshotRef = Readonly<{
   policyVersion: number;
   parentSnapshotId?: string;
   scopeLineageDigest?: string;
-}>;
-
-export type ResearchScopeSnapshotItem = Readonly<{
-  snapshotId: string;
-  libraryID: number;
-  itemKey: string;
-  localItemId?: number;
-  /** Frozen display metadata used by recovery and final coverage reporting. */
-  title?: string;
-  firstCreator?: string;
-  year?: string;
-  metadataFingerprint?: string;
-  attachmentFingerprint?: string;
-  ordinal: number;
 }>;
 
 export type ResearchJobStatus =
@@ -171,28 +158,6 @@ export type ResearchNodeCapacity = Readonly<{
   compactPeripheralTokens: number;
   mandatoryTiering: boolean;
   measuredAt: number;
-}>;
-
-export type ResearchQualityReport = Readonly<{
-  version: 1;
-  computedAt: number;
-  papers: number;
-  nodes: number;
-  claims: number;
-  claimsWithLocators: number;
-  nodesWithEdges: number;
-  edges: number;
-  edgesVerified: number;
-  edgesTentative: number;
-  edgesRefuted: number;
-  contradictions: number;
-  subquestionClaims: Readonly<Record<string, number>>;
-  themes: number;
-  themesWithEdges: number;
-  openQuestions: number;
-  answeredQuestions: number;
-  crossPaperParagraphs?: number;
-  crossPaperParagraphsSupported?: number;
 }>;
 
 export type ResearchPaperTier = "core" | "supporting" | "peripheral";
@@ -367,27 +332,6 @@ export type ResearchWorkItem = Readonly<{
   failureReason?: string;
   createdAt: number;
   updatedAt: number;
-}>;
-
-export type ResearchEvidenceRecord = Readonly<{
-  version: 1 | 2;
-  evidenceRef: string;
-  researchJobId: string;
-  executionId: string;
-  parentTaskId: string;
-  libraryID: number;
-  itemKey: string;
-  sourceFingerprint: string;
-  sourceKind: "metadata" | "abstract" | "body" | "figure" | "quote";
-  /** Required on v2 evidence; points to host-issued observation metadata. */
-  observationId?: string;
-  locator?: Readonly<{
-    kind: "pdf_page";
-    attachmentItemKey: string;
-    pageIndex: number;
-    sourceFingerprint: string;
-  }>;
-  createdAt: number;
 }>;
 
 export type ResearchRecallProbe = Readonly<{

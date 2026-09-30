@@ -11,11 +11,11 @@ import type {
   ResearchEdge,
   ResearchJob,
   ResearchOpenQuestion,
-  ResearchQualityReport,
   ResearchSubquestion,
   ResearchSynthesisPhase,
   ThemeFinding,
 } from "./types";
+import type { ResearchQualityReport } from "../documents/coverageTypes";
 
 /**
  * Flight 0: one report for one research job, from durable state and the run

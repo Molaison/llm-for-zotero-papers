@@ -48,11 +48,8 @@ import type {
   AgentToolActionDescriptor,
 } from "./contracts/types";
 import type { AgentActionVerification } from "./contracts/actionVerificationLabels";
-import type {
-  PlanEvent,
-  PlanRuntimeContext,
-  TrustedReadObservation,
-} from "./plans/types";
+import type { PlanEvent, PlanRuntimeContext } from "./plans/types";
+import type { TrustedReadObservation } from "./context/readObservationTypes";
 import type { SkillRoutingReceipt } from "./skills/routingTypes";
 import type { LoadedSkillRecord } from "./skills/loadingTypes";
 import type {

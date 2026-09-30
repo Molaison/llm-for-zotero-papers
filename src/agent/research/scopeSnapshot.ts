@@ -1,13 +1,10 @@
 import type { ZoteroGateway } from "../services/zoteroGateway";
 import { canonicalJson } from "../services/libraryMutation/canonicalJson";
 import { sha256Text } from "../store/journalRecoveryBlobStore";
-import { RESEARCH_POLICY_VERSION } from "./policy";
+import { RESEARCH_POLICY_VERSION } from "../context/researchPolicy";
 import { saveScopeSnapshot } from "./store";
-import type {
-  ResearchScopeSnapshotItem,
-  ResearchScopeSnapshotRef,
-  ResearchScopeSpec,
-} from "./types";
+import type { ResearchScopeSnapshotItem } from "../documents/coverageTypes";
+import type { ResearchScopeSnapshotRef, ResearchScopeSpec } from "./types";
 import type { TagContextRef } from "../../shared/types";
 import { readAttachmentFileState } from "../../utils/attachmentFileState";
 

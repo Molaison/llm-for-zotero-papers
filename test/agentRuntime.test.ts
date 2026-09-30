@@ -5,7 +5,7 @@ import {
   createAgentRun,
   appendAgentRunEvent,
 } from "../src/agent/store/traceStore";
-import { createRequestUserInputTool } from "../src/agent/tools/plan/requestUserInput";
+import { createRequestUserInputTool } from "../src/agent/tools/control/requestUserInput";
 import {
   bumpConversationWriteGeneration,
   getConversationWriteGeneration,
@@ -27,7 +27,7 @@ import { storedPlanExecution } from "./helpers/planStoreDb";
 import { initResearchStore } from "../src/agent/research/store";
 import { createDocumentPlan } from "./helpers/documentPlan";
 import type { MaterialRef } from "../src/agent/documents/materialRef";
-import { createSubmitDocumentTool } from "../src/agent/tools/plan/submitPlanDocument";
+import { createSubmitDocumentTool } from "../src/agent/tools/control/submitDocument";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";

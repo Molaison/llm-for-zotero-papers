@@ -64,11 +64,11 @@ import {
 import { PlanExecutionRunSession } from "../plans/runSession";
 import type { ZoteroMcpToolActivityEvent } from "./activityTypes";
 export type { ZoteroMcpToolActivityEvent } from "./activityTypes";
-import { extractVerifiedReadSources } from "../plans/readEvidence";
+import { extractVerifiedReadSources } from "../context/readEvidence";
 import type {
   TrustedReadObservation,
   VerifiedReadSource,
-} from "../plans/types";
+} from "../context/readObservationTypes";
 import { attestAndRecordRead } from "../context/taskPaperLedgerRecorder";
 import type { TaskPaperLedgerDelta } from "../context/taskPaperLedger";
 import {

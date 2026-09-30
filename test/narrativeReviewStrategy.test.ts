@@ -3,8 +3,8 @@ import { decodePlanContract } from "../src/agent/plans/contracts";
 import {
   resolveAdaptiveReadingBudget,
   resolvePlannedReadingPapers,
-} from "../src/agent/research/readingBudget";
-import { resolveResearchPolicy } from "../src/agent/research/policy";
+} from "../src/agent/context/readingBudget";
+import { resolveResearchPolicy } from "../src/agent/context/researchPolicy";
 import { bindCitationEvidenceRefs } from "../src/agent/documents/citationService";
 import { canonicalizePlanResearchEvidenceDepth } from "../src/agent/plans/coordinator";
 

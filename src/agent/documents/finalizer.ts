@@ -19,7 +19,7 @@ import {
   type SupportAuditEdge,
   type SupportAuditResult,
 } from "./supportAudit";
-import type { ResearchQualityReport } from "../research/types";
+import type { ResearchQualityReport } from "./coverageTypes";
 import {
   utf8Bytes,
   validateAssets,

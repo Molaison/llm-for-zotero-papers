@@ -1,4 +1,4 @@
-import { type ResearchStage } from "./policy";
+import { type ResearchStage } from "../context/researchPolicy";
 import { loadResearchWorkItem, saveResearchWorkItem } from "./store";
 import type { ResearchJob } from "./types";
 export type CompleteResearchWorkItem = (params: {
