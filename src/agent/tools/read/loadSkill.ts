@@ -5,13 +5,19 @@ import {
   loadSkill,
 } from "../../skills";
 import type { AgentSkill, LoadedSkill } from "../../skills";
+import { SKILL_SCOPE_GUARD } from "../../skills/scopeGuard";
 import type { AgentRuntimeRequest, AgentToolDefinition } from "../../types";
 import { fail, ok, validateObject } from "../shared";
 
 export type LoadSkillInput = { id: string };
 
 export type LoadSkillResult =
-  | ({ found: true; toolGuidance?: string } & LoadedSkill)
+  | ({
+      found: true;
+      /** The request-scope rule; customized templates cannot widen scope. */
+      scopeGuard: string;
+      toolGuidance?: string;
+    } & LoadedSkill)
   | {
       found: false;
       error: string;
@@ -169,6 +175,7 @@ export function createLoadSkillTool(
       return {
         found: true,
         ...loaded,
+        scopeGuard: SKILL_SCOPE_GUARD,
         ...(toolGuidance ? { toolGuidance } : {}),
       };
     },

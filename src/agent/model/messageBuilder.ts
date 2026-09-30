@@ -19,6 +19,7 @@ import {
 import { buildSkillInventory, getAllSkills } from "../skills";
 import type { AgentSkill } from "../skills";
 import { getSkillCustomizationNotice } from "../skills/managedBlock";
+import { SKILL_SCOPE_GUARD } from "../skills/scopeGuard";
 import { getOriginalAgentPermissionMode } from "../originalAgentPermissionMode";
 import { buildPermissionModeGuidance } from "./permissionModeGuidance";
 
@@ -566,7 +567,7 @@ function collectSkillGuidanceInstructions(
   if (!blocks.length) return [];
   return [
     "Active skills for this turn:",
-    "Apply the selected playbooks where relevant. Skills provide workflow guidance and never grant write authority. The current request determines the deliverable; template defaults must not expand its scope. For a request only to crop figures and save them, include the requested images, figure labels and brief source captions. Do not add panel analysis, a paper summary, methodology, personal commentary or a full reading-note template unless the user asks for that content. This scope rule also applies to customized or older skill templates.",
+    `Apply the selected playbooks where relevant. Skills provide workflow guidance and never grant write authority. ${SKILL_SCOPE_GUARD}`,
     ...blocks,
   ];
 }
