@@ -172,9 +172,32 @@ export const LIBRARY_RETRIEVE_GUIDANCE: NonNullable<
   ].join("\n"),
 };
 
+/**
+ * Result-time coverage rule. Paper chat renders no library_retrieve turn
+ * guidance, so a result whose coverage is not complete says it itself.
+ */
+export const LIBRARY_RETRIEVE_COVERAGE_GUIDANCE =
+  "This coverage is not complete: do not present sampled, metadata-only, abstract-only, or partial coverage as exhaustive; name what was not read.";
+
+function hasIncompleteCoverage(result: LibraryRetrieveResult): boolean {
+  const contract = result.answerContract;
+  const receipt = result.coverageReceipt;
+  if (!contract || !receipt) return false;
+  return (
+    contract.metadataCoverage !== "complete" ||
+    contract.indexedTextCoverage !== "complete" ||
+    contract.snippetCoverage === "sampled" ||
+    receipt.papersMetadataOnly > 0 ||
+    receipt.papersBodyRead < receipt.papersPlanned
+  );
+}
+
 export function createLibraryRetrieveTool(
   libraryRetrieveService: LibraryRetrieveService,
-): AgentToolDefinition<LibraryRetrieveInput, LibraryRetrieveResult> {
+): AgentToolDefinition<
+  LibraryRetrieveInput,
+  LibraryRetrieveResult & { guidance?: string }
+> {
   return {
     spec: {
       name: "library_retrieve",
@@ -363,7 +386,7 @@ export function createLibraryRetrieveTool(
           "Library retrieval reads indexed Zotero records without changing them.",
       }),
     async execute(input, context) {
-      return libraryRetrieveService.retrieve({
+      const result = await libraryRetrieveService.retrieve({
         ...input,
         request: context.request,
         item: context.item,
@@ -375,6 +398,10 @@ export function createLibraryRetrieveTool(
         profileOverride: context.request.advanced?.profileOverride,
         signal: context.signal,
       });
+      // Leading field, so a truncated preview of a large result keeps it.
+      return hasIncompleteCoverage(result)
+        ? { guidance: LIBRARY_RETRIEVE_COVERAGE_GUIDANCE, ...result }
+        : result;
     },
   };
 }
