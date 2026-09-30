@@ -1,7 +1,6 @@
 import type { AgentToolDefinition } from "../../types";
 import { readOnlyInvocationPlan } from "../../authorization/invocationPlan";
 import { fail, ok, validateObject } from "../shared";
-import { classifyRequest } from "../../model/requestClassifier";
 
 type SelfContainedTestToolInput = {
   content: string;
@@ -35,7 +34,7 @@ export function createSelfContainedTestTool(): AgentToolDefinition<
       workCategory: "external_system",
     },
     guidance: {
-      matches: (request) => classifyRequest(request).isDemoToolQuery,
+      matches: (request) => request.metadata?.testDemoTool === true,
       instruction:
         "When the user asks for the self-contained demo tool, call self_contained_test_tool instead of answering directly.",
     },
