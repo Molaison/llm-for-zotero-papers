@@ -238,6 +238,9 @@ describe("skill routing without a model call", function () {
     assert.isString(line);
     assert.include(line, "call load_skill");
     assert.notInclude(line, "automatic selection");
+    // Skills are multi-step playbooks; an ordinary paper question needs none.
+    assert.include(line, "workflow playbooks for multi-step tasks");
+    assert.include(line, "ordinary paper questions need no skill");
     const inventory = JSON.parse(
       (line as string).slice((line as string).indexOf("["), line!.length),
     ) as Array<Record<string, unknown>>;

@@ -1,7 +1,7 @@
 ---
 id: evidence-based-qa
-description: Retrieve missing evidence for specific methods, results, or verification questions in selected papers or collections. Clarification or translation of sufficient supplied text needs no retrieval workflow.
-version: 11
+description: Retrieve missing evidence for specific methods, results, or verification questions in selected papers or collections, including broad summaries of one paper. Clarification or translation of sufficient supplied text needs no retrieval workflow.
+version: 10
 contexts: single-paper,paper-set,library-corpus
 activation: auto
 ---

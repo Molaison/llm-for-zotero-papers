@@ -541,6 +541,7 @@ describe("user skill bootstrap upgrades", function () {
   for (const fixture of [
     "evidence-based-qa-v8",
     "evidence-based-qa-v9",
+    "evidence-based-qa-v10",
     "compare-papers-v7",
     "write-note-v16",
     "analyze-figures-v9",

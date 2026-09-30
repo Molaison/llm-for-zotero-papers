@@ -349,7 +349,7 @@ Built-in skills:
 
 | Skill                    | What it guides the agent to do                                    |
 | ------------------------ | ----------------------------------------------------------------- |
-| `evidence-based-qa`      | Answer paper questions, from broad summaries to specific evidence |
+| `evidence-based-qa`      | Retrieve missing evidence for specific paper questions            |
 | `analyze-figures`        | Interpret figures and tables using MinerU-extracted images        |
 | `compare-papers`         | Compare multiple papers using batched reads and focused retrieval |
 | `library-analysis`       | Summarize or analyze your entire library without context overflow |

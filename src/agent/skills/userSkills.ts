@@ -127,8 +127,8 @@ const OBSOLETE_SKILL_FILES: ReadonlyArray<{
     filename: "note-template.md",
     bootstrapRawHashes: ["128vd1c", "m675pz", "v55hyg"],
   },
-  // simple-paper-qa was retired in favour of evidence-based-qa, whose
-  // description now covers broad summaries of one paper. Hashes cover every
+  // simple-paper-qa was retired in favour of evidence-based-qa; ordinary
+  // paper questions need no skill. Hashes cover every
   // committed version of the file (v1-v10).
   {
     filename: "simple-paper-qa.md",
@@ -209,6 +209,7 @@ const BUILTIN_BOOTSTRAP_RAW_HASHES: Partial<
     "qdqcm0",
     "90zxig",
     "1qkh4mt",
+    "14eowou",
   ],
   "write-note.md": ["17lvl1z", "172xn8t", "nvca0f", "1c1s5yg"],
   "literature-review.md": ["kbrknh", "nxpr5d", "1cnjf9i", "3tk61l", "1ptwzpw"],

@@ -83,13 +83,13 @@ describe("retired shipped skills", function () {
     setAppLogSinkForTests(null);
   });
 
-  it("no longer ships simple-paper-qa; evidence-based-qa covers broad single-paper summaries", function () {
+  it("no longer ships simple-paper-qa, and evidence-based-qa does not invite ordinary summaries", function () {
     assert.notProperty(BUILTIN_SKILL_FILES, "simple-paper-qa.md");
     const evidence = parseSkill(BUILTIN_SKILL_FILES["evidence-based-qa.md"]);
-    assert.include(
-      evidence.description,
-      "including broad summaries of one paper",
-    );
+    // An ordinary paper summary needs no skill; advertising one made the
+    // model spend a load_skill round trip on common turns.
+    assert.notInclude(evidence.description, "broad summaries");
+    assert.include(evidence.description, "Retrieve missing evidence");
     assert.notProperty(evidence, "supersedes");
     assert.include(evidence.contexts, "single-paper");
   });

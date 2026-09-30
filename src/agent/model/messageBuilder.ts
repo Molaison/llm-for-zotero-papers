@@ -664,7 +664,7 @@ export async function renderAgentPromptEnvelope(
     {
       id: "skill-inventory",
       lines: [
-        `Installed skill inventory (skills are not preloaded; when a listed skill matches the request and its guidance is not already active, call load_skill with its id): ${JSON.stringify(
+        `Installed skill inventory (workflow playbooks for multi-step tasks: notes, comparisons, reviews, imports, figure work; ordinary paper questions need no skill. When one matches and its guidance is not already active, call load_skill with its id): ${JSON.stringify(
           // Manual skills apply only when the user selects them.
           buildSkillInventory(getAllSkills())
             .filter((skill) => skill.activation !== "manual")
