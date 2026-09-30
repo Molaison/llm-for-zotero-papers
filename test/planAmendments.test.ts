@@ -32,6 +32,7 @@ import { decodePlanAmendmentGrant } from "../src/agent/plans/planAmendmentTypes"
 import {
   initAgentPlanStore,
   listPlanAmendmentGrants,
+  listTaskEvidence,
   loadPlanArtifact,
   loadPlanExecutionLedger,
   PLAN_AMENDMENT_PROPOSALS_TABLE,
@@ -54,6 +55,8 @@ import {
   saveThemeFinding,
 } from "../src/agent/research/store";
 import { PlanExecutionCoordinator } from "../src/agent/plans/coordinator";
+import { PlanExecutionRunSession } from "../src/agent/plans/runSession";
+import { initPlanDocumentStore } from "../src/agent/documents/store";
 import { resolvePlanContract } from "../src/agent/tools/plan/updatePlan";
 
 function installSqliteZotero() {
@@ -954,6 +957,212 @@ describe("autonomous Plan scope amendments", function () {
           .replacementSteps?.[0]?.content,
         "Publish the user-revised completion report",
       );
+    } finally {
+      harness.db.close();
+    }
+  });
+
+  async function amendContractMidRun(mode: "auto" | "yolo") {
+    globalThis.Zotero = {
+      ...(globalThis.Zotero as object),
+      Prefs: {
+        get: (key: string) =>
+          key.endsWith("originalAgentPermissionMode") ? mode : undefined,
+      },
+      Items: {
+        get: (id: number) =>
+          id === 7 ? { id: 7, key: "AAAA1111", libraryID: 1 } : undefined,
+      },
+    } as never;
+    await initAgentPlanStore();
+    await initResearchStore();
+    await initPlanDocumentStore();
+    const planId = `plan-mid-run-${mode}`;
+    const readSteps = (...contents: string[]) =>
+      contents.map((content, index) => ({
+        content,
+        activeForm: content,
+        expectedEffect: "read" as const,
+        acceptanceCriteria: [
+          {
+            criterionId: `read-${index + 1}`,
+            description: "The paper was read",
+            verifier: "verified_read" as const,
+          },
+        ],
+      }));
+    const coordinator = new PlanExecutionCoordinator();
+    await coordinator.updateDraft({
+      planId,
+      conversationKey: 1,
+      provider: "original",
+      revision: 1,
+      ready: true,
+      contract: { deliverable: { kind: "answer" } },
+      steps: readSteps("Read the paper"),
+    });
+    const predecessor = await coordinator.approve({
+      planId,
+      revision: 1,
+      conversationGeneration: 0,
+    });
+    const request = resolvedAgentRequest({
+      conversationKey: 1,
+      mode: "agent",
+      userText: "Which effect does the paper report?",
+      planContext: {
+        phase: "executing",
+        planId,
+        revision: 1,
+        executionId: predecessor.executionId,
+        approvedDigest: predecessor.planDigest,
+        provider: "original",
+      },
+    });
+    const session = new PlanExecutionRunSession(request, async () => {});
+    assert.deepEqual(await session.initialize(), { kind: "ready" });
+    // A write contract a research-mutation grant gave the predecessor run.
+    const predecessorAuthority = { id: "predecessor-grant" } as never;
+    request.actionContract = predecessorAuthority;
+    const tool = createAmendPlanTool({} as never, new PlanAmendmentService());
+    // A ready revision needs three to seven steps.
+    const validated = tool.validate({
+      kind: "contract_revision",
+      rationale: "The user now asks for the reported effect size.",
+      contract: { deliverable: { kind: "answer" } },
+      steps: readSteps(
+        "Read the methods",
+        "Read the results",
+        "Read the effect sizes",
+      ),
+    });
+    assert.isTrue(validated.ok);
+    const amendResult = (await tool.execute(validated.value, {
+      request,
+      runId: "run-1",
+      item: null,
+      currentAnswerText: "",
+      modelName: "test",
+    } as never)) as {
+      awaitingApproval: boolean;
+      successorExecutionId?: string;
+    };
+    await session.recordToolResult({
+      toolName: "amend_plan",
+      executionClass: "control",
+      input: validated.value,
+      result: {
+        callId: "call-amend",
+        name: "amend_plan",
+        ok: true,
+        actionReceipts: [],
+        content: amendResult,
+      },
+      runId: "run-1",
+    });
+    return {
+      planId,
+      predecessor,
+      request,
+      session,
+      amendResult,
+      predecessorAuthority,
+    };
+  }
+
+  it("continues the run on the successor after an auto-approved contract revision", async function () {
+    const harness = installSqliteZotero();
+    try {
+      const { planId, predecessor, request, session, amendResult } =
+        await amendContractMidRun("yolo");
+      assert.isFalse(amendResult.awaitingApproval);
+      const successorExecutionId = amendResult.successorExecutionId!;
+      assert.isString(successorExecutionId);
+      assert.equal(
+        (await loadPlanExecutionLedger(predecessor.executionId))?.status,
+        "superseded",
+      );
+      const successor = await loadPlanExecutionLedger(successorExecutionId);
+      const taskId = successor!.activeTaskId!;
+      assert.isString(taskId);
+      assert.deepEqual(request.planContext, {
+        phase: "executing",
+        planId,
+        revision: 2,
+        executionId: successorExecutionId,
+        approvedDigest: successor!.planDigest,
+        activeTaskId: taskId,
+        provider: "original",
+      });
+      // The successor starts from its own approved contract.
+      assert.isUndefined(request.actionContract);
+
+      const read = (callId: string) =>
+        session.recordToolResult({
+          toolName: "library_search",
+          executionClass: "read",
+          input: { query: "effect" },
+          result: {
+            callId,
+            name: "library_search",
+            ok: true,
+            actionReceipts: [],
+            content: { results: [{ itemId: 7, title: "Paper" }] },
+          },
+          runId: "run-1",
+        });
+      await read("call-read-1");
+
+      const requirementId = successor!.tasks.find(
+        (task) => task.taskId === taskId,
+      )?.completionRequirements?.[0]?.requirementId;
+      assert.isString(requirementId);
+      assert.deepEqual(
+        (await listTaskEvidence(successorExecutionId, taskId)).map((entry) => [
+          entry.kind,
+          entry.requirementId,
+        ]),
+        [["verified_read", requirementId]],
+      );
+      assert.equal(
+        (await loadPlanExecutionLedger(successorExecutionId))?.tasks.find(
+          (task) => task.taskId === taskId,
+        )?.status,
+        "completed",
+      );
+      assert.isEmpty(
+        await listTaskEvidence(
+          predecessor.executionId,
+          predecessor.tasks[0].taskId,
+        ),
+      );
+      await read("call-read-2");
+      await read("call-read-3");
+      assert.deepEqual(await session.evaluateFinal({ canCorrect: false }), {
+        kind: "accept",
+      });
+    } finally {
+      harness.db.close();
+    }
+  });
+
+  it("keeps the run on the current execution while a contract revision awaits review", async function () {
+    const harness = installSqliteZotero();
+    try {
+      const { predecessor, request, amendResult, predecessorAuthority } =
+        await amendContractMidRun("auto");
+      assert.isTrue(amendResult.awaitingApproval);
+      assert.notEqual(
+        (await loadPlanExecutionLedger(predecessor.executionId))?.status,
+        "superseded",
+      );
+      const plan = request.planContext;
+      assert.equal(
+        plan?.phase === "executing" ? plan.executionId : undefined,
+        predecessor.executionId,
+      );
+      assert.equal(plan?.revision, 1);
+      assert.strictEqual(request.actionContract, predecessorAuthority);
     } finally {
       harness.db.close();
     }

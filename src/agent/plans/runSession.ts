@@ -196,6 +196,16 @@ export class PlanExecutionRunSession {
       }
       return { kind: "ready" };
     }
+    return this.bindExecution(plan);
+  }
+
+  /**
+   * Binds this run to one approved execution: checks its identity, digests
+   * and pinned skills, rebuilds its write authority, and starts its next task.
+   */
+  private async bindExecution(
+    plan: Extract<PlanRuntimeContext, { phase: "executing" }>,
+  ): Promise<{ kind: "ready" } | { kind: "failed"; userMessage: string }> {
     const ledger = await loadPlanExecutionLedger(plan.executionId);
     if (!ledger) {
       return {
@@ -476,6 +486,9 @@ export class PlanExecutionRunSession {
     artifacts?: AgentToolArtifact[];
     runId: string;
   }): Promise<void> {
+    if (params.result.ok && params.toolName === "amend_plan") {
+      await this.adoptSupersedingExecution();
+    }
     const plan = this.request.planContext;
     if (!plan || plan.phase !== "executing") return;
     let ledger = await loadPlanExecutionLedger(plan.executionId);
@@ -722,6 +735,52 @@ export class PlanExecutionRunSession {
       }
       return { kind: "fail", failure: message };
     }
+  }
+
+  /**
+   * An auto-approved contract revision supersedes the bound execution and
+   * starts its successor inside this run, so later evidence and finalization
+   * belong to the successor. The successor is bound as a new run binds its
+   * execution; authority from the predecessor never carries over.
+   */
+  private async adoptSupersedingExecution(): Promise<void> {
+    const plan = this.request.planContext;
+    if (plan?.phase !== "executing") return;
+    const current = await loadPlanExecutionLedger(plan.executionId);
+    if (current?.status !== "superseded" || !current.supersededByExecutionId) {
+      return;
+    }
+    const successor = await loadPlanExecutionLedger(
+      current.supersededByExecutionId,
+    );
+    const artifact = successor
+      ? await loadPlanArtifact(successor.planId, successor.revision)
+      : null;
+    if (
+      !successor ||
+      !artifact ||
+      successor.predecessorExecutionId !== plan.executionId ||
+      artifact.status !== "approved"
+    ) {
+      throw new Error(
+        "The superseding Plan execution does not match this conversation's approved revision.",
+      );
+    }
+    // A new execution run starts from its revision's approved contract.
+    this.request.actionContract = artifact.actionContract;
+    this.request.classifiedIntent = artifact.actionContract?.intent;
+    if (
+      this.request.actionProgress?.contractId !== artifact.actionContract?.id
+    ) {
+      this.request.actionProgress = undefined;
+    }
+    const bound = await this.bindExecution({
+      ...plan,
+      revision: successor.revision,
+      executionId: successor.executionId,
+      approvedDigest: successor.planDigest,
+    });
+    if (bound.kind === "failed") throw new Error(bound.userMessage);
   }
 
   private makeEvidence(
