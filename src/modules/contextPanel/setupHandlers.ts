@@ -1,6 +1,9 @@
 import { appLogger } from "../../core/logging";
 import { copyNoteEditingSelectedTextContext } from "./noteEditing/selectionController";
-import { syncTaskProgressPanel } from "./taskProgress/panel";
+import {
+  disposeTaskProgressPanel,
+  syncTaskProgressPanel,
+} from "./taskProgress/panel";
 import {
   TASK_PROGRESS_OPEN_PASSAGE_EVENT,
   TASK_PROGRESS_REMOVE_PAPER_EVENT,
@@ -8384,6 +8387,7 @@ export function setupHandlers(
     cleanupModelCapabilitySubscription?.();
     cleanupModelCapabilitySubscription = null;
     disposeHistoryActivity?.();
+    disposeTaskProgressPanel(body);
     disposeConversationTurnNavigator(body);
     disposeChatRendering(body);
     cleanupChatScroll();

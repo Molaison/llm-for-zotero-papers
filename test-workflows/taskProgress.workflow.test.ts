@@ -1006,5 +1006,16 @@ describe("workflow: task progress", function () {
     await exerciseLibraryRun(rootOf, "standalone", window);
     await exerciseLongList(rootOf, "standalone", window);
     await api.closeStandalone();
+    // A closed window's elements still report isConnected; its panel must
+    // leave the registry, or every later sync keeps repainting it.
+    assert.deepEqual(
+      api
+        .listTaskProgressPanels()
+        .filter(
+          (panel) => panel.gone || panel.documentURI.includes("standaloneChat"),
+        ),
+      [],
+      "the closed window leaves no Task progress panel behind",
+    );
   });
 });

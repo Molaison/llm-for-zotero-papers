@@ -677,6 +677,12 @@ export type WorkflowTestApi = {
   }>;
   /** Repaint every mounted Task progress view now. */
   flushTaskProgress: () => void;
+  /** Every mounted Task progress panel, and whether its window or element is gone. */
+  listTaskProgressPanels: () => Array<{
+    conversationKey: number | null;
+    gone: boolean;
+    documentURI: string;
+  }>;
   getTaskProgressSnapshot: (conversationKey: number) => {
     runState: string;
     turnIndex: number;

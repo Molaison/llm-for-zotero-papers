@@ -418,11 +418,8 @@ function transitionMs(style: CSSStyleDeclaration | null | undefined): number {
 /** Bind the row and drawer `buildUI` placed in this panel. Idempotent. */
 export function mountTaskProgressPanel(body: Element): TaskProgressView | null {
   installTaskProgressRequestLifecycle();
-  for (const [other, mounted] of Array.from(panels)) {
-    if (other !== body && !other.isConnected) {
-      mounted.view.dispose();
-      panels.delete(other);
-    }
+  for (const other of Array.from(panels.keys())) {
+    if (other !== body && isGone(other)) disposeTaskProgressPanel(other);
   }
   const existing = panels.get(body);
   const row = body.querySelector(
@@ -514,13 +511,22 @@ export function syncTaskProgressPanel(body: Element): void {
   view.setInput(input);
 }
 
+/**
+ * A panel that left its document, or whose window closed. A closed window's
+ * elements still report `isConnected` (to the dead document), so the window
+ * is checked too.
+ */
+function isGone(body: Element): boolean {
+  const view = body.ownerDocument?.defaultView;
+  return !body.isConnected || !view || view.closed;
+}
+
 export function syncTaskProgressPanelsForConversation(
   conversationKey: number,
 ): void {
   for (const [body, mounted] of Array.from(panels)) {
-    if (!body.isConnected) {
-      mounted.view.dispose();
-      panels.delete(body);
+    if (isGone(body)) {
+      disposeTaskProgressPanel(body);
       continue;
     }
     if (mounted.conversationKey === conversationKey)
@@ -540,15 +546,32 @@ export function getTaskProgressPanelView(
  */
 export function flushTaskProgressPanels(): void {
   for (const [body, mounted] of Array.from(panels)) {
-    if (!body.isConnected) continue;
+    if (isGone(body)) {
+      disposeTaskProgressPanel(body);
+      continue;
+    }
     syncTaskProgressPanel(body);
     mounted.view.flush();
   }
 }
 
+/** Called by the panel's own teardown, so a closed panel stops syncing. */
 export function disposeTaskProgressPanel(body: Element): void {
   const mounted = panels.get(body);
   if (!mounted) return;
   mounted.view.dispose();
   panels.delete(body);
+}
+
+/** Mounted panels and the conversations they show (workflow harness). */
+export function listMountedTaskProgressPanelsForTests(): Array<{
+  conversationKey: number | null;
+  gone: boolean;
+  documentURI: string;
+}> {
+  return Array.from(panels, ([body, mounted]) => ({
+    conversationKey: mounted.conversationKey,
+    gone: isGone(body),
+    documentURI: body.ownerDocument?.documentURI || "",
+  }));
 }

@@ -18,7 +18,10 @@ import {
   exerciseStreamingReplay,
   startTaskProgressReplay,
 } from "./streamingReplay";
-import { flushTaskProgressPanels } from "./taskProgress/panel";
+import {
+  flushTaskProgressPanels,
+  listMountedTaskProgressPanelsForTests,
+} from "./taskProgress/panel";
 import { clearAllTaskProgress, getTaskProgress } from "./taskProgress/store";
 import { resetTaskProgressDrawerHeight } from "./taskProgress/view";
 import { createCodexStreamingScrollReplay } from "./codexStreamingScrollReplay";
@@ -5902,6 +5905,10 @@ export function installWorkflowTestHarness(targetAddon: {
     flushTaskProgress: () => {
       assertWorkflowTestEnabled();
       flushTaskProgressPanels();
+    },
+    listTaskProgressPanels: () => {
+      assertWorkflowTestEnabled();
+      return listMountedTaskProgressPanelsForTests();
     },
     getTaskProgressSnapshot: (conversationKey) => {
       assertWorkflowTestEnabled();
