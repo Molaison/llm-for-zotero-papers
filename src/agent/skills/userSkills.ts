@@ -171,6 +171,14 @@ const OBSOLETE_SKILL_IDS = new Set([
   "simple-paper-qa",
 ]);
 
+/**
+ * Retired built-ins whose surviving copy (Step 1 keeps only customized or
+ * unknown copies) still loads, as a personal skill under its own id, so a
+ * user's edits never vanish silently. The note skills consolidated into
+ * write-note stay skipped: write-note owns that workflow.
+ */
+const RETIRED_SKILL_IDS_KEPT_AS_PERSONAL = new Set(["simple-paper-qa"]);
+
 /** Obsolete IDs already reported by loadUserSkills; each is logged once. */
 const loggedObsoleteSkillIds = new Set<string>();
 
@@ -543,7 +551,9 @@ export async function initUserSkills(): Promise<void> {
   //   (a) we have a stored hash proving the file is unmodified, OR
   //   (b) bootstrap — no stored hash (pre-hash install) AND the raw file
   //       still matches a known shipped fingerprint.
-  // Any other content is preserved as a personal skill.
+  // Any other content stays on disk. loadUserSkills loads a surviving
+  // simple-paper-qa as a personal skill under its own id; surviving old note
+  // skills are kept on disk but not loaded (write-note owns that workflow).
   if (io.read && io.remove) {
     for (const { filename: file, bootstrapRawHashes } of OBSOLETE_SKILL_FILES) {
       try {
@@ -589,9 +599,9 @@ export async function initUserSkills(): Promise<void> {
                 : ""),
           );
         } else {
-          // Customized or unknown legacy copy → keep as personal skill
+          // Customized or unknown legacy copy → keep it on disk
           seeded.delete(file);
-          appLogger.debug(`[llm-for-zotero] Kept ${file} as personal skill`);
+          appLogger.debug(`[llm-for-zotero] Kept customized ${file} on disk`);
         }
       } catch (err) {
         appLogger.warn(
@@ -800,13 +810,16 @@ export async function loadUserSkills(): Promise<AgentSkill[]> {
         OBSOLETE_SKILL_FILENAMES.has(filename) ||
         OBSOLETE_SKILL_IDS.has(skill.id)
       ) {
+        const keptAsPersonal = RETIRED_SKILL_IDS_KEPT_AS_PERSONAL.has(skill.id);
         if (!loggedObsoleteSkillIds.has(skill.id)) {
           loggedObsoleteSkillIds.add(skill.id);
           appLogger.info(
-            `[llm-for-zotero] Skipped retired skill ${skill.id} left in profile: ${filePath}`,
+            keptAsPersonal
+              ? `[llm-for-zotero] Loaded customized copy of retired skill ${skill.id} as a personal skill: ${filePath}`
+              : `[llm-for-zotero] Skipped retired skill ${skill.id} left in profile: ${filePath}`,
           );
         }
-        continue;
+        if (!keptAsPersonal) continue;
       }
 
       if (skill.id === "unknown" || !skill.instruction.trim()) {

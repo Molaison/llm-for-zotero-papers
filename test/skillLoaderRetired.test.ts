@@ -120,7 +120,7 @@ describe("retired shipped skills", function () {
     });
   });
 
-  it("skips a stale customized profile copy on load, without throwing, and logs once", async function () {
+  it("loads a surviving customized copy as a personal skill under its own id, and logs once", async function () {
     const files: Record<string, string> = {};
     const prefs = new Map<string, string>([[LOG_LEVEL_PREF, "debug"]]);
     installProfile("/tmp/llm-for-zotero-retired-load", files, prefs);
@@ -140,10 +140,13 @@ describe("retired shipped skills", function () {
     const second = await loadUserSkills();
 
     for (const skills of [first, second]) {
-      assert.deepEqual(
+      assert.sameMembers(
         buildSkillInventory(skills).map((entry) => entry.id),
-        ["evidence-based-qa"],
+        ["evidence-based-qa", "simple-paper-qa"],
       );
+      const kept = skills.find((skill) => skill.id === "simple-paper-qa");
+      assert.equal(kept?.source, "personal");
+      assert.include(kept?.instruction, "My own paper-reading rule.");
     }
     const retiredLines = logged.filter((line) =>
       line.includes("simple-paper-qa"),
@@ -151,7 +154,7 @@ describe("retired shipped skills", function () {
     assert.lengthOf(retiredLines, 1);
     assert.include(
       retiredLines[0],
-      "Skipped retired skill simple-paper-qa left in profile",
+      "Loaded customized copy of retired skill simple-paper-qa as a personal skill",
     );
   });
 
