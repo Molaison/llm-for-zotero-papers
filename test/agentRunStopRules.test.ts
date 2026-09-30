@@ -609,6 +609,39 @@ describe("Original Agent run endings", function () {
     assertStoppedBy(ending, "cancelled_before_step", "cancelled");
   });
 
+  it("cancelled_before_step: interrupts an approved plan's active task, like a stop in flight", async function () {
+    // Before, the run was finished first and the catch-all's interrupt was
+    // skipped, so the task stayed in progress and the plan offered no Resume.
+    const original = PlanExecutionRunSession.prototype.interrupt;
+    const reasons: string[] = [];
+    PlanExecutionRunSession.prototype.interrupt = async (reason: string) => {
+      reasons.push(reason);
+    };
+    try {
+      const controller = new AbortController();
+      const registry = new AgentToolRegistry();
+      registerReadTool(registry, async () => {
+        controller.abort();
+        return { notes: [] };
+      });
+      const adapter = scriptedAdapter((step) =>
+        toolStep([readCall(`c${step}`)]),
+      );
+      const ending = await runToEnding(installed, {
+        registry,
+        adapter,
+        signal: controller.signal,
+        request: baseRequest(97_326, "Read the notes"),
+      });
+      assert.equal(ending.run.status, "cancelled");
+      assert.deepEqual(reasons, [
+        "The user stopped the approved plan execution",
+      ]);
+    } finally {
+      PlanExecutionRunSession.prototype.interrupt = original;
+    }
+  });
+
   it("cancelled_in_flight: finishes as cancelled when the user stops a step in flight", async function () {
     const controller = new AbortController();
     const adapter = scriptedAdapter(() => {

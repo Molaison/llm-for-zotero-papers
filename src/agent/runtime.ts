@@ -1530,6 +1530,12 @@ export class AgentRuntime {
         statusText: string,
       ): Promise<{ step: AgentModelStep; stepStreamedText: string }> => {
         if (params.signal?.aborted) {
+          // A stop between steps interrupts an approved plan's active task
+          // as a stop in flight does, so the plan can be resumed; the run is
+          // finished here, so the catch below no longer does it.
+          await activePlanSession
+            .interrupt("The user stopped the approved plan execution")
+            .catch(() => undefined);
           await terminateRun(
             "cancelled",
             turnPathRedactor.redactTerminalText(currentAnswerText),
