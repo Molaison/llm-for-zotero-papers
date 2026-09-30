@@ -92,8 +92,8 @@ export function attachFooterQuotaControl(params: {
   let selectedKey = "";
   const hide = () => {
     if (!button) return;
-    button.style.display = "none";
-    button.textContent = "";
+    if (button.style.display !== "none") button.style.display = "none";
+    if (button.textContent) button.textContent = "";
     button.removeAttribute("title");
     button.removeAttribute("aria-label");
   };
@@ -113,10 +113,16 @@ export function attachFooterQuotaControl(params: {
         hide();
         return;
       }
-      button.textContent = presentation.text;
-      button.title = presentation.title;
-      button.setAttribute("aria-label", presentation.title);
-      button.style.display = "";
+      // Model-button updates sync on every panel refresh (pointer reentry
+      // included); an unchanged value must not touch the DOM.
+      if (button.textContent !== presentation.text) {
+        button.textContent = presentation.text;
+      }
+      if (button.title !== presentation.title) {
+        button.title = presentation.title;
+        button.setAttribute("aria-label", presentation.title);
+      }
+      if (button.style.display) button.style.display = "";
     } catch {
       // Optional account telemetry must never interrupt a chat or show zero.
       if (!disposed && requestGeneration === generation) hide();
