@@ -954,11 +954,6 @@ export type AgentRuntimeRequestInput = AgentRequest & {
   materialOutcomes?: readonly MaterialOutcomeEntry[];
   /** Exact skill instructions loaded or forced by the host for this workflow. */
   loadedSkillRecords?: LoadedSkillRecord[];
-  /**
-   * Tool guidance instructions the model has already received this turn: the
-   * rendered prompt's guidance plus any load_skill returned. Host-set only.
-   */
-  deliveredToolGuidance?: string[];
   /** Legacy stored-artifact compatibility; absent on fresh ordinary turns. */
   classifiedIntent?: ClassifiedTurnIntent;
   /** Cheap chat-path keyword signal for tool-guidance matching only; never grants authority. */
@@ -1035,6 +1030,11 @@ export type ResolvedAgentRuntimeRequest = Omit<
   resolvedSelectedTextAnchors?: readonly ResolvedTurnSelectedTextAnchor[];
   localDocuments?: readonly TurnLocalDocument[];
   turnPaperScopeWarnings?: readonly TurnPaperScopeWarning[];
+  /**
+   * Tool guidance instructions the model has already received this turn: the
+   * rendered prompt's guidance plus any load_skill returned. Runtime-set only.
+   */
+  deliveredToolGuidance?: string[];
 };
 
 /** Canonical request consumed after the one-way runtime boundary. */
