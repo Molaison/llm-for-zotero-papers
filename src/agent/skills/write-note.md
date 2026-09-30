@@ -13,6 +13,7 @@ activation: auto
 Follow the requested operation, content, destination, and preservation constraints.
 User customizations take precedence over formatting defaults, within the current request and host permissions.
 Resolve an ambiguous target or operation before writing.
+Outside Plan mode, when the user asked to save the result and `task_update` is available, first record the save as a task, so the host can see it is still open.
 
 ### Choose the content
 

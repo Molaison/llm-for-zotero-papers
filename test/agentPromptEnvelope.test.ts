@@ -6,7 +6,12 @@ import {
   composeAgentModelInput,
   renderAgentPromptEnvelope,
 } from "../src/agent/model/messageBuilder";
-import type { PlanExecutionLedger } from "../src/agent/plans/types";
+import type {
+  PlanExecutionLedger,
+  PlanRuntimeContext,
+} from "../src/agent/plans/types";
+import { buildZoteroEnvironmentManifest } from "../src/codexAppServer/nativeClient";
+import { AGENT_ACTION_CONTRACT } from "../src/shared/instructionContracts";
 import { COVERAGE_DISCLOSURE_REQUIREMENT } from "../src/agent/documents/draftValidation";
 import type { AgentModelMessage } from "../src/agent/types";
 import { resolvedAgentRequest } from "./helpers/resolvedAgentRequest";
@@ -896,5 +901,73 @@ describe("agent prompt envelope evidence sufficiency", function () {
       prompt,
       "when unchanged, do not repeat the read and retrieve again only for a specifically named missing dimension",
     );
+  });
+});
+
+describe("agent prompt envelope direct workflow", function () {
+  const DECLARE_OUTCOMES =
+    "When a request asks for more than one outcome, such as summarizing a paper and saving it as a note, record each outcome with task_update in your first step, then complete them in order.";
+  const RECEIPT_CONFIRMS =
+    "A write result with a verified receipt already confirms the change; do not re-read the target to confirm it.";
+
+  /** The Original Agent's "## Direct agent workflow" system block. */
+  async function directWorkflowBlock(
+    planContext?: PlanRuntimeContext,
+  ): Promise<string> {
+    const rendered = await renderAgentPromptEnvelope(
+      resolvedAgentRequest({
+        conversationKey: 912_101,
+        mode: "agent",
+        model: "test-model",
+        userText: "Summarize this paper and save it as a note",
+        ...(planContext ? { planContext } : {}),
+      }),
+      [],
+      [],
+    );
+    const block = rendered.inventory.fixedPrompt
+      .split("\n\n")
+      .find((section) => section.startsWith("## Direct agent workflow"));
+    assert.exists(block, "the Original Agent prompt has a direct workflow");
+    return block!;
+  }
+
+  const planning: PlanRuntimeContext = {
+    phase: "planning",
+    planId: "plan-direct-workflow",
+    revision: 1,
+    provider: "original",
+  };
+  const executing: PlanRuntimeContext = {
+    phase: "executing",
+    planId: "plan-direct-workflow",
+    revision: 1,
+    executionId: "execution-direct-workflow",
+    approvedDigest: "sha256:direct-workflow",
+    provider: "original",
+  };
+
+  it("asks an ordinary turn to declare each requested outcome in its first step", async function () {
+    assert.include(await directWorkflowBlock(), DECLARE_OUTCOMES);
+    // A Plan tracks its own steps; task_update cannot add tasks to one.
+    assert.notInclude(await directWorkflowBlock(planning), DECLARE_OUTCOMES);
+    assert.notInclude(await directWorkflowBlock(executing), DECLARE_OUTCOMES);
+  });
+
+  it("tells the model a verified write receipt already confirms the change", async function () {
+    assert.include(await directWorkflowBlock(), RECEIPT_CONFIRMS);
+    assert.include(await directWorkflowBlock(executing), RECEIPT_CONFIRMS);
+  });
+
+  it("keeps both sentences out of the Codex client's instructions", function () {
+    const codexManifest = buildZoteroEnvironmentManifest({
+      scope: { kind: "global", libraryID: 1, conversationKey: 1 } as never,
+      mcpEnabled: true,
+      mcpReady: true,
+    });
+    assert.include(codexManifest, AGENT_ACTION_CONTRACT);
+    for (const sentence of [DECLARE_OUTCOMES, RECEIPT_CONFIRMS]) {
+      assert.notInclude(codexManifest, sentence);
+    }
   });
 });

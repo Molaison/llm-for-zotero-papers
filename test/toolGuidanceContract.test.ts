@@ -10,6 +10,8 @@ import { createBuiltInToolRegistry } from "../src/agent/tools";
 import { RETIRED_TOOL_HINTS } from "../src/agent/context/toolNames";
 import { computeUserTextSignals } from "../src/agent/runtime";
 import { AGENT_PERSONA_INSTRUCTIONS } from "../src/agent/model/agentPersona";
+import { BUILTIN_SKILL_FILES } from "../src/agent/skills";
+import { extractManagedBlock } from "../src/agent/skills/managedBlock";
 import { DEFAULT_SYSTEM_PROMPT } from "../src/utils/llmDefaults";
 
 const root = process.cwd();
@@ -313,6 +315,18 @@ describe("tool guidance contracts", function () {
     assert.include(
       analyzeFigures!,
       "User-provided images remain separate evidence inputs",
+    );
+  });
+
+  it("asks write-note to declare a requested save as a task before any content", function () {
+    const { block } = extractManagedBlock(BUILTIN_SKILL_FILES["write-note.md"]);
+    const declareSave =
+      "Outside Plan mode, when the user asked to save the result and `task_update` is available, first record the save as a task, so the host can see it is still open.";
+    assert.include(block || "", declareSave, "the line is managed guidance");
+    assert.isBelow(
+      block!.indexOf(declareSave),
+      block!.indexOf("### Choose the content"),
+      "the save is declared before the workflow composes anything",
     );
   });
 
