@@ -70,13 +70,17 @@ describe("workflow: standalone responsive chrome", function () {
               );
             }
             const bounds = header.getBoundingClientRect();
-            const buttons = Array.from(header.querySelectorAll("button"))
+            const buttons = (
+              Array.from(
+                header.querySelectorAll("button"),
+              ) as HTMLButtonElement[]
+            )
               .map((button) => button.getBoundingClientRect())
               .filter((rect) => rect.width > 0 && rect.height > 0);
             const context = `${label}, ${width}px, scale ${scale}`;
             for (const button of Array.from(
               header.querySelectorAll(".llm-header-actions button"),
-            )) {
+            ) as Element[]) {
               assert.closeTo(
                 button.getBoundingClientRect().width,
                 bounds.width <= 380 ? 24 : 28,
@@ -86,11 +90,13 @@ describe("workflow: standalone responsive chrome", function () {
             }
             for (const button of Array.from(
               header.querySelectorAll(".llm-history-new, .llm-history-toggle"),
-            )) {
+            ) as Element[]) {
               assert.closeTo(button.getBoundingClientRect().width, 20, 0.5);
             }
-            const runtimeGlyphs = Array.from(
-              runtime.querySelectorAll(".llm-runtime-system-toggle-icon"),
+            const runtimeGlyphs = (
+              Array.from(
+                runtime.querySelectorAll(".llm-runtime-system-toggle-icon"),
+              ) as Element[]
             ).map((icon) => icon.getBoundingClientRect());
             assert.lengthOf(runtimeGlyphs, 2);
             for (const glyph of runtimeGlyphs) {
@@ -140,11 +146,11 @@ describe("workflow: standalone responsive chrome", function () {
     const sidebar = win.document.querySelector(".llm-standalone-sidebar")!;
     const before = sidebar.getBoundingClientRect().width;
     const widths: number[] = [];
-    const start = win.performance.now();
+    const start = win.performance!.now();
     const sampling = new Promise<void>((resolve) => {
       const sample = () => {
         widths.push(sidebar.getBoundingClientRect().width);
-        if (win.performance.now() - start < 600)
+        if (win.performance!.now() - start < 600)
           win.requestAnimationFrame(sample);
         else resolve();
       };

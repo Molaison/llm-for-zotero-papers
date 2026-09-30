@@ -13,6 +13,8 @@ import {
   setUserSkills,
 } from "../src/agent/skills";
 import { AgentToolRegistry } from "../src/agent/tools/registry";
+import { createAttachmentUpdateTool } from "../src/agent/tools/write/attachmentUpdate";
+import { createCollectionUpdateTool } from "../src/agent/tools/write/collectionUpdate";
 import {
   createPaperReadTool as createResolvedPaperReadTool,
   resolveMetadataOverviewTitleForTests,
@@ -231,7 +233,7 @@ describe("semantic tool surface", function () {
     });
     registry.register({
       spec: {
-        name: "query_library",
+        name: "internal_search_delegate",
         description: "Internal legacy delegate",
         inputSchema: { type: "object" },
         executionClass: "read",
@@ -252,7 +254,7 @@ describe("semantic tool surface", function () {
         .map((tool) => tool.name),
       ["library_search"],
     );
-    assert.exists(registry.getTool("query_library"));
+    assert.exists(registry.getTool("internal_search_delegate"));
   });
 
   it("exposes the direct-agent built-in surface and hides legacy primitive names", function () {
@@ -262,9 +264,7 @@ describe("semantic tool surface", function () {
 
     assert.deepEqual(names, [
       "annotate_pdf",
-      "attachment_update",
-      "collection_update",
-      "conversation_read",
+      "context_read",
       "file_io",
       "library_cite",
       "library_delete",
@@ -280,12 +280,11 @@ describe("semantic tool surface", function () {
       "note_write",
       "note_write_batch",
       "paper_read",
+      "read_attachment",
       "request_user_input",
-      "revert_changes",
       "run_command",
-      "saved_search_update",
       "submit_document",
-      "undo_last_action",
+      "undo",
       "workflow_script",
       "zotero_script",
     ]);
@@ -301,32 +300,58 @@ describe("semantic tool surface", function () {
       "answer",
       "review",
     ]);
-    for (const legacyName of [
-      "query_library",
+    // Retired into the facades: no longer registered at all. The write
+    // delegates live on only inside library_update, library_import, and
+    // library_delete; collection, attachment, and saved-search updates are
+    // library_update kinds; the single and multi-revert undos are one `undo`;
+    // tool-result and conversation reads are one `context_read`.
+    for (const retiredName of [
       "read_paper",
       "search_paper",
       "view_pdf_pages",
+      "query_library",
+      "read_library",
       "search_literature_online",
       "edit_current_note",
-      "import_identifiers",
+      "write_notes_batch",
+      "apply_tags",
+      "set_item_tags",
+      "tag_update",
+      "move_to_collection",
       "update_metadata",
+      "reparent_items",
+      "relate_items",
+      "manage_collections",
+      "manage_attachments",
+      "import_identifiers",
+      "import_local_files",
+      "create_items",
+      "trash_items",
+      "restore_from_trash",
+      "merge_items",
+      "collection_update",
+      "attachment_update",
+      "saved_search_update",
+      "undo_last_action",
+      "revert_changes",
+      "tool_result_read",
+      "conversation_read",
     ]) {
-      assert.notInclude(names, legacyName);
-      assert.exists(
-        registry.getTool(legacyName),
-        `${legacyName} remains internally callable`,
-      );
+      assert.notInclude(names, retiredName);
+      assert.notExists(registry.getTool(retiredName), `${retiredName} retired`);
     }
+    // read_attachment is model-visible and keeps its approval gate.
+    assert.isFunction(registry.getTool("read_attachment")?.createPendingAction);
     assert.exists(registry.getTool("web_search"));
     assert.exists(registry.getTool("web_read"));
     assert.notInclude(names, "web_search");
     assert.notInclude(names, "web_read");
+    // Filesystem, shell and script tools are ordinary model-visible tools; no
+    // tier label distinguishes them.
     for (const name of ["file_io", "run_command", "zotero_script"]) {
-      assert.equal(
-        tools.find((tool) => tool.name === name)?.tier,
-        "advanced",
-        `${name} should be advanced`,
-      );
+      const tool = tools.find((entry) => entry.name === name);
+      assert.exists(tool, `${name} should be model-visible`);
+      assert.notProperty(tool, "tier");
     }
   });
 
@@ -390,8 +415,53 @@ describe("semantic tool surface", function () {
     ]);
   });
 
-  it("exposes batch metadata operations in the update_metadata schema", function () {
-    assert.containsAllKeys(schemaProperties("update_metadata"), [
+  it("the collection and attachment delegates keep their own names and labels in cards", async function () {
+    const collections = createCollectionUpdateTool({
+      getCollectionSummary: () => null,
+    } as never);
+    assert.equal(collections.spec.name, "collection_update");
+    assert.equal(collections.presentation?.label, "Update Collections");
+    const collectionInput = collections.validate({
+      action: "create",
+      name: "Audit",
+    });
+    assert.isTrue(collectionInput.ok);
+    if (!collectionInput.ok) return;
+    const collectionCard = await collections.createPendingAction!(
+      collectionInput.value,
+      baseContext,
+    );
+    assert.equal(collectionCard.toolName, "collection_update");
+
+    const attachments = createAttachmentUpdateTool({
+      getAttachmentInfo: () => ({ title: "paper.pdf" }),
+    } as never);
+    assert.equal(attachments.spec.name, "attachment_update");
+    assert.equal(attachments.presentation?.label, "Update Attachments");
+    const attachmentInput = attachments.validate({
+      action: "rename",
+      attachmentId: 5,
+      newName: "renamed.pdf",
+    });
+    assert.isTrue(attachmentInput.ok);
+    if (!attachmentInput.ok) return;
+    const attachmentCard = await attachments.createPendingAction!(
+      attachmentInput.value,
+      baseContext,
+    );
+    assert.equal(attachmentCard.toolName, "attachment_update");
+    // Delegate guidance never reaches the model; library_update carries it.
+    assert.notExists(attachments.guidance);
+    const libraryUpdate =
+      createTestBuiltInRegistry().getTool("library_update")!;
+    assert.include(
+      libraryUpdate.guidance?.instruction || "",
+      "Use kind:'attachment' to delete, rename, or re-link",
+    );
+  });
+
+  it("exposes batch metadata operations in the library_update schema", function () {
+    assert.containsAllKeys(schemaProperties("library_update"), [
       "metadata",
       "operations",
       "paperContext",
@@ -3382,8 +3452,8 @@ describe("semantic tool surface", function () {
     );
   });
 
-  it("matches simple-paper-qa for understand-this-paper typo requests", function () {
-    setUserSkills([parseSkill(BUILTIN_SKILL_FILES["simple-paper-qa.md"])]);
+  it("matches evidence-based-qa for understand-this-paper typo requests", function () {
+    setUserSkills([parseSkill(BUILTIN_SKILL_FILES["evidence-based-qa.md"])]);
     assert.include(
       getMatchedSkillIds(
         resolvedSkillRequest({
@@ -3393,9 +3463,9 @@ describe("semantic tool surface", function () {
             { itemId: 1, contextItemId: 2, title: "Paper" },
           ],
         }),
-        ["simple-paper-qa"],
+        ["evidence-based-qa"],
       ),
-      "simple-paper-qa",
+      "evidence-based-qa",
     );
   });
 

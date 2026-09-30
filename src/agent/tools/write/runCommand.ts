@@ -265,7 +265,7 @@ function getNoteWriteBypassRefusal(
   if (relativeMarkdownTargetAfterCd) {
     return (
       `Refusing run_command relative Markdown note write after shell directory change: ${relativeMarkdownTargetAfterCd}. ` +
-      "Use file_io for external Markdown note files or edit_current_note for Zotero notes so MinerU figure-block completeness can be validated before writing."
+      "Use file_io for external Markdown note files or note_write for Zotero notes so MinerU figure-block completeness can be validated before writing."
     );
   }
   const resolvedTargets = targets.map((path) =>
@@ -279,7 +279,7 @@ function getNoteWriteBypassRefusal(
   if (!noteTarget) return null;
   return (
     `Refusing run_command Markdown note write to configured notes directory: ${noteTarget}. ` +
-    "Use file_io for external Markdown note files or edit_current_note for Zotero notes so MinerU figure-block completeness can be validated before writing."
+    "Use file_io for external Markdown note files or note_write for Zotero notes so MinerU figure-block completeness can be validated before writing."
   );
 }
 

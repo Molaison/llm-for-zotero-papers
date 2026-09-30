@@ -387,6 +387,13 @@ describe("user skill bootstrap upgrades", function () {
       parseSkill(canonicalWriteNote).version,
       parseSkill(shipped).version,
     );
+    assert.include(
+      canonicalWriteNote,
+      '`context_read` with `source: "conversation"`',
+    );
+    assert.include(canonicalWriteNote, "narrowly scoped note");
+    assert.include(canonicalWriteNote, "`sourceMessageId`");
+    assert.include(canonicalWriteNote, "returned `documentId`");
   });
 
   for (const [name, version] of [
@@ -398,7 +405,7 @@ describe("user skill bootstrap upgrades", function () {
         const baseDir = `/tmp/llm-for-zotero-skill-upgrade-${name}-${mode}`;
         const raw = readFileSync(
           new URL(
-            `./fixtures/skillUpgrade/${name}-v${version}.md`,
+            `./fixtures/skillUpgrades/${name}-v${version}.md`,
             import.meta.url,
           ),
           "utf8",
@@ -435,22 +442,65 @@ describe("user skill bootstrap upgrades", function () {
     }
   }
 
-  it("migrates declarative supersession without replacing legacy match metadata", function () {
-    const old = BUILTIN_SKILL_FILES["evidence-based-qa.md"]
-      .replace(/version: \d+/, "version: 6\nmatch: legacy fixture only")
-      .replace("supersedes: simple-paper-qa\n", "");
-    const patched = patchSkillFrontmatter(
-      old,
-      BUILTIN_SKILL_FILES["evidence-based-qa.md"],
+  it("bootstrap-upgrades an unmodified v15 write-note that has no stored hash", async function () {
+    const baseDir = "/tmp/llm-for-zotero-bootstrap-write-note-v15-test";
+    installMockSkillEnvironment(baseDir, {}, new Map<string, string>());
+    // The exact v15 file: the one line and the version v16 changed.
+    const v16 = readFileSync(
+      new URL("./fixtures/skillUpgrades/write-note-v16.md", import.meta.url),
+      "utf8",
     );
-    assert.isString(patched);
-    assert.include(patched as string, "supersedes: simple-paper-qa");
-    assert.include(patched as string, "match:");
+    const v15 = v16
+      .replace("version: 16\n", "version: 15\n")
+      .replace(
+        'Use `context_read` with `source: "conversation"` only when',
+        "Use `conversation_read` only when",
+      );
+    assert.notEqual(v15, v16);
+    const writeNotePath = getCanonicalSkillFilePath("write-note");
+    const files: Record<string, string> = { [writeNotePath]: v15 };
+
+    installMockSkillEnvironment(baseDir, files, new Map<string, string>());
+    await initUserSkills();
+
+    const upgraded = files[writeNotePath];
+    assert.equal(
+      parseSkill(upgraded).version,
+      parseSkill(BUILTIN_SKILL_FILES["write-note.md"]).version,
+    );
+    assert.include(upgraded, '`context_read` with `source: "conversation"`');
+    assert.notInclude(upgraded, "conversation_read");
   });
-  for (const [name, version] of [
-    ["simple-paper-qa", 8],
-    ["evidence-based-qa", 7],
-  ] as const) {
+
+  it("neither adds nor strips the retired supersedes key and keeps legacy match metadata", function () {
+    // supersedes is retired: a shipped file declaring it no longer propagates
+    // the key, and a user file that still carries it keeps its line verbatim.
+    const shipped = BUILTIN_SKILL_FILES["evidence-based-qa.md"].replace(
+      "activation: auto\n",
+      "activation: auto\nsupersedes: older-skill\n",
+    );
+    const old = BUILTIN_SKILL_FILES["evidence-based-qa.md"].replace(
+      /version: \d+/,
+      "version: 6\nmatch: legacy fixture only",
+    );
+    const patched = patchSkillFrontmatter(old, shipped);
+    assert.isString(patched);
+    assert.notInclude(patched as string, "supersedes:");
+    assert.include(patched as string, "match:");
+    assert.equal(
+      parseSkill(patched as string).version,
+      parseSkill(shipped).version,
+    );
+
+    const userCopy = old.replace(
+      "match: legacy fixture only",
+      "match: legacy fixture only\nsupersedes: user-kept",
+    );
+    const patchedUserCopy = patchSkillFrontmatter(userCopy, shipped);
+    assert.isString(patchedUserCopy);
+    assert.include(patchedUserCopy as string, "supersedes: user-kept");
+  });
+  for (const [name, version] of [["evidence-based-qa", 7]] as const) {
     it(`upgrades the unmodified baseline ${name} skill without stored hashes`, async function () {
       const baseDir = `/tmp/llm-for-zotero-baseline-${name}-upgrade`;
       const raw = readFileSync(
@@ -496,6 +546,114 @@ describe("user skill bootstrap upgrades", function () {
         parseSkill(files[filePath]).instruction,
         parseSkill(BUILTIN_SKILL_FILES[`${name}.md`]).instruction,
       );
+    });
+  }
+  function assertUpgradedToShipped(upgraded: string, name: string) {
+    const shippedRaw = BUILTIN_SKILL_FILES[`${name}.md`];
+    const shipped = parseSkill(shippedRaw);
+    assert.equal(parseSkill(upgraded).version, shipped.version);
+    assert.equal(parseSkill(upgraded).description, shipped.description);
+    // A tracked upgrade refreshes only a managed block; text outside the
+    // markers stays with the user.
+    const shippedBlock = extractManagedBlock(shippedRaw).block;
+    if (shippedBlock === null) {
+      assert.equal(parseSkill(upgraded).instruction, shipped.instruction);
+    } else {
+      assert.equal(extractManagedBlock(upgraded).block, shippedBlock);
+    }
+    assert.deepEqual(parseSkill(upgraded).contexts, shipped.contexts);
+  }
+  it("patches old shipped analyze-figures contexts on a customized copy", async function () {
+    const customized = readFileSync(
+      new URL(
+        "./fixtures/skillUpgrades/analyze-figures-v10.md",
+        import.meta.url,
+      ),
+      "utf8",
+    ).replace(
+      "## Requested persistence",
+      "My own figure rule.\n\n## Requested persistence",
+    );
+    const files: Record<string, string> = {};
+    installMockSkillEnvironment(
+      "/tmp/llm-for-zotero-customized-analyze-figures",
+      files,
+      new Map<string, string>(),
+    );
+    const filePath = getCanonicalSkillFilePath("analyze-figures");
+    files[filePath] = customized;
+    await initUserSkills();
+    assert.include(files[filePath], "My own figure rule.");
+    assert.deepEqual(parseSkill(files[filePath]).contexts, [
+      "single-paper",
+      "paper-set",
+      "library-corpus",
+      "visual-input",
+    ]);
+  });
+  // Exact pre-edit copies of the previously shipped version of every skill
+  // whose rules moved to a single owner. An unmodified install must upgrade
+  // both without a stored hash (bootstrap raw hash) and with one (tracked
+  // body hash); a missing hash leaves the user on the stale copy.
+  for (const fixture of [
+    "evidence-based-qa-v8",
+    "evidence-based-qa-v9",
+    "evidence-based-qa-v10",
+    "compare-papers-v7",
+    "write-note-v16",
+    "analyze-figures-v9",
+    "analyze-figures-v10",
+    "import-cited-reference-v3",
+    "import-cited-reference-v4",
+    // The simplified texts main shipped at the same version numbers
+    // (ad2c0fec) before the tool consolidation merged.
+    "simplified/analyze-figures-v10",
+    "simplified/compare-papers-v8",
+    "simplified/evidence-based-qa-v9",
+    "simplified/import-cited-reference-v4",
+    "simplified/literature-review-v9",
+    "simplified/write-note-v16",
+  ] as const) {
+    const name = fixture.replace(/^.*\//, "").replace(/-v\d+$/, "");
+    // The canonical path follows the skill id, which can differ from the
+    // shipped filename (import-cited-reference.md ships id import-to-library).
+    const skillId = parseSkill(BUILTIN_SKILL_FILES[`${name}.md`]).id;
+    const readFixture = () =>
+      readFileSync(
+        new URL(`./fixtures/skillUpgrades/${fixture}.md`, import.meta.url),
+        "utf8",
+      );
+    it(`bootstrap-upgrades the unmodified previous ${fixture} without a stored hash`, async function () {
+      const files: Record<string, string> = {};
+      installMockSkillEnvironment(
+        `/tmp/llm-for-zotero-previous-${fixture}`,
+        files,
+        new Map<string, string>(),
+      );
+      const filePath = getCanonicalSkillFilePath(skillId);
+      files[filePath] = readFixture();
+      await initUserSkills();
+      assertUpgradedToShipped(files[filePath], name);
+    });
+    it(`upgrades the tracked unmodified previous ${fixture}`, async function () {
+      const raw = readFixture();
+      const files: Record<string, string> = {};
+      const prefs = new Map<string, string>();
+      installMockSkillEnvironment(
+        `/tmp/llm-for-zotero-tracked-previous-${fixture}`,
+        files,
+        prefs,
+      );
+      const filePath = getCanonicalSkillFilePath(skillId);
+      files[filePath] = raw;
+      prefs.set(
+        BODY_HASH_PREF_KEY,
+        JSON.stringify({
+          [`${name}.md`]: hashSkillForUpgrade(raw, parseSkill(raw).instruction),
+        }),
+      );
+      await initUserSkills();
+      assertUpgradedToShipped(files[filePath], name);
     });
   }
 });

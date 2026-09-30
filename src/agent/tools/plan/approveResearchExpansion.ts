@@ -133,11 +133,7 @@ export function createApproveResearchExpansionTool(
      */
     presentation: { hiddenInTrace: true },
     isAvailable: (request) => request.planContext?.phase === "executing",
-    guidance: {
-      matches: (request) => request.planContext?.phase === "executing",
-      instruction:
-        "When research_update reports checkpointRequired, stop deep reading and call approve_research_expansion. Do not raise the ceiling through research_update. If approval is declined, either finalize a partial result at the user's direction or revise the plan to narrow scope.",
-    },
+    // Workflow rules: EXECUTING_PHASE_GUIDANCE (plans/planningGuidance.ts).
     validate: validateInput,
     planInvocation: () =>
       readOnlyInvocationPlan({

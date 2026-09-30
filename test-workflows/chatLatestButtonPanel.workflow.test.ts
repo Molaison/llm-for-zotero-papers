@@ -81,7 +81,12 @@ describe("workflow: latest message button in a Codex panel", function () {
       fixture = undefined;
       for (const [name, value] of previous) {
         if (value === undefined) Zotero.Prefs.clear(prefix + name, true);
-        else Zotero.Prefs.set(prefix + name, value, true);
+        else
+          Zotero.Prefs.set(
+            prefix + name,
+            value as string | number | boolean,
+            true,
+          );
       }
       previous.clear();
     }

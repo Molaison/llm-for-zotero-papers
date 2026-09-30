@@ -1,5 +1,6 @@
 import { assert } from "chai";
 import { AGENT_PERSONA_INSTRUCTIONS } from "../src/agent/model/agentPersona";
+import { LITERATURE_SEARCH_GUIDANCE } from "../src/agent/tools/read/literatureSearch";
 import { buildInstructionInventory } from "../src/agent/model/instructionInventory";
 import {
   AGENT_ACTION_CONTRACT,
@@ -40,14 +41,25 @@ describe("instruction harness inventory", function () {
       assert.include(prompt, "labeling a guess does not supply evidence");
     }
   });
-  it("keeps discovery selection distinct from explicit imports in the fixed persona", function () {
-    const prompt = AGENT_PERSONA_INSTRUCTIONS.join("\n");
+  it("keeps discovery selection distinct from explicit imports in literature_search guidance", function () {
+    const persona = AGENT_PERSONA_INSTRUCTIONS.join("\n");
+    const guidance = LITERATURE_SEARCH_GUIDANCE.instruction;
+    assert.include(guidance, "then call literature_review");
+    assert.include(guidance, "discovery never imports silently");
     assert.include(
-      prompt,
-      "literature_review to present a requested discovery shortlist (calling it always opens the paper selection card; discovery never imports on its own in any mode)",
+      guidance,
+      "Do not substitute a discovery card for an explicit import",
     );
-    assert.include(prompt, "library_import only for explicit import requests");
-    assert.notInclude(prompt, "only for imports, note saving");
+    assert.include(
+      guidance,
+      "call library_import for exactly the requested number",
+    );
+    assert.notInclude(persona, "literature_review");
+    assert.notInclude(persona, "only for imports, note saving");
+    assert.include(
+      persona,
+      "literature_search for scholarly evidence, web_search and web_read for general public evidence",
+    );
   });
   it("keeps the shared semantic contracts provider-neutral", function () {
     const contracts = [

@@ -4,7 +4,7 @@ import { MutationNoEffectError } from "../src/agent/services/externalMutationCoo
 import { LibraryMutationService } from "../src/agent/services/libraryMutationService";
 import { executeLibraryMutationAction } from "../src/agent/services/mutationCoordinator";
 import { initAgentChangeJournal } from "../src/agent/store/changeJournal";
-import { createUndoLastActionTool } from "../src/agent/tools/write/undoLastAction";
+import { createUndoTool } from "../src/agent/tools/write/undo";
 import {
   getActiveMutationActionId,
   withActiveMutationAction,
@@ -279,7 +279,7 @@ describe("note batch journal ownership", function () {
     });
     const actionId = String([...db.actions.values()][0].action_id);
 
-    const tool = createUndoLastActionTool(gateway() as never);
+    const tool = createUndoTool(gateway() as never);
     const undone = await tool.execute!({}, context);
 
     assert.equal(
@@ -333,7 +333,7 @@ describe("note batch journal ownership", function () {
     assert.deepEqual(inverseItemIds(steps[0]), [[500]]);
 
     // The note that did land is still undoable from the batch action.
-    const tool = createUndoLastActionTool(gateway() as never);
+    const tool = createUndoTool(gateway() as never);
     await tool.execute!({}, context);
     assert.deepEqual(trashed, [[500]]);
     assert.equal(db.actions.get(actionId)?.status, "reverted");

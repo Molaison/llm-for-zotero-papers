@@ -136,6 +136,7 @@ describe("workflow: document save recovery", function () {
         name: "submit_document",
         ok: true,
         content: { documentId: document.documentId },
+        actionReceipts: [],
       },
       { documentId: document.documentId },
     )!;
@@ -167,7 +168,7 @@ describe("workflow: document save recovery", function () {
     const note = Zotero.Items.getByLibraryAndKey(
       initial.libraryID,
       initial.itemKey,
-    )!;
+    ) as Zotero.Item;
     const noteId = note.id;
     await note.reload(["note"], true);
     assert.include(note.getNote(), "Preserve this exact note.");
@@ -185,7 +186,12 @@ describe("workflow: document save recovery", function () {
     assert.equal(final.savedNote!.itemKey, initial.itemKey);
     assert.isUndefined(final.pendingNote);
     assert.equal(
-      Zotero.Items.getByLibraryAndKey(initial.libraryID, initial.itemKey)!.id,
+      (
+        Zotero.Items.getByLibraryAndKey(
+          initial.libraryID,
+          initial.itemKey,
+        ) as Zotero.Item
+      ).id,
       noteId,
     );
     assert.equal(final.lastExportedName, `document-recovery-${parent.key}.md`);
@@ -194,7 +200,7 @@ describe("workflow: document save recovery", function () {
       [`%${document.visibleHtml}%`],
     );
     assert.lengthOf(
-      rows,
+      rows!,
       1,
       "The real library contains exactly one saved document note",
     );
@@ -304,7 +310,7 @@ describe("workflow: document save recovery", function () {
       const note = Zotero.Items.getByLibraryAndKey(
         binding.libraryID,
         binding.itemKey,
-      )!;
+      ) as Zotero.Item;
       await note.reload(["note"], true);
       if (failCheckpoint)
         assert.notInclude(note.getNote(), "data-attachment-key");

@@ -5,13 +5,19 @@ import {
   loadSkill,
 } from "../../skills";
 import type { AgentSkill, LoadedSkill } from "../../skills";
-import type { AgentToolDefinition } from "../../types";
+import { SKILL_SCOPE_GUARD } from "../../skills/scopeGuard";
+import type { AgentRuntimeRequest, AgentToolDefinition } from "../../types";
 import { fail, ok, validateObject } from "../shared";
 
 export type LoadSkillInput = { id: string };
 
 export type LoadSkillResult =
-  | ({ found: true } & LoadedSkill)
+  | ({
+      found: true;
+      /** The request-scope rule; customized templates cannot widen scope. */
+      scopeGuard: string;
+      toolGuidance?: string;
+    } & LoadedSkill)
   | {
       found: false;
       error: string;
@@ -21,7 +27,53 @@ export type LoadSkillResult =
 export type LoadSkillToolOptions = {
   getSkills?: () => ReadonlyArray<AgentSkill>;
   getShippedInstruction?: (id: string) => string | undefined;
+  /** The tools offered on this request, for guidance tied to a skill. */
+  getToolDefinitions?: (
+    request: AgentRuntimeRequest,
+  ) => ReadonlyArray<AgentToolDefinition<any, any>>;
 };
+
+/**
+ * Tool guidance the model gains by loading `skillId`. The prompt's guidance
+ * block is rendered once per turn, so this is how a skill loaded mid-turn
+ * brings the tool rules tied to it.
+ *
+ * When the host recorded what it already delivered this turn
+ * (`deliveredToolGuidance`: the rendered guidance plus earlier load_skill
+ * returns), every instruction that matches with the loaded skill active is
+ * returned minus that set; this also covers guidance that became applicable
+ * after the render, such as a note obligation approved mid-turn. Without a
+ * record (an MCP call) only guidance tied to the skill is returned: it
+ * matches with the skill and not with the skills active before the load.
+ */
+function collectSkillToolGuidance(
+  skillId: string,
+  request: AgentRuntimeRequest,
+  activeSkillIds: ReadonlyArray<string>,
+  tools: ReadonlyArray<AgentToolDefinition<any, any>>,
+): string[] {
+  const delivered = request.deliveredToolGuidance
+    ? new Set(request.deliveredToolGuidance)
+    : undefined;
+  const withSkill = [...new Set([...activeSkillIds, skillId])];
+  const instructions = new Set<string>();
+  for (const tool of tools) {
+    const guidance = tool.guidance;
+    if (!guidance) continue;
+    const instruction = guidance.instruction.trim();
+    if (!instruction) continue;
+    if (!guidance.matches(request, { matchedSkillIds: withSkill })) continue;
+    if (delivered) {
+      if (delivered.has(instruction)) continue;
+    } else {
+      if (!guidance.matches(request, { matchedSkillIds: [skillId] })) continue;
+      if (guidance.matches(request, { matchedSkillIds: activeSkillIds }))
+        continue;
+    }
+    instructions.add(instruction);
+  }
+  return [...instructions];
+}
 
 /**
  * Read one installed skill into the active agent workflow. The initial prompt
@@ -82,8 +134,32 @@ export function createLoadSkillTool(
         };
       }
       const loaded = await loadSkill(skill, getShippedInstruction(skill.id));
+      let toolGuidance: string | undefined;
       if (context?.request) {
         const records = context.request.loadedSkillRecords || [];
+        if (options.getToolDefinitions) {
+          const isToolVisible = context.isToolVisible;
+          const instructions = collectSkillToolGuidance(
+            skill.id,
+            context.request,
+            records.map((record) => record.id),
+            options
+              .getToolDefinitions(context.request)
+              .filter((tool) => !isToolVisible || isToolVisible(tool.spec)),
+          );
+          if (instructions.length) {
+            toolGuidance = [
+              "Tool guidance for this skill:",
+              ...instructions,
+            ].join("\n\n");
+            if (context.request.deliveredToolGuidance) {
+              context.request.deliveredToolGuidance = [
+                ...context.request.deliveredToolGuidance,
+                ...instructions,
+              ];
+            }
+          }
+        }
         const alreadyLoaded = records.some(
           (record) =>
             record.id === loaded.loadedSkill.id &&
@@ -99,6 +175,8 @@ export function createLoadSkillTool(
       return {
         found: true,
         ...loaded,
+        scopeGuard: SKILL_SCOPE_GUARD,
+        ...(toolGuidance ? { toolGuidance } : {}),
       };
     },
   };

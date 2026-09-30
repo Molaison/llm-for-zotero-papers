@@ -9,5 +9,5 @@ export const BALANCED_EVIDENCE_GUIDANCE =
 
 export const NOTE_EDITING_QUOTE_BLOCK_GUIDANCE =
   "Note-editing output rule: revised or generated note text is not source evidence; do not use Markdown blockquotes (`>`) or standalone source-label citation lines for rewritten note text. " +
-  "Show candidate revised prose in a fenced `text` block, or use edit_current_note for review/diff. " +
+  "Show candidate revised prose in a fenced `text` block, or use note_write for review/diff. " +
   "Use quote anchors or `>` blockquotes only for verbatim original PDF/source quotes with verified quote metadata.";

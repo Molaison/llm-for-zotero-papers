@@ -18,6 +18,7 @@ import {
   type WebAttributionAssessment,
 } from "../../webAccess/attribution";
 import type { PlanExecutionRunSession } from "../plans/runSession";
+import { literaturePaperIdentities } from "../services/literatureDiscovery";
 
 export type AgentFinalAnswerToolRecord = {
   name: string;
@@ -25,8 +26,65 @@ export type AgentFinalAnswerToolRecord = {
   mutability?: "read" | "write";
   effect?: AgentToolEffect;
   actionReceipts?: readonly AgentActionReceipt[];
+  input?: unknown;
   content?: unknown;
 };
+
+type ImportOperationInput = {
+  operation?: { type?: unknown; identifiers?: unknown };
+};
+
+/**
+ * Identifiers of a library_import call: the model's raw arguments, or the
+ * facade's validated input, which wraps the import_identifiers operation.
+ */
+function importedIdentifiers(input: unknown): string[] {
+  const raw = (input || {}) as ImportOperationInput & {
+    kind?: unknown;
+    identifiers?: unknown;
+    delegateInput?: ImportOperationInput;
+  };
+  const operation = raw.delegateInput?.operation || raw.operation;
+  const identifiers =
+    raw.kind === "identifiers"
+      ? raw.identifiers
+      : operation?.type === "import_identifiers"
+        ? operation.identifiers
+        : undefined;
+  return Array.isArray(identifiers)
+    ? identifiers.filter((id): id is string => typeof id === "string")
+    : [];
+}
+
+/** Whether a successful identifier import took at least one saved candidate. */
+function importsSavedCandidate(
+  records: readonly AgentFinalAnswerToolRecord[],
+  record: AgentFinalAnswerToolRecord,
+): boolean {
+  if (!record.ok || record.name !== "library_import") return false;
+  const identifiers = importedIdentifiers(record.input);
+  if (!identifiers.length) return false;
+  const candidates = new Set(
+    records
+      .filter((entry) => entry.ok && entry.name === "literature_search")
+      .flatMap((entry) => {
+        const results = (entry.content as { results?: unknown } | undefined)
+          ?.results;
+        return Array.isArray(results) ? results : [];
+      })
+      .filter(
+        (paper): paper is Record<string, unknown> =>
+          Boolean(paper) && typeof paper === "object",
+      )
+      .flatMap((paper) => literaturePaperIdentities(paper)),
+  );
+  return identifiers.some((id) =>
+    [
+      ...literaturePaperIdentities({ doi: id }),
+      ...literaturePaperIdentities({ arxivId: id }),
+    ].some((key) => candidates.has(key)),
+  );
+}
 
 export type AgentFinalActionSession = Pick<
   ActionContractRunSession,
@@ -176,6 +234,7 @@ export class AgentFinalAnswerController {
       (record) =>
         record.ok &&
         (record.name === "literature_search" ||
+          // Retired name, still present in stored tool history.
           record.name === "search_literature_online" ||
           (record.name === "literature_review" &&
             (record.content as { discoveryPhase?: string } | undefined)
@@ -185,11 +244,19 @@ export class AgentFinalAnswerController {
             ?.reviewRequired,
         ),
     );
+    // Without a classified literature intent the search result offers an
+    // import branch, so importing its saved candidates also closes discovery.
+    const importCloses = !this.request.classifiedIntent?.semantic?.literature;
     if (
       lastDiscovery >= 0 &&
       !params.toolExecutionRecords
         .slice(lastDiscovery + 1)
-        .some((record) => record.ok && record.name === "literature_review")
+        .some(
+          (record) =>
+            (record.ok && record.name === "literature_review") ||
+            (importCloses &&
+              importsSavedCandidate(params.toolExecutionRecords, record)),
+        )
     ) {
       const failure =
         "The relevant-paper shortlist was not presented for review, so discovery is not complete.";

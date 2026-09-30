@@ -165,7 +165,8 @@ describe("shared workflow step selection", function () {
     const first = await registry.getNextWorkflowStep(request);
     assert.equal(first.kind, "action");
     if (first.kind !== "action") return;
-    assert.equal(first.prepared.call.name, "collection_update");
+    assert.equal(first.prepared.call.name, "library_update");
+    assert.equal((first.prepared.call.arguments as any).kind, "collection");
     const progress = request.actionProgress.obligations[0];
     progress.status = "fulfilled";
     progress.verifiedTargetIds = ["collection:91"];

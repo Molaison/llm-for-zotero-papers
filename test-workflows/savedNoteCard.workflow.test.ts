@@ -1,4 +1,5 @@
 import "./hostSurfaceBootstrap";
+import { resolvedAgentRequest } from "../test/helpers/resolvedAgentRequest";
 import { assert } from "chai";
 import { initAgentChangeJournal } from "../src/agent/store/changeJournal";
 import { AgentToolRegistry } from "../src/agent/tools/registry";
@@ -46,7 +47,7 @@ describe("workflow: create then show saved note", function () {
           ),
         );
         const context: AgentToolContext = {
-          request: {
+          request: resolvedAgentRequest({
             conversationKey: parent.id,
             mode: "agent",
             userText: "Create one child note on this paper",
@@ -68,7 +69,7 @@ describe("workflow: create then show saved note", function () {
                 outputDirectories: [],
               },
             },
-          },
+          }),
           item: parent,
           modelName: "workflow",
           currentAnswerText: "",
@@ -91,7 +92,7 @@ describe("workflow: create then show saved note", function () {
         );
         if (mode === "safe") {
           assert.equal(execution.kind, "confirmation");
-          await parent.reload(undefined, true);
+          await parent.reload(undefined as never, true);
           assert.isEmpty(parent.getNotes(), "Safe review precedes mutation");
           if (execution.kind !== "confirmation") return;
           execution = await execution.execute({ approved: true });
@@ -105,10 +106,10 @@ describe("workflow: create then show saved note", function () {
             (receipt) => receipt.status === "applied",
           ),
         );
-        await parent.reload(undefined, true);
+        await parent.reload(undefined as never, true);
         assert.lengthOf(parent.getNotes(), 1);
         const note = Zotero.Items.get(parent.getNotes()[0]);
-        await note.reload(undefined, true);
+        await note.reload(undefined as never, true);
         assert.include(note.getNote(), "Native saved note");
         assert.equal(
           note.getNoteTitle(),
@@ -158,9 +159,11 @@ describe("workflow: create then show saved note", function () {
           "Saved",
         );
         assert.include(
-          [...card.querySelectorAll(".llm-paper-context-chip-text")].map(
-            (chip) => chip.textContent,
-          ),
+          (
+            [
+              ...card.querySelectorAll(".llm-paper-context-chip-text"),
+            ] as Element[]
+          ).map((chip) => chip.textContent),
           `Saved note destination ${mode}`,
           "the row names the paper the note landed on",
         );
@@ -176,7 +179,7 @@ describe("workflow: create then show saved note", function () {
           "no approval, cancellation or draft editor after creation",
         );
         assert.deepEqual(
-          [...card.querySelectorAll("button")].map(
+          ([...card.querySelectorAll("button")] as HTMLButtonElement[]).map(
             (button) => button.textContent,
           ),
           ["Open note"],
@@ -193,9 +196,13 @@ describe("workflow: create then show saved note", function () {
           preview.querySelector("blockquote")!.textContent,
           "A saved quotation.",
         );
-        const open = [
-          ...card.querySelectorAll<HTMLButtonElement>("button.llm-plan-action"),
-        ].find((button) => button.textContent === "Open note")!;
+        const open = (
+          [
+            ...card.querySelectorAll<HTMLButtonElement>(
+              "button.llm-plan-action",
+            ),
+          ] as HTMLButtonElement[]
+        ).find((button) => button.textContent === "Open note")!;
         assert.exists(open, "the row opens the exact note it wrote");
         open.click();
         const deadline = Date.now() + 5000;

@@ -69,9 +69,17 @@ import type {
   VerifiedReadSource,
 } from "../plans/types";
 import { createTrustedReadObservations } from "../plans/readObservation";
+import {
+  isRawPdfRetrievalTool,
+  RETIRED_TOOL_HINTS,
+} from "../context/toolNames";
 import { resolveActiveLibraryID } from "../../utils/zoteroLibraryScope";
 import { resolveAgentToolCallWorkCategory } from "../workCategory";
 import { getNotesDirectoryConfig } from "../../utils/notesDirectoryConfig";
+import {
+  EXECUTING_PHASE_GUIDANCE,
+  PLANNING_PHASE_GUIDANCE,
+} from "../plans/planningGuidance";
 
 export const ZOTERO_MCP_SERVER_NAME = "llm_for_zotero";
 export const ZOTERO_MCP_ENDPOINT_PATH = "/llm-for-zotero/mcp";
@@ -107,14 +115,11 @@ export const ZOTERO_MCP_WRITE_TOOL_NAMES = [
   "approve_research_expansion",
   "approve_research_mutation",
   "library_update",
-  "collection_update",
   "note_write",
   "library_import",
   "library_delete",
-  "attachment_update",
   "zotero_script",
-  "undo_last_action",
-  "revert_changes",
+  "undo",
   "annotate_pdf",
   "file_io",
   "run_command",
@@ -137,17 +142,47 @@ export const ZOTERO_MCP_EXCLUDED_TOOL_NAMES: Record<string, string> = {
   // paged result contract ({done, nextOffset, remaining}) lands.
   library_batch:
     "library_batch runs unattended with no progress channel over MCP; use the in-plugin agent or the slash-command surface.",
-  // Deliberately absent and gated on a metadata flag the MCP path never
-  // sets, so advertising it would offer a permanently unavailable tool.
-  tool_result_read:
-    "tool_result_read is gated on an in-plugin metadata flag that the MCP path does not set.",
+  // Both sources are in-plugin conversation state: the transcript and the
+  // turn-scoped tool-result handles. A standalone MCP client shares neither,
+  // and handle reads are gated on a metadata flag the MCP path never sets.
+  context_read:
+    "context_read reads the in-plugin conversation transcript and its stored tool-result handles; an external MCP client has neither, and handle reads are gated on an in-plugin metadata flag the MCP path does not set.",
 };
 const CURATED_READ_TOOL_NAMES = new Set<string>([
   ...ZOTERO_MCP_SAFE_READ_TOOL_NAMES,
   ...ZOTERO_MCP_PLAN_TOOL_NAMES,
 ]);
 const CURATED_PLAN_TOOL_NAMES = new Set<string>(ZOTERO_MCP_PLAN_TOOL_NAMES);
+/**
+ * Tools whose turn guidance is the single owner of a rule an external agent
+ * also needs. The in-plugin agent receives it only on matching turns; an MCP
+ * catalog is static, so it carries the guidance on the tool description.
+ */
+const MCP_GUIDANCE_TOOL_NAMES = new Set<string>([
+  ...ZOTERO_MCP_PLAN_TOOL_NAMES,
+  "paper_read",
+  "library_retrieve",
+]);
 const CURATED_WRITE_TOOL_NAMES = new Set<string>(ZOTERO_MCP_WRITE_TOOL_NAMES);
+/**
+ * MCP-only descriptions for tools whose in-plugin description routes through
+ * a tool the MCP catalog excludes (see ZOTERO_MCP_EXCLUDED_TOOL_NAMES).
+ */
+const MCP_TOOL_DESCRIPTION_OVERRIDES: ReadonlyMap<string, string> = new Map([
+  [
+    "literature_search",
+    "Search scholarly sources; results come back to the client directly. The literature_review selection card is not available over MCP, so present discovery candidates yourself; discovery never imports silently. An explicit import request uses library_import directly; metadata review uses workflow:'review', mode:'metadata'.",
+  ],
+]);
+/**
+ * External agents never see the envelope's plan-phase sections, so the MCP
+ * catalog carries each one on the phase's anchor tool instead: update_plan
+ * while planning, amend_plan (visible for every approved plan) while executing.
+ */
+const MCP_PLAN_PHASE_GUIDANCE: ReadonlyMap<string, string> = new Map([
+  ["update_plan", PLANNING_PHASE_GUIDANCE],
+  ["amend_plan", EXECUTING_PHASE_GUIDANCE],
+]);
 const READ_ONLY_TOOL_ANNOTATIONS = {
   readOnlyHint: true,
   openWorldHint: false,
@@ -179,15 +214,6 @@ const MCP_READ_DEDUPE_TOOL_NAMES = new Set([
   "library_read",
   "library_retrieve",
   "paper_read",
-]);
-const RAW_PDF_RETRIEVAL_TOOL_NAMES = new Set([
-  "paper_read",
-  "read_paper",
-  "search_paper",
-  "view_pdf_pages",
-  "read_attachment",
-  "library_read",
-  "library_retrieve",
 ]);
 const RAW_PDF_HIDDEN_NATIVE_TOOL_NAMES = new Set([
   "run_command",
@@ -1174,7 +1200,7 @@ function shouldBlockRawPdfRetrieval(params: {
   rawArgs: unknown;
   scope: ZoteroMcpActiveScope | null;
 }): boolean {
-  if (!RAW_PDF_RETRIEVAL_TOOL_NAMES.has(params.toolName)) return false;
+  if (!isRawPdfRetrievalTool(params.toolName)) return false;
   const rawPdfs = getMcpScopePapers(params.scope, ["raw_pdf"]);
   if (!rawPdfs.length) return false;
   const isLibraryAttachmentEnumeration =
@@ -1419,10 +1445,11 @@ function handleToolsList(
         description: decorateMcpToolDescription(
           name,
           [
-            description,
-            CURATED_PLAN_TOOL_NAMES.has(name)
+            MCP_TOOL_DESCRIPTION_OVERRIDES.get(name) ?? description,
+            MCP_GUIDANCE_TOOL_NAMES.has(name)
               ? toolRegistry.getTool(name)?.guidance?.instruction
               : undefined,
+            MCP_PLAN_PHASE_GUIDANCE.get(name),
             describeMcpHostAccess(name),
             // Codex code-mode discovery renders deeply nested input types as
             // `unknown`. Keep the complete contract discoverable there too;
@@ -1562,7 +1589,7 @@ function decorateMcpToolDescription(
     description,
     scopeGuidance,
     writeGuidance,
-    toolName === "undo_last_action" || toolName === "revert_changes"
+    toolName === "undo"
       ? "Standalone clients must supply explicit actionId/actionIds from write receipts; there is no shared external conversation history for relative undo."
       : "",
   ]
@@ -2015,6 +2042,7 @@ function createToolContext(
       kind: "external_runtime",
       standalone: !scope?.runtimeAuthority,
     },
+    isToolVisible: (spec) => isMcpToolVisibleInScope(spec, scope),
     signal: scope?.signal,
     runId,
     item,
@@ -2273,14 +2301,18 @@ async function handleToolsCall(
   };
 
   if (!tool || !isMcpExposedTool(tool.spec)) {
-    completeActivity({ ok: false, error: "Tool unavailable in native mode" });
+    const replacement = Object.prototype.hasOwnProperty.call(
+      RETIRED_TOOL_HINTS,
+      name,
+    )
+      ? RETIRED_TOOL_HINTS[name]
+      : undefined;
+    const text = replacement
+      ? `Unknown tool: ${name}. This tool was renamed; call ${replacement} instead.`
+      : `Zotero MCP tool ${name} is not available through the Zotero MCP server.`;
+    completeActivity({ ok: false, error: text });
     return {
-      content: [
-        {
-          type: "text",
-          text: `Zotero MCP tool is not available in Codex native mode: ${name}`,
-        },
-      ],
+      content: [{ type: "text", text }],
       isError: true,
     };
   }

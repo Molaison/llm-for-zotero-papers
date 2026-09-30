@@ -112,8 +112,8 @@ describe("workflow: paragraph source footers", function () {
       const footerIcon = chip!.querySelector<HTMLElement>(
         ".llm-paper-source-icon",
       )!;
-      const iconStyle = win.getComputedStyle(footerIcon);
-      const chipStyle = win.getComputedStyle(chip!);
+      const iconStyle = win.getComputedStyle(footerIcon)!;
+      const chipStyle = win.getComputedStyle(chip!)!;
       assert.include(iconStyle.maskImage, "action-text-context.svg");
       assert.notEqual(iconStyle.backgroundColor, "rgba(0, 0, 0, 0)");
       assert.isAbove(Number.parseFloat(chipStyle.borderTopWidth), 0);
@@ -121,20 +121,20 @@ describe("workflow: paragraph source footers", function () {
         chip!.querySelector(".llm-paper-source-count")?.textContent,
         "2 Quotes",
       );
-      const paragraph = chip!.closest("p")!;
+      const paragraph = chip!.closest("p") as HTMLElement;
       const originalFontSize = paragraph.style.fontSize;
       for (const fontSize of ["11px", "16px", "22px"]) {
         paragraph.style.fontSize = fontSize;
         assert.isAtMost(
           chip!.getBoundingClientRect().height,
-          Number.parseFloat(win.getComputedStyle(paragraph).fontSize),
+          Number.parseFloat(win.getComputedStyle(paragraph)!.fontSize),
           "the whole chip including its border fits within the paragraph text size",
         );
         assert.isBelow(
           Number.parseFloat(
             win.getComputedStyle(
               chip!.querySelector(".llm-paper-source-count")!,
-            ).fontSize,
+            )!.fontSize,
           ),
           Number.parseFloat(fontSize),
           "the label leaves room for the wrapping inside the text-sized chip",
@@ -213,7 +213,7 @@ describe("workflow: paragraph source footers", function () {
       assert.include(popover.textContent || "", methods);
       assert.isAbove(
         Number.parseFloat(
-          win.getComputedStyle(popover.querySelector(".llm-quote-card-body")!)
+          win.getComputedStyle(popover.querySelector(".llm-quote-card-body")!)!
             .borderLeftWidth,
         ),
         0,

@@ -411,7 +411,7 @@ export async function readAgentConversationAnswer(
   );
   if (!message)
     throw new Error(
-      "No assistant answer with this messageId exists in the current conversation. Use conversation_read to find the exact source.",
+      "No assistant answer with this messageId exists in the current conversation. Use context_read source:'conversation' to find the exact source.",
     );
   return stringifyTranscriptContent(message.content);
 }

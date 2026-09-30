@@ -72,7 +72,7 @@ describe("workflow: duplicate quote rendering", function () {
         followingProse,
       );
       assert.deepEqual(
-        await Zotero.DB.columnQueryAsync(
+        await Zotero.DB.columnQueryAsync<string>(
           "SELECT text FROM llm_for_zotero_chat_messages WHERE conversation_key = ? AND role = 'assistant' ORDER BY id",
           [conversationKey],
         ),

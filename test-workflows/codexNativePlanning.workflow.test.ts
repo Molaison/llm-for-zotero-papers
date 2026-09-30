@@ -54,8 +54,10 @@ describe("workflow: native Codex proposal review", function () {
         new (doc.defaultView as any).Event("input", { bubbles: true }),
       );
       await Zotero.Promise.delay(50);
-      const button = Array.from(
-        root.querySelectorAll<HTMLButtonElement>(".llm-action-picker-item"),
+      const button = (
+        Array.from(
+          root.querySelectorAll<HTMLButtonElement>(".llm-action-picker-item"),
+        ) as HTMLButtonElement[]
       ).find(
         (entry) =>
           entry.querySelector(".llm-action-picker-title")?.textContent ===

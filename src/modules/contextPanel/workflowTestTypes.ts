@@ -527,7 +527,7 @@ export type WorkflowTestApi = {
   enableLiveAgentSending: () => void;
   createPaperWithPdfFixture: (input: {
     title: string;
-    pdfTitle: string;
+    pdfTitle?: string;
     pages?: string[];
   }) => Promise<WorkflowTestFixture>;
   trashWorkflowItem: (itemId: number) => Promise<void>;

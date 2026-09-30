@@ -12,7 +12,6 @@ const skill = (instruction = "Exact approved instructions"): AgentSkill => ({
   version: 2,
   contexts: ["paper-set"],
   activation: "both",
-  supersedes: [],
   instruction,
   source: "customized",
 });

@@ -1,5 +1,5 @@
 import { assert } from "chai";
-import { createEditCurrentNoteTool } from "../src/agent/tools/write/editCurrentNote";
+import { createNoteWriteTool } from "../src/agent/tools/write/noteWrite";
 import { buildAgentInitialMessages } from "../src/agent/model/messageBuilder";
 import { parseSemanticDecisions } from "../src/agent/model/semanticDecisions";
 import { resolvedAgentRequest } from "./helpers/resolvedAgentRequest";
@@ -11,7 +11,7 @@ function fixture(
   html = before,
   selected = "First method.\nSecond method.\nThird method.",
 ) {
-  const tool = createEditCurrentNoteTool({
+  const tool = createNoteWriteTool({
     getActiveNoteSnapshot: () => ({
       noteId: 55,
       libraryID: 1,
@@ -245,94 +245,11 @@ describe("native selection structure and boundaries", function () {
 });
 
 describe("verified selection edit completion", function () {
-  it("finishes from the native receipt without a second model round, but keeps requested explanation, compound work and unverified results open", async function () {
-    const { tool, context, request } = fixture();
-    request.classifiedIntent = {
-      ...actionFixture("note_edit", { targetNoteId: 55 }),
-      semantic: semanticFixture({
-        reading: { source: "provided_context", coverage: "targeted" },
-        responseIntent: "receipt",
-      } as never),
-    };
-    request.actionContract = {
-      id: "contract",
-      version: 4,
-      writeDisposition: "required",
-      interpretationSource: "semantic",
-      obligations: [
-        {
-          id: "edit",
-          operation: "note_edit",
-          coverage: "one",
-          targetKind: "items",
-          parameters: { targetNoteId: 55 },
-          targetBoundary: {
-            kind: "selection",
-            libraryID: 1,
-            frozenTargetIds: [55],
-            scopeDigest: "bound",
-          },
-        },
-      ],
-    };
-    const result = {
-      ok: true,
-      content: {
-        actionId: "change",
-        status: "updated",
-        noteVerification: { noteId: 55, matches: true },
-        noteChange: {
-          title: "Note",
-          note: { itemId: 55, key: "NOTE55", libraryID: 1 },
-          state: "applied",
-          before: { checksum: "before" },
-          after: { checksum: "after" },
-          description: "The note was updated and verified in Zotero.",
-        },
-      },
-      actionReceipts: [
-        {
-          obligationId: "edit",
-          operation: "note_edit",
-          verification: "verified",
-          status: "applied",
-          appliedTargets: ["item:55"],
-          alreadySatisfiedTargets: [],
-          rejectedTargets: [],
-        },
-      ],
-    } as never;
-    const input = tool.validate({
-      mode: "edit",
-      selection: { index: 1, replacement: "New." },
-    });
-    if (!input.ok) return assert.fail(input.error);
-    assert.isFunction(tool.resolveTerminalResult);
-    const terminal = await tool.resolveTerminalResult!(
-      input.value,
-      result,
-      context,
-    );
-    assert.include(terminal?.finalText, "verified");
-    assert.equal(terminal?.providerTranscript, "tool_only");
-    const semantic = request.classifiedIntent.semantic as any;
-    semantic.responseIntent = "answer";
-    assert.isNull(
-      await tool.resolveTerminalResult!(input.value, result, context),
-    );
-    semantic.responseIntent = "receipt";
-    (result as any).actionReceipts[0].verification = "execution_only";
-    assert.isNull(
-      await tool.resolveTerminalResult!(input.value, result, context),
-    );
-    (result as any).actionReceipts[0].verification = "verified";
-    request.actionContract.obligations.push({
-      ...request.actionContract.obligations[0],
-      id: "second",
-    });
-    assert.isNull(
-      await tool.resolveTerminalResult!(input.value, result, context),
-    );
+  it("returns a verified note edit to the model instead of ending the turn from its receipt", function () {
+    // The receipt-only shortcut needed a classifier-produced semantic intent
+    // outside a Plan; no current producer creates that combination.
+    const { tool } = fixture();
+    assert.isUndefined(tool.resolveTerminalResult);
   });
 });
 

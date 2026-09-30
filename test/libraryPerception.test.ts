@@ -8,7 +8,7 @@ import {
   applySort,
   applyOffset,
 } from "../src/agent/services/libraryQueryService";
-import { createQueryLibraryTool } from "../src/agent/tools/read/queryLibrary";
+import { createLibrarySearchTool } from "../src/agent/tools/read/librarySearch";
 import { buildAgentInitialMessages } from "../src/agent/model/messageBuilder";
 import type { AgentToolContext } from "../src/agent/types";
 import { resolvedAgentRequest } from "./helpers/resolvedAgentRequest";
@@ -192,7 +192,7 @@ describe("library_search ordering through the tool", function () {
   ];
 
   function makeTool() {
-    return createQueryLibraryTool({
+    return createLibrarySearchTool({
       resolveLibraryID: () => 1,
       listBibliographicItemTargets: async () => ({
         items: targets,

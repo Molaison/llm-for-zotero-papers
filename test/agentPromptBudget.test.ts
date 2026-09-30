@@ -27,7 +27,7 @@ function buildCatalogToolMessage(rowCount = 80): AgentModelMessage {
   return {
     role: "tool",
     tool_call_id: "call-1",
-    name: "query_library",
+    name: "library_search",
     content: JSON.stringify({
       entity: "items",
       mode: "list",
@@ -141,7 +141,7 @@ describe("agent prompt budget", function () {
         tool_calls: [
           {
             id: "call-1",
-            name: "query_library",
+            name: "library_search",
             arguments: { entity: "items", mode: "list" },
           },
         ],
@@ -170,7 +170,7 @@ describe("agent prompt budget", function () {
         tool_calls: [
           {
             id: "call-1",
-            name: "query_library",
+            name: "library_search",
             arguments: { entity: "items", mode: "list" },
           },
         ],
@@ -201,12 +201,139 @@ describe("agent prompt budget", function () {
     assert.lengthOf(result.handleRecords, 1);
     assert.equal(result.handleRecords[0].handle, modelFacing.toolResultHandle);
     assert.equal(result.handleRecords[0].conversationKey, 1);
-    assert.equal(result.handleRecords[0].toolName, "query_library");
+    assert.equal(result.handleRecords[0].toolName, "library_search");
     assert.lengthOf(
       (result.handleRecords[0].content as { results: unknown[] }).results,
       160,
     );
     assert.notInclude(JSON.stringify(modelFacing), "A".repeat(200));
+  });
+
+  for (const toolName of ["library_search"]) {
+    it(`compacts ${toolName} catalog rows as catalog results`, function () {
+      const catalog = buildCatalogToolMessage(160);
+      catalog.name = toolName;
+      const result = enforceAgentPromptBudget({
+        messages: [
+          { role: "system", content: "Use tools." },
+          { role: "user", content: "Search my library." },
+          {
+            role: "assistant",
+            content: "",
+            tool_calls: [
+              {
+                id: "call-1",
+                name: toolName,
+                arguments: { entity: "items", mode: "list" },
+              },
+            ],
+          },
+          catalog,
+        ],
+        model: "claude-haiku-4-5",
+        inputTokenCap: 8_000,
+        conversationKey: 1,
+        resourceSignature: "scope-a",
+      });
+      assert.deepInclude(result.reductions, {
+        kind: "catalog_compacted",
+        count: 1,
+      });
+    });
+  }
+
+  for (const [toolName, args] of [
+    ["paper_read", { mode: "targeted", query: "method" }],
+    ["read_attachment", { attachmentId: 30_000 }],
+  ] as const) {
+    it(`prunes ${toolName} results under context pressure as paper evidence`, function () {
+      const evidence = buildEvidenceToolMessage(80);
+      evidence.name = toolName;
+      const messages: AgentModelMessage[] = [
+        { role: "system", content: "Use paper evidence." },
+        { role: "user", content: "Answer from the paper." },
+        {
+          role: "assistant",
+          content: "",
+          tool_calls: [{ id: "call-1", name: toolName, arguments: args }],
+        },
+        evidence,
+      ];
+      const result = enforceAgentPromptBudget({
+        messages,
+        model: "claude-haiku-4-5",
+        inputTokenCap: 10_000,
+        conversationKey: 1,
+        resourceSignature: "scope-a",
+      });
+      assert.isTrue(result.changed);
+      assert.isBelow(result.estimatedAfterTokens, result.estimatedBeforeTokens);
+      assert.deepInclude(result.reductions, {
+        kind: "evidence_compacted",
+        count: 1,
+      });
+    });
+  }
+
+  // Stored history written by older versions can still carry a retired tool
+  // name. It is no longer recognised as paper evidence: it is compacted like
+  // any other tool result, and never breaks the budget pass.
+  it("compacts a retired read_paper result generically without throwing", function () {
+    const retired = buildEvidenceToolMessage(80);
+    retired.name = "read_paper";
+    retired.tool_call_id = "call-old";
+    const messages: AgentModelMessage[] = [
+      { role: "system", content: "Use paper evidence." },
+      { role: "user", content: "Answer from the paper." },
+      {
+        role: "assistant",
+        content: "",
+        tool_calls: [
+          {
+            id: "call-old",
+            name: "read_paper",
+            arguments: { chunkIndexes: [1] },
+          },
+        ],
+      },
+      retired,
+      {
+        role: "assistant",
+        content: "",
+        tool_calls: [
+          {
+            id: "call-new",
+            name: "paper_read",
+            arguments: { mode: "targeted", query: "method" },
+          },
+        ],
+      },
+      {
+        role: "tool",
+        tool_call_id: "call-new",
+        name: "paper_read",
+        content: JSON.stringify({ passages: [{ text: "Short passage." }] }),
+      },
+    ];
+    let result: ReturnType<typeof enforceAgentPromptBudget> | undefined;
+    assert.doesNotThrow(() => {
+      result = enforceAgentPromptBudget({
+        messages,
+        model: "claude-haiku-4-5",
+        inputTokenCap: 10_000,
+        conversationKey: 1,
+        resourceSignature: "scope-a",
+      });
+    });
+    assert.isTrue(result!.changed);
+    assert.isBelow(result!.estimatedAfterTokens, result!.estimatedBeforeTokens);
+    const kinds = result!.reductions.map((reduction) => reduction.kind);
+    assert.notInclude(kinds, "evidence_compacted");
+    assert.isTrue(
+      kinds.includes("tool_result_cleared") ||
+        kinds.includes("generic_compacted"),
+      `expected generic compaction, got ${kinds.join(", ")}`,
+    );
   });
 
   it("preserves assistant tool-call and tool-result ordering while reducing", function () {
@@ -219,7 +346,7 @@ describe("agent prompt budget", function () {
         tool_calls: [
           {
             id: "call-1",
-            name: "query_library",
+            name: "library_search",
             arguments: { entity: "items", mode: "list" },
           },
         ],
@@ -258,7 +385,7 @@ describe("agent prompt budget", function () {
         tool_calls: [
           {
             id: "call-1",
-            name: "query_library",
+            name: "library_search",
             arguments: { entity: "items", mode: "list" },
           },
         ],
@@ -533,7 +660,7 @@ describe("agent prompt budget", function () {
         tool_calls: [
           {
             id: "old-call",
-            name: "query_library",
+            name: "library_search",
             arguments: { entity: "items", mode: "list" },
           },
         ],
@@ -583,7 +710,7 @@ describe("agent prompt budget", function () {
         tool_calls: [
           {
             id: "call-library",
-            name: "query_library",
+            name: "library_search",
             arguments: { entity: "items", mode: "list" },
           },
         ],
@@ -598,8 +725,9 @@ describe("agent prompt budget", function () {
         tool_calls: [
           {
             id: "call-read",
-            name: "tool_result_read",
+            name: "context_read",
             arguments: {
+              source: "tool_result",
               handle: "trh_latest",
               path: "results",
               offset: 50,
@@ -611,7 +739,7 @@ describe("agent prompt budget", function () {
       {
         role: "tool",
         tool_call_id: "call-read",
-        name: "tool_result_read",
+        name: "context_read",
         content: latestReadContent,
       },
     ];

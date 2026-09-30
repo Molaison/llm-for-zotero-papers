@@ -84,7 +84,6 @@ export function actionFixture(
     writeDisposition: operation === "read_full" ? "none" : "required",
     actionIntents: [
       {
-        operation,
         ...details,
         coverage: "one",
         targetKind: "items",
@@ -124,7 +123,10 @@ export function actionContractFixture(
     writeDisposition: intent.writeDisposition!,
     interpretationSource: "semantic",
     obligations: [
-      { ...intent.actionIntents[0], id: `obligation:${operation}` },
+      {
+        ...intent.actionIntents[0],
+        id: `obligation:${operation}`,
+      } as import("../../src/agent/contracts/types").AgentActionObligation,
     ],
     intent,
   });

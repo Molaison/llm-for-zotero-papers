@@ -3,7 +3,7 @@ import { resolvedAgentRequest } from "./helpers/resolvedAgentRequest";
 import { classifiedFixture } from "./helpers/semanticIntent";
 import { assert } from "chai";
 import { validWorkflowDependencies } from "../src/agent/contracts/workflowDependencies";
-import { createEditCurrentNoteTool } from "../src/agent/tools/write/editCurrentNote";
+import { createNoteWriteTool } from "../src/agent/tools/write/noteWrite";
 
 describe("finalized material for existing notes", function () {
   it("freezes an existing note independently of the source-paper set", async function () {
@@ -75,7 +75,7 @@ describe("finalized material for existing notes", function () {
           },
         ]),
       );
-      const tool = createEditCurrentNoteTool({} as never);
+      const tool = createNoteWriteTool({} as never);
       assert.isTrue(
         tool.validate({
           mode,

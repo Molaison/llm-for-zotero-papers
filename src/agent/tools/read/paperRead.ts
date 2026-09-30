@@ -53,7 +53,7 @@ import {
   resolveDefaultTargets,
 } from "./pdfToolUtils";
 import type { PdfTarget } from "./pdfToolUtils";
-import { createViewPdfPagesTool } from "./viewPdfPages";
+import { createPdfPageRenderer } from "./pdfPageRenderer";
 import {
   readDocumentsExhaustively,
   type ExhaustiveBatchAnalyzer,
@@ -96,6 +96,10 @@ type PaperReadInput = {
   topK?: number;
   visualInput?: unknown;
 };
+
+/** analyze-figures' failure rule, carried on every failed figures result. */
+export const FIGURE_CROP_FAILURE_GUIDANCE =
+  "No figure crop was extracted: answer from captions and surrounding paper text only, without page screenshots, source images, or image placeholders.";
 
 export type PaperReadFigureExtractionResult = {
   mode: "figures";
@@ -1082,6 +1086,38 @@ function readPaperReadModeFromArgs(args: unknown): string {
   return typeof mode === "string" ? mode.trim() : "";
 }
 
+type PaperReadGuidance = NonNullable<AgentToolDefinition["guidance"]>;
+
+/**
+ * The reading rules apply whenever the turn can reach paper_read: a paper, a
+ * selected passage, a collection, or a tag in context, or a library (global)
+ * conversation, where the model may read explicitly targeted papers.
+ */
+export function matchesPaperReadGuidance(
+  request: Parameters<PaperReadGuidance["matches"]>[0],
+): boolean {
+  const scope = request.turnPaperScope;
+  if (!scope) return false;
+  return (
+    scope.conversationKind === "global" ||
+    scope.papers.length > 0 ||
+    scope.selectedPassagePaperRefs.length > 0 ||
+    scope.collections.length > 0 ||
+    scope.tags.length > 0
+  );
+}
+
+/** The single owner of paper-reading rules (mode choice, depth, progress). */
+export const PAPER_READ_GUIDANCE: PaperReadGuidance = {
+  matches: matchesPaperReadGuidance,
+  instruction: [
+    "Use supplied paper text directly when it supports the answer. Otherwise choose the paper_read mode from the evidence the answer needs: mode:'overview' for a bounded overview; mode:'targeted' with sections for a known section name, or with query for a specific passage (for a single factual lookup start with topK:3 and widen only for several requested facts or comparison dimensions); mode:'outline' for section addresses; mode:'full' for comprehensive reading when useful; mode:'figures' for extracted figure crops; mode:'visual' or mode:'capture' only for explicit page, layout, or current-reader inspection. An overview or targeted read never satisfies an explicit full-read request.",
+    "In collection, tag, or library scope the active-reader paper is never an implicit target: pass explicit targets, batching several papers in one call.",
+    "For eligible textual paper_read results, use paperEvidenceProgress as factual retrieval state. Its recommendations are advisory: decide whether held evidence supports the requested explanation, and freely retrieve missing methods, results, qualifications, or other relevant passages. Avoid repeating unchanged reads; disclose unavailable sources.",
+    "If overview falls back to Zotero metadata or an abstract, answer from that evidence when sufficient and state the limitation. If there is no PDF attachment and the user needs more than local metadata or abstract evidence, use a specifically targeted external lookup when necessary and label it separately.",
+  ].join("\n"),
+};
+
 export function createPaperReadTool(
   pdfService: PdfService,
   retrievalService: RetrievalService,
@@ -1090,7 +1126,7 @@ export function createPaperReadTool(
   figureExtractionService?: PaperReadFigureExtractionService,
   fullReadAnalyzer?: ExhaustiveBatchAnalyzer,
 ): AgentToolDefinition<PaperReadInput, unknown> {
-  const visualTool = createViewPdfPagesTool(pdfPageService, zoteroGateway);
+  const pageRenderer = createPdfPageRenderer(pdfPageService);
   return {
     spec: {
       name: "paper_read",
@@ -1173,8 +1209,8 @@ export function createPaperReadTool(
       executionClass: "read",
       workCategory: "retrieval",
       exposure: "model",
-      tier: "normal",
     },
+    guidance: PAPER_READ_GUIDANCE,
     presentation: {
       label: "Read Paper",
       /**
@@ -1279,6 +1315,22 @@ export function createPaperReadTool(
           if (mode === "visual" && c?.status === "use_figures_mode") {
             return "Use figure extraction for this figure request";
           }
+          // Visual and capture results carry no mode: the page renderer's
+          // content shape identifies them, since trace rows summarize a
+          // result without its call arguments.
+          if (!mode && c?.capturedPageIndex !== undefined) {
+            return "Captured the current reader page";
+          }
+          if (
+            !mode &&
+            typeof c?.pageCount === "number" &&
+            (Array.isArray(c?.pageTexts) || Array.isArray(c?.results))
+          ) {
+            const count = c.pageCount;
+            return count > 0
+              ? `Prepared ${count} PDF page image${count === 1 ? "" : "s"}`
+              : "Prepared PDF pages";
+          }
           if (mode === "figures") {
             const figures = Array.isArray(c?.figures) ? c.figures : [];
             if (c?.status === "mineru_required") {
@@ -1366,26 +1418,24 @@ export function createPaperReadTool(
         topK: normalizePositiveInt(args.topK),
       };
       if (mode === "visual" || mode === "capture") {
-        const visualValidation = visualTool.validate(targetForPageTool(input));
+        const visualValidation = pageRenderer.validate(
+          targetForPageTool(input),
+        );
         if (!visualValidation.ok) return fail(visualValidation.error);
         input.visualInput = visualValidation.value;
       }
       return ok(input);
     },
-    async shouldRequireConfirmation(input, context) {
-      if (input.mode !== "visual" && input.mode !== "capture") return false;
-      return Boolean(
-        await visualTool.shouldRequireConfirmation?.(
-          input.visualInput as never,
-          context,
-        ),
-      );
+    // No paper_read mode asks for approval up front; the page renderer has no
+    // approval hook of its own.
+    async shouldRequireConfirmation() {
+      return false;
     },
     async createPendingAction(input, context) {
       if (input.mode !== "visual" && input.mode !== "capture") {
         throw new Error("Only visual and capture paper_read modes need review");
       }
-      const action = await visualTool.createPendingAction!(
+      const action = await pageRenderer.createPendingAction(
         input.visualInput as never,
         context,
       );
@@ -1394,14 +1444,12 @@ export function createPaperReadTool(
         toolName: "paper_read",
       };
     },
-    applyConfirmation(input, resolutionData, context) {
+    applyConfirmation(input, resolutionData) {
       if (input.mode !== "visual" && input.mode !== "capture") return ok(input);
-      const resolved = visualTool.applyConfirmation?.(
+      const resolved = pageRenderer.applyConfirmation(
         input.visualInput as never,
         resolutionData,
-        context,
       );
-      if (!resolved) return ok(input);
       if (!resolved.ok) return fail(resolved.error);
       return ok({
         ...input,
@@ -1433,7 +1481,7 @@ export function createPaperReadTool(
           });
           if (mineruRedirect) return mineruRedirect;
         }
-        return visualTool.execute(input.visualInput as never, context);
+        return pageRenderer.execute(input.visualInput as never, context);
       }
       // Inside an approved research plan the host manifest owns reading
       // depth: overview already delivers each paper's host-sized text at the
@@ -1509,13 +1557,18 @@ export function createPaperReadTool(
             status: "error",
             query: input.query || context.request.userText || "",
             warning: "Precise figure extraction service is not available.",
+            guidance: FIGURE_CROP_FAILURE_GUIDANCE,
           };
         }
-        const figureResult = await figureExtractionService.extractFigures({
+        const extracted = await figureExtractionService.extractFigures({
           input,
           context,
           paperContexts: figureTargets,
         });
+        const figureResult =
+          extracted.status === "ok" || extracted.guidance
+            ? extracted
+            : { ...extracted, guidance: FIGURE_CROP_FAILURE_GUIDANCE };
         const { artifacts, ...content } = figureResult;
         return artifacts?.length ? { content, artifacts } : content;
       }

@@ -37,7 +37,7 @@ describe("workflow: agent final delivery", function () {
           failFinalRefresh ? /Error:.*presentation failure/ : /Ready/,
         );
         const note = Zotero.Items.get(result.noteIds[0]);
-        await note.reload(undefined, true);
+        await note.reload(undefined as never, true);
         assert.equal(note.parentID, fixture.parentItemId);
         assert.include(note.getNote(), "A complete, persisted note body.");
       } finally {

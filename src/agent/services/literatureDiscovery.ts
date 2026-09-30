@@ -137,21 +137,44 @@ async function save(
   await upsertAgentToolResultHandles([record]);
 }
 
+/** Lowercase a DOI and strip `doi:` / resolver-URL prefixes. */
+function normalizeDoi(value: unknown): string {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/^doi:\s*/, "")
+    .replace(/^https?:\/\/(?:dx\.)?doi\.org\//, "")
+    .trim();
+}
+
+/**
+ * Bare, version-free arXiv id from an id, `arXiv:` form or arxiv.org
+ * abs/pdf URL; empty when the value is not an arXiv id. Versions of one
+ * paper share an id, so they match and dedupe as one paper.
+ */
+function normalizeArxivId(value: unknown): string {
+  const id = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/^arxiv:\s*/, "")
+    .replace(
+      /^(?:https?:\/\/)?(?:www\.|export\.)?arxiv\.org\/(?:abs|pdf)\//,
+      "",
+    )
+    .replace(/\.pdf$/, "")
+    .replace(/\/$/, "")
+    .replace(/v\d+$/, "");
+  return /^(?:\d{4}\.\d{4,5}|[a-z-]+(?:\.[a-z-]+)?\/\d{7})$/.test(id) ? id : "";
+}
+
 /** Match identifiers across providers, with normalized title as a metadata fallback. */
 export function literaturePaperIdentities(
   paper: Record<string, unknown>,
 ): string[] {
   const keys: string[] = [];
-  const doi = String(paper.doi || "")
-    .toLowerCase()
-    .replace(/^https?:\/\/(?:dx\.)?doi\.org\//, "")
-    .trim();
+  const doi = normalizeDoi(paper.doi);
   if (doi) keys.push(`doi:${doi}`);
-  const arxiv = String(paper.arxivId || "")
-    .toLowerCase()
-    .replace(/^arxiv:/, "")
-    .replace(/v\d+$/, "")
-    .trim();
+  const arxiv = normalizeArxivId(paper.arxivId);
   if (arxiv) keys.push(`arxiv:${arxiv}`);
   for (const value of [paper.id, paper.sourceUrl]) {
     if (typeof value === "string" && value.trim())
@@ -161,6 +184,16 @@ export function literaturePaperIdentities(
           .replace(/^https?:\/\//, "")
           .replace(/\/$/, ""),
       );
+  }
+  // Ids derived from an arXiv DOI or URL follow the provider keys, so the
+  // first key (the stored discoveryPaperId) is unchanged.
+  for (const derived of [
+    doi.match(/^10\.48550\/arxiv\.(.+)$/)?.[1],
+    paper.id,
+    paper.sourceUrl,
+  ]) {
+    const id = normalizeArxivId(derived);
+    if (id && !keys.includes(`arxiv:${id}`)) keys.push(`arxiv:${id}`);
   }
   const title = String(paper.title || "")
     .toLowerCase()
@@ -194,6 +227,7 @@ export async function identifyLiteratureCandidates(
   content: Record<string, unknown>,
   context: AgentToolContext,
   reviewRequired: boolean,
+  routeImports = false,
 ): Promise<Record<string, unknown>> {
   const results = Array.isArray(content.results) ? content.results : [];
   const discovery = reviewRequired
@@ -230,15 +264,34 @@ export async function identifyLiteratureCandidates(
       ? {
           sessionId: discovery.record.handle,
           revision: discovery.session.revision,
-          nextStep: discoveryInstruction(discovery.record),
+          nextStep: discoveryInstruction(discovery.record, routeImports),
         }
-      : {}),
+      : routeImports
+        ? { nextStep: CANDIDATE_ROUTE }
+        : {}),
   };
 }
 
-function discoveryInstruction(record: AgentToolResultHandleRecord): string {
+/**
+ * Unclassified turns (chat, fresh plan executions) cannot tell discovery from
+ * an explicit import. The search result is read when the model picks its next
+ * tool, so for callers that can open the card it states the import branch
+ * first. Every other caller gets the card-only text unchanged.
+ */
+const IMPORT_ROUTE =
+  "If the user asked to import or add papers to Zotero without asking to choose them first, skip the selection card: rank these candidates, skip papers already in the library, then call library_import with the DOI or arXiv identifiers of exactly the number the user requested and the requested destination (targetCollectionId; create the collection first only when the user named a new one).";
+const CANDIDATE_ROUTE = `${IMPORT_ROUTE} If they only asked to find or recommend papers, call literature_review with ranked candidateSetId/candidateIndex selections. Otherwise answer from these results.`;
+
+function discoveryInstruction(
+  record: AgentToolResultHandleRecord,
+  offerImport = false,
+): string {
   const s = record.content as LiteratureDiscoverySession;
-  return `Assess titles and abstracts and select ${s.request.batchSize} ${s.papers.length ? "additional " : ""}genuinely relevant papers in ranked order. Respect the user's topic and these constraints: ${JSON.stringify(s.request)}. Assess unused saved candidates first; search further if needed. To expand a provider list, increase its retrieval limit rather than repeating the same bounded request. Call literature_review with sessionId '${record.handle}', revision ${s.revision}, NEW candidateSetId/candidateIndex selections and evidence-based relevance reasons. Do not repeat displayed papers or dump the raw pool. If fewer qualify, explain shortfallReason; use outcome 'no_more' when no further relevant matches were found, or 'search_failed' for a retrieval failure. Empty selections with an explanation are allowed. Never import during discovery or finish with prose instead of the card.`;
+  const select = `titles and abstracts and select ${s.request.batchSize} ${s.papers.length ? "additional " : ""}genuinely relevant papers in ranked order. Respect the user's topic and these constraints: ${JSON.stringify(s.request)}. Assess unused saved candidates first; search further if needed. To expand a provider list, increase its retrieval limit rather than repeating the same bounded request.`;
+  const review = `literature_review with sessionId '${record.handle}', revision ${s.revision}, NEW candidateSetId/candidateIndex selections and evidence-based relevance reasons. Do not repeat displayed papers or dump the raw pool. If fewer qualify, explain shortfallReason; use outcome 'no_more' when no further relevant matches were found, or 'search_failed' for a retrieval failure. Empty selections with an explanation are allowed.`;
+  return offerImport
+    ? `${IMPORT_ROUTE} Otherwise the user only wants discovery: assess ${select} Then call ${review} Discovery never imports and never finishes with prose instead of the card.`
+    : `Assess ${select} Call ${review} Never import during discovery or finish with prose instead of the card.`;
 }
 
 export async function prepareLiteratureDiscoveryReview(

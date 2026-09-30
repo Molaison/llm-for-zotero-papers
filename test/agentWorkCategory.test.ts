@@ -21,7 +21,7 @@ const root = process.cwd();
  * Spec literals the source guard must see. A drop means the scan stopped
  * inspecting sites, not that the sites became correct.
  */
-const EXPECTED_SPEC_LITERAL_SITES = 57;
+const EXPECTED_SPEC_LITERAL_SITES = 52;
 
 const ALLOWED_WORK_CATEGORIES: readonly AgentWorkCategory[] = [
   "retrieval",
@@ -38,23 +38,16 @@ const ALLOWED_WORK_CATEGORIES: readonly AgentWorkCategory[] = [
 const EXPECTED_TOOL_CATEGORIES: Readonly<Record<string, AgentWorkCategory>> = {
   // Reads: library, paper, PDF, and network lookups that never write.
   library_search: "retrieval",
-  query_library: "retrieval",
   library_read: "retrieval",
-  read_library: "retrieval",
   library_retrieve: "retrieval",
   library_cite: "retrieval",
   paper_read: "retrieval",
-  read_paper: "retrieval",
-  search_paper: "retrieval",
-  view_pdf_pages: "retrieval",
   read_attachment: "retrieval",
   literature_search: "retrieval",
-  search_literature_online: "retrieval",
   literature_review: "retrieval",
   web_search: "retrieval",
   web_read: "retrieval",
-  tool_result_read: "retrieval",
-  conversation_read: "retrieval",
+  context_read: "retrieval",
   load_skill: "retrieval",
   // Plan, task, and research bookkeeping.
   update_plan: "planning",
@@ -70,41 +63,20 @@ const EXPECTED_TOOL_CATEGORIES: Readonly<Record<string, AgentWorkCategory>> = {
   submit_plan_document: "generation",
   // Zotero library changes.
   library_update: "zotero_action",
-  apply_tags: "zotero_action",
-  move_to_collection: "zotero_action",
-  update_metadata: "zotero_action",
-  reparent_items: "zotero_action",
-  relate_items: "zotero_action",
-  tag_update: "zotero_action",
-  set_item_tags: "zotero_action",
-  collection_update: "zotero_action",
-  manage_collections: "zotero_action",
   note_write: "zotero_action",
-  edit_current_note: "zotero_action",
   note_write_batch: "zotero_action",
-  write_notes_batch: "zotero_action",
-  saved_search_update: "zotero_action",
   library_settings: "zotero_action",
   library_delete: "zotero_action",
-  trash_items: "zotero_action",
-  restore_from_trash: "zotero_action",
-  merge_items: "zotero_action",
-  attachment_update: "zotero_action",
-  manage_attachments: "zotero_action",
   annotate_pdf: "zotero_action",
-  undo_last_action: "zotero_action",
-  revert_changes: "zotero_action",
-  create_items: "zotero_action",
-  import_identifiers: "zotero_action",
+  undo: "zotero_action",
   // The facade's own label; a files-mode call resolves to its delegate's
   // external_system instead.
   library_import: "zotero_action",
-  // Disk, shell, arbitrary code, and multi-domain imports.
+  // Disk, shell, and arbitrary code.
   workflow_script: "external_system",
   file_io: "external_system",
   run_command: "external_system",
   zotero_script: "external_system",
-  import_local_files: "external_system",
 };
 
 function collectAgentSourceFiles(dir: string): string[] {

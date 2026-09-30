@@ -29,11 +29,7 @@ export function createReadAttachmentTool(
     spec: {
       name: "read_attachment",
       description:
-        "Read the content of a Zotero attachment by contextItemId. Supports " +
-        "Markdown, HTML, TXT, and plain-text DOCX extraction with parent/source " +
-        "metadata when the attachment is a child item. Images are returned as " +
-        "data URLs. PDFs should be read with paper_read/PDF tools unless attachFile " +
-        "is explicitly requested.",
+        "Read a non-PDF attachment by target; attachFile:true sends the whole file after user review. For PDFs use paper_read.",
       inputSchema: {
         type: "object",
         additionalProperties: false,

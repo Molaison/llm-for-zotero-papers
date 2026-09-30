@@ -1,5 +1,6 @@
 import { assert } from "chai";
 import { decodePlanContract } from "../src/agent/plans/contracts";
+import { BUILTIN_SKILL_FILES } from "../src/agent/skills";
 import {
   resolveAdaptiveReadingBudget,
   resolvePlannedReadingPapers,
@@ -124,13 +125,12 @@ describe("narrative literature-review strategy", function () {
     assert.isTrue(tool.guidance!.matches(approved));
     assert.include(
       tool.guidance!.instruction,
-      "immediately record a claim-based node",
+      "The literature-review skill owns the investigation loop",
     );
-    assert.include(
-      tool.guidance!.instruction,
-      "do not call inventory_scope between durable groups",
-    );
-    assert.include(tool.guidance!.instruction, "For a systematic review only");
+    const skill = BUILTIN_SKILL_FILES["literature-review.md"];
+    assert.include(skill, "immediately persist a claim-based node");
+    assert.include(skill, "do not call inventory_scope again");
+    assert.include(skill, "For a systematic review only");
   });
 
   it("names the finalize outcome in the research_update guidance", async function () {
@@ -139,7 +139,7 @@ describe("narrative literature-review strategy", function () {
     const tool = createResearchUpdateTool({} as never);
     assert.include(
       tool.guidance?.instruction ?? "",
-      "then finalize with outcome complete",
+      "finalize {outcome:'complete'|'partial'|'failed'}",
     );
   });
 

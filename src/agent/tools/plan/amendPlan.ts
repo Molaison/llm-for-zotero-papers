@@ -20,12 +20,16 @@ import {
 import type { PlanStep } from "../../plans/types";
 import { freezePlanEffectSpecification } from "../../plans/effectSpecification";
 import {
-  createUpdatePlanTool,
   resolvePlanContract,
   type UpdatePlanInput,
   validateUpdatePlanInput,
 } from "./updatePlan";
 import { fail, ok, validateObject } from "../shared";
+import {
+  PLAN_CONTRACT_SCHEMA,
+  PLAN_EFFECT_SPECIFICATION_REFERENCE_SCHEMA,
+  PLAN_STEPS_SCHEMA,
+} from "../../plans/contractSchema";
 
 type ResearchScopeInput = {
   kind: "research_scope";
@@ -109,9 +113,6 @@ export function createAmendPlanTool(
   gateway: ZoteroGateway,
   amendments: PlanAmendmentService,
 ): AgentToolDefinition<AmendPlanInput, unknown> {
-  const updateSchema = createUpdatePlanTool(gateway).spec.inputSchema as {
-    properties?: Record<string, unknown>;
-  };
   return {
     spec: {
       name: "amend_plan",
@@ -139,11 +140,12 @@ export function createAmendPlanTool(
               },
             },
           },
-          contract: updateSchema.properties?.contract || { type: "object" },
-          effectSpecification: updateSchema.properties?.effectSpecification || {
-            type: "object",
-          },
-          steps: updateSchema.properties?.steps || { type: "array" },
+          // update_plan is not offered while executing, so the replacement
+          // contract's shape is shown here in full. The effect specification
+          // is only referenced: validate() decodes it with the same decoder.
+          contract: PLAN_CONTRACT_SCHEMA,
+          effectSpecification: PLAN_EFFECT_SPECIFICATION_REFERENCE_SCHEMA,
+          steps: PLAN_STEPS_SCHEMA,
         },
       },
       executionClass: "control",
@@ -158,11 +160,7 @@ export function createAmendPlanTool(
      */
     presentation: { hiddenInTrace: true },
     isAvailable: (request) => request.planContext?.phase === "executing",
-    guidance: {
-      matches: (request) => request.planContext?.phase === "executing",
-      instruction:
-        "Use amend_plan research_scope when newly discovered papers are host-provably inside the approved source. Use contract_revision for a changed question, source boundary, deliverable, operation, or parameters. Never describe imports or Zotero mutations as research-scope amendments.",
-    },
+    // Workflow rules: EXECUTING_PHASE_GUIDANCE (plans/planningGuidance.ts).
     validate: validateInput,
     planInvocation: () =>
       readOnlyInvocationPlan({

@@ -1,5 +1,5 @@
 import { assert } from "chai";
-import { createReadLibraryTool } from "../src/agent/tools/read/readLibrary";
+import { createLibraryReadTool } from "../src/agent/tools/read/libraryRead";
 
 function makeItem(params: {
   id: number;
@@ -118,7 +118,7 @@ describe("library_read unified metadata", function () {
       }),
     };
     return {
-      tool: createReadLibraryTool(gateway as never),
+      tool: createLibraryReadTool(gateway as never),
       requestedItemIds,
     };
   }

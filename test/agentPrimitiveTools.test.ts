@@ -15,20 +15,18 @@ import { EDITABLE_ARTICLE_METADATA_FIELDS } from "../src/agent/services/zoteroGa
 import { AgentToolRegistry } from "../src/agent/tools/registry";
 import { PdfService } from "../src/agent/services/pdfService";
 import { RetrievalService } from "../src/agent/services/retrievalService";
-import { createQueryLibraryTool } from "../src/agent/tools/read/queryLibrary";
-import { createReadLibraryTool } from "../src/agent/tools/read/readLibrary";
-import { createReadPaperTool } from "../src/agent/tools/read/readPaper";
-import { createSearchPaperTool } from "../src/agent/tools/read/searchPaper";
+import { createLibrarySearchTool } from "../src/agent/tools/read/librarySearch";
+import { createLibraryReadTool } from "../src/agent/tools/read/libraryRead";
+import { createPaperReadTool } from "../src/agent/tools/read/paperRead";
 import { getPagedOperationId } from "../src/agent/actions/pagedWorkflow";
 import { createFileIOTool } from "../src/agent/tools/write/fileIO";
 import { createBuiltInToolRegistry } from "../src/agent/tools";
-import { createEditCurrentNoteTool } from "../src/agent/tools/write/editCurrentNote";
+import { createNoteWriteTool } from "../src/agent/tools/write/noteWrite";
 import { createApplyTagsTool } from "../src/agent/tools/write/applyTags";
 import { createUpdateMetadataTool } from "../src/agent/tools/write/updateMetadata";
 import { createRunCommandTool } from "../src/agent/tools/write/runCommand";
 import { createZoteroScriptTool } from "../src/agent/tools/write/zoteroScript";
 import { createReadAttachmentTool } from "../src/agent/tools/read/readAttachment";
-import { createViewPdfPagesTool } from "../src/agent/tools/read/viewPdfPages";
 import { getNotesDirectoryConfig } from "../src/utils/notesDirectoryConfig";
 import type {
   AgentModelMessage,
@@ -99,6 +97,38 @@ function messageText(message: AgentModelMessage | undefined): string {
     .join("\n");
 }
 
+const TEST_PDF_FIGURE_CROP_CACHE_VERSION = 2;
+const TEST_PDF_FIGURE_CROP_ALGORITHM_VERSION = 9;
+
+function simpleHashForTest(value: string): string {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `fnv1a32-${(hash >>> 0).toString(16).padStart(8, "0")}`;
+}
+
+function cropManifestHashForTest(manifest: unknown): string {
+  return simpleHashForTest(JSON.stringify(manifest || {}));
+}
+
+function cropPdfFingerprintForTest(
+  paperContext: Pick<
+    PaperContextRef,
+    "itemId" | "contextItemId" | "attachmentTitle" | "title"
+  >,
+): string {
+  return simpleHashForTest(
+    [
+      paperContext.itemId,
+      paperContext.contextItemId,
+      paperContext.attachmentTitle,
+      paperContext.title,
+    ].join("|"),
+  );
+}
+
 function stableSystemText(messages: AgentModelMessage[]): string {
   return messages
     .filter(
@@ -166,6 +196,16 @@ class FakePdfService extends PdfService {
   ): Promise<PdfContext> {
     return this.context;
   }
+}
+
+/** Former read_paper(pdf, gateway) construction, now the paper_read facade. */
+function readPaperViaPaperRead(pdfService: PdfService, zoteroGateway: unknown) {
+  return createPaperReadTool(
+    pdfService,
+    new RetrievalService(pdfService),
+    {} as never,
+    zoteroGateway as never,
+  );
 }
 
 const globalScope = globalThis as typeof globalThis & {
@@ -241,8 +281,8 @@ describe("primitive agent tools", function () {
     );
     assert.notInclude(text, "This is a figure/table interpretation task");
   });
-  it("query_library searches items and enriches requested fields", async function () {
-    const tool = createQueryLibraryTool({
+  it("library_search searches items and enriches requested fields", async function () {
+    const tool = createLibrarySearchTool({
       resolveLibraryID: () => 1,
       searchAllLibraryItems: async () =>
         ({
@@ -355,8 +395,8 @@ describe("primitive agent tools", function () {
     assert.notProperty(compactFirst, "metadata");
   });
 
-  it("query_library lists libraries without requiring an active library", async function () {
-    const tool = createQueryLibraryTool({
+  it("library_search lists libraries without requiring an active library", async function () {
+    const tool = createLibrarySearchTool({
       resolveLibraryID: () => 0,
       listAllLibraries: () => [
         { libraryID: 1, name: "My Library", editable: true },
@@ -378,9 +418,9 @@ describe("primitive agent tools", function () {
     );
   });
 
-  it("query_library related mode resolves the active paper from reader context", async function () {
+  it("library_search related mode resolves the active paper from reader context", async function () {
     let receivedReferenceItemId = 0;
-    const tool = createQueryLibraryTool({
+    const tool = createLibrarySearchTool({
       resolveLibraryID: () => 1,
       listPaperContexts: () => [
         {
@@ -457,9 +497,9 @@ describe("primitive agent tools", function () {
     assert.lengthOf((result as { results: unknown[] }).results, 1);
   });
 
-  it("query_library related mode refuses active-paper fallback in library chat", async function () {
+  it("library_search related mode refuses active-paper fallback in library chat", async function () {
     let relatedSearchCalled = false;
-    const tool = createQueryLibraryTool({
+    const tool = createLibrarySearchTool({
       resolveLibraryID: () => 1,
       listPaperContexts: () => [],
       getActivePaperContext: () => ({
@@ -521,12 +561,12 @@ describe("primitive agent tools", function () {
     assert.equal(relatedSearchCalled, false);
   });
 
-  it("read_library returns item state keyed by itemId", async function () {
+  it("library_read returns item state keyed by itemId", async function () {
     const fakeItem = {
       id: 7,
       getDisplayTitle: () => "Paper Seven",
     } as any;
-    const tool = createReadLibraryTool({
+    const tool = createLibraryReadTool({
       listPaperContexts: () => [],
       getItemCollectionIds: (itemId: number) => (itemId === 7 ? [12] : []),
       getPaperTargetsByItemIds: () => [
@@ -605,13 +645,13 @@ describe("primitive agent tools", function () {
     ]);
   });
 
-  it("read_library does not use active reader fallback in collection-scoped library chat", async function () {
+  it("library_read does not use active reader fallback in collection-scoped library chat", async function () {
     let requestedTargets: number[] = [];
     const fakeItem = {
       id: 99,
       getDisplayTitle: () => "Chandra Paper",
     } as any;
-    const tool = createReadLibraryTool({
+    const tool = createLibraryReadTool({
       listPaperContexts: () => [],
       getItemCollectionIds: (itemId: number) => (itemId === 7 ? [12] : []),
       getPaperTargetsByItemIds: (itemIds: number[]) => {
@@ -651,12 +691,12 @@ describe("primitive agent tools", function () {
     );
   });
 
-  it("read_library keeps explicit item IDs in collection-scoped library chat", async function () {
+  it("library_read keeps explicit item IDs in collection-scoped library chat", async function () {
     const fakeItem = {
       id: 7,
       getDisplayTitle: () => "Collection Paper",
     } as any;
-    const tool = createReadLibraryTool({
+    const tool = createLibraryReadTool({
       listPaperContexts: () => [],
       getItemCollectionIds: (itemId: number) => (itemId === 7 ? [12] : []),
       getPaperTargetsByItemIds: () => [],
@@ -750,11 +790,15 @@ describe("primitive agent tools", function () {
     const systemText =
       typeof messages[0]?.content === "string" ? messages[0].content : "";
     assert.include(systemText, "literature_search");
-    assert.include(systemText, "library_search");
-    assert.include(systemText, "library_retrieve");
-    assert.include(systemText, "library_read");
-    assert.include(systemText, "paper_read");
-    assert.include(systemText, "workflow:'answer'");
+    // Zotero reading and library routing lives in paper_read and
+    // library_retrieve guidance; the fixed persona only points at it.
+    assert.include(
+      systemText,
+      "Tool descriptions and guidance are the source of truth for how to read papers and search the library.",
+    );
+    assert.notInclude(systemText, "paperEvidenceProgress");
+    // Discovery-versus-import rules live in literature_search guidance.
+    assert.notInclude(systemText, "workflow:'answer'");
     assert.include(systemText, "web_search");
     assert.include(systemText, "web_read");
     assert.include(systemText, "Use actual tools for requested effects");
@@ -1432,6 +1476,80 @@ Figure 2 explains the attractor-network interpretation.`;
     }
   });
 
+  it("note_write saves figure Markdown without inspecting MinerU caches", async function () {
+    let replacedContent = "";
+    let saves = 0;
+    const tool = createNoteWriteTool(
+      nativeNoteGateway({
+        getActiveNoteSnapshot: activeDraftNoteSnapshot,
+        onNativeSave: async ({ content }: { content: string }) => {
+          replacedContent = content;
+          saves += 1;
+        },
+        restoreNoteHtml: async () => {},
+      } as never),
+    );
+    const originalIOUtils = (globalThis as { IOUtils?: unknown }).IOUtils;
+    let cacheAccesses = 0;
+    (globalThis as { IOUtils?: unknown }).IOUtils = {
+      read: async () => {
+        cacheAccesses += 1;
+        throw new Error("Unexpected cache read");
+      },
+      exists: async () => {
+        cacheAccesses += 1;
+        return false;
+      },
+      getChildren: async () => {
+        cacheAccesses += 1;
+        return [];
+      },
+    };
+    const context: AgentToolContext = {
+      ...baseContext,
+      request: resolvedAgentRequest({
+        ...baseContext.request,
+        conversationKey: 43_013,
+        userText: "write a note about Figure 2",
+        activeNoteContext: {
+          noteId: 55,
+          title: "Draft Note",
+          noteKind: "standalone",
+          noteText: "Original body",
+        },
+        fullTextPaperContexts: [
+          {
+            itemId: 90,
+            contextItemId: 90,
+            title: "Stochastic Dynamics",
+            mineruCacheDir: "/tmp/llm-for-zotero-mineru/90",
+          },
+        ],
+      }),
+    };
+    try {
+      const content = `![Figure 2c](images/fig2c.png)
+
+Figure 2 explains the attractor-network interpretation.`;
+      const input = tool.validate({ content });
+      if (!input.ok) throw new Error(input.error);
+      const result = (await tool.execute(input.value, context))
+        .content as Record<string, unknown>;
+      assert.deepInclude(result, {
+        status: "updated",
+        noteId: 55,
+        title: "Draft Note",
+      });
+      assert.isTrue(
+        noteHtmlMatches(replacedContent, renderRawNoteHtml(content)),
+      );
+      assert.equal(saves, 1);
+      assert.equal(cacheAccesses, 0);
+    } finally {
+      (globalThis as { IOUtils?: unknown }).IOUtils = originalIOUtils;
+    }
+  });
+
   it("notes directory policy carries path information without enforcement fields", function () {
     const originalPrefs = globalScope.Zotero?.Prefs;
     if (!globalScope.Zotero) {
@@ -1907,7 +2025,7 @@ Figure 2 explains the attractor-network interpretation.`;
     }
   });
 
-  it("read_paper returns citation and source labels", async function () {
+  it("paper_read overview returns citation and source labels", async function () {
     const paperContext: PaperContextRef = {
       itemId: 30,
       contextItemId: 31,
@@ -1915,14 +2033,15 @@ Figure 2 explains the attractor-network interpretation.`;
       firstCreator: "Nguyen",
       year: "2023",
     };
-    const tool = createReadPaperTool(
+    const tool = readPaperViaPaperRead(
       new FakePdfService(
         makePdfContext(["Abstract text.", "Introduction text."]),
       ),
       { resolvePaperContextTarget: () => paperContext } as never,
     );
     const validated = tool.validate({
-      target: { paperContext },
+      mode: "overview",
+      target: { itemId: 30, contextItemId: 31 },
     });
     assert.isTrue(validated.ok);
     if (!validated.ok) return;
@@ -1934,7 +2053,7 @@ Figure 2 explains the attractor-network interpretation.`;
     assert.equal(first.sourceLabel, "(Nguyen, 2023)");
   });
 
-  it("read_paper resolves explicit item and attachment IDs", async function () {
+  it("paper_read overview resolves explicit item and attachment IDs", async function () {
     const hydrated: PaperContextRef = {
       itemId: 30,
       contextItemId: 31,
@@ -1942,7 +2061,7 @@ Figure 2 explains the attractor-network interpretation.`;
       firstCreator: "Nguyen",
       year: "2023",
     };
-    const tool = createReadPaperTool(
+    const tool = readPaperViaPaperRead(
       new FakePdfService(makePdfContext(["Abstract text."])),
       {
         resolvePaperContextTarget: () => hydrated,
@@ -1950,6 +2069,7 @@ Figure 2 explains the attractor-network interpretation.`;
       } as never,
     );
     const validated = tool.validate({
+      mode: "overview",
       target: { itemId: 30, contextItemId: 31 },
     });
     assert.isTrue(validated.ok);
@@ -1962,12 +2082,12 @@ Figure 2 explains the attractor-network interpretation.`;
     assert.equal(first.sourceLabel, "(Nguyen, 2023)");
   });
 
-  it("read_paper resolves multiple explicit item and attachment ID targets", async function () {
+  it("paper_read overview resolves multiple explicit item and attachment ID targets", async function () {
     const contexts: Record<number, PaperContextRef> = {
       31: { itemId: 30, contextItemId: 31, title: "Paper A" },
       41: { itemId: 40, contextItemId: 41, title: "Paper B" },
     };
-    const tool = createReadPaperTool(
+    const tool = readPaperViaPaperRead(
       new FakePdfService(makePdfContext(["Abstract text."])),
       {
         resolvePaperContextTarget: ({
@@ -1979,6 +2099,7 @@ Figure 2 explains the attractor-network interpretation.`;
       } as never,
     );
     const validated = tool.validate({
+      mode: "overview",
       targets: [
         { itemId: 30, contextItemId: 31 },
         { itemId: 40, contextItemId: 41 },
@@ -1994,40 +2115,58 @@ Figure 2 explains the attractor-network interpretation.`;
     assert.deepEqual(paperContexts, [contexts[31], contexts[41]]);
   });
 
-  it("read_paper resolves chunk reads from explicit item and attachment IDs", async function () {
+  it("paper_read reads a section picked from its outline", async function () {
     const hydrated: PaperContextRef = {
       itemId: 30,
       contextItemId: 31,
       title: "Chunk Paper",
     };
-    const tool = createReadPaperTool(
-      new FakePdfService(makePdfContext(["Abstract text.", "Method text."])),
-      {
-        resolvePaperContextTarget: () => hydrated,
-        listPaperContexts: () => [],
-      } as never,
+    const context = makePdfContext(["Abstract text.", "Method text."]);
+    context.chunkMeta = context.chunkMeta!.map((meta, index) => ({
+      ...meta,
+      sectionIndex: index,
+      sectionLabel: index ? "Methods" : "Abstract",
+    }));
+    const tool = readPaperViaPaperRead(new FakePdfService(context), {
+      resolvePaperContextTarget: () => hydrated,
+      listPaperContexts: () => [],
+    } as never);
+    const target = { itemId: 30, contextItemId: 31 };
+    const outlineInput = tool.validate({ mode: "outline", target });
+    assert.isTrue(outlineInput.ok);
+    if (!outlineInput.ok) return;
+    const outline = (await tool.execute(outlineInput.value, baseContext)) as {
+      papers: Array<{
+        outline: { sections: Array<{ sectionId: string; title: string }> };
+      }>;
+    };
+    const methods = outline.papers[0].outline.sections.find(
+      (section) => section.title === "Methods",
     );
+    assert.exists(methods);
+
     const validated = tool.validate({
-      target: { itemId: 30, contextItemId: 31 },
-      chunkIndexes: [1],
+      mode: "targeted",
+      target,
+      query: "method",
+      sectionIds: [methods!.sectionId],
     });
     assert.isTrue(validated.ok);
     if (!validated.ok) return;
-
     const result = await tool.execute(validated.value, baseContext);
-    const first = (result as { results: Array<Record<string, unknown>> })
-      .results[0];
-    assert.equal(first.text, "Method text.");
-    assert.deepEqual(first.paperContext, hydrated);
+    const texts = (
+      result as { results: Array<Record<string, unknown>> }
+    ).results.map((entry) => entry.text);
+    assert.deepEqual(texts, ["Method text."]);
   });
 
-  it("read_paper does not fall back to ambient paper context for invalid explicit targets", async function () {
+  it("paper_read overview does not fall back to ambient paper context for invalid explicit targets", async function () {
     const ambient: PaperContextRef = {
       itemId: 99,
       contextItemId: 199,
       title: "Ambient Paper",
     };
-    const tool = createReadPaperTool(
+    const tool = readPaperViaPaperRead(
       new FakePdfService(makePdfContext(["Ambient abstract."])),
       {
         resolvePaperContextTarget: () => null,
@@ -2035,6 +2174,7 @@ Figure 2 explains the attractor-network interpretation.`;
       } as never,
     );
     const validated = tool.validate({
+      mode: "overview",
       target: { itemId: 30, contextItemId: 31 },
     });
     assert.isTrue(validated.ok);
@@ -2057,7 +2197,7 @@ Figure 2 explains the attractor-network interpretation.`;
     }
   });
 
-  it("search_paper returns citation and source labels", async function () {
+  it("paper_read targeted returns citation and source labels", async function () {
     const paperContext: PaperContextRef = {
       itemId: 40,
       contextItemId: 41,
@@ -2087,12 +2227,18 @@ Figure 2 explains the attractor-network interpretation.`;
           },
         ] as never,
     );
-    const tool = createSearchPaperTool(retrievalService, pdfService, {
-      resolvePaperContextTarget: () => paperContext,
-    } as never);
+    const tool = createPaperReadTool(
+      pdfService,
+      retrievalService,
+      {} as never,
+      {
+        resolvePaperContextTarget: () => paperContext,
+      } as never,
+    );
     const validated = tool.validate({
-      target: { paperContext },
-      question: "evidence",
+      mode: "targeted",
+      target: { itemId: 40, contextItemId: 41 },
+      query: "evidence",
     });
     assert.isTrue(validated.ok);
     if (!validated.ok) return;
@@ -2124,11 +2270,13 @@ Figure 2 explains the attractor-network interpretation.`;
     const turnText = messageText(messages[messages.length - 1]);
     assert.include(turnText, "library_update");
     assert.include(turnText, "collection membership");
-    assert.include(turnText, "confirmation card is the deliverable");
+    // The write delegates are not registered, so their own guidance never
+    // reaches the model; library_update's guidance is the only write guidance.
+    assert.notInclude(turnText, "confirmation card is the deliverable");
   });
 
-  it("edit_current_note confirms and updates the active note", async function () {
-    const tool = createEditCurrentNoteTool(
+  it("note_write confirms and updates the active note", async function () {
+    const tool = createNoteWriteTool(
       nativeNoteGateway({
         getActiveNoteSnapshot: () => ({
           noteId: 55,
@@ -2167,7 +2315,7 @@ Figure 2 explains the attractor-network interpretation.`;
       },
     };
 
-    // edit_current_note is always available (supports both edit and create modes)
+    // note_write is always available (supports both edit and create modes)
     assert.isTrue(tool.isAvailable?.(baseContext.request) !== false);
     assert.isTrue(tool.isAvailable?.(noteRequest) !== false);
 
@@ -2241,9 +2389,9 @@ Figure 2 explains the attractor-network interpretation.`;
     });
   });
 
-  it("edit_current_note applies patches to the explicit target note", function () {
+  it("note_write applies patches to the explicit target note", function () {
     const requestedNoteIds: Array<number | undefined> = [];
-    const tool = createEditCurrentNoteTool({
+    const tool = createNoteWriteTool({
       getActiveNoteSnapshot: ({ noteId }: { noteId?: number }) => {
         requestedNoteIds.push(noteId);
         return noteId === 77
@@ -2287,82 +2435,8 @@ Figure 2 explains the attractor-network interpretation.`;
     assert.equal(validated.value.noteId, 77);
   });
 
-  it("edit_current_note saves figure Markdown without inspecting MinerU caches", async function () {
-    let replacedContent = "";
-    let saves = 0;
-    const tool = createEditCurrentNoteTool(
-      nativeNoteGateway({
-        getActiveNoteSnapshot: activeDraftNoteSnapshot,
-        onNativeSave: async ({ content }: { content: string }) => {
-          replacedContent = content;
-          saves += 1;
-        },
-        restoreNoteHtml: async () => {},
-      } as never),
-    );
-    const originalIOUtils = (globalThis as { IOUtils?: unknown }).IOUtils;
-    let cacheAccesses = 0;
-    (globalThis as { IOUtils?: unknown }).IOUtils = {
-      read: async () => {
-        cacheAccesses += 1;
-        throw new Error("Unexpected cache read");
-      },
-      exists: async () => {
-        cacheAccesses += 1;
-        return false;
-      },
-      getChildren: async () => {
-        cacheAccesses += 1;
-        return [];
-      },
-    };
-    const context: AgentToolContext = {
-      ...baseContext,
-      request: resolvedAgentRequest({
-        ...baseContext.request,
-        conversationKey: 43_013,
-        userText: "write a note about Figure 2",
-        activeNoteContext: {
-          noteId: 55,
-          title: "Draft Note",
-          noteKind: "standalone",
-          noteText: "Original body",
-        },
-        fullTextPaperContexts: [
-          {
-            itemId: 90,
-            contextItemId: 90,
-            title: "Stochastic Dynamics",
-            mineruCacheDir: "/tmp/llm-for-zotero-mineru/90",
-          },
-        ],
-      }),
-    };
-    try {
-      const content = `![Figure 2c](images/fig2c.png)
-
-Figure 2 explains the attractor-network interpretation.`;
-      const input = tool.validate({ content });
-      if (!input.ok) throw new Error(input.error);
-      const result = (await tool.execute(input.value, context))
-        .content as Record<string, unknown>;
-      assert.deepInclude(result, {
-        status: "updated",
-        noteId: 55,
-        title: "Draft Note",
-      });
-      assert.isTrue(
-        noteHtmlMatches(replacedContent, renderRawNoteHtml(content)),
-      );
-      assert.equal(saves, 1);
-      assert.equal(cacheAccesses, 0);
-    } finally {
-      (globalThis as { IOUtils?: unknown }).IOUtils = originalIOUtils;
-    }
-  });
-
-  it("edit_current_note compares HTML as Markdown but preserves the approved HTML payload", async function () {
-    const tool = createEditCurrentNoteTool(
+  it("note_write compares HTML as Markdown but preserves the approved HTML payload", async function () {
+    const tool = createNoteWriteTool(
       nativeNoteGateway({
         getActiveNoteSnapshot: () => ({
           noteId: 55,
@@ -2654,10 +2728,7 @@ await note.saveTx();
   });
 
   it("does not promise an approval step that read tools never perform", function () {
-    const tools = [
-      createReadAttachmentTool({} as never, {} as never),
-      createViewPdfPagesTool({} as never, {} as never),
-    ];
+    const tools = [createReadAttachmentTool({} as never, {} as never)];
     for (const tool of tools) {
       const name = tool.spec.name;
       assert.notProperty(tool.spec, "requiresConfirmation", `${name} flag`);
@@ -2666,5 +2737,21 @@ await note.saveTx();
       assert.notProperty(summaries, "onPending", `${name} onPending`);
       assert.notProperty(summaries, "onApproved", `${name} onApproved`);
     }
+  });
+
+  it("paper_read does not require confirmation for a targeted read", async function () {
+    const tool = createPaperReadTool(
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+    );
+    assert.notProperty(tool.spec, "requiresConfirmation");
+    const validated = tool.validate({ mode: "targeted", query: "method" });
+    assert.isTrue(validated.ok);
+    if (!validated.ok) return;
+    assert.isFalse(
+      await tool.shouldRequireConfirmation!(validated.value, baseContext),
+    );
   });
 });

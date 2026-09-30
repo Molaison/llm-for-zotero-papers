@@ -75,7 +75,7 @@ describe("workflow: interrupted native batch", function () {
         runId,
         conversationKey: request.conversationKey,
         mode: "agent",
-        modelName: "native-batch",
+        model: "native-batch",
         status: "running",
         createdAt: Date.now(),
       });
@@ -142,14 +142,14 @@ describe("workflow: interrupted native batch", function () {
           );
       } finally {
         nativeTarget.saveTx = original;
-        await papers[1].reload(undefined, true);
+        await papers[1].reload(undefined as never, true);
       }
       assert.equal(
         interruptedSaves,
         1,
         "The native save interruption must fire",
       );
-      const persistedTaggedIds = await Zotero.DB.columnQueryAsync(
+      const persistedTaggedIds = await Zotero.DB.columnQueryAsync<number>(
         "SELECT itemID FROM itemTags JOIN tags USING (tagID) WHERE name=? AND itemID IN (?, ?) ORDER BY itemID",
         ["workflow-recovered", papers[0].id, papers[1].id],
       );
@@ -159,7 +159,7 @@ describe("workflow: interrupted native batch", function () {
         "Only the first item persisted",
       );
       await context.checkpointActionProgress();
-      await papers[0].reload(undefined, true);
+      await papers[0].reload(undefined as never, true);
       assert.isTrue(papers[0].hasTag("workflow-recovered"));
       assert.isFalse(
         Zotero.Items.get(papers[1].id).hasTag("workflow-recovered"),
@@ -185,8 +185,8 @@ describe("workflow: interrupted native batch", function () {
         { checkpointedWorkflow: true },
       );
       assert.equal(result.kind, "result");
-      await papers[1].reload(undefined, true);
-      await papers[2].reload(undefined, true);
+      await papers[1].reload(undefined as never, true);
+      await papers[2].reload(undefined as never, true);
       assert.isTrue(
         Zotero.Items.get(papers[1].id).hasTag("workflow-recovered"),
       );

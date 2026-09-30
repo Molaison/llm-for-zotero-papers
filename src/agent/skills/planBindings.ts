@@ -75,3 +75,30 @@ export async function resolvePinnedPlanSkills(params: {
     unavailableLoadedSkillIds,
   };
 }
+
+/**
+ * The skill that owns the research loop's rules (inventory, nodes, links,
+ * verification, structure, writing). research_update carries only its
+ * operation catalog, so every approved plan with an investigation executes
+ * with this skill whether or not skill routing selected it.
+ */
+export const PLAN_INVESTIGATION_SKILL_ID = "literature-review";
+
+/**
+ * Add the investigation skill to an executing turn's skill ids when the
+ * approved contract has an investigation. The installed copy is what renders,
+ * so a user-customized skill file is honoured like any other activation.
+ */
+export function withPlanInvestigationSkill(
+  skillIds: readonly string[],
+  contract: Readonly<{ investigation?: unknown }> | null | undefined,
+  installedSkills: readonly Pick<AgentSkill, "id">[],
+): string[] {
+  if (
+    !contract?.investigation ||
+    skillIds.includes(PLAN_INVESTIGATION_SKILL_ID) ||
+    !installedSkills.some((skill) => skill.id === PLAN_INVESTIGATION_SKILL_ID)
+  )
+    return [...skillIds];
+  return [...skillIds, PLAN_INVESTIGATION_SKILL_ID];
+}

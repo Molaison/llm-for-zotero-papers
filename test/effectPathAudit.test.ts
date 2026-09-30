@@ -72,7 +72,8 @@ import { actionContractFixture } from "./helpers/semanticIntent";
  * evidenced by its own per-tool test, which mints receipts from real tool
  * results: `test/runCommandTool.test.ts`, `test/fileIOTool.test.ts`,
  * `test/undoLastAction.test.ts` (a real journal, a real inverse replay and its
- * per-step native re-read), `test/revertChanges.test.ts` and
+ * per-step native re-read), `test/revertChanges.test.ts` (undo's multi-revert
+ * form) and
  * `test/zoteroScriptConfirmation.test.ts`, the whole-receipt characterizations
  * in `test/agentActionContract.test.ts`, and — for the effects a connected
  * client runs in its own runtime — `test/externalRuntimeEffectReceipts.test.ts`.
@@ -119,6 +120,12 @@ type AuditRow = {
   };
 };
 
+/**
+ * The multi-revert form of `undo`. The table holds one mutating fixture per
+ * tool, so this second mutating input is audited by its own test.
+ */
+const UNDO_MULTI_REVERT_FIXTURE = { count: 1 };
+
 /** One reversible pending action the undo and revert fixtures target. */
 const SEEDED_JOURNAL_ACTION = "audit-journal-action";
 const AUDIT_CONVERSATION_KEY = 1;
@@ -140,17 +147,19 @@ const AUDIT: Readonly<Record<string, AuditRow>> = {
       "relate_items",
       "update_library_tag",
       "set_item_tags",
+      "create_collection",
+      "delete_collection",
+      "update_collection",
+      "delete_attachment",
+      "rename_attachment",
+      "relink_attachment",
+      "save_saved_search",
+      "delete_saved_search",
     ],
     verification: "verified",
     fixture: { kind: "tags", action: "add", itemIds: [1], tags: ["audit"] },
     // A validated operation carrying no changes plans read_only, but it also
     // describes no proposal, so nothing is authorized either way.
-    impact: "state_change",
-  },
-  collection_update: {
-    operations: ["create_collection", "delete_collection", "update_collection"],
-    verification: "verified",
-    fixture: { action: "create", name: "Audit" },
     impact: "state_change",
   },
   note_write: {
@@ -163,16 +172,6 @@ const AUDIT: Readonly<Record<string, AuditRow>> = {
     operations: ["save_notes_batch"],
     verification: "verified",
     fixture: NOTE_BATCH_FIXTURE,
-    impact: "state_change",
-  },
-  saved_search_update: {
-    operations: ["save_saved_search", "delete_saved_search"],
-    verification: "verified",
-    fixture: {
-      action: "save",
-      name: "Audit",
-      conditions: [{ condition: "title", operator: "contains", value: "x" }],
-    },
     impact: "state_change",
   },
   library_settings: {
@@ -194,30 +193,21 @@ const AUDIT: Readonly<Record<string, AuditRow>> = {
     fixture: { mode: "trash", itemIds: [1] },
     impact: "state_change",
   },
-  attachment_update: {
-    operations: ["delete_attachment", "rename_attachment", "relink_attachment"],
-    verification: "verified",
-    fixture: { action: "rename", attachmentId: 1, newName: "Audit.pdf" },
-    impact: "state_change",
-  },
-  undo_last_action: {
-    operations: ["undo"],
+  undo: {
+    operations: ["undo", "revert"],
     verification: "verified",
     verificationNote:
-      "Every replayed step re-reads its own target; the receipt is verified only when all of them read back as restored (test/undoLastAction.test.ts).",
+      "Every replayed step re-reads its own target; the receipt is verified only when all of them read back as restored (test/undoLastAction.test.ts), and for the multi-revert form only when nothing was skipped or left partial (test/revertChanges.test.ts).",
     fixture: { actionId: SEEDED_JOURNAL_ACTION },
     // With an empty journal there is nothing to undo: the plan is read_only
-    // and the execution is a no-op.
+    // and the execution is a no-op. The multi-revert form's mutating input is
+    // pinned in UNDO_MULTI_REVERT_FIXTURE below.
     impact: "state_change",
-  },
-  revert_changes: {
-    operations: ["revert"],
-    verification: "verified",
-    verificationNote:
-      "Same per-step native re-read as undo_last_action, plus nothing skipped or left partial (test/revertChanges.test.ts).",
-    fixture: { count: 1 },
-    // A dry run, or an empty journal, plans read_only and applies no inverse.
-    impact: "state_change",
+    readMode: {
+      fixture: { dryRun: true, count: 1 },
+      reason: "A dry run reads journal state without applying inverses.",
+      proposes: [],
+    },
   },
   annotate_pdf: {
     operations: ["annotation_write"],
@@ -288,114 +278,120 @@ const AUDIT: Readonly<Record<string, AuditRow>> = {
       proposes: [],
     },
   },
+};
 
-  // ── Internal legacy primitives ────────────────────────────────────────────
-  // Registered so prepared slash actions and migration delegates can still
-  // invoke them directly. They are the same definitions the facades above
-  // delegate to, so they carry the same six properties.
+/**
+ * The write delegates are not registered tools: each is reachable only as a
+ * route through the facade that owns it. One row per delegate, keyed by the
+ * delegate's internal name (the facade's `delegateName`), with a mutating
+ * input expressed in the facade's own kind/mode vocabulary.
+ */
+const DELEGATE_ROUTES: Readonly<
+  Record<
+    string,
+    {
+      facade: string;
+      operations: AgentActionOperation[];
+      fixture: Record<string, unknown>;
+    }
+  >
+> = {
   apply_tags: {
+    facade: "library_update",
     operations: ["apply_tags", "remove_tags"],
-    verification: "verified",
-    fixture: { action: "add", itemIds: [1], tags: ["audit"] },
-    impact: "state_change",
-  },
-  move_to_collection: {
-    operations: ["move_to_collection", "remove_from_collection"],
-    verification: "verified",
-    fixture: { itemIds: [1], targetCollectionId: 2 },
-    impact: "state_change",
-  },
-  update_metadata: {
-    operations: ["update_metadata"],
-    verification: "verified",
-    fixture: { itemId: 1, metadata: { title: "Audit" } },
-    impact: "state_change",
-  },
-  reparent_items: {
-    operations: ["reparent_items"],
-    verification: "verified",
-    fixture: { assignments: [{ itemId: 1, parentItemId: 2 }] },
-    impact: "state_change",
-  },
-  relate_items: {
-    operations: ["relate_items"],
-    verification: "verified",
-    fixture: { itemId: 1, relatedItemIds: [2] },
-    impact: "state_change",
-  },
-  create_items: {
-    operations: ["create_items"],
-    verification: "verified",
-    fixture: {
-      items: [{ itemType: "journalArticle", title: "Audit" }],
-    },
-    impact: "state_change",
-  },
-  tag_update: {
-    operations: ["update_library_tag"],
-    verification: "verified",
-    fixture: { action: "rename", tag: "audit", newTag: "audited" },
-    impact: "state_change",
+    fixture: { kind: "tags", action: "add", itemIds: [1], tags: ["audit"] },
   },
   set_item_tags: {
+    facade: "library_update",
     operations: ["set_item_tags"],
-    verification: "verified",
-    fixture: { assignments: [{ itemId: 1, tags: ["audit"] }] },
-    impact: "state_change",
+    fixture: {
+      kind: "tags",
+      action: "set",
+      assignments: [{ itemId: 1, tags: ["audit"] }],
+    },
   },
-  manage_collections: {
+  tag_update: {
+    facade: "library_update",
+    operations: ["update_library_tag"],
+    fixture: { kind: "tag", action: "rename", tag: "audit", newTag: "audited" },
+  },
+  move_to_collection: {
+    facade: "library_update",
+    operations: ["move_to_collection", "remove_from_collection"],
+    fixture: { kind: "collections", itemIds: [1], targetCollectionId: 2 },
+  },
+  update_metadata: {
+    facade: "library_update",
+    operations: ["update_metadata"],
+    fixture: { kind: "metadata", itemId: 1, metadata: { title: "Audit" } },
+  },
+  reparent_items: {
+    facade: "library_update",
+    operations: ["reparent_items"],
+    fixture: { kind: "parent", assignments: [{ itemId: 1, parentItemId: 2 }] },
+  },
+  relate_items: {
+    facade: "library_update",
+    operations: ["relate_items"],
+    fixture: { kind: "related", itemId: 1, relatedItemIds: [2] },
+  },
+  collection_update: {
+    facade: "library_update",
     operations: ["create_collection", "delete_collection", "update_collection"],
-    verification: "verified",
-    fixture: { action: "create", name: "Audit" },
-    impact: "state_change",
+    fixture: { kind: "collection", action: "create", name: "Audit" },
   },
-  edit_current_note: {
-    operations: ["note_create", "note_edit", "note_append"],
-    verification: "verified",
-    fixture: { mode: "create", targetItemId: 1, content: "Audit body" },
-    impact: "state_change",
-  },
-  write_notes_batch: {
-    operations: ["save_notes_batch"],
-    verification: "verified",
-    fixture: NOTE_BATCH_FIXTURE,
-    impact: "state_change",
-  },
-  trash_items: {
-    operations: ["trash_items"],
-    verification: "verified",
-    fixture: { itemIds: [1] },
-    impact: "state_change",
-  },
-  restore_from_trash: {
-    operations: ["restore_from_trash"],
-    verification: "verified",
-    fixture: { itemIds: [1] },
-    impact: "state_change",
-  },
-  merge_items: {
-    operations: ["merge_items"],
-    verification: "verified",
-    fixture: { masterItemId: 1, otherItemIds: [2] },
-    impact: "state_change",
-  },
-  manage_attachments: {
+  attachment_update: {
+    facade: "library_update",
     operations: ["delete_attachment", "rename_attachment", "relink_attachment"],
-    verification: "verified",
-    fixture: { action: "rename", attachmentId: 1, newName: "Audit.pdf" },
-    impact: "state_change",
+    fixture: {
+      kind: "attachment",
+      action: "rename",
+      attachmentId: 1,
+      newName: "Audit.pdf",
+    },
+  },
+  saved_search_update: {
+    facade: "library_update",
+    operations: ["save_saved_search", "delete_saved_search"],
+    fixture: {
+      kind: "savedSearch",
+      action: "save",
+      name: "Audit",
+      conditions: [{ condition: "title", operator: "contains", value: "x" }],
+    },
   },
   import_identifiers: {
+    facade: "library_import",
     operations: ["import_identifiers"],
-    verification: "verified",
-    fixture: { identifiers: ["10.1000/audit"] },
-    impact: "state_change",
+    fixture: { kind: "identifiers", identifiers: ["10.1000/audit"] },
   },
   import_local_files: {
+    facade: "library_import",
     operations: ["import_local_files"],
-    verification: "verified",
-    fixture: { filePaths: ["/tmp/audit.pdf"] },
-    impact: "state_change",
+    fixture: { kind: "files", filePaths: ["/tmp/audit.pdf"] },
+  },
+  create_items: {
+    facade: "library_import",
+    operations: ["create_items"],
+    fixture: {
+      kind: "manual",
+      items: [{ itemType: "journalArticle", title: "Audit" }],
+    },
+  },
+  trash_items: {
+    facade: "library_delete",
+    operations: ["trash_items"],
+    fixture: { mode: "trash", itemIds: [1] },
+  },
+  restore_from_trash: {
+    facade: "library_delete",
+    operations: ["restore_from_trash"],
+    fixture: { mode: "restore", itemIds: [1] },
+  },
+  merge_items: {
+    facade: "library_delete",
+    operations: ["merge_items"],
+    fixture: { mode: "merge", masterItemId: 1, otherItemIds: [2] },
   },
 };
 
@@ -559,7 +555,7 @@ describe("effect path audit", function () {
   const registry = auditRegistry();
 
   before(async function () {
-    // undo_last_action and revert_changes plan from the durable journal, so
+    // Both forms of undo plan from the durable journal, so
     // the audit seeds one reversible action: without it they correctly report
     // a read-only no-op and the mutating path would never be exercised.
     globalThis.Zotero = {
@@ -780,6 +776,7 @@ describe("effect path audit", function () {
     assert.deepEqual(covered.sort(), [
       "file_io",
       "run_command",
+      "undo",
       "zotero_script",
     ]);
   });
@@ -804,6 +801,94 @@ describe("effect path audit", function () {
       Object.fromEntries(
         Object.entries(AUDIT).map(([name, row]) => [name, row.impact]),
       ),
+    );
+  });
+
+  it("routes every write delegate through its facade, and only there", function () {
+    const operationsByFacade: Record<string, Set<string>> = {};
+    for (const [delegateName, route] of Object.entries(DELEGATE_ROUTES)) {
+      assert.notExists(
+        registry.getTool(delegateName),
+        `${delegateName} is a delegate, not a registered tool`,
+      );
+      const facade = registry.getTool(route.facade)!;
+      const validated = facade.validate(route.fixture);
+      assert.isTrue(
+        validated.ok,
+        `${delegateName} route fixture is invalid: ${
+          validated.ok ? "" : validated.error
+        }`,
+      );
+      if (!validated.ok) continue;
+      assert.equal(validated.value.delegateName, delegateName);
+      assert.sameMembers(
+        [...(validated.value.delegateTool.effectOperations || [])],
+        route.operations,
+        `${delegateName} declares other operations than its route`,
+      );
+      for (const operation of route.operations) {
+        (operationsByFacade[route.facade] ||= new Set()).add(operation);
+      }
+    }
+    // The routes together reach exactly what each delegating facade declares.
+    for (const facade of [
+      "library_update",
+      "library_import",
+      "library_delete",
+    ]) {
+      assert.sameMembers(
+        [...(operationsByFacade[facade] || [])],
+        AUDIT[facade].operations,
+        `${facade} declares an operation no audited route reaches`,
+      );
+    }
+  });
+
+  it("never plans a mutating delegate route as a trusted read", async function () {
+    for (const [delegateName, route] of Object.entries(DELEGATE_ROUTES)) {
+      const facade = registry.getTool(route.facade)!;
+      const validated = facade.validate(route.fixture);
+      if (!validated.ok) throw new Error(validated.error);
+      const plan = await facade.planInvocation!(
+        validated.value as never,
+        auditContext(),
+      );
+      assert.equal(
+        plan.impact,
+        "state_change",
+        `${route.facade} → ${delegateName} planned ${plan.impact}`,
+      );
+      const described =
+        (await facade.describeAction!(
+          validated.value as never,
+          auditContext(),
+        )) || [];
+      assert.isNotEmpty(described, `${delegateName} described no proposal`);
+      for (const proposal of described) {
+        assert.include(
+          route.operations,
+          proposal.operation,
+          `${delegateName} described an operation it never declared`,
+        );
+      }
+    }
+  });
+
+  it("never plans undo's multi-revert form as a trusted read", async function () {
+    const undo = registry.getTool("undo")!;
+    const validated = undo.validate(UNDO_MULTI_REVERT_FIXTURE);
+    if (!validated.ok) throw new Error(validated.error);
+    const plan = await undo.planInvocation!(
+      validated.value as never,
+      auditContext(),
+    );
+    assert.equal(plan.impact, "state_change");
+    const described =
+      (await undo.describeAction!(validated.value as never, auditContext())) ||
+      [];
+    assert.deepEqual(
+      described.map((proposal) => proposal.operation),
+      ["revert"],
     );
   });
 

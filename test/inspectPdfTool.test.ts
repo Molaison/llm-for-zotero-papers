@@ -3,13 +3,39 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { strToU8, zipSync } from "fflate";
-import { createSearchPaperTool } from "../src/agent/tools/read/searchPaper";
+import { createPaperReadTool } from "../src/agent/tools/read/paperRead";
 import { createReadAttachmentTool } from "../src/agent/tools/read/readAttachment";
-import { createViewPdfPagesTool } from "../src/agent/tools/read/viewPdfPages";
 import type { AgentToolContext, AgentToolResult } from "../src/agent/types";
 import { resolvedAgentRequest } from "./helpers/resolvedAgentRequest";
 
-describe("search_paper tool", function () {
+/** Former search_paper(retrieval, pdf, gateway) construction, now paper_read. */
+function searchPaperViaPaperRead(
+  retrievalService: unknown,
+  pdfService: unknown,
+  zoteroGateway: unknown,
+) {
+  return createPaperReadTool(
+    pdfService as never,
+    retrievalService as never,
+    {} as never,
+    zoteroGateway as never,
+  );
+}
+
+/** Former view_pdf_pages(pageService, gateway) construction, now paper_read. */
+function viewPdfPagesViaPaperRead(
+  pdfPageService: unknown,
+  zoteroGateway: unknown,
+) {
+  return createPaperReadTool(
+    {} as never,
+    {} as never,
+    pdfPageService as never,
+    zoteroGateway as never,
+  );
+}
+
+describe("paper_read targeted evidence", function () {
   const baseContext: AgentToolContext = {
     request: resolvedAgentRequest({
       conversationKey: 5,
@@ -27,7 +53,7 @@ describe("search_paper tool", function () {
   };
 
   it("retrieves evidence across multiple paper contexts", async function () {
-    const tool = createSearchPaperTool(
+    const tool = searchPaperViaPaperRead(
       {
         retrieveEvidence: async ({
           papers,
@@ -66,10 +92,11 @@ describe("search_paper tool", function () {
     );
 
     const validated = tool.validate({
-      question: "What is the method?",
+      mode: "targeted",
+      query: "What is the method?",
       targets: [
-        { paperContext: { itemId: 1, contextItemId: 101, title: "Paper One" } },
-        { paperContext: { itemId: 2, contextItemId: 202, title: "Paper Two" } },
+        { itemId: 1, contextItemId: 101 },
+        { itemId: 2, contextItemId: 202 },
       ],
     });
     assert.isTrue(validated.ok);
@@ -97,7 +124,7 @@ describe("search_paper tool", function () {
   });
 
   it("resolves evidence targets from explicit item and attachment IDs", async function () {
-    const tool = createSearchPaperTool(
+    const tool = searchPaperViaPaperRead(
       {
         retrieveEvidence: async ({
           papers,
@@ -135,7 +162,8 @@ describe("search_paper tool", function () {
     );
 
     const validated = tool.validate({
-      question: "What is the method?",
+      mode: "targeted",
+      query: "What is the method?",
       targets: [
         { itemId: 1, contextItemId: 101 },
         { itemId: 2, contextItemId: 202 },
@@ -159,7 +187,7 @@ describe("search_paper tool", function () {
 
   it("does not fall back to ambient paper context for invalid evidence targets", async function () {
     let reads = 0;
-    const tool = createSearchPaperTool(
+    const tool = searchPaperViaPaperRead(
       {
         retrieveEvidence: async () => {
           reads += 1;
@@ -177,7 +205,8 @@ describe("search_paper tool", function () {
     );
 
     const validated = tool.validate({
-      question: "What is the method?",
+      mode: "targeted",
+      query: "What is the method?",
       target: { itemId: 9, contextItemId: 909 },
     });
     assert.isTrue(validated.ok);
@@ -196,7 +225,7 @@ describe("search_paper tool", function () {
   });
 
   it("uses presentation summaries for evidence retrieval", function () {
-    const tool = createSearchPaperTool(
+    const tool = searchPaperViaPaperRead(
       {} as never,
       {} as never,
       {
@@ -209,11 +238,12 @@ describe("search_paper tool", function () {
       typeof onSuccess === "function"
         ? onSuccess({
             content: {
+              mode: "targeted",
               results: [{}, {}],
             },
           } as never)
         : "",
-      "Retrieved 2 evidence passages",
+      "Read 2 passages",
     );
   });
 });
@@ -449,12 +479,12 @@ describe("read_attachment tool", function () {
       unknown
     >;
     assert.equal(result.category, "pdf");
-    assert.include(String(result.note), "Use read_paper");
+    assert.include(String(result.note), "Use paper_read");
     assert.notProperty(result, "textContent");
   });
 });
 
-describe("view_pdf_pages tool", function () {
+describe("paper_read page rendering", function () {
   const baseContext: AgentToolContext = {
     request: {
       conversationKey: 5,
@@ -495,7 +525,7 @@ describe("view_pdf_pages tool", function () {
       ).btoa = (value: string) =>
         Buffer.from(value, "binary").toString("base64");
 
-      const tool = createViewPdfPagesTool(
+      const tool = viewPdfPagesViaPaperRead(
         {
           getActivePageIndex: () => 3,
           captureActiveView: async () => ({
@@ -533,7 +563,7 @@ describe("view_pdf_pages tool", function () {
         } as never,
       );
 
-      const validated = tool.validate({ capture: true });
+      const validated = tool.validate({ mode: "capture" });
       assert.isTrue(validated.ok);
       if (!validated.ok) return;
       const execution = (await tool.execute(validated.value, baseContext)) as {
@@ -543,7 +573,7 @@ describe("view_pdf_pages tool", function () {
       const followup = await tool.buildFollowupMessage?.(
         {
           callId: "call-1",
-          name: "view_pdf_pages",
+          name: "paper_read",
           ok: true,
           content: execution.content,
           artifacts: execution.artifacts,
@@ -585,23 +615,59 @@ describe("view_pdf_pages tool", function () {
   });
 
   it("uses presentation summaries for page results", function () {
-    const tool = createViewPdfPagesTool(
+    const tool = viewPdfPagesViaPaperRead(
       {} as never,
       {
         listPaperContexts: () => [],
       } as never,
     );
 
-    const onSuccess = tool.presentation?.summaries?.onSuccess;
+    // The trace summarizes a result without its call arguments, so the
+    // label must come from the result content alone.
+    const summarize = (content: Record<string, unknown>) => {
+      const onSuccess = tool.presentation?.summaries?.onSuccess;
+      return typeof onSuccess === "function"
+        ? onSuccess({ label: "Read Paper", content })
+        : "";
+    };
+    const target = { source: "library", title: "Paper One", itemId: 1 };
     assert.equal(
-      typeof onSuccess === "function"
-        ? onSuccess({
-            content: {
-              pageCount: 1,
-            },
-          } as never)
-        : "",
+      summarize({
+        target,
+        pageCount: 1,
+        results: [{ pageIndex: 2, pageLabel: "3" }],
+        pageTexts: ["Page three"],
+      }),
       "Prepared 1 PDF page image",
+    );
+    assert.equal(
+      summarize({
+        target,
+        pageCount: 2,
+        results: [
+          { pageIndex: 2, pageLabel: "3" },
+          { pageIndex: 3, pageLabel: "4" },
+        ],
+        pageTexts: ["Page three", "Page four"],
+      }),
+      "Prepared 2 PDF page images",
+    );
+    assert.equal(
+      summarize({
+        target,
+        capturedPageIndex: 3,
+        pageLabel: "4",
+        pageCount: 1,
+        pageText: "Visible equation text",
+      }),
+      "Captured the current reader page",
+    );
+    assert.equal(
+      summarize({
+        mode: "targeted",
+        results: [{ text: "Evidence 1" }, { text: "Evidence 2" }],
+      }),
+      "Read 2 passages",
     );
   });
 });

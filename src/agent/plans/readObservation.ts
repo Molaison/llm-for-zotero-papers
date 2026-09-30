@@ -4,6 +4,7 @@ import type {
   ReadObservationCapability,
   TrustedReadObservation,
 } from "./types";
+import { isCatalogToolName } from "../context/toolNames";
 
 type Candidate = {
   itemId?: number;
@@ -135,7 +136,7 @@ function observationSeeds(
 ): ObservationSeed[] {
   const args = record(input) || {};
   const output = record(result) || {};
-  if (["library_search", "search_paper", "query_library"].includes(toolName)) {
+  if (isCatalogToolName(toolName)) {
     return seedRows(directRows(result), () => ["metadata"]);
   }
   if (toolName === "library_read") {
@@ -232,16 +233,7 @@ function observationSeeds(
       return capabilities;
     });
   }
-  if (toolName === "view_pdf_pages") {
-    return seedRows(sources, (row) =>
-      (mayUseAggregatePayload &&
-        hasRows(output, ["pages", "images", "artifacts"])) ||
-      hasRows(row, ["pages", "images", "artifacts"])
-        ? ["figure"]
-        : [],
-    );
-  }
-  if (toolName === "read_attachment" || toolName === "read_paper") {
+  if (toolName === "read_attachment") {
     const aggregateHasBody = hasText(output, ["content", "text", "body"]);
     return seedRows(sources, (row) =>
       (mayUseAggregatePayload && aggregateHasBody) ||

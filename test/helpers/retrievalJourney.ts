@@ -1,5 +1,5 @@
 import { AgentToolRegistry } from "../../src/agent/tools/registry";
-import { createSearchPaperTool } from "../../src/agent/tools/read/searchPaper";
+import { createPaperReadTool } from "../../src/agent/tools/read/paperRead";
 import { RetrievalService } from "../../src/agent/services/retrievalService";
 import { clearAgentTranscriptStore } from "../../src/agent/store/transcriptStore";
 import { initPlanDocumentStore } from "../../src/agent/documents/store";
@@ -33,7 +33,7 @@ import type {
  * from the evidence cache.
  *
  * Everything below the tool is real: the runtime, the registry, the
- * `search_paper` tool and `RetrievalService` itself. Only the two seams that
+ * targeted `paper_read` tool and `RetrievalService` itself. Only the two seams that
  * would otherwise read a PDF are fakes, and they are fakes that count -- the
  * `candidateBuilder` the service is constructed with, and the `PdfService` it
  * ensures paper contexts through. Those two counters are the measurement; the
@@ -150,7 +150,9 @@ export function createRetrievalJourneyRig(): RetrievalJourneyRig {
       ) || null,
   } as unknown as ZoteroGateway;
   const registry = new AgentToolRegistry();
-  registry.register(createSearchPaperTool(service, pdfService, gateway));
+  registry.register(
+    createPaperReadTool(pdfService, service, {} as never, gateway),
+  );
   return {
     candidateBuilds: () => candidateBuilds,
     paperContextEnsures: () => paperContextEnsures,
@@ -159,11 +161,12 @@ export function createRetrievalJourneyRig(): RetrievalJourneyRig {
   };
 }
 
-/** One scripted `search_paper` call against one paper. */
-function searchPaperStep(callId: string, paper: PaperContextRef) {
-  return toolCallStep(callId, "search_paper", {
+/** One scripted targeted `paper_read` call against one paper. */
+function targetedReadStep(callId: string, paper: PaperContextRef) {
+  return toolCallStep(callId, "paper_read", {
+    mode: "targeted",
     target: { itemId: paper.itemId, contextItemId: paper.contextItemId },
-    question: JOURNEY_QUESTION,
+    query: JOURNEY_QUESTION,
     queryVariants: JOURNEY_QUERY_VARIANTS,
   });
 }
@@ -215,9 +218,9 @@ export async function runRetrievalTurn(params: {
     userText: "Check the method in both papers",
     sourceMessageTimestamp: 100,
     steps: [
-      searchPaperStep("search-paper-1", FIRST_PAPER),
-      searchPaperStep("search-paper-2", FIRST_PAPER),
-      searchPaperStep("search-paper-3", SECOND_PAPER),
+      targetedReadStep("targeted-read-1", FIRST_PAPER),
+      targetedReadStep("targeted-read-2", FIRST_PAPER),
+      targetedReadStep("targeted-read-3", SECOND_PAPER),
       finalStep("Both papers describe the same scripted method."),
     ],
   });

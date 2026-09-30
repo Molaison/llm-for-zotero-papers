@@ -992,7 +992,7 @@ describe("Codex app-server native client", function () {
   });
 
   it("keeps automatic skill routing off on a PDF turn without an explicit skill", async function () {
-    setUserSkills([parseSkill(BUILTIN_SKILL_FILES["simple-paper-qa.md"])]);
+    setUserSkills([parseSkill(BUILTIN_SKILL_FILES["evidence-based-qa.md"])]);
     const processKey = "native-direct-pdf-no-automatic-skill";
     const requests: Array<{
       method: string;
@@ -1068,7 +1068,7 @@ describe("Codex app-server native client", function () {
   it("activates only an explicitly selected skill on a PDF turn", async function () {
     setUserSkills([
       parseSkill(BUILTIN_SKILL_FILES["write-note.md"]),
-      parseSkill(BUILTIN_SKILL_FILES["simple-paper-qa.md"]),
+      parseSkill(BUILTIN_SKILL_FILES["evidence-based-qa.md"]),
     ]);
     const processKey = "native-direct-pdf-explicit-skill";
     const requests: Array<{
@@ -1083,7 +1083,7 @@ describe("Codex app-server native client", function () {
       process.platform === "darwin"
         ? writeNoteSkillPath.replace(/^\/tmp\//, "/private/tmp/")
         : writeNoteSkillPath;
-    const simplePaperQaSkillPath = `${expectedCwd}/.agents/skills/simple-paper-qa/SKILL.md`;
+    const evidenceSkillPath = `${expectedCwd}/.agents/skills/evidence-based-qa/SKILL.md`;
     const proc = createNativeLifecycleTestProcess({
       newThreadIds: ["thread-pdf-explicit-skill"],
       requests,
@@ -1104,8 +1104,8 @@ describe("Codex app-server native client", function () {
                 enabled: true,
               },
               {
-                name: "simple-paper-qa",
-                path: simplePaperQaSkillPath,
+                name: "evidence-based-qa",
+                path: evidenceSkillPath,
                 enabled: true,
               },
             ],
@@ -1185,7 +1185,7 @@ describe("Codex app-server native client", function () {
     });
     assert.isFalse(
       turnInput.some(
-        (input) => input.type === "skill" && input.name === "simple-paper-qa",
+        (input) => input.type === "skill" && input.name === "evidence-based-qa",
       ),
     );
     assert.deepEqual(activatedSkills, ["write-note"]);
@@ -3115,7 +3115,7 @@ describe("Codex app-server native client", function () {
 
   it("submits explicit skill selections as structured native Codex skill inputs", async function () {
     setUserSkills([
-      parseSkill(BUILTIN_SKILL_FILES["simple-paper-qa.md"]),
+      parseSkill(BUILTIN_SKILL_FILES["analyze-figures.md"]),
       parseSkill(BUILTIN_SKILL_FILES["evidence-based-qa.md"]),
     ]);
     const processKey = "native-auto-skill-input-test";
@@ -3269,7 +3269,7 @@ describe("Codex app-server native client", function () {
     const turnStartText = JSON.stringify(turnStartParams);
     assert.include(turnStartText, "what method did they use in this paper");
     assert.notInclude(turnStartText, "$evidence-based-qa");
-    assert.notInclude(turnStartText, "$simple-paper-qa");
+    assert.notInclude(turnStartText, "$analyze-figures");
     assert.notInclude(
       JSON.stringify(threadStartParams),
       "LLM-for-Zotero skills active for this turn",
@@ -3783,9 +3783,9 @@ describe("Codex app-server native client", function () {
       scope,
       event: {
         ...baseEvent,
-        toolName: "read_paper",
+        toolName: "paper_read",
         toolLabel: "Read Paper",
-        arguments: {},
+        arguments: { mode: "targeted", query: "method" },
         ok: true,
       },
     });
@@ -3795,11 +3795,25 @@ describe("Codex app-server native client", function () {
       event: {
         ...baseEvent,
         requestId: "read-2",
-        toolName: "read_paper",
+        toolName: "paper_read",
         toolLabel: "Read Paper",
-        arguments: {},
+        arguments: { mode: "targeted", query: "method" },
         ok: true,
         timestamp: 1100,
+      },
+    });
+    // MCP never exposes a retired primitive, so a retired name is not a read.
+    recordCodexNativeReadActivity({
+      threadId: "thread-ledger",
+      scope,
+      event: {
+        ...baseEvent,
+        requestId: "retired-read",
+        toolName: "view_pdf_pages",
+        toolLabel: "Retired View",
+        arguments: { pages: [3] },
+        ok: true,
+        timestamp: 1150,
       },
     });
     recordCodexNativeReadActivity({
@@ -3858,7 +3872,10 @@ describe("Codex app-server native client", function () {
     assert.include(block, "Already inspected in this Codex thread");
     assert.include(block, "Ledger Paper");
     assert.include(block, "Read Paper");
+    assert.include(block, "mode=targeted");
+    assert.include(block, 'query="method"');
     assert.include(block, "2x");
+    assert.notInclude(block, "Retired View");
     assert.include(block, "Read MinerU full.md");
     assert.include(block, "offset=25");
     assert.notInclude(block, "failed search");

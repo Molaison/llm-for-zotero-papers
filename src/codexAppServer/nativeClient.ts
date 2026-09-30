@@ -96,6 +96,7 @@ import {
   type CodexNativeMcpSetupStatus,
 } from "./mcpSetup";
 import {
+  buildCodexNativeSkillInstructionBlock,
   buildCodexNativeSkillRequest,
   resolveExplicitCodexNativeSkillIds,
   resolveCodexNativeSkills,
@@ -124,6 +125,8 @@ export {
   resolveCodexNativeRuntimeCwd,
 } from "./runtimeCwd";
 import { getCanonicalSkillFilePath } from "../agent/skills/nativeSkillPaths";
+import { withPlanInvestigationSkill } from "../agent/skills/planBindings";
+import { getAllSkills } from "../agent/skills";
 import { resolveDocumentOutcomePolicy } from "../agent/documents/outcomePolicy";
 import {
   loadLatestDocumentForRun,
@@ -3708,6 +3711,26 @@ export async function runCodexAppServerNativeTurn(input: {
           planContext?.phase === "executing"
             ? await loadPlanArtifact(planContext.planId, planContext.revision)
             : null;
+        // An approved investigation always executes with the skill that owns
+        // the research loop's rules, unless skills are off for this turn.
+        const turnSkillIds =
+          codexNativeSkillMode === "off"
+            ? resolvedSkills.matchedSkillIds
+            : withPlanInvestigationSkill(
+                resolvedSkills.matchedSkillIds,
+                approvedPlanArtifact?.contract,
+                getAllSkills(),
+              );
+        const turnSkillInstructionBlock =
+          turnSkillIds.length === resolvedSkills.matchedSkillIds.length
+            ? resolvedSkills.instructionBlock
+            : buildCodexNativeSkillInstructionBlock(
+                turnSkillIds,
+                getAllSkills(),
+                {
+                  rawPdfMode: Boolean(skillContext?.localDocuments?.length),
+                },
+              );
         params.executionRequest.planContext = planContext;
         approvedExecutionSession = planSession;
         const initialized = await planSession.initialize();
@@ -3763,7 +3786,7 @@ export async function runCodexAppServerNativeTurn(input: {
               cwd: codexNativeSkillLookupCwd,
               skillIds: currentTurnHasLocalPdfs
                 ? explicitPdfSkillIds
-                : resolvedSkills.matchedSkillIds,
+                : turnSkillIds,
               exactSkillPaths: currentTurnHasLocalPdfs
                 ? explicitPdfSkillPaths
                 : undefined,
@@ -3792,16 +3815,14 @@ export async function runCodexAppServerNativeTurn(input: {
           .filter(Boolean)
           .join("\n\n");
         const skillInstructionBlock = [
-          codexNativeSkillMode === "legacy"
-            ? resolvedSkills.instructionBlock
-            : "",
+          codexNativeSkillMode === "legacy" ? turnSkillInstructionBlock : "",
           buildNativeDocumentOutcomeInstruction(documentOutcomePolicy),
         ]
           .filter(Boolean)
           .join("\n\n");
         const activatedSkillIds = currentTurnHasLocalPdfs
           ? explicitPdfSkillIds
-          : resolvedSkills.matchedSkillIds;
+          : turnSkillIds;
         for (const skillId of activatedSkillIds) {
           params.onSkillActivated?.(skillId);
         }

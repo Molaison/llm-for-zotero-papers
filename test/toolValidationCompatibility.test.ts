@@ -1,5 +1,5 @@
 import { assert } from "chai";
-import { createQueryLibraryTool } from "../src/agent/tools/read/queryLibrary";
+import { createLibrarySearchTool } from "../src/agent/tools/read/librarySearch";
 import { createFileIOTool } from "../src/agent/tools/write/fileIO";
 import type { AgentToolContext } from "../src/agent/types";
 import { createMalformedToolArgumentsDiagnostic } from "../src/agent/toolArgumentDiagnostics";
@@ -17,8 +17,8 @@ const baseContext: AgentToolContext = {
 };
 
 describe("tool validation compatibility", function () {
-  it("normalizes canonical and legacy query_library shapes", function () {
-    const tool = createQueryLibraryTool({} as never);
+  it("normalizes canonical and legacy library_search shapes", function () {
+    const tool = createLibrarySearchTool({} as never);
 
     const itemSearch = tool.validate({
       entity: "items",
@@ -122,8 +122,8 @@ describe("tool validation compatibility", function () {
     assert.equal(legacyCollectionTree.value.view, "tree");
   });
 
-  it("keeps query_library validation strict outside known legacy shapes", function () {
-    const tool = createQueryLibraryTool({} as never);
+  it("keeps library_search validation strict outside known legacy shapes", function () {
+    const tool = createLibrarySearchTool({} as never);
 
     const missingSearchText = tool.validate({
       entity: "items",

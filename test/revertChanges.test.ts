@@ -1,16 +1,16 @@
 import { assert } from "chai";
-import { createRevertChangesTool } from "../src/agent/tools/write/revertChanges";
+import { createUndoTool } from "../src/agent/tools/write/undo";
 import { createTestActionContractService } from "./helpers/actionContractService";
 
 /**
- * revert_changes had no test file of its own. These pin the frozen proposal and
+ * The multi-revert form of `undo` (count/actionIds/dryRun). These pin the frozen proposal and
  * the receipt rule: `verification` comes from the per-step native re-read
  * `revertActions` reports, never from the tool's own counters. The end-to-end
  * evidence for that re-read lives in `undoLastAction.test.ts`, which drives the
  * same replay through a real journal.
  */
-describe("revert_changes effect path", function () {
-  const tool = createRevertChangesTool({} as never);
+describe("undo multi-revert effect path", function () {
+  const tool = createUndoTool({} as never);
   const service = createTestActionContractService();
 
   const validated = (args: Record<string, unknown>) => {

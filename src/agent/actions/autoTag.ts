@@ -325,8 +325,9 @@ export const autoTagAction: AgentAction<AutoTagInput, AutoTagOutput> = {
       });
 
       const mutateResult = await callTool(
-        "apply_tags",
+        "library_update",
         {
+          kind: "tags",
           action: "add",
           id: getPagedOperationId("auto_tag", page, {
             pageSize: options.pageSize,
@@ -592,12 +593,12 @@ async function fetchExistingLibraryTags(
         ),
       );
     } catch {
-      // Fall back to query_library below for tests and older gateways.
+      // Fall back to library_search below for tests and older gateways.
     }
   }
 
   const tagResult = await callTool(
-    "query_library",
+    "library_search",
     { entity: "tags", mode: "list" },
     ctx,
     "Loading existing tags",

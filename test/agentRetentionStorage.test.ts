@@ -2,8 +2,8 @@ import { assert } from "chai";
 import { DatabaseSync } from "node:sqlite";
 import { AgentRuntime } from "../src/agent/runtime";
 import { AgentToolRegistry } from "../src/agent/tools/registry";
-import { createConversationReadTool } from "../src/agent/tools/read/conversationRead";
-import { createEditCurrentNoteTool } from "../src/agent/tools/write/editCurrentNote";
+import { createContextReadTool } from "../src/agent/tools/read/contextRead";
+import { createNoteWriteTool } from "../src/agent/tools/write/noteWrite";
 import {
   clearAgentTranscriptStore,
   loadLatestAgentTranscriptSegment,
@@ -118,11 +118,12 @@ describe("retention through existing SQLite storage", function () {
     assert.equal(result.kind, "completed");
     clearAgentTranscriptStore();
     assert.equal(await readAgentConversationAnswer(key, "answer-0"), answer);
-    const read = createConversationReadTool();
+    const read = createContextReadTool();
     let recovered = "",
       textOffset = 0;
     for (let page = 0; page < 200; page++) {
       const input = read.validate({
+        source: "conversation",
         messageId: "answer-0",
         textOffset,
         maxTokens: 512,
@@ -138,7 +139,7 @@ describe("retention through existing SQLite storage", function () {
       textOffset = output.nextTextOffset;
     }
     assert.equal(recovered, answer);
-    const note = createEditCurrentNoteTool({} as never);
+    const note = createNoteWriteTool({} as never);
     const input = note.validate({
       mode: "create",
       target: "standalone",

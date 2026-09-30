@@ -12,82 +12,83 @@ import {
   resolveLiteratureDiscoveryReview,
 } from "../../services/literatureDiscovery";
 import type { ZoteroGateway } from "../../services/zoteroGateway";
-import type { AgentToolDefinition } from "../../types";
+import type { AgentToolDefinition, ToolSpec } from "../../types";
 import { fail, normalizePositiveInt, ok, validateObject } from "../shared";
+
+/** Exported so a caller-visibility check can ask about this tool by spec. */
+export const LITERATURE_REVIEW_SPEC: ToolSpec = {
+  name: "literature_review",
+  description: "Show the selection card for ranked saved candidates.",
+  executionClass: "read",
+  workCategory: "retrieval",
+  inputSchema: {
+    type: "object",
+    additionalProperties: false,
+    required: ["selections"],
+    properties: {
+      selections: {
+        type: "array",
+        minItems: 0,
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["candidateSetId", "candidateIndex", "reason"],
+          properties: {
+            candidateSetId: {
+              type: "string",
+              description:
+                "Exact candidateSetId returned by literature_search in this turn.",
+            },
+            candidateIndex: {
+              type: "integer",
+              minimum: 1,
+              description:
+                "One-based candidateIndex from that saved candidate set.",
+            },
+            reason: {
+              type: "string",
+              description:
+                "Brief relevance explanation grounded in the retrieved title/abstract, not invented findings.",
+            },
+          },
+        },
+      },
+      sessionId: {
+        type: "string",
+        description: "Discovery sessionId from search results or Find more.",
+      },
+      revision: {
+        type: "integer",
+        minimum: 0,
+        description:
+          "Current discovery revision from search results or Find more.",
+      },
+      outcome: {
+        type: "string",
+        enum: ["complete", "no_more", "search_failed"],
+        description:
+          "Use no_more for exhausted relevant matches or search_failed for retrieval errors. Explain either in shortfallReason.",
+      },
+      targetCollectionId: {
+        type: "integer",
+        minimum: 1,
+        description:
+          "Requested destination, after resolving its native collection identity. Otherwise use the one scoped collection or the current library.",
+      },
+      shortfallReason: {
+        type: "string",
+        description:
+          "Only when fewer genuinely relevant papers can be found than requested: explain the shortfall. Never pad the shortlist with irrelevant papers.",
+      },
+    },
+  },
+};
 
 export function createLiteratureReviewTool(
   gateway: ZoteroGateway,
 ): AgentToolDefinition<LiteratureReviewInput, unknown> {
   return {
-    spec: {
-      name: "literature_review",
-      description:
-        "Show a ranked paper-only import-selection card after literature_search. Select the requested number using saved candidate references and evidence-based relevance reasons. Use this card when the user requests selection or review. Ordinary discovery returns ranked results without importing. Explicit import requests use library_import directly instead.",
-      executionClass: "read",
-      workCategory: "retrieval",
-      inputSchema: {
-        type: "object",
-        additionalProperties: false,
-        required: ["selections"],
-        properties: {
-          selections: {
-            type: "array",
-            minItems: 0,
-            items: {
-              type: "object",
-              additionalProperties: false,
-              required: ["candidateSetId", "candidateIndex", "reason"],
-              properties: {
-                candidateSetId: {
-                  type: "string",
-                  description:
-                    "Exact candidateSetId returned by literature_search in this turn.",
-                },
-                candidateIndex: {
-                  type: "integer",
-                  minimum: 1,
-                  description:
-                    "One-based candidateIndex from that saved candidate set.",
-                },
-                reason: {
-                  type: "string",
-                  description:
-                    "Brief relevance explanation grounded in the retrieved title/abstract, not invented findings.",
-                },
-              },
-            },
-          },
-          sessionId: {
-            type: "string",
-            description:
-              "Discovery sessionId from search results or Find more.",
-          },
-          revision: {
-            type: "integer",
-            minimum: 0,
-            description:
-              "Current discovery revision from search results or Find more.",
-          },
-          outcome: {
-            type: "string",
-            enum: ["complete", "no_more", "search_failed"],
-            description:
-              "Use no_more for exhausted relevant matches or search_failed for retrieval errors. Explain either in shortfallReason.",
-          },
-          targetCollectionId: {
-            type: "integer",
-            minimum: 1,
-            description:
-              "Requested destination, after resolving its native collection identity. Otherwise use the one scoped collection or the current library.",
-          },
-          shortfallReason: {
-            type: "string",
-            description:
-              "Only when fewer genuinely relevant papers can be found than requested: explain the shortfall. Never pad the shortlist with irrelevant papers.",
-          },
-        },
-      },
-    },
+    spec: LITERATURE_REVIEW_SPEC,
     presentation: {
       label: "Review relevant papers",
       summaries: {

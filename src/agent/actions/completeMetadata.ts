@@ -250,7 +250,7 @@ export const completeMetadataAction: AgentAction<
       }
 
       const metaResult = await callTool(
-        "search_literature_online",
+        "literature_search",
         searchArgs,
         ctx,
         `Fetching metadata for "${title}"`,
@@ -331,8 +331,8 @@ export const completeMetadataAction: AgentAction<
     }));
 
     const mutateResult = await callTool(
-      "update_metadata",
-      { operations },
+      "library_update",
+      { kind: "metadata", operations },
       ctx,
       "Updating metadata",
     );
@@ -405,7 +405,7 @@ async function readMetadataEntries(
   ctx: ActionExecutionContext,
 ): Promise<MetadataReadEntry[]> {
   const readResult = await callTool(
-    "read_library",
+    "library_read",
     {
       itemIds: targets.map((target) => target.itemId),
       sections: ["metadata", "tags", "attachments"],

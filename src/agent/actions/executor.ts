@@ -91,7 +91,7 @@ function buildToolContext(
  *
  * NOTE: This function only handles `prepareExecution` (validation + confirmation).
  * It does NOT run the runtime's result-review loop (createResultReviewAction /
- * resolveResultReview). This means tools like search_literature_online will
+ * resolveResultReview). This means tools like literature_search will
  * return raw results without triggering per-item review cards — which is the
  * desired behavior for batch actions that gather data in a loop and present
  * one consolidated confirmation at the end.

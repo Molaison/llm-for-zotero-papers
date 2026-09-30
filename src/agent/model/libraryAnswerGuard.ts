@@ -24,8 +24,7 @@ export type LibraryRetrieveShallowSignal = {
   lastRetrieveShallow: boolean;
 };
 
-// Model-visible evidence-read tools; search_paper/read_paper are registered
-// internal-only and never appear in model-driven runs.
+// Model-visible evidence-read tools.
 const RETRIEVE_FAMILY_TOOLS = new Set([
   "library_retrieve",
   "paper_read",

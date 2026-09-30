@@ -272,7 +272,6 @@ describe("quote guidance prompts", function () {
 
   it("keeps stock skills free of the shared citation policy", function () {
     const skills = [
-      "../src/agent/skills/simple-paper-qa.md",
       "../src/agent/skills/compare-papers.md",
       "../src/agent/skills/evidence-based-qa.md",
       "../src/agent/skills/literature-review.md",
@@ -289,7 +288,7 @@ describe("quote guidance prompts", function () {
     }
   });
 
-  it("injects figure task guidance only for semantic figure intent", async function () {
+  it("renders no figure turn rule; figure rules come only from the analyze-figures skill", async function () {
     const paperContext: PaperContextRef = {
       ...paper(),
       title: "Figure Paper",
@@ -301,15 +300,8 @@ describe("quote guidance prompts", function () {
       fullTextPaperContexts: [],
     });
     const unmatched = await buildAgentInitialMessages(plainRequest, [], []);
-    const conceptualGraphQuestion = await buildAgentInitialMessages(
-      request({
-        userText: "Explain graph neural networks and image representations.",
-        selectedPaperContexts: [paperContext],
-        fullTextPaperContexts: [],
-      }),
-      [],
-      [],
-    );
+    // A legacy plan intent with a semantic figure mode no longer adds a
+    // per-turn figure rule or MinerU cache listing.
     const intentMatched = await buildAgentInitialMessages(
       request({
         userText: "Explain Figure 1.",
@@ -328,20 +320,19 @@ describe("quote guidance prompts", function () {
       ["analyze-figures"],
     );
 
-    for (const messages of [unmatched, conceptualGraphQuestion, matched]) {
-      const unmatchedText = messages
-        .map((message) => message.content)
-        .join("\n");
-      assert.notInclude(unmatchedText, "Available MinerU cache directories");
-      assert.notInclude(unmatchedText, "For figure workflows");
-      assert.notInclude(unmatchedText, "paper_read({ mode:'figures'");
+    const textOf = (messages: typeof unmatched) =>
+      messages.map((message) => message.content).join("\n");
+    for (const messages of [unmatched, intentMatched, matched]) {
+      const text = textOf(messages);
+      assert.notInclude(text, "Available MinerU cache directories");
+      assert.notInclude(text, "/tmp/llm-for-zotero-mineru/12");
+      assert.notInclude(text, "For figure workflows");
+      assert.notInclude(text, "TURN RULE");
     }
-    for (const messages of [intentMatched]) {
-      const matchedText = messages.map((message) => message.content).join("\n");
-      assert.include(matchedText, "paper_read({ mode:'figures'");
-      assert.include(matchedText, "precise PDF crops");
-      assert.include(matchedText, "/tmp/llm-for-zotero-mineru/12");
-    }
+    assert.notInclude(textOf(unmatched), "figure_crops");
+    assert.notInclude(textOf(intentMatched), "figure_crops");
+    // The skill text itself is pinned in toolGuidanceContract and
+    // promptSingleOwner; skills are not loaded in this prompt fixture.
   });
 
   it("describes image support generically without naming model vendors", function () {

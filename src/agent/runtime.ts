@@ -33,10 +33,7 @@ import {
   enforceAgentPromptBudget,
   resolveAgentPromptBudgetLimits,
 } from "./context/promptBudget";
-import {
-  getTurnPapersWithRoles,
-  isSinglePaperConversation,
-} from "./context/requestTurnPaperScope";
+import { getTurnPapersWithRoles } from "./context/requestTurnPaperScope";
 import {
   resolveAgentRuntimeRequest,
   type AgentRequestPaperContextResolver,
@@ -80,6 +77,7 @@ import {
   renderAgentPromptEnvelope,
 } from "./model/messageBuilder";
 import { resolvePlanSkillRoutingReceipt } from "./model/semanticSkillRouting";
+import { withPlanInvestigationSkill } from "./skills/planBindings";
 import {
   buildAdapterToolCallResult,
   type ToolWorkflowOutcome,
@@ -142,7 +140,6 @@ import {
 } from "./execution/transcriptRecovery";
 import {
   buildToolProgressFingerprint,
-  filterTransientRecoveryTool,
   isUserDeniedToolResult,
   readToolError,
   setToolResultReadAvailability,
@@ -165,14 +162,12 @@ import type {
   ResolvedAgentRuntimeRequest,
 } from "./types";
 import { buildAgentStageEvent } from "./stageEvents";
-import { selectAutomaticSkills } from "./model/automaticSkillSelection";
 
 type AgentRuntimeDeps = {
   registry: AgentToolRegistry;
   adapterFactory: (request: ResolvedAgentRuntimeRequest) => AgentModelAdapter;
   paperContextResolver?: AgentRequestPaperContextResolver;
   now?: () => number;
-  skillSelector?: typeof selectAutomaticSkills;
   /** Overridable so a failing re-anchoring can be exercised in tests. */
   reanchorCitations?: typeof reanchorQuoteCitationsToClaims;
 };
@@ -221,7 +216,6 @@ export class AgentRuntime {
   private readonly adapterFactory: AgentRuntimeDeps["adapterFactory"];
   private readonly paperContextResolver?: AgentRequestPaperContextResolver;
   private readonly now: () => number;
-  private readonly skillSelector: typeof selectAutomaticSkills;
   private readonly reanchorCitations: typeof reanchorQuoteCitationsToClaims;
   private readonly pendingConfirmations = new Map<
     string,
@@ -233,7 +227,6 @@ export class AgentRuntime {
     this.adapterFactory = deps.adapterFactory;
     this.paperContextResolver = deps.paperContextResolver;
     this.now = deps.now || (() => Date.now());
-    this.skillSelector = deps.skillSelector || selectAutomaticSkills;
     this.reanchorCitations =
       deps.reanchorCitations || reanchorQuoteCitationsToClaims;
   }
@@ -598,13 +591,12 @@ export class AgentRuntime {
         request.conversationKey,
       );
       setToolResultReadAvailability(request, false);
-      // Approved Plans retain their frozen skill binding. Ordinary turns select
-      // guidance before the main model; skill routing never predicts actions.
+      // Approved Plans retain their frozen skill binding. Ordinary turns carry
+      // only explicitly forced skills; the model loads any other guidance from
+      // the installed inventory with load_skill, so no request precedes it.
       let turnIntent: {
         skillIds: string[];
         classifiedIntent: AgentRuntimeRequest["classifiedIntent"] | null;
-        degraded: boolean;
-        routingReceipt?: AgentRuntimeRequest["skillRoutingReceipt"];
       };
       let approvedPlanArtifact: Awaited<ReturnType<typeof loadPlanArtifact>> =
         null;
@@ -636,34 +628,22 @@ export class AgentRuntime {
           skillIds: reused.skillIds,
           classifiedIntent:
             approvedPlanArtifact?.actionContract?.intent || null,
-          degraded: false,
         };
       } else {
         request.actionContract = undefined;
         request.actionProgress = undefined;
         request.actionPreparation = undefined;
         request.classifiedIntent = undefined;
-        request.skillRoutingReceipt = undefined;
-        const started = this.now();
-        const selected =
-          adapter.supportsTools(request) && !isSinglePaperConversation(request)
-            ? await this.skillSelector(request, getAllSkills(), params.signal)
-            : { skillIds: [], status: "selected" as const };
-        if (adapter.supportsTools(request))
-          await emit({
-            type: "provider_event",
-            providerType: "agent_skill_selection",
-            payload: { ...selected, elapsedMs: this.now() - started },
-          });
-        turnIntent = {
-          skillIds: selected.skillIds,
-          classifiedIntent: null,
-          degraded: false,
-        };
+        request.userTextSignals = computeUserTextSignals(request.userText);
+        turnIntent = { skillIds: [], classifiedIntent: null };
       }
       request.classifiedIntent = turnIntent.classifiedIntent || undefined;
-      request.skillRoutingReceipt = turnIntent.routingReceipt;
-      const matchedSkills = getMatchedSkillIds(request, turnIntent.skillIds);
+      request.skillRoutingReceipt = undefined;
+      let matchedSkills = withPlanInvestigationSkill(
+        getMatchedSkillIds(request, turnIntent.skillIds),
+        approvedPlanArtifact?.contract,
+        getAllSkills(),
+      );
       if (request.planContext?.phase !== "executing") {
         const forcedSkillIds = new Set(request.forcedSkillIds || []);
         request.loadedSkillRecords = (
@@ -718,9 +698,6 @@ export class AgentRuntime {
       }
       const toolDefinitions =
         this.registry.listToolDefinitionsForRequest(request);
-      const toolSpecs = filterTransientRecoveryTool(
-        this.registry.listToolsForRequest(request),
-      );
       await hydrateAgentEvidenceCache(request.conversationKey);
       await hydrateAgentCoverageLedger({
         conversationKey: request.conversationKey,
@@ -990,6 +967,18 @@ export class AgentRuntime {
           usedFallback: false,
         };
       }
+      if (request.planContext?.phase === "executing") {
+        // The plan session resolved the approved skill bindings (forced
+        // choices and skills loaded while planning) against their frozen
+        // version and fingerprint; a changed forced binding already failed
+        // initialization above. Render the compatible ones.
+        const boundSkillIds = (request.loadedSkillRecords || []).map(
+          (record) => record.id,
+        );
+        matchedSkills = Array.from(
+          new Set([...matchedSkills, ...boundSkillIds]),
+        );
+      }
       const actionContractInitialization =
         await actionContractSession.initialize({
           checkpoint: interruptedActionCheckpoint,
@@ -1074,6 +1063,9 @@ export class AgentRuntime {
           contentInputs: resolveCapabilitiesContentInputs(adapterCapabilities),
         },
       );
+      request.deliveredToolGuidance = [
+        ...renderedPrompt.inventory.toolGuidanceInstructions,
+      ];
       const initialTranscriptMessages = promptTranscriptMessages();
       const messages = composeAgentModelInput(renderedPrompt.envelope, {
         transcriptMessages: initialTranscriptMessages,
@@ -2028,6 +2020,11 @@ export class AgentRuntime {
               resolveCapabilitiesContentInputs(adapterCapabilities),
           },
         );
+        // The restart replaces the earlier prompt, so only this render's
+        // guidance has reached the model.
+        request.deliveredToolGuidance = [
+          ...renderedPrompt.inventory.toolGuidanceInstructions,
+        ];
         continuationSession.restartWithMessages(
           composeAgentModelInput(renderedPrompt.envelope, {
             transcriptMessages: promptTranscriptMessages(),
@@ -2516,4 +2513,26 @@ export class AgentRuntime {
       pathLease.release();
     }
   }
+}
+
+/**
+ * Cheap keyword signals from the user's text, computed once per ordinary
+ * turn. They only select which tool guidance is shown; never authority.
+ */
+export function computeUserTextSignals(
+  userText: string,
+): NonNullable<AgentRuntimeRequest["userTextSignals"]> {
+  return {
+    mentionsDuplicates: /\bduplicat|\bmerg(e|ed|es|ing)\b|重复|合并/i.test(
+      userText,
+    ),
+    mentionsTrash: /\btrash\b|\brestor(e|ed|ing)\b|回收站|恢复/i.test(userText),
+    mentionsAttachment:
+      /\battachments?\b|\brenam(e|ed|ing)\b|\brelink(ed|ing)?\b|附件/i.test(
+        userText,
+      ),
+    mentionsImport: /\bimport(s|ed|ing)?\b|导入|add .* to (my )?library/i.test(
+      userText,
+    ),
+  };
 }

@@ -1,10 +1,9 @@
 ---
 id: evidence-based-qa
 description: Retrieve missing evidence for specific methods, results, or verification questions in selected papers or collections. Clarification or translation of sufficient supplied text needs no retrieval workflow.
-version: 9
+version: 12
 contexts: single-paper,paper-set,library-corpus
 activation: auto
-supersedes: simple-paper-qa
 ---
 
 ## Check a paper-specific question
@@ -15,7 +14,6 @@ A failed passage search does not establish that a claim is absent from the paper
 
 Use `paper_read` for a missing passage or section in known papers, batching explicit `targets` when useful.
 For collection or library questions, use `library_retrieve` within that scope, then close-read identified papers as needed.
-Do not substitute the active-reader paper for a requested collection.
 
 Use the returned paper ledger, body evidence, and coverage frontier to assess multi-paper answers.
 Follow up on concrete missing facts or qualifications; neither a fixed call count nor additional decorative quotes determine completeness.

@@ -8,6 +8,7 @@ import {
 import type { AgentActionContract } from "../src/agent/contracts/types";
 import { decodePlanDocument } from "../src/agent/documents/decoders";
 import { buildAgentInitialMessages } from "../src/agent/model/messageBuilder";
+import { PLANNING_PHASE_GUIDANCE } from "../src/agent/plans/planningGuidance";
 import {
   decodeActionContract,
   decodePlanContract,
@@ -638,44 +639,44 @@ describe("Plan Mode research architecture v3", function () {
     assert.isUndefined(
       (researchUpdate.spec.inputSchema as any).properties.papers.maxItems,
     );
+    // The research loop narrative lives in the literature-review skill; the
+    // tool guidance keeps the operation catalog and points at the skill.
+    const researchInstruction = researchUpdate.guidance?.instruction || "";
+    const reviewSkill = readFileSync(
+      fileURLToPath(
+        new URL("../src/agent/skills/literature-review.md", import.meta.url),
+      ),
+      "utf8",
+    );
+    assert.include(reviewSkill, "authoritative scope check");
+    assert.include(reviewSkill, "Read every accessible paper");
+    assert.include(reviewSkill, "host binds internal evidence and finding IDs");
+    assert.include(reviewSkill, "list_themes");
+    assert.include(reviewSkill, "do not recover old tool handles");
     assert.include(
-      researchUpdate.guidance?.instruction || "",
-      "authoritative scope check",
+      reviewSkill,
+      "Treat that manifest as authoritative and call `paper_read` for the next group directly",
     );
     assert.include(
-      researchUpdate.guidance?.instruction || "",
-      "read every accessible paper",
+      reviewSkill,
+      "never re-enumerate or re-verify it with `library_search`",
     );
+    assert.include(reviewSkill, "`next_screen_batch`");
+    assert.include(researchInstruction, "literature-review skill");
+    for (const operation of (researchUpdate.spec.inputSchema as any).properties
+      .operation.enum as string[]) {
+      assert.include(
+        researchInstruction,
+        operation,
+        `the operation catalog names ${operation}`,
+      );
+    }
     assert.include(
-      researchUpdate.guidance?.instruction || "",
-      "host binds internal evidence and finding IDs",
-    );
-    assert.include(researchUpdate.guidance?.instruction || "", "list_themes");
-    assert.include(
-      researchUpdate.guidance?.instruction || "",
-      "do not recover old tool handles",
-    );
-    assert.include(
-      researchUpdate.guidance?.instruction || "",
-      "continuation checkpoint already supplies the authoritative remaining manifest",
-    );
-    assert.include(
-      researchUpdate.guidance?.instruction || "",
-      "next_screen_batch",
-    );
-    assert.include(
-      researchUpdate.guidance?.instruction || "",
-      "never re-enumerate or re-verify it with library_search",
-    );
-    assert.include(
-      updatePlan.guidance?.instruction || "",
+      PLANNING_PHASE_GUIDANCE,
       "resolve it with one bounded metadata query",
     );
-    assert.include(updatePlan.guidance?.instruction || "", "omit include");
-    assert.include(
-      updatePlan.guidance?.instruction || "",
-      "never invent a paper quota",
-    );
+    assert.include(PLANNING_PHASE_GUIDANCE, "omit include");
+    assert.include(PLANNING_PHASE_GUIDANCE, "never invent a paper quota");
     const paperSchema = (researchUpdate.spec.inputSchema as any).properties
       .papers.items;
     assert.deepEqual(paperSchema.required, ["libraryID", "itemKey"]);

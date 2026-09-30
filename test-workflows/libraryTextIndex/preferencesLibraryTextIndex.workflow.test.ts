@@ -138,17 +138,17 @@ describe("workflow: library index settings", function () {
     const indexToggle = doc.querySelector(`${PREFIX}-enabled`) as HTMLElement;
     const semanticLabel = win.getComputedStyle(
       semanticToggle.closest("label")!,
-    );
-    const indexLabel = win.getComputedStyle(indexToggle.closest("label")!);
+    )!;
+    const indexLabel = win.getComputedStyle(indexToggle.closest("label")!)!;
     assert.equal(indexLabel.fontSize, semanticLabel.fontSize);
     assert.equal(indexLabel.fontWeight, semanticLabel.fontWeight);
     assert.equal(indexLabel.color, semanticLabel.color);
     const semanticHint = win.getComputedStyle(
       semanticToggle.closest("label")!.nextElementSibling!,
-    );
+    )!;
     const indexHint = win.getComputedStyle(
       doc.querySelector(`${PREFIX}-hint`)!,
-    );
+    )!;
     assert.equal(indexHint.fontSize, semanticHint.fontSize);
     assert.equal(indexHint.color, semanticHint.color);
     const label = doc.querySelector(`${PREFIX}-label`) as HTMLElement;

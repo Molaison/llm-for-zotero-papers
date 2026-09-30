@@ -1,5 +1,5 @@
 /**
- * Focused facade tool for importing papers into Zotero by DOI, ISBN, arXiv ID, or URL.
+ * Focused facade tool for importing papers into Zotero by DOI, ISBN, arXiv ID, PMID, or ADS bibcode.
  * Provides a self-describing schema for importing papers by identifier.
  */
 import {
@@ -38,7 +38,8 @@ export function createImportIdentifiersTool(
     effectOperations: ["import_identifiers"],
     spec: {
       name: "import_identifiers",
-      description: "Import papers into Zotero by DOI, ISBN, arXiv ID, or URL.",
+      description:
+        "Import papers into Zotero by DOI, ISBN, arXiv ID, PMID, or ADS bibcode.",
       inputSchema: {
         type: "object",
         additionalProperties: false,
@@ -47,7 +48,8 @@ export function createImportIdentifiersTool(
           identifiers: {
             type: "array",
             items: { type: "string" },
-            description: "DOIs, ISBNs, arXiv IDs, or URLs to import.",
+            description:
+              "DOI, ISBN, arXiv ID, PMID, or ADS bibcode values to import.",
           },
           targetCollectionId: {
             type: "number",
@@ -90,7 +92,7 @@ export function createImportIdentifiersTool(
     },
 
     acceptInheritedApproval: async (_input, approval) => {
-      // Accept review-mode approvals from search_literature_online review cards
+      // Accept review-mode approvals from literature_search review cards
       return (
         (approval.sourceMode === "review" ||
           (approval.sourceMode === "approval" &&
@@ -111,6 +113,18 @@ export function createImportIdentifiersTool(
         return fail(
           "identifiers must be a non-empty array of strings. " +
             'Example: { identifiers: ["10.1234/example", "arxiv:2301.00001"] }',
+        );
+      }
+
+      // Zotero has no page-URL translator path; a URL only resolves when it
+      // embeds a DOI (the importer extracts it). Mirrors
+      // ImportCapability.describeUnresolvableIdentifier.
+      const url = identifiers.find(
+        (id) => /^https?:\/\//i.test(id.trim()) && !/10\.\d{4,}\/\S+/.test(id),
+      );
+      if (url) {
+        return fail(
+          `"${url}" is a page URL; identifier import accepts DOI, ISBN, arXiv ID, PMID, or ADS bibcode. Take the DOI or arXiv ID off the page instead.`,
         );
       }
 

@@ -21,7 +21,7 @@ function providerGroups(inputTokenCap: number): ModelProviderGroup[] {
           id: MODEL_ENTRY_ID,
           model: "qwen3.8-max",
           temperature: 0.3,
-          maxTokens: 4096,
+          outputTokenLimit: { mode: "auto" },
           inputTokenCap,
         },
       ],
@@ -37,14 +37,14 @@ async function withPrefs<T>(
   for (const [key, value] of Object.entries(prefs)) {
     const fullKey = `${PREF_PREFIX}.${key}`;
     previous.set(fullKey, Zotero.Prefs.get(fullKey, true));
-    Zotero.Prefs.set(fullKey, value, true);
+    Zotero.Prefs.set(fullKey, value as string | number | boolean, true);
   }
   try {
     return await task();
   } finally {
     for (const [fullKey, value] of previous) {
       if (value === undefined) Zotero.Prefs.clear?.(fullKey, true);
-      else Zotero.Prefs.set(fullKey, value, true);
+      else Zotero.Prefs.set(fullKey, value as string | number | boolean, true);
     }
   }
 }

@@ -150,8 +150,8 @@ export type ToolExecutionDeps = {
    * Records that a durable tool-result handle now exists.
    *
    * A setter because `toolResultReadAvailable` is a `let` in `runTurn` and
-   * the next model step reads it to decide whether to offer the handle-read
-   * tool.
+   * the next model step reads it to decide whether context_read may serve
+   * source:'tool_result' reads.
    */
   setToolResultReadAvailable: (available: boolean) => void;
 };

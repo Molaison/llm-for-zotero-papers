@@ -7,7 +7,7 @@ import {
   ZOTERO_MCP_ENDPOINT_PATH,
 } from "../src/agent/mcp/server";
 import { replayLibraryInverse } from "../test/helpers/replayLibraryInverse";
-import { createQueryLibraryTool } from "../src/agent/tools/read/queryLibrary";
+import { createLibrarySearchTool } from "../src/agent/tools/read/librarySearch";
 import { createSavedSearchTool } from "../src/agent/tools/write/savedSearches";
 
 declare const Zotero: any;
@@ -125,7 +125,7 @@ describe("library operations against real Zotero", function () {
       currentAnswerText: "",
     });
     const node = result.collections.find(
-      (value) => value.collectionId === collection.id,
+      (value: { collectionId: number }) => value.collectionId === collection.id,
     );
     assert.equal(node?.paperCount, 1);
     assert.equal(node?.descendantPaperCount, 1);
@@ -476,7 +476,7 @@ describe("library operations against real Zotero", function () {
           value: `SharedClause-${SUFFIX}`,
         },
       ];
-      const query = createQueryLibraryTool(g).validate({
+      const query = createLibrarySearchTool(g).validate({
         entity: "items",
         mode: "search",
         conditions,

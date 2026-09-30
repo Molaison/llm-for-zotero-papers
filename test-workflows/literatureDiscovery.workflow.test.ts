@@ -4,7 +4,7 @@ import {
   semanticFixture,
 } from "../test/helpers/semanticIntent";
 import { assert } from "chai";
-import { createSearchLiteratureOnlineTool } from "../src/agent/tools/read/searchLiteratureOnline";
+import { createLiteratureSearchTool } from "../src/agent/tools/read/literatureSearch";
 import { createLiteratureReviewTool } from "../src/agent/tools/read/reviewLiterature";
 import type { AgentToolContext, AgentToolResult } from "../src/agent/types";
 import type { WorkflowTestApi } from "../src/modules/contextPanel/workflowTestTypes";
@@ -59,13 +59,13 @@ describe("workflow: expandable ranked discovery", function () {
             publication_year: 2024,
           })),
         }),
-      })) as typeof fetch;
+      })) as unknown as typeof fetch;
       const gateway = {
         resolveMetadataItem: () => null,
         getEditableArticleMetadata: () => null,
         getCollectionSummary: () => null,
       };
-      const search = createSearchLiteratureOnlineTool(gateway as never);
+      const search = createLiteratureSearchTool(gateway as never);
       const searchInput = search.validate({
         mode: "search",
         query: "discovery fixture",
@@ -114,7 +114,7 @@ describe("workflow: expandable ranked discovery", function () {
           card.querySelectorAll<HTMLInputElement>(
             ".llm-search-results-list input[type=checkbox]",
           ),
-        );
+        ) as HTMLInputElement[];
         assert.lengthOf(rows, (batch + 1) * 3);
         if (batch === 0) rows[0].click();
         else
@@ -170,7 +170,7 @@ describe("workflow: expandable ranked discovery", function () {
       title: "Discovery command fixture",
       pages: ["Disposable discovery command fixture."],
     });
-    const search = agent.getToolDefinition("search_literature_online")!;
+    const search = agent.getToolDefinition("literature_search")!;
     assert.exists(search);
     const searches: Array<{ mode: string; limit: number }> = [];
     agent.registerTool({
@@ -257,9 +257,11 @@ describe("workflow: expandable ranked discovery", function () {
         ]);
         assert.isTrue(searches.every((entry) => entry.limit === limit));
         assert.deepEqual(
-          Array.from(card.querySelectorAll(".llm-search-mode-tab")).map(
-            (tab) => tab.textContent,
-          ),
+          (
+            Array.from(
+              card.querySelectorAll(".llm-search-mode-tab"),
+            ) as Element[]
+          ).map((tab) => tab.textContent),
           ["Recommendations", "References", "Citations"],
         );
         const rows = () =>
@@ -267,7 +269,7 @@ describe("workflow: expandable ranked discovery", function () {
             card.querySelectorAll<HTMLInputElement>(
               ".llm-search-results-list input[type=checkbox]",
             ),
-          );
+          ) as HTMLInputElement[];
         assert.lengthOf(rows(), limit);
         assert.isTrue(rows().every((row) => row.checked));
         rows()[0].click();
@@ -302,7 +304,7 @@ describe("workflow: expandable ranked discovery", function () {
             expanded.querySelectorAll<HTMLInputElement>(
               ".llm-search-results-list input[type=checkbox]",
             ),
-          );
+          ) as HTMLInputElement[];
         assert.lengthOf(expandedRows(), limit + 20);
         assert.isTrue(expandedRows()[0].checked);
         assert.isTrue(

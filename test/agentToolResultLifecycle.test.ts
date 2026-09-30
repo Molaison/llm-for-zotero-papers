@@ -1,22 +1,11 @@
 import { assert } from "chai";
 import {
   buildToolProgressFingerprint,
-  filterTransientRecoveryTool,
   isUserDeniedToolResult,
   setToolResultReadAvailability,
 } from "../src/agent/execution/toolResultLifecycle";
 
 describe("Agent tool-result lifecycle", function () {
-  it("keeps transient recovery tools out of a resumed model inventory", function () {
-    assert.deepEqual(
-      filterTransientRecoveryTool([
-        { name: "paper_read" },
-        { name: "tool_result_read" },
-      ]),
-      [{ name: "paper_read" }],
-    );
-  });
-
   it("recognizes an explicit user denial without treating other errors as denial", function () {
     assert.isTrue(
       isUserDeniedToolResult({

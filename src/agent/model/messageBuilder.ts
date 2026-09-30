@@ -20,6 +20,7 @@ import {
 import { buildSkillInventory, getAllSkills } from "../skills";
 import type { AgentSkill } from "../skills";
 import { getSkillCustomizationNotice } from "../skills/managedBlock";
+import { SKILL_SCOPE_GUARD } from "../skills/scopeGuard";
 import { getOriginalAgentPermissionMode } from "../originalAgentPermissionMode";
 import { buildPermissionModeGuidance } from "./permissionModeGuidance";
 
@@ -41,6 +42,10 @@ import { buildAgentCoverageContextBlock } from "../context/coverageLedger";
 import { buildVisibleTurnContextBlock } from "../context/turnContextEnvelope";
 import { getSelectedPassagePaper } from "../context/turnPaperScope";
 import { buildApprovedPlanExecutionInstructions } from "../plans/executionInstructions";
+import {
+  EXECUTING_PHASE_GUIDANCE,
+  PLANNING_PHASE_GUIDANCE,
+} from "../plans/planningGuidance";
 import {
   hasAgentContentInputs,
   normalizeAgentContentInputs,
@@ -421,6 +426,8 @@ type AgentPromptInventoryState = Readonly<{
   fixedPrompt: string;
   tools: readonly AgentToolDefinition<any, any>[];
   matchedSkillInstructions: readonly string[];
+  /** Tool guidance instructions rendered into this turn's guidance block. */
+  toolGuidanceInstructions: readonly string[];
   dynamicGuidance: string;
   stableResourceBlock: string;
   turnResource: string;
@@ -492,7 +499,7 @@ function buildSystemPrompt(sections: PromptSection[]): string {
     .join("\n\n");
 }
 
-function collectToolGuidanceInstructions(
+function collectMatchingToolGuidance(
   request: AgentRuntimeRequest,
   tools: AgentToolDefinition<any, any>[],
   matchedSkillIds: ReadonlyArray<string>,
@@ -511,12 +518,13 @@ function collectToolGuidanceInstructions(
     const instruction = guidance.instruction.trim();
     if (instruction) instructions.add(instruction);
   }
+  return [...instructions];
+}
 
-  if (!instructions.size) return [];
+function buildToolGuidanceSection(instructions: readonly string[]): string[] {
+  if (!instructions.length) return [];
   return [
-    "The following stable tool guidance is provided because the user's message may be relevant to these capabilities. " +
-      "Use your judgement: only invoke a tool if it directly addresses what the user is asking for. " +
-      "Do NOT invoke a tool just because its guidance appears here — the user's actual intent takes priority.",
+    "Tool guidance for this turn: call a tool only when it serves the user's request, never just because its guidance appears here.",
     ...instructions,
   ];
 }
@@ -560,7 +568,7 @@ function collectSkillGuidanceInstructions(
   if (!blocks.length) return [];
   return [
     "Active skills for this turn:",
-    "Apply the selected playbooks where relevant. Skills provide workflow guidance and never grant write authority. The current request determines the deliverable; template defaults must not expand its scope. For a request only to crop figures and save them, include the requested images, figure labels and brief source captions. Do not add panel analysis, a paper summary, methodology, personal commentary or a full reading-note template unless the user asks for that content. This scope rule also applies to customized or older skill templates.",
+    `Apply the selected playbooks where relevant. Skills provide workflow guidance and never grant write authority. ${SKILL_SCOPE_GUARD}`,
     ...blocks,
   ];
 }
@@ -571,65 +579,15 @@ function buildTurnGuidanceBlock(instructions: string[]): string {
   return ["Current-turn dynamic agent guidance:", ...lines].join("\n\n");
 }
 
-function getInScopePaperContexts(request: AgentRuntimeRequest) {
-  return request.turnPaperScope.papers.map((entry) => entry.paper);
-}
-
-function hasFigureTaskIntent(request: AgentRuntimeRequest): boolean {
-  return (
-    request.classifiedIntent?.semantic?.visualMode === "figure" ||
-    Boolean(request.classifiedIntent?.semantic?.figures)
-  );
-}
-
-function buildFigureMineruInstruction(
-  request: AgentRuntimeRequest,
-  matchedSkillIds: ReadonlyArray<string>,
-): string {
-  if (!hasFigureTaskIntent(request)) return "";
-  const mineruPapers = getInScopePaperContexts(request).filter((entry) =>
-    Boolean(entry.mineruCacheDir),
-  );
-  if (!mineruPapers.length) return "";
-  const cacheHints = mineruPapers
-    .map((entry, index) => {
-      const label = entry.title?.trim() || `paper ${index + 1}`;
-      return `- ${label}: ${entry.mineruCacheDir}`;
-    })
-    .join("\n");
-  return (
-    "TURN RULE: This is a figure/table interpretation task and MinerU cache is available for at least one in-scope paper. " +
-    "For figure/image questions, call `paper_read({ mode:'figures', query:'<figure label or all figures>' })` first. This returns precise PDF crops plus captions/provenance. Treat that result as the authority for figure crop cache reuse/regeneration; use returned crop paths/artifacts as-is and do not inspect or validate `figure_crops` metadata before analysis or writing. " +
-    "If figure extraction fails or returns no crops, switch to text-only mode for analysis, note taking, and follow-up artifacts: do not include figure images, rendered PDF page screenshots, MinerU source images, or extracted-image placeholders; explicitly state that extraction failed or no extracted crops are available and base explanations on captions, figure legends, and surrounding paper text. Manual user-provided image inputs are unaffected. " +
-    "For table questions, call `paper_read({ mode:'targeted', query:'<table label and surrounding discussion>' })` because MinerU table evidence is text/structure, not figure crops. " +
-    "Use `full.md`/manifest text for captions and surrounding textual evidence, but do not read or embed MinerU image paths for ordinary figure interpretation. " +
-    "For explicit panel requests, inspect the whole extracted figure crop and treat panel suffixes as hints. " +
-    "Use `paper_read({ mode:'visual', query:'<page/layout request>' })` only when the user explicitly asks for rendered/raw PDF pages, page screenshots, page layout, exact pages, or visible-reader inspection.\n" +
-    `Available MinerU cache directories:\n${cacheHints}`
-  );
-}
-
 function buildRuntimePlatformSection(): string {
   return buildRuntimePlatformGuidanceText();
 }
 
-function buildTextOnlyModelInstruction(
-  request: AgentRuntimeRequest,
-  matchedSkillIds: ReadonlyArray<string>,
-): string {
+function buildTextOnlyModelInstruction(request: AgentRuntimeRequest): string {
   if (isMultimodalRequestSupported(request)) return "";
+  if (!request.screenshots?.length) return "";
   const modelLabel = (request.model || "selected model").trim();
-  if (!hasFigureTaskIntent(request)) {
-    return request.screenshots?.length
-      ? `MODEL LIMITATION: ${modelLabel} is text-only and cannot inspect the supplied screenshots.`
-      : "";
-  }
-  return (
-    `MODEL LIMITATION: ${modelLabel} is treated as text-only in this plugin. ` +
-    "Do not rely on screenshots, PDF page images, or image-file visual inspection. " +
-    "For MinerU-cached papers, prefer `manifest.json`, `full.md` section offsets, captions, tables, formulas, and surrounding extracted text. " +
-    "For figure workflows, you may still call `paper_read({ mode:'figures' })` to obtain extracted crop paths, captions, warnings, and provenance for note embedding. Treat that result as the authority for figure crop cache reuse/regeneration; do not inspect or validate `figure_crops` metadata before analysis or writing. Do not make unsupported visual claims unless an image-capable model inspected the crop."
-  );
+  return `MODEL LIMITATION: ${modelLabel} is text-only and cannot inspect the supplied screenshots.`;
 }
 
 export async function renderAgentPromptEnvelope(
@@ -642,18 +600,19 @@ export async function renderAgentPromptEnvelope(
   } = {},
 ): Promise<RenderedAgentPromptEnvelope> {
   const continuityNotes = await loadAgentTurnMemory(request.conversationKey);
-  const workflowParityInstructions = [
-    buildFigureMineruInstruction(request, matchedSkillIds),
-  ].filter(Boolean);
+  const toolGuidanceInstructions = collectMatchingToolGuidance(
+    request,
+    tools,
+    matchedSkillIds,
+  );
   const dynamicGuidanceInstructions = [
     isSinglePaperConversation(request)
-      ? "Single-paper chat: no automatic skills are active. Answer directly using the supplied paper context. Do not load simple-paper-qa or evidence-based-qa automatically; apply skills the user explicitly selected with slash. You may freely choose additional snippet, section, full, figure, or search reads when useful. For whole-paper explanations, consider the argument, methods, results, and limitations throughout the available source."
+      ? "Single-paper chat: answer directly using the supplied paper context; questions about the paper need no skill, so do not load evidence-based-qa for them. You may freely choose additional snippet, section, full, figure, or search reads when useful. For whole-paper explanations, consider the argument, methods, results, and limitations throughout the available source."
       : "",
     request.workingDirectory
       ? `Command working directory retained from this conversation: ${request.workingDirectory}. run_command uses it when cwd is omitted; pass cwd explicitly to change it. This directory does not confer filesystem permission.`
       : "",
-    ...workflowParityInstructions,
-    ...collectToolGuidanceInstructions(request, tools, matchedSkillIds),
+    ...buildToolGuidanceSection(toolGuidanceInstructions),
   ];
   const matchedSkillInstructions = collectSkillGuidanceInstructions(
     request,
@@ -691,10 +650,29 @@ export async function renderAgentPromptEnvelope(
       ],
     },
     {
+      id: "planning-phase",
+      lines: [
+        request.planContext?.phase === "planning"
+          ? PLANNING_PHASE_GUIDANCE
+          : "",
+      ],
+    },
+    {
+      id: "executing-phase",
+      lines: [
+        request.planContext?.phase === "executing"
+          ? EXECUTING_PHASE_GUIDANCE
+          : "",
+      ],
+    },
+    {
       id: "skill-inventory",
       lines: [
-        `Installed skill inventory (use load_skill for relevant guidance not already active, including when the task changes or automatic selection is unavailable): ${JSON.stringify(
-          buildSkillInventory(getAllSkills()),
+        `Installed skill inventory (workflow playbooks for multi-step tasks: notes, comparisons, reviews, imports, figure work; ordinary paper questions need no skill. When one matches and its guidance is not already active, call load_skill with its id): ${JSON.stringify(
+          // Manual skills apply only when the user selects them.
+          buildSkillInventory(getAllSkills())
+            .filter((skill) => skill.activation !== "manual")
+            .map(({ id, description }) => ({ id, description })),
         )}`,
       ],
     },
@@ -704,7 +682,7 @@ export async function renderAgentPromptEnvelope(
     },
     {
       id: "model-limitations",
-      lines: [buildTextOnlyModelInstruction(request, matchedSkillIds)],
+      lines: [buildTextOnlyModelInstruction(request)],
     },
     {
       id: "custom-instructions",
@@ -775,6 +753,7 @@ export async function renderAgentPromptEnvelope(
       fixedPrompt,
       tools: Object.freeze([...tools]),
       matchedSkillInstructions: Object.freeze([...matchedSkillInstructions]),
+      toolGuidanceInstructions: Object.freeze([...toolGuidanceInstructions]),
       dynamicGuidance: buildTurnGuidanceBlock(dynamicGuidanceInstructions),
       stableResourceBlock,
       turnResource: turnGuidanceBlock

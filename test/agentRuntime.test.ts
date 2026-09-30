@@ -57,7 +57,7 @@ import {
   ActionContractService,
   describeLibraryMutationActions,
 } from "../src/agent/contracts/actionContract";
-import { createToolResultReadTool } from "../src/agent/tools/read/toolResultRead";
+import { createContextReadTool } from "../src/agent/tools/read/contextRead";
 import { createFileIOTool } from "../src/agent/tools/write/fileIO";
 import { createWebSearchTool } from "../src/agent/tools/read/webSearch";
 import { createPaperReadTool } from "../src/agent/tools/read/paperRead";
@@ -224,7 +224,7 @@ describe("AgentRuntime", function () {
     clearAgentToolResultHandleStore();
   });
 
-  it("keeps default paper text across retrieval and follow-ups and resumes auto skills after adding a paper", async function () {
+  it("keeps default paper text across retrieval, follow-ups, and an added paper", async function () {
     const restore = installMockDb();
     const originalLoad = PdfService.prototype.ensurePaperContext;
     const methods =
@@ -258,16 +258,11 @@ describe("AgentRuntime", function () {
       validate: () => ({ ok: true, value: {} }),
       execute: async () => ({ text: "Additional snippet" }),
     });
-    let routingCalls = 0;
     let step = 0;
     const prefixes: string[][] = [];
     try {
       const runtime = new AgentRuntime({
         registry,
-        skillSelector: async () => {
-          routingCalls++;
-          return { status: "selected", skillIds: [] };
-        },
         adapterFactory: () => ({
           getCapabilities: () => ({
             streaming: false,
@@ -341,7 +336,6 @@ describe("AgentRuntime", function () {
         prefixes[2],
         "a follow-up must retain the source prefix",
       );
-      assert.equal(routingCalls, 0);
       await runtime.runTurn({
         request: {
           ...request,
@@ -351,7 +345,6 @@ describe("AgentRuntime", function () {
           ],
         },
       });
-      assert.equal(routingCalls, 1);
       assert.equal(
         prefixes[0][1],
         prefixes[3][1],
@@ -1182,13 +1175,12 @@ describe("AgentRuntime", function () {
     }
   });
 
-  it("loads semantic skill choices for expanded scope without creating action authority", async function () {
+  it("loads forced skills before the first main-model step without creating action authority", async function () {
     const restoreDb = installMockDb();
     setUserSkills(
       Object.values(BUILTIN_SKILL_FILES).map((raw) => parseSkill(raw)),
     );
     const events: AgentEvent[] = [];
-    let selected = false;
     let observed = false;
     try {
       const adapter = new MockAdapter([], {
@@ -1197,7 +1189,6 @@ describe("AgentRuntime", function () {
         multimodal: false,
       });
       adapter.runStep = async (params) => {
-        assert.isTrue(selected);
         assert.includeMembers(
           params.request.loadedSkillRecords!.map((skill) => skill.id),
           ["analyze-figures", "write-note"],
@@ -1227,13 +1218,6 @@ describe("AgentRuntime", function () {
       const runtime = new AgentRuntime({
         registry: new AgentToolRegistry(),
         adapterFactory: () => adapter,
-        skillSelector: async () => {
-          selected = true;
-          return {
-            status: "selected",
-            skillIds: ["analyze-figures", "write-note"],
-          };
-        },
       });
       await runtime.runTurn({
         request: {
@@ -1244,6 +1228,7 @@ describe("AgentRuntime", function () {
           libraryID: 1,
           mode: "agent",
           userText: "Save a crop in a note",
+          forcedSkillIds: ["analyze-figures", "write-note"],
           model: "test",
           apiKey: "test",
           apiBase: "",
@@ -1256,13 +1241,20 @@ describe("AgentRuntime", function () {
         },
       });
       assert.isTrue(observed);
+      assert.isFalse(
+        events.some(
+          (event) =>
+            event.type === "provider_event" &&
+            event.providerType === "agent_skill_selection",
+        ),
+      );
     } finally {
       setUserSkills([]);
       restoreDb();
     }
   });
 
-  it("emits explicitly forced slash skills when automatic routing is unavailable", async function () {
+  it("emits explicitly forced slash skills", async function () {
     const restoreDb = installMockDb();
     setUserSkills(
       Object.values(BUILTIN_SKILL_FILES).map((raw) => parseSkill(raw)),
@@ -3770,7 +3762,7 @@ describe("AgentRuntime", function () {
           };
         },
       });
-      registry.register(createToolResultReadTool());
+      registry.register(createContextReadTool());
 
       let step = 0;
       let restoredContent: Record<string, unknown> | undefined;
@@ -3806,7 +3798,11 @@ describe("AgentRuntime", function () {
             if (step === 2) {
               assert.include(
                 params.tools.map((tool) => tool.name),
-                "tool_result_read",
+                "context_read",
+              );
+              assert.isTrue(
+                params.request.metadata?.agentToolResultReadAvailable === true,
+                "the stored paper result is readable by handle",
               );
               const paperMessage = params.messages.find(
                 (message) =>
@@ -3819,8 +3815,9 @@ describe("AgentRuntime", function () {
               assert.match(delivered.toolResultHandle || "", /^trh_/);
               const call = {
                 id: "rehydrate-paper-call",
-                name: "tool_result_read",
+                name: "context_read",
                 arguments: {
+                  source: "tool_result",
                   handle: delivered.toolResultHandle,
                   path: "results",
                   offset: 0,
@@ -3839,7 +3836,7 @@ describe("AgentRuntime", function () {
             }
             const restoredMessage = params.messages.find(
               (message) =>
-                message.role === "tool" && message.name === "tool_result_read",
+                message.role === "tool" && message.name === "context_read",
             );
             assert.equal(restoredMessage?.role, "tool");
             restoredContent = JSON.parse(
@@ -5410,7 +5407,7 @@ describe("AgentRuntime", function () {
         apiKey: "test",
       };
       const registry = new AgentToolRegistry();
-      registry.register(createToolResultReadTool());
+      registry.register(createContextReadTool());
       const firstRuntime = new AgentRuntime({
         registry,
         adapterFactory: () =>
@@ -5447,6 +5444,7 @@ describe("AgentRuntime", function () {
 
       let secondMessages: AgentModelMessage[] = [];
       let secondToolNames: string[] = [];
+      let secondHandleReadable = false;
       const secondRuntime = new AgentRuntime({
         registry,
         adapterFactory: () => ({
@@ -5461,6 +5459,8 @@ describe("AgentRuntime", function () {
           async runStep(params: AgentStepParams): Promise<AgentModelStep> {
             secondMessages = params.messages;
             secondToolNames = params.tools.map((tool) => tool.name);
+            secondHandleReadable =
+              params.request.metadata?.agentToolResultReadAvailable === true;
             return {
               kind: "final",
               text: "Used it.",
@@ -5497,7 +5497,11 @@ describe("AgentRuntime", function () {
       );
       assert.include(serialized, "remember alpha");
       assert.include(serialized, "Alpha is preserved.");
-      assert.include(secondToolNames, "tool_result_read");
+      assert.include(secondToolNames, "context_read");
+      assert.isTrue(
+        secondHandleReadable,
+        "a handle stored in an earlier turn is readable by source:'tool_result'",
+      );
     } finally {
       restoreDb();
     }
@@ -6088,10 +6092,11 @@ describe("AgentRuntime", function () {
         validate: () => ({ ok: true, value: {} }),
         execute: async () => fullResult,
       });
-      registry.register(createToolResultReadTool());
+      registry.register(createContextReadTool());
 
       let synthesisMessages: AgentModelMessage[] = [];
       const toolNamesByStep: string[][] = [];
+      const handleReadableByStep: boolean[] = [];
       const adapter: AgentModelAdapter = {
         getCapabilities: () => ({
           streaming: false,
@@ -6103,6 +6108,9 @@ describe("AgentRuntime", function () {
         supportsTools: () => true,
         async runStep(params: AgentStepParams): Promise<AgentModelStep> {
           toolNamesByStep.push(params.tools.map((tool) => tool.name));
+          handleReadableByStep.push(
+            params.request.metadata?.agentToolResultReadAvailable === true,
+          );
           if (!synthesisMessages.length) {
             synthesisMessages = params.messages;
             return {
@@ -6180,8 +6188,11 @@ describe("AgentRuntime", function () {
       assert.lengthOf(modelFacing.results, 120);
       assert.include(JSON.stringify(modelFacing), "A".repeat(200));
       assert.isAtLeast(toolNamesByStep.length, 2);
-      assert.notInclude(toolNamesByStep[0], "tool_result_read");
-      assert.notInclude(toolNamesByStep[1], "tool_result_read");
+      // context_read is always offered; no step may read a handle here.
+      assert.include(toolNamesByStep[0], "context_read");
+      assert.include(toolNamesByStep[1], "context_read");
+      assert.isFalse(handleReadableByStep[0]);
+      assert.isFalse(handleReadableByStep[1]);
     } finally {
       restoreDb();
     }
@@ -6215,7 +6226,7 @@ describe("AgentRuntime", function () {
       };
       registry.register({
         spec: {
-          name: "query_library",
+          name: "library_search",
           description: "query",
           inputSchema: { type: "object" },
           executionClass: "read",
@@ -6224,10 +6235,11 @@ describe("AgentRuntime", function () {
         validate: () => ({ ok: true, value: {} }),
         execute: async () => fullResult,
       });
-      registry.register(createToolResultReadTool());
+      registry.register(createContextReadTool());
 
       let synthesisMessages: AgentModelMessage[] = [];
       const toolNamesByStep: string[][] = [];
+      const handleReadableByStep: boolean[] = [];
       const adapter: AgentModelAdapter = {
         getCapabilities: () => ({
           streaming: false,
@@ -6239,6 +6251,9 @@ describe("AgentRuntime", function () {
         supportsTools: () => true,
         async runStep(params: AgentStepParams): Promise<AgentModelStep> {
           toolNamesByStep.push(params.tools.map((tool) => tool.name));
+          handleReadableByStep.push(
+            params.request.metadata?.agentToolResultReadAvailable === true,
+          );
           if (!synthesisMessages.length) {
             synthesisMessages = params.messages;
             return {
@@ -6246,7 +6261,7 @@ describe("AgentRuntime", function () {
               calls: [
                 {
                   id: "call-library",
-                  name: "query_library",
+                  name: "library_search",
                   arguments: { entity: "items", mode: "list" },
                 },
               ],
@@ -6256,7 +6271,7 @@ describe("AgentRuntime", function () {
                 tool_calls: [
                   {
                     id: "call-library",
-                    name: "query_library",
+                    name: "library_search",
                     arguments: { entity: "items", mode: "list" },
                   },
                 ],
@@ -6325,11 +6340,15 @@ describe("AgentRuntime", function () {
       );
       assert.equal(checkpoint?.role, "user");
       const checkpointText = String(checkpoint?.content || "");
-      assert.include(checkpointText, "query_library");
+      assert.include(checkpointText, "library_search");
       assert.match(checkpointText, /handle=trh_[a-z0-9]+/i);
       assert.isAtLeast(toolNamesByStep.length, 2);
-      assert.notInclude(toolNamesByStep[0], "tool_result_read");
-      assert.include(toolNamesByStep[1], "tool_result_read");
+      // context_read is always offered; handle reads open once a result
+      // has been stored.
+      assert.include(toolNamesByStep[0], "context_read");
+      assert.include(toolNamesByStep[1], "context_read");
+      assert.isFalse(handleReadableByStep[0]);
+      assert.isTrue(handleReadableByStep[1]);
       assert.notInclude(checkpointText, "A".repeat(200));
     } finally {
       restoreDb();
@@ -6357,7 +6376,7 @@ describe("AgentRuntime", function () {
       };
       registry.register({
         spec: {
-          name: "query_library",
+          name: "library_search",
           description: "query",
           inputSchema: { type: "object" },
           executionClass: "read",
@@ -6366,7 +6385,7 @@ describe("AgentRuntime", function () {
         validate: () => ({ ok: true, value: {} }),
         execute: async () => fullResult,
       });
-      registry.register(createToolResultReadTool());
+      registry.register(createContextReadTool());
 
       let stepIndex = 0;
       let storedHandle = "";
@@ -6378,6 +6397,7 @@ describe("AgentRuntime", function () {
         contentStart?: string;
       }> = [];
       const toolNamesByStep: string[][] = [];
+      const handleReadableByStep: boolean[] = [];
       const adapter: AgentModelAdapter = {
         getCapabilities: () => ({
           streaming: false,
@@ -6390,13 +6410,16 @@ describe("AgentRuntime", function () {
         async runStep(params: AgentStepParams): Promise<AgentModelStep> {
           stepIndex += 1;
           toolNamesByStep.push(params.tools.map((tool) => tool.name));
+          handleReadableByStep.push(
+            params.request.metadata?.agentToolResultReadAvailable === true,
+          );
           if (stepIndex === 1) {
             return {
               kind: "tool_calls",
               calls: [
                 {
                   id: "call-library",
-                  name: "query_library",
+                  name: "library_search",
                   arguments: { entity: "items", mode: "list" },
                 },
               ],
@@ -6406,7 +6429,7 @@ describe("AgentRuntime", function () {
                 tool_calls: [
                   {
                     id: "call-library",
-                    name: "query_library",
+                    name: "library_search",
                     arguments: { entity: "items", mode: "list" },
                   },
                 ],
@@ -6433,8 +6456,9 @@ describe("AgentRuntime", function () {
               calls: [
                 {
                   id: "call-read",
-                  name: "tool_result_read",
+                  name: "context_read",
                   arguments: {
+                    source: "tool_result",
                     handle: storedHandle,
                     path: "results",
                     offset: 50,
@@ -6448,8 +6472,9 @@ describe("AgentRuntime", function () {
                 tool_calls: [
                   {
                     id: "call-read",
-                    name: "tool_result_read",
+                    name: "context_read",
                     arguments: {
+                      source: "tool_result",
                       handle: storedHandle,
                       path: "results",
                       offset: 50,
@@ -6462,7 +6487,7 @@ describe("AgentRuntime", function () {
           }
           readToolMessage = params.messages.find(
             (message) =>
-              message.role === "tool" && message.name === "tool_result_read",
+              message.role === "tool" && message.name === "context_read",
           );
           readToolStepMessages = params.messages.map((message) => ({
             role: message.role,
@@ -6502,8 +6527,12 @@ describe("AgentRuntime", function () {
       });
 
       assert.equal(outcome.kind, "completed");
-      assert.notInclude(toolNamesByStep[0], "tool_result_read");
-      assert.include(toolNamesByStep[1], "tool_result_read");
+      // context_read is always offered; handle reads open once a result
+      // has been stored.
+      assert.include(toolNamesByStep[0], "context_read");
+      assert.include(toolNamesByStep[1], "context_read");
+      assert.isFalse(handleReadableByStep[0]);
+      assert.isTrue(handleReadableByStep[1]);
       assert.equal(
         readToolMessage?.role,
         "tool",
@@ -6591,7 +6620,7 @@ describe("AgentRuntime", function () {
         validate: () => ({ ok: true, value: {} }),
         execute: async () => fullResult,
       });
-      registry.register(createToolResultReadTool());
+      registry.register(createContextReadTool());
 
       let stepIndex = 0;
       let synthesisMessages: AgentModelMessage[] = [];
@@ -6646,8 +6675,9 @@ describe("AgentRuntime", function () {
             assert.match(storedHandle, /^trh_/);
             const call = {
               id: "call-read-evidence",
-              name: "tool_result_read",
+              name: "context_read",
               arguments: {
+                source: "tool_result",
                 handle: storedHandle,
                 path: "snippets",
                 offset: 0,
@@ -6694,8 +6724,7 @@ describe("AgentRuntime", function () {
 
       assert.equal(outcome.kind, "completed");
       const toolMessage = synthesisMessages.find(
-        (message) =>
-          message.role === "tool" && message.name === "tool_result_read",
+        (message) => message.role === "tool" && message.name === "context_read",
       );
       assert.equal(toolMessage?.role, "tool");
       const restored = JSON.parse((toolMessage as { content: string }).content);
@@ -6722,7 +6751,7 @@ describe("AgentRuntime", function () {
       const registry = new AgentToolRegistry();
       registry.register({
         spec: {
-          name: "query_library",
+          name: "library_search",
           description: "read",
           inputSchema: { type: "object" },
           executionClass: "read",
@@ -6741,7 +6770,7 @@ describe("AgentRuntime", function () {
           })),
         }),
       });
-      registry.register(createToolResultReadTool());
+      registry.register(createContextReadTool());
       const adapter: AgentModelAdapter = {
         getCapabilities: () => ({
           streaming: false,
@@ -6761,7 +6790,7 @@ describe("AgentRuntime", function () {
             initialMessages = structuredClone(params.messages);
             const call = {
               id: "large-read-call",
-              name: "query_library",
+              name: "library_search",
               arguments: { entity: "items", mode: "list" },
             };
             return {
@@ -6868,7 +6897,7 @@ describe("AgentRuntime", function () {
           },
         }),
       });
-      registry.register(createToolResultReadTool());
+      registry.register(createContextReadTool());
 
       let stepIndex = 0;
       let resetCount = 0;
@@ -7165,7 +7194,7 @@ describe("AgentRuntime", function () {
         validate: () => ({ ok: true, value: {} }),
         execute: async () => ({ value: "small result" }),
       });
-      registry.register(createToolResultReadTool());
+      registry.register(createContextReadTool());
 
       let stepIndex = 0;
       let resetCount = 0;
@@ -7291,7 +7320,7 @@ describe("AgentRuntime", function () {
           };
         },
       });
-      registry.register(createToolResultReadTool());
+      registry.register(createContextReadTool());
 
       let stepIndex = 0;
       let resetCount = 0;

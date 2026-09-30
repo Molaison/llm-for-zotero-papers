@@ -1,4 +1,5 @@
 import { defaultInvocationPlan } from "../authorization/invocationPlan";
+import { RETIRED_TOOL_HINTS } from "../context/toolNames";
 import type { ActionContractService } from "../contracts/actionContract";
 import { operationCatalogEntry } from "../contracts/operationCatalog";
 import type { PlanAmendmentService } from "../plans/amendments";
@@ -121,46 +122,37 @@ const MODEL_TOOL_DESCRIPTIONS: Readonly<Record<string, string>> = {
   library_retrieve:
     "Retrieve ranked paper evidence from a library scope with explicit coverage.",
   paper_read:
-    "Read papers by overview, targeted, full, figures, visual, or visible-page mode. For figure crops use mode:figures and figureLabels (e.g. ['Figure 1']); extracts from the source PDF without requiring MinerU. Preserve the active attachment; a sibling PDF's cache is not the same source.",
-  literature_search:
-    "Search scholarly sources and save candidates; import only on request.",
-  literature_review:
-    "Present ranked saved candidates for selection without import.",
+    "Read Zotero paper content. For figure crops use mode:figures and figureLabels (e.g. ['Figure 1']); extracts from the source PDF without requiring MinerU. Preserve the active attachment; a sibling PDF's cache is not the same source.",
   library_update:
-    "Change tags, metadata, memberships, parents, or Related links. Move removes its named source.",
-  collection_update: "Create or delete Zotero collections.",
-  conversation_read:
-    "Read exact chat history. Omit messageId to list; set it to read. Continue with offset or textOffset=nextTextOffset.",
+    "Change tags, metadata, memberships, parents, or Related links; kind:'collection' creates, renames, moves, or deletes a collection, kind:'attachment' renames, relinks, or deletes one, kind:'savedSearch' saves or deletes one. A membership move removes its named source.",
+  context_read:
+    "Read stored context. source:'conversation': omit messageId to list chat messages, set it to read one. source:'tool_result': read a trh_ handle; omit path for metadata. Continue with offset or textOffset=nextTextOffset.",
   note_write:
-    "Write a Zotero note. sourceMessageId reuses an exact answer; documentId reuses finalized material. Markdown file:// images from paper_read figure crops are imported and verified as embedded images; do not reimplement embedding with scripts.",
+    "Write a Zotero note. sourceMessageId reuses an exact answer; documentId reuses finalized material. Markdown file:// images from paper_read figure crops are imported and verified as embedded images; do not reimplement embedding with scripts. First call load_skill('write-note').",
   note_write_batch:
     "Write notes to explicitly identified items as one checkpointed batch; resumeBatchId continues an interrupted one.",
-  saved_search_update: "Create, replace, or delete a Zotero saved search.",
   library_cite:
     "Format Zotero CSL citations or bibliographies, or export with a translator.",
   library_settings: "Read or change supported Zotero settings and sync state.",
   library_import:
-    "Add Zotero items from identifiers, local files, or explicit manual metadata.",
+    "Add items by DOI, ISBN, arXiv ID, PMID, or ADS bibcode, from local files, or from manual metadata.",
   library_delete:
     "Trash or restore Zotero objects, or merge duplicates into a named master.",
-  attachment_update: "Delete, rename, or relink Zotero attachments.",
-  undo_last_action: "Undo the latest reversible journaled action in this chat.",
-  revert_changes:
-    "Inspect or revert durable actions; use dryRun for conflicts.",
+  undo: "Undo the latest reversible action in this chat; count or actionIds revert several, dryRun lists them with conflicts.",
   annotate_pdf:
     "Highlight a quoted PDF passage with an optional comment; Zotero computes the placement.",
   file_io: "Read or write local files, including partial text and images.",
   run_command: "Run a host shell command and return its output and status.",
   zotero_script: "Run Zotero JavaScript with declared access and effect.",
   load_skill:
-    "Load exact instructions for an installed skill ID; this grants no authority.",
+    "Load an installed skill's exact instructions; grants no authority.",
   request_user_input:
     "Ask up to three questions when required input cannot be found.",
   submit_document:
     "Persist validated Markdown and evidence as a versioned material reference.",
   update_plan: "Create or revise a read-only explicit Plan artifact.",
   prepare_plan_execution:
-    "Stage the exact execution contract and required steps for native Plan review. Acceptance checks may be typed objects or concise strings; the host converts strings into typed evidence requirements. The user remains the sole authority for the later run.",
+    "Stage the exact execution contract and required steps for native Plan review. The user remains the sole authority for the later run.",
   task_update:
     "Update tracked work; completion requires host-verifiable evidence.",
   research_update:
@@ -336,7 +328,18 @@ export class AgentToolRegistry {
   ): Promise<PreparedToolExecution> {
     const tool = this.tools.get(call.name);
     if (!tool) {
-      return createSyntheticErrorResult(call, `Unknown tool: ${call.name}`);
+      const replacement = Object.prototype.hasOwnProperty.call(
+        RETIRED_TOOL_HINTS,
+        call.name,
+      )
+        ? RETIRED_TOOL_HINTS[call.name]
+        : undefined;
+      return createSyntheticErrorResult(
+        call,
+        replacement
+          ? `Unknown tool: ${call.name}. This tool was renamed; call ${replacement} instead.`
+          : `Unknown tool: ${call.name}`,
+      );
     }
     if (tool.isAvailable?.(context.request) === false) {
       return createSyntheticErrorResult(
@@ -376,18 +379,9 @@ export class AgentToolRegistry {
     }
     const validation = tool.validate(toolArguments);
     if (!validation.ok) {
-      const validationError =
-        call.name === "library_search" &&
-        (context.request.turnPaperScope.collections.length ||
-          context.request.turnPaperScope.tags.length) &&
-        validation.error.includes("entity and mode are required")
-          ? `${validation.error} For selected collection/tag scopes, use ` +
-            "{ entity:'items', mode:'list', filters:{ collectionId:<collectionId> } } or " +
-            "{ entity:'items', mode:'list', filters:{ tag:'<tag>' } }."
-          : validation.error;
       return createSyntheticErrorResult(
         call,
-        `Invalid tool input for ${call.name}: ${validationError}`,
+        `Invalid tool input for ${call.name}: ${validation.error}`,
         { inputRejected: true },
       );
     }

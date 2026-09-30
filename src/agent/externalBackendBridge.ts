@@ -103,7 +103,7 @@ import {
   loadLatestPlanDocumentForExecution,
 } from "./documents/store";
 import { resolvePlanSkillRoutingReceipt } from "./model/semanticSkillRouting";
-import { getAllSkills, getMatchedSkillIds } from "./skills";
+import { getAllSkills } from "./skills";
 import { resolveDocumentOutcomePolicy } from "./documents/outcomePolicy";
 import {
   PlanExecutionRunSession,
@@ -3161,7 +3161,6 @@ export function createExternalBackendBridgeRuntime(options: {
         await notifyIfLive(makeProfilingEvent("frontend.run_turn.enter"));
         let approvedPlanArtifact: Awaited<ReturnType<typeof loadPlanArtifact>> =
           null;
-        let routedSkillIds: string[] = [];
         if (params.request.planContext?.phase === "executing") {
           approvedPlanArtifact = await loadPlanArtifact(
             params.request.planContext.planId,
@@ -3176,14 +3175,7 @@ export function createExternalBackendBridgeRuntime(options: {
               `Explicit plan skill changed after approval (${reused.changedExplicitSkillIds.join(", ")}); revise and approve the plan again`,
             );
           }
-          routedSkillIds = reused.skillIds;
-        } else {
-          routedSkillIds = params.request.forcedSkillIds || [];
         }
-        const matchedSkillIds = getMatchedSkillIds(
-          params.request,
-          routedSkillIds,
-        );
         const plannedSpec =
           approvedPlanArtifact?.contract?.deliverable.kind === "document"
             ? approvedPlanArtifact.contract.deliverable.spec

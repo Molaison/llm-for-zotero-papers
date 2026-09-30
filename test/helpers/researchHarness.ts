@@ -17,6 +17,7 @@ import { createResearchUpdateTool } from "../../src/agent/tools/plan/researchUpd
 import { normalizeExecutionOutput } from "../../src/agent/tools/execution/results";
 import { resolvePlanContract } from "../../src/agent/tools/plan/updatePlan";
 import type { AgentToolContext } from "../../src/agent/types";
+import type { PlanSkillBinding } from "../../src/agent/plans/types";
 import { resolvedAgentRequest } from "./resolvedAgentRequest";
 
 /**
@@ -65,6 +66,7 @@ export type ResearchHarness = {
   /** Approve the plan and start its first task. */
   approve: (
     overrides?: Partial<ResearchContract> & { deliverable?: unknown },
+    options?: { skillBindings?: readonly PlanSkillBinding[] },
   ) => Promise<PlanExecutionLedger>;
   ledger: () => Promise<PlanExecutionLedger>;
   activeTask: () => Promise<ExecutionTask>;
@@ -343,7 +345,7 @@ export function installResearchHarness(
     libraryID,
     conversationKey,
     planId,
-    async approve(overrides = {}) {
+    async approve(overrides = {}, options = {}) {
       await initAgentPlanStore();
       await initResearchStore();
       await initPlanDocumentStore();
@@ -399,6 +401,7 @@ export function installResearchHarness(
         revision: 1,
         steps,
         contract,
+        skillBindings: options.skillBindings,
         ready: true,
         now: 1,
       });

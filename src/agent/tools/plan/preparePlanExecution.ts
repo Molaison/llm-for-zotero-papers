@@ -11,6 +11,11 @@ import type {
   PlanCompletionRequirementKind,
 } from "../../plans/types";
 import { fail, validateObject } from "../shared";
+import {
+  PLAN_CONTRACT_SCHEMA,
+  PLAN_EFFECT_SPECIFICATION_REFERENCE_SCHEMA,
+  PLAN_STEPS_SCHEMA,
+} from "../../plans/contractSchema";
 
 function defaultCriterionVerifier(
   expectedEffect: unknown,
@@ -272,20 +277,14 @@ export function createPreparePlanExecutionTool(
   gateway?: ZoteroGateway,
 ): AgentToolDefinition<UpdatePlanInput, unknown> {
   const original = createUpdatePlanTool(gateway);
-  const {
-    ready: _ready,
-    explanation: _explanation,
-    ...properties
-  } = (original.spec.inputSchema as { properties: Record<string, unknown> })
-    .properties;
-  const stepsSchema = properties.steps as Record<string, unknown>;
+  const stepsSchema = PLAN_STEPS_SCHEMA as Record<string, unknown>;
   const stepSchema = stepsSchema.items as Record<string, unknown>;
   const stepProperties = stepSchema.properties as Record<string, unknown>;
   const acceptanceCriteriaSchema = stepProperties.acceptanceCriteria as Record<
     string,
     unknown
   >;
-  const contractSchema = properties.contract as Record<string, unknown>;
+  const contractSchema = PLAN_CONTRACT_SCHEMA as Record<string, unknown>;
   const contractProperties = contractSchema.properties as Record<
     string,
     unknown
@@ -320,10 +319,10 @@ export function createPreparePlanExecutionTool(
       description:
         "Stage the execution requirements for your native Codex plan before completing the proposal. The host canonicalizes concise native research shapes (including singular collection/item/tag scope names, string subquestions, narrative boundary objects, document defaults, and string acceptance checks), freezes the exact Zotero scope, and creates durable tasks. This cannot approve the proposal or execute effects; only the user can approve the later run. Omit effects unless the user requested library changes.",
       inputSchema: {
-        ...original.spec.inputSchema,
+        type: "object",
+        additionalProperties: false,
         required: ["contract", "steps"],
         properties: {
-          ...properties,
           contract: {
             ...contractSchema,
             properties: {
@@ -411,6 +410,7 @@ export function createPreparePlanExecutionTool(
               },
             },
           },
+          effectSpecification: PLAN_EFFECT_SPECIFICATION_REFERENCE_SCHEMA,
           steps: {
             ...stepsSchema,
             items: {

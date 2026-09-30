@@ -8,7 +8,6 @@ import {
   composeAgentModelInput,
 } from "../src/agent/model/messageBuilder";
 import { buildAgentResourceContextPlan } from "../src/agent/context/resourceContextPlan";
-import { selectAutomaticSkills } from "../src/agent/model/automaticSkillSelection";
 
 const paper = {
   libraryID: 1,
@@ -94,19 +93,10 @@ describe("default paper prompt context", function () {
     assert.equal((messages[paperMessage] as any).cachePolicy, "stable-prefix");
   });
 
-  it("skips automatic selection for one paper, preserves explicit slash skills, and resumes with added scope", async function () {
-    const single = request({ forcedSkillIds: ["simple-paper-qa"] });
+  it("preserves explicit slash skills for one paper and resumes with added scope", async function () {
+    const single = request({ forcedSkillIds: ["evidence-based-qa"] });
     assert.isTrue(isSinglePaperConversation(single));
-    const result = await selectAutomaticSkills(
-      single,
-      [],
-      undefined,
-      async () => {
-        throw new Error("single paper must not invoke router");
-      },
-    );
-    assert.deepEqual(result.skillIds, []);
-    assert.deepEqual(single.forcedSkillIds, ["simple-paper-qa"]);
+    assert.deepEqual(single.forcedSkillIds, ["evidence-based-qa"]);
     const multi = request({
       selectedPaperContexts: [
         { ...paper, itemId: 30, contextItemId: 31, title: "Second paper" },

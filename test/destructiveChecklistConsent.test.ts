@@ -1,7 +1,7 @@
 import { assert } from "chai";
 import { createImportIdentifiersTool } from "../src/agent/tools/write/importIdentifiers";
 import { createImportLocalFilesTool } from "../src/agent/tools/write/importLocalFiles";
-import { createManageAttachmentsTool } from "../src/agent/tools/write/manageAttachments";
+import { createAttachmentUpdateTool } from "../src/agent/tools/write/attachmentUpdate";
 import { createMergeItemsTool } from "../src/agent/tools/write/mergeItems";
 import { createTrashItemsTool } from "../src/agent/tools/write/trashItems";
 import type { AgentToolContext } from "../src/agent/types";
@@ -247,7 +247,7 @@ describe("destructive checklist consent", function () {
     } as never;
 
     it("renames to the value the user typed, not the model's", function () {
-      const tool = createManageAttachmentsTool(attachmentGateway);
+      const tool = createAttachmentUpdateTool(attachmentGateway);
       const validated = tool.validate({
         action: "rename",
         attachmentId: 5,
@@ -268,7 +268,7 @@ describe("destructive checklist consent", function () {
     });
 
     it("re-links to the corrected path", function () {
-      const tool = createManageAttachmentsTool(attachmentGateway);
+      const tool = createAttachmentUpdateTool(attachmentGateway);
       const validated = tool.validate({
         action: "relink",
         attachmentId: 5,
@@ -289,7 +289,7 @@ describe("destructive checklist consent", function () {
     });
 
     it("refuses an emptied field rather than running the model's value", function () {
-      const tool = createManageAttachmentsTool(attachmentGateway);
+      const tool = createAttachmentUpdateTool(attachmentGateway);
       const validated = tool.validate({
         action: "rename",
         attachmentId: 5,

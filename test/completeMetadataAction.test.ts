@@ -128,7 +128,7 @@ for (const mode of ["safe", "auto", "yolo"] as const)
       registry.register(
         createStubTool(
           {
-            name: "read_library",
+            name: "library_read",
             description: "read",
             inputSchema: { type: "object" },
             executionClass: "read",
@@ -165,7 +165,7 @@ for (const mode of ["safe", "auto", "yolo"] as const)
       registry.register(
         createStubTool(
           {
-            name: "search_literature_online",
+            name: "literature_search",
             description: "search",
             inputSchema: { type: "object" },
             executionClass: "read",
@@ -196,7 +196,7 @@ for (const mode of ["safe", "auto", "yolo"] as const)
       registry.register(
         createStubTool(
           {
-            name: "update_metadata",
+            name: "library_update",
             description: "update",
             inputSchema: { type: "object" },
             executionClass: "external_effect",
@@ -259,7 +259,7 @@ for (const mode of ["safe", "auto", "yolo"] as const)
       registry.register(
         createStubTool(
           {
-            name: "read_library",
+            name: "library_read",
             description: "read",
             inputSchema: { type: "object" },
             executionClass: "read",
@@ -288,7 +288,7 @@ for (const mode of ["safe", "auto", "yolo"] as const)
       registry.register(
         createStubTool(
           {
-            name: "search_literature_online",
+            name: "literature_search",
             description: "search",
             inputSchema: { type: "object" },
             executionClass: "read",
@@ -304,7 +304,7 @@ for (const mode of ["safe", "auto", "yolo"] as const)
       registry.register(
         createStubTool(
           {
-            name: "update_metadata",
+            name: "library_update",
             description: "update",
             inputSchema: { type: "object" },
             executionClass: "external_effect",
@@ -356,7 +356,7 @@ for (const mode of ["safe", "auto", "yolo"] as const)
       registry.register(
         createStubTool(
           {
-            name: "read_library",
+            name: "library_read",
             description: "read",
             inputSchema: { type: "object" },
             executionClass: "read",
@@ -391,7 +391,7 @@ for (const mode of ["safe", "auto", "yolo"] as const)
       registry.register(
         createStubTool(
           {
-            name: "search_literature_online",
+            name: "literature_search",
             description: "search",
             inputSchema: { type: "object" },
             executionClass: "read",
@@ -416,7 +416,7 @@ for (const mode of ["safe", "auto", "yolo"] as const)
       registry.register(
         createStubTool(
           {
-            name: "update_metadata",
+            name: "library_update",
             description: "update",
             inputSchema: { type: "object" },
             executionClass: "external_effect",
@@ -482,7 +482,7 @@ for (const mode of ["safe", "auto", "yolo"] as const)
       registry.register(
         createStubTool(
           {
-            name: "read_library",
+            name: "library_read",
             description: "read",
             inputSchema: { type: "object" },
             executionClass: "read",
@@ -508,7 +508,7 @@ for (const mode of ["safe", "auto", "yolo"] as const)
       registry.register(
         createStubTool(
           {
-            name: "search_literature_online",
+            name: "literature_search",
             description: "search",
             inputSchema: { type: "object" },
             executionClass: "read",
@@ -524,7 +524,7 @@ for (const mode of ["safe", "auto", "yolo"] as const)
       registry.register(
         createStubTool(
           {
-            name: "update_metadata",
+            name: "library_update",
             description: "update",
             inputSchema: { type: "object" },
             executionClass: "external_effect",
@@ -578,7 +578,7 @@ for (const mode of ["safe", "auto", "yolo"] as const)
       registry.register(
         createStubTool(
           {
-            name: "read_library",
+            name: "library_read",
             description: "read",
             inputSchema: { type: "object" },
             executionClass: "read",
@@ -604,7 +604,7 @@ for (const mode of ["safe", "auto", "yolo"] as const)
       registry.register(
         createStubTool(
           {
-            name: "search_literature_online",
+            name: "literature_search",
             description: "search",
             inputSchema: { type: "object" },
             executionClass: "read",
@@ -620,7 +620,7 @@ for (const mode of ["safe", "auto", "yolo"] as const)
       registry.register(
         createStubTool(
           {
-            name: "update_metadata",
+            name: "library_update",
             description: "update",
             inputSchema: { type: "object" },
             executionClass: "external_effect",
@@ -667,7 +667,7 @@ for (const mode of ["safe", "auto", "yolo"] as const)
       registry.register(
         createStubTool(
           {
-            name: "read_library",
+            name: "library_read",
             description: "read",
             inputSchema: { type: "object" },
             executionClass: "read",
@@ -693,7 +693,7 @@ for (const mode of ["safe", "auto", "yolo"] as const)
       registry.register(
         createStubTool(
           {
-            name: "search_literature_online",
+            name: "literature_search",
             description: "search",
             inputSchema: { type: "object" },
             executionClass: "read",
@@ -709,7 +709,7 @@ for (const mode of ["safe", "auto", "yolo"] as const)
       registry.register(
         createStubTool(
           {
-            name: "update_metadata",
+            name: "library_update",
             description: "update",
             inputSchema: { type: "object" },
             executionClass: "external_effect",
@@ -771,7 +771,7 @@ for (const mode of ["safe", "auto", "yolo"] as const)
       registry.register(
         createStubTool(
           {
-            name: "read_library",
+            name: "library_read",
             description: "read",
             inputSchema: { type: "object" },
             executionClass: "read",
@@ -802,7 +802,7 @@ for (const mode of ["safe", "auto", "yolo"] as const)
       registry.register(
         createStubTool(
           {
-            name: "search_literature_online",
+            name: "literature_search",
             description: "search",
             inputSchema: { type: "object" },
             executionClass: "read",
@@ -833,7 +833,7 @@ for (const mode of ["safe", "auto", "yolo"] as const)
       registry.register(
         createStubTool(
           {
-            name: "update_metadata",
+            name: "library_update",
             description: "update",
             inputSchema: { type: "object" },
             executionClass: "external_effect",
@@ -882,7 +882,7 @@ for (const mode of ["safe", "auto", "yolo"] as const)
       registry.register(
         createStubTool(
           {
-            name: "read_library",
+            name: "library_read",
             description: "read",
             inputSchema: { type: "object" },
             executionClass: "read",
@@ -908,7 +908,7 @@ for (const mode of ["safe", "auto", "yolo"] as const)
       registry.register(
         createStubTool(
           {
-            name: "search_literature_online",
+            name: "literature_search",
             description: "search",
             inputSchema: { type: "object" },
             executionClass: "read",
@@ -924,7 +924,7 @@ for (const mode of ["safe", "auto", "yolo"] as const)
       registry.register(
         createStubTool(
           {
-            name: "update_metadata",
+            name: "library_update",
             description: "update",
             inputSchema: { type: "object" },
             executionClass: "external_effect",
@@ -967,7 +967,7 @@ for (const mode of ["safe", "auto", "yolo"] as const)
       registry.register(
         createStubTool(
           {
-            name: "read_library",
+            name: "library_read",
             description: "read",
             inputSchema: { type: "object" },
             executionClass: "read",
@@ -1004,7 +1004,7 @@ for (const mode of ["safe", "auto", "yolo"] as const)
       registry.register(
         createStubTool(
           {
-            name: "search_literature_online",
+            name: "literature_search",
             description: "search",
             inputSchema: { type: "object" },
             executionClass: "read",
@@ -1020,7 +1020,7 @@ for (const mode of ["safe", "auto", "yolo"] as const)
       registry.register(
         createStubTool(
           {
-            name: "update_metadata",
+            name: "library_update",
             description: "update",
             inputSchema: { type: "object" },
             executionClass: "external_effect",

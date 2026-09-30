@@ -38,7 +38,7 @@ import {
   PDF_FIGURE_CROP_CACHE_VERSION,
   buildPdfFigureCropManifestHash,
 } from "../src/services/pdf/pdfFigureCropCache";
-import { createReadLibraryTool } from "../src/agent/tools/read/readLibrary";
+import { createLibraryReadTool } from "../src/agent/tools/read/libraryRead";
 import { ZoteroGateway } from "../src/agent/services/zoteroGateway";
 import { composeRetrievalCandidateInvalidation } from "./helpers/hostSurfaces";
 
@@ -1178,7 +1178,7 @@ describe("mineruSync", function () {
     assert.equal(reusedDir, getMineruItemDir(pdf.id));
   });
 
-  it("exposes mineruCacheDir from read_library after lazy restoring a synced package", async function () {
+  it("exposes mineruCacheDir from library_read after lazy restoring a synced package", async function () {
     const io = setupMemoryIO();
     const items = new Map<number, MockItem>();
     const parent = createParent();
@@ -1211,7 +1211,7 @@ describe("mineruSync", function () {
       bytes: zipBytes!,
     });
 
-    const tool = createReadLibraryTool(new ZoteroGateway());
+    const tool = createLibraryReadTool(new ZoteroGateway());
     const validated = tool.validate({
       itemIds: [parent.id],
       sections: ["attachments"],

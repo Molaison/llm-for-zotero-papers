@@ -1,4 +1,5 @@
 import "./hostSurfaceBootstrap";
+import { resolvedAgentRequest } from "../test/helpers/resolvedAgentRequest";
 import { assert } from "chai";
 import { ActionContractService } from "../src/agent/contracts/actionContract";
 import {
@@ -7,7 +8,7 @@ import {
 } from "../src/agent/originalAgentPermissionMode";
 import { ZoteroGateway } from "../src/agent/services/zoteroGateway";
 import { initAgentChangeJournal } from "../src/agent/store/changeJournal";
-import { createQueryLibraryTool } from "../src/agent/tools/read/queryLibrary";
+import { createLibrarySearchTool } from "../src/agent/tools/read/librarySearch";
 import { AgentToolRegistry } from "../src/agent/tools/registry";
 import type { AgentActionContract, AgentToolContext } from "../src/agent/types";
 import { semanticContractFixture } from "../test/helpers/semanticIntent";
@@ -43,14 +44,14 @@ describe("workflow: behavior audit shared-owner regressions", function () {
       ],
     });
     const context: AgentToolContext = {
-      request: {
+      request: resolvedAgentRequest({
         conversationKey: 2500900001,
         mode: "agent",
         libraryID: Zotero.Libraries.userLibraryID,
         userText: text,
         actionContract: contract,
         actionProgress: contracts.createProgress(contract),
-      },
+      }),
       item: null,
       modelName: "workflow",
       currentAnswerText: "",
@@ -72,14 +73,14 @@ describe("workflow: behavior audit shared-owner regressions", function () {
       );
       registry.register(
         (Zotero as any).LLMForZotero.api.agent.getToolDefinition(
-          "collection_update",
+          "library_update",
         ),
       );
       const execution = await registry.prepareExecution(
         {
           id: "collection-create",
-          name: "collection_update",
-          arguments: { action: "create", libraryID, name },
+          name: "library_update",
+          arguments: { kind: "collection", action: "create", libraryID, name },
         },
         context,
         { callerKind: "model" },
@@ -125,7 +126,7 @@ describe("workflow: behavior audit shared-owner regressions", function () {
         await item.saveTx();
         items.push(item);
       }
-      const tool = createQueryLibraryTool(new ZoteroGateway());
+      const tool = createLibrarySearchTool(new ZoteroGateway());
       for (const deleted of [false, true]) {
         const parsed = tool.validate({
           entity: "items",
@@ -272,7 +273,7 @@ describe("workflow: behavior audit shared-owner regressions", function () {
           applied.execution.result.ok,
           JSON.stringify(applied.execution.result.content),
         );
-        await note.reload(undefined, true);
+        await note.reload(undefined as never, true);
         const template = Zotero.getMainWindow().document.createElement(
           "template",
         ) as HTMLTemplateElement;

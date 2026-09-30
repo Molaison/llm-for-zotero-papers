@@ -21,7 +21,6 @@ function skill(overrides: Partial<AgentSkill> = {}): AgentSkill {
     version: 3,
     contexts: ["single-paper", "note"],
     activation: "both",
-    supersedes: [],
     instruction: "Full instructions that must not appear in inventory.",
     source: "system",
     ...overrides,
@@ -185,6 +184,35 @@ describe("load_skill tool", function () {
       id: "write-note",
       version: 3,
     });
+  });
+
+  it("carries the request-scope guard with every loaded skill", async function () {
+    // A customized or older template must not widen the request either.
+    const customized = skill({
+      source: "customized",
+      instruction: "Always write a full reading note with panel analysis.",
+    });
+    const tool = createLoadSkillTool({
+      getSkills: () => [customized],
+      getShippedInstruction: () => "Shipped write-note body.",
+    });
+    const validation = tool.validate({ id: "write-note" });
+    assert.isTrue(validation.ok);
+    if (!validation.ok) return;
+    const result = (await tool.execute(
+      validation.value,
+      {} as never,
+    )) as LoadSkillResult;
+    if (!result.found) return assert.fail(result.error);
+    assert.include(
+      result.scopeGuard,
+      "template defaults must not expand its scope",
+    );
+    assert.include(
+      result.scopeGuard,
+      "This scope rule also applies to customized or older skill templates.",
+    );
+    assert.include(result.scopeGuard, "crop figures");
   });
 
   it("returns current IDs when a skill is unavailable", async function () {

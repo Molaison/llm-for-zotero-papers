@@ -438,12 +438,6 @@ type ToolSpecBase = {
    */
   exposure?: "model" | "internal";
   /**
-   * Advanced tools remain model-visible when exposure is "model", but get
-   * stricter policy/trace treatment because they can touch local files,
-   * shell commands, or direct Zotero scripts.
-   */
-  tier?: "normal" | "advanced";
-  /**
    * Advertise the tool only to the in-plugin Agent runtime. External bridges,
    * MCP, and public tool catalogs must not expose it.
    */
@@ -962,6 +956,13 @@ export type AgentRuntimeRequestInput = AgentRequest & {
   loadedSkillRecords?: LoadedSkillRecord[];
   /** Legacy stored-artifact compatibility; absent on fresh ordinary turns. */
   classifiedIntent?: ClassifiedTurnIntent;
+  /** Cheap chat-path keyword signal for tool-guidance matching only; never grants authority. */
+  userTextSignals?: {
+    mentionsDuplicates: boolean;
+    mentionsTrash: boolean;
+    mentionsAttachment: boolean;
+    mentionsImport: boolean;
+  };
   /** Legacy or approved-Plan obligations; absent on fresh ordinary turns. */
   actionContract?: AgentActionContract;
   /** Mutable completion state kept separate from the immutable contract. */
@@ -1029,6 +1030,11 @@ export type ResolvedAgentRuntimeRequest = Omit<
   resolvedSelectedTextAnchors?: readonly ResolvedTurnSelectedTextAnchor[];
   localDocuments?: readonly TurnLocalDocument[];
   turnPaperScopeWarnings?: readonly TurnPaperScopeWarning[];
+  /**
+   * Tool guidance instructions the model has already received this turn: the
+   * rendered prompt's guidance plus any load_skill returned. Runtime-set only.
+   */
+  deliveredToolGuidance?: string[];
 };
 
 /** Canonical request consumed after the one-way runtime boundary. */
@@ -1290,6 +1296,12 @@ export type AgentToolContext = {
   readCurrentTurnActions?: () => import("./authorization/types").ActionReviewInput["currentTurnActions"];
   /** Announce instructions loaded during the current run through its durable trace. */
   publishSkillActivation?: (id: string) => Promise<void>;
+  /**
+   * Whether a tool is offered to the calling client. MCP sets it from the
+   * active profile so load_skill never returns guidance for a hidden tool;
+   * absent means every tool offered on the request.
+   */
+  isToolVisible?: (spec: ToolSpec) => boolean;
   /** Host-injected Auto reviewer, shared by normal and nested operation assessment. */
   reviewAction?: import("./authorization/types").ActionReviewer;
   /** Host-owned authority; never decoded from model or MCP tool arguments. */

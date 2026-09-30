@@ -1,4 +1,5 @@
 import { assert } from "chai";
+import { createPaperReadTool } from "../src/agent/tools/read/paperRead";
 import {
   buildAgentInitialMessages,
   buildAgentPromptInstructionInventory,
@@ -847,8 +848,47 @@ describe("agent prompt envelope evidence sufficiency", function () {
     }
   });
 
-  it("keeps retrieval choices advisory in the stable persona", async function () {
-    const messages = await buildAgentInitialMessages(request(false), [], []);
+  it("delivers paper_read guidance in a library chat with nothing selected", async function () {
+    const paperRead = createPaperReadTool(
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+    );
+    const messages = await buildAgentInitialMessages(
+      resolvedAgentRequest({
+        conversationKey: 4103,
+        mode: "agent",
+        conversationKind: "global",
+        libraryID: 1,
+        userText: "What does the Smith 2020 paper report?",
+        model: "test-model",
+      }),
+      [paperRead],
+      [],
+    );
+    const prompt = messages.map(messageText).join("\n");
+    assert.include(prompt, paperRead.guidance!.instruction);
+    assert.include(prompt, "recommendations are advisory");
+  });
+
+  it("keeps retrieval recommendations advisory in paper-scoped paper_read guidance", async function () {
+    const paperRead = createPaperReadTool(
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+    );
+    const withoutTool = await buildAgentInitialMessages(request(false), [], []);
+    assert.notInclude(
+      withoutTool.map(messageText).join("\n"),
+      "recommendations are advisory",
+    );
+    const messages = await buildAgentInitialMessages(
+      request(false),
+      [paperRead],
+      [],
+    );
     const prompt = messages.map(messageText).join("\n");
     assert.include(prompt, "recommendations are advisory");
     assert.include(prompt, "freely retrieve missing methods, results");

@@ -99,7 +99,7 @@ describe("workflow: completed native note change", function () {
           execution.execution.result.ok,
           JSON.stringify(execution.execution.result.content),
         );
-        await note.reload(undefined, true);
+        await note.reload(undefined as never, true);
         return execution.execution.result;
       }
       const result = await edit(notes[0], "Verified replacement.");
@@ -129,11 +129,13 @@ describe("workflow: completed native note change", function () {
       // under no paper is one object, so the row draws one chip: the note. A
       // second chip carrying the same title would be a paper that never existed.
       assert.deepEqual(
-        [
-          ...node.querySelectorAll<HTMLElement>(
-            ".llm-agent-action-summary-item .llm-selected-context",
-          ),
-        ].map((chip) =>
+        (
+          [
+            ...node.querySelectorAll<HTMLElement>(
+              ".llm-agent-action-summary-item .llm-selected-context",
+            ),
+          ] as HTMLElement[]
+        ).map((chip) =>
           chip.classList.contains("llm-note-context-chip")
             ? "note"
             : chip.className,
@@ -185,9 +187,9 @@ describe("workflow: completed native note change", function () {
         1,
         "the replacement is drawn as an added line",
       );
-      const undo = [...node.querySelectorAll("button")].find(
-        (button) => button.textContent === "Undo",
-      )!;
+      const undo = (
+        [...node.querySelectorAll("button")] as HTMLButtonElement[]
+      ).find((button) => button.textContent === "Undo")!;
       assert.exists(undo);
       undo.click();
       for (
@@ -202,8 +204,8 @@ describe("workflow: completed native note change", function () {
         "Undone",
         node.textContent || "",
       );
-      await notes[0].reload(undefined, true);
-      await notes[1].reload(undefined, true);
+      await notes[0].reload(undefined as never, true);
+      await notes[1].reload(undefined as never, true);
       assert.include(notes[0].getNote(), "Original paragraph.");
       assert.notInclude(notes[0].getNote(), "Verified replacement.");
       assert.include(notes[1].getNote(), "A later unrelated action.");
@@ -232,7 +234,7 @@ describe("workflow: completed native note change", function () {
       } catch (error) {
         conflict = String(error);
       }
-      await notes[0].reload(undefined, true);
+      await notes[0].reload(undefined as never, true);
       assert.equal(
         notes[0].getNote(),
         concurrentHtml,
