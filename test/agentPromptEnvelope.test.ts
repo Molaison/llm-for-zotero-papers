@@ -905,8 +905,6 @@ describe("agent prompt envelope evidence sufficiency", function () {
 });
 
 describe("agent prompt envelope direct workflow", function () {
-  const DECLARE_OUTCOMES =
-    "When a request asks for more than one outcome, such as summarizing a paper and saving it as a note, record each outcome with task_update in your first step, then complete them in order.";
   const RECEIPT_CONFIRMS =
     "A write result with a verified receipt already confirms the change; do not re-read the target to confirm it.";
 
@@ -932,12 +930,6 @@ describe("agent prompt envelope direct workflow", function () {
     return block!;
   }
 
-  const planning: PlanRuntimeContext = {
-    phase: "planning",
-    planId: "plan-direct-workflow",
-    revision: 1,
-    provider: "original",
-  };
   const executing: PlanRuntimeContext = {
     phase: "executing",
     planId: "plan-direct-workflow",
@@ -947,27 +939,18 @@ describe("agent prompt envelope direct workflow", function () {
     provider: "original",
   };
 
-  it("asks an ordinary turn to declare each requested outcome in its first step", async function () {
-    assert.include(await directWorkflowBlock(), DECLARE_OUTCOMES);
-    // A Plan tracks its own steps; task_update cannot add tasks to one.
-    assert.notInclude(await directWorkflowBlock(planning), DECLARE_OUTCOMES);
-    assert.notInclude(await directWorkflowBlock(executing), DECLARE_OUTCOMES);
-  });
-
   it("tells the model a verified write receipt already confirms the change", async function () {
     assert.include(await directWorkflowBlock(), RECEIPT_CONFIRMS);
     assert.include(await directWorkflowBlock(executing), RECEIPT_CONFIRMS);
   });
 
-  it("keeps both sentences out of the Codex client's instructions", function () {
+  it("keeps the receipt sentence out of the Codex client's instructions", function () {
     const codexManifest = buildZoteroEnvironmentManifest({
       scope: { kind: "global", libraryID: 1, conversationKey: 1 } as never,
       mcpEnabled: true,
       mcpReady: true,
     });
     assert.include(codexManifest, AGENT_ACTION_CONTRACT);
-    for (const sentence of [DECLARE_OUTCOMES, RECEIPT_CONFIRMS]) {
-      assert.notInclude(codexManifest, sentence);
-    }
+    assert.notInclude(codexManifest, RECEIPT_CONFIRMS);
   });
 });

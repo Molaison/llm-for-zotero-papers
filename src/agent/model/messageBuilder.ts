@@ -643,17 +643,11 @@ export async function renderAgentPromptEnvelope(
         [
           "## Direct agent workflow",
           "Understand the current request yourself and choose the lightest useful sequence of reads, searches, questions, document finalization, and concrete actions.",
-          // A Plan tracks its own steps; task_update cannot add tasks to one.
-          request.planContext
-            ? ""
-            : "When a request asks for more than one outcome, such as summarizing a paper and saving it as a note, record each outcome with task_update in your first step, then complete them in order.",
           "Use actual tools for requested effects. Inspect results and continue until the requested outcome is complete, reviewed, or has a concrete error.",
           "A write result with a verified receipt already confirms the change; do not re-read the target to confirm it.",
           "Natural-language restrictions in the current request and clarifications remain binding. Tool calls do not grant their own permission; the host validates each concrete proposal, applies permission policy, journals effects, and verifies native state.",
           "Resolve named targets from supplied identities or bounded search results. If several candidates remain, use request_user_input rather than guessing.",
-        ]
-          .filter(Boolean)
-          .join("\n"),
+        ].join("\n"),
       ],
     },
     {
