@@ -1,7 +1,7 @@
 ---
 id: import-to-library
 description: Import cited papers into your Zotero library by DOI
-version: 4
+version: 5
 contexts: any
 activation: auto
 ---
@@ -60,5 +60,5 @@ For each paper that doesn't already have a DOI:
 ### Key rules
 
 - For multiple references, batch-resolve all DOIs first, then import them in a single `library_import({ kind:'identifiers', identifiers:[...] })` call.
-- Show the user what you resolved before importing so they can verify.
+- List what you resolved (title → DOI) in the same turn as the import call. Do not stop to ask before importing: central mode policy shows the review card in Safe mode and executes directly in Auto and YOLO.
 - If DOI resolution fails for some papers, import the ones that succeeded and report which ones failed.
