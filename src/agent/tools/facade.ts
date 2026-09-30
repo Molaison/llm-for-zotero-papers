@@ -81,57 +81,6 @@ function validateDelegate(
   });
 }
 
-export function createRenamedTool<TInput, TResult>(params: {
-  tool: AgentToolDefinition<TInput, TResult>;
-  name: string;
-  description: string;
-  label?: string;
-  exposure?: "model" | "internal";
-  guidance?: AgentToolDefinition<TInput, TResult>["guidance"];
-}): AgentToolDefinition<TInput, TResult> {
-  const { tool } = params;
-  return {
-    ...tool,
-    guidance: params.guidance,
-    spec: {
-      ...tool.spec,
-      name: params.name,
-      description: params.description,
-      exposure: params.exposure || "model",
-    },
-    presentation: tool.presentation
-      ? {
-          ...tool.presentation,
-          label: params.label || tool.presentation.label,
-        }
-      : params.label
-        ? { label: params.label }
-        : undefined,
-    describeAction: (input, context) =>
-      tool.describeAction?.(input, context) ||
-      describeLibraryMutationActions(input),
-    execute: (input, context) =>
-      tool.execute(input, {
-        ...context,
-        journalToolName: context.journalToolName || params.name,
-      }),
-    createPendingAction: tool.createPendingAction
-      ? async (input, context) =>
-          clonePendingAction(
-            await tool.createPendingAction!(input, context),
-            params.name,
-          )
-      : undefined,
-    resolveResultReview: tool.resolveResultReview
-      ? async (input, result, resolution, context) =>
-          rewriteReviewResolution(
-            await tool.resolveResultReview!(input, result, resolution, context),
-            params.name,
-          )
-      : undefined,
-  };
-}
-
 export function createDelegatingTool<TResult = unknown>(params: {
   name: string;
   description: string;

@@ -9,7 +9,6 @@ import {
 } from "../src/agent/reviewCards";
 import { AgentRuntime } from "../src/agent/runtime";
 import { initAgentChangeJournal } from "../src/agent/store/changeJournal";
-import { createRenamedTool } from "../src/agent/tools/facade";
 import { createLiteratureReviewTool } from "../src/agent/tools/read/reviewLiterature";
 import { createLiteratureSearchTool } from "../src/agent/tools/read/literatureSearch";
 import { AgentToolRegistry } from "../src/agent/tools/registry";
@@ -430,13 +429,7 @@ describe("AgentRuntime HITL review workflow", function () {
               sessionId = result.sessionId;
               return result;
             };
-            registry.register(
-              createRenamedTool({
-                tool: search,
-                name: "literature_search",
-                label: "Search",
-              }),
-            );
+            registry.register(search);
             registry.register(createLiteratureReviewTool(gateway as never));
             registry.register(
               createStubFacadeTool(

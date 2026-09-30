@@ -1,7 +1,6 @@
 import { assert } from "chai";
 import { AgentRuntime } from "../../src/agent/runtime";
 import { AgentToolRegistry } from "../../src/agent/tools/registry";
-import { createRenamedTool } from "../../src/agent/tools/facade";
 import { createSubmitDocumentTool } from "../../src/agent/tools/plan/submitPlanDocument";
 import { createNoteWriteTool } from "../../src/agent/tools/write/noteWrite";
 import { createNoteWriteBatchTool } from "../../src/agent/tools/write/noteWriteBatch";
@@ -320,15 +319,7 @@ function createDirectJourneyRegistry(): AgentToolRegistry {
     ),
   );
   registry.register(createSubmitDocumentTool(submitDocumentGateway));
-  registry.register(
-    createRenamedTool({
-      tool: createNoteWriteTool(noteGateway),
-      name: "note_write",
-      label: "Write Note",
-      description:
-        "Create, append to, or edit one Zotero note and verify native post-state.",
-    }),
-  );
+  registry.register(createNoteWriteTool(noteGateway));
   return registry;
 }
 
@@ -600,15 +591,7 @@ function createBatchJourneyRegistry(
       (itemId) => (globalThis.Zotero as any).Items.get(itemId) || null,
     ),
   );
-  registry.register(
-    createRenamedTool({
-      tool: createNoteWriteBatchTool(gateway),
-      name: "note_write_batch",
-      label: "Write Notes",
-      description:
-        "Write a note onto each of many items in one checkpointed batch operation.",
-    }),
-  );
+  registry.register(createNoteWriteBatchTool(gateway));
   registry.register(createUndoTool(gateway));
   return registry;
 }

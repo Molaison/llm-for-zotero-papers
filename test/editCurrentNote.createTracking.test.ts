@@ -10,7 +10,6 @@ import {
   listJournalActions,
 } from "../src/agent/store/changeJournal";
 import { sha256Text } from "../src/agent/store/journalRecoveryBlobStore";
-import { createRenamedTool } from "../src/agent/tools/facade";
 import { AgentToolRegistry } from "../src/agent/tools/registry";
 import { createNoteWriteTool } from "../src/agent/tools/write/noteWrite";
 import type { AgentToolContext } from "../src/agent/types";
@@ -504,13 +503,7 @@ describe("noteWrite create tracking", function () {
       const gateway = new ZoteroGateway();
       const contracts = new ActionContractService(gateway);
       const registry = new AgentToolRegistry(contracts);
-      registry.register(
-        createRenamedTool({
-          tool: createNoteWriteTool(gateway),
-          name: "note_write",
-          description: "Write a note",
-        }),
-      );
+      registry.register(createNoteWriteTool(gateway));
       const request = resolvedAgentRequest({
         classifiedIntent: classifiedFixture(),
         ...baseContext.request,
@@ -584,13 +577,7 @@ describe("noteWrite create tracking", function () {
       const gateway = new ZoteroGateway();
       const contracts = new ActionContractService(gateway);
       const registry = new AgentToolRegistry(contracts);
-      registry.register(
-        createRenamedTool({
-          tool: createNoteWriteTool(gateway),
-          name: "note_write",
-          description: "Write a note",
-        }),
-      );
+      registry.register(createNoteWriteTool(gateway));
       const request = resolvedAgentRequest({
         ...baseContext.request,
         userText:
