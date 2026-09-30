@@ -17,6 +17,7 @@ import type {
 } from "../src/agent/model/adapter";
 import { AgentRuntime } from "../src/agent/runtime";
 import { AgentToolRegistry } from "../src/agent/tools/registry";
+import { createBuiltInToolRegistry } from "../src/agent/tools";
 import { resolveAgentRuntimeRequest } from "../src/agent/context/resolvedAgentRequest";
 import { renderAgentPromptEnvelope } from "../src/agent/model/messageBuilder";
 import { initAgentTraceStore } from "../src/agent/store/traceStore";
@@ -246,6 +247,23 @@ describe("skill routing without a model call", function () {
     }
     assert.notInclude(line, "simple-paper-qa");
     assert.notInclude(line, "slash-only");
+  });
+
+  it("points note_write at the write-note skill in its model-facing description", function () {
+    const registry = createBuiltInToolRegistry({
+      zoteroGateway: {} as never,
+      pdfService: {} as never,
+      pdfPageService: {} as never,
+      retrievalService: {} as never,
+    });
+    const noteWrite = registry
+      .listTools()
+      .find((tool) => tool.name === "note_write");
+    assert.isDefined(noteWrite);
+    assert.match(
+      noteWrite!.description,
+      / First call load_skill\('write-note'\)\.$/,
+    );
   });
 
   describe("an executing investigation plan", function () {

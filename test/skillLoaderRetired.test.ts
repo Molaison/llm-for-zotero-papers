@@ -119,9 +119,13 @@ describe("retired shipped skills", function () {
         ["evidence-based-qa"],
       );
     }
-    assert.lengthOf(
-      logged.filter((line) => line.includes("simple-paper-qa")),
-      1,
+    const retiredLines = logged.filter((line) =>
+      line.includes("simple-paper-qa"),
+    );
+    assert.lengthOf(retiredLines, 1);
+    assert.include(
+      retiredLines[0],
+      "Skipped retired skill simple-paper-qa left in profile",
     );
   });
 

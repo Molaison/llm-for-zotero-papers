@@ -97,6 +97,10 @@ type PaperReadInput = {
   visualInput?: unknown;
 };
 
+/** analyze-figures' failure rule, carried on every failed figures result. */
+export const FIGURE_CROP_FAILURE_GUIDANCE =
+  "No figure crop was extracted: answer from captions and surrounding paper text only, without page screenshots, source images, or image placeholders.";
+
 export type PaperReadFigureExtractionResult = {
   mode: "figures";
   status: "ok" | "mineru_required" | "no_figures" | "error";
@@ -1554,13 +1558,18 @@ export function createPaperReadTool(
             status: "error",
             query: input.query || context.request.userText || "",
             warning: "Precise figure extraction service is not available.",
+            guidance: FIGURE_CROP_FAILURE_GUIDANCE,
           };
         }
-        const figureResult = await figureExtractionService.extractFigures({
+        const extracted = await figureExtractionService.extractFigures({
           input,
           context,
           paperContexts: figureTargets,
         });
+        const figureResult =
+          extracted.status === "ok" || extracted.guidance
+            ? extracted
+            : { ...extracted, guidance: FIGURE_CROP_FAILURE_GUIDANCE };
         const { artifacts, ...content } = figureResult;
         return artifacts?.length ? { content, artifacts } : content;
       }

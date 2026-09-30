@@ -128,7 +128,7 @@ const MODEL_TOOL_DESCRIPTIONS: Readonly<Record<string, string>> = {
   context_read:
     "Read exact stored context. source:'conversation': omit messageId to list chat messages, set it to read one. source:'tool_result': read a trh_ handle; omit path for metadata. Continue with offset or textOffset=nextTextOffset.",
   note_write:
-    "Write a Zotero note. sourceMessageId reuses an exact answer; documentId reuses finalized material. Markdown file:// images from paper_read figure crops are imported and verified as embedded images; do not reimplement embedding with scripts.",
+    "Write a Zotero note. sourceMessageId reuses an exact answer; documentId reuses finalized material. Markdown file:// images from paper_read figure crops are imported and verified as embedded images; do not reimplement embedding with scripts. First call load_skill('write-note').",
   note_write_batch:
     "Write notes to explicitly identified items as one checkpointed batch; resumeBatchId continues an interrupted one.",
   library_cite:

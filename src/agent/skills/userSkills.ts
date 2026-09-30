@@ -802,7 +802,7 @@ export async function loadUserSkills(): Promise<AgentSkill[]> {
         if (!loggedObsoleteSkillIds.has(skill.id)) {
           loggedObsoleteSkillIds.add(skill.id);
           appLogger.info(
-            `[llm-for-zotero] Skipping retired skill ${skill.id} (preserved customized copy, not loaded): ${filePath}`,
+            `[llm-for-zotero] Skipped retired skill ${skill.id} left in profile: ${filePath}`,
           );
         }
         continue;
