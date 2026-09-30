@@ -1246,6 +1246,19 @@ const zhCN: Record<string, string> = {
   "1 excluded": "已排除 1 篇",
   "{count} excluded": "已排除 {count} 篇",
   "Remove from this task": "从本任务中移除",
+  Source: "原文",
+  "Open this passage in the paper": "在论文中打开这段内容",
+  "Locating this passage…": "正在定位这段内容…",
+  "Jumped to the passage (page {page})": "已跳转到这段内容（第 {page} 页）",
+  "Opened page {page}; couldn't highlight this passage":
+    "已打开第 {page} 页；无法高亮这段内容",
+  "Couldn't find this passage in the PDF; opened page {page}":
+    "在 PDF 中找不到这段内容；已打开第 {page} 页",
+  "Couldn't find this passage in the PDF; opened the paper":
+    "在 PDF 中找不到这段内容；已打开论文",
+  "Opened page {page}": "已打开第 {page} 页",
+  "No PDF for this paper": "这篇论文没有 PDF",
+  "Could not open the paper.": "无法打开论文。",
 
   // ── Language setting ────────────────────────────────────────────────────
   Language: "语言",

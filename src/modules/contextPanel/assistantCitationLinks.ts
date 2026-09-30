@@ -1,6 +1,7 @@
 import { appLogger } from "../../core/logging";
 import { setStatus } from "./textUtils";
 import { sanitizeText } from "../../utils/textSanitization";
+import { t } from "../../utils/i18n";
 import {
   formatPaperCitationLabel,
   formatPaperSourceLabel,
@@ -90,6 +91,11 @@ import {
   renderRenderedMathPreviewInto,
 } from "./renderedMarkdown";
 import type { Message, PaperContextRef, QuoteCitation } from "./types";
+import {
+  buildTaskPaperPassageSearchTexts,
+  taskPaperPassagePageLabel,
+  type TaskPaperPassageTarget,
+} from "./taskProgress/passageSource";
 
 type CitationParagraphJumpNavigation = {
   reader: any;
@@ -1691,6 +1697,8 @@ async function attemptCitationParagraphJump(params: {
   preferredFullQuoteText?: string;
   verifiedSourceMatchText?: string;
   verifiedFullSpan?: boolean;
+  /** More wordings of the same passage, tried after the ones above. */
+  fallbackQuoteTexts?: string[];
 }): Promise<ExactQuoteJumpResult> {
   // Source navigation is user-initiated. Raise an existing PDF above standalone
   // chat/document windows too, even if its paragraph cannot be highlighted.
@@ -1704,6 +1712,7 @@ async function attemptCitationParagraphJump(params: {
         params.preferredFullQuoteText,
         params.quoteText,
         params.verifiedSourceMatchText,
+        ...(params.fallbackQuoteTexts || []),
       ]
         .map((value) => sanitizeText(value || "").trim())
         .filter(Boolean),
@@ -3920,6 +3929,269 @@ async function resolveAndNavigateAssistantCitation(params: {
     // been corrected by FindController during this click).
     refreshAllCitationButtonPages(params.body, params.panelItem);
     logCitationNavigationTiming(timing, timingOutcome);
+  }
+}
+
+export type TaskPaperPassageNavigationOutcome =
+  /** The passage was found and highlighted. */
+  | "jumped"
+  /** The reader is on the passage's page, without a highlight. */
+  | "page"
+  /** The paper is open; neither the passage nor its page was found. */
+  | "opened"
+  | "no-pdf"
+  | "failed"
+  /** The same passage is already being opened. */
+  | "busy";
+
+const taskPaperPassageNavigationsInFlight = new Set<string>();
+
+/**
+ * A reader just opened has no viewer yet, and navigating it throws. Wait
+ * until its PDF text can be read (which also loads its page labels).
+ */
+async function waitForTaskPaperPassageReader(reader: any): Promise<boolean> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < 8000) {
+    if (reader?._internalReader) break;
+    await new Promise((resolve) => setTimeout(resolve, 40));
+  }
+  if (!reader?._internalReader) return false;
+  await warmPageTextCache(reader).catch(() => null);
+  return true;
+}
+
+function formatStatus(
+  template: string,
+  values: Record<string, string | number>,
+): string {
+  return t(template).replace(/\{(\w+)\}/g, (match, name: string) =>
+    name in values ? String(values[name]) : match,
+  );
+}
+
+/** The PDF a Task progress passage was read from, else the paper's first. */
+function resolveTaskPaperPassagePdf(
+  target: TaskPaperPassageTarget,
+): Zotero.Item | null {
+  for (const id of [target.contextItemId, target.itemId]) {
+    const itemId = Math.floor(Number(id) || 0);
+    if (itemId <= 0) continue;
+    const pdf = getFirstPdfAttachment(Zotero.Items.get(itemId) || null);
+    if (pdf) return pdf;
+  }
+  return null;
+}
+
+/**
+ * Open the paper a Task progress passage came from and show the passage:
+ * the same background verification, reader opening and FindController
+ * highlight a quote card's jump uses, with the paper already known. When the
+ * text is not found, the passage's page (if its label names one) or else the
+ * paper is opened, and the status line says so.
+ */
+export async function navigateToTaskPaperPassage(params: {
+  body: Element;
+  target: TaskPaperPassageTarget;
+  button?: HTMLButtonElement | null;
+}): Promise<TaskPaperPassageNavigationOutcome> {
+  const { target, button } = params;
+  const status = params.body.querySelector("#llm-status") as HTMLElement | null;
+  const report = (
+    text: string,
+    variant: "ready" | "sending" | "error" | "warning",
+  ) => {
+    if (status) setStatus(status, text, variant);
+  };
+  const flightKey = [
+    target.contextItemId || 0,
+    target.itemId,
+    target.label,
+    target.rawSnippet,
+  ].join("\u0000");
+  if (
+    button?.dataset.loading === "true" ||
+    taskPaperPassageNavigationsInFlight.has(flightKey)
+  ) {
+    return "busy";
+  }
+  taskPaperPassageNavigationsInFlight.add(flightKey);
+  const endNavigationActivity = beginQuoteNavigationActivity();
+  if (button) {
+    button.dataset.loading = "true";
+    button.disabled = true;
+  }
+  try {
+    const pdf = resolveTaskPaperPassagePdf(target);
+    if (!pdf) {
+      report(t("No PDF for this paper"), "error");
+      return "no-pdf";
+    }
+    const pdfId = Math.floor(pdf.id);
+    const searchTexts = buildTaskPaperPassageSearchTexts(
+      target.cleanedSnippet,
+      target.rawSnippet,
+    );
+    const pageLabel = taskPaperPassagePageLabel(target.label);
+    const displayLabel = target.label || "Task progress passage";
+
+    if (searchTexts.length) {
+      report(t("Locating this passage…"), "sending");
+      let match: {
+        pageIndex: number;
+        pageLabel?: string;
+        quoteText: string;
+        sourceMatchText?: string;
+        sourceMatchPageOccurrence?: number;
+      } | null = null;
+      // The paper is known, so it is the one authoritative candidate: a
+      // passage that only partly aligns (clipped, TeX dropped) still counts.
+      const resolution = await resolveVerifiedQuoteTarget({
+        candidates: [
+          { contextItemId: pdfId, authoritative: true, labelRank: 0 },
+        ],
+        searchTexts,
+        verify: verifyQuoteInCitationCandidate,
+      });
+      if (resolution.status === "resolved") {
+        match = {
+          pageIndex: resolution.pageIndex,
+          quoteText: resolution.quoteText,
+          sourceMatchText: resolution.sourceMatchText,
+          sourceMatchPageOccurrence: resolution.sourceMatchPageOccurrence,
+        };
+      } else if (resolution.status === "unverifiable") {
+        // The background worker could not read the PDF: let the viewer.
+        const candidate = buildCandidateForContextItemId(pdfId);
+        if (candidate) {
+          const opened = await locateQuoteByOpeningCitationCandidates({
+            candidates: [candidate],
+            searchTexts,
+          });
+          match = opened.matches[0] || null;
+        }
+      }
+      if (match) {
+        const reader = await openReaderForItem(pdfId, {
+          pageIndex: match.pageIndex,
+          pageLabel: match.pageLabel,
+        });
+        if (!reader) {
+          report(t("Could not open the paper."), "error");
+          return "failed";
+        }
+        const matchPageLabel =
+          getPageLabelForIndex(reader, match.pageIndex) ||
+          match.pageLabel ||
+          `${match.pageIndex + 1}`;
+        const paragraphJump = await attemptCitationParagraphJump({
+          reader,
+          contextItemId: pdfId,
+          displayCitationLabel: displayLabel,
+          quoteText: match.quoteText,
+          pageIndex: match.pageIndex,
+          pageLabel: matchPageLabel,
+          sourceMatchPageOccurrence: match.sourceMatchPageOccurrence,
+          verifiedSourceMatchText: match.sourceMatchText,
+          // Never `verifiedFullSpan`: it would switch off the page's
+          // largest-unique-partial-span fallback this passage may need.
+          fallbackQuoteTexts: searchTexts,
+        });
+        const jumpedLabel = resolveJumpedPageLabel(
+          reader,
+          paragraphJump,
+          matchPageLabel,
+        );
+        if (paragraphJump.matched) {
+          report(
+            formatStatus("Jumped to the passage (page {page})", {
+              page: jumpedLabel,
+            }),
+            "ready",
+          );
+          return "jumped";
+        }
+        report(
+          formatStatus("Opened page {page}; couldn't highlight this passage", {
+            page: jumpedLabel,
+          }),
+          "warning",
+        );
+        return "page";
+      }
+    }
+
+    // Not found in the whole document's text (or no text to find): open the
+    // paper and, when the label names a page, search that page with the
+    // page-native partial-span fallback before settling for the page alone.
+    const reader = await openReaderForItem(pdfId);
+    if (!reader) {
+      report(t("Could not open the paper."), "error");
+      return "failed";
+    }
+    Zotero.getMainWindow()?.focus();
+    if (pageLabel) {
+      const ready = await waitForTaskPaperPassageReader(reader);
+      const pageIndex = ready
+        ? resolvePageIndexForLabel(reader, pageLabel)
+        : null;
+      if (pageIndex !== null && searchTexts.length) {
+        report(t("Locating this passage…"), "sending");
+        await navigateReaderToPage(reader, pageIndex, pageLabel);
+        const paragraphJump = await attemptCitationParagraphJump({
+          reader,
+          contextItemId: pdfId,
+          displayCitationLabel: displayLabel,
+          quoteText: searchTexts[0],
+          fallbackQuoteTexts: searchTexts.slice(1),
+          pageIndex,
+          pageLabel,
+        });
+        if (paragraphJump.matched) {
+          report(
+            formatStatus("Jumped to the passage (page {page})", {
+              page: resolveJumpedPageLabel(reader, paragraphJump, pageLabel),
+            }),
+            "ready",
+          );
+          return "jumped";
+        }
+      }
+      if (
+        pageIndex !== null &&
+        (await navigateReaderToPage(reader, pageIndex, pageLabel))
+      ) {
+        report(
+          formatStatus(
+            searchTexts.length
+              ? "Couldn't find this passage in the PDF; opened page {page}"
+              : "Opened page {page}",
+            { page: pageLabel },
+          ),
+          searchTexts.length ? "warning" : "ready",
+        );
+        return "page";
+      }
+    }
+    report(
+      t("Couldn't find this passage in the PDF; opened the paper"),
+      "warning",
+    );
+    return "opened";
+  } catch (error) {
+    appLogger.warn("LLM task progress passage navigation failed", {
+      itemId: target.itemId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    report(t("Could not open the paper."), "error");
+    return "failed";
+  } finally {
+    taskPaperPassageNavigationsInFlight.delete(flightKey);
+    endNavigationActivity();
+    if (button) {
+      button.dataset.loading = "false";
+      button.disabled = false;
+    }
   }
 }
 

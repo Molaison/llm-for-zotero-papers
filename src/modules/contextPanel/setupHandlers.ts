@@ -1,7 +1,12 @@
 import { appLogger } from "../../core/logging";
 import { copyNoteEditingSelectedTextContext } from "./noteEditing/selectionController";
 import { syncTaskProgressPanel } from "./taskProgress/panel";
-import { TASK_PROGRESS_REMOVE_PAPER_EVENT } from "./taskProgress/view";
+import {
+  TASK_PROGRESS_OPEN_PASSAGE_EVENT,
+  TASK_PROGRESS_REMOVE_PAPER_EVENT,
+} from "./taskProgress/view";
+import type { TaskPaperPassageTarget } from "./taskProgress/passageSource";
+import { navigateToTaskPaperPassage } from "./assistantCitationLinks";
 import { resolveTaskPaperScopeItemIds } from "../../agent/context/taskPaperScopeListing";
 import { libraryIndexService } from "../../services/libraryIndexService";
 import { createNoteConversationItem } from "../../services/notes/conversationItem";
@@ -4718,6 +4723,20 @@ export function setupHandlers(
   // retrieval and the next question leave it out.
   body.addEventListener(TASK_PROGRESS_REMOVE_PAPER_EVENT, (event: Event) => {
     void removeTaskProgressPaper(event);
+  });
+  // "Source" on a passage the card lists: open its paper at the passage.
+  body.addEventListener(TASK_PROGRESS_OPEN_PASSAGE_EVENT, (event: Event) => {
+    const target = (event as CustomEvent<TaskPaperPassageTarget>).detail;
+    if (!target || !(Number(target.itemId) > 0)) return;
+    const button =
+      (event.target as Element | null)?.closest?.<HTMLButtonElement>(
+        "button.llm-task-paper-open",
+      ) || null;
+    void navigateToTaskPaperPassage({ body, target, button }).catch(
+      (error: unknown) => {
+        appLogger.warn("LLM task progress passage open failed", error);
+      },
+    );
   });
   const removeTaskProgressPaper = async (event: Event) => {
     if (!item) return;

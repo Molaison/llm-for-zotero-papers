@@ -15335,6 +15335,45 @@ item-pane-sidenav .llm-persistent-rail-entry[hidden] {
   font-size: var(--llm-fs-11);
 }
 
+/* The passage's label, with "Source" (open it in the paper) at the right. */
+.llm-task-paper-read-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.llm-task-paper-read-head > .llm-task-paper-how {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.llm-task-paper-open {
+  appearance: none;
+  flex: 0 0 auto;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--fill-tertiary);
+  font: inherit;
+  font-size: var(--llm-fs-11);
+  cursor: pointer;
+}
+
+.llm-task-paper-open:hover,
+.llm-task-paper-open:focus-visible {
+  outline: none;
+  color: var(--fill-primary);
+  text-decoration: underline;
+}
+
+.llm-task-paper-open:disabled {
+  opacity: 0.5;
+  cursor: default;
+  text-decoration: none;
+}
+
 .llm-task-paper-snippet {
   margin: 3px 0 0;
   padding: 5px 9px;

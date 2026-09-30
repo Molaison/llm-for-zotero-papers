@@ -21,6 +21,7 @@ import {
 } from "../src/modules/contextPanel/taskProgress/store";
 import {
   TASK_PROGRESS_FLASH_MS,
+  TASK_PROGRESS_OPEN_PASSAGE_EVENT,
   TASK_PROGRESS_DRAWER_MIN_PX,
   TASK_PROGRESS_WINDOW,
   createTaskProgressDrawer,
@@ -606,6 +607,134 @@ describe("task progress view", function () {
     assert.equal(harness.count(), "0 of 20 read", "not painted yet");
     harness.runTimers();
     assert.equal(harness.count(), "10 of 20 read");
+  });
+
+  it("offers Source on passages with text or a named page, and asks the panel to open it", function () {
+    seedScope(3);
+    class FakeCustomEvent {
+      constructor(
+        public type: string,
+        public init: { bubbles?: boolean; detail?: unknown },
+      ) {}
+    }
+    const doc = {
+      ...(fakeDocument as unknown as Record<string, unknown>),
+      defaultView: { CustomEvent: FakeCustomEvent },
+    } as unknown as Document;
+    const harness = track(mount({}, { doc }));
+    applyTaskPaperUpdate(
+      KEY,
+      {
+        version: 1,
+        callId: "c1",
+        toolName: "library_retrieve",
+        papers: [
+          {
+            key: "1:2",
+            libraryID: 1,
+            itemId: 2,
+            contextItemId: 22,
+            title: "Paper 2",
+            state: "read",
+          },
+        ],
+        reads: [
+          {
+            key: "1:2",
+            callId: "c1",
+            toolName: "library_retrieve",
+            granularity: "section",
+            label: "Results",
+            snippet: "## Results\nDrift grows with time…",
+          },
+          {
+            key: "1:2",
+            callId: "c1",
+            toolName: "view_pdf_pages",
+            granularity: "page",
+            label: "p. 3",
+          },
+          {
+            key: "1:2",
+            callId: "c1",
+            toolName: "view_pdf_pages",
+            granularity: "page",
+            label: "Figures",
+          },
+          {
+            key: "1:2",
+            callId: "c1",
+            toolName: "library_retrieve",
+            granularity: "outline",
+            label: "Methods",
+          },
+        ],
+      },
+      "run-a",
+    );
+    harness.row.dispatchFakeEvent("click");
+    const paper = harness.items()[1];
+    const summary = paper.findByClass("llm-task-paper-summary")!;
+    summary.dispatchFakeEvent("click");
+    const details = paper.findByClass("llm-task-paper-details")!;
+    const reads = details.findAllByClass("llm-task-paper-read");
+    assert.lengthOf(reads, 4);
+    const sources = reads.map((node) =>
+      node.findByClass("llm-task-paper-open"),
+    );
+    assert.deepEqual(
+      sources.map(Boolean),
+      [true, true, false, false],
+      "a snippet or a named page: never a page read without one, nor an outline",
+    );
+    const source = sources[0]!;
+    assert.equal(source.tagName.toLowerCase(), "button");
+    assert.equal(source.type, "button");
+    assert.equal(source.textContent, "Source");
+    assert.equal(
+      source.attributes["aria-label"],
+      "Open this passage in the paper",
+    );
+    assert.equal(
+      reads[0].findByClass("llm-task-paper-how")!.textContent,
+      "Results",
+      "the label row keeps its label text",
+    );
+    const dispatched: FakeCustomEvent[] = [];
+    (source as any).dispatchEvent = (event: FakeCustomEvent) => {
+      dispatched.push(event);
+      return true;
+    };
+    const click = source.dispatchFakeEvent("click");
+    assert.isTrue(click.propagationStopped, "the click stays on the button");
+    assert.lengthOf(dispatched, 1);
+    assert.equal(dispatched[0].type, TASK_PROGRESS_OPEN_PASSAGE_EVENT);
+    assert.isTrue(dispatched[0].init.bubbles);
+    assert.deepEqual(dispatched[0].init.detail, {
+      itemId: 2,
+      contextItemId: 22,
+      libraryID: 1,
+      rawSnippet: "## Results\nDrift grows with time…",
+      cleanedSnippet: "Results Drift grows with time…",
+      label: "Results",
+      granularity: "section",
+    });
+    assert.isFalse((details as any).hidden, "the paper stays expanded");
+    assert.equal(summary.getAttribute("aria-expanded"), "true");
+    assert.isTrue(harness.view.isOpen(), "the drawer stays open");
+
+    const page = sources[1]!;
+    (page as any).dispatchEvent = (event: FakeCustomEvent) => {
+      dispatched.push(event);
+      return true;
+    };
+    page.dispatchFakeEvent("click");
+    assert.deepInclude(dispatched[1].init.detail as object, {
+      rawSnippet: "",
+      cleanedSnippet: "",
+      label: "p. 3",
+      granularity: "page",
+    });
   });
 
   it("jumps from a citation to its quote chip, collapsing the drawer", function () {

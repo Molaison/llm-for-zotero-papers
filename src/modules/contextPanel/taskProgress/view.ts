@@ -33,6 +33,10 @@ import type {
 import type { TaskPaperScopeEntry } from "../../../agent/context/taskPaperScopeListing";
 import { t } from "../../../utils/i18n";
 import {
+  canOpenTaskPaperPassage,
+  type TaskPaperPassageTarget,
+} from "./passageSource";
+import {
   countPlanSteps,
   isLivePlanExecutionStatus,
   renderChecklistSteps,
@@ -72,6 +76,12 @@ const SHOWN_CLASS = "llm-task-progress-shown";
  */
 export const TASK_PROGRESS_REMOVE_PAPER_EVENT =
   "llm-task-progress-remove-paper";
+/**
+ * Dispatched (bubbling) when the user asks to see a passage in its paper;
+ * the detail is a `TaskPaperPassageTarget`. The panel opens the reader.
+ */
+export const TASK_PROGRESS_OPEN_PASSAGE_EVENT =
+  "llm-task-progress-open-passage";
 /** On the chat shell while the Task progress card is in it. */
 const PRESENT_CLASS = "llm-task-progress-present";
 /** On the panel while the drag handle is held. */
@@ -942,6 +952,39 @@ export function mountTaskProgressView(params: {
     event.stopPropagation?.();
   };
 
+  /** "Source": open the paper at this passage (the panel does the work). */
+  const openPassageButton = (
+    model: TaskProgressPaperRow,
+    read: TaskPaperReadEvent,
+    cleanedSnippet: string,
+  ) => {
+    const button = el(doc, "button", "llm-task-paper-open", t("Source"));
+    button.type = "button";
+    button.title = t("Open this passage in the paper");
+    button.setAttribute("aria-label", t("Open this passage in the paper"));
+    button.addEventListener("click", (event: Event) => {
+      event.preventDefault?.();
+      event.stopPropagation?.();
+      if (button.disabled) return;
+      const View = (doc.defaultView as any)?.CustomEvent;
+      if (typeof View !== "function") return;
+      const detail: TaskPaperPassageTarget = {
+        itemId: model.itemId,
+        libraryID: model.libraryID,
+        rawSnippet: read.snippet || "",
+        cleanedSnippet,
+        label: read.label || "",
+        granularity: read.granularity,
+      };
+      const contextItemId = model.entry?.contextItemIds?.[0];
+      if (contextItemId) detail.contextItemId = contextItemId;
+      button.dispatchEvent(
+        new View(TASK_PROGRESS_OPEN_PASSAGE_EVENT, { bubbles: true, detail }),
+      );
+    });
+    return button;
+  };
+
   const renderDetails = (refs: PaperRowRefs) => {
     const { row: model, details } = refs;
     const children: HTMLElement[] = [];
@@ -972,7 +1015,11 @@ export function mountTaskProgressView(params: {
         }
         for (const read of reads) {
           const item = el(doc, "div", "llm-task-paper-read");
-          item.append(
+          const snippet = read.snippet
+            ? cleanTaskPaperSnippet(read.snippet)
+            : "";
+          const head = el(doc, "div", "llm-task-paper-read-head");
+          head.append(
             el(
               doc,
               "div",
@@ -980,9 +1027,10 @@ export function mountTaskProgressView(params: {
               formatTaskPaperPassageLabel(read, model.title),
             ),
           );
-          const snippet = read.snippet
-            ? cleanTaskPaperSnippet(read.snippet)
-            : "";
+          if (canOpenTaskPaperPassage(read)) {
+            head.append(openPassageButton(model, read, snippet));
+          }
+          item.append(head);
           if (snippet) {
             item.append(
               el(doc, "blockquote", "llm-task-paper-snippet", snippet),
