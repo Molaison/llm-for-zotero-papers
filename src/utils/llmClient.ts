@@ -1444,7 +1444,7 @@ export async function preflightRequestModelCapabilities(
   }
 }
 
-function getReasoningReserveTokens(reasoning?: ReasoningConfig): number {
+export function getReasoningReserveTokens(reasoning?: ReasoningConfig): number {
   const level = reasoning?.level || "none";
   switch (level) {
     case "minimal":

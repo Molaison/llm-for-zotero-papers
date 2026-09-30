@@ -1,5 +1,6 @@
 import { assert } from "chai";
 import {
+  createLlmBatchAnalyzer,
   readDocumentsExhaustively,
   type ExhaustiveBatchInput,
 } from "../src/shared/exhaustiveDocumentReader";
@@ -35,6 +36,28 @@ function buildPaper(): {
 }
 
 describe("exhaustiveDocumentReader", function () {
+  it("leaves a reasoning model room to think inside each digest's output limit", async function () {
+    // DeepSeek at reasoning "high" spent the old fixed 700 tokens thinking,
+    // so every batch came back truncated and every retry repeated it.
+    const limits: unknown[] = [];
+    const analyze = createLlmBatchAnalyzer(
+      { model: "reasoner", reasoning: { level: "high" } } as never,
+      (async (params: { outputTokenLimit?: unknown }) => {
+        limits.push(params.outputTokenLimit);
+        return {
+          text: '{"digest":"Covered 0","relevantChunkIds":[0]}',
+          completion: { status: "complete" },
+        };
+      }) as never,
+    );
+    const output = await analyze({
+      question: "Summarize",
+      chunks: [{ chunkIndex: 0, text: "Body" }],
+    } as never);
+    assert.equal(output.digest, "Covered 0");
+    assert.deepEqual(limits, [{ mode: "custom", tokens: 700 + 4096 }]);
+  });
+
   it("processes every source chunk and returns a complete coverage receipt", async function () {
     const seen = new Set<number>();
     const result = await readDocumentsExhaustively({

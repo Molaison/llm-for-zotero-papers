@@ -6,6 +6,7 @@ import {
 } from "../utils/modelInputCap";
 import {
   callLLM,
+  getReasoningReserveTokens,
   requireCompleteModelText,
   type ChatParams,
 } from "../utils/llmClient";
@@ -252,15 +253,22 @@ export function createExhaustiveBatchAnalyzer(
   };
 }
 
-function createLlmBatchAnalyzer(
+export function createLlmBatchAnalyzer(
   config: LlmBatchConfig,
+  call: typeof callLLM = callLLM,
 ): ExhaustiveBatchAnalyzer {
+  // A reasoning model thinks inside the output limit. Without the reasoning
+  // reserve every digest is cut off, and each retry repeats the truncation.
+  const reasoningReserve = getReasoningReserveTokens(config.reasoning);
   return createExhaustiveBatchAnalyzer(async ({ maxTokens, ...input }) =>
     requireCompleteModelText(
-      await callLLM({
+      await call({
         ...config,
         ...input,
-        outputTokenLimit: { mode: "custom", tokens: maxTokens },
+        outputTokenLimit: {
+          mode: "custom",
+          tokens: maxTokens + reasoningReserve,
+        },
       }),
       "Exhaustive document batch",
     ),
