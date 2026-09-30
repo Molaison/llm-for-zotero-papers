@@ -219,6 +219,7 @@ export function makeGateway(
       itemIds = [],
       collectionIds = [],
       tagContexts = [],
+      excludedItemIds = [],
     }: {
       itemIds?: number[];
       collectionIds?: number[];
@@ -227,19 +228,25 @@ export function makeGateway(
         normalizedName?: string;
         scope?: "allTagged" | "untagged";
       }>;
+      excludedItemIds?: readonly number[];
     }) => {
       const union = new Set<number>();
       const tagItemIds = new Set<number>();
+      // Like the gateway: a removed paper is never part of the scope.
+      const excluded = new Set(excludedItemIds);
       let summedScopeCount = 0;
       const add = (
         scopedEntries: ReturnType<typeof makeItem>[],
         tagScope = false,
       ) => {
+        let count = 0;
         for (const entry of scopedEntries) {
+          if (excluded.has(entry.target.itemId)) continue;
           union.add(entry.target.itemId);
           if (tagScope) tagItemIds.add(entry.target.itemId);
+          count += 1;
         }
-        return scopedEntries.length;
+        return count;
       };
 
       add(
@@ -394,6 +401,8 @@ export type RetrieveServiceRig = {
 
 export type RetrieveServiceRigOptions = {
   papers?: number;
+  /** Collections every paper belongs to (default none). */
+  collectionIds?: number[];
   /** Defaults to a disabled index, so the rig keeps today's direct path. */
   textIndex?: LibraryTextIndexFacade;
   /** Variants the fake reformulator returns, one list per round. */
@@ -456,7 +465,11 @@ export function createRetrieveServiceRig(
       options.unmatchedMetadata
         ? "This paper describes a procedure."
         : "This paper describes a method.",
-      { hasPdf: true, contextItemId: itemId + 1 },
+      {
+        hasPdf: true,
+        contextItemId: itemId + 1,
+        collectionIds: options.collectionIds,
+      },
     );
   });
   const candidateBuilderCalls: number[] = [];

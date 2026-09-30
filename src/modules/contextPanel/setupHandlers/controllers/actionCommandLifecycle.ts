@@ -7,7 +7,6 @@ import type {
 import {
   ACTION_COMPLETION_DISMISS_MS,
   formatActionCompletionCountdown,
-  formatActionLabel,
   type ActionCompletionFeedback,
 } from "../../actionStatusText";
 import { renderPendingActionCard } from "../../agentTrace/render";
@@ -19,18 +18,8 @@ const PAGED_REVIEW_TRANSITION_ACTION_IDS = new Set([
   "refresh",
 ]);
 
-export type ActionProgressIndicator = {
-  setStep(stepName: string, index: number, total: number): void;
-  setSummary(summary: string): void;
-  hide(): void;
-  remove(): void;
-};
-
 export type ActionCommandLifecycle = {
   closeActionHitlPanel: () => void;
-  createActionProgressIndicator: (
-    actionName: string,
-  ) => ActionProgressIndicator;
   showActionCompletionCard: (feedback: ActionCompletionFeedback) => void;
   showActionHitlCard: (
     requestId: string,
@@ -276,7 +265,6 @@ export function createActionCommandLifecycle(params: {
     const ownerDoc = body.ownerDocument;
     if (!ownerDoc || !chatBox) return;
     clearActionCompletionTimers();
-    chatBox.querySelector(".llm-action-progress-card")?.remove();
     chatBox.querySelector(".llm-action-inline-card")?.remove();
     const wrapper = ownerDoc.createElement("div");
     wrapper.className = "llm-action-inline-card llm-action-inline-card-status";
@@ -315,76 +303,8 @@ export function createActionCommandLifecycle(params: {
     actionCompletionDismissTimer = setTimeout(dismissCompletionCard, totalMs);
   };
 
-  const createActionProgressIndicator = (
-    actionName: string,
-  ): ActionProgressIndicator => {
-    const ownerDoc = body.ownerDocument;
-    let element: HTMLDivElement | null = null;
-    let stepText: HTMLDivElement | null = null;
-    let summaryText: HTMLDivElement | null = null;
-
-    const ensureMounted = () => {
-      if (!ownerDoc || !chatBox) return;
-      if (element && element.isConnected) return;
-      chatBox.querySelector(".llm-action-progress-card")?.remove();
-      const wrapper = ownerDoc.createElement("div");
-      wrapper.className = "llm-action-progress-card llm-plan-container";
-      const { header, actions } = createDocumentCardLayout(ownerDoc, {
-        title: formatActionLabel(actionName),
-        status: "Working",
-        statusKind: "executing",
-      });
-      const typing = ownerDoc.createElement("div");
-      typing.className = "llm-typing llm-action-progress-typing";
-      typing.innerHTML =
-        '<span class="llm-typing-dot"></span><span class="llm-typing-dot"></span><span class="llm-typing-dot"></span>';
-      actions.appendChild(typing);
-      wrapper.appendChild(header);
-      stepText = ownerDoc.createElement("div");
-      stepText.className = "llm-action-progress-step";
-      stepText.textContent = "Starting...";
-      wrapper.appendChild(stepText);
-      summaryText = ownerDoc.createElement("div");
-      summaryText.className = "llm-action-progress-summary";
-      summaryText.textContent = "";
-      wrapper.appendChild(summaryText);
-      chatBox.appendChild(wrapper);
-      scheduleChatContentScroll(chatBox);
-      element = wrapper;
-      syncHasActionCardAttr();
-    };
-
-    ensureMounted();
-    return {
-      setStep(stepName: string, index: number, total: number) {
-        ensureMounted();
-        if (stepText) stepText.textContent = `${stepName} (${index}/${total})`;
-        if (summaryText) summaryText.textContent = "";
-      },
-      setSummary(summary: string) {
-        ensureMounted();
-        if (summaryText) summaryText.textContent = summary;
-      },
-      hide() {
-        element?.remove();
-        element = null;
-        stepText = null;
-        summaryText = null;
-        syncHasActionCardAttr();
-      },
-      remove() {
-        element?.remove();
-        element = null;
-        stepText = null;
-        summaryText = null;
-        syncHasActionCardAttr();
-      },
-    };
-  };
-
   return {
     closeActionHitlPanel,
-    createActionProgressIndicator,
     showActionCompletionCard,
     showActionHitlCard,
   };

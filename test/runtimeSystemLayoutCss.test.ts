@@ -20,22 +20,107 @@ function extractCssRule(css: string, selector: string): string {
 }
 
 describe("runtime system control layout", function () {
-  it("scales the mode chip label with the plugin font setting at every width", function () {
+  it("scales the mode toggle labels with the plugin font setting at every width", function () {
     const css = source("addon/content/zoteroPane.css");
-    const modeChipRule = extractCssRule(css, ".llm-mode-chip");
+    const tabRule = extractCssRule(css, ".llm-standalone-tab");
+    const toggleRowRule = extractCssRule(css, ".llm-header-toggle-row");
 
-    // The label follows --llm-font-scale like the rest of the plugin's text.
-    // A static chip, or one frozen behind a width breakpoint, is a downgrade at
-    // the sidebar widths people actually use — it stops responding to the font
-    // size shortcuts.
-    assert.include(modeChipRule, "font-size: var(--llm-fs-12)");
+    // The labels follow --llm-font-scale like the rest of the plugin's text,
+    // at the standalone window's own size: the sidebar row supplies the same
+    // values the standalone root does.
+    const standaloneRootRule = extractCssRule(
+      css,
+      "#llmforzotero-standalone-chat-root",
+    );
+    assert.include(tabRule, "font-size: var(--llm-standalone-ui-font-size)");
+    for (const declaration of [
+      "--llm-standalone-ui-font-size: var(--llm-fs-12);",
+      "--llm-standalone-ui-line-height: calc(20px * var(--llm-font-scale));",
+    ]) {
+      assert.include(standaloneRootRule, declaration);
+      assert.include(toggleRowRule, declaration);
+    }
 
     // No width breakpoint may pin it either: the compact header shrinks buttons
-    // to icons, but the chip keeps scaling.
+    // to icons, but the toggle keeps scaling.
     const compactBlock =
       css.match(/@container \(max-width: 380px\) \{[\s\S]*?\n\}/)?.[0] || "";
     assert.notEqual(compactBlock, "", "compact header block must still exist");
-    assert.notInclude(compactBlock, ".llm-mode-chip");
+    assert.notInclude(compactBlock, ".llm-header-mode-tab");
+    assert.notInclude(css, ".llm-mode-chip");
+  });
+
+  it("lays the sidebar header out as the mode toggle, then actions", function () {
+    const css = source("addon/content/zoteroPane.css");
+    const toggleRowRule = extractCssRule(css, ".llm-header-toggle-row");
+    const modeTabRule = extractCssRule(
+      css,
+      ".llm-header-toggle-row .llm-header-mode-tab",
+    );
+    const navRowRule = extractCssRule(css, ".llm-header-nav-row");
+    const dividerRule = extractCssRule(css, ".llm-header-runtime-divider");
+
+    // No docked title row in either layout: the header opens with the toggle.
+    assert.notInclude(css, ".llm-docked-");
+    assert.notInclude(
+      source("src/modules/contextPanel/buildUI.ts"),
+      "createDockedPanelTitle",
+    );
+
+    // Row 1: the centered toggle, free of any divider or fixed height.
+    assert.notInclude(toggleRowRule, "border");
+    assert.notMatch(toggleRowRule, /(^|\s)height:/);
+    assert.include(toggleRowRule, "justify-content: center");
+    assert.include(toggleRowRule, "padding: 6px 0 8px");
+    assert.include(modeTabRule, "min-width: 64px");
+    assert.include(modeTabRule, "padding-inline: 12px");
+
+    // Row 2: actions, with no divider under them (none above the chat).
+    assert.notInclude(navRowRule, "border-bottom");
+    assert.include(dividerRule, "width: 1px");
+    assert.include(dividerRule, "height: 16px");
+    assert.include(
+      dividerRule,
+      "border-inline-start: var(--material-panedivider)",
+    );
+
+    // The items-list alignment is gone for good.
+    assert.notInclude(css, "--llm-items-header");
+    assert.notInclude(css, ".llm-header-mode-row");
+    assert.notInclude(
+      source("src/modules/contextPanel/dedicatedChatPane.ts"),
+      "itemsHeaderHeight",
+    );
+    assert.notInclude(
+      source("src/modules/contextPanel/buildUI.ts"),
+      "itemsHeaderHeight",
+    );
+  });
+
+  it("shows the toggle row exactly when the history bar shows", function () {
+    const css = source("addon/content/zoteroPane.css");
+    // The history bar is always laid out: its display is !important so no
+    // transient inline write can hide it (see the tab-switch fix that made
+    // it so). The toggle row carries no inline display writes of its own, so
+    // the two rows can never fall out of step.
+    assert.include(
+      extractCssRule(css, ".llm-history-bar"),
+      "display: flex !important",
+    );
+    assert.include(
+      extractCssRule(css, ".llm-header-toggle-row"),
+      "display: flex",
+    );
+    for (const path of [
+      "src/modules/contextPanel/buildUI.ts",
+      "src/modules/contextPanel/setupHandlers.ts",
+      "src/modules/contextPanel/setupHandlers/controllers/historyLifecycleController.ts",
+      "src/modules/contextPanel/panelHostOwnership.ts",
+    ]) {
+      const text = source(path);
+      assert.notInclude(text, "headerToggleRow", path);
+      assert.notInclude(text, "#llm-header-toggle-row", path);
+    }
   });
 
   it("uses the shared mask assets instead of inline runtime glyph markup", function () {

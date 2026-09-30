@@ -291,7 +291,8 @@ function createControllerHarness(
     historyUndoText,
     historyUndoBtn: null,
     topToast,
-    modeChipBtn: null,
+    paperChatTabBtn: null,
+    libraryChatTabBtn: null,
     getItem: () => currentItem,
     setItem: (item) => {
       currentItem = item;

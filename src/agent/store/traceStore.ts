@@ -732,6 +732,64 @@ export async function listAgentRunEvents(
   return out;
 }
 
+/**
+ * Several runs' events of the given types, in one read: run order is the
+ * caller's, events within a run by sequence. For a view that rebuilds a
+ * conversation-wide summary from a few event kinds (Task progress).
+ */
+export async function listAgentRunEventsForRuns(
+  runIds: readonly string[],
+  eventTypes: readonly string[],
+): Promise<AgentRunEventRecord[]> {
+  const ids = [...new Set(runIds.map((id) => id.trim()).filter(Boolean))];
+  const types = [...new Set(eventTypes)];
+  if (!ids.length || !types.length) return [];
+  const out: AgentRunEventRecord[] = [];
+  // Bounded IN lists keep each statement well under SQLite's variable cap.
+  for (let start = 0; start < ids.length; start += 200) {
+    const chunk = ids.slice(start, start + 200);
+    const rows = (await Zotero.DB.queryAsync(
+      `SELECT run_id AS runId,
+              seq,
+              payload_json AS payloadJson,
+              created_at AS createdAt
+       FROM ${AGENT_RUN_EVENTS_TABLE}
+       WHERE run_id IN (${chunk.map(() => "?").join(", ")})
+         AND event_type IN (${types.map(() => "?").join(", ")})
+       ORDER BY run_id, seq ASC, id ASC`,
+      [...chunk, ...types],
+    )) as
+      | Array<{
+          runId?: unknown;
+          seq?: unknown;
+          payloadJson?: unknown;
+          createdAt?: unknown;
+        }>
+      | undefined;
+    for (const row of rows || []) {
+      if (typeof row.runId !== "string") continue;
+      const seq = Number(row.seq);
+      const createdAt = Number(row.createdAt);
+      if (!Number.isFinite(seq) || !Number.isFinite(createdAt)) continue;
+      let payload: AgentEvent | null = null;
+      try {
+        payload = JSON.parse(String(row.payloadJson || "")) as AgentEvent;
+      } catch (_error) {
+        payload = null;
+      }
+      if (!payload || typeof payload.type !== "string") continue;
+      out.push({
+        runId: row.runId,
+        seq: Math.floor(seq),
+        eventType: payload.type,
+        payload,
+        createdAt: Math.floor(createdAt),
+      });
+    }
+  }
+  return out;
+}
+
 export async function getAgentRunTrace(runId: string): Promise<{
   run: AgentRunRecord | null;
   events: AgentRunEventRecord[];

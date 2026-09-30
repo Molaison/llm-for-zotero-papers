@@ -14,6 +14,12 @@ import {
   resolveActionFailureFeedback,
 } from "../../actionStatusText";
 import { getAbortController, setAbortController } from "../../state";
+import {
+  beginTaskAction,
+  endTaskAction,
+  setTaskActionStep,
+  setTaskActionSummary,
+} from "../../taskProgress/store";
 import type { ActionCommandLifecycle } from "./actionCommandLifecycle";
 
 export type ActionExecutionLlmConfig = {
@@ -53,6 +59,41 @@ function claimActionAbortSlot(conversationKey: number | null): {
   };
 }
 
+type RunAction = ReturnType<typeof getAgentApi>["runAction"];
+
+let actionRunSeq = 0;
+
+/**
+ * The action's progress, told to the Task progress store: the row and the
+ * overlay's Steps block show it (there is no card in the chat).
+ */
+function createActionTaskProgress(
+  conversationKey: number | null,
+  actionName: string,
+) {
+  const key = conversationKey && conversationKey > 0 ? conversationKey : 0;
+  const runId = `action-${Date.now()}-${++actionRunSeq}`;
+  if (key)
+    beginTaskAction(key, { runId, title: formatActionLabel(actionName) });
+  return {
+    step: (step: string, index: number, total: number) => {
+      if (key) setTaskActionStep(key, runId, { step, index, total });
+    },
+    summary: (summary: string) => {
+      if (key) setTaskActionSummary(key, runId, summary);
+    },
+    end: (outcome: "completed" | "failed" | "cancelled", detail?: string) => {
+      if (key) endTaskAction(key, runId, outcome, detail);
+    },
+  };
+}
+
+function feedbackText(feedback: { title: string; description?: string }) {
+  return feedback.description
+    ? `${feedback.title}: ${feedback.description}`
+    : feedback.title;
+}
+
 export async function runAgentActionWithLifecycle(params: {
   actionName: string;
   input: Record<string, unknown>;
@@ -64,6 +105,8 @@ export async function runAgentActionWithLifecycle(params: {
   lifecycle: ActionCommandLifecycle;
   setStatus: (message: string, level: "ready" | "warning" | "error") => void;
   logError: (message: string, error?: unknown) => void;
+  /** Test seam; the agent API's `runAction` by default. */
+  runAction?: RunAction;
 }): Promise<void> {
   const {
     actionName,
@@ -79,10 +122,25 @@ export async function runAgentActionWithLifecycle(params: {
   } = params;
   const abortSlot = claimActionAbortSlot(conversationKey ?? null);
   setStatus(`Running: ${formatActionLabel(actionName)}...`, "ready");
-  const progressIndicator = lifecycle.createActionProgressIndicator(actionName);
+  const progress = createActionTaskProgress(
+    conversationKey ?? null,
+    actionName,
+  );
   let lastProgressSummary = "";
+  const endFailed = (error: unknown) => {
+    const feedback = resolveActionFailureFeedback({
+      actionName,
+      error,
+      lastProgressSummary,
+    });
+    progress.end(
+      abortSlot.signal?.aborted ? "cancelled" : "failed",
+      feedbackText(feedback),
+    );
+    return feedback;
+  };
   try {
-    const agentApi = getAgentApi();
+    const runAction = params.runAction || getAgentApi().runAction;
     const commonOptions = {
       libraryID,
       // Files the run's changes under the user's conversation so undo and
@@ -93,23 +151,23 @@ export async function runAgentActionWithLifecycle(params: {
       signal: abortSlot.signal,
       onProgress: (event: ActionProgressEvent) => {
         if (event.type === "step_start") {
-          progressIndicator.setStep(event.step, event.index, event.total);
+          progress.step(event.step, event.index, event.total);
           setStatus(`${event.step} (${event.index}/${event.total})`, "ready");
         } else if (event.type === "step_done") {
           if (event.summary) {
             lastProgressSummary = event.summary;
-            progressIndicator.setSummary(event.summary);
+            progress.summary(event.summary);
             setStatus(event.summary, "ready");
           }
-        } else if (event.type === "confirmation_required") {
-          progressIndicator.hide();
         }
       },
     };
     if (isPagedLibraryAction) {
-      agentApi.getZoteroGateway().invalidateLibrarySearchCache?.(libraryID);
+      getAgentApi()
+        .getZoteroGateway()
+        .invalidateLibrarySearchCache?.(libraryID);
     }
-    const result = await agentApi.runAction(actionName, input, {
+    const result = await runAction(actionName, input, {
       ...commonOptions,
       confirmationMode: "native_ui",
       requestConfirmation: (requestId, pendingAction) =>
@@ -125,37 +183,23 @@ export async function runAgentActionWithLifecycle(params: {
       result.ok ? "ready" : "error",
     );
     if (result.ok) {
-      progressIndicator.remove();
-      lifecycle.showActionCompletionCard(
-        resolveActionCompletionFeedback({
-          actionName,
-          output: result.output,
-          lastProgressSummary,
-        }),
-      );
+      const feedback = resolveActionCompletionFeedback({
+        actionName,
+        output: result.output,
+        lastProgressSummary,
+      });
+      progress.end("completed", feedback.title);
+      lifecycle.showActionCompletionCard(feedback);
     } else {
       lifecycle.closeActionHitlPanel();
-      lifecycle.showActionCompletionCard(
-        resolveActionFailureFeedback({
-          actionName,
-          error: result.error,
-          lastProgressSummary,
-        }),
-      );
+      lifecycle.showActionCompletionCard(endFailed(result.error));
     }
   } catch (error) {
     lifecycle.closeActionHitlPanel();
     logError("LLM: action picker run error", error);
     setStatus(`Error: ${String(error)}`, "error");
-    lifecycle.showActionCompletionCard(
-      resolveActionFailureFeedback({
-        actionName,
-        error,
-        lastProgressSummary,
-      }),
-    );
+    lifecycle.showActionCompletionCard(endFailed(error));
   } finally {
     abortSlot.release();
-    progressIndicator.remove();
   }
 }

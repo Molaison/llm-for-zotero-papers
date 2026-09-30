@@ -14,7 +14,11 @@ import {
   type ToolWorkflowOutcome,
 } from "../model/toolArtifactDelivery";
 import { resolveCapabilitiesContentInputs } from "../model/contentCapabilities";
-import { createTrustedReadObservations } from "../plans/readObservation";
+import {
+  attestAndRecordRead,
+  buildPaperLedgerUpdateEvent,
+} from "../context/taskPaperLedgerRecorder";
+import type { TaskPaperLedgerDelta } from "../context/taskPaperLedger";
 import type { PlanExecutionRunSession } from "../plans/runSession";
 import { canonicalJson } from "../services/libraryMutation/canonicalJson";
 import { sha256Text } from "../store/journalRecoveryBlobStore";
@@ -372,17 +376,26 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
       }
       deps.request.documentArtifactObservations = [...artifactsByPath.values()];
     }
+    // Recorded at attestation, from the original content (the paper
+    // frontier may replace it with a handle below), and emitted right after
+    // this call's tool_result.
+    let paperLedgerDelta: TaskPaperLedgerDelta | null = null;
     if (
       !cachedPaperEvidence &&
       toolResult.ok &&
       executedCall.toolDefinition?.spec.executionClass === "read"
     ) {
-      const observations = await createTrustedReadObservations({
+      const attested = await attestAndRecordRead({
         toolName: toolResult.name,
         callId: toolResult.callId,
         input: executedCall.input,
         result: toolResult.content,
+        conversationKey: deps.request.conversationKey,
+        libraryID: deps.request.libraryID,
+        runId: deps.runId,
       });
+      const observations = attested.observations;
+      paperLedgerDelta = attested.paperLedgerDelta;
       if (observations.length) {
         const merged = new Map(
           (deps.request.documentReadObservations || []).map((entry) => [
@@ -515,6 +528,9 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
           ? deps.request.planContext.activeTaskId
           : undefined,
     });
+    if (paperLedgerDelta) {
+      await deps.emit(buildPaperLedgerUpdateEvent(paperLedgerDelta));
+    }
     if (toolResult.materialRef) {
       deps.finalizedMaterialRefs.set(
         toolResult.materialRef.documentId,

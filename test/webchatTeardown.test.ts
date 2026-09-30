@@ -216,18 +216,18 @@ describe("WebChat connection check ownership", function () {
     assert.isAbove(applyEnd, applyStart, "applyWebChatModeUI end not found");
     const applyBody = setupHandlers.slice(applyStart, applyEnd);
 
-    const dotAttached = applyBody.indexOf("modeChipBtn.appendChild(dot);");
+    const dotAttached = applyBody.indexOf("paperChatTabBtn.prepend(dot);");
     const startCall = applyBody.search(/ConnectionCheck\(dot\)/);
-    assert.isAbove(dotAttached, -1, "mode chip dot attachment not found");
+    assert.isAbove(dotAttached, -1, "mode tab dot attachment not found");
     assert.isAbove(
       startCall,
       dotAttached,
-      "the poll must start after the dot is attached to the mode chip",
+      "the poll must start after the dot is attached to the mode tab",
     );
 
     const dotRemoved = applyBody.indexOf("oldDot.remove();");
     const stopCall = applyBody.search(/stop\w*ConnectionCheck\(\);/);
-    assert.isAbove(dotRemoved, -1, "mode chip dot removal not found");
+    assert.isAbove(dotRemoved, -1, "mode tab dot removal not found");
     assert.isAbove(
       stopCall,
       dotRemoved,

@@ -84,6 +84,7 @@ import {
 import { buildAssistantDisplayMarkdownForRender } from "../assistantRichText";
 import { renderRenderedMarkdownInto } from "../renderedMarkdown";
 import { applyStableAnimationPhase } from "../stableAnimationPhase";
+import { isCodexPlanChecklistEvent } from "../taskProgress/codexPlan";
 import { showStandaloneConfirmationDialog } from "../standaloneConfirmationDialog";
 import { openStandalonePlanDocumentWindow } from "../standalonePlanDocumentWindow";
 import {
@@ -4704,6 +4705,8 @@ function appendCodexAgentTraceEvent(
       return true;
     }
     case "codex_progress": {
+      // Codex's own plan shows in the Task progress Steps block, not here.
+      if (isCodexPlanChecklistEvent(entry.payload)) return true;
       const progressText = readAgentTraceText(entry.payload.text);
       if (progressText) {
         // Agent messages are activity entries. Keep them in arrival order with

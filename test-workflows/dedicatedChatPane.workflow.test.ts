@@ -78,6 +78,41 @@ describe("workflow: dedicated native chat pane", function () {
     return details;
   }
 
+  /**
+   * Both layouts share one header: the toggle row, then the actions row with
+   * the divider that closes the header. Neither has a docked title row.
+   */
+  function assertHeaderRows(
+    details: Element,
+    layout: "independent" | "stacked",
+  ) {
+    const section = details.querySelector(".llm-dedicated-chat-pane")!;
+    assert.isNull(
+      section.querySelector(".llm-docked-title-row"),
+      `no docked title row (${layout})`,
+    );
+    const toggleRow = section.querySelector(".llm-header-toggle-row")!;
+    const navRow = section.querySelector(".llm-header-nav-row")!;
+    assert.isAbove(toggleRow.getBoundingClientRect().height, 0);
+    assert.isAtMost(
+      toggleRow.getBoundingClientRect().bottom,
+      navRow.getBoundingClientRect().top + 0.5,
+      `the toggle row sits above the actions row (${layout})`,
+    );
+    assert.equal(
+      win.getComputedStyle(navRow).borderBottomStyle,
+      "none",
+      `no divider under the actions row (${layout})`,
+    );
+    // The toggle opens the header, a few pixels under the panel's top.
+    const panelTop = section
+      .querySelector(".llm-panel")!
+      .getBoundingClientRect().top;
+    const gap = toggleRow.getBoundingClientRect().top - panelTop;
+    assert.isAtLeast(gap, 0, `toggle row starts inside the panel (${layout})`);
+    assert.isAtMost(gap, 12, `toggle row leads the header (${layout})`);
+  }
+
   function assertSidebarGaps(details: Element) {
     const panel = details.querySelector(".llm-panel")!;
     const chip = panel.querySelector(".llm-shortcuts > .llm-shortcut-btn")!;
@@ -175,6 +210,7 @@ describe("workflow: dedicated native chat pane", function () {
   it("aligns shortcuts and the composer at a 5px left gap after switching sidebar layouts", async function () {
     const details = await openChatPane();
     assertSidebarGaps(details);
+    assertHeaderRows(details, "independent");
     Zotero.Prefs.set(layoutPref, "stacked", true);
     await until(
       () =>
@@ -182,6 +218,16 @@ describe("workflow: dedicated native chat pane", function () {
         "stacked",
       "Stacked layout applies",
     );
+    await until(
+      () =>
+        ((
+          details.querySelector(
+            ".llm-dedicated-chat-pane .llm-header-toggle-row",
+          ) as HTMLElement | null
+        )?.getBoundingClientRect().height ?? 0) > 0,
+      "stacked chat header is laid out",
+    );
+    assertHeaderRows(details, "stacked");
     Zotero.Prefs.set(layoutPref, "independent", true);
     await openChatPane();
     assertSidebarGaps(details);
@@ -222,7 +268,7 @@ describe("workflow: dedicated native chat pane", function () {
     );
   });
 
-  for (const layout of ["independent", "stacked"]) {
+  for (const layout of ["independent", "stacked"] as const) {
     it(`drops multiple papers into a fresh sidebar Library chat in ${layout} layout`, async function () {
       Zotero.Prefs.set(layoutPref, layout, true);
       await until(
@@ -292,6 +338,32 @@ describe("workflow: dedicated native chat pane", function () {
           panel().querySelectorAll("[data-paper-context-item-id]").length === 2,
         "drop prepares a library chat and renders both context chips",
       );
+      // Both header rows show the moment the library chat lands, before any
+      // history refresh: the toggle row and the history bar never diverge.
+      for (const selector of [
+        ".llm-header-toggle-row",
+        "#llm-history-bar",
+        "#llm-library-chat-tab",
+        "#llm-history-new",
+      ]) {
+        const rect = panel().querySelector(selector).getBoundingClientRect();
+        assert.isAbove(rect.height, 0, `${selector} is visible (${layout})`);
+      }
+      assert.isTrue(
+        panel()
+          .querySelector("#llm-library-chat-tab")
+          .classList.contains("active"),
+        "Library chat is the active tab",
+      );
+      assertHeaderRows(details, layout);
+      await until(
+        () => Boolean(panel().querySelector(".llm-standalone-start-page")),
+        "the fresh Library chat shows the Library start page",
+      );
+      assert.isNull(
+        panel().querySelector(".llm-start-page"),
+        `no Paper chat start page in a Library chat (${layout})`,
+      );
       const key = panel().dataset.itemId;
       assert.isNull(
         panel().querySelector(".llm-input-drop-active"),
@@ -336,7 +408,7 @@ describe("workflow: dedicated native chat pane", function () {
         panel().querySelectorAll("[data-paper-context-item-id]"),
         2,
       );
-      panel().querySelector("#llm-mode-chip").click();
+      panel().querySelector("#llm-paper-chat-tab").click();
       await until(
         () => panel().dataset.conversationKind === "paper",
         "paper mode remains available",
@@ -462,17 +534,14 @@ describe("workflow: dedicated native chat pane", function () {
       "composer stays in the pane",
     );
     const root = section.querySelector("#llm-main");
-    const titleRow = section.querySelector(".llm-docked-title-row");
-    assert.isOk(titleRow, "dedicated panel has its own title row");
-    assert.include(titleRow.textContent, "LLM-for-Zotero");
-    assert.isOk(titleRow.querySelector("img"), "title uses the plugin logo");
-    const close = titleRow.querySelector(".llm-docked-close");
-    assert.isOk(close, "title row has a close control");
     const toolbar = section.querySelector(".llm-header-top");
-    assert.isAtLeast(
-      toolbar.getBoundingClientRect().top,
-      titleRow.getBoundingClientRect().bottom,
-      "classic toolbar sits below the title",
+    assertHeaderRows(details, "independent");
+    const navRow = section.querySelector(".llm-header-nav-row");
+    assert.closeTo(
+      navRow.getBoundingClientRect().width,
+      root.getBoundingClientRect().width,
+      0.5,
+      "the header divider spans the whole panel",
     );
     assert.isNull(
       section.querySelector("[data-chat-mode]"),
@@ -485,7 +554,8 @@ describe("workflow: dedicated native chat pane", function () {
     for (const id of [
       "llm-history-new",
       "llm-history-toggle",
-      "llm-mode-chip",
+      "llm-paper-chat-tab",
+      "llm-library-chat-tab",
       "llm-popout",
       "llm-settings",
       "llm-export",
@@ -498,16 +568,19 @@ describe("workflow: dedicated native chat pane", function () {
         `${id} is visible in the classic toolbar`,
       );
     }
-    close.click();
-    await Zotero.Promise.delay(100);
-    assert.isTrue(
-      details.sidenav._collapsed,
-      "close collapses the native sidebar",
-    );
+    // With no docked close button, the plugin's rail icon closes the chat.
     const icon: any = Array.from(
       details.sidenav.querySelectorAll("[data-pane]"),
     ).find(
       (node: any) => node.getAttribute("data-pane") === section.dataset.pane,
+    );
+    icon.dispatchEvent(
+      new win.MouseEvent("click", { bubbles: true, detail: 1, button: 0 }),
+    );
+    await Zotero.Promise.delay(100);
+    assert.isTrue(
+      details.sidenav._collapsed,
+      "the rail icon collapses the native sidebar",
     );
     icon.dispatchEvent(
       new win.MouseEvent("click", { bubbles: true, detail: 1, button: 0 }),
@@ -627,12 +700,7 @@ describe("workflow: dedicated native chat pane", function () {
         0,
         "native details return",
       );
-      assert.equal(
-        section.querySelector(".llm-docked-title-row").getBoundingClientRect()
-          .height,
-        0,
-        "dedicated title is absent in stacked layout",
-      );
+      assertHeaderRows(details, "stacked");
       assert.isTrue(
         section.querySelector("collapsible-section").collapsible,
         "stacked section is collapsible",
@@ -661,11 +729,7 @@ describe("workflow: dedicated native chat pane", function () {
           "chat",
         "independent layout returns",
       );
-      assert.isAbove(
-        section.querySelector(".llm-docked-title-row").getBoundingClientRect()
-          .height,
-        0,
-      );
+      assertHeaderRows(details, "independent");
       assert.equal(
         details.querySelector("item-pane-header").getBoundingClientRect()
           .height,
@@ -694,32 +758,7 @@ describe("workflow: dedicated native chat pane", function () {
       await reader._waitForReader();
     }
     await openChatPane();
-    const title = activeDetails().querySelector(".llm-docked-title-row");
-    const titleBounds = title.getBoundingClientRect();
-    const dividerBounds = activeDetails()
-      .sidenav.querySelector(".divider")
-      .getBoundingClientRect();
-    assert.closeTo(
-      titleBounds.top,
-      activeDetails().getBoundingClientRect().top,
-      1,
-      "title starts at the native toolbar top",
-    );
-    assert.closeTo(
-      titleBounds.bottom,
-      dividerBounds.bottom,
-      1,
-      "title separator aligns with the native side navigation separator",
-    );
-    for (const selector of [".llm-docked-brand", ".llm-docked-close"]) {
-      const bounds = title.querySelector(selector).getBoundingClientRect();
-      assert.closeTo(
-        (bounds.top + bounds.bottom) / 2,
-        (titleBounds.top + titleBounds.bottom - 1) / 2,
-        0.5,
-        `${selector} is vertically centered inside the title border`,
-      );
-    }
+    assertHeaderRows(activeDetails(), "independent");
     const panel = () =>
       activeDetails().querySelector("#llm-main") as HTMLElement;
     await until(
@@ -740,13 +779,15 @@ describe("workflow: dedicated native chat pane", function () {
       win.document.documentElement.getAttribute("data-llm-pane-view"),
       "chat",
     );
-    (panel().querySelector("#llm-mode-chip") as HTMLElement).click();
+    (panel().querySelector("#llm-library-chat-tab") as HTMLElement).click();
     await until(
       () => panel()?.dataset.conversationKind === "global",
       "Library chat is selected",
     );
     const conversation = panel().dataset.itemId;
-    (panel().querySelector(".llm-docked-close") as HTMLButtonElement).click();
+    // The rail icon closes the open chat, and a second click reopens it.
+    await clickPane("llm-context-panel");
+    assert.isTrue(activeDetails().sidenav._collapsed, "rail icon closes chat");
     await clickPane("llm-context-panel");
     await until(
       () =>
@@ -761,7 +802,7 @@ describe("workflow: dedicated native chat pane", function () {
         panel()?.dataset.itemId === conversation,
       "Library chat stays locked across tabs",
     );
-    (panel().querySelector("#llm-mode-chip") as HTMLElement).click();
+    (panel().querySelector("#llm-paper-chat-tab") as HTMLElement).click();
     await until(
       () =>
         panel()?.dataset.conversationKind === "paper" &&
@@ -785,7 +826,7 @@ describe("workflow: dedicated native chat pane", function () {
           ".llm-dedicated-chat-pane > collapsible-section",
         ).collapsible,
       );
-      (panel().querySelector("#llm-mode-chip") as HTMLElement).click();
+      (panel().querySelector("#llm-library-chat-tab") as HTMLElement).click();
       await until(
         () => panel().dataset.conversationKind === "global",
         "Library chat opens in stacked reader",
@@ -797,7 +838,7 @@ describe("workflow: dedicated native chat pane", function () {
         "stacked reader tabs preserve Library lock",
       );
       await Zotero.Promise.delay(300);
-      (panel().querySelector("#llm-mode-chip") as HTMLElement).click();
+      (panel().querySelector("#llm-paper-chat-tab") as HTMLElement).click();
       await until(
         () =>
           panel().dataset.contextOwnerItemId ===

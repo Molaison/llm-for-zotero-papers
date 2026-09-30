@@ -1,8 +1,7 @@
 import {
-  renderPlanProgress,
-  disposePlanProgress,
-  isFloatingPlanExecutionStatus,
-} from "../src/modules/contextPanel/agentTrace/planProgressView";
+  isLivePlanExecutionStatus,
+  renderPlanSteps,
+} from "../src/modules/contextPanel/taskProgress/planSteps";
 import { assert } from "chai";
 import { createApplyTagsTool } from "../src/agent/tools/write/applyTags";
 import { createFileIOTool } from "../src/agent/tools/write/fileIO";
@@ -1264,7 +1263,7 @@ describe("agentTrace render", function () {
   it("phase-anchors every reconstructed continuous progress animation", function () {
     const css = readFileSync("addon/content/zoteroPane.css", "utf8");
     const relevantSelector =
-      /(?:llm-at-(?:row-)?planning|llm-text-shimmer|llm-typing-dot|llm-plan-progress-trigger-dot|llm-plan-task-badge-in_progress|llm-compact-marker-pending)/;
+      /(?:llm-at-(?:row-)?planning|llm-text-shimmer|llm-typing-dot|llm-task-progress-ring|llm-plan-task-badge-in_progress|llm-compact-marker-pending)/;
     const infiniteRules = Array.from(
       css.matchAll(/animation:[^;]*\binfinite\b[^;]*;/g),
     ).flatMap((match) => {
@@ -1287,12 +1286,13 @@ describe("agentTrace render", function () {
     }
   });
 
-  it("floats only starting or running Plan execution states", function () {
-    assert.isTrue(isFloatingPlanExecutionStatus("running"));
-    assert.isFalse(isFloatingPlanExecutionStatus("interrupted"));
-    assert.isFalse(isFloatingPlanExecutionStatus("waiting_for_user"));
-    assert.isFalse(isFloatingPlanExecutionStatus("completed"));
-    assert.isFalse(isFloatingPlanExecutionStatus("failed"));
+  it("shows Steps only for starting or running Plan execution states", function () {
+    assert.isTrue(isLivePlanExecutionStatus("pending"));
+    assert.isTrue(isLivePlanExecutionStatus("running"));
+    assert.isFalse(isLivePlanExecutionStatus("interrupted"));
+    assert.isFalse(isLivePlanExecutionStatus("waiting_for_user"));
+    assert.isFalse(isLivePlanExecutionStatus("completed"));
+    assert.isFalse(isLivePlanExecutionStatus("failed"));
   });
 
   it("formats compact Codex-style activity durations", function () {
@@ -2061,7 +2061,7 @@ describe("agentTrace render", function () {
     assert.isNull(executing.findByClass("llm-at-planning-drive"));
   });
 
-  it("renders execution progress as a compact accessible pill with the full ledger in a popover", function () {
+  it("renders a live execution as the overlay Steps block, never in the trace", function () {
     const makeTask = (
       id: string,
       status: "completed" | "in_progress" | "pending",
@@ -2134,54 +2134,46 @@ describe("agentTrace render", function () {
       trace.findByClass("llm-plan-container-execution"),
       "even stale streaming history cannot mount progress",
     );
-    const root = renderPlanProgress(
-      fakeDocument,
-      (events[0].payload as any).ledger,
-      events,
+    const host = fakeDocument.createElement(
+      "section",
     ) as unknown as FakeElement;
-    const trigger = root?.findByClass("llm-plan-progress-trigger");
-    const popover = root?.findByClass("llm-plan-progress-popover");
-
-    assert.exists(root);
-    assert.equal(root?.dataset.llmPlanExecutionId, "execution-pill");
-    assert.equal(root?.dataset.llmPlanExecutionStatus, "running");
-    assert.include(collectFakeText(trigger), "Task progress");
-    assert.include(collectFakeText(trigger), "1/3");
-    assert.notInclude(collectFakeText(trigger), "Drafting the brief");
-    assert.include(collectFakeText(popover), "Drafting the brief");
-    assert.include(collectFakeText(popover), "Search the library");
-    assert.include(collectFakeText(popover), "Finalize references");
-    assert.equal(trigger?.attributes["aria-expanded"], "false");
-    assert.include(
-      trigger?.attributes["aria-label"] || "",
-      "1 of 3 required steps complete",
+    renderPlanSteps(fakeDocument, host as unknown as HTMLElement, {
+      ledger: (events[0].payload as any).ledger,
+    });
+    const block = host.findByClass("llm-task-progress-steps-body");
+    assert.exists(block);
+    assert.equal(
+      block?.getAttribute("data-llm-plan-execution-id"),
+      "execution-pill",
     );
-    assert.exists(popover?.findByClass("llm-plan-task-list"));
-    const progress = popover?.findByClass("llm-plan-progress");
+    assert.equal(
+      block?.getAttribute("data-llm-plan-execution-status"),
+      "running",
+    );
+    assert.include(collectFakeText(block), "Steps");
+    assert.include(collectFakeText(block), "In progress");
+    assert.include(collectFakeText(block), "Drafting the brief");
+    assert.include(collectFakeText(block), "Search the library");
+    assert.include(collectFakeText(block), "Finalize references");
+    assert.exists(block?.findByClass("llm-plan-task-list"));
+    const progress = block?.findByClass("llm-plan-progress");
     assert.equal(progress?.attributes.role, "progressbar");
     assert.equal(progress?.attributes["aria-valuemin"], "0");
     assert.equal(progress?.attributes["aria-valuemax"], "3");
     assert.equal(progress?.attributes["aria-valuenow"], "1");
-    assert.notInclude(collectFakeText(progress), "steps complete");
-
-    root?.dispatchFakeEvent("mouseenter");
-    assert.isTrue(root?.classList.contains("llm-plan-progress-hover"));
-    root?.dispatchFakeEvent("mouseleave");
-    assert.isFalse(root?.classList.contains("llm-plan-progress-hover"));
-
-    trigger?.dispatchFakeEvent("click");
-    assert.isTrue(root?.classList.contains("llm-plan-progress-open"));
-    assert.equal(trigger?.attributes["aria-expanded"], "true");
-    assert.include(trigger?.attributes["aria-label"] || "", "Hide");
-    trigger?.dispatchFakeEvent("click");
-    assert.isFalse(root?.classList.contains("llm-plan-progress-open"));
+    assert.equal(
+      (block?.findByClass("llm-plan-progress-fill")?.style as any)?.width,
+      "33%",
+    );
+    assert.isNull(host.findByClass("llm-plan-progress-trigger"));
+    assert.isNull(host.findByClass("llm-plan-progress-floating"));
   });
 
-  it("keeps clicked task progress open across live execution rerenders", function () {
+  it("patches the Steps block in place across live execution updates", function () {
     const renderProgress = (
       status: "running" | "completed",
       updatedAt: number,
-      previous?: FakeElement,
+      host: FakeElement,
     ) =>
       (() => {
         const events: AgentRunEventRecord[] = [
@@ -2252,80 +2244,33 @@ describe("agentTrace render", function () {
           events,
         }) as unknown as FakeElement;
         assert.isNull(trace.findByClass("llm-plan-container-execution"));
-        return renderPlanProgress(
-          fakeDocument,
-          (events[0].payload as any).ledger,
-          events,
-          previous as unknown as HTMLElement,
-        ) as unknown as FakeElement;
+        renderPlanSteps(fakeDocument, host as unknown as HTMLElement, {
+          ledger: (events[0].payload as any).ledger,
+        });
+        return host.findByClass("llm-task-progress-steps-body")!;
       })();
 
-    const first = renderProgress("running", 2);
-    const firstRoot = first.findByClass("llm-plan-container-execution");
-    firstRoot
-      ?.findByClass("llm-plan-progress-trigger")
-      ?.dispatchFakeEvent("click");
-    assert.isTrue(firstRoot?.classList.contains("llm-plan-progress-open"));
-
-    const updated = renderProgress("running", 3, first);
-    const updatedRoot = updated.findByClass("llm-plan-container-execution");
-    const updatedTrigger = updatedRoot?.findByClass(
-      "llm-plan-progress-trigger",
-    );
-    assert.isTrue(updatedRoot?.classList.contains("llm-plan-progress-open"));
-    assert.equal(updatedTrigger?.attributes["aria-expanded"], "true");
-    assert.include(updatedTrigger?.attributes["aria-label"] || "", "Hide");
-
-    disposePlanProgress(updated as unknown as HTMLElement);
-    assert.isNull(updated.parentElement);
-    const restarted = renderProgress("running", 5);
-    const restartedRoot = restarted.findByClass("llm-plan-container-execution");
-    assert.isFalse(restartedRoot?.classList.contains("llm-plan-progress-open"));
-  });
-
-  it("disposes progress observers and listeners when its live owner unmounts", function () {
-    let observers = 0;
-    const listeners = new Set<EventListener>();
-    const doc = {
-      ...fakeDocument,
-      defaultView: {
-        ResizeObserver: class {
-          observe() {
-            observers++;
-          }
-          disconnect() {
-            observers--;
-          }
-        },
-        addEventListener(_type: string, listener: EventListener) {
-          listeners.add(listener);
-        },
-        removeEventListener(_type: string, listener: EventListener) {
-          listeners.delete(listener);
-        },
-      },
-    } as unknown as Document;
-    const root = renderPlanProgress(
-      doc,
-      {
-        executionId: "dispose",
-        planId: "dispose",
-        revision: 1,
-        status: "running",
-        createdAt: 1,
-        updatedAt: 1,
-        tasks: [],
-      } as any,
-      [],
+    const host = fakeDocument.createElement(
+      "section",
     ) as unknown as FakeElement;
-    const trigger = root.findByClass("llm-plan-progress-trigger")!;
-    assert.equal(observers, 1);
-    assert.equal(listeners.size, 1);
-    disposePlanProgress(root as unknown as HTMLElement);
-    trigger.dispatchFakeEvent("click");
-    assert.equal(observers, 0);
-    assert.equal(listeners.size, 0);
-    assert.equal(trigger.attributes["aria-expanded"], "false");
+    const first = renderProgress("running", 2, host);
+    const firstTask = first.findByClass("llm-plan-task")!;
+    firstTask.open = true;
+    const updated = renderProgress("running", 3, host);
+    assert.strictEqual(updated, first, "the block is patched, not replaced");
+    assert.strictEqual(
+      updated.findByClass("llm-plan-task"),
+      firstTask,
+      "task rows are matched by id",
+    );
+    assert.isTrue(firstTask.open, "an opened task row stays open");
+    const completed = renderProgress("completed", 4, host);
+    assert.strictEqual(completed, first);
+    assert.equal(
+      completed.getAttribute("data-llm-plan-execution-status"),
+      "completed",
+    );
+    assert.include(collectFakeText(completed), "Done");
   });
 
   for (const status of [
@@ -2365,6 +2310,7 @@ describe("agentTrace render", function () {
       }) as unknown as FakeElement;
       assert.isNull(trace.findByClass("llm-plan-container-execution"));
       assert.isNull(trace.findByClass("llm-plan-progress-trigger"));
+      assert.isNull(trace.findByClass("llm-task-progress-steps"));
     });
   }
 
@@ -2725,6 +2671,56 @@ describe("agentTrace render", function () {
     assert.deepEqual(
       message.pendingAgentTraceEvents.map((e: any) => e.eventType),
       ["codex_progress"],
+    );
+  });
+
+  it("renders no trace row for Codex's plan checklist, which Task progress shows", function () {
+    const message: any = {
+      role: "assistant",
+      text: "",
+      timestamp: 1,
+      runMode: "agent",
+      modelProviderLabel: "Codex",
+    };
+    const controller = createCodexNativeActivityTraceControllerForTests(
+      message,
+      () => {},
+    );
+    controller.appendNativePlanProgress([
+      { content: "Inspect the scope", status: "completed" },
+      { content: "Compare the methods", status: "in_progress" },
+    ]);
+    const events = message.pendingAgentTraceEvents as AgentRunEventRecord[];
+    assert.lengthOf(events, 1, "the plan is kept for history");
+    const { items } = buildAgentTraceDisplayItems(events, null, message);
+    const texts = flattenTraceItems(items).map((item) => JSON.stringify(item));
+    assert.isFalse(
+      texts.some((text) => text.includes("Compare the methods")),
+      "no checklist row in the trace",
+    );
+    // A run stored by an older build renders no row either.
+    const legacy = buildAgentTraceDisplayItems(
+      [
+        {
+          runId: "legacy",
+          seq: 1,
+          eventType: "codex_progress",
+          payload: {
+            type: "codex_progress",
+            itemId: "codex-plan-checklist",
+            text: "✓ Inspect the scope\n• Compare the methods",
+            status: "running",
+          },
+          createdAt: 1,
+        },
+      ],
+      null,
+      message,
+    );
+    assert.isFalse(
+      flattenTraceItems(legacy.items).some((item) =>
+        JSON.stringify(item).includes("Compare the methods"),
+      ),
     );
   });
 

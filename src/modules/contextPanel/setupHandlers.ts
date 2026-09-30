@@ -1,5 +1,14 @@
 import { appLogger } from "../../core/logging";
 import { copyNoteEditingSelectedTextContext } from "./noteEditing/selectionController";
+import { syncTaskProgressPanel } from "./taskProgress/panel";
+import {
+  TASK_PROGRESS_OPEN_PASSAGE_EVENT,
+  TASK_PROGRESS_REMOVE_PAPER_EVENT,
+} from "./taskProgress/view";
+import type { TaskPaperPassageTarget } from "./taskProgress/passageSource";
+import { navigateToTaskPaperPassage } from "./assistantCitationLinks";
+import { resolveTaskPaperScopeItemIds } from "../../agent/context/taskPaperScopeListing";
+import { libraryIndexService } from "../../services/libraryIndexService";
 import { createNoteConversationItem } from "../../services/notes/conversationItem";
 /* eslint-disable @typescript-eslint/no-require-imports */
 import { createElement } from "../../utils/domHelpers";
@@ -369,6 +378,7 @@ import {
   type RuntimeConversationSystem,
   type RuntimeSystemControls,
 } from "./runtimeSystemControls";
+import { resolveSidebarChatModeToggleState } from "./sidebarChatModeToggle";
 import { getPanelDomRefs } from "./setupHandlers/domRefs";
 import {
   chooseAutoLoadedContextPanelItem,
@@ -738,8 +748,9 @@ export function setupHandlers(
     historyToggleBtn,
     historyModeIndicator,
     historyMenu,
-    modeCapsule,
-    modeChipBtn,
+    chatModeTabs,
+    paperChatTabBtn,
+    libraryChatTabBtn,
     historyRowMenu,
     historyRowRenameBtn,
     historyUndo,
@@ -1258,6 +1269,11 @@ export function setupHandlers(
   let syncFooterPermissionControl = () => Promise.resolve();
   let disposeFooterPermissionControl: (() => void) | null = null;
   const updateRuntimeModeButton = () => {
+    updateRuntimeModeButtonState();
+    // Plain chat lists the scope only; Agent mode records reads.
+    syncTaskProgressPanel(body);
+  };
+  const updateRuntimeModeButtonState = () => {
     void syncFooterPermissionControl();
     if (!runtimeModeBtn) return;
     const indicator = runtimeModeBtn.querySelector(
@@ -1349,13 +1365,20 @@ export function setupHandlers(
     },
   };
   let runtimeSystemSwitchInFlight = false;
+  const headerRuntimeControls = body.querySelector(
+    "#llm-header-runtime-controls",
+  ) as HTMLElement | null;
   const updateRuntimeSystemToggles = () => {
-    syncRuntimeSystemControls(panelRuntimeSystemControls, {
+    const state = syncRuntimeSystemControls(panelRuntimeSystemControls, {
       activeSystem: getConversationSystem(),
       codexEnabled: isCodexModeAvailable(),
       claudeEnabled: isClaudeModeAvailable(),
       busy: runtimeSystemSwitchInFlight,
     });
+    // The divider before the runtime systems goes when they do.
+    if (headerRuntimeControls) {
+      headerRuntimeControls.style.display = state.groupVisible ? "" : "none";
+    }
   };
   let claudeWarmupInFlight: Promise<void> | null = null;
   const warmClaudeModeCaches = () => {
@@ -1695,6 +1718,36 @@ export function setupHandlers(
   );
   const getTextContextConversationKey = (): number | null =>
     item ? getConversationKey(item) : null;
+  // WebChat owns the paper slot's tooltip while it is active.
+  let webChatModeTabTitle = "";
+  const syncChatModeTabs = () => {
+    if (!chatModeTabs || !paperChatTabBtn || !libraryChatTabBtn) return;
+    const state = resolveSidebarChatModeToggleState({
+      isGlobalMode: Boolean(item) && isGlobalMode(),
+      isNoteSession: isNoteSession(),
+      isWebChat: panelRoot.dataset.webchatMode === "true",
+    });
+    chatModeTabs.dataset.mode = state.activeTab;
+    const paperLabelEl = paperChatTabBtn.querySelector(
+      ".llm-header-mode-tab-label",
+    );
+    const paperLabel = t(state.paperTabLabel);
+    if (paperLabelEl) paperLabelEl.textContent = paperLabel;
+    paperChatTabBtn.title =
+      state.showWebChatDot && webChatModeTabTitle
+        ? webChatModeTabTitle
+        : paperLabel;
+    for (const tab of [paperChatTabBtn, libraryChatTabBtn]) {
+      const active = tab.dataset.tab === state.activeTab;
+      tab.classList.toggle("active", active);
+      tab.setAttribute("aria-pressed", active ? "true" : "false");
+      tab.disabled = state.disabled;
+      if (state.disabled) tab.setAttribute("aria-disabled", "true");
+      else tab.removeAttribute("aria-disabled");
+    }
+    // The Task progress row follows the conversation and mode shown.
+    syncTaskProgressPanel(body);
+  };
   const syncConversationIdentity = () => {
     if (
       item &&
@@ -1834,34 +1887,7 @@ export function setupHandlers(
       // Keep historyModeIndicator (which is the clock history button) accessible.
       // Its label is static "Conversation history" — no text update needed.
     }
-    // Update mode capsule data-active state
-    if (modeCapsule) {
-      modeCapsule.dataset.mode = mode || "";
-    }
-    if (modeChipBtn) {
-      // [webchat] Don't overwrite — applyWebChatModeUI manages the chip in webchat mode
-      if (!modeChipBtn.querySelector(".llm-webchat-dot")) {
-        const currentLabel = noteSession
-          ? t("Note chat")
-          : mode === "global"
-            ? t("Library chat")
-            : t("Paper chat");
-        modeChipBtn.textContent = currentLabel;
-        modeChipBtn.title = noteSession
-          ? currentLabel
-          : mode === "global"
-            ? "Switch to paper chat"
-            : "Switch to library chat";
-        modeChipBtn.setAttribute(
-          "aria-label",
-          noteSession
-            ? currentLabel
-            : mode === "global"
-              ? "Switch to paper chat"
-              : "Switch to library chat",
-        );
-      }
-    }
+    syncChatModeTabs();
     if (inputBox && !noteSession) {
       inputBox.placeholder =
         mode === "global"
@@ -2342,7 +2368,12 @@ export function setupHandlers(
       if (panelWidth <= 0) return;
       withScrollGuard(chatBox, conversationKey, () => {
         applyResponsiveActionButtonsLayout();
-        updateHeaderSpacing(headerTop);
+        // The runtime systems share the actions row (row 2) with the panel
+        // actions; that row's gap is the one they compress against.
+        updateHeaderSpacing(
+          headerTop?.querySelector<HTMLElement>(".llm-header-nav-row") ||
+            headerTop,
+        );
         if (panelWidth !== lastUserContextAlignmentPanelWidth) {
           syncUserContextAlignmentWidths(body);
           lastUserContextAlignmentPanelWidth = panelWidth;
@@ -4109,6 +4140,16 @@ export function setupHandlers(
     list.appendChild(chip);
   };
 
+  /** A folder or tag chip's name, with the papers removed in Task progress. */
+  const withExcludedCount = (name: string, excluded?: number[]) =>
+    excluded?.length
+      ? `${name} · ${
+          excluded.length === 1
+            ? t("1 excluded")
+            : t("{count} excluded").replace("{count}", `${excluded.length}`)
+        }`
+      : name;
+
   const appendCollectionChip = (
     ownerDoc: Document,
     list: HTMLDivElement,
@@ -4146,7 +4187,7 @@ export function setupHandlers(
       ownerDoc,
       "span",
       "llm-collection-chip-title",
-      { textContent: ref.name },
+      { textContent: withExcludedCount(ref.name, ref.excludedItemIds) },
     );
     chipLabel.append(chipIcon, chipTitle);
     const removeBtn = createElement(
@@ -4190,7 +4231,7 @@ export function setupHandlers(
     });
     const chipIcon = createContextIcon(ownerDoc, "tag", "llm-tag-chip-icon");
     const chipTitle = createElement(ownerDoc, "span", "llm-tag-chip-title", {
-      textContent: ref.name,
+      textContent: withExcludedCount(ref.name, ref.excludedItemIds),
     });
     chipLabel.append(chipIcon, chipTitle);
     const removeBtn = createElement(
@@ -4211,6 +4252,12 @@ export function setupHandlers(
   };
 
   const updatePaperPreview = () => {
+    renderPaperPreview();
+    // Task progress lists what the context bar holds: follow every change.
+    syncTaskProgressPanel(body);
+  };
+
+  const renderPaperPreview = () => {
     if (!item || !paperPreview || !paperPreviewList) return;
     closePaperChipMenu();
     const itemId = item.id;
@@ -4684,6 +4731,91 @@ export function setupHandlers(
     schedulePanelStateRefresh();
   };
   requestAutoLoadedPaperContextRefresh = updatePaperPreviewPreservingScroll;
+
+  // Task progress lists the context bar's papers and can remove one. A paper
+  // added on its own loses its chip; a paper that came with a folder or a tag
+  // is excluded from that folder or tag (the chip stays and counts it), so
+  // retrieval and the next question leave it out.
+  body.addEventListener(TASK_PROGRESS_REMOVE_PAPER_EVENT, (event: Event) => {
+    void removeTaskProgressPaper(event);
+  });
+  // "Source" on a passage the card lists: open its paper at the passage.
+  body.addEventListener(TASK_PROGRESS_OPEN_PASSAGE_EVENT, (event: Event) => {
+    const target = (event as CustomEvent<TaskPaperPassageTarget>).detail;
+    if (!target || !(Number(target.itemId) > 0)) return;
+    const button =
+      (event.target as Element | null)?.closest?.<HTMLButtonElement>(
+        "button.llm-task-paper-open",
+      ) || null;
+    void navigateToTaskPaperPassage({ body, target, button }).catch(
+      (error: unknown) => {
+        appLogger.warn("LLM task progress passage open failed", error);
+      },
+    );
+  });
+  const removeTaskProgressPaper = async (event: Event) => {
+    if (!item) return;
+    const owner = item;
+    const itemId = Math.floor(
+      Number((event as CustomEvent<{ itemId?: number }>).detail?.itemId || 0),
+    );
+    if (!(itemId > 0)) return;
+    const autoLoaded = resolveAutoLoadedPaperContext();
+    if (autoLoaded?.itemId === itemId) return;
+    const papers = getManualPaperContextsForItem(item.id, autoLoaded);
+    const removed = papers.filter((paper) => paper.itemId === itemId);
+    let changed = false;
+    if (removed.length) {
+      for (const paper of removed) {
+        paperContextModeOverrides.delete(`${item.id}:${buildPaperKey(paper)}`);
+      }
+      const next = papers.filter((paper) => paper.itemId !== itemId);
+      if (next.length) selectedPaperContextCache.set(item.id, next);
+      else clearSelectedPaperState(item.id);
+      changed = true;
+    }
+    // A folder or tag that also brings the paper keeps it out from now on.
+    const collections = selectedCollectionContextCache.get(item.id) || [];
+    const tags = selectedTagContextCache.get(item.id) || [];
+    const libraryID =
+      collections[0]?.libraryID || tags[0]?.libraryID || item.libraryID;
+    const snapshot =
+      collections.length || tags.length
+        ? await libraryIndexService.getSnapshot(libraryID).catch(() => null)
+        : null;
+    // The panel moved on to another conversation while the index loaded.
+    if (item !== owner) return;
+    if (snapshot) {
+      const holds = (
+        contexts: Parameters<typeof resolveTaskPaperScopeItemIds>[1],
+      ) => resolveTaskPaperScopeItemIds(snapshot, contexts).includes(itemId);
+      const exclude = <T extends { excludedItemIds?: number[] }>(ref: T): T =>
+        ({
+          ...ref,
+          excludedItemIds: [...(ref.excludedItemIds || []), itemId],
+        }) as T;
+      let excluded = false;
+      const nextCollections = collections.map((ref) => {
+        if (!holds({ collections: [ref] })) return ref;
+        excluded = true;
+        return exclude(ref);
+      });
+      const nextTags = tags.map((ref) => {
+        if (!holds({ tags: [ref] })) return ref;
+        excluded = true;
+        return exclude(ref);
+      });
+      if (excluded) {
+        if (collections.length)
+          selectedCollectionContextCache.set(item.id, nextCollections);
+        if (tags.length) selectedTagContextCache.set(item.id, nextTags);
+        changed = true;
+      }
+    }
+    if (!changed) return;
+    initializedConversationComposeContextKeys.add(item.id);
+    updatePaperPreviewPreservingScroll();
+  };
   const updateFilePreviewPreservingScroll = () => {
     schedulePanelStateRefresh();
   };
@@ -4743,7 +4875,8 @@ export function setupHandlers(
     historyUndoText,
     historyUndoBtn,
     topToast,
-    modeChipBtn,
+    paperChatTabBtn,
+    libraryChatTabBtn,
     getItem: () => item,
     setItem: (nextItem) => {
       if (
@@ -6357,61 +6490,44 @@ export function setupHandlers(
     panelRoot.dataset.webchatMode = isWebChat ? "true" : "false";
     syncQueuedFollowUpRegistration();
 
-    // Mode chip: show target site name with connection dot, or restore original
-    if (modeChipBtn) {
+    // Mode toggle: WebChat takes the paper slot, with its connection dot on
+    // that active tab, and the toggle stays static until WebChat exits.
+    if (paperChatTabBtn) {
       if (isWebChat) {
-        // Resolve the target label from the current model name
-        let webchatChipLabel = "chatgpt";
-        let webchatChipTitle = "WebChat Sync";
+        let webchatTabTitle = "WebChat Sync";
         try {
           const { currentModel } = getSelectedModelInfo();
           const { getWebChatTargetByModelName } =
             require("../../webchat/types") as typeof import("../../webchat/types");
           const entry = getWebChatTargetByModelName(currentModel || "");
           if (entry) {
-            webchatChipLabel = entry.displayName;
-            webchatChipTitle = `${entry.label} Web Sync (${entry.modelName})`;
+            webchatTabTitle = `${entry.label} Web Sync (${entry.modelName})`;
           }
         } catch {
           /* fallback to defaults */
         }
+        webChatModeTabTitle = webchatTabTitle;
 
-        let dot = modeChipBtn.querySelector(
+        let dot = paperChatTabBtn.querySelector(
           ".llm-webchat-dot",
         ) as HTMLElement | null;
         if (!dot) {
-          dot = (modeChipBtn.ownerDocument as Document).createElement("span");
+          dot = (paperChatTabBtn.ownerDocument as Document).createElement(
+            "span",
+          );
           dot.className = "llm-webchat-dot llm-webchat-dot-disconnected";
         }
-        modeChipBtn.textContent = "";
-        modeChipBtn.appendChild(dot);
-        modeChipBtn.appendChild(
-          (modeChipBtn.ownerDocument as Document).createTextNode(
-            ` ${webchatChipLabel}`,
-          ),
-        );
-        modeChipBtn.title = webchatChipTitle;
-        modeChipBtn.disabled = true;
-        modeChipBtn.setAttribute("aria-disabled", "true");
-        modeChipBtn.dataset.webchatStatic = "true";
-        modeChipBtn.style.cursor = "default";
+        paperChatTabBtn.prepend(dot);
+        syncChatModeTabs();
         webChatFeature.startConnectionCheck(dot);
       } else {
-        const oldDot = modeChipBtn.querySelector(".llm-webchat-dot");
+        webChatModeTabTitle = "";
+        const oldDot = paperChatTabBtn.querySelector(".llm-webchat-dot");
         if (oldDot) {
           oldDot.remove();
-          // Restore mode chip text — the normal render sync skips it while the dot is present
-          const chipLabel = isGlobalMode() ? "Library chat" : "Paper chat";
-          modeChipBtn.textContent = chipLabel;
-          modeChipBtn.title = isGlobalMode()
-            ? "Switch to paper chat"
-            : "Switch to library chat";
         }
         webChatFeature.stopConnectionCheck();
-        modeChipBtn.disabled = false;
-        modeChipBtn.removeAttribute("aria-disabled");
-        delete modeChipBtn.dataset.webchatStatic;
-        modeChipBtn.style.cursor = "";
+        syncChatModeTabs();
       }
     }
 
@@ -6521,7 +6637,7 @@ export function setupHandlers(
     if (headerTop) ro.observe(headerTop);
     for (const element of Array.from(
       headerTop?.querySelectorAll(
-        ".llm-mode-chip, .llm-runtime-system-controls",
+        ".llm-header-nav-row, .llm-runtime-system-controls",
       ) || [],
     ))
       ro.observe(element as Element);

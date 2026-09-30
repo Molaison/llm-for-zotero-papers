@@ -7,7 +7,6 @@ This folder implements the reader/library side-panel chat experience.
 - `index.ts`: registration entrypoint (panel section, style injection, reader popup selection tracking).
 - `dedicatedChatPane.ts`: mutually exclusive chat/details presentation in the native right pane, with a native lifecycle recheck when returning to a retained reader tab.
 - `sidebarLayout.ts`: persisted Independent/Stacked presentation choice and live native section updates.
-- `dockedPanelTitle.ts`: the plugin title row and native close control above the classic chat toolbar.
 - `buildUI.ts`: static panel DOM construction.
 - `setupHandlers.ts`: runtime orchestration and event wiring across panel features.
 - `chat.ts`: conversation load/render/send/retry/edit and streaming orchestration.

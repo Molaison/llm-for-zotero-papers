@@ -28,6 +28,56 @@ class LibraryRetrieveService extends ResolvedLibraryRetrieveService {
 }
 
 describe("LibraryRetrieveService", function () {
+  it("leaves out a folder's papers the user removed in Task progress", async function () {
+    const entries = [1, 2, 3].map((itemId) =>
+      makeItem(itemId, `Drift paper ${itemId}`, "Representational drift.", {
+        hasPdf: true,
+        collectionIds: [44],
+      }),
+    );
+    const gateway = makeGateway(entries) as any;
+    const resolve = gateway.resolveLibraryScopeItemIds;
+    const seen: Array<number[] | undefined> = [];
+    gateway.resolveLibraryScopeItemIds = async (params: any) => {
+      seen.push(params.excludedItemIds);
+      const resolved = await resolve(params);
+      const excluded = new Set(params.excludedItemIds || []);
+      return {
+        ...resolved,
+        itemIds: resolved.itemIds.filter((id: number) => !excluded.has(id)),
+      };
+    };
+    const service = new LibraryRetrieveService(
+      gateway,
+      { ensurePaperContext: async () => makePdfContext([]) } as any,
+      async () => [],
+    );
+    const result = await service.retrieve({
+      query: "representational drift",
+      depth: "metadata",
+      request: {
+        conversationKey: 1,
+        mode: "agent",
+        userText: "What do these papers say about drift?",
+        libraryID: 1,
+        selectedCollectionContexts: [
+          {
+            collectionId: 44,
+            name: "Drift",
+            libraryID: 1,
+            excludedItemIds: [2],
+          },
+        ],
+      },
+    });
+    assert.deepEqual(seen, [[2]], "the exclusion reaches the scope");
+    assert.equal(result.resourcePool.totalItems, 2);
+    assert.notInclude(
+      result.candidates.map((candidate) => candidate.itemId),
+      "2",
+    );
+  });
+
   it("metadata mode inspects a 500-paper folder without full-text expansion", async function () {
     const entries = Array.from({ length: 500 }, (_, index) =>
       makeItem(

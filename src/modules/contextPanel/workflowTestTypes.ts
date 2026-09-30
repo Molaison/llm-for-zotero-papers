@@ -628,6 +628,72 @@ export type WorkflowTestApi = {
     turnIndex: number;
     chunks: number;
   }) => Promise<import("./chatMemoryReplay").ChatModeTurnResult>;
+  startTaskProgressReplay: (
+    input: {
+      /** A synthetic panel; otherwise the visible native panel of `surface`. */
+      panelId?: string;
+      surface?: "embedded" | "standalone";
+    } & import("./streamingReplay").TaskProgressReplayInput,
+  ) => Promise<import("./streamingReplay").TaskProgressReplayHandle>;
+  /** A built-in action through the production runner, scripted. */
+  startTaskProgressAction: (input: {
+    panelId?: string;
+    surface?: "embedded" | "standalone";
+    actionName: string;
+  }) => Promise<import("./taskProgressReplay").TaskProgressActionHandle>;
+  /** A native Codex turn through the production callbacks. */
+  startCodexTaskProgressReplay: (input: {
+    panelId?: string;
+    surface?: "embedded" | "standalone";
+    user: Partial<import("./types").Message>;
+  }) => Promise<import("./taskProgressReplay").CodexTaskProgressReplayHandle>;
+  /** Store turns (messages and run traces) in the panel's conversation. */
+  seedTaskProgressConversation: (input: {
+    panelId?: string;
+    surface?: "embedded" | "standalone";
+    turns: import("./taskProgressReplay").TaskProgressStoredTurn[];
+  }) => Promise<{ conversationKey: number; runIds: string[] }>;
+  /** Drop the record and loaded messages, then show the conversation again. */
+  reopenTaskProgressConversation: (input: {
+    panelId?: string;
+    surface?: "embedded" | "standalone";
+  }) => Promise<void>;
+  /** Fill a panel's context bar (papers, folders, tags) and redraw it. */
+  setTaskProgressComposerContexts: (input: {
+    panelId?: string;
+    surface?: "embedded" | "standalone";
+    paperContexts?: import("../../shared/types").PaperContextRef[];
+    collectionContexts?: import("../../shared/types").CollectionContextRef[];
+    tagContexts?: import("../../shared/types").TagContextRef[];
+  }) => Promise<void>;
+  /** A panel's context bar: its papers, folder exclusions and chip labels. */
+  readTaskProgressComposerContexts: (input: {
+    panelId?: string;
+    surface?: "embedded" | "standalone";
+  }) => Promise<{
+    paperItemIds: number[];
+    collections: Array<{ collectionId: number; excludedItemIds: number[] }>;
+    chipLabels: string[];
+  }>;
+  /** Repaint every mounted Task progress view now. */
+  flushTaskProgress: () => void;
+  getTaskProgressSnapshot: (conversationKey: number) => {
+    runState: string;
+    turnIndex: number;
+    label: string;
+    scopeKeys: string[];
+    listingLoaded: boolean;
+    planSeen: boolean;
+    hydrated: boolean;
+    checklist: {
+      source: "action" | "codex";
+      title: string;
+      steps: Array<{ label: string; status: string }>;
+      outcome?: string;
+      detail?: string;
+    } | null;
+    paperStates: Record<string, string>;
+  } | null;
   exerciseNativeStreamingReplay: (input: {
     surface: "embedded" | "standalone";
     historyTurns: number;

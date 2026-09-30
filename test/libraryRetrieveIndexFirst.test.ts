@@ -260,6 +260,38 @@ describe("library retrieve, index first (v2 rules)", function () {
     );
   });
 
+  it("never searches a paper the user removed from the task scope", async function () {
+    const index = fakeIndex(() => ({}));
+    const rig = createRetrieveServiceRig({
+      papers: 3,
+      collectionIds: [44],
+      textIndex: index,
+    });
+    await rig.service.retrieve({
+      query: "method",
+      depth: "evidence",
+      request: {
+        conversationKey: 1,
+        mode: "agent",
+        userText: "What methods do these papers use?",
+        libraryID: 1,
+        selectedCollectionContexts: [
+          {
+            collectionId: 44,
+            name: "Methods",
+            libraryID: 1,
+            excludedItemIds: [20],
+          },
+        ],
+      },
+    });
+    assert.isNotEmpty(index.scopes);
+    for (const scope of index.scopes) {
+      assert.notInclude(scope, 21, "the removed paper's PDF is not searched");
+    }
+    assert.sameMembers(index.scopes[0], [11, 31]);
+  });
+
   it("falls back to today's path when the index is disabled or unavailable", async function () {
     const rig = createRetrieveServiceRig({
       papers: 2,

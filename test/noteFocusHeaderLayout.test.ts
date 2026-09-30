@@ -17,15 +17,19 @@ describe("note focus header layout", function () {
     assert.include(
       buildUi,
       "historyBar.append(historyNewBtn, historyToggle, headerRuntimeControls)",
-      "note focus must keep the same +, history, mode-chip, runtime order as normal chat",
+      "note focus must keep the same +, history, runtime order as normal chat",
     );
     assert.include(
       buildUi,
-      "headerRuntimeControls.append(modeSwitchWrap, runtimeSystemControls.group)",
-      "runtime icons must remain immediately after the static mode chip",
+      "headerRuntimeControls.append(runtimeDivider, runtimeSystemControls.group)",
+      "runtime icons must follow the divider after the history button",
     );
-    assert.include(buildUi, 't("Note chat")');
-    assert.include(setupHandlers, 't("Note chat")');
+    assert.include(buildUi, "resolveSidebarChatModeToggleState");
+    assert.include(setupHandlers, "resolveSidebarChatModeToggleState");
+    // Both render paths label the paper slot through the shared resolver,
+    // which yields "Note" for note sessions.
+    assert.include(buildUi, "t(chatModeToggle.paperTabLabel)");
+    assert.include(setupHandlers, "t(state.paperTabLabel)");
     assert.notInclude(
       setupHandlers,
       'historyNewBtn.style.display = noteSession ? "none" : ""',

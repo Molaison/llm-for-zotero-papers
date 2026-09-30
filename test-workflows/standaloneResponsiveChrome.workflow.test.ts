@@ -27,7 +27,7 @@ describe("workflow: standalone responsive chrome", function () {
     await api.reset();
   });
 
-  it("keeps embedded header controls on one line at every font size", async function () {
+  it("keeps each embedded header row on one line at every font size", async function () {
     const doc = win.document;
     const panel = doc.createElement("div");
     panel.className = "llm-panel";
@@ -49,9 +49,31 @@ describe("workflow: standalone responsive chrome", function () {
       runtime.style.display = "inline-flex";
       for (const child of Array.from(runtime.children) as HTMLElement[])
         child.style.display = "inline-flex";
-      const chip = panel.querySelector(".llm-mode-chip") as HTMLElement;
-      for (const label of ["Library chat", "Paper chat", "Note chat"]) {
-        chip.textContent = label;
+      const paperTabLabel = panel.querySelector(
+        "#llm-paper-chat-tab .llm-header-mode-tab-label",
+      ) as HTMLElement;
+      const toggleRow = header.querySelector(
+        ".llm-header-toggle-row",
+      ) as HTMLElement;
+      const navRow = header.querySelector(".llm-header-nav-row") as HTMLElement;
+      const tabGroup = header.querySelector(
+        ".llm-header-mode-tabs",
+      ) as HTMLElement;
+      assert.isOk(paperTabLabel, "the paper tab renders its label");
+      assert.isOk(toggleRow, "the toggle row is rendered");
+      assert.isOk(navRow, "the actions row is rendered");
+      // The cloned header comes from a live panel that may hide its rows.
+      toggleRow.style.display = "";
+      const historyBar = header.querySelector(
+        "#llm-history-bar",
+      ) as HTMLElement;
+      historyBar.style.display = "inline-flex";
+      const runtimeWrapper = header.querySelector(
+        "#llm-header-runtime-controls",
+      ) as HTMLElement;
+      runtimeWrapper.style.display = "";
+      for (const label of ["Paper chat", "Note chat", "Web chat"]) {
+        paperTabLabel.textContent = label;
         for (const scale of [0.8, 1.2, 1.8]) {
           panel.style.setProperty("--llm-font-scale", String(scale));
           for (const width of [320, 340, 380, 500]) {
@@ -59,12 +81,10 @@ describe("workflow: standalone responsive chrome", function () {
             await new Promise<void>((resolve) =>
               win.requestAnimationFrame(() => resolve()),
             );
-            updateHeaderSpacing(header.querySelector(".llm-header-top"));
+            updateHeaderSpacing(navRow);
             if (width >= 380) {
               assert.equal(
-                header
-                  .querySelector<HTMLElement>(".llm-header-top")!
-                  .style.getPropertyValue("--llm-runtime-compression"),
+                navRow.style.getPropertyValue("--llm-runtime-compression"),
                 "0",
                 "Ample room must restore the original runtime spacing",
               );
@@ -91,7 +111,12 @@ describe("workflow: standalone responsive chrome", function () {
             for (const button of Array.from(
               header.querySelectorAll(".llm-history-new, .llm-history-toggle"),
             ) as Element[]) {
-              assert.closeTo(button.getBoundingClientRect().width, 20, 0.5);
+              assert.closeTo(
+                button.getBoundingClientRect().width,
+                bounds.width <= 380 ? 24 : 28,
+                0.5,
+                `History buttons keep their hit area: ${context}`,
+              );
             }
             const runtimeGlyphs = (
               Array.from(
@@ -110,16 +135,59 @@ describe("workflow: standalone responsive chrome", function () {
             );
             assert.lengthOf(
               buttons,
-              9,
+              10,
               `All header controls visible: ${context}`,
             );
+            const toggleRowRect = toggleRow.getBoundingClientRect();
+            const navRowRect = navRow.getBoundingClientRect();
+            for (const [row, rowButtons] of [
+              [
+                toggleRow,
+                Array.from(toggleRow.querySelectorAll("button")) as Element[],
+              ],
+              [
+                navRow,
+                Array.from(navRow.querySelectorAll("button")) as Element[],
+              ],
+            ] as const) {
+              const rects = rowButtons
+                .map((button) => button.getBoundingClientRect())
+                .filter((rect) => rect.width > 0 && rect.height > 0);
+              assert.isAbove(rects.length, 0, context);
+              for (const rect of rects) {
+                assert.closeTo(
+                  (rect.top + rect.bottom) / 2,
+                  (rects[0].top + rects[0].bottom) / 2,
+                  0.5,
+                  `Each header row must stay on one line: ${context}`,
+                );
+                const rowRect = row.getBoundingClientRect();
+                assert.isAtLeast(rect.top, rowRect.top - 0.5, context);
+                assert.isAtMost(rect.bottom, rowRect.bottom + 0.5, context);
+              }
+            }
+            assert.isAtMost(
+              toggleRowRect.bottom,
+              navRowRect.top + 0.5,
+              `The toggle row sits above the actions row: ${context}`,
+            );
+            const tabsRect = tabGroup.getBoundingClientRect();
+            assert.closeTo(
+              tabsRect.left + tabsRect.width / 2,
+              toggleRowRect.left + toggleRowRect.width / 2,
+              1,
+              `The mode toggle is centered: ${context}`,
+            );
+            // The runtime systems follow the history button in the actions row.
+            const historyRect = header
+              .querySelector("#llm-history-toggle")!
+              .getBoundingClientRect();
+            assert.isAtLeast(
+              runtimeGlyphs[0].left,
+              historyRect.right,
+              `Runtime systems follow history: ${context}`,
+            );
             for (const [index, rect] of buttons.entries()) {
-              assert.closeTo(
-                (rect.top + rect.bottom) / 2,
-                (buttons[0].top + buttons[0].bottom) / 2,
-                0.5,
-                `Header must stay on one line: ${context}`,
-              );
               assert.isAtLeast(rect.left, bounds.left - 0.5, context);
               assert.isAtMost(rect.right, bounds.right + 0.5, context);
               for (const other of buttons.slice(index + 1)) {
@@ -195,7 +263,7 @@ describe("workflow: standalone responsive chrome", function () {
       for (const width of [700, 550, 500]) {
         await api.resizeStandaloneWindow(width, 650);
         const leading = rect(".llm-standalone-tab-row-leading");
-        const tabs = rect(".llm-standalone-tab-group");
+        const tabs = rect(".llm-standalone-tab-row .llm-standalone-tab-group");
         assert.isAtMost(
           leading.right,
           tabs.left + 0.5,
@@ -203,7 +271,7 @@ describe("workflow: standalone responsive chrome", function () {
         );
         assert.isAtMost(tabs.right, win.innerWidth);
         for (const tab of Array.from(
-          doc.querySelectorAll(".llm-standalone-tab"),
+          doc.querySelectorAll(".llm-standalone-tab-row .llm-standalone-tab"),
         ) as HTMLElement[]) {
           assert.isAtMost(
             tab.scrollWidth,
@@ -221,7 +289,7 @@ describe("workflow: standalone responsive chrome", function () {
     }
     await api.hoverStandaloneSidebarToggle();
     for (const tab of Array.from(
-      doc.querySelectorAll(".llm-standalone-tab"),
+      doc.querySelectorAll(".llm-standalone-tab-row .llm-standalone-tab"),
     ) as HTMLElement[]) {
       const bounds = tab.getBoundingClientRect();
       assert.isTrue(

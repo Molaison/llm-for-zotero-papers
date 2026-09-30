@@ -1,6 +1,7 @@
 import { resolveAgentToolPresentationLabel } from "../toolPresentation";
 import { createJournalId } from "../store/changeJournal";
 import { createAbortController } from "../../utils/apiHelpers";
+import { normalizeExcludedItemIds } from "../../services/context/normalizers";
 /**
  * MCP (Model Context Protocol) server for the llm-for-zotero plugin.
  *
@@ -68,7 +69,8 @@ import type {
   TrustedReadObservation,
   VerifiedReadSource,
 } from "../plans/types";
-import { createTrustedReadObservations } from "../plans/readObservation";
+import { attestAndRecordRead } from "../context/taskPaperLedgerRecorder";
+import type { TaskPaperLedgerDelta } from "../context/taskPaperLedger";
 import {
   isRawPdfRetrievalTool,
   RETIRED_TOOL_HINTS,
@@ -650,7 +652,13 @@ function normalizeCollectionContexts(
     const key = `${libraryID}:${collectionId}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push({ collectionId, libraryID, name });
+    const excludedItemIds = normalizeExcludedItemIds(value?.excludedItemIds);
+    out.push({
+      collectionId,
+      libraryID,
+      name,
+      ...(excludedItemIds ? { excludedItemIds } : {}),
+    });
   }
   return out.length ? out : undefined;
 }
@@ -684,12 +692,14 @@ function normalizeTagContexts(
       : `${libraryID}:tag:${normalizedName || name.toLowerCase()}`;
     if (seen.has(key)) continue;
     seen.add(key);
+    const excludedItemIds = normalizeExcludedItemIds(value?.excludedItemIds);
     out.push({
       name,
       libraryID,
       normalizedName: normalizedName || undefined,
       scope,
       includeAutomatic: includeAutomatic || undefined,
+      ...(excludedItemIds ? { excludedItemIds } : {}),
     });
   }
   return out.length ? out : undefined;
@@ -1761,6 +1771,7 @@ function buildMcpToolActivityEvent(params: {
   workCategory?: import("../types").AgentWorkCategory;
   verifiedReadSources?: VerifiedReadSource[];
   readObservations?: readonly TrustedReadObservation[];
+  paperLedgerDelta?: TaskPaperLedgerDelta;
   mutability?: "read" | "write";
   researchJobId?: string;
   scope: ZoteroMcpActiveScope | null;
@@ -1785,6 +1796,9 @@ function buildMcpToolActivityEvent(params: {
     quoteCitations: params.quoteCitations,
     verifiedReadSources: params.verifiedReadSources,
     readObservations: params.readObservations,
+    ...(params.paperLedgerDelta
+      ? { paperLedgerDelta: params.paperLedgerDelta }
+      : {}),
     profileSignature: params.scope?.profileSignature,
     conversationKey: params.scope?.conversationKey,
     libraryID: params.libraryID || undefined,
@@ -2274,6 +2288,7 @@ async function handleToolsCall(
     actionReceipts?: AgentActionReceipt[];
     verifiedReadSources?: VerifiedReadSource[];
     readObservations?: readonly TrustedReadObservation[];
+    paperLedgerDelta?: TaskPaperLedgerDelta | null;
     researchJobId?: string;
   }) => {
     emitZoteroMcpToolActivity(
@@ -2290,6 +2305,7 @@ async function handleToolsCall(
         workCategory,
         verifiedReadSources: result.verifiedReadSources,
         readObservations: result.readObservations,
+        paperLedgerDelta: result.paperLedgerDelta || undefined,
         researchJobId: result.researchJobId,
         mutability:
           tool?.spec.executionClass === "external_effect" ? "write" : "read",
@@ -2503,15 +2519,21 @@ async function handleToolsCall(
       scope.clarificationHistory = toolContext.request.clarificationHistory;
     }
     let result = formatToolResult(prepared.execution);
-    const readObservations =
+    // One attestation site, one recorder: the read's trusted observations and
+    // its Task progress delta come from the same call. Without a
+    // conversation there is nothing to record the delta in.
+    const { observations: readObservations, paperLedgerDelta } =
       tool.spec.executionClass === "read" && !result.isError
-        ? await createTrustedReadObservations({
+        ? await attestAndRecordRead({
             toolName: name,
             callId: prepared.execution.result.callId,
             input: prepared.execution.input,
             result: prepared.execution.result.content,
+            conversationKey: scopeConversationKey,
+            libraryID: callScope.libraryID,
+            runId: scope?.runId,
           })
-        : [];
+        : { observations: [], paperLedgerDelta: null };
     rememberDocumentReadObservations(headers, readObservations);
     rememberDocumentArtifacts(
       headers,
@@ -2543,6 +2565,7 @@ async function handleToolsCall(
         }),
       ),
       readObservations,
+      paperLedgerDelta,
     });
     clearMcpReadDedupeCacheAfterToolResult(tool.spec, result);
     rememberMcpReadResult(readDedupeKey, result, readObservations);
