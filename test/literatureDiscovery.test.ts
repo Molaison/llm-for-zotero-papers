@@ -7,6 +7,7 @@ import { AgentFinalAnswerController } from "../src/agent/finalization/finalAnswe
 import { resolvedAgentRequest } from "./helpers/resolvedAgentRequest";
 import { createBuiltInToolRegistry } from "../src/agent/tools";
 import type { AgentToolContext, AgentToolResult } from "../src/agent/types";
+import { literaturePaperIdentities } from "../src/agent/services/literatureDiscovery";
 
 describe("ranked literature discovery workflow", function () {
   const originalFetch = globalThis.fetch;
@@ -327,6 +328,98 @@ describe("ranked literature discovery workflow", function () {
       assert.equal(verdict.kind, "correct");
     });
   }
+
+  // arXiv-provider results carry only an abs URL; other providers carry a
+  // DataCite 10.48550 DOI. Imports name the same paper by arXiv id or DOI.
+  describe("matching imports to saved candidates by normalized identity", function () {
+    const arxivCandidate = {
+      title: "Arxiv Paper",
+      sourceUrl: "http://arxiv.org/abs/2301.00001v1",
+    };
+    async function verdictFor(
+      candidates: Record<string, unknown>[],
+      identifiers: string[],
+    ) {
+      const context = makeContext();
+      const controller = new AgentFinalAnswerController(
+        context.request,
+        { evaluateFinal: async () => ({ kind: "accept" }) },
+        [],
+      );
+      const verdict = await controller.evaluate({
+        candidateText: "Imported the paper.",
+        canCorrect: true,
+        toolExecutionRecords: [
+          {
+            name: "literature_search",
+            ok: true,
+            content: { reviewRequired: true, results: candidates },
+          },
+          {
+            name: "library_import",
+            ok: true,
+            input: { kind: "identifiers", identifiers },
+          },
+        ],
+      });
+      return verdict.kind;
+    }
+    for (const [label, candidate, identifier] of [
+      ["an arXiv abs URL by arxiv: id", arxivCandidate, "arxiv:2301.00001"],
+      [
+        "an arXiv abs URL by versioned arXiv: id",
+        arxivCandidate,
+        "arXiv:2301.00001v1",
+      ],
+      [
+        "a DOI by a DOI:-prefixed uppercase DOI",
+        { doi: "10.1000/abc" },
+        "DOI: 10.1000/ABC",
+      ],
+      [
+        "a DOI by a doi:-prefixed DOI",
+        { doi: "https://doi.org/10.1000/abc" },
+        "doi:10.1000/abc",
+      ],
+      [
+        "a 10.48550 arXiv DOI by arXiv id",
+        { doi: "10.48550/arXiv.2301.00001" },
+        "2301.00001",
+      ],
+    ] as const) {
+      it(`closes discovery after importing ${label}`, async function () {
+        assert.equal(await verdictFor([candidate], [identifier]), "accept");
+      });
+    }
+    it("does not close discovery after importing a different arXiv id", async function () {
+      assert.equal(
+        await verdictFor([arxivCandidate], ["arxiv:2301.00002"]),
+        "correct",
+      );
+    });
+    it("dedupes versions of one arXiv paper and keeps distinct ids apart", function () {
+      const shares = (a: Record<string, unknown>, b: Record<string, unknown>) =>
+        literaturePaperIdentities(a).some((key) =>
+          literaturePaperIdentities(b).includes(key),
+        );
+      assert.isTrue(
+        shares(arxivCandidate, {
+          sourceUrl: "https://arxiv.org/abs/2301.00001v2",
+        }),
+      );
+      assert.isTrue(
+        shares(arxivCandidate, { doi: "10.48550/arXiv.2301.00001" }),
+      );
+      assert.isFalse(
+        shares(arxivCandidate, {
+          sourceUrl: "http://arxiv.org/abs/2301.00002v1",
+        }),
+      );
+      assert.isFalse(
+        shares({ doi: "10.48550/arXiv.2301.00001" }, { arxivId: "2301.00011" }),
+      );
+    });
+  });
 
   it("still requires the card when a classified discovery turn imports", async function () {
     const context = makeContext();

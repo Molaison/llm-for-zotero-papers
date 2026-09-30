@@ -137,21 +137,44 @@ async function save(
   await upsertAgentToolResultHandles([record]);
 }
 
+/** Lowercase a DOI and strip `doi:` / resolver-URL prefixes. */
+function normalizeDoi(value: unknown): string {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/^doi:\s*/, "")
+    .replace(/^https?:\/\/(?:dx\.)?doi\.org\//, "")
+    .trim();
+}
+
+/**
+ * Bare, version-free arXiv id from an id, `arXiv:` form or arxiv.org
+ * abs/pdf URL; empty when the value is not an arXiv id. Versions of one
+ * paper share an id, so they match and dedupe as one paper.
+ */
+function normalizeArxivId(value: unknown): string {
+  const id = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/^arxiv:\s*/, "")
+    .replace(
+      /^(?:https?:\/\/)?(?:www\.|export\.)?arxiv\.org\/(?:abs|pdf)\//,
+      "",
+    )
+    .replace(/\.pdf$/, "")
+    .replace(/\/$/, "")
+    .replace(/v\d+$/, "");
+  return /^(?:\d{4}\.\d{4,5}|[a-z-]+(?:\.[a-z-]+)?\/\d{7})$/.test(id) ? id : "";
+}
+
 /** Match identifiers across providers, with normalized title as a metadata fallback. */
 export function literaturePaperIdentities(
   paper: Record<string, unknown>,
 ): string[] {
   const keys: string[] = [];
-  const doi = String(paper.doi || "")
-    .toLowerCase()
-    .replace(/^https?:\/\/(?:dx\.)?doi\.org\//, "")
-    .trim();
+  const doi = normalizeDoi(paper.doi);
   if (doi) keys.push(`doi:${doi}`);
-  const arxiv = String(paper.arxivId || "")
-    .toLowerCase()
-    .replace(/^arxiv:/, "")
-    .replace(/v\d+$/, "")
-    .trim();
+  const arxiv = normalizeArxivId(paper.arxivId);
   if (arxiv) keys.push(`arxiv:${arxiv}`);
   for (const value of [paper.id, paper.sourceUrl]) {
     if (typeof value === "string" && value.trim())
@@ -161,6 +184,16 @@ export function literaturePaperIdentities(
           .replace(/^https?:\/\//, "")
           .replace(/\/$/, ""),
       );
+  }
+  // Ids derived from an arXiv DOI or URL follow the provider keys, so the
+  // first key (the stored discoveryPaperId) is unchanged.
+  for (const derived of [
+    doi.match(/^10\.48550\/arxiv\.(.+)$/)?.[1],
+    paper.id,
+    paper.sourceUrl,
+  ]) {
+    const id = normalizeArxivId(derived);
+    if (id && !keys.includes(`arxiv:${id}`)) keys.push(`arxiv:${id}`);
   }
   const title = String(paper.title || "")
     .toLowerCase()
