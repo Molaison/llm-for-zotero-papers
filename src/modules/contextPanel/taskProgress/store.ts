@@ -8,9 +8,10 @@
  * views, which subscribe and repaint on their own schedule. Every writer is
  * idempotent, so a replayed or duplicated event changes nothing.
  *
- * At most `TASK_PROGRESS_MAX_CONVERSATIONS` conversations are kept, least
- * recently written first out; a conversation with a live run is evicted only
- * when every kept conversation is live.
+ * At most `TASK_PROGRESS_MAX_CONVERSATIONS` idle conversations are kept,
+ * least recently written first out. A conversation with a live run neither
+ * counts against that limit nor is evicted, so live runs can never crowd out
+ * the conversations being opened beside them.
  */
 import {
   applyFinalCitations,
@@ -155,31 +156,23 @@ function isLive(state: TaskRunState): boolean {
 }
 
 /**
- * Evict idle records first, then the oldest, but never `keep`: the record the
- * caller is making room for. When every other record is live, the newcomer
- * was the only idle one, so it was dropped the moment it was created and its
- * conversation could never show progress.
+ * Evict the least recently written idle records beyond the limit, never
+ * `keep` (the record the caller is making room for) and never a live one.
+ * Counting live records against the limit let a handful of live runs leave
+ * room for a single idle record: two conversations being opened then evicted
+ * each other on every write and neither ever showed its progress.
  */
 function evict(keep: number): void {
-  while (records.size > TASK_PROGRESS_MAX_CONVERSATIONS) {
-    let victim: number | undefined;
-    for (const [key, record] of records) {
-      if (key !== keep && !isLive(record.runState)) {
-        victim = key;
-        break;
-      }
-    }
-    if (victim === undefined) {
-      for (const key of records.keys()) {
-        if (key !== keep) {
-          victim = key;
-          break;
-        }
-      }
-    }
-    if (victim === undefined) return;
-    records.delete(victim);
-    viewMemos.delete(victim);
+  let idle = 0;
+  for (const record of records.values()) {
+    if (!isLive(record.runState)) idle += 1;
+  }
+  for (const [key, record] of records) {
+    if (idle <= TASK_PROGRESS_MAX_CONVERSATIONS) return;
+    if (key === keep || isLive(record.runState)) continue;
+    records.delete(key);
+    viewMemos.delete(key);
+    idle -= 1;
   }
 }
 

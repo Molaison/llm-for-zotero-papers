@@ -140,33 +140,39 @@ describe("task progress store", function () {
     assert.equal(getTaskProgress(9)!.runState, "completed");
   });
 
-  it("keeps at most six conversations, evicting idle ones first", function () {
+  it("keeps at most six idle conversations, oldest out, and every live one", function () {
     beginTaskRun(1, { runId: "live" });
-    for (let key = 2; key <= TASK_PROGRESS_MAX_CONVERSATIONS + 2; key++) {
+    for (let key = 2; key <= TASK_PROGRESS_MAX_CONVERSATIONS + 3; key++) {
       completeTaskRun(key, { runId: `r${key}` });
     }
     const kept = listTaskProgressConversations();
-    assert.lengthOf(kept, TASK_PROGRESS_MAX_CONVERSATIONS);
-    assert.include(kept, 1, "a live run is kept");
+    assert.lengthOf(kept, TASK_PROGRESS_MAX_CONVERSATIONS + 1);
+    assert.include(kept, 1, "a live run is kept and not counted");
     assert.notInclude(kept, 2);
     assert.notInclude(kept, 3);
-    assert.include(kept, TASK_PROGRESS_MAX_CONVERSATIONS + 2);
+    assert.include(kept, TASK_PROGRESS_MAX_CONVERSATIONS + 3);
     clearTaskProgress(1);
     assert.isNull(getTaskProgress(1));
   });
 
-  it("never evicts the conversation it makes room for, even when every other one is live", function () {
-    // Six runs that never reported an end (a full workflow suite leaves such
-    // records behind) must not keep a new conversation from ever showing.
-    for (let key = 1; key <= TASK_PROGRESS_MAX_CONVERSATIONS; key++) {
+  it("keeps conversations being opened beside many live runs", function () {
+    // Five live runs used to leave room for one idle record, so two
+    // conversations being opened evicted each other on every write.
+    for (let key = 1; key <= TASK_PROGRESS_MAX_CONVERSATIONS - 1; key++) {
       beginTaskRun(key, { runId: `live${key}` });
     }
-    const newcomer = TASK_PROGRESS_MAX_CONVERSATIONS + 1;
-    completeTaskRun(newcomer, { runId: "new" });
-    assert.isNotNull(getTaskProgress(newcomer));
+    const first = TASK_PROGRESS_MAX_CONVERSATIONS;
+    const second = TASK_PROGRESS_MAX_CONVERSATIONS + 1;
+    for (let pass = 0; pass < 3; pass++) {
+      completeTaskRun(first, { runId: "first" });
+      completeTaskRun(second, { runId: "second" });
+    }
+    assert.isNotNull(getTaskProgress(first));
+    assert.isNotNull(getTaskProgress(second));
     const kept = listTaskProgressConversations();
-    assert.lengthOf(kept, TASK_PROGRESS_MAX_CONVERSATIONS);
-    assert.notInclude(kept, 1, "the oldest record makes room");
+    for (let key = 1; key <= TASK_PROGRESS_MAX_CONVERSATIONS - 1; key++) {
+      assert.include(kept, key, "live runs are kept");
+    }
   });
 
   it("remembers that a plan ran after its steps are gone", function () {
@@ -421,8 +427,9 @@ describe("task progress store", function () {
     beginTaskRun(100, { runId: "run-evicted" });
     completeTaskRun(100, { runId: "run-evicted" });
     rememberTaskProgressView(100, { open: true });
+    // Idle records push it out; live ones no longer count against the limit.
     for (let key = 101; key <= 100 + TASK_PROGRESS_MAX_CONVERSATIONS; key++) {
-      beginTaskRun(key, { runId: `run-${key}` });
+      completeTaskRun(key, { runId: `run-${key}` });
     }
     assert.isNull(getTaskProgress(100));
     assert.isNull(getTaskProgressViewMemo(100), "evicted with its record");
