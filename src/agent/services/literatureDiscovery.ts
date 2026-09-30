@@ -221,6 +221,7 @@ export async function identifyLiteratureCandidates(
       discovery.session.candidateSetIds.push(record.handle);
     await save(discovery.record, context);
   }
+  const unclassified = !context.request.classifiedIntent?.semantic?.literature;
   return {
     ...content,
     candidateSetId: record.handle,
@@ -230,15 +231,29 @@ export async function identifyLiteratureCandidates(
       ? {
           sessionId: discovery.record.handle,
           revision: discovery.session.revision,
-          nextStep: discoveryInstruction(discovery.record),
+          nextStep: discoveryInstruction(discovery.record, unclassified),
         }
-      : {}),
+      : unclassified
+        ? { nextStep: CANDIDATE_ROUTE }
+        : {}),
   };
 }
 
-function discoveryInstruction(record: AgentToolResultHandleRecord): string {
+/**
+ * Chat turns carry no classified literature intent, so a search result cannot
+ * tell discovery from an explicit import. The result is read when the model
+ * picks its next tool, so it states the import branch first.
+ */
+const IMPORT_ROUTE =
+  "If the user asked to import or add papers to Zotero, skip the selection card: rank these candidates, then call library_import with the DOI or arXiv identifiers of exactly the number the user requested and the requested destination (targetCollectionId; create a named new collection first).";
+const CANDIDATE_ROUTE = `${IMPORT_ROUTE} If they only asked to find or recommend papers, call literature_review with ranked candidateSetId/candidateIndex selections. Otherwise answer from these results.`;
+
+function discoveryInstruction(
+  record: AgentToolResultHandleRecord,
+  offerImport = false,
+): string {
   const s = record.content as LiteratureDiscoverySession;
-  return `Assess titles and abstracts and select ${s.request.batchSize} ${s.papers.length ? "additional " : ""}genuinely relevant papers in ranked order. Respect the user's topic and these constraints: ${JSON.stringify(s.request)}. Assess unused saved candidates first; search further if needed. To expand a provider list, increase its retrieval limit rather than repeating the same bounded request. Call literature_review with sessionId '${record.handle}', revision ${s.revision}, NEW candidateSetId/candidateIndex selections and evidence-based relevance reasons. Do not repeat displayed papers or dump the raw pool. If fewer qualify, explain shortfallReason; use outcome 'no_more' when no further relevant matches were found, or 'search_failed' for a retrieval failure. Empty selections with an explanation are allowed. Never import during discovery or finish with prose instead of the card.`;
+  return `${offerImport ? `${IMPORT_ROUTE} Otherwise the user only wants discovery: a` : "A"}ssess titles and abstracts and select ${s.request.batchSize} ${s.papers.length ? "additional " : ""}genuinely relevant papers in ranked order. Respect the user's topic and these constraints: ${JSON.stringify(s.request)}. Assess unused saved candidates first; search further if needed. To expand a provider list, increase its retrieval limit rather than repeating the same bounded request. Then call literature_review with sessionId '${record.handle}', revision ${s.revision}, NEW candidateSetId/candidateIndex selections and evidence-based relevance reasons. Do not repeat displayed papers or dump the raw pool. If fewer qualify, explain shortfallReason; use outcome 'no_more' when no further relevant matches were found, or 'search_failed' for a retrieval failure. Empty selections with an explanation are allowed. Discovery never imports and never finishes with prose instead of the card.`;
 }
 
 export async function prepareLiteratureDiscoveryReview(

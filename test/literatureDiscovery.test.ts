@@ -240,6 +240,50 @@ describe("ranked literature discovery workflow", function () {
     assert.equal(second.kind, "fail");
   });
 
+  it("accepts an unclassified search that ended in library_import without a card", async function () {
+    // The search result offered the import branch; completion must honor it
+    // instead of demanding the selection card after the papers were imported.
+    const context = makeContext();
+    const content = await search(context);
+    const controller = new AgentFinalAnswerController(
+      context.request,
+      { evaluateFinal: async () => ({ kind: "accept" }) },
+      [],
+    );
+    const verdict = await controller.evaluate({
+      candidateText: "Imported three papers into the new collection.",
+      canCorrect: true,
+      toolExecutionRecords: [
+        { name: "literature_search", ok: true, content },
+        { name: "library_import", ok: true, content: { succeeded: 3 } },
+      ],
+    });
+    assert.equal(verdict.kind, "accept");
+  });
+
+  it("still requires the card when a classified discovery turn imports", async function () {
+    const context = makeContext();
+    context.request.classifiedIntent = classifiedFixture({
+      externalSearchIntent: "literature",
+      semantic: semanticFixture({ literature: "discover" }),
+    });
+    const content = await search(context);
+    const controller = new AgentFinalAnswerController(
+      context.request,
+      { evaluateFinal: async () => ({ kind: "accept" }) },
+      [],
+    );
+    const verdict = await controller.evaluate({
+      candidateText: "Imported the papers.",
+      canCorrect: true,
+      toolExecutionRecords: [
+        { name: "literature_search", ok: true, content },
+        { name: "library_import", ok: true, content: { succeeded: 3 } },
+      ],
+    });
+    assert.equal(verdict.kind, "correct");
+  });
+
   for (const [text, count] of [
     ["Find relevant papers for me", 5],
     ["Find three relevant papers for me", 3],
@@ -360,6 +404,79 @@ describe("ranked literature discovery workflow", function () {
         context,
       ),
     );
+  });
+
+  it("routes an explicit import to library_import in the search result's next step", async function () {
+    // Chat turns carry no classified intent, so a workflow:'review' search
+    // opens a discovery session even when the user asked to import. The
+    // result's nextStep is read when the model picks its next tool, so it
+    // must state both branches instead of only the selection card.
+    const content = await search();
+    const nextStep = String(content.nextStep);
+    const importAt = nextStep.indexOf("library_import");
+    const reviewAt = nextStep.indexOf("call literature_review");
+    assert.isAtLeast(importAt, 0, nextStep);
+    assert.isAtLeast(reviewAt, 0, nextStep);
+    assert.isBelow(importAt, reviewAt, nextStep);
+    assert.match(nextStep, /If the user asked to import/);
+    assert.match(nextStep, /targetCollectionId/);
+    assert.match(nextStep, /Otherwise/);
+    assert.notInclude(nextStep, "Never import during discovery or finish");
+  });
+
+  it("routes an unclassified answer-workflow search by the user's request", async function () {
+    // Without a discovery session the model still chooses between the
+    // selection card and a direct import right after this result.
+    const context = makeContext();
+    const tool = createLiteratureSearchTool(gateway as never);
+    const parsed = tool.validate({
+      mode: "search",
+      workflow: "answer",
+      query: "hippocampal replay",
+    });
+    if (!parsed.ok) throw new Error(parsed.error);
+    const content = (await tool.execute(parsed.value, context)) as any;
+    assert.isFalse(content.reviewRequired);
+    const nextStep = String(content.nextStep);
+    assert.match(nextStep, /If the user asked to import/);
+    assert.isBelow(
+      nextStep.indexOf("library_import"),
+      nextStep.indexOf("call literature_review"),
+      nextStep,
+    );
+    assert.isAtLeast(nextStep.indexOf("library_import"), 0, nextStep);
+    assert.match(nextStep, /Otherwise answer from these results/);
+  });
+
+  it("adds no routing to a classified scholarly-evidence search", async function () {
+    const context = makeContext();
+    context.request.classifiedIntent = classifiedFixture({
+      externalSearchIntent: "literature",
+      semantic: semanticFixture({ literature: "none" }),
+    });
+    const tool = createLiteratureSearchTool(gateway as never);
+    const parsed = tool.validate({
+      mode: "search",
+      workflow: "answer",
+      query: "representational drift",
+    });
+    if (!parsed.ok) throw new Error(parsed.error);
+    const content = (await tool.execute(parsed.value, context)) as any;
+    assert.isUndefined(content.nextStep);
+  });
+
+  it("keeps a classified discovery turn on the selection card only", async function () {
+    const context = makeContext();
+    context.request.classifiedIntent = classifiedFixture({
+      externalSearchIntent: "literature",
+      semantic: semanticFixture({ literature: "discover" }),
+    });
+    const content = await search(context);
+    const nextStep = String(content.nextStep);
+    assert.notInclude(nextStep, "library_import");
+    assert.match(nextStep, /^Assess titles and abstracts/);
+    assert.include(nextStep, "call literature_review");
+    assert.include(nextStep, "Discovery never imports");
   });
 
   it("requires the current expansion even when an earlier card was presented", async function () {

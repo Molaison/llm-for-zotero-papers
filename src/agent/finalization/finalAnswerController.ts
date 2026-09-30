@@ -186,11 +186,19 @@ export class AgentFinalAnswerController {
             ?.reviewRequired,
         ),
     );
+    // Without a classified literature intent the search result offers an
+    // import branch, so a completed library_import also closes discovery.
+    const importCloses = !this.request.classifiedIntent?.semantic?.literature;
     if (
       lastDiscovery >= 0 &&
       !params.toolExecutionRecords
         .slice(lastDiscovery + 1)
-        .some((record) => record.ok && record.name === "literature_review")
+        .some(
+          (record) =>
+            record.ok &&
+            (record.name === "literature_review" ||
+              (importCloses && record.name === "library_import")),
+        )
     ) {
       const failure =
         "The relevant-paper shortlist was not presented for review, so discovery is not complete.";
