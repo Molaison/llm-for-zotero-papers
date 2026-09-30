@@ -229,7 +229,12 @@ let lifecycleInstalled = false;
 function settleFromHistory(conversationKey: number, requestId: number): void {
   const record = getTaskProgress(conversationKey);
   if (!record) return;
-  if (record.runState !== "working" && record.runState !== "answering") return;
+  if (
+    record.runState !== "working" &&
+    record.runState !== "answering" &&
+    record.runState !== "waiting"
+  )
+    return;
   if (requestId && getCancelledRequestId(conversationKey) >= requestId) {
     endTaskRun(conversationKey, "cancelled");
     return;
@@ -244,7 +249,11 @@ function settleFromHistory(conversationKey: number, requestId: number): void {
     endTaskRun(conversationKey, "cancelled");
     return;
   }
-  if (latest.interrupted || /^Error:/.test(latest.text || "")) {
+  if (latest.interrupted) {
+    endTaskRun(conversationKey, "interrupted");
+    return;
+  }
+  if (/^Error:/.test(latest.text || "")) {
     endTaskRun(conversationKey, "failed");
     return;
   }
@@ -261,8 +270,9 @@ function settleFromHistory(conversationKey: number, requestId: number): void {
 export function installTaskProgressRequestLifecycle(): void {
   if (lifecycleInstalled) return;
   lifecycleInstalled = true;
-  // A plan, an action or a Codex plan makes the row apply mid-conversation
-  // (a one-paper chat included): its panels sync once so the scope lists.
+  // A plan, an action, a Codex plan or a run's outcomes make the row apply
+  // mid-conversation (a one-paper chat included): its panels sync once so
+  // the scope lists.
   const stepsSeen = new Set<number>();
   subscribeTaskProgress((conversationKey) => {
     const record = getTaskProgress(conversationKey);

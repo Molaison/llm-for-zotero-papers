@@ -17,6 +17,7 @@ import {
   clearAllTaskProgress,
   completeTaskRun,
   getTaskProgress,
+  markTaskWaiting,
 } from "../src/modules/contextPanel/taskProgress/store";
 import type { Message } from "../src/modules/contextPanel/types";
 import { ledgerDelta, quoteCitation } from "./helpers/taskProgressFixtures";
@@ -123,6 +124,34 @@ describe("task progress request lifecycle", function () {
       "failed",
       "a request that left no answer failed",
     );
+  });
+
+  it("settles interrupted from a stream-interrupted answer", function () {
+    chatHistory.set(KEY, [
+      question("q", 1),
+      {
+        role: "assistant",
+        text: "A partial answer",
+        timestamp: 2,
+        interrupted: true,
+      },
+    ]);
+    tryBeginRequest(KEY, 1, null);
+    finishRequest(KEY, 1);
+    assert.equal(getTaskProgress(KEY)!.runState, "interrupted");
+  });
+
+  it("settles a run that still waited on a decision when its request ended", function () {
+    chatHistory.set(KEY, [
+      question("q", 1),
+      { role: "assistant", text: "Answer.", timestamp: 2, runMode: "agent" },
+    ]);
+    tryBeginRequest(KEY, 1, null);
+    beginTaskRun(KEY, { runId: "run-w" });
+    markTaskWaiting(KEY, "run-w", true);
+    assert.equal(getTaskProgress(KEY)!.runState, "waiting");
+    finishRequest(KEY, 1);
+    assert.equal(getTaskProgress(KEY)!.runState, "completed");
   });
 
   it("leaves a run the runtime already settled as it was", function () {

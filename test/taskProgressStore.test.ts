@@ -23,8 +23,16 @@ import {
   setTaskScope,
   subscribeTaskProgress,
   taskTurnIndexFor,
+  displayedTaskRunState,
+  markTaskWaiting,
+  setTaskOutcomes,
 } from "../src/modules/contextPanel/taskProgress/store";
-import { ledgerDelta, quoteCitation } from "./helpers/taskProgressFixtures";
+import {
+  ledgerDelta,
+  outcomeCheckpoint,
+  outcomeTask,
+  quoteCitation,
+} from "./helpers/taskProgressFixtures";
 
 describe("task progress store", function () {
   afterEach(function () {
@@ -433,5 +441,170 @@ describe("task progress store", function () {
     }
     assert.isNull(getTaskProgress(100));
     assert.isNull(getTaskProgressViewMemo(100), "evicted with its record");
+  });
+});
+
+describe("task progress outcome ledger", function () {
+  afterEach(function () {
+    clearAllTaskProgress();
+  });
+
+  const save = outcomeTask("save", {
+    description: "Save the summary as a note",
+    capability: "zotero.notes",
+    targets: ["item:7"],
+  });
+  const read = outcomeTask("read", {
+    description: "Read the paper",
+    effect: "read",
+    status: "completed",
+    doneTargets: ["item:7"],
+  });
+
+  it("shows a run's outcomes as its steps, and keeps the row for the conversation", function () {
+    beginTaskRun(20, { runId: "run-a" });
+    setTaskOutcomes(20, "run-a", outcomeCheckpoint([read, save]));
+    const record = getTaskProgress(20)!;
+    assert.equal(record.checklist?.source, "outcomes");
+    assert.equal(record.checklist?.runId, "run-a");
+    assert.deepEqual(
+      record.checklist?.steps.map((step) => [step.label, step.status]),
+      [
+        ["Read the paper", "completed"],
+        ["Save the summary as a note", "pending"],
+      ],
+    );
+    assert.equal(record.checklist?.done, 1);
+    assert.equal(record.checklist?.total, 2);
+    assert.isTrue(record.planSeen, "the row applies, even in a one-paper chat");
+    assert.equal(displayedTaskRunState(record), "working");
+  });
+
+  it("changes nothing for a checkpoint with no outcome and no end", function () {
+    beginTaskRun(21, { runId: "run-a" });
+    const version = getTaskProgress(21)!.version;
+    setTaskOutcomes(21, "run-a", outcomeCheckpoint([]));
+    assert.equal(getTaskProgress(21)!.version, version);
+    assert.isNull(getTaskProgress(21)!.checklist);
+    assert.isFalse(getTaskProgress(21)!.planSeen);
+  });
+
+  it("is idempotent, and does not repaint when the steps it shows did not change", function () {
+    beginTaskRun(22, { runId: "run-a" });
+    setTaskOutcomes(22, "run-a", outcomeCheckpoint([read, save]));
+    let notified = 0;
+    const unsubscribe = subscribeTaskProgress(() => {
+      notified += 1;
+    });
+    try {
+      const version = getTaskProgress(22)!.version;
+      setTaskOutcomes(22, "run-a", outcomeCheckpoint([read, save]));
+      setTaskOutcomes(
+        22,
+        "run-a",
+        outcomeCheckpoint(
+          [read, { ...save, receiptIds: ["receipt-failed"], updatedAt: 9 }],
+          undefined,
+          9,
+        ),
+      );
+      assert.equal(getTaskProgress(22)!.version, version);
+      assert.equal(notified, 0);
+      setTaskOutcomes(
+        22,
+        "run-a",
+        outcomeCheckpoint([read, { ...save, status: "completed" }]),
+      );
+      assert.equal(notified, 1, "a step that moved repaints once");
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it("records an end with no outcome without showing steps", function () {
+    beginTaskRun(23, { runId: "run-a" });
+    setTaskOutcomes(23, "run-a", outcomeCheckpoint([], "blocked"));
+    const record = getTaskProgress(23)!;
+    assert.deepEqual(record.checklist?.steps, []);
+    assert.isFalse(record.planSeen);
+    assert.equal(displayedTaskRunState(record), "blocked");
+  });
+
+  it("shows the settled end state of its own run, and completeTaskRun does not hide it", function () {
+    beginTaskRun(24, { runId: "run-a" });
+    setTaskOutcomes(
+      24,
+      "run-a",
+      outcomeCheckpoint(
+        [{ ...save, status: "skipped" }],
+        "completed_with_exceptions",
+      ),
+    );
+    assert.equal(
+      displayedTaskRunState(getTaskProgress(24)),
+      "completed_with_exceptions",
+    );
+    completeTaskRun(24, { runId: "run-a" });
+    const record = getTaskProgress(24)!;
+    assert.equal(record.runState, "completed");
+    assert.equal(displayedTaskRunState(record), "completed_with_exceptions");
+    beginTaskRun(24, { runId: "run-b" });
+    assert.equal(
+      displayedTaskRunState(getTaskProgress(24)),
+      "working",
+      "a new question starts without the last run's ending",
+    );
+  });
+
+  it("waits on the user while a decision card is open, and counts as live", function () {
+    beginTaskRun(1, { runId: "waiting" });
+    markTaskWaiting(1, "waiting", true);
+    assert.equal(getTaskProgress(1)!.runState, "waiting");
+    for (let key = 2; key <= TASK_PROGRESS_MAX_CONVERSATIONS + 3; key++) {
+      completeTaskRun(key, { runId: `r${key}` });
+    }
+    assert.include(
+      listTaskProgressConversations(),
+      1,
+      "a waiting run is live: never evicted",
+    );
+    markTaskWaiting(1, "other-run", false);
+    assert.equal(getTaskProgress(1)!.runState, "waiting");
+    markTaskWaiting(1, "waiting", false);
+    assert.equal(getTaskProgress(1)!.runState, "working");
+    markTaskWaiting(1, "waiting", true);
+    endTaskRun(1, "cancelled", "waiting");
+    assert.equal(getTaskProgress(1)!.runState, "cancelled");
+    markTaskWaiting(1, "waiting", false);
+    markTaskWaiting(1, "waiting", true);
+    assert.equal(
+      getTaskProgress(1)!.runState,
+      "cancelled",
+      "a settled run neither works nor waits again",
+    );
+  });
+
+  it("ignores another run's ledger, and shows an ending only for the run it names", function () {
+    beginTaskRun(26, { runId: "run-b" });
+    const version = getTaskProgress(26)!.version;
+    setTaskOutcomes(26, "run-a", outcomeCheckpoint([save], "blocked"));
+    assert.isNull(
+      getTaskProgress(26)!.checklist,
+      "another run's steps stay out",
+    );
+    assert.equal(getTaskProgress(26)!.version, version);
+    assert.equal(displayedTaskRunState(getTaskProgress(26)), "working");
+    // A run the record cannot name yet shows the ledger's steps, but not an
+    // ending it cannot tell is its own.
+    beginTaskRun(27);
+    setTaskOutcomes(27, "run-a", outcomeCheckpoint([save], "blocked"));
+    assert.equal(getTaskProgress(27)!.checklist?.runId, "run-a");
+    assert.equal(displayedTaskRunState(getTaskProgress(27)), "working");
+  });
+
+  it("ends a stream-interrupted run as interrupted", function () {
+    beginTaskRun(25, { runId: "run-a" });
+    endTaskRun(25, "interrupted", "run-a");
+    assert.equal(getTaskProgress(25)!.runState, "interrupted");
   });
 });

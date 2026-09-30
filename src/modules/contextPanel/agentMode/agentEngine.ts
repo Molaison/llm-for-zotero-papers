@@ -6,6 +6,8 @@ import {
   completeTaskRun,
   endTaskRun,
   markTaskAnswering,
+  markTaskWaiting,
+  setTaskOutcomes,
   taskTurnIndexFor,
 } from "../taskProgress/store";
 /**
@@ -505,6 +507,8 @@ export function createAgentTurnEventHandler(
         setStatusSafely(event.reason, "sending");
         break;
       case "confirmation_required":
+        // The run waits on the user's decision until the card resolves.
+        markTaskWaiting(conversationKey, assistantMessage.agentRunId, true);
         showInlineConfirmationCard(body, ui, event.requestId, event.action);
         queueRefresh();
         body.ownerDocument?.defaultView?.setTimeout(() => {
@@ -513,6 +517,7 @@ export function createAgentTurnEventHandler(
         setStatusSafely("Approval required", "sending");
         return;
       case "confirmation_resolved":
+        markTaskWaiting(conversationKey, assistantMessage.agentRunId, false);
         closeInlineConfirmationCard(body, ui, event.requestId);
         queueRefresh();
         setStatusSafely(
@@ -534,6 +539,16 @@ export function createAgentTurnEventHandler(
           assistantMessage.agentRunId,
         );
         return;
+      case "execution_checkpoint":
+        // The run's outcomes, as its ledger stands, are its Task progress steps.
+        if (assistantMessage.agentRunId) {
+          setTaskOutcomes(
+            conversationKey,
+            assistantMessage.agentRunId,
+            event.checkpoint,
+          );
+        }
+        break;
       case "message_rollback":
         if (typeof event.length === "number" && event.length > 0) {
           assistantMessage.pendingFinalText = (
@@ -790,8 +805,6 @@ async function handleAgentTurnFailure(ctx: {
     await markCancelled();
     return;
   }
-  // The run failed; the row keeps the partial ledger and says so.
-  endTaskRun(conversationKey, "failed", assistantMessage.agentRunId);
   const errMsg = (err as Error).message || "Error";
   const userFacingError =
     errMsg.includes("[ede_diagnostic]") &&
@@ -814,6 +827,13 @@ async function handleAgentTurnFailure(ctx: {
         partialText,
         errorMessage: userFacingError,
       });
+  // The run stopped early; the row keeps the partial ledger and says how,
+  // as the conversation will say once it is reopened.
+  endTaskRun(
+    conversationKey,
+    outcome.interrupted ? "interrupted" : "failed",
+    assistantMessage.agentRunId,
+  );
   if (!finalText && !outcome.interrupted && restorePreviousAssistant) {
     restorePreviousAssistant();
     await restorePairedUser?.();

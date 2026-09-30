@@ -5930,6 +5930,7 @@ export function installWorkflowTestHarness(targetAddon: {
               steps: record.checklist.steps.map((step) => ({ ...step })),
               outcome: record.checklist.outcome,
               detail: record.checklist.detail,
+              end: record.checklist.end,
             }
           : null,
         paperStates: Object.fromEntries(

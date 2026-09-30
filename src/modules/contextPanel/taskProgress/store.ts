@@ -25,6 +25,12 @@ import type {
   TaskPaperScopeListing,
 } from "../../../agent/context/taskPaperScopeListing";
 import type {
+  ExecutionCheckpoint,
+  ExecutionTaskStatus,
+  OutcomeException,
+  RunEndState,
+} from "../../../agent/execution/types";
+import type {
   PlanExecutionLedger,
   PlanEvent,
 } from "../../../agent/plans/types";
@@ -34,9 +40,13 @@ export type TaskRunState =
   | "idle"
   | "working"
   | "answering"
+  /** Live: a decision card waits on the user. */
+  | "waiting"
   | "completed"
   | "failed"
-  | "cancelled";
+  | "cancelled"
+  /** The answer's stream broke off. */
+  | "interrupted";
 
 export type TaskProgressResearch = Extract<
   PlanEvent,
@@ -48,19 +58,37 @@ export type TaskProgressPlan = {
   research?: TaskProgressResearch;
 };
 
-export type TaskProgressStepStatus = "pending" | "in_progress" | "completed";
+export type TaskProgressStepStatus = ExecutionTaskStatus;
+
+/** What a step drawn from a run's outcome ledger says beyond its label. */
+export type TaskProgressOutcomeStep = {
+  /** Created by the host from a write, not declared by the model. */
+  host: boolean;
+  /** A write, whose targets the row can count. */
+  write: boolean;
+  /** Receipt-form targets it names, and how many of those are done. */
+  targets: number;
+  doneTargets: number;
+  /** Targets it did not do, by the host's reason. */
+  exceptions: readonly OutcomeException[];
+};
 
 export type TaskProgressStep = {
   label: string;
   status: TaskProgressStepStatus;
+  /** Why it ended as it did (an outcome's reason). */
+  detail?: string;
+  /** Set on a step that is a run's outcome. */
+  outcome?: TaskProgressOutcomeStep;
 };
 
 /**
- * Steps that are not an in-plugin plan: a built-in action's progress, or the
- * checklist Codex keeps with its `update_plan` tool.
+ * Steps that are not an in-plugin plan: a built-in action's progress, the
+ * checklist Codex keeps with its `update_plan` tool, or the outcomes a run's
+ * ledger holds.
  */
 export type TaskProgressChecklist = {
-  source: "action" | "codex";
+  source: "action" | "codex" | "outcomes";
   /** The run the steps belong to (an action gets its own id). */
   runId: string;
   /** The action's name; empty for Codex. */
@@ -75,6 +103,8 @@ export type TaskProgressChecklist = {
   outcome?: "completed" | "failed" | "cancelled";
   /** Completion or error text at the end. */
   detail?: string;
+  /** How the run that owns the outcomes ended, once its ledger settled. */
+  end?: RunEndState;
 };
 
 /** The scope a turn attached, and its listing once the snapshot resolved it. */
@@ -103,11 +133,14 @@ export type TaskProgressRecord = {
   scope: TaskProgressScope | null;
   /** The live plan, or null when none runs. */
   plan: TaskProgressPlan | null;
-  /** An action's or Codex's steps, kept until the next question starts. */
+  /**
+   * An action's, Codex's or a run's outcome steps, kept until the next
+   * question starts.
+   */
   checklist: TaskProgressChecklist | null;
   /**
-   * True once a plan, an action or a Codex plan ran here: the row then stays
-   * for the conversation.
+   * True once a plan, an action, a Codex plan or a run's outcomes ran here:
+   * the row then stays for the conversation.
    */
   planSeen: boolean;
   /** Bumped when the answer starts streaming; open drawers collapse. */
@@ -152,7 +185,7 @@ function normalizeKey(value: unknown): number {
 }
 
 function isLive(state: TaskRunState): boolean {
-  return state === "working" || state === "answering";
+  return state === "working" || state === "answering" || state === "waiting";
 }
 
 /**
@@ -387,7 +420,7 @@ export function completeTaskRun(
 /** The run stopped early. The partial ledger stays. */
 export function endTaskRun(
   conversationKey: number,
-  outcome: "failed" | "cancelled",
+  outcome: "failed" | "cancelled" | "interrupted",
   runId?: string,
 ): void {
   const record = records.get(normalizeKey(conversationKey));
@@ -396,6 +429,43 @@ export function endTaskRun(
   writable(conversationKey);
   record.runState = outcome;
   changed(record);
+}
+
+/**
+ * A decision card opened (`waiting`) or was answered. The run is still live
+ * while it waits, and goes back to working once the user decides.
+ */
+export function markTaskWaiting(
+  conversationKey: number,
+  runId: string | undefined,
+  waiting: boolean,
+): void {
+  const record = records.get(normalizeKey(conversationKey));
+  if (!record || !isCurrentRun(record, runId)) return;
+  const applies = waiting
+    ? record.runState === "working" || record.runState === "answering"
+    : record.runState === "waiting";
+  if (!applies) return;
+  writable(conversationKey);
+  record.runState = waiting ? "waiting" : "working";
+  changed(record);
+}
+
+/**
+ * The state a record shows: how its current run's outcome ledger settled,
+ * once it did, or else its run state. A settled ledger is published before
+ * the run's final answer, so the answer completing never hides its ending.
+ */
+export function displayedTaskRunState(
+  record: TaskProgressRecord | null | undefined,
+): TaskRunState | RunEndState {
+  if (!record) return "idle";
+  const checklist = record.checklist;
+  return checklist?.source === "outcomes" &&
+    checklist.end &&
+    checklist.runId === record.runId
+    ? checklist.end
+    : record.runState;
 }
 
 /** The live plan's steps, or null once no plan runs. */
@@ -600,6 +670,71 @@ export function setTaskChecklist(
   changed(record);
 }
 
+/**
+ * The steps a run's outcome ledger shows, one per outcome, with how the run
+ * ended once it settled. Null for a ledger with no outcome and no end.
+ */
+export function taskOutcomesChecklist(
+  runId: string,
+  checkpoint: ExecutionCheckpoint,
+): TaskProgressChecklist | null {
+  if (!runId || (!checkpoint.tasks.length && !checkpoint.end)) return null;
+  const steps: TaskProgressStep[] = checkpoint.tasks.map((task) => ({
+    label: task.description,
+    status: task.status,
+    ...(task.reason ? { detail: task.reason } : {}),
+    outcome: {
+      host: task.origin === "host",
+      write: task.effect === "mutation",
+      targets: task.targets?.length || 0,
+      doneTargets: task.doneTargets?.length || 0,
+      exceptions: (task.exceptions || []).map((entry) => ({
+        targets: [...entry.targets],
+        reason: entry.reason,
+      })),
+    },
+  }));
+  return {
+    source: "outcomes",
+    runId,
+    title: "",
+    steps,
+    done: countDone(steps),
+    total: steps.length,
+    summary: "",
+    ...(checkpoint.end ? { end: checkpoint.end.state } : {}),
+  };
+}
+
+/**
+ * A run's outcome ledger, as its latest checkpoint stands. With at least one
+ * outcome the row applies for the conversation, as an action's steps do. A
+ * checkpoint that changes nothing the steps show changes nothing here, and
+ * another run's checkpoint is ignored.
+ */
+export function setTaskOutcomes(
+  conversationKey: number,
+  runId: string,
+  checkpoint: ExecutionCheckpoint,
+): void {
+  const next = taskOutcomesChecklist(runId?.trim() || "", checkpoint);
+  if (!next) return;
+  const existing = records.get(normalizeKey(conversationKey));
+  if (existing && !isCurrentRun(existing, next.runId)) return;
+  const record = writable(conversationKey);
+  if (!record) return;
+  const planSeen = record.planSeen || next.steps.length > 0;
+  if (
+    planSeen === record.planSeen &&
+    JSON.stringify(record.checklist) === JSON.stringify(next)
+  ) {
+    return;
+  }
+  record.checklist = next;
+  record.planSeen = planSeen;
+  changed(record);
+}
+
 // ---------------------------------------------------------------------------
 // History
 // ---------------------------------------------------------------------------
@@ -621,9 +756,9 @@ export type TaskProgressHistory = {
   latestTurn: number;
   /** How the latest question ended, or null when it has no answer. */
   settled: TaskRunState | null;
-  /** A plan or a Codex plan ran in the conversation. */
+  /** A plan, a Codex plan or a run's outcomes ran in the conversation. */
   planSeen: boolean;
-  /** The latest run's Codex plan, if it had one. */
+  /** The latest run's Codex plan or outcome steps, if it had any. */
   checklist: Omit<
     TaskProgressChecklist,
     "done" | "total" | "summary" | "title"
@@ -682,7 +817,10 @@ export function hydrateTaskProgress(
         total: steps.length,
         summary: "",
       };
-      record.planSeen = true;
+      // A ledger that only recorded its ending shows no steps.
+      if (history.checklist.source !== "outcomes" || steps.length) {
+        record.planSeen = true;
+      }
     }
   }
   record.hydrated = true;

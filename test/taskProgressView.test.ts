@@ -16,9 +16,13 @@ import {
   endTaskRun,
   getTaskProgress,
   markTaskAnswering,
+  markTaskWaiting,
+  setTaskOutcomes,
   setTaskPlan,
   setTaskScope,
 } from "../src/modules/contextPanel/taskProgress/store";
+import { OUTCOME_REASONS } from "../src/agent/loop/outcomes";
+import { initI18n, t } from "../src/utils/i18n";
 import {
   TASK_PROGRESS_FLASH_MS,
   TASK_PROGRESS_OPEN_PASSAGE_EVENT,
@@ -37,7 +41,12 @@ import {
   type TaskProgressViewInput,
 } from "../src/modules/contextPanel/taskProgress/view";
 import { collectFakeText, fakeDocument, FakeElement } from "./helpers/fakeDom";
-import { ledgerDelta, quoteCitation } from "./helpers/taskProgressFixtures";
+import {
+  ledgerDelta,
+  outcomeCheckpoint,
+  outcomeTask,
+  quoteCitation,
+} from "./helpers/taskProgressFixtures";
 
 const KEY = 42;
 
@@ -98,6 +107,7 @@ function mount(
     doc?: Document;
     /** Set to true to make timers throw, as a closed window's do. */
     windowClosed?: { value: boolean };
+    resolvePaperLabel?: (itemId: number) => string | null;
   } = {},
 ): Harness {
   const timers = new Map<number, { callback: () => void; ms: number }>();
@@ -142,6 +152,7 @@ function mount(
         : undefined,
       navigateToCitation: (card) => navigated.push(card as never),
       layout: options.layout,
+      resolvePaperLabel: options.resolvePaperLabel,
     },
   });
   view.setInput({
@@ -1365,6 +1376,402 @@ describe("task progress view", function () {
       assert.isFalse(harness.view.isOpen(), "the other one was closed");
       harness.row.dispatchFakeEvent("click");
       assert.deepEqual(expandedKeys(harness), ["1:5"]);
+    });
+  });
+});
+
+describe("task progress view of an outcome ledger", function () {
+  const views: TaskProgressView[] = [];
+  afterEach(function () {
+    for (const view of views.splice(0)) view.dispose();
+    clearAllTaskProgress();
+    resetTaskProgressDrawerHeight();
+  });
+  function track(harness: Harness): Harness {
+    views.push(harness.view);
+    return harness;
+  }
+  const pill = (harness: Harness) =>
+    harness.row.findByClass("llm-task-progress-pill") as any;
+  function openSteps(harness: Harness): FakeElement {
+    harness.row.dispatchFakeEvent("click");
+    const steps = harness.drawer.findByClass("llm-task-progress-steps")!;
+    assert.isFalse((steps as any).hidden, "the Steps block shows");
+    return steps;
+  }
+  const headerStatus = (steps: FakeElement) =>
+    steps.findByClass("llm-plan-status")!.textContent;
+  const rows = (steps: FakeElement) => steps.findAllByClass("llm-plan-task");
+  const labelOf = (row: FakeElement) =>
+    row.findByClass("llm-plan-task-label")!.textContent;
+  const detailOf = (row: FakeElement) =>
+    row.findByClass("llm-plan-task-original")?.textContent || "";
+
+  const read = outcomeTask("read", {
+    description: "Read the paper",
+    effect: "read",
+    status: "completed",
+  });
+  const save = outcomeTask("save", {
+    description: "Save the summary as a note",
+  });
+
+  it("while the run is live: no pill, the steps count first, and one row per outcome", function () {
+    seedScope();
+    const harness = track(mount());
+    beginTaskRun(KEY, { runId: "run-a" });
+    setTaskOutcomes(KEY, "run-a", outcomeCheckpoint([read, save]));
+    harness.view.flush();
+    assert.isTrue(pill(harness).hidden);
+    assert.equal(harness.row.dataset.state, "working");
+    assert.equal(harness.count(), "1/2 steps · 0 of 200 read");
+    const steps = openSteps(harness);
+    assert.equal(headerStatus(steps), "In progress");
+    assert.include(collectFakeText(steps), "Steps");
+    const [readRow, saveRow] = rows(steps);
+    assert.deepEqual(
+      [readRow.className, saveRow.className],
+      [
+        "llm-plan-task llm-plan-task-completed",
+        "llm-plan-task llm-plan-task-pending",
+      ],
+    );
+    assert.equal(readRow.findByClass("llm-plan-task-badge")!.textContent, "✓");
+    assert.equal(
+      saveRow.findByClass("llm-plan-task-badge")!.textContent,
+      "2",
+      "a pending part shows its number",
+    );
+    assert.equal(
+      readRow.findByClass("llm-plan-task-pill")!.textContent,
+      "Done",
+    );
+    assert.isTrue((saveRow.findByClass("llm-plan-task-pill") as any).hidden);
+    assert.equal(labelOf(saveRow), "Save the summary as a note");
+  });
+
+  it("while a decision card is open: Needs your decision", function () {
+    seedScope();
+    const harness = track(mount());
+    beginTaskRun(KEY, { runId: "run-a" });
+    setTaskOutcomes(KEY, "run-a", outcomeCheckpoint([save]));
+    markTaskWaiting(KEY, "run-a", true);
+    harness.view.flush();
+    assert.equal(harness.row.dataset.state, "waiting");
+    assert.equal(pill(harness).textContent, "Needs input");
+    assert.equal(pill(harness).dataset.tone, "waiting");
+    assert.equal(harness.count(), "0/1 steps · 0 of 200 read");
+    markTaskWaiting(KEY, "run-a", false);
+    harness.view.flush();
+    assert.isTrue(pill(harness).hidden);
+    assert.equal(harness.row.dataset.state, "working");
+  });
+
+  it("completed with exceptions: the pill, the steps count, and a not-done row naming reasons and papers", function () {
+    seedScope(6);
+    const harness = track(
+      mount(
+        {},
+        {
+          resolvePaperLabel: (itemId) => (itemId === 4 ? "(Lee, 2020)" : null),
+        },
+      ),
+    );
+    beginTaskRun(KEY, { runId: "run-a" });
+    setTaskOutcomes(
+      KEY,
+      "run-a",
+      outcomeCheckpoint(
+        [
+          // A model outcome names its targets without an item count.
+          {
+            ...save,
+            status: "completed",
+            targets: ["item:5", "item:6"],
+            doneTargets: ["item:5", "item:6"],
+          },
+          outcomeTask("host-tags", {
+            description: "Added tags",
+            origin: "host",
+            status: "completed",
+            targets: ["item:3", "item:4", "item:99", "file:/tmp/export.csv"],
+            doneTargets: ["item:3"],
+            exceptions: [
+              {
+                targets: ["item:4", "item:99"],
+                reason: "In a group library you cannot edit",
+              },
+              { targets: ["file:/tmp/export.csv"], reason: "Not applied" },
+            ],
+          }),
+        ],
+        "completed_with_exceptions",
+      ),
+    );
+    completeTaskRun(KEY, { runId: "run-a" });
+    harness.view.flush();
+    assert.equal(harness.row.dataset.state, "completed_with_exceptions");
+    assert.equal(pill(harness).textContent, "Partly done");
+    assert.equal(pill(harness).dataset.tone, "completed_with_exceptions");
+    assert.match(harness.count(), /^2\/2 steps · /);
+    assert.equal(
+      harness.row.getAttribute("aria-label"),
+      `Task progress, Partly done, ${harness.count()}`,
+    );
+    const steps = openSteps(harness);
+    assert.equal(headerStatus(steps), "Completed with exceptions");
+    assert.equal(
+      (steps.findByClass("llm-plan-status") as any).dataset.status,
+      "completed_with_exceptions",
+    );
+    const [saveRow, hostRow, notDone] = rows(steps);
+    assert.equal(labelOf(saveRow), "Save the summary as a note");
+    assert.equal(labelOf(hostRow), "Added tags · 4 items");
+    assert.equal(notDone.findByClass("llm-plan-task-badge")!.textContent, "!");
+    assert.equal(labelOf(notDone), "3 not done");
+    assert.equal(
+      detailOf(notDone),
+      "In a group library you cannot edit: (Lee, 2020), item:99 · Not applied: file:/tmp/export.csv",
+    );
+  });
+
+  it("completed with exceptions for one targeted write: counts its targets", function () {
+    seedScope(6);
+    const targets = Array.from(
+      { length: 10 },
+      (_, index) => `item:${index + 1}`,
+    );
+    const harness = track(mount());
+    beginTaskRun(KEY, { runId: "run-a" });
+    setTaskOutcomes(
+      KEY,
+      "run-a",
+      outcomeCheckpoint(
+        [
+          outcomeTask("host-batch", {
+            description: "Updated metadata",
+            origin: "host",
+            status: "completed",
+            targets,
+            doneTargets: targets.slice(0, 8),
+            exceptions: [
+              {
+                targets: targets.slice(8),
+                reason: "In a group library you cannot edit",
+              },
+            ],
+          }),
+        ],
+        "completed_with_exceptions",
+      ),
+    );
+    completeTaskRun(KEY, { runId: "run-a" });
+    harness.view.flush();
+    assert.match(harness.count(), /^8 of 10 done · /);
+  });
+
+  it("names a host outcome's items only when there are several, and counts targets only for an exception", function () {
+    seedScope();
+    const harness = track(mount());
+    beginTaskRun(KEY, { runId: "run-a" });
+    setTaskOutcomes(
+      KEY,
+      "run-a",
+      outcomeCheckpoint(
+        [
+          outcomeTask("host-tag", {
+            description: "Added tags",
+            origin: "host",
+            status: "completed",
+            targets: ["item:3"],
+            doneTargets: ["item:3"],
+          }),
+        ],
+        "completed",
+      ),
+    );
+    completeTaskRun(KEY, { runId: "run-a" });
+    harness.view.flush();
+    assert.equal(pill(harness).textContent, "Completed");
+    assert.match(harness.count(), /^1\/1 steps · /);
+    const [row] = rows(openSteps(harness));
+    assert.equal(labelOf(row), "Added tags");
+  });
+
+  it("names at most five targets per reason, and reads each paper's label once", function () {
+    seedScope();
+    const lookedUp: number[] = [];
+    const harness = track(
+      mount(
+        {},
+        {
+          resolvePaperLabel: (itemId) => {
+            lookedUp.push(itemId);
+            return `(Author ${itemId}, 2020)`;
+          },
+        },
+      ),
+    );
+    const undone = Array.from(
+      { length: 8 },
+      (_, index) => `item:${index + 11}`,
+    );
+    const tags = outcomeTask("host-tags", {
+      description: "Added tags",
+      origin: "host",
+      status: "completed",
+      targets: [...undone, "item:30"],
+      doneTargets: ["item:30"],
+      exceptions: [
+        { targets: undone, reason: "In a group library you cannot edit" },
+      ],
+    });
+    const expected =
+      "In a group library you cannot edit: (Author 11, 2020), (Author 12, 2020), (Author 13, 2020), (Author 14, 2020), (Author 15, 2020) and 3 more";
+    beginTaskRun(KEY, { runId: "run-a" });
+    setTaskOutcomes(KEY, "run-a", outcomeCheckpoint([save, tags]));
+    harness.view.flush();
+    const steps = openSteps(harness);
+    assert.equal(labelOf(rows(steps)[2]), "8 not done");
+    assert.equal(detailOf(rows(steps)[2]), expected);
+    // Repaints as the ledger moves on reuse the labels already read.
+    const saved = { ...save, status: "completed" as const };
+    setTaskOutcomes(KEY, "run-a", outcomeCheckpoint([saved, tags]));
+    harness.view.flush();
+    setTaskOutcomes(
+      KEY,
+      "run-a",
+      outcomeCheckpoint([saved, tags], "completed_with_exceptions"),
+    );
+    harness.view.flush();
+    // Each repaint rebuilt the Steps block; the labels were read only once.
+    assert.equal(detailOf(rows(steps)[2]), expected);
+    assert.deepEqual(lookedUp, [11, 12, 13, 14, 15]);
+  });
+
+  it("blocked: Needs your decision, the steps count, and why", function () {
+    seedScope();
+    const harness = track(mount());
+    beginTaskRun(KEY, { runId: "run-a" });
+    setTaskOutcomes(
+      KEY,
+      "run-a",
+      outcomeCheckpoint(
+        [{ ...save, status: "blocked", reason: OUTCOME_REASONS.declined }],
+        "blocked",
+      ),
+    );
+    completeTaskRun(KEY, { runId: "run-a" });
+    harness.view.flush();
+    assert.equal(harness.row.dataset.state, "blocked");
+    assert.equal(pill(harness).textContent, "Needs input");
+    assert.equal(pill(harness).dataset.tone, "blocked");
+    assert.match(harness.count(), /^0\/1 steps · /);
+    const steps = openSteps(harness);
+    assert.equal(headerStatus(steps), "Needs your decision");
+    assert.equal(
+      (steps.findByClass("llm-plan-status") as any).dataset.status,
+      "waiting_for_user",
+      "a blocked ledger's header takes the amber waiting look",
+    );
+    const [row] = rows(steps);
+    assert.equal(row.className, "llm-plan-task llm-plan-task-blocked");
+    assert.equal(row.findByClass("llm-plan-task-badge")!.textContent, "!");
+    assert.equal(row.findByClass("llm-plan-task-pill")!.textContent, "Blocked");
+    assert.equal(detailOf(row), "You declined this change.");
+  });
+
+  it("interrupted: the pill, the header, and how to resume", function () {
+    seedScope();
+    const harness = track(mount());
+    beginTaskRun(KEY, { runId: "run-a" });
+    setTaskOutcomes(
+      KEY,
+      "run-a",
+      outcomeCheckpoint([read, save], "interrupted"),
+    );
+    endTaskRun(KEY, "failed", "run-a");
+    harness.view.flush();
+    assert.equal(harness.row.dataset.state, "interrupted");
+    assert.equal(pill(harness).textContent, "Interrupted");
+    assert.equal(pill(harness).dataset.tone, "interrupted");
+    assert.match(harness.count(), /^1\/2 steps · /);
+    const steps = openSteps(harness);
+    assert.equal(headerStatus(steps), "Interrupted");
+    assert.include(collectFakeText(steps), "Say “continue” to resume.");
+  });
+
+  it("an end with no outcome shows no steps", function () {
+    seedScope();
+    const harness = track(mount());
+    beginTaskRun(KEY, { runId: "run-a" });
+    setTaskOutcomes(KEY, "run-a", outcomeCheckpoint([], "blocked"));
+    harness.view.flush();
+    assert.equal(harness.count(), "0 of 200 read");
+    assert.equal(pill(harness).textContent, "Needs input");
+    harness.row.dispatchFakeEvent("click");
+    const steps = harness.drawer.findByClass("llm-task-progress-steps")!;
+    assert.isTrue((steps as any).hidden);
+  });
+
+  describe("in Chinese", function () {
+    const globals = globalThis as unknown as { Zotero?: unknown };
+    let previousZotero: unknown;
+    before(function () {
+      previousZotero = globals.Zotero;
+      globals.Zotero = { Prefs: { get: () => "zh-CN" }, locale: "zh-CN" };
+      initI18n();
+    });
+    after(function () {
+      if (previousZotero === undefined) delete globals.Zotero;
+      else globals.Zotero = previousZotero;
+      initI18n();
+    });
+
+    it("translates every host reason and new string, and keeps the model's words as written", function () {
+      for (const value of [
+        ...Object.values(OUTCOME_REASONS),
+        "Needs your decision",
+        "Partly done",
+        "{done} of {total} done",
+        "{count} not done",
+        "{count} items",
+        "Say “continue” to resume.",
+      ]) {
+        assert.notEqual(t(value), value, value);
+      }
+      seedScope();
+      const harness = track(mount());
+      beginTaskRun(KEY, { runId: "run-a" });
+      setTaskOutcomes(
+        KEY,
+        "run-a",
+        outcomeCheckpoint(
+          [
+            { ...save, status: "blocked", reason: OUTCOME_REASONS.declined },
+            outcomeTask("ask", {
+              description: "Ask which collection to use",
+              status: "blocked",
+              reason: "Needs the user's choice of collection",
+            }),
+            // The model's words stay as written even when they read like a
+            // string the plugin translates.
+            outcomeTask("pick", {
+              description: "Pick a collection",
+              status: "blocked",
+              reason: "Needs input",
+            }),
+          ],
+          "blocked",
+        ),
+      );
+      harness.view.flush();
+      const [declinedRow, askRow, pickRow] = rows(openSteps(harness));
+      assert.equal(detailOf(declinedRow), t(OUTCOME_REASONS.declined));
+      assert.equal(detailOf(askRow), "Needs the user's choice of collection");
+      assert.equal(labelOf(askRow), "Ask which collection to use");
+      assert.notEqual(t("Needs input"), "Needs input");
+      assert.equal(detailOf(pickRow), "Needs input");
     });
   });
 });

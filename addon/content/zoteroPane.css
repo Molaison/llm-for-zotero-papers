@@ -9702,7 +9702,9 @@ details.llm-agent-action-row[open] > summary .llm-agent-action-row-marker {
   color: #2e9b55;
 }
 
-.llm-plan-status[data-status="partial"] {
+.llm-plan-status[data-status="partial"],
+[data-llm-checklist-source="outcomes"]
+  .llm-plan-status[data-status="waiting_for_user"] {
   background: color-mix(in srgb, #d58a22 16%, transparent);
   color: #d58a22;
 }
@@ -14862,17 +14864,21 @@ item-pane-sidenav .llm-persistent-rail-entry[hidden] {
 }
 
 .llm-task-progress[data-state="working"] .llm-task-progress-ring-arc,
-.llm-task-progress[data-state="answering"] .llm-task-progress-ring-arc {
+.llm-task-progress[data-state="answering"] .llm-task-progress-ring-arc,
+.llm-task-progress[data-state="waiting"] .llm-task-progress-ring-arc {
   display: inline;
 }
 
 .llm-task-progress[data-state="working"] .llm-task-progress-ring-track,
-.llm-task-progress[data-state="answering"] .llm-task-progress-ring-track {
+.llm-task-progress[data-state="answering"] .llm-task-progress-ring-track,
+.llm-task-progress[data-state="waiting"] .llm-task-progress-ring-track {
   animation: llm-plan-progress-spin 1.1s linear infinite;
   animation-delay: var(--llm-stable-animation-delay, 0ms);
 }
 
-.llm-task-progress[data-state="cancelled"] .llm-task-progress-ring-base {
+.llm-task-progress[data-state="cancelled"] .llm-task-progress-ring-base,
+.llm-task-progress[data-state="interrupted"] .llm-task-progress-ring-base,
+.llm-task-progress[data-state="blocked"] .llm-task-progress-ring-base {
   stroke-dasharray: 3 3;
 }
 
@@ -14895,12 +14901,16 @@ item-pane-sidenav .llm-persistent-rail-entry[hidden] {
 }
 
 .llm-task-progress[data-state="completed"] .llm-task-progress-badge-done,
+.llm-task-progress[data-state="completed_with_exceptions"]
+  .llm-task-progress-badge-done,
 .llm-task-progress[data-state="failed"] .llm-task-progress-badge-failed {
   display: inline-flex;
   animation: llm-task-progress-pop 300ms var(--llm-task-progress-ease) both;
 }
 
 .llm-task-progress[data-state="completed"] .llm-task-progress-ring-track,
+.llm-task-progress[data-state="completed_with_exceptions"]
+  .llm-task-progress-ring-track,
 .llm-task-progress[data-state="failed"] .llm-task-progress-ring-track {
   display: none;
 }
@@ -14932,6 +14942,17 @@ item-pane-sidenav .llm-persistent-rail-entry[hidden] {
 .llm-task-progress-pill[data-tone="failed"] {
   color: var(--llm-diff-remove-fg);
   background: color-mix(in srgb, var(--llm-diff-remove-fg) 16%, transparent);
+}
+
+/* A run that ended short of everything it set out to do, or waits on the
+   user: the amber the plan's partial status and interrupted badge use in
+   both themes. */
+.llm-task-progress-pill[data-tone="completed_with_exceptions"],
+.llm-task-progress-pill[data-tone="blocked"],
+.llm-task-progress-pill[data-tone="waiting"],
+.llm-task-progress-pill[data-tone="interrupted"] {
+  color: #d58a22;
+  background: color-mix(in srgb, #d58a22 16%, transparent);
 }
 
 .llm-task-progress-chevron {

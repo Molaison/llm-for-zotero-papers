@@ -7,9 +7,11 @@
  * - every run's `paper_ledger_update` events (in-plugin Agent runs and the
  *   Codex/Claude Code run snapshots, which carry the MCP deltas);
  * - each finished answer's `quoteCitations`, the citations it rendered;
- * - whether a plan ran (`plan_*` events) or Codex kept a plan (its
- *   `codex-plan-checklist` event): the row then stays for the conversation;
- * - the latest run's Codex plan, shown as the steps.
+ * - whether a plan ran (`plan_*` events), Codex kept a plan (its
+ *   `codex-plan-checklist` event) or a run had outcomes (its
+ *   `execution_checkpoint` events): the row then stays for the conversation;
+ * - the latest run's Codex plan, or its latest outcome ledger with how the
+ *   run ended, shown as the steps.
  *
  * A built-in action leaves no conversation record, so its steps and its
  * "an action ran here" mark last only for the session.
@@ -32,6 +34,7 @@ import {
   getTaskProgress,
   getTaskProgressClearCount,
   hydrateTaskProgress,
+  taskOutcomesChecklist,
   type TaskProgressHistory,
   type TaskProgressHistoryRun,
   type TaskRunState,
@@ -44,6 +47,7 @@ export const TASK_PROGRESS_HISTORY_EVENT_TYPES = [
   "plan_updated",
   "plan_ready",
   "plan_execution_updated",
+  "execution_checkpoint",
 ] as const;
 
 const PLAN_EVENT_TYPES = new Set<string>([
@@ -57,9 +61,8 @@ function settledState(message: Message | undefined): TaskRunState | null {
     return null;
   }
   if (message.text === "[Cancelled]") return "cancelled";
-  if (message.interrupted || /^Error:/.test(message.text || "")) {
-    return "failed";
-  }
+  if (message.interrupted) return "interrupted";
+  if (/^Error:/.test(message.text || "")) return "failed";
   return "completed";
 }
 
@@ -85,6 +88,8 @@ export function buildTaskProgressHistory(
       const payload: AgentEvent = entry.payload;
       if (payload.type === "paper_ledger_update" && payload.delta) {
         deltas.push(payload.delta);
+      } else if (payload.type === "execution_checkpoint") {
+        if (payload.checkpoint?.tasks?.length) planSeen = true;
       } else if (PLAN_EVENT_TYPES.has(payload.type)) {
         planSeen = true;
       } else if (readCodexPlanChecklist(payload)) {
@@ -106,6 +111,14 @@ export function buildTaskProgressHistory(
     for (const entry of eventsByRun.get(latest.runId) || []) {
       const steps = readCodexPlanChecklist(entry.payload);
       if (steps) checklist = { source: "codex", runId: latest.runId, steps };
+      // The run's latest checkpoint is its ledger as it stood last.
+      if (
+        entry.payload.type === "execution_checkpoint" &&
+        entry.payload.checkpoint
+      )
+        checklist =
+          taskOutcomesChecklist(latest.runId, entry.payload.checkpoint) ??
+          checklist;
     }
   }
   return {

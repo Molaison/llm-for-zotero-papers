@@ -1279,6 +1279,21 @@ const zhCN: Record<string, string> = {
   Blocked: "已阻塞",
   Superseded: "已被取代",
   "Supporting step": "辅助步骤",
+  "Needs your decision": "需要你的决定",
+  "Partly done": "部分完成",
+  "{done} of {total} done": "已完成 {done}/{total}",
+  "{count} not done": "{count} 项未完成",
+  "{count} items": "{count} 项",
+  "Say “continue” to resume.": "回复“继续”即可恢复。",
+  // The reasons the host writes into a run's outcome ledger (OUTCOME_REASONS).
+  "A skipped, blocked, or cancelled task needs the reason.":
+    "跳过、阻塞或取消的任务需要说明原因。",
+  "The change could not be verified; check the current state before retrying.":
+    "无法验证此更改；请先检查当前状态再重试。",
+  "You declined this change.": "你拒绝了此更改。",
+  "Not applied": "未应用",
+  "Not done before the answer.": "回答前未完成。",
+  "The change was not applied.": "此更改未应用。",
   Done: "完成",
   "Done when:": "完成条件：",
   Revision: "修订",

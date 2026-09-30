@@ -31,6 +31,7 @@ import type {
   TaskPaperTextSource,
 } from "../../../agent/context/taskPaperLedger";
 import type { TaskPaperScopeEntry } from "../../../agent/context/taskPaperScopeListing";
+import type { RunEndState } from "../../../agent/execution/types";
 import { t } from "../../../utils/i18n";
 import {
   canOpenTaskPaperPassage,
@@ -41,8 +42,10 @@ import {
   isLivePlanExecutionStatus,
   renderChecklistSteps,
   renderPlanSteps,
+  resolveTaskPaperLabel,
 } from "./planSteps";
 import {
+  displayedTaskRunState,
   getTaskProgress,
   getTaskProgressViewMemo,
   rememberTaskProgressView,
@@ -277,6 +280,50 @@ function actionText(record: TaskProgressRecord | null): string {
   );
 }
 
+/**
+ * The row's status pill for a shown state, or empty while the run works.
+ * Short, so the count beside it keeps its room; the Steps header says the
+ * full phrase.
+ */
+export function taskRunStatePill(state: TaskRunState | RunEndState): string {
+  switch (state) {
+    case "completed":
+      return t("Completed");
+    case "failed":
+      return t("Failed");
+    case "cancelled":
+      return t("Cancelled");
+    case "completed_with_exceptions":
+      return t("Partly done");
+    case "blocked":
+    case "waiting":
+      return t("Needs input");
+    case "interrupted":
+      return t("Interrupted");
+  }
+  return "";
+}
+
+/**
+ * "8 of 10 done": what a run that completed with exceptions reports when its
+ * one outcome is a write over named targets. Empty otherwise.
+ */
+function targetedWriteText(record: TaskProgressRecord | null): string {
+  const checklist = record?.checklist;
+  if (
+    checklist?.source !== "outcomes" ||
+    displayedTaskRunState(record) !== "completed_with_exceptions" ||
+    checklist.steps.length !== 1
+  )
+    return "";
+  const outcome = checklist.steps[0].outcome;
+  if (!outcome?.write || !outcome.targets) return "";
+  return format("{done} of {total} done", {
+    done: outcome.doneTargets,
+    total: outcome.targets,
+  });
+}
+
 /** The row's count text, e.g. "37 of 200 read · 12 cited". */
 export function formatTaskProgressCount(
   record: TaskProgressRecord | null,
@@ -285,12 +332,14 @@ export function formatTaskProgressCount(
 ): string {
   const state: TaskRunState = record?.runState || "idle";
   const steps = currentSteps(record);
-  const stepsText = steps
-    ? format("{done}/{total} steps", {
-        done: steps.completed,
-        total: steps.total,
-      })
-    : "";
+  const stepsText =
+    targetedWriteText(record) ||
+    (steps
+      ? format("{done}/{total} steps", {
+          done: steps.completed,
+          total: steps.total,
+        })
+      : "");
   // A built-in action records no reads: the row says what it is doing.
   if (record?.checklist?.source === "action") {
     const parts = [stepsText, actionText(record)].filter(Boolean);
@@ -640,6 +689,8 @@ export type TaskProgressViewDeps = {
   navigateToCitation?: (card: HTMLElement) => void;
   /** Live layout; without it (unit tests) the drawer settles at once. */
   layout?: TaskProgressLayout;
+  /** A paper's "(creator, year)" label; defaults to reading it from Zotero. */
+  resolvePaperLabel?: (itemId: number) => string | null;
 };
 
 export type TaskProgressLayout = {
@@ -689,6 +740,15 @@ export function mountTaskProgressView(params: {
   deps: TaskProgressViewDeps;
 }): TaskProgressView {
   const { doc, row, drawer, shell, chatBox, keyTarget, deps } = params;
+  // A not-done row's paper labels, read once per item while the view lives,
+  // so a repaint never looks them up again.
+  const readPaperLabel = deps.resolvePaperLabel || resolveTaskPaperLabel;
+  const paperLabels = new Map<number, string | null>();
+  const resolvePaperLabel = (itemId: number): string | null => {
+    if (!paperLabels.has(itemId))
+      paperLabels.set(itemId, readPaperLabel(itemId));
+    return paperLabels.get(itemId) ?? null;
+  };
   const body = drawer.querySelector(
     ".llm-task-progress-drawer-body",
   ) as HTMLElement;
@@ -1361,11 +1421,18 @@ export function mountTaskProgressView(params: {
     if (note.hidden !== input.recordsReads) note.hidden = input.recordsReads;
     const plan = current?.plan;
     const live = Boolean(plan && isLivePlanExecutionStatus(plan.ledger.status));
-    const checklist = current?.checklist;
+    // A ledger that only recorded its ending has no steps to show.
+    const checklist =
+      current?.checklist &&
+      (current.checklist.source !== "outcomes" ||
+        current.checklist.steps.length)
+        ? current.checklist
+        : null;
     if (steps.hidden !== (!live && !checklist))
       steps.hidden = !live && !checklist;
     if (live && plan) renderPlanSteps(doc, steps, plan);
-    else if (checklist) renderChecklistSteps(doc, steps, checklist);
+    else if (checklist)
+      renderChecklistSteps(doc, steps, checklist, { resolvePaperLabel });
     else if (steps.firstChild) steps.replaceChildren();
   };
 
@@ -1394,26 +1461,19 @@ export function mountTaskProgressView(params: {
         else rowHost.removeAttribute(ROW_SHOWN_ATTR);
       }
     }
-    const state = current?.runState || "idle";
+    const state = displayedTaskRunState(current);
     if (row.dataset.state !== state) row.dataset.state = state;
     const countText = formatTaskProgressCount(current, input.recordsReads);
     if (countEl.textContent !== countText) countEl.textContent = countText;
+    const pillText = taskRunStatePill(state);
     if (pillEl) {
-      const pillText =
-        state === "completed"
-          ? t("Completed")
-          : state === "failed"
-            ? t("Failed")
-            : state === "cancelled"
-              ? t("Cancelled")
-              : "";
       if (pillEl.textContent !== pillText) pillEl.textContent = pillText;
       if (pillEl.hidden !== !pillText) pillEl.hidden = !pillText;
       if (pillEl.dataset.tone !== state) pillEl.dataset.tone = state;
     }
-    const ariaLabel = countText
-      ? `${t("Task progress")}, ${countText}`
-      : t("Task progress");
+    const ariaLabel = [t("Task progress"), pillText, countText]
+      .filter(Boolean)
+      .join(", ");
     if (row.getAttribute("aria-label") !== ariaLabel)
       row.setAttribute("aria-label", ariaLabel);
     if (!visible) {

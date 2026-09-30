@@ -1,8 +1,10 @@
 /**
  * The Steps block of the Task progress drawer: the live plan's status, its
  * required-step progress bar, the task list, and the research line — or,
- * with no plan, a checklist: a built-in action's steps and summary, or the
- * plan Codex keeps with `update_plan`.
+ * with no plan, a checklist: a built-in action's steps and summary, the
+ * plan Codex keeps with `update_plan`, or a run's outcome ledger (each
+ * outcome with its pill and reason, a "not done" row for the targets it
+ * left undone, and how the run ended).
  *
  * This is the one place step progress renders (the floating capsule, the
  * in-chat action "Working" card and the Codex checklist trace row it
@@ -10,10 +12,16 @@
  * matching task rows by id, so an open `<details>` row and the nodes a
  * reader is looking at survive every ledger update.
  */
+import { OUTCOME_REASONS } from "../../../agent/loop/outcomes";
 import type { PlanExecutionLedger } from "../../../agent/plans/types";
+import { formatPaperDisplayLabel } from "../../../shared/paperDisplayLabels";
 import { t } from "../../../utils/i18n";
 import { applyStableAnimationPhase } from "../stableAnimationPhase";
-import type { TaskProgressChecklist, TaskProgressPlan } from "./store";
+import type {
+  TaskProgressChecklist,
+  TaskProgressPlan,
+  TaskProgressStep,
+} from "./store";
 
 const PLAN_STATUS_SYMBOLS: Record<string, string> = {
   pending: "",
@@ -26,6 +34,48 @@ const PLAN_STATUS_SYMBOLS: Record<string, string> = {
   skipped: "–",
   cancelled: "×",
 };
+
+/** The pill a task row shows for its status (English; rendered through t()). */
+const PLAN_STATUS_PILLS: Record<string, string> = {
+  completed: "Done",
+  failed: "Failed",
+  blocked: "Blocked",
+  waiting_for_user: "Needs input",
+  interrupted: "Interrupted",
+  skipped: "Skipped",
+  cancelled: "Cancelled",
+};
+
+/** Reasons the host writes into a ledger; everything else is the model's or a receipt's own words. */
+const HOST_REASONS: ReadonlySet<string> = new Set(
+  Object.values(OUTCOME_REASONS),
+);
+
+/** An outcome's reason in the reader's language when the host wrote it. */
+function outcomeReasonText(reason: string): string {
+  return HOST_REASONS.has(reason) ? t(reason) : reason;
+}
+
+/**
+ * A paper's "(creator, year)" label, read from Zotero; null for an id that
+ * names no regular item, which then shows as written.
+ */
+export function resolveTaskPaperLabel(itemId: number): string | null {
+  try {
+    const item = Zotero.Items.get(itemId);
+    if (!item || !item.isRegularItem()) return null;
+    const field = (name: string) =>
+      String(item.getField(name as never) || "").trim();
+    return formatPaperDisplayLabel({
+      title: field("title") || item.getDisplayTitle(),
+      firstCreator: field("firstCreator"),
+      year: field("date").match(/\b\d{4}\b/)?.[0],
+    });
+  } catch {
+    // A library that cannot be read leaves the target as written.
+    return null;
+  }
+}
 
 /** Plan execution states the Steps block shows as live. */
 export function isLivePlanExecutionStatus(status: string | undefined): boolean {
@@ -175,16 +225,9 @@ function renderExecutionTasks(
 
     const pill = doc.createElement("span");
     pill.className = `llm-plan-task-pill llm-plan-task-pill-${entry.status}`;
-    const pillText: Record<string, string> = {
-      completed: "Done",
-      failed: "Failed",
-      blocked: "Blocked",
-      waiting_for_user: "Needs input",
-      interrupted: "Interrupted",
-      skipped: "Skipped",
-      cancelled: "Cancelled",
-    };
-    pill.textContent = pillText[entry.status] ? t(pillText[entry.status]) : "";
+    pill.textContent = PLAN_STATUS_PILLS[entry.status]
+      ? t(PLAN_STATUS_PILLS[entry.status])
+      : "";
     if (!pill.textContent) pill.hidden = true;
 
     line.append(badge, content, pill);
@@ -308,7 +351,35 @@ export function renderPlanSteps(
   host.replaceChildren(next);
 }
 
+/**
+ * The header look of an outcome ledger's ending. A blocked ledger waits on
+ * the user, so it takes the amber waiting look, not the red a blocked plan
+ * shows.
+ */
+function outcomesHeaderStatus(
+  end: TaskProgressChecklist["end"],
+): string | undefined {
+  return end === "blocked" ? "waiting_for_user" : end;
+}
+
 function checklistStatusLabel(checklist: TaskProgressChecklist): string {
+  if (checklist.source === "outcomes") {
+    switch (checklist.end) {
+      case "completed":
+        return t("Completed");
+      case "completed_with_exceptions":
+        return t("Completed with exceptions");
+      case "blocked":
+        return t("Needs your decision");
+      case "interrupted":
+        return t("Interrupted");
+      case "failed":
+        return t("Failed");
+      case "cancelled":
+        return t("Cancelled");
+    }
+    return t("In progress");
+  }
   switch (checklist.outcome) {
     case "completed":
       return t("Completed");
@@ -320,10 +391,131 @@ function checklistStatusLabel(checklist: TaskProgressChecklist): string {
   return t("In progress");
 }
 
+/** Targets a not-done row names for one reason before it counts the rest. */
+const NOT_DONE_NAMED_TARGETS = 5;
+
+export type ChecklistRenderOptions = {
+  /** A paper's "(creator, year)" label; a target it cannot name shows as written. */
+  resolvePaperLabel?: (itemId: number) => string | null;
+};
+
+/** How a not-done row names one target: a paper by its label, else as written. */
+function targetLabel(
+  target: string,
+  resolvePaperLabel: ChecklistRenderOptions["resolvePaperLabel"],
+): string {
+  const item = /^item:(\d+)(?:#\d+)?$/.exec(target);
+  if (!item || !resolvePaperLabel) return target;
+  return resolvePaperLabel(Number(item[1])) || target;
+}
+
+/** A step row: badge, label, and, for an outcome, its reason and pill. */
+function buildChecklistRow(
+  doc: Document,
+  step: TaskProgressStep,
+  index: number,
+  outcomes: boolean,
+): HTMLElement {
+  const row = doc.createElement("div");
+  row.dataset.taskId = `step-${index + 1}`;
+  row.className = `llm-plan-task llm-plan-task-${step.status}`;
+  row.setAttribute("role", "listitem");
+  const line = doc.createElement("div");
+  line.className = "llm-plan-task-line";
+  const badge = doc.createElement("span");
+  badge.className = `llm-plan-task-badge llm-plan-task-badge-${step.status}`;
+  badge.setAttribute("aria-hidden", "true");
+  badge.textContent =
+    PLAN_STATUS_SYMBOLS[step.status] ||
+    (step.status === "in_progress" ? "" : `${index + 1}`);
+  const content = doc.createElement("span");
+  content.className = "llm-plan-task-content";
+  const label = doc.createElement("span");
+  label.className = "llm-plan-task-label";
+  const items = step.outcome?.host ? step.outcome.targets : 0;
+  label.textContent =
+    items > 1
+      ? `${step.label} · ${t("{count} items").replace("{count}", `${items}`)}`
+      : step.label;
+  content.appendChild(label);
+  if (outcomes && step.detail) {
+    const reason = doc.createElement("span");
+    reason.className = "llm-plan-task-original";
+    reason.textContent = outcomeReasonText(step.detail);
+    content.appendChild(reason);
+  }
+  line.append(badge, content);
+  if (outcomes) {
+    const pill = doc.createElement("span");
+    pill.className = `llm-plan-task-pill llm-plan-task-pill-${step.status}`;
+    pill.textContent = PLAN_STATUS_PILLS[step.status]
+      ? t(PLAN_STATUS_PILLS[step.status])
+      : "";
+    if (!pill.textContent) pill.hidden = true;
+    line.appendChild(pill);
+  }
+  row.appendChild(line);
+  return row;
+}
+
+/**
+ * The row under an outcome that left targets undone: how many, and each
+ * reason with the targets it covers.
+ */
+function buildNotDoneRow(
+  doc: Document,
+  step: TaskProgressStep,
+  index: number,
+  options: ChecklistRenderOptions,
+): HTMLElement {
+  const exceptions = step.outcome?.exceptions || [];
+  const undone = new Set(exceptions.flatMap((entry) => entry.targets));
+  const row = doc.createElement("div");
+  row.dataset.taskId = `step-${index + 1}-not-done`;
+  row.className = "llm-plan-task llm-plan-task-waiting_for_user";
+  row.setAttribute("role", "listitem");
+  const line = doc.createElement("div");
+  line.className = "llm-plan-task-line";
+  const badge = doc.createElement("span");
+  badge.className = "llm-plan-task-badge llm-plan-task-badge-waiting_for_user";
+  badge.setAttribute("aria-hidden", "true");
+  badge.textContent = PLAN_STATUS_SYMBOLS.waiting_for_user;
+  const content = doc.createElement("span");
+  content.className = "llm-plan-task-content";
+  const label = doc.createElement("span");
+  label.className = "llm-plan-task-label";
+  label.textContent = t("{count} not done").replace(
+    "{count}",
+    `${undone.size}`,
+  );
+  const detail = doc.createElement("span");
+  detail.className = "llm-plan-task-original";
+  detail.textContent = exceptions
+    .map((entry) => {
+      const reason = outcomeReasonText(entry.reason);
+      if (!entry.targets.length) return reason;
+      const named = entry.targets
+        .slice(0, NOT_DONE_NAMED_TARGETS)
+        .map((target) => targetLabel(target, options.resolvePaperLabel))
+        .join(", ");
+      const rest = entry.targets.length - NOT_DONE_NAMED_TARGETS;
+      return rest > 0
+        ? `${reason}: ${named} ${t("and {count} more").replace("{count}", `${rest}`)}`
+        : `${reason}: ${named}`;
+    })
+    .join(" · ");
+  content.append(label, detail);
+  line.append(badge, content);
+  row.appendChild(line);
+  return row;
+}
+
 function buildChecklistContent(
   doc: Document,
   checklist: TaskProgressChecklist,
+  options: ChecklistRenderOptions = {},
 ): HTMLElement {
+  const outcomes = checklist.source === "outcomes";
   const content = doc.createElement("div");
   content.className = "llm-task-progress-steps-body";
   content.setAttribute("data-llm-checklist-run-id", checklist.runId);
@@ -341,7 +533,9 @@ function buildChecklistContent(
   const status = doc.createElement("span");
   status.className = "llm-plan-status";
   status.textContent = checklistStatusLabel(checklist);
-  status.dataset.status = checklist.outcome || "running";
+  status.dataset.status =
+    (outcomes ? outcomesHeaderStatus(checklist.end) : checklist.outcome) ||
+    "running";
   header.append(heading, status);
   const children: HTMLElement[] = [header];
   if (checklist.total > 0) {
@@ -367,29 +561,18 @@ function buildChecklistContent(
   tasks.setAttribute("role", "list");
   checklist.steps.forEach((step, index) => {
     if (!step.label) return;
-    const row = doc.createElement("div");
-    row.dataset.taskId = `step-${index + 1}`;
-    row.className = `llm-plan-task llm-plan-task-${step.status}`;
-    row.setAttribute("role", "listitem");
-    const line = doc.createElement("div");
-    line.className = "llm-plan-task-line";
-    const badge = doc.createElement("span");
-    badge.className = `llm-plan-task-badge llm-plan-task-badge-${step.status}`;
-    badge.setAttribute("aria-hidden", "true");
-    badge.textContent =
-      PLAN_STATUS_SYMBOLS[step.status] ||
-      (step.status === "in_progress" ? "" : `${index + 1}`);
-    const content = doc.createElement("span");
-    content.className = "llm-plan-task-content";
-    const label = doc.createElement("span");
-    label.className = "llm-plan-task-label";
-    label.textContent = step.label;
-    content.appendChild(label);
-    line.append(badge, content);
-    row.appendChild(line);
-    tasks.appendChild(row);
+    tasks.appendChild(buildChecklistRow(doc, step, index, outcomes));
+    if (outcomes && step.outcome?.exceptions.length) {
+      tasks.appendChild(buildNotDoneRow(doc, step, index, options));
+    }
   });
   children.push(tasks);
+  if (outcomes && checklist.end === "interrupted") {
+    const resume = doc.createElement("p");
+    resume.className = "llm-plan-research-progress";
+    resume.textContent = t("Say “continue” to resume.");
+    children.push(resume);
+  }
   if (checklist.summary) {
     const summary = doc.createElement("div");
     summary.className = "llm-plan-research-progress";
@@ -417,8 +600,9 @@ export function renderChecklistSteps(
   doc: Document,
   host: HTMLElement,
   checklist: TaskProgressChecklist,
+  options: ChecklistRenderOptions = {},
 ): void {
-  const next = buildChecklistContent(doc, checklist);
+  const next = buildChecklistContent(doc, checklist, options);
   const previous = host.firstChild as HTMLElement | null;
   if (
     previous &&

@@ -14,9 +14,14 @@ import type {
 import { buildQuoteCitation } from "../src/services/quotes/quoteCitations";
 import {
   clearAllTaskProgress,
+  displayedTaskRunState,
   getTaskProgress,
 } from "../src/modules/contextPanel/taskProgress/store";
-import { ledgerDelta } from "./helpers/taskProgressFixtures";
+import {
+  ledgerDelta,
+  outcomeCheckpoint,
+  outcomeTask,
+} from "./helpers/taskProgressFixtures";
 
 function fakeItem(id: number): Zotero.Item {
   return {
@@ -1966,6 +1971,35 @@ describe("agent engine final UI release", function () {
       );
     });
 
+    it("ends the run interrupted when its answer broke off mid-stream, as a reopen shows it", async function () {
+      const conversationKey = 707;
+      const deps = createDeps({
+        runtime: runtimeWith(async (params) => {
+          await params.onStart?.("run-drop");
+          await params.onEvent?.({
+            type: "message_delta",
+            text: "Drift tracks experience",
+          });
+          throw new Error("Error in input stream");
+        }),
+        pendingWrites: [],
+        idleRestores: [],
+        statuses: [],
+      });
+      const history: any[] = [];
+      deps.chatHistory.set(conversationKey, history);
+      await sendAgentTurn(
+        {
+          body: {} as Element,
+          item: fakeItem(conversationKey),
+          question: "What drives drift?",
+        },
+        deps,
+      );
+      assert.isTrue(history[history.length - 1].interrupted);
+      assert.equal(getTaskProgress(conversationKey)!.runState, "interrupted");
+    });
+
     it("marks the run cancelled when the user stopped it", async function () {
       const conversationKey = 703;
       let cancelled = false;
@@ -2060,6 +2094,132 @@ describe("agent engine final UI release", function () {
       );
       assert.equal(turnAtStart, 2);
       assert.equal(getTaskProgress(conversationKey)!.runState, "failed");
+    });
+
+    it("shows the run's outcomes as they move and keeps how its ledger ended after the answer", async function () {
+      const conversationKey = 705;
+      const seen: Array<{ state: string; steps: string[] }> = [];
+      const snap = () => {
+        const record = getTaskProgress(conversationKey);
+        seen.push({
+          state: displayedTaskRunState(record),
+          steps: (record?.checklist?.steps || []).map(
+            (step) => `${step.label}:${step.status}`,
+          ),
+        });
+      };
+      const save = outcomeTask("save", {
+        description: "Save the summary as a note",
+      });
+      const tags = outcomeTask("host:1", {
+        description: "Added tags",
+        origin: "host",
+        status: "completed",
+        targets: ["item:3", "item:4"],
+        doneTargets: ["item:3"],
+        exceptions: [{ targets: ["item:4"], reason: "Not applied" }],
+      });
+      const deps = createDeps({
+        runtime: runtimeWith(async (params) => {
+          await params.onStart?.("run-outcomes");
+          await params.onEvent?.({
+            type: "execution_checkpoint",
+            checkpoint: outcomeCheckpoint([save]),
+          });
+          snap();
+          await params.onEvent?.({
+            type: "execution_checkpoint",
+            checkpoint: outcomeCheckpoint(
+              [{ ...save, status: "completed" }, tags],
+              "completed_with_exceptions",
+              3,
+            ),
+          });
+          snap();
+          await params.onEvent?.({ type: "final", text: "Saved." });
+          return {
+            kind: "completed",
+            runId: "run-outcomes",
+            text: "Saved.",
+            usedFallback: false,
+          };
+        }),
+        pendingWrites: [],
+        idleRestores: [],
+        statuses: [],
+      });
+      deps.chatHistory.set(conversationKey, []);
+      await sendAgentTurn(
+        {
+          body: {} as Element,
+          item: fakeItem(conversationKey),
+          question: "Save a summary and tag both papers",
+        },
+        deps,
+      );
+      assert.deepEqual(seen, [
+        { state: "working", steps: ["Save the summary as a note:pending"] },
+        {
+          state: "completed_with_exceptions",
+          steps: [
+            "Save the summary as a note:completed",
+            "Added tags:completed",
+          ],
+        },
+      ]);
+      const record = getTaskProgress(conversationKey)!;
+      assert.equal(record.runState, "completed");
+      assert.equal(displayedTaskRunState(record), "completed_with_exceptions");
+      assert.isTrue(record.planSeen);
+    });
+
+    it("waits on the user while a decision card is open, then works on", async function () {
+      const conversationKey = 706;
+      const states: string[] = [];
+      const deps = createDeps({
+        runtime: runtimeWith(async (params) => {
+          await params.onStart?.("run-wait");
+          await params.onEvent?.({
+            type: "confirmation_required",
+            requestId: "req-1",
+            action: {
+              toolName: "edit_current_note",
+              title: "Save the note?",
+              confirmLabel: "Save",
+              cancelLabel: "Cancel",
+              fields: [],
+            },
+          });
+          states.push(getTaskProgress(conversationKey)!.runState);
+          await params.onEvent?.({
+            type: "confirmation_resolved",
+            requestId: "req-1",
+            approved: true,
+          });
+          states.push(getTaskProgress(conversationKey)!.runState);
+          await params.onEvent?.({ type: "final", text: "Saved." });
+          return {
+            kind: "completed",
+            runId: "run-wait",
+            text: "Saved.",
+            usedFallback: false,
+          };
+        }),
+        pendingWrites: [],
+        idleRestores: [],
+        statuses: [],
+      });
+      deps.chatHistory.set(conversationKey, []);
+      await sendAgentTurn(
+        {
+          body: {} as Element,
+          item: fakeItem(conversationKey),
+          question: "Save a note",
+        },
+        deps,
+      );
+      assert.deepEqual(states, ["waiting", "working"]);
+      assert.equal(getTaskProgress(conversationKey)!.runState, "completed");
     });
   });
 });

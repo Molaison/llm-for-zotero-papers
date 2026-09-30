@@ -540,4 +540,172 @@ describe("workflow: task progress unified", function () {
       restore();
     }
   });
+
+  it("reopens a run's outcome steps and honest end state after a restart", async function () {
+    /** One outcome of a stored ledger, as the host recorded it. */
+    function outcome(
+      runId: string,
+      local: string,
+      fields: Record<string, unknown>,
+    ) {
+      return {
+        taskId: `${runId}:task:${local}`,
+        dependencies: [],
+        journalActionIds: [],
+        verifiedReceiptIds: [],
+        readEvidenceIds: [],
+        materialRefs: [],
+        createdAt: 1,
+        updatedAt: 2,
+        effect: "mutation",
+        ...fields,
+      };
+    }
+    function ledger(runId: string, tasks: Array<Record<string, unknown>>) {
+      return {
+        type: "execution_checkpoint",
+        checkpoint: {
+          version: 1,
+          executionId: runId,
+          conversationKey: 1,
+          conversationGeneration: 0,
+          tasks,
+          createdAt: 1,
+          updatedAt: 2,
+          end: { state: "completed_with_exceptions" },
+        },
+      } as never;
+    }
+    async function reopened(title: string, runId: string, events: never[]) {
+      const fixture = await api.createPaperWithPdfFixture({
+        title,
+        pdfTitle: title,
+        pages: [`${title} evidence.`],
+      });
+      fixtures.push(fixture);
+      const panel = await api.renderPanelForItem(fixture.parentItemId);
+      const seeded = await api.seedTaskProgressConversation({
+        panelId: panel.panelId,
+        turns: [
+          {
+            runId,
+            user: { text: "Tag these papers and save a summary as a note" },
+            answer: "Done, with exceptions.",
+            events,
+          },
+        ],
+      });
+      await api.reopenTaskProgressConversation({ panelId: panel.panelId });
+      const tp = () => view(panel.panelId);
+      await until(() => {
+        api.flushTaskProgress();
+        return Boolean(
+          api.getTaskProgressSnapshot(seeded.conversationKey)?.hydrated &&
+          !tp().row.hidden,
+        );
+      }, "the conversation is rebuilt, and its outcomes show the row in a one-paper chat");
+      api.flushTaskProgress();
+      return { panel, tp };
+    }
+
+    const rejected = fixtures[1].parentItemId;
+    const applied = fixtures[0].parentItemId;
+    const first = `tp-outcomes-1-${Date.now()}`;
+    const summary = await reopened("Outcome ledger summary paper", first, [
+      ledger(first, [
+        outcome(first, "save", {
+          description: "Save the summary as a note",
+          status: "completed",
+          origin: "model",
+          capability: "zotero.notes",
+        }),
+        outcome(first, "host-tags", {
+          description: "Added tags",
+          status: "completed",
+          origin: "host",
+          capability: "zotero.tags",
+          operation: "apply_tags",
+          targets: [`item:${applied}`, `item:${rejected}`],
+          doneTargets: [`item:${applied}`],
+          exceptions: [
+            {
+              targets: [`item:${rejected}`],
+              reason: "In a group library you cannot edit",
+            },
+          ],
+        }),
+      ]),
+    ]);
+    const restore = showOnScreen(summary.panel.panelId);
+    try {
+      const tp = summary.tp;
+      const pill = tp().root.querySelector(
+        ".llm-task-progress-pill",
+      ) as HTMLElement;
+      assert.equal(pill.textContent, "Partly done");
+      assert.isFalse(pill.hidden);
+      assert.equal(tp().row.dataset.state, "completed_with_exceptions");
+      assert.match(tp().count(), /^2\/2 steps/);
+      tp().row.click();
+      await until(
+        () => !tp().steps.hidden,
+        "the Steps block shows the outcomes",
+      );
+      const lines = Array.from(
+        tp().steps.querySelectorAll(".llm-plan-task"),
+      ) as HTMLElement[];
+      const label = (line: HTMLElement) =>
+        line.querySelector(".llm-plan-task-label")?.textContent || "";
+      assert.deepEqual(lines.map(label), [
+        "Save the summary as a note",
+        "Added tags · 2 items",
+        "1 not done",
+      ]);
+      const detail =
+        lines[2].querySelector(".llm-plan-task-original")?.textContent || "";
+      assert.include(detail, "In a group library you cannot edit");
+      assert.include(detail, `(${TITLES[1]}, n.d.)`);
+      assert.equal(
+        tp().steps.querySelector(".llm-plan-status")?.textContent,
+        "Completed with exceptions",
+      );
+      // The pill fades in and the drawer opens before the screenshot.
+      await Zotero.Promise.delay(400);
+      await capture(summary.panel.panelId, "tp-outcomes-reopened.png");
+      tp().row.click();
+      await api.clickPanelDelete(summary.panel.panelId);
+    } finally {
+      restore();
+    }
+
+    const second = `tp-outcomes-2-${Date.now()}`;
+    const targets = Array.from(
+      { length: 10 },
+      (_, index) => `item:${910_000 + index}`,
+    );
+    const batch = await reopened("Outcome ledger batch paper", second, [
+      ledger(second, [
+        outcome(second, "host-batch", {
+          description: "Updated metadata",
+          status: "completed",
+          origin: "host",
+          capability: "zotero.metadata",
+          operation: "update_metadata",
+          targets,
+          doneTargets: targets.slice(0, 8),
+          exceptions: [
+            {
+              targets: targets.slice(8),
+              reason: "In a group library you cannot edit",
+            },
+          ],
+        }),
+      ]),
+    ]);
+    try {
+      assert.match(batch.tp().count(), /^8 of 10 done/);
+    } finally {
+      await api.clickPanelDelete(batch.panel.panelId);
+    }
+  });
 });

@@ -692,11 +692,13 @@ export type WorkflowTestApi = {
     planSeen: boolean;
     hydrated: boolean;
     checklist: {
-      source: "action" | "codex";
+      source: "action" | "codex" | "outcomes";
       title: string;
       steps: Array<{ label: string; status: string }>;
       outcome?: string;
       detail?: string;
+      /** How the run that owns an outcomes checklist ended. */
+      end?: string;
     } | null;
     paperStates: Record<string, string>;
   } | null;
