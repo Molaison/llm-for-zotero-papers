@@ -18,6 +18,8 @@ import type {
 import { AgentRuntime } from "../src/agent/runtime";
 import { AgentToolRegistry } from "../src/agent/tools/registry";
 import { createBuiltInToolRegistry } from "../src/agent/tools";
+import { NOTE_WRITE_GUIDANCE } from "../src/agent/tools/write/noteWrite";
+import type { AgentToolContext } from "../src/agent/types";
 import { resolveAgentRuntimeRequest } from "../src/agent/context/resolvedAgentRequest";
 import { renderAgentPromptEnvelope } from "../src/agent/model/messageBuilder";
 import { initAgentTraceStore } from "../src/agent/store/traceStore";
@@ -264,6 +266,84 @@ describe("skill routing without a model call", function () {
       noteWrite!.description,
       / First call load_skill\('write-note'\)\.$/,
     );
+  });
+
+  describe("load_skill returns the tool guidance tied to the skill", function () {
+    function loadSkillIn(
+      request: ReturnType<typeof resolveAgentRuntimeRequest>,
+    ) {
+      const registry = createBuiltInToolRegistry({
+        zoteroGateway: {} as never,
+        pdfService: {} as never,
+        pdfPageService: {} as never,
+        retrievalService: {} as never,
+      });
+      const tool = registry.getTool("load_skill")!;
+      const context = { request } as unknown as AgentToolContext;
+      return async () =>
+        (await tool.execute({ id: "write-note" }, context)) as Record<
+          string,
+          unknown
+        >;
+    }
+
+    it("appends NOTE_WRITE_GUIDANCE when write-note is loaded on an ordinary turn, once per turn", async function () {
+      const request = resolveAgentRuntimeRequest({
+        conversationKey: 1,
+        mode: "agent",
+        userText: "Save a summary of this paper as a note.",
+        libraryID: 1,
+      });
+      const load = loadSkillIn(request);
+      const first = await load();
+      assert.isTrue(first.found);
+      assert.isString(first.toolGuidance);
+      assert.match(
+        first.toolGuidance as string,
+        /^Tool guidance for this skill:\n\n/,
+      );
+      assert.include(
+        first.toolGuidance as string,
+        NOTE_WRITE_GUIDANCE.instruction,
+      );
+      const again = await load();
+      assert.notProperty(again, "toolGuidance");
+    });
+
+    it("does not repeat guidance the system prompt already rendered on a $write-note turn", async function () {
+      const request = resolveAgentRuntimeRequest({
+        conversationKey: 1,
+        mode: "agent",
+        userText: "$write-note\n\nSave a summary of this paper as a note.",
+        forcedSkillIds: ["write-note"],
+        libraryID: 1,
+      });
+      const result = await loadSkillIn(request)();
+      assert.isTrue(result.found);
+      assert.notProperty(result, "toolGuidance");
+    });
+
+    it("adds nothing for a skill no tool guidance is tied to", async function () {
+      const registry = createBuiltInToolRegistry({
+        zoteroGateway: {} as never,
+        pdfService: {} as never,
+        pdfPageService: {} as never,
+        retrievalService: {} as never,
+      });
+      const request = resolveAgentRuntimeRequest({
+        conversationKey: 1,
+        mode: "agent",
+        userText: "Compare these papers.",
+        libraryID: 1,
+      });
+      const result = (await registry
+        .getTool("load_skill")!
+        .execute({ id: "compare-papers" }, {
+          request,
+        } as unknown as AgentToolContext)) as Record<string, unknown>;
+      assert.isTrue(result.found);
+      assert.notProperty(result, "toolGuidance");
+    });
   });
 
   describe("an executing investigation plan", function () {

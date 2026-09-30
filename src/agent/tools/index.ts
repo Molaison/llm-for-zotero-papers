@@ -694,7 +694,12 @@ export function createBuiltInToolRegistry(
   registry.register(markToolTier(runCommand, "advanced"));
   registry.register(markToolTier(zoteroScript, "advanced"));
   registry.register(createContextReadTool());
-  registry.register(createLoadSkillTool());
+  registry.register(
+    createLoadSkillTool({
+      getToolDefinitions: (request) =>
+        registry.listToolDefinitionsForRequest(request),
+    }),
+  );
   registry.register(createUpdatePlanTool(deps.zoteroGateway));
   registry.register(createPreparePlanExecutionTool(deps.zoteroGateway));
   registry.register(createRequestUserInputTool());

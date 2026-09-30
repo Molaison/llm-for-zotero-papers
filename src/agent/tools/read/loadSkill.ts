@@ -5,13 +5,13 @@ import {
   loadSkill,
 } from "../../skills";
 import type { AgentSkill, LoadedSkill } from "../../skills";
-import type { AgentToolDefinition } from "../../types";
+import type { AgentRuntimeRequest, AgentToolDefinition } from "../../types";
 import { fail, ok, validateObject } from "../shared";
 
 export type LoadSkillInput = { id: string };
 
 export type LoadSkillResult =
-  | ({ found: true } & LoadedSkill)
+  | ({ found: true; toolGuidance?: string } & LoadedSkill)
   | {
       found: false;
       error: string;
@@ -21,7 +21,38 @@ export type LoadSkillResult =
 export type LoadSkillToolOptions = {
   getSkills?: () => ReadonlyArray<AgentSkill>;
   getShippedInstruction?: (id: string) => string | undefined;
+  /** The tools offered on this request, for guidance tied to a skill. */
+  getToolDefinitions?: (
+    request: AgentRuntimeRequest,
+  ) => ReadonlyArray<AgentToolDefinition<any, any>>;
 };
+
+/**
+ * Tool guidance that becomes active only because `skillId` is active, minus
+ * guidance the turn already rendered for the skills active before this load
+ * (forced, plan-pinned, or loaded earlier in the turn). The system prompt is
+ * rendered once per turn, so this is the only way a skill loaded mid-turn
+ * brings its tool rules with it.
+ */
+function collectSkillToolGuidance(
+  skillId: string,
+  request: AgentRuntimeRequest,
+  activeSkillIds: ReadonlyArray<string>,
+  tools: ReadonlyArray<AgentToolDefinition<any, any>>,
+): string | undefined {
+  const instructions = new Set<string>();
+  for (const tool of tools) {
+    const guidance = tool.guidance;
+    if (!guidance) continue;
+    if (!guidance.matches(request, { matchedSkillIds: [skillId] })) continue;
+    if (guidance.matches(request, { matchedSkillIds: activeSkillIds }))
+      continue;
+    const instruction = guidance.instruction.trim();
+    if (instruction) instructions.add(instruction);
+  }
+  if (!instructions.size) return undefined;
+  return ["Tool guidance for this skill:", ...instructions].join("\n\n");
+}
 
 /**
  * Read one installed skill into the active agent workflow. The initial prompt
@@ -82,8 +113,17 @@ export function createLoadSkillTool(
         };
       }
       const loaded = await loadSkill(skill, getShippedInstruction(skill.id));
+      let toolGuidance: string | undefined;
       if (context?.request) {
         const records = context.request.loadedSkillRecords || [];
+        if (options.getToolDefinitions) {
+          toolGuidance = collectSkillToolGuidance(
+            skill.id,
+            context.request,
+            records.map((record) => record.id),
+            options.getToolDefinitions(context.request),
+          );
+        }
         const alreadyLoaded = records.some(
           (record) =>
             record.id === loaded.loadedSkill.id &&
@@ -99,6 +139,7 @@ export function createLoadSkillTool(
       return {
         found: true,
         ...loaded,
+        ...(toolGuidance ? { toolGuidance } : {}),
       };
     },
   };
