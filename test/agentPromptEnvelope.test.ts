@@ -944,6 +944,20 @@ describe("agent prompt envelope direct workflow", function () {
     assert.include(await directWorkflowBlock(executing), RECEIPT_CONFIRMS);
   });
 
+  it("asks only an ordinary turn to declare the parts of a compound request", async function () {
+    const DECLARE_PARTS =
+      "When a request asks for more than one outcome, such as summarizing a paper and saving it as a note, declare each part with task_update in your first step, together with that step's first tool calls. The host marks each part done from the tools' results; never mark one done yourself.";
+    const planning: PlanRuntimeContext = {
+      phase: "planning",
+      planId: "plan-direct-workflow",
+      revision: 1,
+      provider: "original",
+    };
+    assert.include(await directWorkflowBlock(), DECLARE_PARTS);
+    assert.notInclude(await directWorkflowBlock(executing), DECLARE_PARTS);
+    assert.notInclude(await directWorkflowBlock(planning), DECLARE_PARTS);
+  });
+
   it("keeps the receipt sentence out of the Codex client's instructions", function () {
     const codexManifest = buildZoteroEnvironmentManifest({
       scope: { kind: "global", libraryID: 1, conversationKey: 1 } as never,

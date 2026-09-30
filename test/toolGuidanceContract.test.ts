@@ -154,6 +154,16 @@ describe("tool guidance contracts", function () {
     },
   ];
 
+  it("shows the model that it declares ordinary parts and the host marks them done", function () {
+    const taskUpdate = stubRegistry()
+      .listTools()
+      .find((tool) => tool.name === "task_update");
+    assert.equal(
+      taskUpdate?.description,
+      "Declare a compound request's parts for the host to track: taskId, description, expectedEffect (read, artifact, mutation, or reasoning), and expectedCapability such as zotero.notes for a write. The host marks parts done; mark one skipped or blocked, with the reason, only if it cannot be done.",
+    );
+  });
+
   it("does not contain stale pseudo-call examples in shipped guidance", function () {
     const failures: string[] = [];
     for (const source of readSourceFiles()) {

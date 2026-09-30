@@ -156,8 +156,6 @@ const MODEL_TOOL_DESCRIPTIONS: Readonly<Record<string, string>> = {
   update_plan: "Create or revise a read-only explicit Plan artifact.",
   prepare_plan_execution:
     "Stage the exact execution contract and required steps for native Plan review. The user remains the sole authority for the later run.",
-  task_update:
-    "Update tracked work; completion requires host-verifiable evidence.",
   research_update:
     "Persist verified research claims, relationships, work, and evidence.",
   amend_plan:

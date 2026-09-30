@@ -59,7 +59,6 @@ import type { SkillRoutingReceipt } from "./skills/routingTypes";
 import type { LoadedSkillRecord } from "./skills/loadingTypes";
 import type {
   ExecutionCheckpoint,
-  ExecutionEvidenceInventory,
   MaterialOutcomeEntry,
 } from "./execution/types";
 
@@ -67,7 +66,6 @@ export type {
   ApprovedPlanGrant,
   ExecutionTask,
   ExecutionTaskKind,
-  ExecutionTaskStatus,
   PlanArtifact,
   PlanArtifactStatus,
   PlanEvent,
@@ -103,8 +101,7 @@ export type {
 export type {
   ExecutionCheckpoint,
   ExecutionCheckpointTask,
-  ExecutionCheckpointTaskUpdate,
-  ExecutionEvidenceInventory,
+  ExecutionTaskStatus,
   MaterialOutcomeEntry,
   MaterialOutcomeLedger,
   MaterialOutcomeStatus,
@@ -1410,8 +1407,6 @@ export type AgentToolContext = {
   publishExecutionCheckpoint?: (
     checkpoint: ExecutionCheckpoint,
   ) => Promise<void>;
-  /** Resolve host-known evidence that ordinary task progress may reference. */
-  loadExecutionEvidence?: () => Promise<ExecutionEvidenceInventory>;
   /** Host-owned v5 Plan scope resolved from the approved artifact and ledger. */
   loadApprovedPlanEffectContext?: () => Promise<
     | Readonly<{

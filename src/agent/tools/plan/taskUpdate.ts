@@ -17,12 +17,21 @@ import type {
   TaskTransitionRequest,
 } from "../../plans/types";
 import { fail, ok, validateObject } from "../shared";
+import { ToolInputRejection } from "../execution/failure";
+import { ACTION_CAPABILITIES } from "../../contracts/operationCatalog";
+import type { AgentActionCapability } from "../../contracts/types";
 import {
-  applyExecutionCheckpointUpdates,
+  assertCheckpointOwner,
   createEmptyExecutionCheckpoint,
-  loadExecutionEvidenceForRun,
-  type ExecutionCheckpointTaskUpdate,
+  ordinaryExecutionTaskId,
 } from "../../execution/checkpoint";
+import type { ExecutionCheckpoint, OutcomeEffect } from "../../execution/types";
+import {
+  declareOutcomes,
+  markOutcomes,
+  type OutcomeDeclaration,
+  type OutcomeModelMark,
+} from "../../loop/outcomes";
 
 type TaskUpdateRequest = {
   taskId: string;
@@ -349,6 +358,100 @@ export function buildReasoningAssertionEvidence(params: {
   };
 }
 
+const OUTCOME_MARK_STATUSES: ReadonlySet<ExecutionTaskStatus> = new Set([
+  "skipped",
+  "blocked",
+  "cancelled",
+]);
+const EXPECTED_EFFECT_REQUIRED =
+  "Give each new task an expectedEffect: read, artifact, mutation, or reasoning.";
+const HOST_MARKS_DONE =
+  "The host marks tasks done from the tools' results; nothing changed.";
+
+function actionCapability(
+  value: string | undefined,
+): AgentActionCapability | undefined {
+  return value && ACTION_CAPABILITIES.has(value as AgentActionCapability)
+    ? (value as AgentActionCapability)
+    : undefined;
+}
+
+/**
+ * One ordinary call: new tasks become declared parts, then skipped, blocked
+ * or cancelled marks apply. Any other requested status changes nothing, and
+ * `ignored` says so. A malformed call is an input rejection.
+ */
+function applyOrdinaryTaskUpdates(
+  checkpoint: ExecutionCheckpoint,
+  requests: readonly TaskUpdateRequest[],
+  now: number,
+): { checkpoint: ExecutionCheckpoint; ignored: boolean } {
+  try {
+    const existing = new Map(
+      checkpoint.tasks.map((task) => [task.taskId, task]),
+    );
+    const seen = new Set<string>();
+    const declarations: OutcomeDeclaration[] = [];
+    const marks: OutcomeModelMark[] = [];
+    let ignored = false;
+    for (const request of requests) {
+      const taskId = ordinaryExecutionTaskId(
+        checkpoint.executionId,
+        request.taskId,
+      );
+      if (seen.has(taskId)) {
+        throw new Error(`Task ${taskId} may appear only once in one update`);
+      }
+      seen.add(taskId);
+      const prior = existing.get(taskId);
+      if (!prior) {
+        const effect: OutcomeEffect | undefined =
+          request.expectedEffect === "reasoning"
+            ? "answer"
+            : request.expectedEffect;
+        if (!effect) throw new ToolInputRejection(EXPECTED_EFFECT_REQUIRED);
+        declarations.push({
+          taskId,
+          description: request.description || "",
+          effect,
+          capability: actionCapability(request.expectedCapability),
+          targets: request.targetIds,
+        });
+      } else if (request.description) {
+        // A repeat keeps the part; a new description for it is refused.
+        declarations.push({
+          taskId,
+          description: request.description,
+          effect: prior.effect || "answer",
+        });
+      }
+      if (OUTCOME_MARK_STATUSES.has(request.status)) {
+        marks.push({
+          taskId,
+          status: request.status as OutcomeModelMark["status"],
+          reason: request.reason || "",
+        });
+      } else if (prior || request.status !== "pending") {
+        ignored = true;
+      }
+    }
+    const marked = markOutcomes(
+      declareOutcomes(checkpoint, declarations, now),
+      marks,
+      now,
+    );
+    return {
+      checkpoint: marked.checkpoint,
+      ignored: ignored || marked.ignored.length > 0,
+    };
+  } catch (error) {
+    if (error instanceof ToolInputRejection) throw error;
+    throw new ToolInputRejection(
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+}
+
 export function createTaskUpdateTool(): AgentToolDefinition<
   TaskUpdateInput,
   unknown
@@ -357,7 +460,7 @@ export function createTaskUpdateTool(): AgentToolDefinition<
     spec: {
       name: "task_update",
       description:
-        "Create or update progress for compound work. Use task as a compatible single-update shorthand or tasks to commit a related batch atomically. Ordinary tasks use a short stable taskId, description, optional dependencies, and host-issued evidence identities. Approved Plan tasks accept immutable IDs and status transitions only.",
+        "Declare a compound request's parts for the host to track: taskId, description, expectedEffect (read, artifact, mutation, or reasoning), and expectedCapability such as zotero.notes for a write. The host marks parts done; mark one skipped or blocked, with the reason, only if it cannot be done.",
       inputSchema: {
         type: "object",
         additionalProperties: false,
@@ -422,34 +525,21 @@ export function createTaskUpdateTool(): AgentToolDefinition<
             "Ordinary task progress requires durable run checkpoint persistence",
           );
         }
-        const checkpoint =
+        const now = Date.now();
+        const current =
           context.request.executionCheckpoint ||
-          createEmptyExecutionCheckpoint(execution);
-        const inventory = context.loadExecutionEvidence
-          ? await context.loadExecutionEvidence()
-          : await loadExecutionEvidenceForRun(context.runId, context.request);
-        const updates: ExecutionCheckpointTaskUpdate[] = input.tasks.map(
-          (request) => ({
-            taskId: request.taskId,
-            description: request.description,
-            dependencies: request.dependencies,
-            status: request.status,
-            reason: request.reason,
-            journalActionIds: request.journalActionIds,
-            verifiedReceiptIds: request.verifiedReceiptIds,
-            readEvidenceIds: request.readEvidenceIds,
-            materialRefs: request.materialRefs,
-          }),
+          createEmptyExecutionCheckpoint(execution, now);
+        assertCheckpointOwner(current, execution);
+        const { checkpoint, ignored } = applyOrdinaryTaskUpdates(
+          current,
+          input.tasks,
+          now,
         );
-        const updated = applyExecutionCheckpointUpdates({
-          checkpoint,
-          updates,
-          evidence: inventory,
-          context: execution,
-        });
-        await context.publishExecutionCheckpoint(updated);
-        context.request.executionCheckpoint = updated;
-        return { checkpoint: updated };
+        if (checkpoint !== current) {
+          await context.publishExecutionCheckpoint(checkpoint);
+          context.request.executionCheckpoint = checkpoint;
+        }
+        return ignored ? { checkpoint, note: HOST_MARKS_DONE } : { checkpoint };
       }
       if (
         input.tasks.some((request) =>

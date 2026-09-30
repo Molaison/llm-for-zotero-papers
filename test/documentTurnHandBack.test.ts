@@ -166,7 +166,13 @@ describe("a finalized document hands the turn back while requested work remains"
     const turn = await runTurn([
       toolCallStep("task-1", "task_update", {
         tasks: [
-          { taskId: "save-note", description: SAVE_TASK, status: "pending" },
+          {
+            taskId: "save-note",
+            description: SAVE_TASK,
+            status: "pending",
+            expectedEffect: "mutation",
+            expectedCapability: "zotero.notes",
+          },
         ],
       }),
       stepOf(submitDocumentCall("submit-1")),
@@ -218,46 +224,39 @@ describe("a finalized document hands the turn back while requested work remains"
     assert.equal(answerText(turn), documentText(turn));
   });
 
-  it("ends the turn on submit_document when every declared task is completed, waiting, or blocked", async function () {
-    // A completed task needs host-verified evidence, so the note is written
-    // first and its receipt closes the save task. Only one ordinary task may
-    // be in progress at a time, so the others close over three steps.
+  it("ends the turn on submit_document when every declared task is closed", async function () {
+    // Only the host marks a part done. The model closes a part it cannot do
+    // as blocked or skipped, with the reason.
     const turn = await runTurn([
-      stepOf(inlineNoteCall("note-1"), {
-        id: "task-1",
-        name: "task_update",
-        arguments: {
-          tasks: [
-            {
-              taskId: "ask",
-              description: "Ask which collection to use",
-              status: "in_progress",
-            },
-          ],
-        },
+      toolCallStep("task-1", "task_update", {
+        tasks: [
+          {
+            taskId: "ask",
+            description: "Ask which collection to use",
+            status: "pending",
+            expectedEffect: "reasoning",
+          },
+          {
+            taskId: "check",
+            description: "Check the citation style",
+            status: "pending",
+            expectedEffect: "reasoning",
+          },
+        ],
       }),
-      (messages) =>
-        toolCallStep("task-2", "task_update", {
-          tasks: [
-            { taskId: "ask", status: "waiting_for_user" },
-            {
-              taskId: "save-note",
-              description: SAVE_TASK,
-              status: "completed",
-              verifiedReceiptIds: deliveredContent(
-                messages,
-                "note_write",
-              ).actionReceipts.map((receipt: { id: string }) => receipt.id),
-            },
-            {
-              taskId: "check",
-              description: "Check the citation style",
-              status: "in_progress",
-            },
-          ],
-        }),
-      toolCallStep("task-3", "task_update", {
-        tasks: [{ taskId: "check", status: "blocked" }],
+      toolCallStep("task-2", "task_update", {
+        tasks: [
+          {
+            taskId: "ask",
+            status: "blocked",
+            reason: "Needs the user's choice of collection",
+          },
+          {
+            taskId: "check",
+            status: "skipped",
+            reason: "The summary cites no other work",
+          },
+        ],
       }),
       stepOf(submitDocumentCall("submit-1")),
     ]);
@@ -265,12 +264,12 @@ describe("a finalized document hands the turn back while requested work remains"
     assert.equal(turn.outcome.kind, "completed");
     assert.deepEqual(
       turn.request?.executionCheckpoint?.tasks.map((task) => task.status),
-      ["waiting_for_user", "completed", "blocked"],
+      ["blocked", "skipped"],
       "the checkpoint holds no pending or in-progress task",
     );
     assert.equal(
       turn.steps,
-      4,
+      3,
       "no requested work remains, so the document ends the turn",
     );
     assert.equal(answerText(turn), documentText(turn));

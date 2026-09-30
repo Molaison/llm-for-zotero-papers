@@ -1,6 +1,17 @@
 import type { AgentActionCapability } from "../contracts/types";
 import type { MaterialRef } from "../documents/materialRef";
-import type { ExecutionTaskStatus } from "../plans/types";
+
+/** Where one tracked task stands, in ordinary work and in an approved Plan. */
+export type ExecutionTaskStatus =
+  | "pending"
+  | "in_progress"
+  | "waiting_for_user"
+  | "interrupted"
+  | "completed"
+  | "blocked"
+  | "failed"
+  | "skipped"
+  | "cancelled";
 
 /** What completes an outcome. */
 export type OutcomeEffect = "read" | "artifact" | "mutation" | "answer";
@@ -72,13 +83,6 @@ export type ExecutionCheckpoint = Readonly<{
   end?: Readonly<{ state: RunEndState }>;
 }>;
 
-export type ExecutionEvidenceInventory = Readonly<{
-  journalActionIds: ReadonlySet<string>;
-  verifiedReceiptIds: ReadonlySet<string>;
-  readEvidenceIds: ReadonlySet<string>;
-  materialRefs: ReadonlyMap<string, MaterialRef>;
-}>;
-
 /**
  * What happened to one finalized material revision, so far.
  *
@@ -111,16 +115,4 @@ export type DroppedMaterialOutcome = Readonly<{
 export type MaterialOutcomeLedger = Readonly<{
   entries: readonly MaterialOutcomeEntry[];
   dropped: readonly DroppedMaterialOutcome[];
-}>;
-
-export type ExecutionCheckpointTaskUpdate = Readonly<{
-  taskId: string;
-  description?: string;
-  dependencies?: readonly string[];
-  status: ExecutionTaskStatus;
-  reason?: string;
-  journalActionIds?: readonly string[];
-  verifiedReceiptIds?: readonly string[];
-  readEvidenceIds?: readonly string[];
-  materialRefs?: readonly MaterialRef[];
 }>;

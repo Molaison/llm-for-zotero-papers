@@ -1,12 +1,15 @@
 import { assert } from "chai";
 import {
-  applyExecutionCheckpointUpdates,
   collectJournalActionIds,
   createEmptyExecutionCheckpoint,
-  type ExecutionEvidenceInventory,
 } from "../src/agent/execution/checkpoint";
-import { createTaskUpdateTool } from "../src/agent/tools/plan/taskUpdate";
+import {
+  applyOutcomeEvidence,
+  declareOutcomes,
+} from "../src/agent/loop/outcomes";
 import { renderExecutionCheckpointBlock } from "../src/agent/model/messageBuilder";
+import { ToolInputRejection } from "../src/agent/tools/execution/failure";
+import { createTaskUpdateTool } from "../src/agent/tools/plan/taskUpdate";
 import type {
   AgentExecutionContext,
   AgentToolContext,
@@ -28,21 +31,12 @@ const executionContext: AgentExecutionContext = {
   configuredAccess: { libraryIDs: [1], outputDirectories: [] },
 };
 
-const evidence: ExecutionEvidenceInventory = {
-  journalActionIds: new Set(["action-1"]),
-  verifiedReceiptIds: new Set(["receipt-1"]),
-  readEvidenceIds: new Set(["read-1"]),
-  materialRefs: new Map([
-    [
-      "document-1:2:sha256:material",
-      {
-        documentId: "document-1",
-        documentVersion: 2,
-        contentHash: "sha256:material",
-      },
-    ],
-  ]),
-};
+const NOTHING_CHANGED =
+  "The host marks tasks done from the tools' results; nothing changed.";
+
+function taskId(local: string): string {
+  return `execution-direct-1:task:${local}`;
+}
 
 describe("ordinary ExecutionCheckpoint", function () {
   it("collects parent and per-item action identities from nested results", function () {
@@ -63,158 +57,43 @@ describe("ordinary ExecutionCheckpoint", function () {
     );
   });
 
-  it("namespaces model-local IDs and applies a dependent batch atomically", function () {
-    const initial = createEmptyExecutionCheckpoint(executionContext, 10);
-    const updated = applyExecutionCheckpointUpdates({
-      checkpoint: initial,
-      updates: [
-        {
-          taskId: "read",
-          description: "Read the selected papers",
-          status: "completed",
-          readEvidenceIds: ["read-1"],
-        },
-        {
-          taskId: "save",
-          description: "Save the finalized synthesis",
-          dependencies: ["read"],
-          status: "in_progress",
-        },
-      ],
-      evidence,
-      now: 20,
-    });
-
-    assert.deepEqual(
-      updated.tasks.map((task) => ({
-        taskId: task.taskId,
-        dependencies: task.dependencies,
-        status: task.status,
-      })),
+  it("renders only progress and evidence identities into recovery context", function () {
+    const declared = declareOutcomes(
+      createEmptyExecutionCheckpoint(executionContext, 10),
       [
         {
-          taskId: "execution-direct-1:task:read",
-          dependencies: [],
-          status: "completed",
-        },
-        {
-          taskId: "execution-direct-1:task:save",
-          dependencies: ["execution-direct-1:task:read"],
-          status: "in_progress",
-        },
-      ],
-    );
-    assert.deepEqual(updated.tasks[0].readEvidenceIds, ["read-1"]);
-    assert.equal(initial.tasks.length, 0);
-  });
-
-  it("rejects one unknown evidence reference without partially applying the batch", function () {
-    const initial = createEmptyExecutionCheckpoint(executionContext, 10);
-    assert.throws(
-      () =>
-        applyExecutionCheckpointUpdates({
-          checkpoint: initial,
-          updates: [
-            {
-              taskId: "read",
-              description: "Read the selected papers",
-              status: "completed",
-              readEvidenceIds: ["read-1"],
-            },
-            {
-              taskId: "save",
-              description: "Save the document",
-              status: "completed",
-              verifiedReceiptIds: ["invented-receipt"],
-            },
-          ],
-          evidence,
-          now: 20,
-        }),
-      "not host-verified",
-    );
-    assert.deepEqual(initial.tasks, []);
-  });
-
-  it("requires host-known evidence before a task can be completed", function () {
-    const initial = createEmptyExecutionCheckpoint(executionContext, 10);
-    assert.throws(
-      () =>
-        applyExecutionCheckpointUpdates({
-          checkpoint: initial,
-          updates: [
-            {
-              taskId: "done",
-              description: "Claim completion",
-              status: "completed",
-            },
-          ],
-          evidence,
-          now: 20,
-        }),
-      "host-verified evidence",
-    );
-    assert.throws(
-      () =>
-        applyExecutionCheckpointUpdates({
-          checkpoint: initial,
-          updates: [
-            {
-              taskId: "journal-only",
-              description: "Do a write",
-              status: "completed",
-              journalActionIds: ["action-1"],
-            },
-          ],
-          evidence,
-          now: 20,
-        }),
-      "host-verified evidence",
-    );
-  });
-
-  it("keeps a versioned MaterialRef and no document payload in task state", function () {
-    const initial = createEmptyExecutionCheckpoint(executionContext, 10);
-    const updated = applyExecutionCheckpointUpdates({
-      checkpoint: initial,
-      updates: [
-        {
-          taskId: "draft",
-          description: "Finalize the draft",
-          status: "completed",
-          materialRefs: [evidence.materialRefs.values().next().value!],
-        },
-      ],
-      evidence,
-      now: 20,
-    });
-
-    assert.deepEqual(updated.tasks[0].materialRefs, [
-      {
-        documentId: "document-1",
-        documentVersion: 2,
-        contentHash: "sha256:material",
-      },
-    ]);
-    assert.notProperty(updated.tasks[0], "markdown");
-    assert.notProperty(updated.tasks[0], "payload");
-  });
-
-  it("renders only progress and evidence identities into recovery context", function () {
-    const checkpoint = applyExecutionCheckpointUpdates({
-      checkpoint: createEmptyExecutionCheckpoint(executionContext, 10),
-      updates: [
-        {
           taskId: "save",
           description: "Save the finalized synthesis",
-          status: "completed",
-          journalActionIds: ["action-1"],
-          verifiedReceiptIds: ["receipt-1"],
+          effect: "mutation",
+          capability: "zotero.notes",
         },
       ],
-      evidence,
-      now: 20,
-    });
+      20,
+    );
+    const checkpoint = applyOutcomeEvidence(
+      declared,
+      {
+        kind: "receipt",
+        receipt: {
+          version: 2,
+          executionAuthority: "external_runtime",
+          id: "receipt-1",
+          proposalId: "proposal-1",
+          proofDomain: "zotero_state",
+          capability: "zotero.notes",
+          operation: "note_create",
+          verification: "verified",
+          status: "applied",
+          requestedTargets: ["item:7"],
+          appliedTargets: ["item:7"],
+          alreadySatisfiedTargets: [],
+          rejectedTargets: [],
+          reasons: [],
+          verifiedFacts: ["native_note:9:text_match"],
+        },
+      },
+      30,
+    ).checkpoint;
     const request = resolvedAgentRequest({
       conversationKey: 41,
       mode: "agent",
@@ -234,26 +113,65 @@ describe("ordinary ExecutionCheckpoint", function () {
   });
 });
 
-describe("task_update direct-agent batch", function () {
+describe("task_update ordinary declarations", function () {
+  let published: ExecutionCheckpoint[];
+
+  beforeEach(function () {
+    published = [];
+  });
+
   function context(
-    publish: (checkpoint: ExecutionCheckpoint) => Promise<void>,
+    executionCheckpoint?: ExecutionCheckpoint,
   ): AgentToolContext {
     return {
       request: resolvedAgentRequest({
         conversationKey: 41,
         mode: "agent",
-        userText: "Read the papers, make a synthesis, and save it",
+        userText: "Summarize this paper and save it as a note",
         libraryID: 1,
         executionContext,
+        ...(executionCheckpoint ? { executionCheckpoint } : {}),
       }),
       runId: "run-1",
       item: null,
       currentAnswerText: "",
       modelName: "test",
-      loadExecutionEvidence: async () => evidence,
-      publishExecutionCheckpoint: publish,
+      publishExecutionCheckpoint: async (checkpoint) => {
+        published.push(structuredClone(checkpoint));
+      },
     };
   }
+
+  async function call(
+    ctx: AgentToolContext,
+    args: unknown,
+  ): Promise<{ checkpoint: ExecutionCheckpoint; note?: string }> {
+    const tool = createTaskUpdateTool();
+    const validated = tool.validate(args);
+    if (!validated.ok) throw new Error(validated.error);
+    return (await tool.execute(validated.value, ctx)) as {
+      checkpoint: ExecutionCheckpoint;
+      note?: string;
+    };
+  }
+
+  async function rejectionOf(promise: Promise<unknown>): Promise<Error> {
+    try {
+      await promise;
+    } catch (error) {
+      return error as Error;
+    }
+    throw new Error("expected task_update to refuse the call");
+  }
+
+  const declareSave = {
+    taskId: "save",
+    description: "Save it as a note on the paper",
+    status: "pending",
+    expectedEffect: "mutation",
+    expectedCapability: "zotero.notes",
+    targetIds: ["12"],
+  };
 
   it("accepts the legacy task shorthand and the new tasks batch, but not both", function () {
     const tool = createTaskUpdateTool();
@@ -284,76 +202,241 @@ describe("task_update direct-agent batch", function () {
     assert.isFalse(invalid.ok);
   });
 
-  it("persists one complete checkpoint event for the whole ordinary batch", async function () {
-    const published: ExecutionCheckpoint[] = [];
-    const tool = createTaskUpdateTool();
-    const validated = tool.validate({
+  it("declares a new part as a pending model outcome with its effect, capability and targets", async function () {
+    const ctx = context();
+    const result = await call(ctx, {
       tasks: [
+        declareSave,
         {
-          taskId: "read",
-          description: "Read the selected papers",
-          status: "completed",
-          readEvidenceIds: ["read-1"],
-        },
-        {
-          taskId: "synthesize",
-          description: "Synthesize the findings",
-          dependencies: ["read"],
-          status: "in_progress",
+          taskId: "explain",
+          description: "Explain the method",
+          status: "pending",
+          expectedEffect: "reasoning",
         },
       ],
     });
-    assert.isTrue(validated.ok);
-    if (!validated.ok) return;
-    const ctx = context(async (checkpoint) => {
-      published.push(structuredClone(checkpoint));
-    });
-
-    const result = (await tool.execute(validated.value, ctx)) as {
-      checkpoint: ExecutionCheckpoint;
-    };
 
     assert.lengthOf(published, 1);
     assert.deepEqual(result.checkpoint, published[0]);
     assert.deepEqual(ctx.request.executionCheckpoint, published[0]);
+    assert.notProperty(result, "note");
     assert.deepEqual(
-      published[0].tasks.map((task) => task.status),
-      ["completed", "in_progress"],
+      published[0].tasks.map((task) => [
+        task.taskId,
+        task.status,
+        task.origin,
+        task.effect,
+        task.capability,
+        task.targets,
+      ]),
+      [
+        [
+          taskId("save"),
+          "pending",
+          "model",
+          "mutation",
+          "zotero.notes",
+          ["item:12"],
+        ],
+        [taskId("explain"), "pending", "model", "answer", undefined, undefined],
+      ],
     );
   });
 
-  it("does not publish or mutate request state when any update is invalid", async function () {
-    let published = 0;
-    const tool = createTaskUpdateTool();
-    const validated = tool.validate({
-      tasks: [
-        {
-          taskId: "read",
-          description: "Read",
-          status: "completed",
-          readEvidenceIds: ["read-1"],
-        },
-        {
+  it("ignores an expectedCapability that is not an action capability", async function () {
+    const result = await call(context(), {
+      task: { ...declareSave, expectedCapability: "zotero.everything" },
+    });
+    assert.notProperty(result.checkpoint.tasks[0], "capability");
+    assert.equal(result.checkpoint.tasks[0].effect, "mutation");
+  });
+
+  it("refuses a new part without expectedEffect with the exact message, and publishes nothing", async function () {
+    const ctx = context();
+    const error = await rejectionOf(
+      call(ctx, {
+        tasks: [
+          {
+            taskId: "save",
+            description: "Save it as a note",
+            status: "pending",
+          },
+        ],
+      }),
+    );
+    assert.instanceOf(error, ToolInputRejection);
+    assert.equal(
+      error.message,
+      "Give each new task an expectedEffect: read, artifact, mutation, or reasoning.",
+    );
+    assert.lengthOf(published, 0);
+    assert.isUndefined(ctx.request.executionCheckpoint);
+  });
+
+  it("answers a request to complete, start or reopen a part with the note and changes nothing", async function () {
+    const ctx = context();
+    await call(ctx, { task: declareSave });
+    const declared = ctx.request.executionCheckpoint;
+
+    for (const status of ["completed", "in_progress", "pending"]) {
+      const result = await call(ctx, {
+        task: {
           taskId: "save",
-          description: "Save",
-          status: "completed",
-          verifiedReceiptIds: ["not-real"],
+          status,
+          verifiedReceiptIds: ["receipt-1"],
+        },
+      });
+      assert.equal(result.note, NOTHING_CHANGED, status);
+      assert.strictEqual(result.checkpoint, declared);
+    }
+    assert.lengthOf(published, 1, "only the declaration was published");
+    assert.strictEqual(ctx.request.executionCheckpoint, declared);
+    assert.equal(declared?.tasks[0].status, "pending");
+  });
+
+  it("refuses a skipped part without the reason", async function () {
+    const ctx = context();
+    await call(ctx, { task: declareSave });
+    const error = await rejectionOf(
+      call(ctx, { task: { taskId: "save", status: "skipped" } }),
+    );
+    assert.instanceOf(error, ToolInputRejection);
+    assert.equal(
+      error.message,
+      "A skipped, blocked, or cancelled task needs the reason.",
+    );
+    assert.lengthOf(published, 1);
+    assert.equal(ctx.request.executionCheckpoint?.tasks[0].status, "pending");
+  });
+
+  it("marks a part skipped with its reason", async function () {
+    const ctx = context();
+    await call(ctx, { task: declareSave });
+    const result = await call(ctx, {
+      task: {
+        taskId: "save",
+        status: "skipped",
+        reason: "The library is read-only",
+      },
+    });
+    assert.notProperty(result, "note");
+    assert.lengthOf(published, 2);
+    assert.deepEqual(
+      [result.checkpoint.tasks[0].status, result.checkpoint.tasks[0].reason],
+      ["skipped", "The library is read-only"],
+    );
+    assert.deepEqual(ctx.request.executionCheckpoint, published[1]);
+  });
+
+  it("never takes evidence identities from an ordinary task", async function () {
+    const result = await call(context(), {
+      task: {
+        ...declareSave,
+        journalActionIds: ["action-1"],
+        verifiedReceiptIds: ["receipt-1"],
+        readEvidenceIds: ["read-1"],
+        materialRefs: [
+          {
+            documentId: "document-1",
+            documentVersion: 2,
+            contentHash: "sha256:material",
+          },
+        ],
+      },
+    });
+    const [task] = result.checkpoint.tasks;
+    assert.equal(task.status, "pending");
+    assert.deepEqual(task.journalActionIds, []);
+    assert.deepEqual(task.verifiedReceiptIds, []);
+    assert.deepEqual(task.readEvidenceIds, []);
+    assert.deepEqual(task.materialRefs, []);
+  });
+
+  it("applies the declarations of a call before its marks, and publishes one checkpoint", async function () {
+    const ctx = context();
+    await call(ctx, {
+      task: {
+        taskId: "read",
+        description: "Read the paper",
+        status: "pending",
+        expectedEffect: "read",
+      },
+    });
+    const result = await call(ctx, {
+      tasks: [
+        declareSave,
+        { taskId: "read", status: "skipped", reason: "The PDF is missing" },
+        {
+          taskId: "cite",
+          description: "Cite it in APA",
+          status: "blocked",
+          reason: "Needs the citation style",
+          expectedEffect: "reasoning",
         },
       ],
     });
-    assert.isTrue(validated.ok);
-    if (!validated.ok) return;
-    const ctx = context(async () => {
-      published += 1;
-    });
 
-    try {
-      await tool.execute(validated.value, ctx);
-      assert.fail("expected evidence validation to reject the whole batch");
-    } catch (error) {
-      assert.include(String(error), "not host-verified");
+    assert.lengthOf(published, 2, "one checkpoint per call");
+    assert.notProperty(result, "note");
+    assert.deepEqual(
+      published[1].tasks.map((task) => [task.taskId, task.status, task.reason]),
+      [
+        [taskId("read"), "skipped", "The PDF is missing"],
+        [taskId("save"), "pending", undefined],
+        [taskId("cite"), "blocked", "Needs the citation style"],
+      ],
+    );
+  });
+
+  it("declares a new part pending, with the note, when asked to start or complete it", async function () {
+    const result = await call(context(), {
+      task: { ...declareSave, status: "completed" },
+    });
+    assert.equal(result.checkpoint.tasks[0].status, "pending");
+    assert.equal(result.note, NOTHING_CHANGED);
+    assert.lengthOf(published, 1);
+  });
+
+  it("refuses a malformed call as an input rejection: a new description, a repeated id, or an invalid id", async function () {
+    const ctx = context();
+    await call(ctx, { task: declareSave });
+    for (const [args, message] of [
+      [
+        { task: { ...declareSave, description: "Save somewhere else" } },
+        /immutable/,
+      ],
+      [
+        {
+          tasks: [
+            {
+              taskId: "draft",
+              description: "Draft the summary",
+              status: "pending",
+              expectedEffect: "artifact",
+            },
+            { taskId: "draft", status: "skipped", reason: "No time" },
+          ],
+        },
+        /only once/,
+      ],
+      [{ task: { ...declareSave, taskId: "save the note" } }, /Task IDs/],
+    ] as const) {
+      const error = await rejectionOf(call(ctx, args));
+      assert.instanceOf(error, ToolInputRejection);
+      assert.match(error.message, message);
     }
-    assert.equal(published, 0);
-    assert.isUndefined(ctx.request.executionCheckpoint);
+    assert.lengthOf(published, 1);
+  });
+
+  it("refuses a checkpoint another execution owns", async function () {
+    const foreign = createEmptyExecutionCheckpoint(
+      { ...executionContext, executionId: "execution-other" },
+      10,
+    );
+    const error = await rejectionOf(
+      call(context(foreign), { task: declareSave }),
+    );
+    assert.include(error.message, "belongs to another execution");
+    assert.lengthOf(published, 0);
   });
 });

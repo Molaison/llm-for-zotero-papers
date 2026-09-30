@@ -10,6 +10,7 @@ import type { ResearchContract, ResearchProgress } from "../research/types";
 import type { ResearchPolicySnapshot } from "../research/policy";
 import type { ActionConstraint } from "../authorization/types";
 import type { AgentActionOperation } from "../contracts/types";
+import type { ExecutionTaskStatus } from "../execution/types";
 
 export type PlanProvider = "original" | "codex" | "claude";
 
@@ -211,16 +212,7 @@ export type PlanArtifact = Readonly<{
   approvedAt?: number;
 }>;
 
-export type ExecutionTaskStatus =
-  | "pending"
-  | "in_progress"
-  | "waiting_for_user"
-  | "interrupted"
-  | "completed"
-  | "blocked"
-  | "failed"
-  | "skipped"
-  | "cancelled";
+export type { ExecutionTaskStatus };
 
 export type ExecutionTaskKind = "required_step" | "supporting_child";
 
