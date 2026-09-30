@@ -165,6 +165,16 @@ const MCP_GUIDANCE_TOOL_NAMES = new Set<string>([
 ]);
 const CURATED_WRITE_TOOL_NAMES = new Set<string>(ZOTERO_MCP_WRITE_TOOL_NAMES);
 /**
+ * MCP-only descriptions for tools whose in-plugin description routes through
+ * a tool the MCP catalog excludes (see ZOTERO_MCP_EXCLUDED_TOOL_NAMES).
+ */
+const MCP_TOOL_DESCRIPTION_OVERRIDES: ReadonlyMap<string, string> = new Map([
+  [
+    "literature_search",
+    "Search scholarly sources; results come back to the client directly. The literature_review selection card is not available over MCP, so present discovery candidates yourself; discovery never imports silently. An explicit import request uses library_import directly; metadata review uses workflow:'review', mode:'metadata'.",
+  ],
+]);
+/**
  * External agents never see the envelope's plan-phase sections, so the MCP
  * catalog carries each one on the phase's anchor tool instead: update_plan
  * while planning, amend_plan (visible for every approved plan) while executing.
@@ -1435,7 +1445,7 @@ function handleToolsList(
         description: decorateMcpToolDescription(
           name,
           [
-            description,
+            MCP_TOOL_DESCRIPTION_OVERRIDES.get(name) ?? description,
             MCP_GUIDANCE_TOOL_NAMES.has(name)
               ? toolRegistry.getTool(name)?.guidance?.instruction
               : undefined,

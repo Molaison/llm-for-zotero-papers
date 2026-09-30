@@ -25,6 +25,7 @@ import type {
 } from "../src/agent/types";
 import { createPaperReadTool } from "../src/agent/tools/read/paperRead";
 import { createLibraryRetrieveTool } from "../src/agent/tools/read/libraryRetrieve";
+import { createLiteratureSearchTool } from "../src/agent/tools/read/literatureSearch";
 import { createFileIOTool } from "../src/agent/tools/write/fileIO";
 import { createResearchUpdateTool } from "../src/agent/tools/plan/researchUpdate";
 import { createAmendPlanTool } from "../src/agent/tools/plan/amendPlan";
@@ -1510,6 +1511,32 @@ describe("Zotero MCP server", function () {
     } finally {
       scope.clear();
     }
+  });
+
+  it("does not send MCP clients to literature_review, which MCP does not expose", async function () {
+    const registry = new AgentToolRegistry();
+    const literature = createLiteratureSearchTool({} as never);
+    assert.include(literature.spec.description, "call literature_review");
+    registry.register(literature);
+    registerMcpServer({ toolRegistry: registry, zoteroGateway: {} as never });
+    const response = await invokeMcpEndpoint({
+      token: getOrCreateZoteroMcpBearerToken(),
+      body: { jsonrpc: "2.0", id: 1, method: "tools/list" },
+    });
+    const tools = JSON.parse(response[2]).result.tools as Array<{
+      name: string;
+      description: string;
+    }>;
+    const names = tools.map((entry) => entry.name);
+    assert.include(names, "literature_search");
+    assert.notInclude(names, "literature_review");
+    const description = tools.find(
+      (entry) => entry.name === "literature_search",
+    )!.description;
+    assert.notInclude(description, "call literature_review");
+    assert.include(description, "not available over MCP");
+    assert.include(description, "library_import");
+    assert.include(description, "mode:'metadata'");
   });
 
   it("keeps Codex direct-path PDF turns on the metadata/write MCP surface", async function () {
