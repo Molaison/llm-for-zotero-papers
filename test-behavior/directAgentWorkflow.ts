@@ -9,17 +9,6 @@ import { stripZoteroNoteWrapper } from "../src/services/notePersistence";
 import { assertExact, check } from "./core";
 import { snapshot, itemKey, collectionKey, onlyChanges } from "./native";
 import type { JourneyContext } from "./journeys";
-import {
-  enableComposePlanMode,
-  getPlanningRuntimeContext,
-  stageApprovedPlanExecution,
-} from "../src/modules/contextPanel/planModeState";
-import {
-  loadPlanArtifact,
-  loadPlanExecutionLedger,
-} from "../src/agent/plans/store";
-import { planExecutionCoordinator } from "../src/agent/plans/coordinator";
-import { getConversationWriteGeneration } from "../src/shared/conversationWriteFence";
 
 declare const Zotero: any;
 declare const IOUtils: any;
@@ -46,7 +35,6 @@ function assertDirectModelLoop(
 /** A real composer-to-native-state journey; no model answers or effects are supplied by the driver. */
 export async function directAgentWorkflow(id: string, ctx: JourneyContext) {
   const { fixtures: f, harness, driver, write } = ctx;
-  const planned = id === "semantic.compound-plan";
   const revised = id === "semantic.compound-revise";
   const recovery = id === "semantic.compound-resume" || revised;
   const clarified = id === "semantic.compound-clarified";
@@ -59,7 +47,7 @@ export async function directAgentWorkflow(id: string, ctx: JourneyContext) {
     : f.collections.destination;
   check(destination, "The requested native destination exists");
   const fixture = await harness.createPaperWithPdfFixture({
-    title: `Semantic workflow population coding ${f.marker} ${planned ? "plan" : "direct"}`,
+    title: `Semantic workflow population coding ${f.marker} direct`,
     pdfTitle: "Synthetic semantic workflow acceptance paper",
     pages: [
       "SYNTHETIC TEST PAPER. Hypothesis: a stable population readout can coexist with representational drift. This is a synthetic experiment, not a published biological result.",
@@ -95,49 +83,6 @@ export async function directAgentWorkflow(id: string, ctx: JourneyContext) {
     ? "Help me move this current paper into learning folder, then summarize this paper, then save the summary as a note attached to that paper. Include the methods, quantitative result, and limitations in the summary."
     : `Move this current paper from folder "${f.collections.geometry.name}" into folder "${destination.name}", then summarize this paper, then save the summary as a note attached to that paper. Preserve its membership in "${f.collections.unrelated.name}". Include the methods, quantitative result, and limitations in the summary.`;
   const request = { conversationKey: paper.id, activeItemId: paper.id };
-  let executionId: string | undefined;
-  let executionPrompt = prompt;
-  if (planned) {
-    const planning = enableComposePlanMode({
-      conversationKey: paper.id,
-      provider: "original",
-    });
-    await driver.turn(
-      id,
-      prompt,
-      "auto",
-      { ...request, planContext: getPlanningRuntimeContext(paper.id) },
-      "none",
-      () => harness.askStandalone(prompt),
-    );
-    assertExact(
-      await snapshot(),
-      before,
-      "Planning must not mutate native Zotero state",
-    );
-    const artifact = await loadPlanArtifact(planning.planId, planning.revision);
-    check(
-      artifact?.status === "awaiting_approval",
-      "The complete workflow must produce an approvable plan",
-    );
-    await write(`${id}/plan.json`, artifact);
-    await harness.captureStandaloneScreenshot(
-      `${ctx.request.reportDir}/${id}/plan-ready.png`,
-    );
-    const ledger = await planExecutionCoordinator.approve({
-      planId: artifact.planId,
-      revision: artifact.revision,
-      conversationGeneration: getConversationWriteGeneration(paper.id),
-      actionContract: artifact.actionContract,
-    });
-    executionId = ledger.executionId;
-    await write(`${id}/approval.json`, {
-      approvedBy: "explicit manual behavior-suite invocation",
-      ledger,
-    });
-    stageApprovedPlanExecution(ledger);
-    executionPrompt = "Execute the approved workflow to completion.";
-  }
   const startedAt = Date.now();
   const noteTool = recovery
     ? getAgentRuntime().getToolDefinition("note_write")
@@ -165,11 +110,11 @@ export async function directAgentWorkflow(id: string, ctx: JourneyContext) {
   try {
     turn = await driver.turn(
       id,
-      executionPrompt,
+      prompt,
       "auto",
       request,
       clarified ? "review" : "none",
-      () => harness.askStandalone(executionPrompt),
+      () => harness.askStandalone(prompt),
       async (action) => {
         await harness.captureStandaloneScreenshot(
           `${ctx.request.reportDir}/${id}/source-question.png`,
@@ -468,21 +413,6 @@ export async function directAgentWorkflow(id: string, ctx: JourneyContext) {
     submitIndex,
     saveIndex,
   });
-  if (executionId) {
-    assertExact(
-      turn.events.filter(
-        (event) => event.type === "tool_call" && event.name === "task_update",
-      ).length,
-      0,
-      "Host-verifiable Plan tasks require no model status mirroring",
-    );
-    const ledger = await loadPlanExecutionLedger(executionId);
-    await write(`${id}/final-ledger.json`, ledger);
-    check(
-      ledger?.tasks.every((task) => task.status === "completed"),
-      "Every required plan task must complete from evidence",
-    );
-  }
   await write(`${id}/summary-note.html`, note.getNote(), true);
   await write(`${id}/execution-after.json`, after);
   await write(`${id}/timing.json`, {

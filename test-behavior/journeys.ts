@@ -17,7 +17,6 @@ import {
   type Fixtures,
   type NativeState,
 } from "./native";
-import { researchJourney } from "./research";
 import { retentionJourney } from "./retention";
 import { deliveryJourney } from "./delivery";
 import { figureNoteJourney, figureCommandJourney } from "./figureNote";
@@ -118,7 +117,6 @@ export async function executeJourneyStep(
       await ordinaryMoveWorkflow(ctx);
     } else if (
       id === "semantic.compound" ||
-      id === "semantic.compound-plan" ||
       id === "semantic.compound-resume" ||
       id === "semantic.compound-revise" ||
       id === "semantic.compound-implicit" ||
@@ -402,8 +400,6 @@ export async function executeJourneyStep(
         detail:
           "Machine checks passed. Inspect vault/figures.md and cropped images for correct figure boundaries, caption and provenance.",
       };
-    } else if (id === "research.review") {
-      outcome = await researchJourney(ctx);
     } else if (id === "library.tags") {
       const targets = [f.items.geometry, f.items.memory, f.items.shared];
       const tags = [

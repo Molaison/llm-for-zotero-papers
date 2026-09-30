@@ -370,8 +370,6 @@ function createControllerHarness(
     isClaudeConversationSystem:
       options.isClaudeConversationSystem || (() => false),
     getCurrentRuntimeMode: () => "chat",
-    activatePlanMode: () => undefined,
-    isPlanAvailable: () => false,
     setCurrentRuntimeMode: () => {
       runtimeSwitches += 1;
     },
@@ -749,8 +747,6 @@ describe("actionCommandController", function () {
       isWebChatMode: () => false,
       isClaudeConversationSystem: () => false,
       getCurrentRuntimeMode: () => "chat",
-      activatePlanMode: () => undefined,
-      isPlanAvailable: () => false,
       setCurrentRuntimeMode: () => {
         runtimeSwitches += 1;
       },

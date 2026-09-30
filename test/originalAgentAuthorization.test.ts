@@ -221,24 +221,6 @@ describe("central authorization from concrete proposals", function () {
             },
       );
     });
-    it(`${mode}: plan approval does not bypass integrity or restrictions`, function () {
-      const context = { mode, hasApprovedPlanAuthority: true };
-      assert.equal(authorizeOriginalAction(action(), context).kind, "execute");
-      assert.equal(
-        authorizeOriginalAction(action(), {
-          ...context,
-          constraints: [noZotero],
-        }).kind,
-        "block",
-      );
-      assert.equal(
-        authorizeOriginalAction(
-          action("apply_tags", { riskSignals: ["protected_target"] }),
-          context,
-        ).kind,
-        "block",
-      );
-    });
     it(`${mode}: assesses concrete effects without semantic intent`, function () {
       const expected =
         mode === "safe"
@@ -291,6 +273,19 @@ describe("central authorization from concrete proposals", function () {
       );
     });
   }
+
+  it("safe: an approved plan is no authority, so every write is reviewed", function () {
+    assert.deepEqual(
+      authorizeOriginalAction(action(), {
+        mode: "safe",
+        hasApprovedPlanAuthority: true,
+      } as never),
+      {
+        kind: "confirm",
+        reason: "Safe mode reviews every external write before it runs.",
+      },
+    );
+  });
 
   it("auto permits ordinary writes and full recovery across library and directory boundaries", function () {
     const executionContext = {

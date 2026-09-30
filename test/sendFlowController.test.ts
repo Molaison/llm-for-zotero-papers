@@ -31,7 +31,6 @@ import { resolvePromptText as resolveProductionPromptText } from "../src/modules
 import { createPaperPortalItem } from "../src/modules/contextPanel/portalScope";
 import { buildTurnPaperScope } from "../src/agent/context/turnPaperScope";
 import { savePlanExecutionLedger } from "../src/agent/plans/store";
-import { clearPlanModeState } from "../src/modules/contextPanel/planModeState";
 import {
   installPlanStoreZotero,
   storedPlanExecution,
@@ -3155,13 +3154,12 @@ describe("sendFlowController", function () {
     assert.equal(inputBox.value, "draft typed while waiting");
   });
 
-  it("runs an ordinary message as its own turn while a stored plan waits, and resumes the plan on continue", async function () {
+  it("sends every message as an ordinary turn while a stored plan waits, a continue included", async function () {
     const stored = storedPlanExecution("interrupted", item.id);
     const restoreZotero = await installPlanStoreZotero({
       Prefs: { get: () => undefined },
       Items: { get: () => null },
     });
-    clearPlanModeState(item.id);
     try {
       await savePlanExecutionLedger(stored);
       const sends: Array<{ planContext: unknown; displayQuestion: unknown }> =
@@ -3184,20 +3182,16 @@ describe("sendFlowController", function () {
       await controller.doSend();
 
       assert.lengthOf(sends, 2);
-      assert.isUndefined(
-        sends[0].planContext,
-        "an unrelated question must not be absorbed by the stored plan",
+      assert.deepEqual(
+        sends.map((send) => send.planContext),
+        [undefined, undefined],
+        "plan mode is retired: no send carries a plan context",
       );
-      assert.equal(
-        sends[0].displayQuestion,
-        "What is the sample size of this study?",
+      assert.deepEqual(
+        sends.map((send) => send.displayQuestion),
+        ["What is the sample size of this study?", "Continue."],
       );
-      assert.deepInclude(sends[1].planContext as object, {
-        phase: "executing",
-        executionId: stored.executionId,
-      });
     } finally {
-      clearPlanModeState(item.id);
       restoreZotero();
     }
   });

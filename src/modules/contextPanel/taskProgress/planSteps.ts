@@ -23,7 +23,8 @@ import type {
   TaskProgressStep,
 } from "./store";
 
-const PLAN_STATUS_SYMBOLS: Record<string, string> = {
+/** The badge symbol a plan or checklist step shows for its status. */
+export const PLAN_STATUS_SYMBOLS: Record<string, string> = {
   pending: "",
   in_progress: "",
   waiting_for_user: "!",

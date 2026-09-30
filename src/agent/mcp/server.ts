@@ -2079,16 +2079,6 @@ async function restorePlanExecutionContext(
   );
   const initialized = await session.initialize();
   if (initialized.kind === "failed") throw new Error(initialized.userMessage);
-  context.loadApprovedPlanEffectContext = async () => {
-    const specification = session.approvedEffectSpecification();
-    if (!specification) return undefined;
-    return {
-      specification,
-      activeEffectIds: session.activeWorkflowEffectIds() || [],
-      resolvedMaterials: await session.resolvedWorkflowMaterials(),
-      resolvedTargetBindings: await session.resolvedWorkflowTargetBindings(),
-    };
-  };
   if (context.request.actionContract && !context.request.actionProgress) {
     context.request.actionProgress = toolRegistry.createActionProgress(
       context.request.actionContract,

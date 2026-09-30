@@ -3479,14 +3479,17 @@ export async function runCodexAppServerNativeTurn(input: {
                 const turnResult = await proc.sendRequest("turn/start", {
                   threadId: args.thread.threadId,
                   input: args.input,
-                  additionalContext: {
-                    zotero_plan: {
-                      kind: "application",
-                      value:
-                        args.planInstructions ||
-                        "No active Zotero planning or execution request. Prior plan instructions do not authorize work in this turn.",
-                    },
-                  },
+                  // Plan mode is retired: an ordinary turn names no plan.
+                  ...(args.planInstructions
+                    ? {
+                        additionalContext: {
+                          zotero_plan: {
+                            kind: "application",
+                            value: args.planInstructions,
+                          },
+                        },
+                      }
+                    : {}),
                   model: params.model,
                   ...(codexNativeRuntimeCwd
                     ? { cwd: codexNativeRuntimeCwd }

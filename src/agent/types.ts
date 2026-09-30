@@ -50,11 +50,9 @@ import type {
 import type { AgentActionVerification } from "./contracts/actionVerificationLabels";
 import type {
   PlanEvent,
-  PlanEffectSpecification,
   PlanRuntimeContext,
   TrustedReadObservation,
 } from "./plans/types";
-import type { ResolvedPlanMaterialBinding } from "./plans/effectAuthorization";
 import type { SkillRoutingReceipt } from "./skills/routingTypes";
 import type { LoadedSkillRecord } from "./skills/loadingTypes";
 import type {
@@ -1358,8 +1356,7 @@ export type AgentToolContext = {
     | "external_runtime"
     | "auto_policy"
     | "yolo"
-    | "yolo_judgment"
-    | "plan_approval";
+    | "yolo_judgment";
   signal?: AbortSignal;
   /**
    * Internal consent witness used only when journal initialization failed.
@@ -1411,16 +1408,6 @@ export type AgentToolContext = {
   updateExecutionCheckpoint?: (
     apply: (checkpoint: ExecutionCheckpoint) => ExecutionCheckpoint,
   ) => Promise<ExecutionCheckpoint>;
-  /** Host-owned v5 Plan scope resolved from the approved artifact and ledger. */
-  loadApprovedPlanEffectContext?: () => Promise<
-    | Readonly<{
-        specification: PlanEffectSpecification;
-        activeEffectIds: readonly string[];
-        resolvedMaterials: readonly ResolvedPlanMaterialBinding[];
-        resolvedTargetBindings: Readonly<Record<string, readonly string[]>>;
-      }>
-    | undefined
-  >;
 };
 
 export type AgentToolInputValidation<T> =

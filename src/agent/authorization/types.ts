@@ -80,8 +80,7 @@ export type AuthorizationDecision =
         | "external_runtime"
         | "auto_policy"
         | "yolo"
-        | "yolo_judgment"
-        | "plan_approval";
+        | "yolo_judgment";
     }
   | { kind: "confirm"; reason: string }
   | { kind: "block"; reason: string };
@@ -141,6 +140,4 @@ export type OriginalAuthorizationContext = {
   executionContext?: import("../types").AgentExecutionContext;
   /** Legacy compatibility input. Direct-agent policy does not use this as authority. */
   hasMatchingActionIntent?: boolean;
-  /** Host-verified approved-plan scope; never supplied by model tool input. */
-  hasApprovedPlanAuthority?: boolean;
 };

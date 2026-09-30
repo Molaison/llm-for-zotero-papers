@@ -490,17 +490,6 @@ import { attachComposeCaptureController } from "./setupHandlers/controllers/comp
 import { attachFloatingMenuInteractionController } from "./setupHandlers/controllers/floatingMenuInteractionController";
 import { createPaperPickerController } from "./setupHandlers/controllers/paperPickerController";
 import { createActionCommandController } from "./setupHandlers/controllers/actionCommandController";
-import { showStandaloneConfirmationDialog } from "./standaloneConfirmationDialog";
-import {
-  PLAN_APPROVED_EVENT,
-  PLAN_CANCEL_EVENT,
-  PLAN_REVISE_EVENT,
-  beginPlanRevision,
-  disableComposePlanMode,
-  enableComposePlanMode,
-  getComposePlanState,
-  toggleComposePlanMode,
-} from "./planModeState";
 import { parseInlineActionCommand } from "./setupHandlers/controllers/actionCommandParams";
 import { addZoteroItemsAsDefaultContext } from "./contextSelectionActions";
 import { registerContextSurfaceActionTarget } from "./zoteroItemContextMenu";
@@ -732,7 +721,6 @@ export function setupHandlers(
     modelMenu,
     reasoningBtn,
     runtimeModeBtn,
-    planModeChip,
     reasoningSlot,
     reasoningMenu,
     actionsRow,
@@ -1708,7 +1696,6 @@ export function setupHandlers(
 
   // Compute conversation key early so all closures can reference it.
   let conversationKey = item ? getConversationKey(item) : null;
-  let syncPlanModeChip = () => {};
   const handleQuoteProvenanceRevalidationRequest = () => {
     const activeConversationKey = item ? getConversationKey(item) : null;
     if (activeConversationKey) {
@@ -1780,7 +1767,6 @@ export function setupHandlers(
       Number.isFinite(conversationKey) && (conversationKey as number) > 0
         ? `${conversationKey}`
         : "";
-    syncPlanModeChip();
     const libraryID = getCurrentLibraryID();
     panelRoot.dataset.libraryId = libraryID > 0 ? `${libraryID}` : "";
     const mode: "global" | "paper" | null = item
@@ -2170,38 +2156,6 @@ export function setupHandlers(
       uploadBtn.setAttribute("aria-expanded", "false");
     }
   };
-  const getCurrentPlanProvider = (): "original" | "codex" | "claude" =>
-    isClaudeConversationSystem()
-      ? "claude"
-      : isCodexConversationSystem()
-        ? "codex"
-        : "original";
-  const isPlanAvailable = () =>
-    !isWebChatModeActive() &&
-    (isRuntimeConversationSystem() || getCurrentRuntimeMode() === "agent");
-  syncPlanModeChip = () => {
-    if (!planModeChip || !item) return;
-    const state = getComposePlanState(getConversationKey(item));
-    planModeChip.style.display =
-      isPlanAvailable() && state?.enabled ? "inline-flex" : "none";
-    planModeChip.dataset.planId = state?.planId || "";
-    planModeChip.dataset.planRevision = state ? `${state.revision}` : "";
-  };
-  const activatePlanMode = () => {
-    if (!item || isWebChatModeActive()) return;
-    if (!isPlanAvailable()) {
-      if (status) {
-        setStatus(status, "Plan mode is available in Agent mode", "warning");
-      }
-      return;
-    }
-    enableComposePlanMode({
-      conversationKey: getConversationKey(item),
-      provider: getCurrentPlanProvider(),
-    });
-    syncPlanModeChip();
-    if (status) setStatus(status, "Plan mode enabled", "ready");
-  };
   let openModelMenu = () => {};
   let closeModelMenu = () => {
     setFloatingMenuOpen(modelMenu, MODEL_MENU_OPEN_CLASS, false);
@@ -2222,7 +2176,6 @@ export function setupHandlers(
     disposeFooterPermissionControl = controller.dispose;
     void syncFooterPermissionControl();
   }
-  syncPlanModeChip();
   let openReasoningMenu = () => {};
   let closeReasoningMenu = () => {
     setFloatingMenuOpen(reasoningMenu, REASONING_MENU_OPEN_CLASS, false);
@@ -6874,8 +6827,6 @@ export function setupHandlers(
     logError: (message, error) => {
       appLogger.debug(message, error);
     },
-    activatePlanMode,
-    isPlanAvailable,
   });
   const {
     isActionPickerOpen,
@@ -7283,47 +7234,6 @@ export function setupHandlers(
     consumeForcedSkillIds,
   });
   doSend = sendFlowController.doSend;
-  const handlePlanApproved = (event: Event) => {
-    const detail = (event as CustomEvent<{ planId?: string }>).detail;
-    syncPlanModeChip();
-    void doSend({
-      overrideText: `Execute the approved plan${detail?.planId ? ` ${detail.planId}` : ""}. Follow the durable task ledger and verify every required step.`,
-    });
-  };
-  const handlePlanRevise = (event: Event) => {
-    if (!item) return;
-    const detail = (
-      event as CustomEvent<{
-        planId: string;
-        revision: number;
-        provider: "original" | "codex" | "claude";
-        comment: string;
-      }>
-    ).detail;
-    if (!detail?.planId || !detail.comment?.trim()) return;
-    beginPlanRevision({
-      conversationKey: getConversationKey(item),
-      planId: detail.planId,
-      revision: detail.revision + 1,
-      provider: detail.provider,
-    });
-    syncPlanModeChip();
-    void doSend({
-      // Native Plan receives the prior artifact and revision instructions in
-      // its turn context. Keep the user's request intact for action contracts.
-      overrideText:
-        detail.provider === "codex" && isCodexAppServerModeEnabled()
-          ? detail.comment.trim()
-          : `Revise the prior plan using this feedback: ${detail.comment.trim()}`,
-    });
-  };
-  const handlePlanCancel = () => {
-    if (item) disableComposePlanMode(getConversationKey(item));
-    syncPlanModeChip();
-  };
-  body.addEventListener(PLAN_APPROVED_EVENT, handlePlanApproved);
-  body.addEventListener(PLAN_REVISE_EVENT, handlePlanRevise);
-  body.addEventListener(PLAN_CANCEL_EVENT, handlePlanCancel);
   // The header trash action uses the same durable, undoable deletion
   // lifecycle as Delete in conversation history.
   const executeSend = async () => {
@@ -7699,7 +7609,6 @@ export function setupHandlers(
       // Only an explicit toggle updates the sticky default, so implicit
       // switches (/compact, skill selection) stay scoped to this conversation.
       setLastUsedRuntimeMode(nextMode);
-      syncPlanModeChip();
       if (status) {
         setStatus(
           status,
@@ -7709,90 +7618,6 @@ export function setupHandlers(
           "ready",
         );
       }
-    });
-  }
-
-  if (planModeChip) {
-    planModeChip.addEventListener("click", (e: Event) => {
-      e.preventDefault();
-      e.stopPropagation();
-      if (
-        !item ||
-        !requireCurrentPanelOwnership(body, item, "cancel-agent-plan")
-      ) {
-        return;
-      }
-      const ownershipLease = capturePanelOperationLease(body);
-      const ownershipItem = item;
-      if (!ownershipLease) return;
-      void (async () => {
-        const key = getConversationKey(ownershipItem);
-        const state = getComposePlanState(key);
-        if (!state) return;
-        if (state.submitted) {
-          const confirmed = await showStandaloneConfirmationDialog(
-            body.ownerDocument,
-            {
-              title: "Cancel this plan?",
-              message:
-                "Planning will stop. The cancelled plan remains visible in the conversation history.",
-              confirmLabel: "Cancel plan",
-              cancelLabel: "Keep planning",
-              destructive: true,
-            },
-          );
-          if (!confirmed) return;
-          if (
-            !isPanelOperationLeaseCurrent(ownershipLease) ||
-            !requireCurrentPanelOwnership(
-              body,
-              ownershipItem,
-              "cancel-agent-plan-commit",
-            )
-          ) {
-            return;
-          }
-          getAbortController(key)?.abort();
-          await import("../../agent/plans/coordinator").then(
-            ({ planExecutionCoordinator }) => {
-              if (
-                !isPanelOperationLeaseCurrent(ownershipLease) ||
-                !requireCurrentPanelOwnership(
-                  body,
-                  ownershipItem,
-                  "cancel-agent-plan-artifact",
-                )
-              ) {
-                return;
-              }
-              return planExecutionCoordinator.cancelArtifact({
-                planId: state.planId,
-                revision: state.revision,
-              });
-            },
-          );
-          if (
-            !isPanelOperationLeaseCurrent(ownershipLease) ||
-            !requireCurrentPanelOwnership(
-              body,
-              ownershipItem,
-              "cancel-agent-plan-result",
-            )
-          ) {
-            return;
-          }
-        }
-        disableComposePlanMode(key);
-        syncPlanModeChip();
-        const CustomEventCtor = body.ownerDocument.defaultView?.CustomEvent;
-        if (CustomEventCtor)
-          body.dispatchEvent(
-            new CustomEventCtor(PLAN_CANCEL_EVENT, {
-              bubbles: true,
-              detail: { planId: state.planId, revision: state.revision },
-            }),
-          );
-      })();
     });
   }
 
@@ -7891,40 +7716,6 @@ export function setupHandlers(
         selectActivePaperPickerRow();
         return;
       }
-    }
-    if (
-      ke.key === "Tab" &&
-      ke.shiftKey &&
-      !ke.altKey &&
-      !ke.ctrlKey &&
-      !ke.metaKey
-    ) {
-      const anotherSurfaceOwnsShortcut =
-        isFloatingMenuOpen(modelMenu) ||
-        isFloatingMenuOpen(reasoningMenu) ||
-        isFloatingMenuOpen(retryModelMenu) ||
-        isHistoryMenuOpen() ||
-        isHistoryNewMenuOpen() ||
-        Boolean(actionHitlPanel && actionHitlPanel.style.display !== "none") ||
-        Boolean(body.ownerDocument.querySelector("[role='dialog']"));
-      if (anotherSurfaceOwnsShortcut) return;
-      e.preventDefault();
-      e.stopPropagation();
-      if (!item || isWebChatModeActive()) return;
-      if (!isPlanAvailable()) return;
-      const enabled = toggleComposePlanMode({
-        conversationKey: getConversationKey(item),
-        provider: getCurrentPlanProvider(),
-      });
-      syncPlanModeChip();
-      if (status) {
-        setStatus(
-          status,
-          enabled ? "Plan mode enabled" : "Plan mode disabled",
-          "ready",
-        );
-      }
-      return;
     }
     // Backspace at position 0 with active badge: remove it
     if (
@@ -8391,9 +8182,6 @@ export function setupHandlers(
     disposeConversationTurnNavigator(body);
     disposeChatRendering(body);
     cleanupChatScroll();
-    body.removeEventListener(PLAN_APPROVED_EVENT, handlePlanApproved);
-    body.removeEventListener(PLAN_REVISE_EVENT, handlePlanRevise);
-    body.removeEventListener(PLAN_CANCEL_EVENT, handlePlanCancel);
     codexDirectController?.dispose();
     codexDirectController = null;
     body.removeEventListener(

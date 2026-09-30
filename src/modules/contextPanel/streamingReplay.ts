@@ -31,6 +31,10 @@ import {
 } from "./taskProgress/store";
 import { flushTaskProgressPanels } from "./taskProgress/panel";
 
+/** Anything a plan card could once be operated with: Resume, approve, revise. */
+const PLAN_CONTROL_SELECTOR =
+  ".llm-plan-recovery-card, .llm-plan-container:not(.llm-plan-document-card) button, .llm-plan-container:not(.llm-plan-document-card) textarea";
+
 export type StreamingReplayResult = {
   historyTurns: number;
   chunks: number;
@@ -61,7 +65,8 @@ export type StreamingReplayResult = {
   inputFrameMs: number[];
   typingFrameMs: number[];
   composerPreserved: boolean;
-  resumeVisibilityCorrect: boolean;
+  /** No Resume or other plan control appears, not even for an interrupted plan. */
+  noPlanControls: boolean;
   singleExecutionProgress: boolean;
   completedProgressNodes: number;
   reopenedProgressNodes: number;
@@ -327,7 +332,7 @@ export async function exerciseStreamingReplay(
     pausedProgressNodes: [],
     resumeStartsProgress: true,
     inactiveProgressReads: 0,
-    resumeVisibilityCorrect: !box.querySelector(".llm-plan-recovery-card"),
+    noPlanControls: !box.querySelector(PLAN_CONTROL_SELECTOR),
     stepsVisibleWhileRunning,
     rowVisibleAfterCompletion: false,
     rowStateAfterCompletion: "",
@@ -556,9 +561,8 @@ export async function exerciseStreamingReplay(
       type: "plan_execution_updated",
       ledger: { ...changed, status: "interrupted", updatedAt: nextUpdate++ },
     });
-    result.resumeVisibilityCorrect &&=
-      !stepsShown() &&
-      Boolean(box.querySelector(".llm-plan-recovery-card button"));
+    result.noPlanControls &&=
+      !stepsShown() && !box.querySelector(PLAN_CONTROL_SELECTOR);
     const quote =
       "The source quotation remains readable while the answer is still arriving.";
     const answer = `Final replay answer with **evidence**.\n\n> ${quote}\n>\n> (Workflow, 2026)\n\nThe explanation continues.`;
@@ -773,7 +777,7 @@ async function exerciseChatStreamingReplay(
     inputFrameMs: [],
     typingFrameMs: [],
     composerPreserved: false,
-    resumeVisibilityCorrect: true,
+    noPlanControls: true,
     singleExecutionProgress: true,
     completedProgressNodes: 0,
     reopenedProgressNodes: 0,

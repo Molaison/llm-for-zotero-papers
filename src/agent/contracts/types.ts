@@ -216,6 +216,7 @@ export type AgentActionProgressLedger = {
       | "auto_policy"
       | "yolo"
       | "yolo_judgment"
+      /** Stored before plan mode was retired; no new grant carries it. */
       | "plan_approval";
     status: "staged" | "executed" | "failed" | "uncertain";
     createdAt: number;

@@ -114,13 +114,6 @@ export const catalog: Contract[] = [
     "Recover a lost note-save response using the same finalized summary and native note, without replaying the move or generation.",
   ),
   contract(
-    "semantic.compound-plan",
-    "semantic",
-    "auto",
-    false,
-    "Plan, approve, and execute the complete compound workflow with native evidence.",
-  ),
-  contract(
     "semantic.filing",
     "library",
     "auto",
@@ -253,13 +246,6 @@ export const catalog: Contract[] = [
     "auto",
     false,
     "Explicitly requested top five papers are imported without a confirmation, with five distinct valid identifiers and verified native items.",
-  ),
-  contract(
-    "research.review",
-    "research",
-    "auto",
-    false,
-    "One approved plan completes a scoped population-coding review with durable paper checkpoints and a published document; prose quality remains human-reviewed.",
   ),
   ...(["safe", "auto", "yolo"] as const).flatMap((mode) => [
     contract(

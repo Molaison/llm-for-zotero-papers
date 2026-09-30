@@ -7,105 +7,80 @@ import {
 
 describe("workflow: native Codex proposal review", function () {
   this.timeout(30000);
-  it("enters native planning from the composer shortcut and slash menu", async function () {
+  it("offers no Plan entry: no chip, no Shift+Tab toggle, no /plan, and the old plan events send nothing", async function () {
     const api = (Zotero as any).LLMForZotero.api
       .workflowTest as WorkflowTestApi;
     const pref = "extensions.zotero.llmforzotero.enableCodexAppServerMode";
     const previous = Zotero.Prefs.get(pref, true);
     Zotero.Prefs.set(pref, true, true);
     const fixture = await api.createPaperWithPdfFixture({
-      title: "Native planning entry fixture",
-      pages: ["Disposable planning entry fixture."],
+      title: "Retired plan entry fixture",
+      pages: ["Disposable plan entry fixture."],
     });
     try {
       await api.reset();
       const panel = await api.renderPanelForItem(fixture.parentItemId);
       await api.clickPanelSystemToggle(panel.panelId, "codex");
       const doc = Zotero.getMainWindow().document;
+      const win = doc.defaultView as any;
       const root = doc.querySelector<HTMLElement>(
         `[data-workflow-panel-id="${panel.panelId}"]`,
       )!;
+      assert.notExists(
+        root.querySelector("#llm-plan-mode-chip"),
+        "no Plan chip",
+      );
       const input = root.querySelector<HTMLTextAreaElement>("#llm-input")!;
-      const chip = root.querySelector<HTMLElement>("#llm-plan-mode-chip")!;
-      input.dispatchEvent(
-        new (doc.defaultView as any).KeyboardEvent("keydown", {
-          key: "Tab",
-          shiftKey: true,
-          bubbles: true,
-          cancelable: true,
-        }),
+      const shiftTab = new win.KeyboardEvent("keydown", {
+        key: "Tab",
+        shiftKey: true,
+        bubbles: true,
+        cancelable: true,
+      });
+      input.dispatchEvent(shiftTab);
+      assert.isFalse(
+        shiftTab.defaultPrevented,
+        "Shift+Tab is left to the platform: it no longer toggles Plan mode",
       );
-      assert.notEqual(
-        chip.style.display,
-        "none",
-        "Codex must expose the Plan shortcut despite using the chat transport",
-      );
-      input.dispatchEvent(
-        new (doc.defaultView as any).KeyboardEvent("keydown", {
-          key: "Tab",
-          shiftKey: true,
-          bubbles: true,
-          cancelable: true,
-        }),
-      );
-      assert.equal(chip.style.display, "none");
-      input.value = "/plan";
-      input.dispatchEvent(
-        new (doc.defaultView as any).Event("input", { bubbles: true }),
-      );
-      await Zotero.Promise.delay(50);
-      const button = (
-        Array.from(
-          root.querySelectorAll<HTMLButtonElement>(".llm-action-picker-item"),
-        ) as HTMLButtonElement[]
-      ).find(
-        (entry) =>
-          entry.querySelector(".llm-action-picker-title")?.textContent ===
-          "/plan",
-      );
-      assert.exists(button, "Codex slash menu should include /plan");
-      button!.click();
-      assert.notEqual(chip.style.display, "none");
-      assert.equal(
-        (await api.getDiagnostics(panel.panelId)).runtimeMode,
-        "chat",
-        "Planning must preserve the native transport",
-      );
-      const feedback =
-        'Add the tag "native-review" to exactly Zotero item 3900.';
-      root.querySelector("#llm-main")!.dispatchEvent(
-        new (doc.defaultView as any).CustomEvent("llm-plan-revise", {
-          bubbles: true,
-          detail: {
-            planId: "native-feedback-workflow",
-            revision: 1,
-            provider: "codex",
-            comment: feedback,
-          },
-        }),
-      );
-      const deadline = Date.now() + 5000;
-      while (!api.getLastSend() && Date.now() < deadline)
-        await Zotero.Promise.delay(20);
-      assert.equal(
-        api.getLastSend()?.question,
-        feedback,
-        "Native revision instructions must not obscure the user's action request",
-      );
-      assert.equal(api.getLastSend()?.planContext?.revision, 2);
-
-      const codexConversationKey = (await api.getDiagnostics(panel.panelId))
-        .conversationKey;
-      const upstream = await api.clickPanelSystemToggle(panel.panelId, "codex");
-      assert.notEqual(
-        upstream.conversationKey,
-        codexConversationKey,
-        "switching runtimes should mount a fresh provider conversation",
-      );
-      assert.equal(
-        chip.style.display,
-        "none",
-        "a fresh provider conversation must not retain the prior Plan chip",
+      const slashTitles = async (text: string) => {
+        input.value = text;
+        input.dispatchEvent(new win.Event("input", { bubbles: true }));
+        await Zotero.Promise.delay(50);
+        return (
+          Array.from(
+            root.querySelectorAll(".llm-action-picker-item"),
+          ) as HTMLElement[]
+        ).map(
+          (entry) =>
+            entry.querySelector(".llm-action-picker-title")?.textContent || "",
+        );
+      };
+      const everything = await slashTitles("/");
+      assert.include(everything, "/compact", "the slash menu rendered");
+      assert.notInclude(everything, "/plan");
+      assert.notInclude(await slashTitles("/plan"), "/plan");
+      input.value = "";
+      for (const name of [
+        "llm-plan-approved",
+        "llm-plan-revise",
+        "llm-plan-cancel",
+      ]) {
+        root.querySelector("#llm-main")!.dispatchEvent(
+          new win.CustomEvent(name, {
+            bubbles: true,
+            detail: {
+              planId: "retired-plan",
+              revision: 1,
+              provider: "codex",
+              comment: "Change the plan",
+            },
+          }),
+        );
+      }
+      await Zotero.Promise.delay(200);
+      assert.isNull(
+        api.getLastSend(),
+        "a stale plan card event starts no turn",
       );
     } finally {
       await api.reset();
@@ -192,27 +167,5 @@ describe("workflow: native Codex proposal review", function () {
       await api.reset();
       await api.cleanupFixture(fixture);
     }
-  });
-  it("renders the authoritative native Markdown and binds approval to the saved proposal", async function () {
-    const api = (Zotero as any).LLMForZotero.api
-      .workflowTest as WorkflowTestApi;
-    const result = await api.exerciseNativePlanReview();
-    assert.equal(result.stagedStatus, "drafting");
-    assert.equal(result.heading, "Native proposal");
-    assert.equal(result.strong, "representational drift");
-    assert.include(result.summary || "", "Library changes: none");
-    assert.equal(result.approvedStatus, "approved", result.cardText || "");
-    assert.equal(
-      result.markdown,
-      "# Native proposal\n\nExplain **representational drift** using a concrete example.\n\n- State the assumptions.\n- Explain the result.",
-    );
-    assert.isTrue(result.digestMatches);
-    assert.equal(result.continuationId, "workflow-thread");
-    assert.equal(result.frozenScopeCount, 1);
-    assert.equal(result.taskCount, 3);
-    assert.deepEqual(result.taskStatuses, ["pending", "pending", "pending"]);
-    assert.equal(result.executionPhase, "executing");
-    assert.isTrue(result.executionIdMatches);
-    assert.equal(result.nativeTitle, "Native planning workflow fixture");
   });
 });

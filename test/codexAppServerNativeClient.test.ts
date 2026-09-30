@@ -178,6 +178,56 @@ describe("Codex app-server native client", function () {
       restorePrefs();
     }
   });
+  it("sends an ordinary turn with no Zotero plan context", async function () {
+    const requests: Array<{ method: string; params: Record<string, any> }> = [];
+    const proc = createNativeLifecycleTestProcess({
+      newThreadIds: ["ordinary-thread"],
+      requests,
+      permissionProfilesResult: {
+        data: [{ id: ":danger-full-access", description: "Full access" }],
+      },
+      deltaForTurn: () => "An ordinary answer",
+    });
+    const restorePrefs = installDirectPathTestPrefs(
+      "off",
+      ":danger-full-access",
+    );
+    const originalDB = (globalThis as any).Zotero.DB;
+    (globalThis as any).Zotero.DB = { queryAsync: async () => [] };
+    const originalSpawn = CodexAppServerProcess.spawn;
+    CodexAppServerProcess.spawn = async () => proc;
+    const processKey = "native-ordinary-no-plan";
+    try {
+      await runCodexAppServerNativeTurn({
+        scope: {
+          conversationKey: 6_000_000_898,
+          libraryID: 1,
+          kind: "global" as const,
+        },
+        model: "gpt-5.6",
+        messages: [{ role: "user" as const, content: "Explain drift" }],
+        processKey,
+        hooks: {
+          loadProviderSessionId: async () => undefined,
+          persistProviderSessionId: async () => {},
+        },
+      });
+      const [turn] = requests.filter(
+        (request) => request.method === "turn/start",
+      );
+      assert.exists(turn);
+      assert.equal(turn.params.collaborationMode.mode, "default");
+      assert.isUndefined(
+        turn.params.additionalContext?.zotero_plan,
+        "plan mode is retired: an ordinary turn names no plan, not even to say none is active",
+      );
+    } finally {
+      destroyCachedCodexAppServerProcess(processKey, proc);
+      CodexAppServerProcess.spawn = originalSpawn;
+      (globalThis as any).Zotero.DB = originalDB;
+      restorePrefs();
+    }
+  });
   it("cancels planning from a native question and denies native effect escalation", async function () {
     const requests: Array<{ method: string; params: Record<string, any> }> = [];
     let finishTurn: (() => void) | undefined;

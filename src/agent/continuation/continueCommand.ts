@@ -14,7 +14,7 @@ const CONTINUE_COMMANDS = new Set([
 
 /**
  * Whether a whole message asks for stored work to continue: an interrupted
- * run's outcome ledger, or a stored plan execution.
+ * run's outcome ledger.
  *
  * Case, surrounding space and trailing punctuation are ignored; nothing else
  * is: "continue with a different question" is a new request, and resuming

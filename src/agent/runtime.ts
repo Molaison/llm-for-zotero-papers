@@ -91,10 +91,7 @@ import {
   type ToolWorkflowOutcome,
 } from "./model/toolArtifactDelivery";
 import { PlanExecutionRunSession } from "./plans/runSession";
-import {
-  loadLatestResumablePlanExecutionForConversation,
-  loadPlanArtifact,
-} from "./plans/store";
+import { loadPlanArtifact } from "./plans/store";
 import type { PlanEvent } from "./plans/types";
 import {
   acquireLocalDocumentPathLease,
@@ -689,18 +686,6 @@ export class AgentRuntime {
         publishSkillActivation: (id) =>
           emit({ type: "status", text: `Skill activated: ${id}` }),
         updateExecutionCheckpoint,
-        loadApprovedPlanEffectContext: async () => {
-          const specification = activePlanSession.approvedEffectSpecification();
-          if (!specification) return undefined;
-          return {
-            specification,
-            activeEffectIds: activePlanSession.activeWorkflowEffectIds() || [],
-            resolvedMaterials:
-              await activePlanSession.resolvedWorkflowMaterials(),
-            resolvedTargetBindings:
-              await activePlanSession.resolvedWorkflowTargetBindings(),
-          };
-        },
       };
       const toolsUsedThisTurn: string[] = [];
       const toolExecutionRecords: ToolExecutionRecord[] = [];
@@ -909,14 +894,6 @@ export class AgentRuntime {
       const resumableBatches = await listResumableBatches(
         request.conversationKey,
       );
-      // A stored plan execution runs only when the user answers it or asks to
-      // continue it, so an ordinary turn can start while one waits. Only such
-      // a turn names it: a planning or executing turn is the plan's own.
-      const unfinishedPlan = request.planContext
-        ? null
-        : await loadLatestResumablePlanExecutionForConversation(
-            request.conversationKey,
-          );
       let recoveryMessage: AgentModelMessage | null = null;
       let interruptedActionCheckpoint: ActionContractCheckpoint | null = null;
       let interruptedTraceEvents: readonly AgentRunEventRecord[] | undefined;
@@ -1000,18 +977,13 @@ export class AgentRuntime {
       // its one-time recovery note. Every other turn gets it as a prompt-only
       // host message: the ledger is recomputed from run events at every turn
       // start, so persisting the block would only stack identical -- and,
-      // once the material is saved, stale -- copies in the transcript. The
-      // unfinished-plan line always travels in the prompt-only message, even
-      // beside that note, because the note itself is persisted.
-      const turnStartRecoveryMessage = buildTurnStartRecoveryMessage(
-        recoveryMessage
-          ? { unfinishedPlan }
-          : {
-              materialOutcomes: request.materialOutcomes,
-              resumableBatches,
-              unfinishedPlan,
-            },
-      );
+      // once the material is saved, stale -- copies in the transcript.
+      const turnStartRecoveryMessage = recoveryMessage
+        ? null
+        : buildTurnStartRecoveryMessage({
+            materialOutcomes: request.materialOutcomes,
+            resumableBatches,
+          });
       const conversationReferenceMessage = buildConversationReferenceMessage(
         transcriptSegment.messages,
       );

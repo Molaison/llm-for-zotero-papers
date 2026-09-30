@@ -166,9 +166,6 @@ export function authorizeOriginalAction(
   if (context.mode === "yolo") {
     return { kind: "execute", authority: "yolo_judgment" };
   }
-  if (context.hasApprovedPlanAuthority) {
-    return { kind: "execute", authority: "plan_approval" };
-  }
   if (context.mode === "safe") {
     return {
       kind: "confirm",

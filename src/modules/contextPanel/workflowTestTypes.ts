@@ -577,7 +577,6 @@ export type WorkflowTestApi = {
   }) => Promise<WorkflowTestStandaloneNoteFixture>;
   renderPanelForItem: (itemId: number) => Promise<WorkflowTestPanel>;
   refreshActiveConversationPanels: (conversationKey?: number) => void;
-  exerciseNativePlanReview: typeof import("./nativePlanReviewReplay").exerciseNativePlanReview;
   exerciseNativeQuestionReview: (
     panelId: string,
   ) => ReturnType<
@@ -731,11 +730,6 @@ export type WorkflowTestApi = {
   exerciseDuplicatePanelSetup: (
     panelId: string,
   ) => Promise<WorkflowTestDuplicatePanelSetupDiagnostics>;
-  exerciseRebuiltPanelPlanApproval: (panelId: string) => Promise<{
-    sendsAfterApproval: number;
-    queuedAfterApproval: number;
-    sendsAfterDispose: number;
-  }>;
   /** Approve a reviewable plan the way the review card does and start its execution. */
   approvePlanForExecution: (input: {
     planId: string;

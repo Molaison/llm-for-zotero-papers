@@ -9151,42 +9151,6 @@ label.llm-search-results-item:hover {
   width: fit-content;
 }
 
-.llm-plan-mode-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  order: -90;
-  box-sizing: border-box;
-  width: fit-content;
-  max-width: 100%;
-  min-width: 0;
-  min-height: 26px;
-  padding: 3px 5px 3px 8px;
-  border: 1px solid var(--stroke-secondary);
-  border-radius: 4px;
-  background: var(--material-background);
-  color: var(--fill-secondary);
-  cursor: pointer;
-  font-size: var(--llm-fs-12);
-  line-height: 1.25;
-}
-
-.llm-plan-mode-chip:hover {
-  border-color: var(--stroke-primary);
-  color: var(--fill-primary);
-}
-
-.llm-plan-mode-chip:focus-visible {
-  outline: 1px solid var(--color-accent);
-  outline-offset: 1px;
-}
-
-.llm-plan-mode-chip-label {
-  min-width: 0;
-  font-weight: 500;
-  white-space: nowrap;
-}
-
 .llm-plan-container,
 .llm-agent-hitl-card {
   box-sizing: border-box;
@@ -12378,25 +12342,6 @@ details.llm-agent-action-row[open] > summary .llm-agent-action-row-marker {
   border-radius: 0;
   background: transparent;
   position: static;
-}
-
-/* Plan is a removable composer mode chip, not an expandable context stack. */
-.llm-selected-context.llm-plan-mode-chip {
-  display: inline-flex;
-  flex-direction: row;
-  align-items: center;
-  gap: 6px;
-  width: fit-content;
-  min-height: 26px;
-  padding: 3px 5px 3px 8px;
-  border: 1px solid var(--stroke-secondary);
-  border-radius: 4px;
-  background: var(--material-background);
-}
-
-.llm-selected-context.llm-plan-mode-chip:hover {
-  border-color: var(--stroke-primary);
-  color: var(--fill-primary);
 }
 
 .llm-selected-context.expanded .llm-selected-context-header {

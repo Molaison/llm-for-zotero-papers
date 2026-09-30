@@ -29,14 +29,6 @@ import {
 } from "../test-behavior/oracles";
 
 describe("manually invoked behavior suite contract", function () {
-  it("exercises research publication through the real chat sender, never by marking the outbox delivered", function () {
-    const journey = readFileSync("test-behavior/research.ts", "utf8");
-    assert.include(journey, "harness.askStandalone(planningPrompt)");
-    assert.include(journey, "harness.askStandalone(executionPrompt)");
-    assert.include(journey, "publication.status");
-    assert.notInclude(journey, "deliverPendingPlanDocumentMessage");
-    assert.notInclude(journey, "markPlanDocumentDelivered");
-  });
   it("requires the settled note permission behavior without turning the suite into a release gate", function () {
     for (const mode of ["safe", "auto", "yolo"] as const) {
       const note = catalog.find((row) => row.id === `modes.${mode}.note`)!;

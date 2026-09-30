@@ -2866,14 +2866,6 @@ function syncInlineActionCardAttr(body: Element): void {
   }
 }
 
-function latestAssistantMessage(conversationKey: number): Message | undefined {
-  const history = chatHistory.get(conversationKey) || [];
-  for (let index = history.length - 1; index >= 0; index--) {
-    if (history[index].role === "assistant") return history[index];
-  }
-  return undefined;
-}
-
 function findNativeMcpActionCard(
   chatBox: HTMLElement,
   requestId: string,
@@ -6308,30 +6300,6 @@ export async function retryLatestAssistantResponse(
   const conversationGeneration = getConversationWriteGeneration(
     getConversationKey(item),
   );
-  const retryTraceEvents =
-    retryPair.assistantMessage.pendingAgentTraceEvents ||
-    (retryPair.assistantMessage.agentRunId
-      ? (await getAgentRunTrace(retryPair.assistantMessage.agentRunId)).events
-      : []);
-  const retryPlanEvent = retryTraceEvents
-    .map((event) => event.payload)
-    .find(
-      (event) =>
-        event.type === "provider_event" &&
-        event.providerType === "codex_plan_context",
-    );
-  const retryPlanContext =
-    retryPlanEvent?.type === "provider_event"
-      ? (retryPlanEvent.payload?.planContext as
-          | import("../../agent/plans/types").PlanRuntimeContext
-          | undefined)
-      : undefined;
-  const retryActionContract =
-    retryPlanEvent?.type === "provider_event"
-      ? (retryPlanEvent.payload?.actionContract as
-          | AgentActionContract
-          | undefined)
-      : undefined;
 
   const assistantMessage = retryPair.assistantMessage;
   let codexActivityTrace: CodexNativeActivityTraceController | null = null;
@@ -6958,25 +6926,14 @@ export async function retryLatestAssistantResponse(
               handleUsage,
               conversationKey,
               conversationGeneration,
-              planContext: retryPlanContext,
-              actionContract: retryActionContract,
             }),
           });
           assistantMessage.agentRunId = result.agentRunId;
           if (result.documentId) {
             assistantMessage.documentId = result.documentId;
           }
-          await finalizeCodexPlanExecution({
-            planContext: retryPlanContext,
-            answer: result.text,
-            assistantMessage,
-            trace: codexActivityTrace,
-          });
           return {
-            text:
-              retryPlanContext?.phase === "planning"
-                ? "The plan is ready for review."
-                : result.text,
+            text: result.text,
             completion: { status: "complete" as const },
           };
         })()
@@ -10395,8 +10352,6 @@ function updateMountedAssistantViews(
         events,
         previous: view.trace,
         actionSummaryHost: view.actionSummaryHost,
-        allowPlanRecovery:
-          message === latestAssistantMessage(getConversationKey(item)),
         onInterleavedText: () => {
           interleaved = true;
         },
@@ -11530,7 +11485,6 @@ export function refreshChat(
               panelItem: item,
               message: msg,
               userMessage: previousUserMessage,
-              allowPlanRecovery: index === latestAssistantIndex,
               events: traceEvents,
               actionSummaryHost,
               onTraceMissing:

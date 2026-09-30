@@ -8,10 +8,7 @@ import { resolveAgentRuntimeRequest } from "../../agent/context/resolvedAgentReq
 import { createProviderRequestScope } from "../../utils/providerTransport";
 import { waitForElementGeometrySettled } from "./workflowLayout";
 import { getChatScrollSnapshot } from "./chatScrollSnapshots";
-import {
-  exerciseNativePlanReview,
-  exerciseNativeQuestionReview,
-} from "./nativePlanReviewReplay";
+import { exerciseNativeQuestionReview } from "./nativePlanReviewReplay";
 import { exercisePlanHistoryReplay } from "./planHistoryReplay";
 import { deliverPendingPlanDocumentMessage } from "../../agent/documents/publication";
 import {
@@ -52,12 +49,6 @@ import {
   disposeAgentTrace,
 } from "./agentTrace/render";
 import { disposeSetupHandlers, setupHandlers } from "./setupHandlers";
-import { PLAN_APPROVED_EVENT } from "./planModeState";
-import {
-  buildQueuedFollowUpThreadKey,
-  getQueuedFollowUps,
-  setQueuedFollowUps,
-} from "./queuedFollowUps";
 import {
   activeConversationModeByLibrary,
   activeContextPanels,
@@ -1856,75 +1847,6 @@ async function researchFlightReport(input: { executionId: string }) {
     ...(runs.length ? { runs } : {}),
   });
   return { report, rendered: renderResearchFlightReport(report) };
-}
-
-async function exerciseRebuiltPanelPlanApproval(panelId: string) {
-  assertWorkflowTestEnabled();
-  const panel = getPanel(panelId);
-  const item = activeContextPanels.get(panel.body)?.() || panel.item;
-  const conversationKey = getConversationKey(item);
-  const threadKey = buildQueuedFollowUpThreadKey({
-    conversationKey,
-    conversationSystem: "upstream",
-  });
-  for (let index = 0; index < 2; index++) {
-    disposeSetupHandlers(panel.body);
-    buildUI(panel.body, item);
-    setupHandlers(panel.body, item);
-  }
-  let sends = 0;
-  let release!: () => void;
-  const heldSend = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  const settledBefore = getWorkflowTestSendSettledSequence();
-  setWorkflowTestSendInterceptor(async (opts) => {
-    lastSend = opts;
-    sends++;
-    await heldSend;
-    return false;
-  });
-  const dispatch = () => {
-    const EventCtor = panel.body.ownerDocument.defaultView!.CustomEvent;
-    panel.body.querySelector("#llm-main")!.dispatchEvent(
-      new EventCtor(PLAN_APPROVED_EVENT, {
-        bubbles: true,
-        detail: { planId: "workflow-single-approval" },
-      }),
-    );
-  };
-  try {
-    dispatch();
-    const deadline = Date.now() + 10000;
-    while (!sends && Date.now() < deadline) await Zotero.Promise.delay(25);
-    if (!sends)
-      throw new Error("Plan approval never reached the send boundary");
-    const queuedAfterApproval = getQueuedFollowUps(threadKey).length;
-    const sendsAfterApproval = sends;
-    setQueuedFollowUps(threadKey, []);
-    release();
-    while (
-      getWorkflowTestSendSettledSequence() <= settledBefore &&
-      Date.now() < deadline
-    )
-      await Zotero.Promise.delay(25);
-    if (getWorkflowTestSendSettledSequence() <= settledBefore)
-      throw new Error("The intercepted approval send did not settle");
-    disposeSetupHandlers(panel.body);
-    dispatch();
-    await Zotero.Promise.delay(100);
-    return {
-      sendsAfterApproval,
-      queuedAfterApproval,
-      sendsAfterDispose: sends,
-    };
-  } finally {
-    setQueuedFollowUps(threadKey, []);
-    release();
-    setWorkflowTestSendInterceptor((opts) => {
-      lastSend = opts;
-    });
-  }
 }
 
 async function exercisePanelDraftStateRefresh(
@@ -5790,10 +5712,6 @@ export function installWorkflowTestHarness(targetAddon: {
     renderPanelForItem,
     refreshActiveConversationPanels,
     exerciseBackgroundAgentPublication,
-    exerciseNativePlanReview: () => {
-      assertWorkflowTestEnabled();
-      return exerciseNativePlanReview();
-    },
     exerciseNativeQuestionReview: (panelId: string) => {
       assertWorkflowTestEnabled();
       const panel = getPanel(panelId);
@@ -5950,7 +5868,6 @@ export function installWorkflowTestHarness(targetAddon: {
     startNewPanelConversation,
     togglePanelConversationMode,
     exerciseDuplicatePanelSetup,
-    exerciseRebuiltPanelPlanApproval,
     approvePlanForExecution,
     researchFlightReport,
     exercisePanelDraftStateRefresh,

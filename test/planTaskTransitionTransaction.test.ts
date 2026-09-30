@@ -81,7 +81,6 @@ import type {
   PlanExecutionLedger,
   TaskEvidence,
 } from "../src/agent/plans/types";
-import { takePendingPlanExecution } from "../src/modules/contextPanel/planModeState";
 import {
   PlanExecutionRunSession,
   recordMcpPlanEvidence,
@@ -2714,33 +2713,6 @@ describe("transactional Plan task transitions", function () {
       now: 3,
     });
     assert.deepEqual(together, separate);
-  });
-
-  it("reattaches the durable non-terminal execution on continue after in-memory state is gone", async function () {
-    const resumable = { ...execution(), conversationKey: 9041 };
-    await savePlanExecutionLedger(resumable);
-
-    assert.deepInclude(await takePendingPlanExecution(9041, "continue"), {
-      phase: "executing",
-      executionId: resumable.executionId,
-      planId: resumable.planId,
-      revision: resumable.revision,
-    });
-
-    await savePlanExecutionLedger({
-      ...resumable,
-      status: "completed",
-      activeTaskId: undefined,
-      completedAt: 3,
-      updatedAt: 3,
-      tasks: resumable.tasks.map((task) => ({
-        ...task,
-        status: "completed",
-        completedAt: 3,
-        updatedAt: 3,
-      })),
-    });
-    assert.isUndefined(await takePendingPlanExecution(9041, "continue"));
   });
 
   it("commits document delivery and terminal Plan progress together", async function () {

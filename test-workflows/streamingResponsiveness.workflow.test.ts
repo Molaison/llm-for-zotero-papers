@@ -80,8 +80,8 @@ describe("workflow: streaming responsiveness", function () {
         );
         assert.isTrue(result.composerPreserved);
         assert.isTrue(
-          result.resumeVisibilityCorrect,
-          "resume is visible only when interrupted",
+          result.noPlanControls,
+          "plan mode is retired: no Resume, even for an interrupted plan",
         );
         assert.isTrue(
           result.singleExecutionProgress,

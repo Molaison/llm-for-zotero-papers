@@ -222,7 +222,7 @@ export async function runBehaviorSuite(requestPath: string): Promise<void> {
     }
     await write(
       "manual-review.md",
-      "# Human review\n\nNo automated prose-quality verdict is issued.\nRead generated notes, vault Markdown and research.review/review.md when present.\nAssess synthesis, unsupported claims, coverage, references, lost discussion points, figure crops and readable layout.\nRecord your judgment and document path here.\n\nComputer-use inspection is separate evidence: a programmatically captured screenshot alone is not a visual pass.\n\nDeferred coverage: real process restart/resume, post-effect timeout/retry, stale approval payload changes, duplicate-item merge and group-library fixtures are not covered by this version of the live suite.\nThe figure journey includes one routine Auto Python command probe; broader command-execution conformance remains untested.\n",
+      "# Human review\n\nNo automated prose-quality verdict is issued.\nRead generated notes and vault Markdown.\nAssess synthesis, unsupported claims, coverage, references, lost discussion points, figure crops and readable layout.\nRecord your judgment and document path here.\n\nComputer-use inspection is separate evidence: a programmatically captured screenshot alone is not a visual pass.\n\nDeferred coverage: real process restart/resume, post-effect timeout/retry, stale approval payload changes, duplicate-item merge and group-library fixtures are not covered by this version of the live suite.\nThe figure journey includes one routine Auto Python command probe; broader command-execution conformance remains untested.\n",
       true,
     );
     completed = true;

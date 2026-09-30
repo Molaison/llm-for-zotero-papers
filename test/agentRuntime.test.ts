@@ -9653,17 +9653,7 @@ describe("finalized material announcement", function () {
     }
   });
 
-  const PLAN_LINE_HEADER = "Unfinished plan (status=";
-
-  function planLineMessages(
-    messages: readonly AgentModelMessage[],
-  ): AgentModelMessage[] {
-    return messages.filter((message) =>
-      String(message.content).includes(PLAN_LINE_HEADER),
-    );
-  }
-
-  it("names an unfinished plan on an ordinary turn without persisting the line", async function () {
+  it("says nothing about a stored unfinished plan on the next turn", async function () {
     const installed = installMockDb();
     const restoreStores = installPlanSqlite();
     clearAgentTranscriptStore();
@@ -9674,149 +9664,19 @@ describe("finalized material announcement", function () {
         storedPlanExecution("interrupted", conversationKey),
       );
 
-      const next = await runPlainTurn(
-        conversationKey,
+      for (const text of [
         "What is the sample size of this study?",
-        200,
-      );
-      const [line] = planLineMessages(next.promptMessages);
-      assert.exists(line, "the turn must know the plan is still waiting");
-      assert.equal(
-        line.content,
-        'Unfinished plan (status=interrupted): step 2 of 3, "Explain the agreed concept". The current message was not taken as a resume of the plan; mention the plan only if it bears on the request, and the user can resume it by saying "continue".',
-      );
-      assert.isTrue(
-        (line as { transient?: boolean }).transient,
-        "the plan's status is read again every turn, so the line must never persist",
-      );
-      assert.include(
-        String(
-          next.promptMessages[next.promptMessages.indexOf(line) + 1]?.content,
-        ),
-        "What is the sample size of this study?",
-        "the host line sits immediately before this turn's user message",
-      );
-      assert.notInclude(
-        readPersistedTranscript(installed, conversationKey)
-          .map((message) => String(message.content))
-          .join("\n"),
-        PLAN_LINE_HEADER,
-      );
-    } finally {
-      restoreStores();
-      installed();
-    }
-  });
-
-  it("keeps the unfinished-plan line out of an interrupted run's persisted recovery note", async function () {
-    const installed = installMockDb();
-    const restoreStores = installPlanSqlite();
-    clearAgentTranscriptStore();
-    try {
-      await initAgentPlanStore();
-      const conversationKey = 774415;
-      await savePlanExecutionLedger(
-        storedPlanExecution("interrupted", conversationKey),
-      );
-      installed.runs.set("run-interrupted-plan", {
-        rowid: 0,
-        runId: "run-interrupted-plan",
-        conversationKey,
-        mode: "agent",
-        modelName: "test",
-        status: "failed",
-        createdAt: 1,
-        completedAt: 2,
-        finalText: INTERRUPTED_AGENT_RUN_MARKER,
-      });
-
-      const next = await runPlainTurn(conversationKey, "Summarize it", 200);
-      const recoveryNote = next.promptMessages.find((message) =>
-        String(message.content).startsWith(
-          "Recovery note for interrupted run run-interrupted-plan.",
-        ),
-      );
-      assert.exists(recoveryNote, "the interrupted run keeps its own note");
-      assert.notInclude(String(recoveryNote?.content), PLAN_LINE_HEADER);
-      const lines = planLineMessages(next.promptMessages);
-      assert.lengthOf(lines, 1);
-      assert.isTrue((lines[0] as { transient?: boolean }).transient);
-      const persisted = readPersistedTranscript(installed, conversationKey)
-        .map((message) => String(message.content))
-        .join("\n");
-      assert.include(persisted, "Recovery note for interrupted run");
-      assert.notInclude(persisted, PLAN_LINE_HEADER);
-    } finally {
-      restoreStores();
-      installed();
-    }
-  });
-
-  it("does not name the plan on the turn that runs it", async function () {
-    const installed = installMockDb();
-    const restoreStores = installPlanSqlite();
-    clearAgentTranscriptStore();
-    try {
-      await initAgentPlanStore();
-      await initPlanDocumentStore();
-      await initResearchStore();
-      const conversationKey = 774416;
-      const plan = await createDocumentPlan(conversationKey);
-
-      const ordinary = await runPlainTurn(conversationKey, "Why?", 200);
-      assert.lengthOf(
-        planLineMessages(ordinary.promptMessages),
-        1,
-        "control: the same stored execution is named on an ordinary turn",
-      );
-
-      let planPrompt: AgentModelMessage[] | undefined;
-      const runtime = new AgentRuntime({
-        registry: new AgentToolRegistry(),
-        adapterFactory: () => ({
-          getCapabilities: () => ({
-            streaming: false,
-            toolCalls: true,
-            multimodal: false,
-            fileInputs: false,
-            reasoning: false,
-          }),
-          supportsTools: () => true,
-          async runStep(params: AgentStepParams): Promise<AgentModelStep> {
-            planPrompt ||= params.messages;
-            return {
-              kind: "final",
-              text: "Working on the guide.",
-              assistantMessage: {
-                role: "assistant",
-                content: "Working on the guide.",
-              },
-            };
-          },
-        }),
-      });
-      await runtime.runTurn({
-        request: {
-          conversationKey,
-          mode: "agent",
-          userText: "continue",
-          libraryID: 1,
-          model: "test",
-          apiKey: "test",
-          apiBase: "https://example.invalid",
-          metadata: { sourceMessageTimestamp: 300 },
-          planContext: {
-            phase: "executing",
-            planId: plan.planId,
-            revision: plan.revision,
-            executionId: plan.executionId,
-            approvedDigest: plan.planDigest,
-            provider: "original",
-          },
-        },
-      });
-      assert.exists(planPrompt, "the plan turn reached the model");
-      assert.isEmpty(planLineMessages(planPrompt!));
+        "continue",
+      ]) {
+        const next = await runPlainTurn(conversationKey, text, 200);
+        assert.notMatch(
+          next.promptMessages
+            .map((message) => String(message.content))
+            .join("\n"),
+          /Unfinished plan|resume the plan|resume it by saying/i,
+          `plan mode is retired: "${text}" is an ordinary turn`,
+        );
+      }
     } finally {
       restoreStores();
       installed();

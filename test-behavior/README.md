@@ -20,7 +20,7 @@ npm run test:behavior -- --list
 # Live smoke: 11 checks, including a six-round visible paper conversation.
 npm run test:behavior:smoke
 
-# All checks in the current catalog, including a 50–55-paper current-folder review.
+# All checks in the current catalog.
 npm run test:behavior
 
 # Select a journey or an individual check; required dependencies are included.
@@ -29,15 +29,11 @@ npm run test:behavior -- --select paper,library
 
 # Crop-to-note regression with the Geva paper and commentary PDF in zotero-dev.
 npm run test:behavior -- --select figures --model deepseek-flash
-
-# Same research journey with 8 synthetic papers, or a current real collection.
-npm run test:behavior:smoke -- --select research
-npm run test:behavior -- --select research --collection Representation_Drift
 ```
 
 `--model`, `--reasoning`, and `--timeout` are explicit overrides.
 The defaults are `deepseek-v4-flash`, `high`, and a six-hour overall deadline.
-Ordinary Agent turns have a twelve-minute cancellation deadline; the research journey allows up to one hour per turn.
+Ordinary Agent turns have a twelve-minute cancellation deadline.
 Do not edit/rebuild the plugin or launch another suite while a run is active.
 The development launcher watches source changes, and a reload would invalidate the running test.
 An already-started request is never silently replayed after a reload.
@@ -54,17 +50,12 @@ It does not test Claude Code, Codex or WebChat.
 | ---------------------------------------- | ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Paper conversation and research material | Auto                            | Six visible composer turns; one durable child note; a filed standalone note; targeted editing; Obsidian Markdown; real cropped figures where a suitable paper is available |
 | Library curation                         | YOLO, with an Auto merge canary | Exact tags; add versus move; collection union without paper loss; metadata; Related links; trash/restore; five real imports                                                |
-| Research                                 | Auto plus one plan approval     | Frozen per-run scope; durable research evidence; completion ledger; published document; exact coverage; human prose review                                                 |
 | Mode conformance                         | Safe / Auto / YOLO              | Read, note, metadata, file, explicit no-write and related-paper review behavior                                                                                            |
 | Recovery                                 | Safe / Auto                     | Cancellation without mutations; honest handling of a missing figure                                                                                                        |
 | Figure extraction                        | Auto / YOLO                     | Semantic skills before work; real bundled Python crops from the active PDF; native embedded images; crop-only note content; no confirmations or script detours             |
 
 `catalog.ts` is the authoritative list of stable check IDs, dependencies, acceptance statements and evidence types.
 `--list` shows the complete selected list and expected mode.
-The full research journey sorts the currently selected collection's direct regular items by title and key, then takes at most 55.
-Fewer than 50 produces `BLOCKED`; it is never silently replaced by the mini fixture.
-The run saves the actual selected item identities, metadata hashes and attachment keys.
-This is a snapshot within a run, not a frozen corpus shared across releases.
 
 ## Evidence and judgments
 
@@ -83,7 +74,6 @@ tmp/behavior-reports/<source-fingerprint>/<run-id>/
     before.json / after.json / diff.json
     turn-*.json / turn-*-answer.md
   vault/                     Actual exported Markdown and figure assets
-  research.review/           Plan, approval, scope, checkpoints and final review
   done.json                  Completion marker and command exit status
 ```
 
@@ -127,7 +117,6 @@ It also compares interactive quote citations in a normal chat render, the genera
 The synthetic paper has explicitly fictional author-year metadata so this comparison tests author-year citation presentation.
 Missing-author fallback labels are a separate product behavior, not evidence of a metadata-complete citation regression.
 The remaining probes use the real Agent API, not UI button clicks.
-The research plan approval currently uses the same coordinator as the UI, but is not itself a UI-click test.
 
 ## Extend it without hiding failures
 
@@ -146,7 +135,7 @@ Their automatic confirmation handling should not be used to judge Auto/YOLO conf
 
 The figure journey includes one Auto command probe that writes and runs a temporary Python script to read a crop's dimensions while preserving the image and native Zotero state.
 This is evidence for routine intermediate script execution, not general command-execution conformance.
-The current live catalog does not yet automate real-process research restart/resume, timeout-after-effect retry, stale approval payload edits, duplicate-item merge, or group-library fixture creation.
+The current live catalog does not yet automate real-process restart/resume, timeout-after-effect retry, stale approval payload edits, duplicate-item merge, or group-library fixture creation.
 Existing unit/workflow coverage of those mechanisms is not presented as live-suite coverage.
 These need dedicated scenarios before this suite can claim to cover them.
 No quality judge is run; you inspect the generated documents yourself.

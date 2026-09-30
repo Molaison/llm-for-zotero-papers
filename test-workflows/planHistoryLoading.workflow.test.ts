@@ -37,7 +37,11 @@ describe("workflow: plan history loading", function () {
         assert.equal(result.documentMounts, 1);
         assert.equal(result.documentPaints, 1);
         assert.equal(result.planPaints, historyTurns);
-        assert.equal(result.planReads, historyTurns * result.mountedPanels);
+        assert.equal(
+          result.planReads,
+          0,
+          "old plan cards render from their own events, never the plan store",
+        );
         assert.equal(result.ledgerReads, 0);
         assert.equal(result.progressNodes, 0);
       } finally {

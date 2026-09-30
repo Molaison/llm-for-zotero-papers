@@ -1,4 +1,3 @@
-import { appLogger } from "../../../core/logging";
 import type {
   AgentActionSummaryResultCard,
   AgentNoteChangeResultCard,
@@ -20,17 +19,11 @@ import {
 } from "../../../agent/documents/store";
 import type { PlanDocument } from "../../../agent/documents/types";
 import { subscribeDocumentPublication } from "../../../agent/documents/publicationEvents";
-import { planExecutionCoordinator } from "../../../agent/plans/coordinator";
-import {
-  loadPlanArtifact,
-  loadPlanExecutionLedger,
-} from "../../../agent/plans/store";
 import {
   isContentLikeToolArgumentKey,
   isMalformedToolArgumentsDiagnostic,
 } from "../../../agent/toolArgumentDiagnostics";
 import type {
-  AgentActionContract,
   AgentActionReceipt,
   AgentConfirmationResolution,
   AgentPendingAction,
@@ -50,7 +43,6 @@ import type {
   PlanExecutionLedger,
 } from "../../../agent/types";
 import { SKILL_ACTIVATION_TRACE_LABEL } from "../../../agent/workCategory";
-import { getConversationWriteGeneration } from "../../../shared/conversationWriteFence";
 import type { GeneratedChatImage } from "../../../shared/types";
 import { toFileUrl } from "../../../utils/pathFileUrl";
 import { normalizePublicWebUrl } from "../../../webAccess/tavilyClient";
@@ -75,17 +67,11 @@ import {
   renderPlanDocumentContent,
   renderPlanDocumentFigures,
 } from "../planDocumentPresentation";
-import {
-  PLAN_APPROVED_EVENT,
-  PLAN_CANCEL_EVENT,
-  PLAN_REVISE_EVENT,
-  stageApprovedPlanExecution,
-} from "../planModeState";
 import { buildAssistantDisplayMarkdownForRender } from "../assistantRichText";
 import { renderRenderedMarkdownInto } from "../renderedMarkdown";
 import { applyStableAnimationPhase } from "../stableAnimationPhase";
 import { isCodexPlanChecklistEvent } from "../taskProgress/codexPlan";
-import { showStandaloneConfirmationDialog } from "../standaloneConfirmationDialog";
+import { PLAN_STATUS_SYMBOLS } from "../taskProgress/planSteps";
 import { openStandalonePlanDocumentWindow } from "../standalonePlanDocumentWindow";
 import {
   disposeStreamingMarkdown,
@@ -229,7 +215,6 @@ type RenderAgentTraceParams = {
   userMessage?: Message | null;
   events: AgentRunEventRecord[];
   previous?: HTMLElement;
-  allowPlanRecovery?: boolean;
   onTraceMissing?: () => void;
   onInterleavedText?: () => void;
   /** The conversation owns this footer below the assistant's final answer. */
@@ -5643,381 +5628,209 @@ function disposePlanCard(node: HTMLElement): void {
   node.remove();
 }
 
-function dispatchPlanEvent(
-  root: HTMLElement,
-  name: string,
-  detail: Record<string, unknown>,
-): void {
-  const EventCtor = root.ownerDocument.defaultView?.CustomEvent;
-  if (!EventCtor) return;
-  root.dispatchEvent(new EventCtor(name, { bubbles: true, detail }));
-}
+/**
+ * A run's plan as that run's own events recorded it: the proposal it drafted
+ * and, for a run that executed one, the execution as it last stood. Plan mode
+ * is retired, so this only ever describes an old conversation, and the card
+ * built from it is read-only.
+ */
+type PlanProjection = {
+  artifact?: PlanArtifact;
+  ledger?: PlanExecutionLedger;
+};
 
 function getPlanProjection(
   events: AgentRunEventRecord[],
-):
-  | { artifact: PlanArtifact; ledger?: undefined }
-  | { artifact?: undefined; ledger: PlanExecutionLedger }
-  | null {
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const event = events[index].payload;
-    if (event.type === "plan_execution_updated") {
-      return { ledger: event.ledger };
-    }
-    if (event.type === "plan_ready" || event.type === "plan_updated") {
-      return { artifact: event.artifact };
-    }
+): PlanProjection | null {
+  let artifact: PlanArtifact | undefined;
+  let ledger: PlanExecutionLedger | undefined;
+  for (const record of events) {
+    const event = record.payload;
+    if (event.type === "plan_execution_updated") ledger = event.ledger;
+    else if (event.type === "plan_ready" || event.type === "plan_updated")
+      artifact = event.artifact;
   }
-  return null;
+  return artifact || ledger ? { artifact, ledger } : null;
 }
 
-function getPlanActionContract(
+/** A planning run's card is its answer; an execution run keeps its own. */
+function isPlanningAnswer(projection: PlanProjection | null): boolean {
+  return Boolean(projection?.artifact && !projection.ledger);
+}
+
+/**
+ * How the plan ended, as its run last recorded it. A plan that stopped
+ * mid-way never resumes now, so every live state reads as not finished.
+ */
+function planEnd(projection: PlanProjection): {
+  status: string;
+  label: string;
+} {
+  if (projection.ledger) {
+    switch (projection.ledger.status) {
+      case "completed":
+        return { status: "completed", label: "Completed" };
+      case "completed_with_exceptions":
+        return { status: "partial", label: "Completed with exceptions" };
+      case "blocked":
+        return { status: "blocked", label: "Blocked" };
+      case "failed":
+        return { status: "failed", label: "Failed" };
+      case "cancelled":
+        return { status: "cancelled", label: "Cancelled" };
+      case "superseded":
+        return { status: "superseded", label: "Superseded" };
+      case "interrupted":
+        return { status: "interrupted", label: "Interrupted" };
+    }
+    return { status: "not_finished", label: "Not finished" };
+  }
+  switch (projection.artifact?.status) {
+    case "approved":
+      return { status: "approved", label: "Approved" };
+    case "superseded":
+      return { status: "superseded", label: "Superseded" };
+    case "cancelled":
+      return { status: "cancelled", label: "Cancelled" };
+    case "awaiting_approval":
+      return { status: "proposed", label: "Proposed" };
+  }
+  return { status: "not_finished", label: "Not finished" };
+}
+
+/** The plan's text and steps as the model proposed them. */
+function renderPlanProposal(
+  doc: Document,
   events: AgentRunEventRecord[],
-): AgentActionContract | undefined {
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const event = events[index].payload;
-    if (
-      event.type === "provider_event" &&
-      event.providerType === "agent_action_contract" &&
-      event.payload?.contract
-    ) {
-      return event.payload.contract as AgentActionContract;
-    }
+  artifact: PlanArtifact,
+): HTMLElement {
+  const markdown = doc.createElement("div");
+  markdown.className = "llm-plan-markdown";
+  const rawSource =
+    artifact.nativePlanning?.proposal?.markdown ||
+    [
+      artifact.explanation?.trim() || "",
+      ...(artifact.steps || []).map(
+        (step, index) => `${index + 1}. ${step.content}`,
+      ),
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+  const labels = researchDisplayLabels(events);
+  const source = labels ? projectPaperReferences(rawSource, labels) : rawSource;
+  try {
+    renderRenderedMarkdownInto(markdown, source, doc);
+  } catch {
+    markdown.textContent = source;
   }
-  return undefined;
+  if (artifact.nativePlanning?.proposal && artifact.contract) {
+    const summary = doc.createElement("p");
+    summary.className = "llm-plan-contract-summary";
+    const investigation = artifact.contract.investigation;
+    summary.textContent = [
+      investigation?.scopeSnapshot
+        ? `Research scope: ${investigation.scopeSnapshot.itemCount} papers`
+        : "Scope: the approved request",
+      `Deliverable: ${artifact.contract.deliverable.kind}`,
+      artifact.contract.effects?.libraryMutation
+        ? `Library changes: ${artifact.contract.effects.libraryMutation.approval === "after_research" ? "review exact targets after research" : "within the approved scope"}`
+        : "Library changes: none",
+    ].join(" · ");
+    markdown.appendChild(summary);
+  }
+  return markdown;
 }
 
+/**
+ * An executed plan's steps as they stood when its run last reported them. A
+ * step still marked in progress was cut off with its run, so it shows as
+ * interrupted rather than as a spinner that never stops.
+ */
+function renderEndedPlanTasks(
+  doc: Document,
+  ledger: PlanExecutionLedger,
+): HTMLElement {
+  const list = doc.createElement("div");
+  list.className = "llm-plan-task-list";
+  list.setAttribute("role", "list");
+  (ledger.tasks || []).forEach((task, index) => {
+    const status = task.status === "in_progress" ? "interrupted" : task.status;
+    const row = doc.createElement("div");
+    row.dataset.taskId = task.taskId;
+    row.className = `llm-plan-task llm-plan-task-${status}`;
+    row.setAttribute("role", "listitem");
+    const line = doc.createElement("div");
+    line.className = "llm-plan-task-line";
+    const badge = doc.createElement("span");
+    badge.className = `llm-plan-task-badge llm-plan-task-badge-${status}`;
+    badge.setAttribute("aria-hidden", "true");
+    badge.textContent = PLAN_STATUS_SYMBOLS[status] || `${index + 1}`;
+    const content = doc.createElement("span");
+    content.className = "llm-plan-task-content";
+    const label = doc.createElement("span");
+    label.className = "llm-plan-task-label";
+    label.textContent = task.content || task.activeForm || "";
+    content.appendChild(label);
+    line.append(badge, content);
+    row.appendChild(line);
+    list.appendChild(row);
+  });
+  return list;
+}
+
+/** An old plan, read-only: its steps and how it ended, with no control. */
 function renderPlanContainer(params: {
   doc: Document;
   events: AgentRunEventRecord[];
-  projection:
-    | { artifact: PlanArtifact; ledger?: undefined }
-    | { artifact?: undefined; ledger: PlanExecutionLedger };
+  projection: PlanProjection;
 }): HTMLElement {
-  if (params.projection.ledger) {
-    const ledger = params.projection.ledger;
-    const root = params.doc.createElement("section");
-    root.className = "llm-plan-recovery-card";
-    const text = params.doc.createElement("p");
-    text.textContent = "Plan execution was interrupted.";
-    const resume = params.doc.createElement("button");
-    resume.type = "button";
-    resume.className = "llm-plan-action llm-plan-approve";
-    const label = params.doc.createElement("span");
-    label.className = "llm-plan-action-label-full";
-    label.textContent = "Resume execution";
-    resume.appendChild(label);
-    let disposed = false;
-    const onResume = async () => {
-      resume.disabled = true;
-      try {
-        const current = await loadPlanExecutionLedger(ledger.executionId);
-        if (disposed || !root.isConnected) return;
-        if (!current || current.status !== "interrupted") {
-          text.textContent = "This execution is no longer available to resume.";
-          resume.remove();
-          return;
-        }
-        stageApprovedPlanExecution(current);
-        dispatchPlanEvent(root, PLAN_APPROVED_EVENT, {
-          planId: current.planId,
-          revision: current.revision,
-          executionId: current.executionId,
-          recovery: true,
-        });
-      } catch (error) {
-        if (!disposed)
-          text.textContent =
-            error instanceof Error ? error.message : String(error);
-      } finally {
-        if (!disposed) resume.disabled = false;
-      }
-    };
-    resume.addEventListener("click", onResume);
-    cardDisposers.set(root, () => {
-      disposed = true;
-      resume.removeEventListener("click", onResume);
-    });
-    root.append(text, resume);
-    return root;
-  }
-  const root = params.doc.createElement("section");
+  const { doc, projection } = params;
+  const { artifact, ledger } = projection;
+  const root = doc.createElement("section");
   root.className = "llm-plan-container";
-  const actionContract = getPlanActionContract(params.events);
+  const revision = ledger?.revision || artifact?.revision || 1;
+  root.dataset.llmPlanId = ledger?.planId || artifact?.planId || "";
+  root.dataset.llmPlanRevision = `${revision}`;
+  root.setAttribute("aria-label", "Plan");
 
-  const artifactStatusLabel = (status: PlanArtifact["status"]): string => {
-    switch (status) {
-      case "drafting":
-        return "Planning";
-      case "awaiting_approval":
-        return "Ready to review";
-      case "approved":
-        return "Approved";
-      case "superseded":
-        return "Superseded";
-      case "cancelled":
-        return "Cancelled";
-    }
-  };
+  const header = doc.createElement("div");
+  header.className = "llm-plan-header";
+  const heading = doc.createElement("div");
+  heading.className = "llm-plan-heading";
+  const title = doc.createElement("strong");
+  title.className = "llm-plan-title";
+  title.textContent = "Plan";
+  heading.appendChild(title);
+  if (revision > 1) {
+    const version = doc.createElement("span");
+    version.className = "llm-plan-version";
+    version.textContent = `Revision ${revision}`;
+    heading.appendChild(version);
+  }
+  const end = planEnd(projection);
+  const status = doc.createElement("span");
+  status.className = "llm-plan-status";
+  status.textContent = end.label;
+  status.dataset.status = end.status;
+  header.append(heading, status);
+  root.appendChild(header);
 
-  const renderArtifactMarkdown = (artifact: PlanArtifact): HTMLElement => {
-    const markdown = params.doc.createElement("div");
-    markdown.className = "llm-plan-markdown";
-    const rawSource =
-      artifact.nativePlanning?.proposal?.markdown ||
-      [
-        artifact.explanation?.trim() || "",
-        ...artifact.steps.map((step, index) => `${index + 1}. ${step.content}`),
-      ]
-        .filter(Boolean)
-        .join("\n\n");
-    const labels = researchDisplayLabels(params.events);
-    const source = labels
-      ? projectPaperReferences(rawSource, labels)
-      : rawSource;
-    try {
-      renderRenderedMarkdownInto(markdown, source, params.doc);
-    } catch {
-      markdown.textContent = source;
-    }
-    if (artifact.nativePlanning?.proposal && artifact.contract) {
-      const summary = params.doc.createElement("p");
-      summary.className = "llm-plan-contract-summary";
-      const investigation = artifact.contract.investigation;
-      summary.textContent = [
-        investigation?.scopeSnapshot
-          ? `Research scope: ${investigation.scopeSnapshot.itemCount} papers`
-          : "Scope: the approved request",
-        `Deliverable: ${artifact.contract.deliverable.kind}`,
-        artifact.contract.effects?.libraryMutation
-          ? `Library changes: ${artifact.contract.effects.libraryMutation.approval === "after_research" ? "review exact targets after research" : "within the approved scope"}`
-          : "Library changes: none",
-      ].join(" · ");
-      markdown.appendChild(summary);
-    }
-    return markdown;
-  };
-
-  let disposed = false;
-  let lastArtifact = params.projection.artifact;
-  let paintedSignature = "";
-  cardDisposers.set(root, () => {
-    disposed = true;
-  });
-  const paint = (projection: { artifact: PlanArtifact }) => {
-    if (disposed || projection.artifact.updatedAt < lastArtifact.updatedAt)
-      return;
-    const signature = JSON.stringify([
-      projection.artifact.planId,
-      projection.artifact.revision,
-      projection.artifact.digest,
-      projection.artifact.status,
-      projection.artifact.updatedAt,
-    ]);
-    if (signature === paintedSignature) return;
-    paintedSignature = signature;
-    lastArtifact = projection.artifact;
-    root.replaceChildren();
-    const artifact = projection.artifact;
-    const planId = artifact.planId;
-    const revision = artifact.revision;
-    root.dataset.llmPlanId = planId;
-    root.dataset.llmPlanRevision = `${revision}`;
-    root.setAttribute("aria-label", "Plan");
-
-    const header = params.doc.createElement("div");
-    header.className = "llm-plan-header";
-    const heading = params.doc.createElement("div");
-    heading.className = "llm-plan-heading";
-    const title = params.doc.createElement("strong");
-    title.className = "llm-plan-title";
-    title.textContent = "Plan";
-    heading.appendChild(title);
-    if (revision > 1) {
-      const version = params.doc.createElement("span");
-      version.className = "llm-plan-version";
-      version.textContent = `Revision ${revision}`;
-      heading.appendChild(version);
-    }
-    const status = params.doc.createElement("span");
-    status.className = "llm-plan-status";
-    status.textContent = artifactStatusLabel(artifact.status);
-    status.dataset.status = artifact.status;
-    header.append(heading, status);
-    root.appendChild(header);
-
-    if (artifact) {
-      root.appendChild(renderArtifactMarkdown(artifact));
-      const snapshot = artifact.contract?.investigation?.scopeSnapshot;
-      if (snapshot) {
-        const scope = params.doc.createElement("div");
-        scope.className = "llm-plan-scope-snapshot";
-        const createdAt = new Date(snapshot.createdAt).toLocaleString();
-        const shortDigest =
-          snapshot.digest.length > 24
-            ? `${snapshot.digest.slice(0, 16)}…${snapshot.digest.slice(-8)}`
-            : snapshot.digest;
-        scope.textContent = `Frozen scope · ${snapshot.itemCount.toLocaleString()} items · ${createdAt} · policy v${snapshot.policyVersion} · ${shortDigest}`;
-        scope.title = `Scope snapshot ${snapshot.snapshotId}\nDigest: ${snapshot.digest}`;
-        root.appendChild(scope);
-      }
-    }
-
-    const live = params.doc.createElement("div");
-    live.className = "llm-plan-live-region";
-    live.setAttribute("aria-live", "polite");
-    live.textContent = status.textContent || "";
-    root.appendChild(live);
-
-    if (projection.artifact?.status === "awaiting_approval") {
-      const approvalHint = params.doc.createElement("p");
-      approvalHint.className = "llm-plan-approval-hint";
-      approvalHint.textContent =
-        "Approve to start these steps. During execution, Safe reviews eligible scope amendments, Auto handles in-goal amendments, and YOLO may also approve successor revisions. Hard safety boundaries remain enforced.";
-      root.appendChild(approvalHint);
-      const actions = params.doc.createElement("div");
-      actions.className = "llm-plan-actions llm-plan-review-actions";
-      const setReviewActionLabel = (
-        button: HTMLButtonElement,
-        fullLabel: string,
-        compactLabel: string,
-      ) => {
-        button.setAttribute("aria-label", fullLabel);
-        const full = params.doc.createElement("span");
-        full.className = "llm-plan-action-label-full";
-        full.textContent = fullLabel;
-        const compact = params.doc.createElement("span");
-        compact.className = "llm-plan-action-label-compact";
-        compact.textContent = compactLabel;
-        button.replaceChildren(full, compact);
-      };
-      const approve = params.doc.createElement("button");
-      approve.type = "button";
-      approve.className = "llm-plan-action llm-plan-approve";
-      setReviewActionLabel(approve, "Approve plan", "Approve");
-      const revise = params.doc.createElement("button");
-      revise.type = "button";
-      revise.className = "llm-plan-action llm-plan-revise";
-      setReviewActionLabel(revise, "Request changes", "Revise");
-      const cancel = params.doc.createElement("button");
-      cancel.type = "button";
-      cancel.className = "llm-plan-action llm-plan-cancel";
-      setReviewActionLabel(cancel, "Cancel", "Cancel");
-      actions.append(approve, revise, cancel);
-      root.appendChild(actions);
-
-      const revisionBox = params.doc.createElement("div");
-      revisionBox.className = "llm-plan-revision-box";
-      revisionBox.style.display = "none";
-      const revisionInput = params.doc.createElement("textarea");
-      revisionInput.className = "llm-plan-revision-input";
-      revisionInput.placeholder = "What should change in this plan?";
-      const sendRevision = params.doc.createElement("button");
-      sendRevision.type = "button";
-      sendRevision.className = "llm-plan-action llm-plan-approve";
-      sendRevision.textContent = "Send revision";
-      revisionBox.append(revisionInput, sendRevision);
-      root.appendChild(revisionBox);
-
-      const reviewArtifact = projection.artifact;
-      approve.addEventListener("click", () => {
-        approve.disabled = true;
-        revise.disabled = true;
-        cancel.disabled = true;
-        approve.textContent = "Starting…";
-        approve.setAttribute("aria-label", "Starting plan");
-        void planExecutionCoordinator
-          .approve({
-            planId: reviewArtifact.planId,
-            revision: reviewArtifact.revision,
-            expectedDigest: reviewArtifact.digest,
-            conversationGeneration: getConversationWriteGeneration(
-              reviewArtifact.conversationKey,
-            ),
-            actionContract,
-          })
-          .then(async (ledger) => {
-            stageApprovedPlanExecution(ledger);
-            const approvedArtifact = await loadPlanArtifact(
-              reviewArtifact.planId,
-              reviewArtifact.revision,
-            );
-            paint({
-              artifact:
-                approvedArtifact ||
-                ({
-                  ...reviewArtifact,
-                  status: "approved",
-                  approvedAt: Date.now(),
-                  updatedAt: Date.now(),
-                } as PlanArtifact),
-            });
-            dispatchPlanEvent(root, PLAN_APPROVED_EVENT, {
-              planId: ledger.planId,
-              revision: ledger.revision,
-              executionId: ledger.executionId,
-            });
-          })
-          .catch((error) => {
-            approve.disabled = false;
-            revise.disabled = false;
-            cancel.disabled = false;
-            setReviewActionLabel(approve, "Approve plan", "Approve");
-            const errorMessage = params.doc.createElement("p");
-            errorMessage.className = "llm-plan-error";
-            errorMessage.textContent =
-              error instanceof Error ? error.message : String(error);
-            root.appendChild(errorMessage);
-          });
-      });
-      revise.addEventListener("click", () => {
-        revisionBox.style.display =
-          revisionBox.style.display === "none" ? "flex" : "none";
-        if (revisionBox.style.display !== "none") revisionInput.focus();
-      });
-      sendRevision.addEventListener("click", () => {
-        const comment = revisionInput.value.trim();
-        if (!comment) return;
-        dispatchPlanEvent(root, PLAN_REVISE_EVENT, {
-          planId: reviewArtifact.planId,
-          revision: reviewArtifact.revision,
-          provider: reviewArtifact.provider,
-          comment,
-        });
-      });
-      cancel.addEventListener("click", () => {
-        void (async () => {
-          const confirmed = await showStandaloneConfirmationDialog(params.doc, {
-            title: "Cancel this plan?",
-            message: "The cancelled plan will remain in conversation history.",
-            confirmLabel: "Cancel plan",
-            cancelLabel: "Keep plan",
-            destructive: true,
-          });
-          if (!confirmed) return;
-          const artifact = await planExecutionCoordinator.cancelArtifact({
-            planId: reviewArtifact.planId,
-            revision: reviewArtifact.revision,
-          });
-          if (artifact) paint({ artifact });
-          dispatchPlanEvent(root, PLAN_CANCEL_EVENT, {
-            planId: reviewArtifact.planId,
-            revision: reviewArtifact.revision,
-          });
-        })();
-      });
-    }
-  };
-
-  paint(params.projection);
-  const artifact = params.projection.artifact;
-  if (artifact) {
-    void loadPlanArtifact(artifact.planId, artifact.revision)
-      .then((stored) => {
-        if (disposed || !root.isConnected) return;
-        if (stored) paint({ artifact: stored });
-      })
-      .catch((error) => appLogger.warn("LLM: Failed to hydrate plan:", error));
+  if (ledger?.tasks?.length)
+    root.appendChild(renderEndedPlanTasks(doc, ledger));
+  else if (artifact)
+    root.appendChild(renderPlanProposal(doc, params.events, artifact));
+  const snapshot = artifact?.contract?.investigation?.scopeSnapshot;
+  if (snapshot) {
+    const scope = doc.createElement("div");
+    scope.className = "llm-plan-scope-snapshot";
+    const createdAt = new Date(snapshot.createdAt).toLocaleString();
+    const shortDigest =
+      snapshot.digest.length > 24
+        ? `${snapshot.digest.slice(0, 16)}…${snapshot.digest.slice(-8)}`
+        : snapshot.digest;
+    scope.textContent = `Frozen scope · ${snapshot.itemCount.toLocaleString()} items · ${createdAt} · policy v${snapshot.policyVersion} · ${shortDigest}`;
+    scope.title = `Scope snapshot ${snapshot.snapshotId}\nDigest: ${snapshot.digest}`;
+    root.appendChild(scope);
   }
   return root;
 }
@@ -6355,7 +6168,6 @@ type TraceView = {
     node: HTMLElement;
     caption: HTMLElement;
   };
-  allowPlanRecovery?: boolean;
   streaming?: boolean;
   eventCount?: number;
   lastEvent?: AgentRunEventRecord;
@@ -6397,7 +6209,6 @@ export function renderAgentTrace({
   onTraceMissing,
   onInterleavedText,
   previous,
-  allowPlanRecovery = false,
   actionCardNavigation,
   actionSummaryHost,
 }: RenderAgentTraceParams): HTMLElement | null {
@@ -6443,7 +6254,6 @@ export function renderAgentTrace({
   view.quoteCitations = message.quoteCitations;
   view.quoteOverride = message.quoteDisplayOverride;
   const textOnly =
-    view.allowPlanRecovery === allowPlanRecovery &&
     view.streaming === message.streaming &&
     message.streaming !== false &&
     !formattingChanged &&
@@ -6453,7 +6263,6 @@ export function renderAgentTrace({
         entry.payload.type === "reasoning" ||
         entry.payload.type === "message_delta",
     );
-  view.allowPlanRecovery = allowPlanRecovery;
   view.streaming = message.streaming;
   view.eventCount = events.length;
   view.lastEvent = events[events.length - 1];
@@ -6806,7 +6615,10 @@ export function renderAgentTrace({
   }
   view.items = nextViews;
   if (textOnly) {
-    if (view.document || (view.plan && getPlanProjection(events)?.artifact))
+    if (
+      view.document ||
+      (view.plan && isPlanningAnswer(getPlanProjection(events)))
+    )
       onInterleavedText?.();
     return wrap;
   }
@@ -6893,23 +6705,17 @@ export function renderAgentTrace({
     );
 
   const planProjection = getPlanProjection(events);
-  const visiblePlanProjection =
-    planProjection?.artifact ||
-    (allowPlanRecovery && planProjection?.ledger?.status === "interrupted")
-      ? planProjection
-      : null;
-  if (!visiblePlanProjection && view.plan) {
+  if (!planProjection && view.plan) {
     disposePlanCard(view.plan.node);
     view.plan = undefined;
   }
-  if (visiblePlanProjection) {
-    // The structured plan is the planning turn's visible answer. Keep the
-    // provider's often-duplicated prose in durable history without rendering a
-    // second copy below the card. Execution turns still render their final
-    // answer normally; the live request owns execution progress separately.
-    if (visiblePlanProjection.artifact) onInterleavedText?.();
+  if (planProjection) {
+    // An old planning turn's card is its visible answer: keep the provider's
+    // often-duplicated prose in durable history without rendering a second
+    // copy below it. An execution turn renders its final answer as usual.
+    if (isPlanningAnswer(planProjection)) onInterleavedText?.();
     const planSignature = JSON.stringify([
-      visiblePlanProjection,
+      planProjection,
       [...(researchDisplayLabels(events) || [])],
     ]);
     if (view.plan?.signature !== planSignature) {
@@ -6919,14 +6725,12 @@ export function renderAgentTrace({
         node: renderPlanContainer({
           doc,
           events,
-          projection: visiblePlanProjection,
+          projection: planProjection,
         }),
       };
     }
     const planContainer = view.plan.node;
-    const planId =
-      visiblePlanProjection.artifact?.planId ||
-      visiblePlanProjection.ledger!.planId;
+    const planId = planContainer.dataset.llmPlanId;
     for (const node of Array.from(
       doc.querySelectorAll<HTMLElement>(".llm-plan-container"),
     )) {

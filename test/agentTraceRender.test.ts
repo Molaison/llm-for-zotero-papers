@@ -1116,46 +1116,216 @@ describe("agentTrace render", function () {
     }
   });
 
-  it("uses the established Plan button shape and centered label for Resume execution", function () {
-    const trace = renderAgentTrace({
-      doc: fakeDocument,
-      message: { role: "assistant", text: "", timestamp: 1, runMode: "agent" },
-      allowPlanRecovery: true,
-      events: [
-        {
-          runId: "interrupted-plan",
-          seq: 1,
-          eventType: "plan_execution_updated",
-          createdAt: 1,
-          payload: {
-            type: "plan_execution_updated",
-            ledger: {
-              executionId: "interrupted-plan",
-              status: "interrupted",
-              tasks: [],
-            } as any,
-          },
-        },
+  describe("old plan cards", function () {
+    const planTask = (index: number, status: string, content: string) => ({
+      version: 2,
+      taskId: `old-execution:task-${index}`,
+      executionId: "old-execution",
+      planStepId: `step-${index}`,
+      kind: "required_step",
+      content,
+      activeForm: `${content} now`,
+      acceptanceCriteria: [],
+      expectedEffect: "reasoning",
+      obligationIds: [],
+      status,
+      attemptCount: status === "pending" ? 0 : 1,
+      evidenceIds: [],
+      failureReasons: [],
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    const proposal = {
+      version: 1,
+      planId: "old-plan",
+      revision: 2,
+      digest: "sha256:old-plan",
+      provider: "original",
+      conversationKey: 1,
+      status: "awaiting_approval",
+      explanation: "Compare how the two cohorts drift.",
+      steps: [
+        { planStepId: "step-1", content: "Read both papers" },
+        { planStepId: "step-2", content: "Write the comparison" },
       ],
-    }) as unknown as FakeElement;
-    const recovery = trace.findByClass("llm-plan-recovery-card");
-    assert.exists(recovery);
-    assert.include(
-      collectFakeText(recovery),
-      "Plan execution was interrupted.",
-    );
-    assert.equal(
-      recovery?.findByClass("llm-plan-action-label-full")?.textContent,
-      "Resume execution",
-    );
-    const css = readFileSync("addon/content/zoteroPane.css", "utf8");
-    const rule =
-      css.match(
-        /\.llm-plan-recovery-card \.llm-plan-action\s*\{[^}]*\}/,
-      )?.[0] || "";
-    assert.include(rule, "appearance: none");
-    assert.include(rule, "align-items: center");
-    assert.include(rule, "justify-content: center");
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const execution = (status: string, tasks: unknown[]) => ({
+      version: 2,
+      executionId: "old-execution",
+      planId: "old-plan",
+      revision: 2,
+      planDigest: "sha256:old-plan",
+      conversationKey: 1,
+      attempt: 1,
+      provider: "original",
+      status,
+      tasks,
+      createdAt: 1,
+      updatedAt: 2,
+    });
+    const record = (seq: number, payload: unknown): AgentRunEventRecord => ({
+      runId: "old-plan-run",
+      seq,
+      eventType: (payload as { type: string }).type,
+      createdAt: seq,
+      payload: payload as never,
+    });
+    const render = (
+      events: AgentRunEventRecord[],
+      onInterleavedText?: () => void,
+    ) =>
+      renderAgentTrace({
+        doc: fakeDocument,
+        message: {
+          role: "assistant",
+          text: "The plan is ready for review.",
+          timestamp: 1,
+          runMode: "agent",
+        },
+        events,
+        onInterleavedText,
+        // The latest message once offered Resume; plan mode is retired.
+        ...({ allowPlanRecovery: true } as object),
+      }) as unknown as FakeElement;
+    const statusOf = (card: FakeElement | null) =>
+      card?.findByClass("llm-plan-status")?.textContent;
+
+    it("shows a proposal's steps from its own event, read-only", function () {
+      let textHidden = false;
+      const trace = render(
+        [record(1, { type: "plan_ready", artifact: proposal })],
+        () => {
+          textHidden = true;
+        },
+      );
+      const card = trace.findByClass("llm-plan-container");
+      assert.exists(card);
+      assert.equal(card?.dataset.llmPlanId, "old-plan");
+      assert.equal(card?.findByClass("llm-plan-title")?.textContent, "Plan");
+      assert.equal(
+        card?.findByClass("llm-plan-version")?.textContent,
+        "Revision 2",
+      );
+      assert.equal(statusOf(card), "Proposed");
+      const markdown = card?.findByClass("llm-plan-markdown")?.innerHTML || "";
+      assert.include(markdown, "Read both papers");
+      assert.include(markdown, "Write the comparison");
+      assert.lengthOf(card!.findAllByTag("button"), 0, "no plan control");
+      assert.lengthOf(card!.findAllByTag("textarea"), 0);
+      assert.isTrue(textHidden, "the card is the planning turn's answer");
+    });
+
+    it("shows how an execution ended, with each step, and offers no Resume", function () {
+      let textHidden = false;
+      const trace = render(
+        [
+          record(1, { type: "plan_ready", artifact: proposal }),
+          record(2, {
+            type: "plan_execution_updated",
+            ledger: execution("interrupted", [
+              planTask(1, "completed", "Read both papers"),
+              planTask(2, "interrupted", "Write the comparison"),
+              planTask(3, "pending", "Save it as a note"),
+            ]),
+          }),
+        ],
+        () => {
+          textHidden = true;
+        },
+      );
+      assert.isNull(trace.findByClass("llm-plan-recovery-card"));
+      const card = trace.findByClass("llm-plan-container");
+      assert.exists(card);
+      assert.equal(statusOf(card), "Interrupted");
+      const rows = card!.findAllByClass("llm-plan-task");
+      assert.deepEqual(
+        rows.map((row) => row.findByClass("llm-plan-task-label")?.textContent),
+        ["Read both papers", "Write the comparison", "Save it as a note"],
+      );
+      assert.deepEqual(
+        rows.map((row) => row.className),
+        [
+          "llm-plan-task llm-plan-task-completed",
+          "llm-plan-task llm-plan-task-interrupted",
+          "llm-plan-task llm-plan-task-pending",
+        ],
+      );
+      assert.isNull(
+        card!.findByClass("llm-plan-markdown"),
+        "the executed steps replace the proposal text",
+      );
+      assert.lengthOf(card!.findAllByTag("button"), 0, "no plan control");
+      assert.notInclude(collectFakeText(trace), "Resume");
+      assert.isFalse(textHidden, "an execution turn keeps its own answer");
+    });
+
+    it("says a run that stopped mid-plan did not finish, and never shows a step as still running", function () {
+      const trace = render([
+        record(1, {
+          type: "plan_execution_updated",
+          ledger: execution("running", [
+            planTask(1, "completed", "Read both papers"),
+            planTask(2, "in_progress", "Write the comparison"),
+          ]),
+        }),
+      ]);
+      const card = trace.findByClass("llm-plan-container");
+      assert.equal(statusOf(card), "Not finished");
+      assert.deepEqual(
+        card!.findAllByClass("llm-plan-task").map((row) => row.className),
+        [
+          "llm-plan-task llm-plan-task-completed",
+          "llm-plan-task llm-plan-task-interrupted",
+        ],
+      );
+    });
+
+    it("tells how the plan ended from the run's last execution report", function () {
+      const trace = render([
+        record(1, {
+          type: "plan_execution_updated",
+          ledger: execution("running", [
+            planTask(1, "in_progress", "Read both papers"),
+          ]),
+        }),
+        record(2, {
+          type: "plan_execution_updated",
+          ledger: execution("completed", [
+            planTask(1, "completed", "Read both papers"),
+          ]),
+        }),
+      ]);
+      const card = trace.findByClass("llm-plan-container");
+      assert.equal(statusOf(card), "Completed");
+      assert.deepEqual(
+        card!.findAllByClass("llm-plan-task").map((row) => row.className),
+        ["llm-plan-task llm-plan-task-completed"],
+      );
+    });
+
+    for (const [status, label] of [
+      ["completed", "Completed"],
+      ["completed_with_exceptions", "Completed with exceptions"],
+      ["failed", "Failed"],
+      ["cancelled", "Cancelled"],
+      ["superseded", "Superseded"],
+      ["blocked", "Blocked"],
+      ["waiting_for_user", "Not finished"],
+    ]) {
+      it(`labels an execution that ended ${status} "${label}"`, function () {
+        const trace = render([
+          record(1, {
+            type: "plan_execution_updated",
+            ledger: execution(status, [
+              planTask(1, "completed", "Read both papers"),
+            ]),
+          }),
+        ]);
+        assert.equal(statusOf(trace.findByClass("llm-plan-container")), label);
+      });
+    }
   });
 
   it("projects authoritative work categories without inferring from tool names", function () {

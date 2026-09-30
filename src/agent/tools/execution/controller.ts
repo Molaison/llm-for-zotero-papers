@@ -93,8 +93,7 @@ type GrantAuthority =
   | "safe_confirmation"
   | "auto_policy"
   | "yolo"
-  | "yolo_judgment"
-  | "plan_approval";
+  | "yolo_judgment";
 
 /** Owns the lifetime of one invocation; authority is bound to exact assessed payloads. */
 export class InvocationController {
@@ -556,8 +555,6 @@ export class InvocationController {
         ? assessed.authorization.authority
         : undefined;
     switch (policy) {
-      case "plan_approval":
-        return "plan_approval";
       case "yolo_judgment":
         return "yolo_judgment";
       case "yolo":
@@ -613,7 +610,6 @@ export class InvocationController {
       proposalDigest: assessed.proposal.payloadDigest,
       toolName: this.call.name,
       authority,
-      planEffectIds: assessed.planEffectIds,
       ...(assessed.review ? { review: assessed.review } : {}),
       status: "staged" as "staged" | "executed" | "failed",
       createdAt: Date.now(),
