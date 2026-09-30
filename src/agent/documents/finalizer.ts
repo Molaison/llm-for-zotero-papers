@@ -1,6 +1,4 @@
 import { renderMarkdownForNote } from "../../utils/markdown";
-import { updatePlanTask } from "../plans/taskUpdates";
-import type { TaskEvidence } from "../plans/types";
 import { canonicalJson } from "../services/libraryMutation/canonicalJson";
 import type { ZoteroGateway } from "../services/zoteroGateway";
 import { sha256Text } from "../store/journalRecoveryBlobStore";
@@ -254,25 +252,11 @@ export async function finalizeDocument(params: {
   };
 }
 
-/** Persist the document, pending outbox, and any Plan integrity evidence together. */
+/** Persist the document and its pending outbox together. */
 export async function persistFinalizedDocument(
   finalized: FinalizedDocument,
-  evidence?: TaskEvidence | TaskEvidence[],
 ): Promise<void> {
   await Zotero.DB.executeTransaction(async () => {
     await savePlanDocumentInTransaction(finalized);
-    for (const entry of evidence
-      ? Array.isArray(evidence)
-        ? evidence
-        : [evidence]
-      : [])
-      await updatePlanTask({
-        kind: "evidence",
-        executionId: entry.executionId,
-        taskId: entry.taskId,
-        evidence: [entry],
-        now: entry.createdAt,
-        alreadyInTransaction: true,
-      });
   });
 }

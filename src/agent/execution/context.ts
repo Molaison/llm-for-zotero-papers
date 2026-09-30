@@ -41,10 +41,7 @@ export function createAgentExecutionContext(
     conversationGeneration: request.conversationGeneration || 0,
     chatLibraryID:
       request.libraryID || request.turnPaperScope.libraryID || undefined,
-    permissionOwner:
-      request.planContext?.phase === "executing"
-        ? "approved_plan"
-        : "original_agent",
+    permissionOwner: "original_agent",
     workspaceSnapshot: {
       ...(activePaper
         ? {
@@ -90,14 +87,5 @@ export function createAgentExecutionContext(
       },
       hostCommandExecution: false,
     },
-    ...(request.planContext?.phase === "executing"
-      ? {
-          approvedPlanBinding: {
-            planId: request.planContext.planId,
-            revision: request.planContext.revision,
-            approvedDigest: request.planContext.approvedDigest,
-          },
-        }
-      : {}),
   };
 }

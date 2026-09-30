@@ -31,17 +31,14 @@ const CATEGORY_BEARING_EVENT_TYPES: ReadonlySet<AgentEvent["type"]> = new Set([
 ]);
 
 /**
- * What a plan event says about the planning stage.
- *
- * The same table the runtime publishes plan events through
- * (`PLANNING_STAGE_STATUS_BY_PLAN_EVENT` in `agent/runtime.ts`): a revision
- * still being drafted opens the stage and a reviewable plan closes it.
- * Every other plan event reports work inside a stage rather than a
- * transition of one -- an execution ledger advancing would otherwise close a
- * stage nothing had opened, once per task.
+ * What an old run's stored plan event says about the planning stage, the
+ * way the runtime once published it: a revision still being drafted opened
+ * the stage and a reviewable plan closed it. Every other plan event reported
+ * work inside a stage rather than a transition of one -- an execution ledger
+ * advancing would otherwise close a stage nothing had opened, once per task.
  */
 const PLANNING_STAGE_STATUS_BY_PLAN_EVENT: Readonly<
-  Partial<Record<AgentEvent["type"], "started" | "completed">>
+  Record<string, "started" | "completed">
 > = {
   plan_updated: "started",
   plan_ready: "completed",
@@ -193,7 +190,8 @@ function projectStageBeforeEvent(
   calls: Map<string, ProjectedCall>,
 ): AgentStagePayload | null {
   const payload = entry.payload;
-  const planningStatus = PLANNING_STAGE_STATUS_BY_PLAN_EVENT[payload.type];
+  const planningStatus: "started" | "completed" | undefined =
+    PLANNING_STAGE_STATUS_BY_PLAN_EVENT[payload.type];
   if (planningStatus)
     return buildStage({
       stage: "planning",

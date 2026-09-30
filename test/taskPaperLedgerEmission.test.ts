@@ -1,9 +1,7 @@
 import { assert } from "chai";
-import { readFileSync } from "node:fs";
 import { AgentRuntime } from "../src/agent/runtime";
 import { AgentToolRegistry } from "../src/agent/tools/registry";
 import { initAgentChangeJournal } from "../src/agent/store/changeJournal";
-import { PlanExecutionRunSession } from "../src/agent/plans/runSession";
 import {
   clearRememberedLocalDocumentPaths,
   rememberLocalDocumentPaths,
@@ -132,15 +130,8 @@ function registerTools(registry: AgentToolRegistry): void {
 async function runTurn(options: { conversationKey?: number }): Promise<{
   events: AgentEvent[];
   persisted: Array<{ eventType: string; payload: AgentEvent }>;
-  recordToolResultCalls: string[];
 }> {
   const restoreDb = installMockDb();
-  const originalRecord = PlanExecutionRunSession.prototype.recordToolResult;
-  const recordToolResultCalls: string[] = [];
-  PlanExecutionRunSession.prototype.recordToolResult = async function (params) {
-    recordToolResultCalls.push(params.result.callId);
-    return originalRecord.call(this, params);
-  };
   try {
     await initAgentChangeJournal();
     const registry = new AgentToolRegistry(createTestActionContractService());
@@ -175,9 +166,8 @@ async function runTurn(options: { conversationKey?: number }): Promise<{
       eventType: String(row.eventType),
       payload: JSON.parse(String(row.payloadJson)) as AgentEvent,
     }));
-    return { events, persisted, recordToolResultCalls };
+    return { events, persisted };
   } finally {
-    PlanExecutionRunSession.prototype.recordToolResult = originalRecord;
     restoreDb();
   }
 }
@@ -301,20 +291,5 @@ describe("task paper ledger emission", function () {
     );
     assert.deepInclude(result!.content as object, { mode: "targeted" });
     assert.notProperty(result!.content as object, "paperLedgerDelta");
-  });
-
-  it("records once even though the plan session re-attests the same call", async function () {
-    const { events, recordToolResultCalls } = await runTurn({});
-    assert.includeMembers(recordToolResultCalls, [
-      "call-retrieve",
-      "call-read",
-    ]);
-    assert.lengthOf(ledgerEvents(events), 2);
-    const source = readFileSync(
-      new URL("../src/agent/plans/runSession.ts", import.meta.url),
-      "utf8",
-    );
-    assert.notInclude(source, "paper_ledger_update");
-    assert.notInclude(source, "taskPaperLedger");
   });
 });

@@ -1,4 +1,3 @@
-import { semanticContractFixture } from "./helpers/semanticIntent";
 import { assert } from "chai";
 import { DatabaseSync } from "node:sqlite";
 import { decodePlanContract } from "../src/agent/plans/contracts";
@@ -12,30 +11,15 @@ import {
 import { buildAgentTraceDisplayItems } from "../src/modules/contextPanel/agentTrace/render";
 import type { AgentRunEventRecord } from "../src/agent/store/traceStore";
 import { resolvedAgentRequest } from "./helpers/resolvedAgentRequest";
-import { AgentToolRegistry } from "../src/agent/tools/registry";
-import { ActionContractService } from "../src/agent/contracts/actionContract";
-import { initAgentChangeJournal } from "../src/agent/store/changeJournal";
-import { ChangeJournalTestDb } from "./helpers/changeJournalTestDb";
-import { stateChangeInvocationPlan } from "../src/agent/authorization/invocationPlan";
 import type { AgentActionContract } from "../src/agent/contracts/types";
-import { createAmendPlanTool } from "../src/agent/tools/plan/amendPlan";
-import { createUpdatePlanTool } from "../src/agent/tools/plan/updatePlan";
-import { createPreparePlanExecutionTool } from "../src/agent/tools/plan/preparePlanExecution";
-import {
-  ZOTERO_MCP_PLAN_TOOL_NAMES,
-  ZOTERO_MCP_WRITE_TOOL_NAMES,
-} from "../src/agent/mcp/server";
 import { buildResearchScopeSuccessorSnapshot } from "../src/agent/research/scopeSnapshot";
 import { decodeResearchJob } from "../src/agent/research/decoders";
 import { resolveResearchPolicy } from "../src/agent/context/researchPolicy";
 import { decodePlanAmendmentGrant } from "../src/agent/plans/planAmendmentTypes";
 import {
-  initAgentPlanStore,
   listPlanAmendmentGrants,
-  listTaskEvidence,
   loadPlanArtifact,
   loadPlanExecutionLedger,
-  PLAN_AMENDMENT_PROPOSALS_TABLE,
   savePlanExecutionLedger,
   saveTaskEvidence,
 } from "../src/agent/plans/store";
@@ -55,9 +39,11 @@ import {
   saveThemeFinding,
 } from "../src/agent/research/store";
 import { PlanExecutionCoordinator } from "../src/agent/plans/coordinator";
-import { PlanExecutionRunSession } from "../src/agent/plans/runSession";
-import { initPlanDocumentStore } from "../src/agent/documents/store";
-import { resolvePlanContract } from "../src/agent/tools/plan/updatePlan";
+import { resolvePlanContract } from "../src/agent/plans/preparation";
+import {
+  initDormantPlanTables,
+  PLAN_AMENDMENT_PROPOSALS_TABLE,
+} from "../src/agent/store/dormantPlanTables";
 
 function installSqliteZotero() {
   const db = new DatabaseSync(":memory:");
@@ -226,7 +212,7 @@ describe("autonomous Plan scope amendments", function () {
   it("commits a proposal and its authorization grant atomically", async function () {
     const harness = installSqliteZotero();
     try {
-      await initAgentPlanStore();
+      await initDormantPlanTables();
       const service = new PlanAmendmentService();
       const proposal = await service.buildProposal({
         kind: "research_ceiling",
@@ -325,7 +311,7 @@ describe("autonomous Plan scope amendments", function () {
   it("applies an in-source corpus amendment without discarding valid paper evidence", async function () {
     const harness = installSqliteZotero();
     try {
-      await initAgentPlanStore();
+      await initDormantPlanTables();
       await initResearchStore();
       let sourceIds = [1];
       const items = new Map([
@@ -582,7 +568,7 @@ describe("autonomous Plan scope amendments", function () {
   it("persists a contract-revision grant before creating its successor execution", async function () {
     const harness = installSqliteZotero();
     try {
-      await initAgentPlanStore();
+      await initDormantPlanTables();
       await initResearchStore();
       const coordinator = new PlanExecutionCoordinator();
       const baseContract = { deliverable: { kind: "answer" as const } };
@@ -716,7 +702,7 @@ describe("autonomous Plan scope amendments", function () {
   it("rolls back successor creation and can retry the same exact grant after migration fails", async function () {
     const harness = installSqliteZotero();
     try {
-      await initAgentPlanStore();
+      await initDormantPlanTables();
       await initResearchStore();
       const coordinator = new PlanExecutionCoordinator();
       const baseContract = { deliverable: { kind: "answer" as const } };
@@ -857,7 +843,7 @@ describe("autonomous Plan scope amendments", function () {
   it("keeps the amendment lineage when the user revises the reviewable successor", async function () {
     const harness = installSqliteZotero();
     try {
-      await initAgentPlanStore();
+      await initDormantPlanTables();
       await initResearchStore();
       const coordinator = new PlanExecutionCoordinator();
       const step = (revision: number, content: string) => ({
@@ -961,217 +947,10 @@ describe("autonomous Plan scope amendments", function () {
       harness.db.close();
     }
   });
-
-  async function amendContractMidRun(mode: "auto" | "yolo") {
-    globalThis.Zotero = {
-      ...(globalThis.Zotero as object),
-      Prefs: {
-        get: (key: string) =>
-          key.endsWith("originalAgentPermissionMode") ? mode : undefined,
-      },
-      Items: {
-        get: (id: number) =>
-          id === 7 ? { id: 7, key: "AAAA1111", libraryID: 1 } : undefined,
-      },
-    } as never;
-    await initAgentPlanStore();
-    await initResearchStore();
-    await initPlanDocumentStore();
-    const planId = `plan-mid-run-${mode}`;
-    const readSteps = (...contents: string[]) =>
-      contents.map((content, index) => ({
-        content,
-        activeForm: content,
-        expectedEffect: "read" as const,
-        acceptanceCriteria: [
-          {
-            criterionId: `read-${index + 1}`,
-            description: "The paper was read",
-            verifier: "verified_read" as const,
-          },
-        ],
-      }));
-    const coordinator = new PlanExecutionCoordinator();
-    await coordinator.updateDraft({
-      planId,
-      conversationKey: 1,
-      provider: "original",
-      revision: 1,
-      ready: true,
-      contract: { deliverable: { kind: "answer" } },
-      steps: readSteps("Read the paper"),
-    });
-    const predecessor = await coordinator.approve({
-      planId,
-      revision: 1,
-      conversationGeneration: 0,
-    });
-    const request = resolvedAgentRequest({
-      conversationKey: 1,
-      mode: "agent",
-      userText: "Which effect does the paper report?",
-      planContext: {
-        phase: "executing",
-        planId,
-        revision: 1,
-        executionId: predecessor.executionId,
-        approvedDigest: predecessor.planDigest,
-        provider: "original",
-      },
-    });
-    const session = new PlanExecutionRunSession(request, async () => {});
-    assert.deepEqual(await session.initialize(), { kind: "ready" });
-    // A write contract a research-mutation grant gave the predecessor run.
-    const predecessorAuthority = { id: "predecessor-grant" } as never;
-    request.actionContract = predecessorAuthority;
-    const tool = createAmendPlanTool({} as never, new PlanAmendmentService());
-    // A ready revision needs three to seven steps.
-    const validated = tool.validate({
-      kind: "contract_revision",
-      rationale: "The user now asks for the reported effect size.",
-      contract: { deliverable: { kind: "answer" } },
-      steps: readSteps(
-        "Read the methods",
-        "Read the results",
-        "Read the effect sizes",
-      ),
-    });
-    assert.isTrue(validated.ok);
-    const amendResult = (await tool.execute(validated.value, {
-      request,
-      runId: "run-1",
-      item: null,
-      currentAnswerText: "",
-      modelName: "test",
-    } as never)) as {
-      awaitingApproval: boolean;
-      successorExecutionId?: string;
-    };
-    await session.recordToolResult({
-      toolName: "amend_plan",
-      executionClass: "control",
-      input: validated.value,
-      result: {
-        callId: "call-amend",
-        name: "amend_plan",
-        ok: true,
-        actionReceipts: [],
-        content: amendResult,
-      },
-      runId: "run-1",
-    });
-    return {
-      planId,
-      predecessor,
-      request,
-      session,
-      amendResult,
-      predecessorAuthority,
-    };
-  }
-
-  it("continues the run on the successor after an auto-approved contract revision", async function () {
-    const harness = installSqliteZotero();
-    try {
-      const { planId, predecessor, request, session, amendResult } =
-        await amendContractMidRun("yolo");
-      assert.isFalse(amendResult.awaitingApproval);
-      const successorExecutionId = amendResult.successorExecutionId!;
-      assert.isString(successorExecutionId);
-      assert.equal(
-        (await loadPlanExecutionLedger(predecessor.executionId))?.status,
-        "superseded",
-      );
-      const successor = await loadPlanExecutionLedger(successorExecutionId);
-      const taskId = successor!.activeTaskId!;
-      assert.isString(taskId);
-      assert.deepEqual(request.planContext, {
-        phase: "executing",
-        planId,
-        revision: 2,
-        executionId: successorExecutionId,
-        approvedDigest: successor!.planDigest,
-        activeTaskId: taskId,
-        provider: "original",
-      });
-      // The successor starts from its own approved contract.
-      assert.isUndefined(request.actionContract);
-
-      const read = (callId: string) =>
-        session.recordToolResult({
-          toolName: "library_search",
-          executionClass: "read",
-          input: { query: "effect" },
-          result: {
-            callId,
-            name: "library_search",
-            ok: true,
-            actionReceipts: [],
-            content: { results: [{ itemId: 7, title: "Paper" }] },
-          },
-          runId: "run-1",
-        });
-      await read("call-read-1");
-
-      const requirementId = successor!.tasks.find(
-        (task) => task.taskId === taskId,
-      )?.completionRequirements?.[0]?.requirementId;
-      assert.isString(requirementId);
-      assert.deepEqual(
-        (await listTaskEvidence(successorExecutionId, taskId)).map((entry) => [
-          entry.kind,
-          entry.requirementId,
-        ]),
-        [["verified_read", requirementId]],
-      );
-      assert.equal(
-        (await loadPlanExecutionLedger(successorExecutionId))?.tasks.find(
-          (task) => task.taskId === taskId,
-        )?.status,
-        "completed",
-      );
-      assert.isEmpty(
-        await listTaskEvidence(
-          predecessor.executionId,
-          predecessor.tasks[0].taskId,
-        ),
-      );
-      await read("call-read-2");
-      await read("call-read-3");
-      assert.deepEqual(await session.evaluateFinal({ canCorrect: false }), {
-        kind: "accept",
-      });
-    } finally {
-      harness.db.close();
-    }
-  });
-
-  it("keeps the run on the current execution while a contract revision awaits review", async function () {
-    const harness = installSqliteZotero();
-    try {
-      const { predecessor, request, amendResult, predecessorAuthority } =
-        await amendContractMidRun("auto");
-      assert.isTrue(amendResult.awaitingApproval);
-      assert.notEqual(
-        (await loadPlanExecutionLedger(predecessor.executionId))?.status,
-        "superseded",
-      );
-      const plan = request.planContext;
-      assert.equal(
-        plan?.phase === "executing" ? plan.executionId : undefined,
-        predecessor.executionId,
-      );
-      assert.equal(plan?.revision, 1);
-      assert.strictEqual(request.actionContract, predecessorAuthority);
-    } finally {
-      harness.db.close();
-    }
-  });
-
   it("marks a successor mutation task complete when verified receipts carry forward", async function () {
     const harness = installSqliteZotero();
     try {
-      await initAgentPlanStore();
+      await initDormantPlanTables();
       await initResearchStore();
       const makeTask = (
         executionId: string,
@@ -1345,154 +1124,6 @@ describe("autonomous Plan scope amendments", function () {
       "block",
     );
   });
-
-  it("keeps action-scope eligibility and mode authority in the amendment service", function () {
-    const service = new PlanAmendmentService();
-    const failure = {
-      code: "added_target" as const,
-      message: "A source-scoped target was added.",
-      expectedCount: 1,
-      proposedCount: 2,
-      rejectedTargets: [],
-      missingTargets: [],
-      amendableObligation: {
-        obligationId: "tag-obligation",
-        libraryID: 1,
-        boundaryKind: "collection" as const,
-        previousTargetIds: [1],
-        currentTargetIds: [1, 2],
-        addedTargetIds: [2],
-      },
-    };
-    const base = {
-      planContext: {
-        phase: "executing" as const,
-        planId: "plan-1",
-        revision: 1,
-        executionId: "execution-1",
-        approvedDigest: "sha256:plan",
-        provider: "original" as const,
-      },
-      failure,
-      actionImpact: "state_change" as const,
-      riskSignals: [] as string[],
-      hasHardConstraints: false,
-    };
-
-    assert.deepEqual(
-      service.decideActionScopeAmendment({
-        ...base,
-        originalMode: "auto",
-      }),
-      { kind: "execute", authority: "auto_policy" },
-    );
-    assert.equal(
-      service.decideActionScopeAmendment({
-        ...base,
-        originalMode: "yolo",
-        riskSignals: ["protected_target"],
-      }).kind,
-      "block",
-    );
-    assert.equal(
-      service.decideActionScopeAmendment({
-        ...base,
-        originalMode: "auto",
-        failure: { ...failure, code: "fixed_selection" },
-      }).kind,
-      "block",
-    );
-  });
-
-  it("grants yolo judgment for unmatched conversation writes and keeps the rails", function () {
-    const service = new PlanAmendmentService();
-    const failure = {
-      code: "different_operation" as const,
-      message: "Action apply_tags does not match any authorized obligation.",
-      expectedCount: 1,
-      proposedCount: 1,
-      rejectedTargets: [],
-      missingTargets: [],
-    };
-    const base = {
-      planContext: undefined,
-      failure,
-      actionImpact: "state_change" as const,
-      riskSignals: [] as string[],
-      hasHardConstraints: false,
-    };
-    for (const code of [
-      "different_operation",
-      "different_parameters",
-      "scope_mismatch",
-      "fixed_selection",
-      "added_target",
-      "incomplete_batch",
-    ] as const) {
-      assert.deepEqual(
-        service.decideActionScopeAmendment({
-          ...base,
-          originalMode: "yolo",
-          failure: { ...failure, code },
-        }),
-        { kind: "execute", authority: "yolo_judgment" },
-        code,
-      );
-    }
-    for (const code of [
-      "hard_constraint",
-      "protected_target",
-      "closed_obligation",
-      "stale_scope",
-      "workflow_dependency",
-      "missing_typed_proposal",
-    ] as const) {
-      assert.equal(
-        service.decideActionScopeAmendment({
-          ...base,
-          originalMode: "yolo",
-          failure: { ...failure, code },
-        }).kind,
-        "block",
-        code,
-      );
-    }
-    assert.equal(
-      service.decideActionScopeAmendment({
-        ...base,
-        originalMode: "yolo",
-        riskSignals: ["protected_target"],
-      }).kind,
-      "block",
-    );
-    assert.equal(
-      service.decideActionScopeAmendment({
-        ...base,
-        originalMode: "yolo",
-        actionImpact: "prohibited",
-      }).kind,
-      "block",
-    );
-    // A present-but-unviolated hard constraint does not block judgment; the
-    // policy blocks violating proposals before this decision is consulted.
-    assert.equal(
-      service.decideActionScopeAmendment({
-        ...base,
-        originalMode: "yolo",
-        hasHardConstraints: true,
-      }).kind,
-      "execute",
-    );
-    for (const mode of ["safe", "auto"] as const) {
-      assert.equal(
-        service.decideActionScopeAmendment({ ...base, originalMode: mode })
-          .kind,
-        "block",
-        mode,
-      );
-    }
-  });
-
   it("requires review for semantic revision in Safe and Auto but not YOLO", function () {
     for (const mode of ["safe", "auto"] as const) {
       assert.deepEqual(
@@ -1672,218 +1303,6 @@ describe("autonomous Plan scope amendments", function () {
     assert.exists(row);
     assert.notInclude(JSON.stringify(row), "amended automatically");
   });
-
-  it("exposes one validated amend_plan control over the Plan MCP write surface", function () {
-    const tool = createAmendPlanTool({} as never, new PlanAmendmentService());
-    assert.include(ZOTERO_MCP_PLAN_TOOL_NAMES, "amend_plan");
-    assert.include(ZOTERO_MCP_WRITE_TOOL_NAMES, "amend_plan");
-    assert.equal(tool.spec.executionClass, "control");
-    assert.isTrue(
-      tool.validate({
-        kind: "research_scope",
-        rationale: "A new paper is now in the approved collection.",
-        addedTargets: [{ libraryID: 1, itemKey: "BBBB2222" }],
-      }).ok,
-    );
-    assert.isFalse(
-      tool.validate({
-        kind: "research_scope",
-        rationale: "Missing exact identity.",
-        addedTargets: [{ libraryID: 1 }],
-      }).ok,
-    );
-  });
-
-  it("lets Auto and YOLO authorize an exact in-source action addition while Safe pauses", async function () {
-    class FakeAmendments extends PlanAmendmentService {
-      authorities: string[] = [];
-      override async authorizeActionScopeAmendment(params: any): Promise<any> {
-        this.authorities.push(params.authority);
-        return {
-          version: 1,
-          grantId: "grant-1",
-          authority: params.authority,
-          status: "authorized",
-          authorizedAt: 1,
-          proposal: {
-            version: 1,
-            amendmentId: "amendment-1",
-            proposalDigest: "sha256:proposal",
-            kind: "action_scope",
-            goalImpact: "within_goal",
-            planId: "plan-1",
-            planRevision: 1,
-            planDigest: "sha256:plan",
-            executionId: "execution-1",
-            executionDigest: "sha256:execution",
-            conversationKey: 1,
-            previousScopeDigest: "sha256:old",
-            resultingScopeDigest: "sha256:new",
-            targetSetDigest: "sha256:targets",
-            proposalPayloadDigest: params.actionProposal.payloadDigest,
-            addedActionTargets: ["item:3"],
-            rationale: "Item 3 remains inside collection 11.",
-            createdAt: 1,
-          },
-        };
-      }
-      override async markApplied(grant: any): Promise<any> {
-        return { ...grant, status: "applied", appliedAt: 2 };
-      }
-      override async markFailed(grant: any): Promise<any> {
-        return { ...grant, status: "failed", failedAt: 2 };
-      }
-      override async actionScopeGrantMatches(): Promise<boolean> {
-        return true;
-      }
-    }
-
-    const gateway = {
-      listCurrentCollectionSummaries: () => [
-        {
-          collectionId: 11,
-          libraryID: 1,
-          name: "Review",
-          path: "Review",
-        },
-      ],
-      listCollectionSummaries: () => [],
-      listCurrentCollectionTargetIds: () => [1, 2, 3],
-      getItem: (id: number) => ({
-        id,
-        libraryID: 1,
-        isRegularItem: () => true,
-      }),
-    };
-    const contract: AgentActionContract = semanticContractFixture({
-      version: 3,
-      id: "contract-1",
-      writeDisposition: "required",
-      interpretationSource: "classifier",
-      obligations: [
-        {
-          id: "tag-review",
-          reviewPreference: "default",
-          capability: "zotero.tags",
-          operation: "apply_tags",
-          proofDomain: "zotero_state",
-          coverage: "all",
-          targetKind: "papers",
-          parameters: { tags: ["reviewed"] },
-          scope: {
-            kind: "collection",
-            libraryID: 1,
-            collectionId: 11,
-            collectionPath: "Review",
-            includeDescendants: false,
-          },
-          targetBoundary: {
-            kind: "collection",
-            libraryID: 1,
-            frozenTargetIds: [1, 2],
-            scopeDigest: "v1:collection:1:1:2",
-          },
-        },
-      ],
-    });
-    for (const mode of ["safe", "auto", "yolo"] as const) {
-      const amendments = new FakeAmendments();
-      globalThis.Zotero = {
-        DB: new ChangeJournalTestDb(),
-        Prefs: { get: () => mode },
-        debug: () => undefined,
-      } as never;
-      await initAgentChangeJournal();
-      const contracts = new ActionContractService(gateway as never);
-      const registry = new AgentToolRegistry(contracts, amendments);
-      registry.register({
-        effectOperations: ["apply_tags"],
-        spec: {
-          name: "tag_scope",
-          description: "Tag the approved source",
-          inputSchema: { type: "object" },
-          executionClass: "external_effect",
-          requiresConfirmation: false,
-        },
-        validate: () => ({ ok: true, value: {} }),
-        planInvocation: () =>
-          stateChangeInvocationPlan({
-            domains: ["zotero_library"],
-            effects: ["modify"],
-            targets: ["item:1", "item:2", "item:3"],
-            reason: "Apply the approved tag.",
-          }),
-        describeAction: () => [
-          {
-            id: "apply-tags",
-            proofDomain: "zotero_state",
-            capability: "zotero.tags",
-            operation: "apply_tags",
-            source: "zotero_native",
-            parameters: { tags: ["reviewed"] },
-            requestedTargets: ["item:1", "item:2", "item:3"],
-            destinationCollectionIds: [],
-          },
-        ],
-        execute: async () => ({ content: { applied: 3 }, effect: "applied" }),
-      });
-      const progress = contracts.createProgress(contract);
-      const prepared = await registry.prepareExecution(
-        { id: `call-${mode}`, name: "tag_scope", arguments: {} },
-        {
-          request: resolvedAgentRequest({
-            conversationKey: 1,
-            mode: "agent",
-            userText: "Tag every paper in Review",
-            actionContract: contract,
-            actionProgress: progress,
-            planContext: {
-              phase: "executing",
-              planId: "plan-1",
-              revision: 1,
-              executionId: "execution-1",
-              approvedDigest: "sha256:plan",
-              provider: "original",
-            },
-          }),
-          item: null,
-          currentAnswerText: "",
-          modelName: "gpt-5",
-          runId: `run-${mode}`,
-          checkpointActionProgress: async () => undefined,
-        },
-      );
-      if (mode === "safe") {
-        assert.equal(prepared.kind, "confirmation");
-        assert.deepEqual(amendments.authorities, []);
-        if (prepared.kind === "confirmation") {
-          const executed = await prepared.execute({ approved: true });
-          assert.equal(executed.kind, "result");
-          if (executed.kind === "result") {
-            assert.include(
-              executed.execution.result.actionReceipts?.[0].requestedTargets ||
-                [],
-              "item:3",
-            );
-          }
-        }
-        assert.deepEqual(amendments.authorities, ["user"]);
-      } else {
-        assert.equal(prepared.kind, "result");
-        if (prepared.kind === "result") {
-          assert.include(
-            prepared.execution.result.actionReceipts?.[0].requestedTargets ||
-              [],
-            "item:3",
-          );
-        }
-        assert.deepEqual(amendments.authorities, [
-          mode === "auto" ? "auto_policy" : "yolo",
-        ]);
-      }
-    }
-  });
-
   it("builds an immutable child snapshot only for bibliographic additions inside the approved source", async function () {
     const items = new Map([
       [1, { id: 1, key: "AAAA1111", libraryID: 1 }],
@@ -2002,221 +1421,5 @@ describe("autonomous Plan scope amendments", function () {
     });
     assert.equal(job.baseSnapshotId, "snapshot-1");
     assert.equal(job.scopeLineageDigest, "legacy:snapshot-1");
-  });
-
-  it("lets a plan declare a review preference on each concrete effect", function () {
-    const tool = createUpdatePlanTool();
-    const schema = JSON.stringify(tool.spec.inputSchema);
-    assert.include(
-      schema,
-      '"review":{"type":"string","enum":["default","review","direct"]',
-    );
-    assert.notInclude(schema, '"reviewPreference"');
-  });
-});
-
-/**
- * amend_plan and prepare_plan_execution no longer re-embed update_plan's
- * contract schema (plans/contractSchema.ts owns it). The host's decoders are
- * the validation: validate() still decodes the effect specification, and the
- * contract is decoded when the tool resolves it, with the same messages.
- */
-describe("plan tools decode a loosely advertised contract strictly", function () {
-  const originalZotero = globalThis.Zotero;
-
-  afterEach(function () {
-    globalThis.Zotero = originalZotero;
-  });
-
-  const step = {
-    content: "Answer the approved question",
-    activeForm: "Answering the approved question",
-    acceptanceCriteria: [
-      {
-        criterionId: "answer-1",
-        description: "The answer is complete",
-        verifier: "bounded_reasoning" as const,
-      },
-    ],
-    expectedEffect: "reasoning" as const,
-  };
-  const steps = [
-    { ...step, planStepId: "s1" },
-    { ...step, planStepId: "s2" },
-    { ...step, planStepId: "s3" },
-  ];
-  /** An investigation missing its required requiredEvidenceDepth. */
-  const contractMissingField = () => {
-    const contract = researchContract({ libraryID: 1, kind: "library" });
-    delete (contract.investigation as Record<string, unknown>)
-      .requiredEvidenceDepth;
-    return contract;
-  };
-  const effectSpecificationMissingEffects = {
-    version: 1,
-    constraints: [],
-    deferredEffects: [],
-  };
-  const DECODER_CONTRACT_ERROR =
-    "investigation.requiredEvidenceDepth is invalid";
-  const DECODER_EFFECT_ERROR = "effectSpecification effects must be arrays";
-
-  async function rejection(run: () => Promise<unknown>): Promise<string> {
-    try {
-      await run();
-    } catch (error) {
-      return (error as Error).message;
-    }
-    return assert.fail("expected the host to reject the contract");
-  }
-
-  it("update_plan rejects a contract missing a required field with the decoder's message", async function () {
-    const harness = installSqliteZotero();
-    try {
-      await initAgentPlanStore();
-      await initResearchStore();
-      const tool = createUpdatePlanTool();
-      const badEffects = tool.validate({
-        ready: true,
-        steps,
-        effectSpecification: effectSpecificationMissingEffects,
-      });
-      assert.isFalse(badEffects.ok);
-      if (!badEffects.ok) assert.equal(badEffects.error, DECODER_EFFECT_ERROR);
-
-      const input = tool.validate({
-        ready: false,
-        contract: contractMissingField(),
-        steps,
-      });
-      assert.isTrue(input.ok);
-      if (!input.ok) return;
-      const message = await rejection(() =>
-        tool.execute(input.value, {
-          request: resolvedAgentRequest({
-            conversationKey: 1,
-            planContext: {
-              phase: "planning",
-              provider: "original",
-              planId: "plan-loose-update",
-              revision: 1,
-            },
-          }),
-          runId: "run",
-        } as never),
-      );
-      assert.equal(message, DECODER_CONTRACT_ERROR);
-      assert.isNull(await loadPlanArtifact("plan-loose-update", 1));
-    } finally {
-      harness.db.close();
-    }
-  });
-
-  it("prepare_plan_execution rejects a contract missing a required field with the decoder's message", async function () {
-    const harness = installSqliteZotero();
-    try {
-      await initAgentPlanStore();
-      await initResearchStore();
-      const tool = createPreparePlanExecutionTool();
-      const badEffects = tool.validate({
-        contract: { deliverable: { kind: "answer" } },
-        steps,
-        effectSpecification: effectSpecificationMissingEffects,
-      });
-      assert.isFalse(badEffects.ok);
-      if (!badEffects.ok) assert.equal(badEffects.error, DECODER_EFFECT_ERROR);
-
-      const input = tool.validate({ contract: contractMissingField(), steps });
-      assert.isTrue(input.ok);
-      if (!input.ok) return;
-      const message = await rejection(() =>
-        tool.execute(input.value, {
-          request: resolvedAgentRequest({
-            conversationKey: 1,
-            planContext: {
-              phase: "planning",
-              provider: "codex",
-              planId: "plan-loose-native",
-              revision: 1,
-              nativePlanning: {
-                attemptId: "attempt",
-                threadId: "thread",
-                turnId: "turn",
-                ephemeral: false,
-              },
-            },
-          }),
-          runId: "run",
-        } as never),
-      );
-      assert.equal(message, DECODER_CONTRACT_ERROR);
-      assert.isNull(await loadPlanArtifact("plan-loose-native", 1));
-    } finally {
-      harness.db.close();
-    }
-  });
-
-  it("amend_plan contract_revision rejects a contract missing a required field with the decoder's message", async function () {
-    const harness = installSqliteZotero();
-    try {
-      await initAgentPlanStore();
-      await initResearchStore();
-      const coordinator = new PlanExecutionCoordinator();
-      const artifact = await coordinator.updateDraft({
-        planId: "plan-loose-amend",
-        conversationKey: 1,
-        provider: "original",
-        revision: 1,
-        steps: [{ ...step, planStepId: "plan-loose-amend:r1:s1" }],
-        contract: { deliverable: { kind: "answer" as const } },
-        ready: true,
-        now: 1,
-      });
-      const ledger = await coordinator.approve({
-        planId: "plan-loose-amend",
-        revision: 1,
-        conversationGeneration: 1,
-        now: 2,
-      });
-      const tool = createAmendPlanTool({} as never, new PlanAmendmentService());
-      const badEffects = tool.validate({
-        kind: "contract_revision",
-        rationale: "The deliverable changed.",
-        contract: { deliverable: { kind: "answer" } },
-        steps,
-        effectSpecification: effectSpecificationMissingEffects,
-      });
-      assert.isFalse(badEffects.ok);
-      if (!badEffects.ok) assert.equal(badEffects.error, DECODER_EFFECT_ERROR);
-
-      const input = tool.validate({
-        kind: "contract_revision",
-        rationale: "The question changed.",
-        contract: contractMissingField(),
-        steps,
-      });
-      assert.isTrue(input.ok);
-      if (!input.ok) return;
-      const message = await rejection(() =>
-        tool.execute(input.value, {
-          request: resolvedAgentRequest({
-            conversationKey: 1,
-            planContext: {
-              phase: "executing",
-              provider: "original",
-              planId: "plan-loose-amend",
-              revision: 1,
-              executionId: ledger.executionId,
-              approvedDigest: artifact.digest,
-            },
-          }),
-          runId: "run",
-        } as never),
-      );
-      assert.equal(message, DECODER_CONTRACT_ERROR);
-      assert.isNull(await loadPlanArtifact("plan-loose-amend", 2));
-    } finally {
-      harness.db.close();
-    }
   });
 });

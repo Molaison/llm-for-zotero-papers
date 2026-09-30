@@ -2,17 +2,13 @@ import { recordJournalObservation } from "../../store/changeJournal";
 import { appLogger } from "../../../core/logging";
 import { ToolExecutionFailure, ToolInputRejection } from "./failure";
 import { buildActionCallDigest } from "../../authorization/proposal";
-import type {
-  ActionContractService,
-  ScopeValidationFailure,
-} from "../../contracts/actionContract";
+import type { ActionContractService } from "../../contracts/actionContract";
 import { createFallbackToolReceipts } from "../../contracts/actionEvaluation";
 import { getOriginalAgentPermissionMode } from "../../originalAgentPermissionMode";
-import type {
-  ActionScopeDecision,
-  PlanAmendmentService,
-} from "../../plans/amendments";
-import type { PlanAmendmentGrant } from "../../plans/planAmendmentTypes";
+import {
+  decideScopeJudgment,
+  type ScopeJudgmentDecision,
+} from "../../authorization/scopeJudgment";
 import { canonicalJson } from "../../services/libraryMutation/canonicalJson";
 import type {
   AgentActionEvidence,
@@ -83,10 +79,6 @@ type ReceiptOutcome = {
   content?: unknown;
   actionEvidence?: AgentActionEvidence[];
 };
-type AuthorizedAmendment = {
-  grant: PlanAmendmentGrant;
-  failure: ScopeValidationFailure;
-};
 /** Authority recorded on the persisted authorization grant for one invocation. */
 type GrantAuthority =
   | "external_runtime"
@@ -100,7 +92,6 @@ export class InvocationController {
   private readonly assessor: InvocationAssessor;
   private readonly frozenContract: string;
   private readonly frozenExecutionContext: string;
-  private amendment?: AuthorizedAmendment;
   /** Exact proposal the host authorized on the agent's judgment (yolo only). */
   private judgment?: { proposalDigest: string };
   private readonly childResults = new Map<
@@ -114,7 +105,6 @@ export class InvocationController {
     private readonly context: AgentToolContext,
     private readonly options: PreparedToolExecutionOptions,
     private readonly contracts?: ActionContractService,
-    private readonly amendments?: PlanAmendmentService,
   ) {
     this.assessor = new InvocationAssessor(tool, context, options, contracts);
     this.frozenContract = canonicalJson(context.request.actionContract || null);
@@ -166,7 +156,6 @@ export class InvocationController {
   ) {
     const prepared = assessed?.preparedAction;
     if (prepared?.hasExplicitAdapter && !prepared.proposals.length) return [];
-    const details = this.amendment?.failure.amendableObligation;
     const receipts =
       prepared && this.contracts
         ? await this.contracts.finalize(
@@ -174,12 +163,6 @@ export class InvocationController {
             prepared,
             outcome,
             this.context.request.actionProgress,
-            details
-              ? {
-                  obligationId: details.obligationId,
-                  addedTargetIds: details.addedTargetIds,
-                }
-              : undefined,
           )
         : createFallbackToolReceipts({
             toolName: this.call.name,
@@ -264,8 +247,6 @@ export class InvocationController {
         content: {
           code: failure.code,
           error: failure.message,
-          requiresPlanRevision:
-            this.context.request.planContext?.phase === "executing",
           retryable: false,
           expectedCount: failure.expectedCount,
           proposedCount: failure.proposedCount,
@@ -276,69 +257,19 @@ export class InvocationController {
     };
   }
 
-  private amendmentDecision(assessed: AssessedInvocation): ActionScopeDecision {
-    return (
-      this.amendments?.decideActionScopeAmendment({
-        planContext: this.context.request.planContext,
-        originalMode: getOriginalAgentPermissionMode(),
-        failure: assessed.scopeFailure!,
-        actionImpact: assessed.plan.impact,
-        riskSignals: assessed.plan.riskSignals,
-        hasHardConstraints: Boolean(
-          (
-            this.context.request.actionContract?.intent?.semantic
-              ?.constraints ||
-            this.context.request.classifiedIntent?.semantic?.constraints ||
-            []
-          ).length,
-        ),
-      }) || {
-        kind: "block" as const,
-        reason: "Plan amendment authority is unavailable.",
-      }
-    );
-  }
-
-  private async authorizeAmendment(
-    assessed: AssessedInvocation,
-    authority: "user" | "auto_policy" | "yolo",
-  ) {
-    const plan = this.context.request.planContext;
-    if (
-      !this.amendments ||
-      plan?.phase !== "executing" ||
-      !assessed.scopeFailure
-    )
-      throw new Error("Plan amendment authority is unavailable");
-    const grant = await this.amendments.authorizeActionScopeAmendment({
-      plan,
-      conversationKey: this.context.request.conversationKey,
-      failure: assessed.scopeFailure,
-      actionProposal: assessed.proposal,
-      authority,
+  private scopeDecision(assessed: AssessedInvocation): ScopeJudgmentDecision {
+    return decideScopeJudgment({
+      originalMode: getOriginalAgentPermissionMode(),
+      failure: assessed.scopeFailure!,
+      actionImpact: assessed.plan.impact,
+      riskSignals: assessed.plan.riskSignals,
     });
-    this.amendment = { grant, failure: assessed.scopeFailure };
-  }
-
-  private async amendmentMatches(
-    assessed: AssessedInvocation,
-  ): Promise<boolean> {
-    return Boolean(
-      assessed.scopeFailure &&
-      this.amendment &&
-      this.amendments &&
-      (await this.amendments.actionScopeGrantMatches({
-        grant: this.amendment.grant,
-        failure: assessed.scopeFailure,
-        actionProposal: assessed.proposal,
-      })),
-    );
   }
 
   /** The scope decision grants judgment for this exact scope failure. */
   private grantsJudgment(assessed: AssessedInvocation): boolean {
     if (!assessed.scopeFailure) return false;
-    const decision = this.amendmentDecision(assessed);
+    const decision = this.scopeDecision(assessed);
     return (
       decision.kind === "execute" && decision.authority === "yolo_judgment"
     );
@@ -356,19 +287,11 @@ export class InvocationController {
     return this.judgmentGranted(assessed) && this.grantsJudgment(assessed);
   }
 
-  private async failAmendment(reason: unknown) {
-    if (this.amendment && this.amendments)
-      this.amendment = {
-        ...this.amendment,
-        grant: await this.amendments.markFailed(this.amendment.grant, reason),
-      };
-  }
-
   private async dispatch(
     assessed: AssessedInvocation,
   ): Promise<PreparedToolExecution> {
     const scopeDecision = assessed.scopeFailure
-      ? this.amendmentDecision(assessed)
+      ? this.scopeDecision(assessed)
       : undefined;
     if (scopeDecision?.kind === "block")
       return this.result(this.scopeFailure(assessed));
@@ -387,11 +310,7 @@ export class InvocationController {
         this.context,
       )) ??
         this.tool.spec.requiresConfirmation);
-    const needsReview =
-      assessed.authorization.kind === "confirm" ||
-      (scopeDecision?.kind === "confirm" &&
-        getOriginalAgentPermissionMode() !== "yolo") ||
-      toolReview;
+    const needsReview = assessed.authorization.kind === "confirm" || toolReview;
     if (needsReview) {
       const action = assessed.scopeFailure
         ? createProposalConfirmationAction({
@@ -403,11 +322,8 @@ export class InvocationController {
           : createProposalConfirmationAction(assessed.proposal);
       return this.review(assessed, action);
     }
-    if (scopeDecision?.kind === "execute") {
-      if (scopeDecision.authority === "yolo_judgment")
-        this.judgment = { proposalDigest: assessed.proposal.payloadDigest };
-      else await this.authorizeAmendment(assessed, scopeDecision.authority);
-    }
+    if (scopeDecision?.kind === "execute")
+      this.judgment = { proposalDigest: assessed.proposal.payloadDigest };
     return this.execute(assessed);
   }
 
@@ -489,7 +405,7 @@ export class InvocationController {
       const assessed = await this.assessor.assess(input);
       if (
         assessed.scopeFailure &&
-        this.amendmentDecision(assessed).kind === "block"
+        this.scopeDecision(assessed).kind === "block"
       )
         return this.result(this.scopeFailure(assessed));
       if (assessed.authorization.kind === "block")
@@ -507,17 +423,13 @@ export class InvocationController {
           }),
           false,
         );
-      if (assessed.scopeFailure) {
-        // A judgment write has no plan ledger to amend; the review only adds
-        // the user's approval on top of the host's judgment grant.
-        if (this.grantsJudgment(assessed))
-          this.judgment = { proposalDigest: assessed.proposal.payloadDigest };
-        else await this.authorizeAmendment(assessed, "user");
-      }
+      // The review only adds the user's approval on top of the host's
+      // judgment grant.
+      if (this.grantsJudgment(assessed))
+        this.judgment = { proposalDigest: assessed.proposal.payloadDigest };
       // This digest exists only after a validated, real review resolution.
       return this.execute(assessed, assessed.proposal.payloadDigest);
     } catch (error) {
-      await this.failAmendment(error);
       return this.result(await this.failure(input, error, displayed));
     }
   }
@@ -536,9 +448,8 @@ export class InvocationController {
 
   /**
    * The one authority this invocation executes under, most specific first:
-   * a real user review, then a plan amendment grant, then the judgment marker
-   * (the single source of truth for judgment, in or out of a Plan), and
-   * finally the policy's own verdict.
+   * a real user review, then the judgment marker (the single source of truth
+   * for judgment), and finally the policy's own verdict.
    */
   private grantAuthority(
     assessed: AssessedInvocation,
@@ -547,8 +458,6 @@ export class InvocationController {
     if (this.context.authorization?.kind === "external_runtime")
       return "external_runtime";
     if (userApproval) return "safe_confirmation";
-    const amended = this.amendment?.grant.authority;
-    if (amended) return amended === "user" ? "safe_confirmation" : amended;
     if (this.judgmentGranted(assessed)) return "yolo_judgment";
     const policy =
       assessed.authorization.kind === "execute"
@@ -675,31 +584,6 @@ export class InvocationController {
     });
   }
 
-  private async completeAmendment() {
-    if (!this.amendment || !this.amendments) return;
-    const grant = await this.amendments.markApplied(this.amendment.grant);
-    this.amendment = { ...this.amendment, grant };
-    const details = this.amendment.failure.amendableObligation;
-    if (details)
-      await this.context.publishPlanEvent?.({
-        type: "plan_scope_amended",
-        amendmentId: grant.proposal.amendmentId,
-        executionId: grant.proposal.executionId,
-        mode:
-          this.context.request.planContext?.provider !== "original"
-            ? "native"
-            : grant.authority === "user"
-              ? "safe"
-              : grant.authority === "yolo"
-                ? "yolo"
-                : "auto",
-        rationale: grant.proposal.rationale,
-        previousItemCount: details.previousTargetIds.length,
-        newItemCount: details.currentTargetIds.length,
-        authority: grant.authority,
-      });
-  }
-
   private async execute(
     prepared: AssessedInvocation,
     userApproval?: string,
@@ -712,7 +596,6 @@ export class InvocationController {
         );
       grant = await this.stageAuthority(prepared, userApproval);
     } catch (error) {
-      await this.failAmendment(error);
       return this.result(await this.failure(prepared.input, error, prepared));
     }
     const run = async (): Promise<PreparedToolExecution> => {
@@ -723,14 +606,7 @@ export class InvocationController {
             "Conversation lifecycle changed before this tool could execute.",
           );
         assessed = await this.assessor.assess(prepared.input);
-        if (
-          assessed.scopeFailure &&
-          !this.judgmentAccepts(assessed) &&
-          !(await this.amendmentMatches(assessed))
-        ) {
-          await this.failAmendment(
-            "The action targets or payload changed after amendment authorization.",
-          );
+        if (assessed.scopeFailure && !this.judgmentAccepts(assessed)) {
           if (grant) grant.status = "failed";
           return this.result(this.scopeFailure(assessed));
         }
@@ -795,7 +671,6 @@ export class InvocationController {
           throw new Error(
             `${this.call.name} completed without the required explicit write effect. Its outcome is unknown; inspect current state before retrying.`,
           );
-        await this.completeAmendment();
         // The staged grant already resolved the one authority; a tool with no
         // staged grant (not an external effect) resolves it the same way.
         const authority = grant
@@ -858,7 +733,6 @@ export class InvocationController {
         await this.recordGrantOutcome(grant, "failed", {
           error: String(error),
         });
-        await this.failAmendment(error);
         return this.result(await this.failure(assessed.input, error, assessed));
       }
     };

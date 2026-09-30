@@ -11,9 +11,7 @@ import {
   updatePlanAmendmentProposalStatus,
   updatePlanAmendmentGrant,
 } from "./store";
-import type { ScopeValidationFailure } from "../contracts/actionContract";
 import type { AgentActionContract } from "../contracts/types";
-import type { ActionProposal } from "../authorization/types";
 import type { PlanEffectSpecification, PlanRuntimeContext } from "./types";
 import type { PlanExecutionLedger, PlanProvider, TaskEvidence } from "./types";
 import type { ZoteroGateway } from "../services/zoteroGateway";
@@ -54,27 +52,6 @@ export type PlanAmendmentDecision =
   | Readonly<{ kind: "confirm"; authority: "user" }>
   | Readonly<{ kind: "review"; authority: "user" }>
   | Readonly<{ kind: "block"; reason: string }>;
-
-/** Scope-failure decisions include the yolo judgment grant, which has no plan ledger. */
-export type ActionScopeDecision =
-  | PlanAmendmentDecision
-  | Readonly<{ kind: "execute"; authority: "yolo_judgment" }>;
-
-const JUDGMENT_AMENDABLE_CODES: ReadonlySet<ScopeValidationFailure["code"]> =
-  new Set([
-    "different_operation",
-    "different_parameters",
-    "scope_mismatch",
-    "fixed_selection",
-    "added_target",
-    "incomplete_batch",
-  ]);
-
-const RAIL_RISK_SIGNALS: ReadonlySet<string> = new Set([
-  "protected_target",
-  "authorization_tampering",
-  "privilege_escalation",
-]);
 
 export function classifyPlanAmendmentAuthority(params: {
   mode: OriginalAgentPermissionMode;
@@ -144,57 +121,6 @@ export class PlanAmendmentService {
     hardBlocked: boolean;
   }): PlanAmendmentDecision {
     return classifyPlanAmendmentAuthorityForProvider(params);
-  }
-
-  decideActionScopeAmendment(params: {
-    planContext?: PlanRuntimeContext;
-    originalMode: OriginalAgentPermissionMode;
-    failure: ScopeValidationFailure;
-    actionImpact: "read_only" | "state_change" | "ambiguous" | "prohibited";
-    riskSignals: readonly string[];
-    hasHardConstraints: boolean;
-  }): ActionScopeDecision {
-    const plan = params.planContext;
-    const details = params.failure.amendableObligation;
-    const railSignal = params.riskSignals.some((signal) =>
-      RAIL_RISK_SIGNALS.has(signal),
-    );
-    const hardBlocked =
-      params.actionImpact === "prohibited" ||
-      params.hasHardConstraints ||
-      railSignal;
-    const planAmendable = Boolean(
-      plan &&
-      plan.phase === "executing" &&
-      params.failure.code === "added_target" &&
-      details &&
-      details.addedTargetIds.length &&
-      details.boundaryKind !== undefined,
-    );
-    if (planAmendable) {
-      return this.decideAuthority({
-        provider: plan!.provider,
-        originalMode: params.originalMode,
-        goalImpact: "within_goal",
-        hardBlocked,
-      });
-    }
-    // Yolo judgment: the user delegated decisions. Violating proposals were
-    // already blocked by authorizeOriginalAction; here only the impact and
-    // integrity signals remain as rails.
-    if (
-      params.originalMode === "yolo" &&
-      params.actionImpact !== "prohibited" &&
-      !railSignal &&
-      JUDGMENT_AMENDABLE_CODES.has(params.failure.code)
-    ) {
-      return { kind: "execute", authority: "yolo_judgment" };
-    }
-    return {
-      kind: "block",
-      reason:
-        "Only a host-validated addition inside an approved source can amend an executing Plan.",
-    };
   }
 
   async digest(value: unknown): Promise<string> {
@@ -376,121 +302,6 @@ export class PlanAmendmentService {
       proposal.proposalDigest,
       "failed",
       now,
-    );
-  }
-
-  async authorizeActionScopeAmendment(params: {
-    plan: Extract<PlanRuntimeContext, { phase: "executing" }>;
-    conversationKey: number;
-    failure: ScopeValidationFailure;
-    actionProposal: ActionProposal;
-    authority: PlanAmendmentAuthority;
-    rationale?: string;
-    now?: number;
-  }): Promise<PlanAmendmentGrant> {
-    const details = params.failure.amendableObligation;
-    if (
-      params.failure.code !== "added_target" ||
-      !details ||
-      !details.addedTargetIds.length ||
-      details.boundaryKind === undefined
-    ) {
-      throw new Error(
-        "Only a host-validated addition inside an approved source can receive an action-scope amendment grant.",
-      );
-    }
-    const [artifact, ledger] = await Promise.all([
-      loadPlanArtifact(params.plan.planId, params.plan.revision),
-      loadPlanExecutionLedger(params.plan.executionId),
-    ]);
-    if (
-      !artifact ||
-      !ledger ||
-      artifact.digest !== params.plan.approvedDigest ||
-      ledger.planDigest !== params.plan.approvedDigest ||
-      artifact.status !== "approved" ||
-      ledger.executionId !== params.plan.executionId ||
-      ["failed", "cancelled", "superseded"].includes(ledger.status) ||
-      artifact.conversationKey !== params.conversationKey ||
-      ledger.conversationKey !== params.conversationKey
-    ) {
-      throw new Error(
-        "The Plan or conversation identity changed before the scope amendment could be authorized.",
-      );
-    }
-    const previousScopeDigest = await this.digest({
-      obligationId: details.obligationId,
-      libraryID: details.libraryID,
-      targets: details.previousTargetIds,
-    });
-    const resultingScopeDigest = await this.digest({
-      obligationId: details.obligationId,
-      libraryID: details.libraryID,
-      targets: details.currentTargetIds,
-    });
-    const targetSetDigest = await this.digest({
-      libraryID: details.libraryID,
-      targets: details.addedTargetIds,
-    });
-    const proposal = await this.buildProposal({
-      kind: "action_scope",
-      goalImpact: "within_goal",
-      planId: artifact.planId,
-      planRevision: artifact.revision,
-      planDigest: artifact.digest,
-      executionId: ledger.executionId,
-      executionDigest: await this.executionIdentityDigest(ledger),
-      conversationKey: artifact.conversationKey,
-      previousScopeDigest,
-      resultingScopeDigest,
-      targetSetDigest,
-      proposalPayloadDigest: params.actionProposal.payloadDigest,
-      addedActionTargets: details.addedTargetIds.map((id) => `item:${id}`),
-      rationale:
-        params.rationale ||
-        `New targets remain inside the approved ${details.boundaryKind} source for ${details.obligationId}.`,
-      now: params.now,
-    });
-    return this.authorize(proposal, params.authority, params.now);
-  }
-
-  async actionScopeGrantMatches(params: {
-    grant: PlanAmendmentGrant;
-    failure: ScopeValidationFailure;
-    actionProposal: ActionProposal;
-  }): Promise<boolean> {
-    const details = params.failure.amendableObligation;
-    if (
-      params.grant.status !== "authorized" ||
-      params.grant.proposal.kind !== "action_scope" ||
-      params.failure.code !== "added_target" ||
-      !details ||
-      params.grant.proposal.proposalPayloadDigest !==
-        params.actionProposal.payloadDigest
-    ) {
-      return false;
-    }
-    const [previousScopeDigest, resultingScopeDigest, targetSetDigest] =
-      await Promise.all([
-        this.digest({
-          obligationId: details.obligationId,
-          libraryID: details.libraryID,
-          targets: details.previousTargetIds,
-        }),
-        this.digest({
-          obligationId: details.obligationId,
-          libraryID: details.libraryID,
-          targets: details.currentTargetIds,
-        }),
-        this.digest({
-          libraryID: details.libraryID,
-          targets: details.addedTargetIds,
-        }),
-      ]);
-    return (
-      params.grant.proposal.previousScopeDigest === previousScopeDigest &&
-      params.grant.proposal.resultingScopeDigest === resultingScopeDigest &&
-      params.grant.proposal.targetSetDigest === targetSetDigest
     );
   }
 

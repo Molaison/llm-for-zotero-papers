@@ -21,7 +21,7 @@ const root = process.cwd();
  * Spec literals the source guard must see. A drop means the scan stopped
  * inspecting sites, not that the sites became correct.
  */
-const EXPECTED_SPEC_LITERAL_SITES = 52;
+const EXPECTED_SPEC_LITERAL_SITES = 50;
 
 const ALLOWED_WORK_CATEGORIES: readonly AgentWorkCategory[] = [
   "retrieval",
@@ -49,10 +49,7 @@ const EXPECTED_TOOL_CATEGORIES: Readonly<Record<string, AgentWorkCategory>> = {
   web_read: "retrieval",
   context_read: "retrieval",
   load_skill: "retrieval",
-  // Plan, task, and research bookkeeping.
-  update_plan: "planning",
-  prepare_plan_execution: "planning",
-  amend_plan: "planning",
+  // Task and research bookkeeping.
   task_update: "planning",
   research_update: "planning",
   approve_research_expansion: "planning",
@@ -60,7 +57,6 @@ const EXPECTED_TOOL_CATEGORIES: Readonly<Record<string, AgentWorkCategory>> = {
   request_user_input: "planning",
   // Authored deliverables.
   submit_document: "generation",
-  submit_plan_document: "generation",
   // Zotero library changes.
   library_update: "zotero_action",
   note_write: "zotero_action",

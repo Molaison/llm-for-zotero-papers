@@ -124,8 +124,8 @@ function jsonRecord(value: unknown, label: string): Record<string, unknown> {
 }
 
 /**
- * update_plan's model-facing schema leaves these enumerations to the decoder
- * (see plans/contractSchema.ts), so each rejection names the accepted values.
+ * The plan contract schema left these enumerations to the decoder, so each
+ * rejection names the accepted values.
  */
 const VALID_OPERATIONS_HINT = `; use one of: ${Object.keys(OPERATION_CATALOG).join(", ")}`;
 const VALID_RESTRICTION_EFFECTS = [

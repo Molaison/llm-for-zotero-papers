@@ -74,13 +74,9 @@ function request() {
   });
 }
 describe("generated workflow material", function () {
-  it("requires durable material for a summary that will be saved, in ordinary and approved Plan execution", function () {
+  it("requires durable material for a summary that will be saved", function () {
     const r = request();
     assert.isTrue(resolveDocumentOutcomePolicy({ request: r }).required);
-    r.planContext = { phase: "executing", planId: "plan", revision: 1 } as any;
-    assert.isTrue(resolveDocumentOutcomePolicy({ request: r }).required);
-    r.planContext = { phase: "planning", planId: "plan", revision: 1 } as any;
-    assert.isFalse(resolveDocumentOutcomePolicy({ request: r }).required);
   });
   it("requires the preceding move and verified body evidence for the exact source paper", function () {
     const r = request();

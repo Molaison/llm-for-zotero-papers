@@ -66,8 +66,6 @@ export type {
   LoadedSkillRecord,
   SkillInventoryEntry,
 } from "./progressiveLoading";
-export { resolvePinnedPlanSkills } from "./planBindings";
-export type { PlanSkillBindingResolution } from "./planBindings";
 
 /**
  * Built-in skill files bundled at compile time.

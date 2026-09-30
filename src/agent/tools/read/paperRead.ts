@@ -186,17 +186,6 @@ function dedupePaperContexts(
   });
 }
 
-export function hasApprovedFullReadAuthorization(
-  request: AgentToolContext["request"],
-): boolean {
-  return Boolean(
-    request.planContext?.phase === "executing" &&
-    request.actionContract?.obligations.some(
-      (obligation) => obligation.operation === "read_full",
-    ),
-  );
-}
-
 function resolveFullReadTargets(params: {
   input: PaperReadInput;
   context: AgentToolContext;
@@ -213,21 +202,19 @@ function resolveFullReadTargets(params: {
         )
       : [];
   const request = params.context.request;
-  const legacyPlanAuthorization = hasApprovedFullReadAuthorization(request);
   const isLegacySemanticTurn = Boolean(request.classifiedIntent?.semantic);
   if (
     isLegacySemanticTurn &&
-    request.classifiedIntent?.semantic?.reading.coverage !== "exhaustive" &&
-    !legacyPlanAuthorization
+    request.classifiedIntent?.semantic?.reading.coverage !== "exhaustive"
   )
     throw new Error(
-      "Exhaustive reading requires compatible legacy turn intent or an approved full-read contract.",
+      "Exhaustive reading requires compatible legacy turn intent.",
     );
 
   // In the direct workflow the main agent chooses reading depth through the
   // actual paper_read call. Explicit selectors are already host-resolved and
   // therefore define the intended read set without a preliminary model gate.
-  if (!isLegacySemanticTurn && !legacyPlanAuthorization) {
+  if (!isLegacySemanticTurn) {
     if (explicitTargets.length) return explicitTargets;
     const active = getTurnPapersWithRoles(request, ["active"]).slice(0, 1);
     if (!active.length)
@@ -1483,17 +1470,7 @@ export function createPaperReadTool(
         }
         return pageRenderer.execute(input.visualInput as never, context);
       }
-      // Inside an approved research plan the host manifest owns reading
-      // depth: overview already delivers each paper's host-sized text at the
-      // required depth, so an explicit "full" read of manifest targets is
-      // served as overview instead of failing on missing full-read authority.
-      const servedFullAsOverview =
-        input.mode === "full" &&
-        context.request.planContext?.phase === "executing" &&
-        Boolean(input.target || input.targets?.length);
-      const mode: PaperReadMode = servedFullAsOverview
-        ? "overview"
-        : input.mode;
+      const mode: PaperReadMode = input.mode;
       const targets =
         mode === "full"
           ? resolveFullReadTargets({ input, context, zoteroGateway })
@@ -1724,12 +1701,6 @@ export function createPaperReadTool(
         );
         return {
           mode,
-          ...(servedFullAsOverview
-            ? {
-                readingNote:
-                  "mode 'full' was served as 'overview': inside an approved research plan the host manifest owns reading depth, and overview delivers each paper's host-sized text at the required depth. Record these papers with research_update record_papers.",
-              }
-            : {}),
           results: overviewQuotePack.results.map((result) => {
             const paper = (result as Record<string, unknown>).paperContext as
               | (PaperDisplayMetadata & {

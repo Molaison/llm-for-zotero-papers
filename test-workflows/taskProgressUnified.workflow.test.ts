@@ -262,7 +262,7 @@ describe("workflow: task progress unified", function () {
     }
   });
 
-  it("shows Codex's update_plan as the Steps, never as a trace row, and restores it", async function () {
+  it("shows Codex's own checklist as the Steps, never as a trace row, and restores it", async function () {
     const panel = await api.renderPanelForItem(fixtures[1].parentItemId);
     const restore = showOnScreen(panel.panelId);
     try {

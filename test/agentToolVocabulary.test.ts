@@ -39,12 +39,7 @@ const GUIDANCE_CAP_EXCEPTIONS: ReadonlyMap<string, number> = new Map([
  * what the model receives: the compacted schema from `registry.listTools()`.
  */
 const PLAN_SCHEMA_CAP = 6000;
-const CAPPED_PLAN_TOOLS = [
-  "update_plan",
-  "amend_plan",
-  "prepare_plan_execution",
-  "research_update",
-] as const;
+const CAPPED_PLAN_TOOLS = ["research_update"] as const;
 
 /**
  * Plan schemas allowed past the cap, pinned at their current size so they
@@ -56,14 +51,11 @@ const PLAN_SCHEMA_CAP_EXCEPTIONS: ReadonlyMap<string, number> = new Map([
 ]);
 
 /**
- * Model-facing paths Gemini receives as strings on purpose. An effect's
- * parameters are an open JSON map (decoded by jsonRecord); an open map has no
- * fixed properties for Gemini to declare. research_update's criterionResults
- * and frameSlots are open maps of the same kind.
+ * Model-facing paths Gemini receives as strings on purpose. research_update's
+ * criterionResults and frameSlots are open JSON maps; an open map has no
+ * fixed properties for Gemini to declare.
  */
 const GEMINI_STRING_ALLOWLIST: ReadonlySet<string> = new Set([
-  "update_plan.effectSpecification.effects[].parameters",
-  "update_plan.effectSpecification.deferredEffects[].parameters",
   "research_update.papers[].criterionResults",
   "research_update.papers[].finding.frameSlots",
 ]);
@@ -179,37 +171,6 @@ describe("agent tool vocabulary", function () {
     assert.deepEqual(
       degraded.filter((path) => !GEMINI_STRING_ALLOWLIST.has(path)),
       [],
-    );
-  });
-  it("amend_plan shows the whole replacement contract shape", function () {
-    const amend = registry.listTools().find((t) => t.name === "amend_plan");
-    const contract = (amend?.inputSchema as any).properties.contract;
-    assert.includeMembers(contract.properties.investigation.required, [
-      "question",
-      "subquestions",
-      "criteria",
-      "reviewMode",
-      "readingStrategy",
-      "scope",
-      "requiredEvidenceDepth",
-      "estimatedDeepReadPapers",
-      "approvedLargeCorpus",
-    ]);
-    assert.includeMembers(contract.properties.deliverable.required, ["kind"]);
-    assert.includeMembers(
-      contract.properties.deliverable.properties.spec.required,
-      [
-        "kind",
-        "title",
-        "requiredSections",
-        "requiresReferences",
-        "requiresCoverageSection",
-        "allowFigures",
-      ],
-    );
-    assert.include(
-      contract.properties.investigation.properties.scope.properties.kind.enum,
-      "items",
     );
   });
   it("a retired name is unknown to the registry and the error names the facade", async function () {

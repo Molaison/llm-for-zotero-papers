@@ -21,7 +21,6 @@ describe("MCP tool surface has not drifted from the registry", function () {
     // quietly satisfying itself.
     const modelVisible = [
       "annotate_pdf",
-      "amend_plan",
       "approve_research_expansion",
       "approve_research_mutation",
       "file_io",
@@ -42,7 +41,6 @@ describe("MCP tool surface has not drifted from the registry", function () {
       "context_read",
       "task_update",
       "undo",
-      "update_plan",
       "submit_document",
       "zotero_script",
     ];

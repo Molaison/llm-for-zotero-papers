@@ -9,7 +9,6 @@ import {
   type ToolExecutionDeps,
   type ToolExecutionRecord,
 } from "../src/agent/execution/toolExecution";
-import { PlanExecutionRunSession } from "../src/agent/plans/runSession";
 import { initAgentChangeJournal } from "../src/agent/store/changeJournal";
 import { AgentToolRegistry } from "../src/agent/tools/registry";
 import { stateChangeInvocationPlan } from "../src/agent/authorization/invocationPlan";
@@ -208,7 +207,6 @@ async function createHarness(registry: AgentToolRegistry): Promise<Harness> {
       contracts: registry,
       emit,
     }),
-    activePlanSession: new PlanExecutionRunSession(request, async () => {}),
     paperEvidenceFrontier: new PaperEvidenceFrontier(),
     resourceContextPlan: buildAgentResourceContextPlan(request),
     persistToolResultHandles: async (written) => {

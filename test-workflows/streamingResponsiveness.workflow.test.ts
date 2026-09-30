@@ -80,12 +80,8 @@ describe("workflow: streaming responsiveness", function () {
         );
         assert.isTrue(result.composerPreserved);
         assert.isTrue(
-          result.noPlanControls,
-          "plan mode is retired: no Resume, even for an interrupted plan",
-        );
-        assert.isTrue(
-          result.singleExecutionProgress,
-          "historical resumed turns cannot recreate task progress",
+          result.stepsVisibleWhileRunning,
+          "the run's steps show in the Task progress drawer while it works",
         );
         assert.equal(result.floatingCapsuleNodes, 0, "no floating capsule");
       } finally {

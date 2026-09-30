@@ -133,7 +133,6 @@ export function createApproveResearchExpansionTool(
      */
     presentation: { hiddenInTrace: true },
     isAvailable: (request) => request.planContext?.phase === "executing",
-    // Workflow rules: EXECUTING_PHASE_GUIDANCE (plans/planningGuidance.ts).
     validate: validateInput,
     planInvocation: () =>
       readOnlyInvocationPlan({

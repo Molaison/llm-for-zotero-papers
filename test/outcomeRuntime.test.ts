@@ -5,11 +5,8 @@ import { AgentToolRegistry } from "../src/agent/tools/registry";
 import { createSubmitDocumentTool } from "../src/agent/tools/control/submitDocument";
 import { createTaskUpdateTool } from "../src/agent/tools/control/taskUpdate";
 import { createNoteWriteTool } from "../src/agent/tools/write/noteWrite";
-import { initAgentPlanStore } from "../src/agent/plans/store";
-import { initResearchStore } from "../src/agent/research/store";
 import { OUTCOME_REASONS } from "../src/agent/loop/outcomes";
 import { createTestActionContractService } from "./helpers/actionContractService";
-import { createDocumentPlan } from "./helpers/documentPlan";
 import {
   PARENT_ITEM_ID,
   finalStep,
@@ -750,44 +747,6 @@ describe("outcome ledger in runtime turns", function () {
     assert.equal(save.status, "blocked");
     assert.equal(save.reason, OUTCOME_REASONS.declined);
     assert.include(save.receiptIds, "declined:note-1");
-  });
-
-  it("records no outcome evidence on an approved Plan turn", async function () {
-    const restorePlanStore = installPlanSqlite();
-    try {
-      await initAgentPlanStore();
-      await initResearchStore();
-      const plan = await createDocumentPlan(conversationKey);
-      const turn = await runTurn({
-        conversationKey,
-        userText: "Continue the approved plan",
-        planContext: {
-          phase: "executing",
-          planId: plan.planId,
-          revision: plan.revision,
-          executionId: plan.executionId,
-          approvedDigest: plan.planDigest,
-          provider: "original",
-        },
-        steps: [
-          stepOf({ id: "command-1", name: "run_command", arguments: {} }),
-          finalStep("Working on the guide."),
-          finalStep("Working on the guide."),
-          finalStep("Working on the guide."),
-        ],
-      });
-      assert.isAbove(turn.requests, 0, "the plan turn reached the model");
-      assert.isNotEmpty(
-        turn.events.flatMap((event) =>
-          event.type === "tool_result" ? event.actionReceipts || [] : [],
-        ),
-        "the write left a receipt an ordinary turn would bind",
-      );
-      assert.isEmpty(checkpoints(turn));
-      assert.isUndefined(turn.request?.executionCheckpoint);
-    } finally {
-      restorePlanStore();
-    }
   });
 });
 

@@ -223,32 +223,6 @@ describe("ActionContractRunSession checkpoint parsing", function () {
 });
 
 describe("ActionContractRunSession initialization", function () {
-  it("restores verified effects and saved material for the same approved Plan contract", async function () {
-    const contract = createContract("approved");
-    const progress = createProgress(contract, {
-      materialOutputs: [
-        {
-          outputId: "summary",
-          documentId: "stable",
-          documentVersion: 1,
-          contentHash: "hash",
-        },
-      ],
-    });
-    progress.obligations[0].status = "fulfilled";
-    const harness = createHarness();
-    harness.request.planContext = { phase: "executing" } as any;
-    harness.request.actionContract = contract;
-    await harness.session.initialize({ checkpoint: { contract, progress } });
-    assert.deepEqual(
-      harness.request.actionProgress?.materialOutputs,
-      progress.materialOutputs,
-    );
-    assert.equal(
-      harness.request.actionProgress?.obligations[0].status,
-      "fulfilled",
-    );
-  });
   it("does not restore superseded actions from a bare resume classification", async function () {
     const prior = createContract("superseded");
     const current = createContract("revised");

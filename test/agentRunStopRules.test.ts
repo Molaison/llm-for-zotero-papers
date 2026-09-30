@@ -3,7 +3,6 @@ import { readFileSync } from "node:fs";
 import ts from "typescript";
 import { AgentRuntime } from "../src/agent/runtime";
 import { AgentToolRegistry } from "../src/agent/tools/registry";
-import { PlanExecutionRunSession } from "../src/agent/plans/runSession";
 import { ActionContractRunSession } from "../src/agent/contracts/actionContractRunSession";
 import { clearAgentReadLedger } from "../src/agent/context/resourceContextPlan";
 import { clearAgentCoverageLedger } from "../src/agent/context/coverageLedger";
@@ -608,40 +607,6 @@ describe("Original Agent run endings", function () {
     assert.isNull(ending.run.finalText);
     assertStoppedBy(ending, "cancelled_before_step", "cancelled");
   });
-
-  it("cancelled_before_step: interrupts an approved plan's active task, like a stop in flight", async function () {
-    // Before, the run was finished first and the catch-all's interrupt was
-    // skipped, so the task stayed in progress and the plan offered no Resume.
-    const original = PlanExecutionRunSession.prototype.interrupt;
-    const reasons: string[] = [];
-    PlanExecutionRunSession.prototype.interrupt = async (reason: string) => {
-      reasons.push(reason);
-    };
-    try {
-      const controller = new AbortController();
-      const registry = new AgentToolRegistry();
-      registerReadTool(registry, async () => {
-        controller.abort();
-        return { notes: [] };
-      });
-      const adapter = scriptedAdapter((step) =>
-        toolStep([readCall(`c${step}`)]),
-      );
-      const ending = await runToEnding(installed, {
-        registry,
-        adapter,
-        signal: controller.signal,
-        request: baseRequest(97_326, "Read the notes"),
-      });
-      assert.equal(ending.run.status, "cancelled");
-      assert.deepEqual(reasons, [
-        "The user stopped the approved plan execution",
-      ]);
-    } finally {
-      PlanExecutionRunSession.prototype.interrupt = original;
-    }
-  });
-
   it("cancelled_in_flight: finishes as cancelled when the user stops a step in flight", async function () {
     const controller = new AbortController();
     const adapter = scriptedAdapter(() => {
@@ -718,31 +683,6 @@ describe("Original Agent run endings", function () {
     assert.equal(ending.run.finalText, "Nothing to compact yet");
     assertStoppedBy(ending, "manual_compaction", "completed");
   });
-
-  it("plan_initialization_failed: stops when the plan session cannot bind", async function () {
-    const original = PlanExecutionRunSession.prototype.initialize;
-    PlanExecutionRunSession.prototype.initialize = async () => ({
-      kind: "failed",
-      userMessage: "The approved plan execution ledger could not be loaded.",
-    });
-    try {
-      const adapter = scriptedAdapter(() => finalStep("Never reached."));
-      const ending = await runToEnding(installed, {
-        adapter,
-        request: baseRequest(97_318, "Continue the plan"),
-      });
-
-      const text = "The approved plan execution ledger could not be loaded.";
-      assert.equal(adapter.steps(), 0);
-      assert.deepInclude(ending.outcome, { kind: "completed", text });
-      assert.equal(ending.run.status, "failed");
-      assert.equal(ending.run.finalText, text);
-      assertStoppedBy(ending, "plan_initialization_failed", "failed");
-    } finally {
-      PlanExecutionRunSession.prototype.initialize = original;
-    }
-  });
-
   it("action_contract_initialization_failed: stops when the action contract cannot initialize", async function () {
     const original = ActionContractRunSession.prototype.initialize;
     ActionContractRunSession.prototype.initialize = async () => ({

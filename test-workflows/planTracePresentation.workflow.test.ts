@@ -1,19 +1,29 @@
 import { assert } from "chai";
 import type { WorkflowTestApi } from "../src/modules/contextPanel/workflowTestTypes";
-import { createDocumentPlan } from "../test/helpers/documentPlan";
-import { PlanDocumentFinalizer } from "../src/agent/documents/planFinalization";
+import { DirectDocumentFinalizer } from "../src/agent/documents/directFinalization";
 import type { ZoteroGateway } from "../src/agent/services/zoteroGateway";
+import type { AgentRuntimeRequest } from "../src/agent/types";
 
 describe("workflow: Plan trace presentation", function () {
   this.timeout(30000);
 
   it("replaces a pending publication card in place when delivery commits", async function () {
-    const plan = await createDocumentPlan(Date.now());
-    const { document } = await new PlanDocumentFinalizer(
+    const conversationKey = Date.now();
+    const { document } = await new DirectDocumentFinalizer(
       {} as ZoteroGateway,
     ).finalize({
-      executionId: plan.executionId,
-      activeTaskId: plan.activeTaskId!,
+      request: {
+        conversationKey,
+        mode: "agent",
+        userText: "Write the guide",
+        documentOutcomePolicy: {
+          required: true,
+          documentKind: "guide",
+          integrityPolicy: "authored",
+          trigger: "document_intent",
+        },
+      } as unknown as AgentRuntimeRequest,
+      runId: `publication-trace-${conversationKey}`,
       input: {
         title: "Guide",
         markdown:
@@ -48,7 +58,7 @@ describe("workflow: Plan trace presentation", function () {
       };
       await waitFor(() => trace.textContent!.includes("Publishing document…"));
       const card = trace.querySelector(".llm-plan-document-card");
-      await deliver(plan.conversationKey);
+      await deliver(conversationKey);
       await waitFor(() =>
         Boolean(trace.querySelector(".llm-plan-document-action-expand")),
       );

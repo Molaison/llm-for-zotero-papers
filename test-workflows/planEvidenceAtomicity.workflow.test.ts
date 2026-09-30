@@ -2,10 +2,10 @@ import { assert } from "chai";
 import { createDocumentPlan } from "../test/helpers/documentPlan";
 import { PlanExecutionCoordinator } from "../src/agent/plans/coordinator";
 import {
-  clearPlanConversationRowsInTransaction,
   listTaskEvidence,
   loadPlanExecutionLedger,
 } from "../src/agent/plans/store";
+import { clearDormantPlanRowsInTransaction } from "../src/agent/store/dormantPlanTables";
 import type { TaskEvidence } from "../src/agent/plans/types";
 
 describe("workflow: atomic Plan evidence", function () {
@@ -83,7 +83,7 @@ describe("workflow: atomic Plan evidence", function () {
     } finally {
       Zotero.DB.queryAsync = originalQuery;
       await Zotero.DB.executeTransaction(() =>
-        clearPlanConversationRowsInTransaction(parent.id),
+        clearDormantPlanRowsInTransaction(parent.id),
       );
       await parent.eraseTx();
     }

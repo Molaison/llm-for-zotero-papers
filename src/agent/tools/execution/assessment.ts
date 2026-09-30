@@ -212,10 +212,6 @@ export class InvocationAssessor {
       throw new Error(
         `External effect blocked for ${tool.spec.name}: no typed action adapter describes its exact operation, capability, proof domain, and targets.`,
       );
-    if (effect && request.planContext?.phase === "planning")
-      throw new Error(
-        `Plan mode blocked ${tool.spec.name}: no effects may run before plan approval.`,
-      );
     if (
       effect &&
       !delegated &&
@@ -250,7 +246,6 @@ export class InvocationAssessor {
           {
             allowPartialCoverage: Boolean(
               options.checkpointedWorkflow ||
-              request.planContext?.phase === "executing" ||
               (options.callerKind === "action" && context.journalActionScope),
             ),
             concreteWrite: concreteWrite && plan.impact !== "read_only",

@@ -41,11 +41,6 @@ import {
 import { buildAgentCoverageContextBlock } from "../context/coverageLedger";
 import { buildVisibleTurnContextBlock } from "../context/turnContextEnvelope";
 import { getSelectedPassagePaper } from "../context/turnPaperScope";
-import { buildApprovedPlanExecutionInstructions } from "../plans/executionInstructions";
-import {
-  EXECUTING_PHASE_GUIDANCE,
-  PLANNING_PHASE_GUIDANCE,
-} from "../plans/planningGuidance";
 import {
   hasAgentContentInputs,
   normalizeAgentContentInputs,
@@ -165,59 +160,6 @@ function buildFullUserMessage(
   const visibleTurnContext = buildVisibleTurnContextBlock(request);
   if (visibleTurnContext) {
     contextLines.push(visibleTurnContext);
-  }
-  if (request.planContext?.phase === "planning") {
-    const priorPlan = request.metadata?.priorPlanArtifact as
-      | import("../plans/types").PlanArtifact
-      | null
-      | undefined;
-    contextLines.push(
-      [
-        "PLAN MODE — pre-approval boundary:",
-        `Plan identity: ${request.planContext.planId} revision ${request.planContext.revision}.`,
-        "You may inspect Zotero context, PDFs, and read-only web/literature sources. You must not mutate Zotero, write files, run commands or scripts, import/upload data, change settings, or trigger any other side effect.",
-        "Use request_user_input only for a material choice that cannot be discovered. Use update_plan for 3–7 concise, user-visible steps. Every acceptance criterion must provide a stable criterionId, an objective description, and its verifier; the host derives requirements from those criteria. Keep each step content to one short sentence. Then set ready=true and stop for user review.",
-      ].join("\n"),
-    );
-    if (
-      (priorPlan?.version === 4 || priorPlan?.version === 5) &&
-      priorPlan.planId === request.planContext.planId &&
-      priorPlan.revision === request.planContext.revision - 1
-    ) {
-      contextLines.push(
-        [
-          "HOST-PERSISTED PLAN REVISION BASE:",
-          "Revise this exact contract and step list according to the user's feedback. Do not rediscover or reconstruct this plan, its frozen item scope, or unchanged evidence strategy from prior tool handles.",
-          JSON.stringify({
-            explanation: priorPlan.explanation,
-            contract: priorPlan.contract,
-            steps: priorPlan.steps.map((step) => ({
-              planStepId: step.planStepId,
-              content: step.content,
-              activeForm: step.activeForm,
-              acceptanceCriteria: step.acceptanceCriteria,
-              expectedCapability: step.expectedCapability,
-              expectedEffect: step.expectedEffect,
-              targetBoundary: step.targetBoundary,
-            })),
-          }),
-        ].join("\n"),
-      );
-    }
-  } else if (request.planContext?.phase === "executing") {
-    const ledger = request.metadata?.planExecutionLedger as
-      | import("../plans/types").PlanExecutionLedger
-      | null
-      | undefined;
-    const approvedContract = request.metadata?.approvedPlanContract as
-      | import("../plans/types").PlanContract
-      | null
-      | undefined;
-    if (ledger) {
-      contextLines.push(
-        buildApprovedPlanExecutionInstructions(ledger, approvedContract),
-      );
-    }
   }
   const executionCheckpoint = renderExecutionCheckpointBlock(request);
   if (executionCheckpoint) contextLines.push(executionCheckpoint);
@@ -644,31 +586,11 @@ export async function renderAgentPromptEnvelope(
           "## Direct agent workflow",
           "Understand the current request yourself and choose the lightest useful sequence of reads, searches, questions, document finalization, and concrete actions.",
           "Use actual tools for requested effects. Inspect results and continue until the requested outcome is complete, reviewed, or has a concrete error.",
-          ...(request.planContext
-            ? []
-            : [
-                "When a request asks for more than one outcome, such as summarizing a paper and saving it as a note, declare each part with task_update in your first step, together with that step's first tool calls. The host marks each part done from the tools' results; never mark one done yourself.",
-              ]),
+          "When a request asks for more than one outcome, such as summarizing a paper and saving it as a note, declare each part with task_update in your first step, together with that step's first tool calls. The host marks each part done from the tools' results; never mark one done yourself.",
           "A write result with a verified receipt already confirms the change; do not re-read the target to confirm it.",
           "Natural-language restrictions in the current request and clarifications remain binding. Tool calls do not grant their own permission; the host validates each concrete proposal, applies permission policy, journals effects, and verifies native state.",
           "Resolve named targets from supplied identities or bounded search results. If several candidates remain, use request_user_input rather than guessing.",
         ].join("\n"),
-      ],
-    },
-    {
-      id: "planning-phase",
-      lines: [
-        request.planContext?.phase === "planning"
-          ? PLANNING_PHASE_GUIDANCE
-          : "",
-      ],
-    },
-    {
-      id: "executing-phase",
-      lines: [
-        request.planContext?.phase === "executing"
-          ? EXECUTING_PHASE_GUIDANCE
-          : "",
       ],
     },
     {

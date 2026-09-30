@@ -53,29 +53,6 @@ describe("DocumentOutcomePolicy", function () {
       }).required,
     );
   });
-  it("requires research-grounded documents for planned literature reviews", function () {
-    const policy = resolveDocumentOutcomePolicy({
-      request: request("continue", {
-        planContext: {
-          phase: "executing",
-          planId: "plan-1",
-          revision: 1,
-          executionId: "execution-1",
-          approvedDigest: "sha256:approved",
-          provider: "original",
-        },
-      }),
-      plannedDocumentKind: "literature_review",
-      plannedResearch: true,
-    });
-    assert.deepInclude(policy, {
-      required: true,
-      documentKind: "literature_review",
-      integrityPolicy: "research_grounded",
-      trigger: "plan_deliverable",
-    });
-  });
-
   it("does not invent a document for a non-writing plan outcome", function () {
     const policy = resolveDocumentOutcomePolicy({
       request: request("continue", {

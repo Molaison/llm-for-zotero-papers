@@ -1,10 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { initPlanDocumentStore } from "../../src/agent/documents/store";
 import { PlanExecutionCoordinator } from "../../src/agent/plans/coordinator";
-import {
-  initAgentPlanStore,
-  loadPlanExecutionLedger,
-} from "../../src/agent/plans/store";
+import { loadPlanExecutionLedger } from "../../src/agent/plans/store";
 import type {
   ExecutionTask,
   PlanExecutionLedger,
@@ -15,10 +12,11 @@ import { initResearchStore } from "../../src/agent/research/store";
 import type { ResearchContract } from "../../src/agent/research/types";
 import { createResearchUpdateTool } from "../../src/agent/tools/plan/researchUpdate";
 import { normalizeExecutionOutput } from "../../src/agent/tools/execution/results";
-import { resolvePlanContract } from "../../src/agent/tools/plan/updatePlan";
+import { resolvePlanContract } from "../../src/agent/plans/preparation";
 import type { AgentToolContext } from "../../src/agent/types";
 import type { PlanSkillBinding } from "../../src/agent/plans/types";
 import { resolvedAgentRequest } from "./resolvedAgentRequest";
+import { initDormantPlanTables } from "../../src/agent/store/dormantPlanTables";
 
 /**
  * In-memory Zotero for the research loop: a sqlite database behind
@@ -346,7 +344,7 @@ export function installResearchHarness(
     conversationKey,
     planId,
     async approve(overrides = {}, options = {}) {
-      await initAgentPlanStore();
+      await initDormantPlanTables();
       await initResearchStore();
       await initPlanDocumentStore();
       const { deliverable, ...investigationOverrides } = overrides;

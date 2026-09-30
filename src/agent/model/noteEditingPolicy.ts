@@ -10,7 +10,6 @@ export function isSelfContainedSelectionEdit(
     intent?.semantic?.reading.source === "provided_context" &&
     intent.deliverableIntent !== "document" &&
     !request.documentOutcomePolicy?.required &&
-    !request.planContext &&
     intent.actionIntents.length === 1 &&
     intent.actionIntents[0].operation === "note_edit" &&
     intent.externalSearchIntent === "none" &&

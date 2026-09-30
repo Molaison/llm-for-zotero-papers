@@ -1,7 +1,6 @@
 import { assert } from "chai";
 import {
   BUILTIN_SKILL_FILES,
-  fingerprintSkillInstruction,
   getAllSkills,
   parseSkill,
   setUserSkills,
@@ -23,13 +22,7 @@ import { NOTE_WRITE_GUIDANCE } from "../src/agent/tools/write/noteWrite";
 import type { AgentToolContext } from "../src/agent/types";
 import { resolveAgentRuntimeRequest } from "../src/agent/context/resolvedAgentRequest";
 import { renderAgentPromptEnvelope } from "../src/agent/model/messageBuilder";
-import { initAgentTraceStore } from "../src/agent/store/traceStore";
-import { initConversationKeyLedgerStore } from "../src/shared/conversationKeyLedger";
 import { installMockDb } from "./helpers/agentRuntimeMockDb";
-import {
-  installResearchHarness,
-  type ResearchHarness,
-} from "./helpers/researchHarness";
 
 /**
  * Skill guidance never costs a model request. A turn renders a skill body only
@@ -372,154 +365,6 @@ describe("skill routing without a model call", function () {
       assert.notProperty(result, "toolGuidance");
     });
   });
-
-  describe("an executing investigation plan", function () {
-    let harness: ResearchHarness | undefined;
-
-    beforeEach(function () {
-      harness = installResearchHarness({ conversationKey: 93_002 });
-    });
-
-    afterEach(function () {
-      harness?.close();
-      harness = undefined;
-    });
-
-    function builtInRegistry() {
-      return createBuiltInToolRegistry({
-        zoteroGateway: {} as never,
-        pdfService: {} as never,
-        pdfPageService: {} as never,
-        retrievalService: {} as never,
-      });
-    }
-
-    async function binding(id: string, source: "loaded" | "forced") {
-      const skill = getAllSkills().find((entry) => entry.id === id)!;
-      return {
-        id,
-        version: skill.version,
-        instructionFingerprint: await fingerprintSkillInstruction(
-          skill.instruction,
-        ),
-        source,
-      } as const;
-    }
-
-    /** Runs the executing turn up to its first model request. */
-    async function runExecutingTurn(
-      ledger: Awaited<ReturnType<ResearchHarness["approve"]>>,
-      registry: AgentToolRegistry,
-      onFirstStep?: (params: AgentStepParams) => Promise<void>,
-    ): Promise<{ prompt: string; finalText: string }> {
-      await initAgentTraceStore();
-      await initConversationKeyLedgerStore();
-      let prompt = "";
-      let finalText = "";
-      const runtime = new AgentRuntime({
-        registry,
-        adapterFactory: () => ({
-          getCapabilities: () => ({
-            streaming: false,
-            toolCalls: true,
-            multimodal: false,
-          }),
-          supportsTools: () => true,
-          async runStep(params: AgentStepParams): Promise<AgentModelStep> {
-            prompt = promptText(params.messages);
-            await onFirstStep?.(params);
-            throw new Error("prompt captured");
-          },
-        }),
-      });
-      await runtime
-        .runTurn({
-          request: {
-            conversationKey: harness!.conversationKey,
-            mode: "agent",
-            userText: "Continue the approved plan",
-            libraryID: harness!.libraryID,
-            model: "test",
-            apiKey: "test",
-            apiBase: "https://example.invalid",
-            planContext: {
-              phase: "executing",
-              planId: harness!.planId,
-              revision: 1,
-              executionId: ledger.executionId,
-              approvedDigest: ledger.planDigest,
-              activeTaskId: ledger.activeTaskId,
-              provider: "original",
-            },
-          },
-          onEvent: (event) => {
-            if (event.type === "final") finalText = event.text;
-          },
-        })
-        .catch((error) => {
-          if (!String(error).includes("prompt captured")) throw error;
-        });
-      return { prompt, finalText };
-    }
-
-    it("still renders the literature-review block", async function () {
-      const ledger = await harness!.approve();
-      const { prompt } = await runExecutingTurn(
-        ledger,
-        new AgentToolRegistry(),
-      );
-      assert.include(prompt, "### Skill: literature-review");
-    });
-
-    it("renders a skill loaded while planning, with its note guidance once", async function () {
-      const ledger = await harness!.approve(
-        {},
-        { skillBindings: [await binding("write-note", "loaded")] },
-      );
-      const registry = builtInRegistry();
-      let reload: Record<string, unknown> | undefined;
-      const { prompt } = await runExecutingTurn(
-        ledger,
-        registry,
-        async (params) => {
-          reload = (await registry
-            .getTool("load_skill")!
-            .execute({ id: "write-note" }, {
-              request: params.request,
-            } as unknown as AgentToolContext)) as Record<string, unknown>;
-        },
-      );
-      assert.include(prompt, "### Skill: write-note");
-      assert.include(prompt, "### Skill: literature-review");
-      assert.include(prompt, NOTE_WRITE_GUIDANCE.instruction);
-      assert.isTrue(reload?.found);
-      assert.notProperty(reload, "toolGuidance", "already rendered");
-    });
-
-    it("refuses to run when an explicit skill changed after approval", async function () {
-      const ledger = await harness!.approve(
-        {},
-        { skillBindings: [await binding("compare-papers", "forced")] },
-      );
-      setUserSkills(
-        getAllSkills().map((skill) =>
-          skill.id === "compare-papers"
-            ? { ...skill, instruction: `${skill.instruction}\n\nEdited.` }
-            : skill,
-        ),
-      );
-      const { prompt, finalText } = await runExecutingTurn(
-        ledger,
-        new AgentToolRegistry(),
-      );
-      assert.equal(prompt, "", "the model is never called");
-      assert.include(
-        finalText,
-        "The forced skill 'compare-papers' changed or is unavailable",
-      );
-    });
-  });
-
   it("returns guidance that became applicable after the render, once", async function () {
     const registry = createBuiltInToolRegistry({
       zoteroGateway: {} as never,

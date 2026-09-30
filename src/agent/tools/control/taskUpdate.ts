@@ -4,18 +4,7 @@ import type {
   ExecutionTaskStatus,
 } from "../../types";
 import type { MaterialRef } from "../../documents/materialRef";
-import { planExecutionCoordinator } from "../../plans/coordinator";
 import { readOnlyInvocationPlan } from "../../authorization/invocationPlan";
-import { listTaskEvidence } from "../../plans/store";
-import { planRequiresModelTaskUpdates } from "../../plans/taskOwnership";
-import type {
-  ExecutionTask,
-  PlanAcceptanceCriterion,
-  PlanCompletionRequirementKind,
-  PlanExecutionLedger,
-  TaskEvidence,
-  TaskTransitionRequest,
-} from "../../plans/types";
 import { fail, ok, validateObject } from "../shared";
 import { ToolInputRejection } from "../execution/failure";
 import { ACTION_CAPABILITIES } from "../../contracts/operationCatalog";
@@ -32,6 +21,21 @@ import {
   type OutcomeModelMark,
 } from "../../loop/outcomes";
 
+type TaskVerifier =
+  | "verified_read"
+  | "research_coverage"
+  | "document_integrity"
+  | "document_published"
+  | "mutation_receipts"
+  | "bounded_reasoning"
+  | "user_decision";
+
+type TaskAcceptanceCriterion = Readonly<{
+  criterionId: string;
+  description: string;
+  verifier: TaskVerifier;
+}>;
+
 type TaskUpdateRequest = {
   taskId: string;
   status: ExecutionTaskStatus;
@@ -40,7 +44,7 @@ type TaskUpdateRequest = {
   parentTaskId?: string;
   content?: string;
   activeForm?: string;
-  acceptanceCriteria?: PlanAcceptanceCriterion[];
+  acceptanceCriteria?: TaskAcceptanceCriterion[];
   expectedEffect?: "read" | "artifact" | "mutation" | "reasoning";
   expectedCapability?: string;
   targetIds?: string[];
@@ -55,7 +59,7 @@ type TaskUpdateRequest = {
 type TaskUpdateInput = {
   /** Compatible shorthand for one transition. */
   task?: TaskUpdateRequest;
-  /** Atomic batch form used by ordinary tracked work and Plan transitions. */
+  /** Atomic batch form. */
   tasks: TaskUpdateRequest[];
 };
 
@@ -70,7 +74,7 @@ const STATUSES = new Set<ExecutionTaskStatus>([
   "skipped",
   "cancelled",
 ]);
-const VERIFIERS = new Set<PlanCompletionRequirementKind>([
+const VERIFIERS = new Set<TaskVerifier>([
   "verified_read",
   "research_coverage",
   "document_integrity",
@@ -202,7 +206,7 @@ function parseTaskUpdate(
           typeof value.criterionId === "string" ? value.criterionId.trim() : "";
         const description =
           typeof value.description === "string" ? value.description.trim() : "";
-        const verifier = value.verifier as PlanCompletionRequirementKind;
+        const verifier = value.verifier as TaskVerifier;
         return criterionId && description && VERIFIERS.has(verifier)
           ? [{ criterionId, description, verifier }]
           : [];
@@ -313,48 +317,6 @@ export function validateTaskUpdateInput(
     tasks.push(parsed.value);
   }
   return ok({ tasks });
-}
-
-export function buildReasoningAssertionEvidence(params: {
-  executionId: string;
-  task: ExecutionTask;
-  status: ExecutionTaskStatus;
-  assertion?: string;
-  createdAt?: number;
-}): TaskEvidence | undefined {
-  const assertion = params.assertion?.trim();
-  if (!assertion) return undefined;
-  const requirement = params.task.completionRequirements?.find(
-    (entry) => entry.kind === "bounded_reasoning",
-  );
-  if (!requirement) {
-    // Extra narrative is not evidence for a host-verifiable task. Ignore it
-    // and let the normal completion verifier require the real receipts.
-    return undefined;
-  }
-  if (params.status !== "completed") {
-    throw new Error(
-      "A reasoning assertion must accompany a completed transition",
-    );
-  }
-  const createdAt = params.createdAt ?? Date.now();
-  return {
-    version: 3,
-    evidenceId: `${params.executionId}:${params.task.taskId}:reasoning:${createdAt}`,
-    executionId: params.executionId,
-    taskId: params.task.taskId,
-    kind: "reasoning_assertion",
-    verified: true,
-    requirementId: requirement.requirementId,
-    criterionIds: requirement.criterionIds,
-    contractDigest: requirement.contractDigest,
-    payload: {
-      type: "bounded_reasoning",
-      assertion,
-    },
-    summary: assertion,
-    createdAt,
-  };
 }
 
 const OUTCOME_MARK_STATUSES: ReadonlySet<ExecutionTaskStatus> = new Set([
@@ -476,33 +438,13 @@ export function createTaskUpdateTool(): AgentToolDefinition<
       workCategory: "planning",
     },
     /**
-     * The plan machinery itself. Its calls are how a plan is drafted and
-     * advanced, and the plan card already shows the reader the outcome, so a
-     * row for each of them would report the trace's own plumbing.
+     * Its calls declare the parts the host tracks, and Task progress already
+     * shows the reader those parts, so a row for each call would report the
+     * trace's own plumbing.
      */
     presentation: { hiddenInTrace: true },
-    isAvailable: (request) => {
-      if (request.planContext?.phase !== "executing") {
-        return request.executionContext?.permissionOwner === "original_agent";
-      }
-      const ledger = request.metadata?.planExecutionLedger as
-        | PlanExecutionLedger
-        | null
-        | undefined;
-      return !ledger || planRequiresModelTaskUpdates(ledger);
-    },
-    guidance: {
-      matches: (request) => {
-        if (request.planContext?.phase !== "executing") return false;
-        const ledger = request.metadata?.planExecutionLedger as
-          | PlanExecutionLedger
-          | null
-          | undefined;
-        return !ledger || planRequiresModelTaskUpdates(ledger);
-      },
-      instruction:
-        "Execute the approved plan in order. The host owns the authoritative immutable task ledger. Never call task_update for research or document tasks whose requirements are only verified_read, material_integrity, mutation_receipts, research_coverage, document_integrity, or document_published; their owning tools advance them automatically. For other active tasks, use task as a single-transition shorthand or tasks for an atomic related batch, with only each immutable taskId, status, optional reason, and required reasoningAssertion. A completed request is rejected unless receipts or verified evidence satisfy the task; after completion the host starts the next pending task. Never rename, create, delete, reorder, or silently skip an approved task.",
-    },
+    isAvailable: (request) =>
+      request.executionContext?.permissionOwner === "original_agent",
     validate: validateTaskUpdateInput,
     planInvocation: () =>
       readOnlyInvocationPlan({
@@ -511,112 +453,29 @@ export function createTaskUpdateTool(): AgentToolDefinition<
           "This host-owned control updates only task progress in the active workflow.",
       }),
     execute: async (input, context) => {
-      const plan = context.request.planContext;
-      if (!plan || plan.phase !== "executing") {
-        const execution = context.request.executionContext;
-        if (execution?.permissionOwner !== "original_agent") {
-          throw new Error(
-            "task_update requires an ordinary Original Agent execution or an approved Plan",
-          );
-        }
-        if (!context.runId || !context.updateExecutionCheckpoint) {
-          throw new Error(
-            "Ordinary task progress requires durable run checkpoint persistence",
-          );
-        }
-        let ignored = false;
-        const checkpoint = await context.updateExecutionCheckpoint(
-          (current) => {
-            assertCheckpointOwner(current, execution);
-            const applied = applyOrdinaryTaskUpdates(
-              current,
-              input.tasks,
-              Date.now(),
-            );
-            ignored = applied.ignored;
-            return applied.checkpoint;
-          },
-        );
-        return ignored ? { checkpoint, note: HOST_MARKS_DONE } : { checkpoint };
-      }
-      if (
-        input.tasks.some((request) =>
-          Boolean(
-            request.description ||
-            request.dependencies?.length ||
-            request.parentTaskId ||
-            request.content ||
-            request.activeForm ||
-            request.acceptanceCriteria?.length ||
-            request.expectedEffect ||
-            request.expectedCapability ||
-            request.targetIds?.length ||
-            request.journalActionIds?.length ||
-            request.verifiedReceiptIds?.length ||
-            request.readEvidenceIds?.length ||
-            request.materialRefs?.length,
-          ),
-        )
-      ) {
+      const execution = context.request.executionContext;
+      if (execution?.permissionOwner !== "original_agent") {
         throw new Error(
-          "Approved Plan tasks are immutable; task_update accepts only taskId, status, reason, and bounded reasoning evidence",
+          "task_update requires an ordinary Original Agent execution",
         );
       }
-      let ledger = await planExecutionCoordinator.startNextTask(
-        plan.executionId,
-      );
-      const transitions: Array<{
-        request: TaskTransitionRequest;
-        evidence?: TaskEvidence;
-      }> = [];
-      for (const request of input.tasks) {
-        const current = ledger.tasks.find(
-          (task) => task.taskId === request.taskId,
+      if (!context.runId || !context.updateExecutionCheckpoint) {
+        throw new Error(
+          "Ordinary task progress requires durable run checkpoint persistence",
         );
-        if (!current) throw new Error(`Unknown Plan taskId: ${request.taskId}`);
-        if (current.status === request.status) {
-          throw new Error(
-            `Task ${request.taskId} is already ${request.status}; task_update requires a status transition`,
-          );
-        }
-        const evidence = buildReasoningAssertionEvidence({
-          executionId: plan.executionId,
-          task: current,
-          status: request.status,
-          assertion: request.reasoningAssertion,
-        });
-        const requestedBy =
-          request.status === "skipped" && current.expectedEffect === "mutation"
-            ? (await listTaskEvidence(plan.executionId, request.taskId)).some(
-                (entry) =>
-                  entry.verified &&
-                  entry.kind === "validation" &&
-                  entry.reference?.startsWith("user-declined:"),
-              )
-              ? "user"
-              : plan.provider
-            : plan.provider;
-        transitions.push({
-          request: {
-            executionId: plan.executionId,
-            taskId: request.taskId,
-            toStatus: request.status,
-            reason: request.reason,
-            requestedBy,
-          },
-          evidence,
-        });
       }
-      ledger =
-        await planExecutionCoordinator.requestTransitionBatch(transitions);
-      if (ledger.status === "running" || ledger.status === "pending") {
-        ledger = await planExecutionCoordinator.startNextTask(plan.executionId);
-      }
-      await context.publishPlanEvent?.({
-        type: "plan_execution_updated",
-        ledger,
+      let ignored = false;
+      const checkpoint = await context.updateExecutionCheckpoint((current) => {
+        assertCheckpointOwner(current, execution);
+        const applied = applyOrdinaryTaskUpdates(
+          current,
+          input.tasks,
+          Date.now(),
+        );
+        ignored = applied.ignored;
+        return applied.checkpoint;
       });
-      return { ledger };
+      return ignored ? { checkpoint, note: HOST_MARKS_DONE } : { checkpoint };
     },
   };
 }

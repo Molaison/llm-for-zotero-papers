@@ -260,7 +260,7 @@ export type PlanDocumentOutboxRecord = Readonly<{
 
 export type SubmitPlanDocumentInput = Readonly<{
   materialOutputId?: string;
-  /** Direct-agent document shape. Approved Plans continue to use their frozen spec. */
+  /** The document's shape. */
   documentKind?: DocumentSpec["kind"];
   /** Use research_grounded when claims depend on retrieved literature evidence. */
   integrityPolicy?: DocumentIntegrityPolicy;

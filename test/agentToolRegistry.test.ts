@@ -441,116 +441,6 @@ describe("AgentToolRegistry", function () {
       "protected integrity boundary",
     );
   });
-
-  it("executes an approved item checkpoint without requiring no-op assignments for other frozen targets", async function () {
-    globalThis.Zotero = { DB: new ChangeJournalTestDb() } as never;
-    await initAgentChangeJournal();
-    const contracts = new ActionContractService({
-      getItem: (id: number) => ({ id, libraryID: 1 }),
-    } as never);
-    const registry = new AgentToolRegistry(contracts);
-    const written: number[] = [];
-    registry.register({
-      effectOperations: ["apply_tags"],
-      spec: {
-        name: "checkpoint_tag",
-        description: "Add an approved tag",
-        inputSchema: { type: "object" },
-        executionClass: "external_effect",
-        requiresConfirmation: true,
-      },
-      validate: (args: any) => ({ ok: true, value: args }),
-      planInvocation: (input: any) =>
-        stateChangeInvocationPlan({
-          reason: "Add a tag",
-          targets: [`item:${input.itemId}`],
-          reversibility: "full",
-        }),
-      describeAction: (input: any) => [
-        {
-          id: "tag",
-          operation: "apply_tags",
-          capability: "zotero.tags",
-          proofDomain: "zotero_state",
-          source: "zotero_native",
-          requestedTargets: [`item:${input.itemId}`],
-          destinationCollectionIds: [],
-          parameters: { tags: ["review"] },
-        },
-      ],
-      execute: async (input: any) => {
-        written.push(input.itemId);
-        return { effect: "applied", content: {} };
-      },
-    });
-    const contract = semanticContractFixture({
-      version: 4,
-      id: "approved-batch",
-      writeDisposition: "required",
-      interpretationSource: "classifier",
-      obligations: [
-        {
-          id: "tags",
-          reviewPreference: "default",
-          operation: "apply_tags",
-          capability: "zotero.tags",
-          proofDomain: "zotero_state",
-          coverage: "some",
-          targetKind: "papers",
-          parameters: { tags: ["review"] },
-          targetBoundary: {
-            kind: "selection",
-            libraryID: 1,
-            frozenTargetIds: [1, 2, 3],
-            scopeDigest: "fixed-three",
-          },
-        },
-      ],
-    });
-    for (const [approved, itemId] of [
-      [false, 1],
-      [true, 4],
-      [true, 1],
-    ] as const) {
-      const result = await registry.prepareExecution(
-        {
-          id: `checkpoint-${approved}-${itemId}`,
-          name: "checkpoint_tag",
-          arguments: { itemId },
-        },
-        {
-          ...baseContext,
-          request: {
-            ...baseContext.request,
-            actionContract: contract as never,
-            actionProgress: contracts.createProgress(contract as never),
-            ...(approved
-              ? {
-                  planContext: {
-                    phase: "executing",
-                    planId: "approved",
-                    revision: 1,
-                  } as never,
-                }
-              : {}),
-          },
-        },
-        { callerKind: "mcp" },
-      );
-      if (!approved || itemId === 4) {
-        assert.isEmpty(written);
-        assert.equal(result.kind, "result");
-        if (result.kind === "result")
-          assert.isFalse(result.execution.result.ok);
-      }
-    }
-    assert.deepEqual(
-      written,
-      [1],
-      "Approved checkpoints must retain the exact target boundary while allowing one item at a time",
-    );
-  });
-
   for (const mode of ["safe", "auto", "yolo"]) {
     it(`requires the discovery selection path before importing in ${mode}`, async function () {
       globalThis.Zotero = {
@@ -2308,7 +2198,6 @@ describe("AgentToolRegistry", function () {
         .map((spec) => spec.name)
         .sort();
       assert.deepEqual(userInput, [
-        "amend_plan",
         "approve_research_expansion",
         "approve_research_mutation",
         "request_user_input",
@@ -2438,7 +2327,7 @@ describe("AgentToolRegistry", function () {
       );
       assert.equal(
         inspected,
-        4,
+        3,
         "the source scan lost or gained requiresConfirmation sites; update the count deliberately",
       );
     });

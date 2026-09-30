@@ -1,19 +1,17 @@
+import { initDormantPlanTables } from "../src/agent/store/dormantPlanTables";
 import { assert } from "chai";
 import { DatabaseSync } from "node:sqlite";
 import {
   assertTaskCompletionEvidence,
   PlanExecutionCoordinator,
 } from "../src/agent/plans/coordinator";
-import {
-  initAgentPlanStore,
-  loadPlanExecutionLedger,
-} from "../src/agent/plans/store";
+import { loadPlanExecutionLedger } from "../src/agent/plans/store";
 import type { ExecutionTask, TaskEvidence } from "../src/agent/plans/types";
 import {
   initResearchStore,
   loadResearchJobForExecution,
 } from "../src/agent/research/store";
-import { resolvePlanContract } from "../src/agent/tools/plan/updatePlan";
+import { resolvePlanContract } from "../src/agent/plans/preparation";
 
 function installSqliteZotero() {
   const db = new DatabaseSync(":memory:");
@@ -231,7 +229,7 @@ describe("research reading task ownership", function () {
   it("binds the reading step's verified_read requirement to the research scope at approval", async function () {
     const harness = installSqliteZotero();
     try {
-      await initAgentPlanStore();
+      await initDormantPlanTables();
       await initResearchStore();
       const { ledger } = await approveResearchPlan(harness.gateway);
       const job = await loadResearchJobForExecution(ledger.executionId);
@@ -251,7 +249,7 @@ describe("research reading task ownership", function () {
   it("keeps the reading task active after a verified paper_read until the host reports every manifest paper durable", async function () {
     const harness = installSqliteZotero();
     try {
-      await initAgentPlanStore();
+      await initDormantPlanTables();
       await initResearchStore();
       const { coordinator, ledger } = await approveResearchPlan(
         harness.gateway,
@@ -365,7 +363,7 @@ describe("research coverage evidence storage", function () {
     const { decodeTaskEvidence } = await import("../src/agent/plans/decoders");
     const harness = installSqliteZotero();
     try {
-      await initAgentPlanStore();
+      await initDormantPlanTables();
       await initResearchStore();
       const { coordinator, ledger } = await approveResearchPlan(
         harness.gateway,

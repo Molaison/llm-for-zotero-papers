@@ -20,7 +20,6 @@ import {
 import {
   chatHistory,
   getCancelledRequestId,
-  getLivePlanExecution,
   getPendingRequestId,
   initializedConversationComposeContextKeys,
   isRequestPending,
@@ -29,8 +28,6 @@ import {
   selectedTagContextCache,
   subscribeRequestActivity,
 } from "../state";
-import { agentRunTraceCache } from "../agentState";
-import type { AgentRunEventRecord } from "../../../agent/types";
 import type { Message } from "../types";
 import { ensureTaskProgressHydrated } from "./history";
 import { resolveMineruHint } from "./mineruHint";
@@ -39,11 +36,9 @@ import {
   completeTaskRun,
   endTaskRun,
   getTaskProgress,
-  setTaskPlan,
   setTaskScope,
   subscribeTaskProgress,
   taskTurnIndexFor,
-  type TaskProgressResearch,
 } from "./store";
 import {
   mountTaskProgressView,
@@ -146,80 +141,6 @@ function ensureScopeListing(
 }
 
 // ---------------------------------------------------------------------------
-// Plan steps
-// ---------------------------------------------------------------------------
-
-const researchCache = new WeakMap<
-  AgentRunEventRecord[],
-  { length: number; executionId: string; research?: TaskProgressResearch }
->();
-
-function latestResearch(
-  events: AgentRunEventRecord[] | undefined,
-  executionId: string,
-): TaskProgressResearch | undefined {
-  if (!events?.length) return undefined;
-  const cached = researchCache.get(events);
-  let from = 0;
-  let research: TaskProgressResearch | undefined;
-  if (
-    cached &&
-    cached.executionId === executionId &&
-    cached.length <= events.length
-  ) {
-    from = cached.length;
-    research = cached.research;
-  }
-  for (let index = from; index < events.length; index++) {
-    const payload = events[index]?.payload;
-    if (
-      payload?.type === "plan_research_progress" &&
-      payload.progress.executionId === executionId
-    ) {
-      research = payload.progress;
-    }
-  }
-  researchCache.set(events, { length: events.length, executionId, research });
-  return research;
-}
-
-/**
- * Point the conversation's Steps block at its live plan execution, or clear
- * it. Progress belongs to the live request, never to a historical trace.
- */
-export function syncTaskProgressPlan(conversationKey: number): void {
-  const binding = getLivePlanExecution(conversationKey);
-  const history = chatHistory.get(conversationKey) || [];
-  let latest: Message | undefined;
-  for (let index = history.length - 1; index >= 0; index--) {
-    if (history[index].role === "assistant") {
-      latest = history[index];
-      break;
-    }
-  }
-  const message =
-    binding && latest?.agentRunId === binding.runId && latest.streaming
-      ? latest
-      : undefined;
-  if (!binding || !message) {
-    setTaskPlan(conversationKey, null);
-    return;
-  }
-  const events =
-    message.pendingAgentTraceEvents || agentRunTraceCache.get(binding.runId);
-  const research = latestResearch(events, binding.ledger.executionId);
-  const existing = getTaskProgress(conversationKey)?.plan;
-  setTaskPlan(conversationKey, {
-    ledger: binding.ledger,
-    research:
-      research ??
-      (existing?.ledger.executionId === binding.ledger.executionId
-        ? existing?.research
-        : undefined),
-  });
-}
-
-// ---------------------------------------------------------------------------
 // Request lifecycle safety net
 // ---------------------------------------------------------------------------
 
@@ -270,7 +191,7 @@ function settleFromHistory(conversationKey: number, requestId: number): void {
 export function installTaskProgressRequestLifecycle(): void {
   if (lifecycleInstalled) return;
   lifecycleInstalled = true;
-  // A plan, an action, a Codex plan or a run's outcomes make the row apply
+  // An action, a Codex plan or a run's outcomes make the row apply
   // mid-conversation (a one-paper chat included): its panels sync once so
   // the scope lists.
   const stepsSeen = new Set<number>();
@@ -294,7 +215,6 @@ export function installTaskProgressRequestLifecycle(): void {
       const requestId = requestStarts.get(conversationKey) || 0;
       requestStarts.delete(conversationKey);
       settleFromHistory(conversationKey, requestId);
-      setTaskPlan(conversationKey, null);
     }
     syncTaskProgressPanelsForConversation(conversationKey);
   });

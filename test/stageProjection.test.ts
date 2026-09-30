@@ -758,13 +758,13 @@ describe("agent trace stage projection", function () {
   });
 
   it("builds a stage the same way wherever one is produced", function () {
-    // Three producers emit stage events -- the runtime, the Codex bridge and
-    // this projection -- and one trace can hold events from any of them. They
-    // share one builder so "the same stage" is the same object, and so an
-    // undefined-valued key never survives into a trace the store would drop
-    // it from.
+    // Three producers emit stage events -- the runtime's tool execution, the
+    // Codex bridge and this projection -- and one trace can hold events from
+    // any of them. They share one builder so "the same stage" is the same
+    // object, and so an undefined-valued key never survives into a trace the
+    // store would drop it from.
     const sources = [
-      readFileSync("src/agent/runtime.ts", "utf8"),
+      readFileSync("src/agent/execution/toolExecution.ts", "utf8"),
       readFileSync(
         "src/modules/contextPanel/agentTrace/stageProjection.ts",
         "utf8",

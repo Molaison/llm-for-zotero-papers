@@ -1,5 +1,4 @@
 import { assert } from "chai";
-import type { PlanExecutionLedger } from "../src/agent/plans/types";
 import {
   TASK_PROGRESS_MAX_CONVERSATIONS,
   applyTaskPaperUpdate,
@@ -19,7 +18,6 @@ import {
   setTaskActionSummary,
   setTaskChecklist,
   markTaskAnswering,
-  setTaskPlan,
   setTaskScope,
   subscribeTaskProgress,
   taskTurnIndexFor,
@@ -182,24 +180,6 @@ describe("task progress store", function () {
       assert.include(kept, key, "live runs are kept");
     }
   });
-
-  it("remembers that a plan ran after its steps are gone", function () {
-    const ledger = {
-      executionId: "e1",
-      status: "running",
-      tasks: [],
-    } as unknown as PlanExecutionLedger;
-    setTaskPlan(7, { ledger });
-    const version = getTaskProgress(7)!.version;
-    setTaskPlan(7, { ledger });
-    assert.equal(getTaskProgress(7)!.version, version, "same ledger, no work");
-    setTaskPlan(7, null);
-    assert.isNull(getTaskProgress(7)!.plan);
-    assert.isTrue(getTaskProgress(7)!.planSeen);
-    setTaskPlan(8, null);
-    assert.isNull(getTaskProgress(8), "clearing nothing creates nothing");
-  });
-
   it("keeps a scope listing until the attached scope changes", function () {
     const listing = {
       libraryID: 1,

@@ -1,9 +1,12 @@
-/** Native history-loading regression and timing fixture, used only by workflow tests. */
+/**
+ * Native history-loading regression and timing fixture, used only by workflow
+ * tests: a conversation whose old runs drafted plans opens with every old
+ * plan card rendered from its own stored events, never from the plan store.
+ */
 import { getAgentRuntime } from "../../agent";
-import { savePlanArtifact } from "../../agent/plans/store";
+import { PLAN_ARTIFACTS_TABLE } from "../../agent/store/dormantPlanTables";
 import { normalizeExecutionOutput } from "../../agent/tools/execution/results";
 import type { AgentRunEventRecord } from "../../agent/types";
-import type { PlanArtifact } from "../../agent/plans/types";
 import {
   buildAgentEngineDepsForTests,
   getConversationKey,
@@ -108,7 +111,8 @@ export async function exercisePlanHistoryReplay(
   const traces = new Map<string, AgentRunEventRecord[]>();
   for (let i = 0; i < input.historyTurns; i++) {
     const runId = `${prefix}-${i}`;
-    const artifact: PlanArtifact = {
+    // As plan mode stored it: a row in the plan store, and the run's event.
+    const artifact = {
       version: 1,
       planId: runId,
       revision: 1,
@@ -129,7 +133,23 @@ export async function exercisePlanHistoryReplay(
         },
       ],
     };
-    await savePlanArtifact(artifact);
+    await Zotero.DB.queryAsync(
+      `INSERT OR REPLACE INTO ${PLAN_ARTIFACTS_TABLE}
+        (plan_id, revision, conversation_key, provider, status, digest,
+         payload_json, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        artifact.planId,
+        artifact.revision,
+        key,
+        "original",
+        artifact.status,
+        "fixture",
+        JSON.stringify(artifact),
+        stamp,
+        stamp,
+      ],
+    );
     traces.set(runId, [
       {
         runId,
@@ -137,7 +157,7 @@ export async function exercisePlanHistoryReplay(
         eventType: "plan_ready",
         createdAt: stamp,
         payload: { type: "plan_ready", artifact },
-      },
+      } as unknown as AgentRunEventRecord,
       ...Array.from(
         { length: 12 },
         (_, n): AgentRunEventRecord => ({

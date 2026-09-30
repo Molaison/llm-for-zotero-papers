@@ -507,19 +507,6 @@ export async function nextDirectDocumentSequence(
   }, 1);
 }
 
-export async function nextPlanDocumentVersion(params: {
-  planId: string;
-  planRevision: number;
-}): Promise<number> {
-  const rows = (await Zotero.DB.queryAsync(
-    `SELECT COUNT(*) AS maxVersion
-     FROM ${PLAN_DOCUMENTS_TABLE}
-     WHERE plan_id = ? AND plan_revision = ?`,
-    [params.planId, params.planRevision],
-  )) as Array<{ maxVersion?: unknown }>;
-  return Math.max(0, Number(rows?.[0]?.maxVersion || 0)) + 1;
-}
-
 export async function loadPlanDocumentOutbox(
   documentId: string,
 ): Promise<PlanDocumentOutboxRecord | null> {

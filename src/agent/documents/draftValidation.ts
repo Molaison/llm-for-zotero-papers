@@ -18,14 +18,6 @@ const DIRECT_QUOTATION_MIN_WORDS = 5;
 const QUOTATION_PREVIEW_CHARS = 60;
 const QUOTATION_PREVIEW_COUNT = 3;
 
-/**
- * The coverage disclosure rule in the words the validator enforces. Every
- * instruction that asks for the disclosure renders this text so the model is
- * never told one vocabulary and validated against another.
- */
-export const COVERAGE_DISCLOSURE_REQUIREMENT =
-  'Coverage disclosure required: one heading containing "scope" and one heading containing "limitations"; a single "Scope and limitations" section satisfies both.';
-
 function normalizeHeading(value: string): string {
   return value
     .trim()

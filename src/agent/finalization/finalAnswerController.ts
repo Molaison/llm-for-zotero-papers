@@ -17,7 +17,6 @@ import {
   assessWebAttribution,
   type WebAttributionAssessment,
 } from "../../webAccess/attribution";
-import type { PlanExecutionRunSession } from "../plans/runSession";
 import { literaturePaperIdentities } from "../services/literatureDiscovery";
 import {
   openDeclaredOutcomes,
@@ -139,10 +138,6 @@ export class AgentFinalAnswerController {
     private readonly request: AgentRuntimeRequest,
     private readonly actionContractSession: AgentFinalActionSession,
     private readonly transcriptMessages: readonly AgentModelMessage[],
-    private readonly planSession?: Pick<
-      PlanExecutionRunSession,
-      "evaluateFinal"
-    >,
   ) {}
 
   async evaluate(params: {
@@ -153,10 +148,7 @@ export class AgentFinalAnswerController {
     // Action contracts remain a compatibility boundary for approved legacy
     // Plans. Fresh direct turns are checked at each concrete invocation and
     // have no predicted obligations to evaluate here.
-    if (
-      this.request.actionContract &&
-      this.request.planContext?.phase !== "planning"
-    ) {
+    if (this.request.actionContract) {
       const actionDecision = await this.actionContractSession.evaluateFinal({
         canCorrect: params.canCorrect,
       });
@@ -195,18 +187,6 @@ export class AgentFinalAnswerController {
       };
     }
 
-    const planDecision = await this.planSession?.evaluateFinal({
-      canCorrect: params.canCorrect,
-      successfulToolResultCount: params.toolExecutionRecords.filter(
-        (record) => record.ok,
-      ).length,
-    });
-    if (planDecision && planDecision.kind !== "accept") {
-      return planDecision.kind === "correct"
-        ? { kind: "correct", correction: planDecision.correction }
-        : { kind: "fail", userMessage: planDecision.failure };
-    }
-
     const outcomeCorrection = this.openOutcomeCorrection(params.canCorrect);
     if (outcomeCorrection) {
       return { kind: "correct", correction: outcomeCorrection };
@@ -215,10 +195,7 @@ export class AgentFinalAnswerController {
     if (
       this.request.documentOutcomePolicy?.required &&
       !params.toolExecutionRecords.some(
-        (record) =>
-          (record.name === "submit_document" ||
-            record.name === "submit_plan_document") &&
-          record.ok,
+        (record) => record.name === "submit_document" && record.ok,
       )
     ) {
       const failure =
@@ -316,7 +293,7 @@ export class AgentFinalAnswerController {
    * evidence moved the ledger since the last one.
    */
   private openOutcomeCorrection(canCorrect: boolean): string | undefined {
-    if (!canCorrect || this.request.planContext) return undefined;
+    if (!canCorrect) return undefined;
     const checkpoint = this.request.executionCheckpoint;
     const open = openDeclaredOutcomes(checkpoint);
     if (!open.length) return undefined;

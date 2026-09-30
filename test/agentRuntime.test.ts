@@ -19,20 +19,14 @@ import { stripNoteHtml } from "../src/utils/noteText";
 import { renderMarkdownForNote } from "../src/utils/markdown";
 import { DatabaseSync } from "node:sqlite";
 import { initPlanDocumentStore } from "../src/agent/documents/store";
-import {
-  initAgentPlanStore,
-  savePlanExecutionLedger,
-} from "../src/agent/plans/store";
+import { savePlanExecutionLedger } from "../src/agent/plans/store";
 import { storedPlanExecution } from "./helpers/planStoreDb";
-import { initResearchStore } from "../src/agent/research/store";
-import { createDocumentPlan } from "./helpers/documentPlan";
 import type { MaterialRef } from "../src/agent/documents/materialRef";
 import { createSubmitDocumentTool } from "../src/agent/tools/control/submitDocument";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { AgentRuntime } from "../src/agent/runtime";
-import { PlanExecutionRunSession } from "../src/agent/plans/runSession";
 import { clearAgentReadLedger } from "../src/agent/context/resourceContextPlan";
 import { clearAgentCoverageLedger } from "../src/agent/context/coverageLedger";
 import {
@@ -105,6 +99,7 @@ import {
 } from "./helpers/agentRuntimeMockDb";
 import { createTestActionContractService } from "./helpers/actionContractService";
 import { stateChangeInvocationPlan } from "../src/agent/authorization/invocationPlan";
+import { initDormantPlanTables } from "../src/agent/store/dormantPlanTables";
 
 function registerZeroEffectLibraryUpdate(registry: AgentToolRegistry): void {
   registry.register({
@@ -1000,11 +995,6 @@ describe("AgentRuntime", function () {
 
   it("finalizes a run row when the provider throws", async function () {
     const restoreDb = installMockDb();
-    const originalInterrupt = PlanExecutionRunSession.prototype.interrupt;
-    const interruptions: string[] = [];
-    PlanExecutionRunSession.prototype.interrupt = async function (reason) {
-      interruptions.push(reason);
-    };
     try {
       const runtime = new AgentRuntime({
         registry: new AgentToolRegistry(),
@@ -1042,13 +1032,7 @@ describe("AgentRuntime", function () {
       );
       assert.equal(run?.status, "failed");
       assert.equal(run?.finalText, INTERRUPTED_AGENT_RUN_MARKER);
-      assert.lengthOf(
-        interruptions,
-        1,
-        "provider failure must terminalize the active plan session too",
-      );
     } finally {
-      PlanExecutionRunSession.prototype.interrupt = originalInterrupt;
       restoreDb();
     }
   });
@@ -9658,7 +9642,7 @@ describe("finalized material announcement", function () {
     const restoreStores = installPlanSqlite();
     clearAgentTranscriptStore();
     try {
-      await initAgentPlanStore();
+      await initDormantPlanTables();
       const conversationKey = 774414;
       await savePlanExecutionLedger(
         storedPlanExecution("interrupted", conversationKey),
@@ -9677,117 +9661,6 @@ describe("finalized material announcement", function () {
           `plan mode is retired: "${text}" is an ordinary turn`,
         );
       }
-    } finally {
-      restoreStores();
-      installed();
-    }
-  });
-
-  it("carries the material ref on the final event when a later turn re-adopts the document", async function () {
-    const installed = installMockDb();
-    const restoreStores = installPlanSqlite();
-    clearAgentTranscriptStore();
-    try {
-      await initAgentPlanStore();
-      await initPlanDocumentStore();
-      await initResearchStore();
-      const conversationKey = 41;
-      const { documentId, materialRef } =
-        await runFinalizingTurn(conversationKey);
-      // Only a plan-executing turn keeps a progress ledger across runs; an
-      // ordinary turn discards any contract it is handed (runtime.ts clears
-      // actionContract/actionProgress/classifiedIntent before the model runs).
-      const plan = await createDocumentPlan(conversationKey);
-
-      const registry = new AgentToolRegistry();
-      registry.register(createSubmitDocumentTool(submitDocumentGateway));
-      const events: AgentEvent[] = [];
-      const secondTurn = new AgentRuntime({
-        registry,
-        adapterFactory: () => ({
-          getCapabilities: () => ({
-            streaming: false,
-            toolCalls: true,
-            multimodal: false,
-          }),
-          supportsTools: () => true,
-          async runStep(): Promise<AgentModelStep> {
-            return {
-              kind: "final",
-              text: "The guide is ready.",
-              assistantMessage: {
-                role: "assistant",
-                content: "The guide is ready.",
-              },
-            };
-          },
-        }),
-      });
-      const intent = classifiedFixture({
-        semantic: semanticFixture({
-          materialOutputs: [
-            {
-              id: "guide",
-              description: "The requested guide",
-              afterActions: [],
-              sourceActionIndexes: [],
-              requiredEvidence: "none",
-            },
-          ],
-        }),
-      });
-      await secondTurn.runTurn({
-        request: {
-          conversationKey,
-          mode: "agent",
-          userText: "Continue the approved plan",
-          libraryID: 1,
-          model: "test",
-          apiKey: "test",
-          apiBase: "https://example.invalid",
-          metadata: { sourceMessageTimestamp: 200 },
-          planContext: {
-            phase: "executing",
-            planId: plan.planId,
-            revision: plan.revision,
-            executionId: plan.executionId,
-            approvedDigest: plan.planDigest,
-            provider: "original",
-          },
-          actionContract: {
-            version: 4,
-            id: "contract:reused",
-            interpretationSource: "semantic",
-            writeDisposition: "none",
-            intent,
-            obligations: [],
-          },
-          actionProgress: {
-            version: 1,
-            contractId: "contract:reused",
-            state: "pending",
-            correctionCount: 0,
-            obligations: [],
-            appliedReceiptKeys: [],
-            materialOutputs: [{ outputId: "guide", ...materialRef }],
-          },
-        },
-        onEvent: (event) => events.push(event),
-      });
-
-      const finalEvent = events.find((event) => event.type === "final") as
-        | Extract<AgentEvent, { type: "final" }>
-        | undefined;
-      assert.equal(
-        finalEvent?.documentId,
-        documentId,
-        "the re-adopted document must name the turn's outcome",
-      );
-      assert.deepEqual(
-        finalEvent?.materialRef,
-        materialRef,
-        "re-adopted material keeps the exact identity turn 1 finalized",
-      );
     } finally {
       restoreStores();
       installed();
@@ -10241,88 +10114,6 @@ describe("agent stage events", function () {
           ["item:failed", "failed"],
         ],
         "a pending item reports no stage rather than a wrong one",
-      );
-    } finally {
-      restoreDb();
-    }
-  });
-
-  it("reports each plan event as a planning stage", async function () {
-    const restoreDb = installMockDb();
-    try {
-      const registry = new AgentToolRegistry(createTestActionContractService());
-      registry.register({
-        spec: {
-          name: "plan_probe",
-          description: "publish plan events",
-          inputSchema: { type: "object" },
-          executionClass: "control",
-          workCategory: "planning",
-        },
-        presentation: { label: "Plan" },
-        validate: (args) => ({ ok: true, value: args as never }),
-        execute: async (_input: unknown, context: any) => {
-          await context.publishPlanEvent?.({
-            type: "plan_updated",
-            artifact: { planId: "p1", revision: 1 } as never,
-          });
-          await context.publishPlanEvent?.({
-            type: "plan_ready",
-            artifact: { planId: "p1", revision: 1 } as never,
-          });
-          await context.publishPlanEvent?.({
-            type: "plan_execution_updated",
-            ledger: { executionId: "e1", tasks: [] } as never,
-          });
-          await context.publishPlanEvent?.({
-            type: "plan_research_progress",
-            progress: { researchJobId: "r1" } as never,
-          });
-          return { content: { ok: true } };
-        },
-      } as never);
-      const events: AgentEvent[] = [];
-      const runtime = new AgentRuntime({
-        registry,
-        adapterFactory: () =>
-          new MockAdapter(
-            [
-              toolCallStep("plan-1", "plan_probe"),
-              {
-                kind: "final",
-                text: "Planned.",
-                assistantMessage: { role: "assistant", content: "Planned." },
-              },
-            ],
-            { streaming: false, toolCalls: true, multimodal: false },
-          ),
-      });
-      await runtime.runTurn({
-        request: {
-          classifiedIntent: classifiedFixture(),
-          conversationKey: 990_104,
-          mode: "agent",
-          userText: "Plan it",
-          model: "test",
-          apiKey: "test",
-          apiBase: "https://example.invalid",
-        },
-        onEvent: (event) => events.push(event),
-      });
-
-      const planning = stageEvents(events).filter(
-        (event) => event.stage === "planning" && !event.callId,
-      );
-      assert.deepEqual(
-        planning.map((event) => event.status),
-        ["started", "completed"],
-        "only a drafted revision and a reviewable plan move the stage",
-      );
-      const types = events.map((event) => event.type);
-      assert.equal(
-        types[types.indexOf("plan_updated") - 1],
-        "agent_stage",
-        "the planning stage precedes the plan event it describes",
       );
     } finally {
       restoreDb();

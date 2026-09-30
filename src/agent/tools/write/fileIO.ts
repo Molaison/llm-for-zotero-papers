@@ -3,7 +3,6 @@ import { prepareDocumentMarkdownExport } from "../../documents/exportBundle";
 import {
   loadPlanDocument,
   loadLatestDocumentForRun,
-  loadLatestPlanDocumentForExecution,
 } from "../../documents/store";
 /**
  * Tool for reading and writing files on the local filesystem.
@@ -594,13 +593,7 @@ async function resolveFileWriteBundle(
   const document =
     explicitDocument ||
     (context && (await loadWorkflowMaterial(context.request))) ||
-    (context?.request.planContext?.phase === "executing"
-      ? await loadLatestPlanDocumentForExecution(
-          context.request.planContext.executionId,
-        )
-      : context?.runId
-        ? await loadLatestDocumentForRun(context.runId)
-        : null);
+    (context?.runId ? await loadLatestDocumentForRun(context.runId) : null);
   const mustUseDocument =
     context?.request.documentOutcomePolicy?.required &&
     ["file", "both"].includes(

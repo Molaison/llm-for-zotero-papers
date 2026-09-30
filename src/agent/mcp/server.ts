@@ -61,7 +61,6 @@ import {
   type McpToolDefinition,
   type McpToolsListResult,
 } from "./protocol";
-import { PlanExecutionRunSession } from "../plans/runSession";
 import type { ZoteroMcpToolActivityEvent } from "./activityTypes";
 export type { ZoteroMcpToolActivityEvent } from "./activityTypes";
 import { extractVerifiedReadSources } from "../context/readEvidence";
@@ -78,10 +77,6 @@ import {
 import { resolveActiveLibraryID } from "../../utils/zoteroLibraryScope";
 import { resolveAgentToolCallWorkCategory } from "../workCategory";
 import { getNotesDirectoryConfig } from "../../utils/notesDirectoryConfig";
-import {
-  EXECUTING_PHASE_GUIDANCE,
-  PLANNING_PHASE_GUIDANCE,
-} from "../plans/planningGuidance";
 
 export const ZOTERO_MCP_SERVER_NAME = "llm_for_zotero";
 export const ZOTERO_MCP_ENDPOINT_PATH = "/llm-for-zotero/mcp";
@@ -103,9 +98,6 @@ export const ZOTERO_MCP_SAFE_READ_TOOL_NAMES = [
 ] as const;
 export const ZOTERO_MCP_PLAN_TOOL_NAMES = [
   "request_user_input",
-  "update_plan",
-  "prepare_plan_execution",
-  "amend_plan",
   "task_update",
   "research_update",
   "approve_research_expansion",
@@ -113,7 +105,6 @@ export const ZOTERO_MCP_PLAN_TOOL_NAMES = [
   "submit_document",
 ] as const;
 export const ZOTERO_MCP_WRITE_TOOL_NAMES = [
-  "amend_plan",
   "approve_research_expansion",
   "approve_research_mutation",
   "library_update",
@@ -175,15 +166,6 @@ const MCP_TOOL_DESCRIPTION_OVERRIDES: ReadonlyMap<string, string> = new Map([
     "literature_search",
     "Search scholarly sources; results come back to the client directly. The literature_review selection card is not available over MCP, so present discovery candidates yourself; discovery never imports silently. An explicit import request uses library_import directly; metadata review uses workflow:'review', mode:'metadata'.",
   ],
-]);
-/**
- * External agents never see the envelope's plan-phase sections, so the MCP
- * catalog carries each one on the phase's anchor tool instead: update_plan
- * while planning, amend_plan (visible for every approved plan) while executing.
- */
-const MCP_PLAN_PHASE_GUIDANCE: ReadonlyMap<string, string> = new Map([
-  ["update_plan", PLANNING_PHASE_GUIDANCE],
-  ["amend_plan", EXECUTING_PHASE_GUIDANCE],
 ]);
 const READ_ONLY_TOOL_ANNOTATIONS = {
   readOnlyHint: true,
@@ -256,7 +238,6 @@ type ZoteroMcpScopeMetadata = {
   model?: string;
   codexPath?: string;
   reasoning?: ReasoningConfig;
-  planContext?: AgentRuntimeRequest["planContext"];
   /** Host-created execution facts; never accepted from MCP tool arguments. */
   executionContext?: AgentRuntimeRequest["executionContext"];
   actionContract?: AgentRuntimeRequest["actionContract"];
@@ -822,7 +803,6 @@ function normalizeActiveScope(
     codexPath: normalizeText(scope.codexPath, 4096),
     reasoning: normalizeReasoningConfig(scope.reasoning),
     signal: scope.signal,
-    planContext: scope.planContext,
     executionContext: scope.executionContext
       ? { ...scope.executionContext, permissionOwner: "external_runtime" }
       : undefined,
@@ -1406,26 +1386,11 @@ function isMcpToolVisibleInScope(
   if (!isMcpExposedTool(tool)) return false;
   if (tool.name === "request_user_input")
     return Boolean(scope?.requestInteraction);
-  if (CURATED_PLAN_TOOL_NAMES.has(tool.name)) {
-    if (tool.name === "submit_document") {
-      return true;
-    }
-    const phase = scope?.planContext?.phase;
-    if (tool.name === "update_plan")
-      return phase === "planning" && !scope?.planContext?.nativePlanning;
-    if (tool.name === "prepare_plan_execution")
-      return (
-        phase === "planning" && Boolean(scope?.planContext?.nativePlanning)
-      );
-    // Codex app-server binds an MCP catalog to the native thread. A thread
-    // created in Plan mode is resumed for approved execution, and a server
-    // reload does not reliably add newly visible tools to that bound catalog.
-    // Advertise the guarded execution tools up front for native planning;
-    // their validators still reject every call until approval changes the
-    // host-owned phase to `executing`.
-    if (phase === "planning" && scope?.planContext?.nativePlanning) return true;
-    if (phase !== "executing") return false;
-  }
+  // Of the control tools only submit_document serves an external turn:
+  // task_update tracks the in-plugin Agent's own parts, and the research
+  // tools run only inside an approved plan.
+  if (CURATED_PLAN_TOOL_NAMES.has(tool.name))
+    return tool.name === "submit_document";
   if (!hasRawPdfScope(scope)) return true;
   return getZoteroMcpDirectPdfToolNames().includes(tool.name);
 }
@@ -1459,11 +1424,10 @@ function handleToolsList(
             MCP_GUIDANCE_TOOL_NAMES.has(name)
               ? toolRegistry.getTool(name)?.guidance?.instruction
               : undefined,
-            MCP_PLAN_PHASE_GUIDANCE.get(name),
             describeMcpHostAccess(name),
             // Codex code-mode discovery renders deeply nested input types as
             // `unknown`. Keep the complete contract discoverable there too;
-            // otherwise native Plan has to guess evidence and scope shapes.
+            // otherwise the agent has to guess evidence and scope shapes.
             CURATED_PLAN_TOOL_NAMES.has(name)
               ? `Complete input JSON Schema (including nested fields): ${JSON.stringify(schema)}`
               : undefined,
@@ -1865,7 +1829,6 @@ function createToolContext(
         ? ("codex_responses" as const)
         : undefined,
     reasoning: scope?.reasoning,
-    planContext: scope?.planContext,
     executionContext: scope?.executionContext,
     actionProgress: scope?.actionProgress,
     clarificationHistory: scope?.clarificationHistory,
@@ -1992,15 +1955,6 @@ function createToolContext(
       },
       hostCommandExecution: true,
     },
-    ...(request.planContext?.phase === "executing"
-      ? {
-          approvedPlanBinding: {
-            planId: request.planContext.planId,
-            revision: request.planContext.revision,
-            approvedDigest: request.planContext.approvedDigest,
-          },
-        }
-      : {}),
   };
   const priorAccess = request.executionContext.configuredAccess;
   request.executionContext = {
@@ -2065,25 +2019,6 @@ function createToolContext(
     modelProviderLabel:
       exhaustiveReadBackend === "codex_responses" ? "Codex" : "External MCP",
   };
-}
-
-async function restorePlanExecutionContext(
-  context: AgentToolContext,
-  toolRegistry: AgentToolRegistry,
-): Promise<void> {
-  const plan = context.request.planContext;
-  if (plan?.phase !== "executing") return;
-  const session = new PlanExecutionRunSession(
-    context.request,
-    async () => undefined,
-  );
-  const initialized = await session.initialize();
-  if (initialized.kind === "failed") throw new Error(initialized.userMessage);
-  if (context.request.actionContract && !context.request.actionProgress) {
-    context.request.actionProgress = toolRegistry.createActionProgress(
-      context.request.actionContract,
-    );
-  }
 }
 
 function formatToolResult(
@@ -2422,7 +2357,6 @@ async function handleToolsCall(
       callScope,
       deps.zoteroGateway,
     );
-    toolContext.publishPlanEvent = scope?.publishHostEvent;
     toolContext.checkpointActionProgress = async () => {
       const request = toolContext.request;
       if (!scope?.publishHostEvent)
@@ -2458,7 +2392,6 @@ async function handleToolsCall(
           });
       }
     };
-    await restorePlanExecutionContext(toolContext, deps.toolRegistry);
     let prepared = await deps.toolRegistry.prepareExecution(
       {
         id: `mcp-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,

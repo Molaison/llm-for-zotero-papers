@@ -3006,7 +3006,7 @@ describe("semantic tool surface", function () {
     } catch (error) {
       assert.match(
         error instanceof Error ? error.message : String(error),
-        /requires compatible legacy turn intent or an approved full-read contract/,
+        /requires compatible legacy turn intent/,
       );
     }
     assert.deepEqual(prepared, []);

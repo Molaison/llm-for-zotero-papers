@@ -9169,17 +9169,6 @@ label.llm-search-results-item:hover {
   color: var(--fill-primary);
 }
 
-.llm-plan-recovery-card .llm-plan-action {
-  appearance: none;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  box-sizing: border-box;
-  max-height: none;
-  max-width: 100%;
-  line-height: 1.25;
-}
-
 .llm-note-review-card {
   box-shadow: none;
 }
@@ -10392,26 +10381,6 @@ details.llm-agent-action-row[open] > summary .llm-agent-action-row-marker {
   color: #c84b4b;
 }
 
-.llm-plan-task-details {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin: 0 9px 9px 40px;
-  padding-left: 9px;
-  border-left: 1px solid var(--stroke-secondary);
-}
-
-.llm-plan-task-details p {
-  margin: 0;
-  color: var(--fill-tertiary);
-  font-size: var(--llm-fs-10);
-  line-height: 1.4;
-}
-
-.llm-plan-task-details .llm-plan-task-failure {
-  color: #c84b4b;
-}
-
 .llm-task-progress-steps .llm-plan-header {
   gap: 8px;
   min-height: 18px;
@@ -10467,16 +10436,6 @@ details.llm-agent-action-row[open] > summary .llm-agent-action-row-marker {
 
 .llm-task-progress-steps .llm-plan-task-pill {
   padding: 1px 5px;
-}
-
-.llm-task-progress-steps .llm-plan-task-details {
-  gap: 3px;
-  margin: 0 7px 7px 31px;
-  padding-left: 7px;
-}
-
-.llm-task-progress-steps .llm-plan-task-details p {
-  line-height: 1.3;
 }
 
 .llm-task-progress-steps .llm-plan-research-progress {
@@ -10583,7 +10542,6 @@ details.llm-agent-action-row[open] > summary .llm-agent-action-row-marker {
   margin-left: 0;
 }
 
-.llm-plan-recovery-card .llm-plan-approve .llm-plan-action-label-full,
 .llm-plan-review-actions .llm-plan-approve .llm-plan-action-label-full,
 .llm-plan-review-actions .llm-plan-approve .llm-plan-action-label-compact {
   position: relative;

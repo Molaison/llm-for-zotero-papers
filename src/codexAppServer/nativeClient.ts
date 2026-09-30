@@ -1,15 +1,6 @@
 import { appLogger } from "../core/logging";
-import { buildApprovedPlanExecutionInstructions } from "../agent/plans/executionInstructions";
 import { createAbortController } from "../utils/apiHelpers";
 import { readNativeQuestions } from "./nativeQuestions";
-import {
-  finalizeNativePlanProposal,
-  beginNativePlanningAttempt,
-} from "../agent/plans/nativePlanning";
-import type {
-  CodexNativePlanDelta,
-  CodexNativePlanProposal,
-} from "../utils/codexAppServerProcess";
 import { renderResolvedActionContract } from "../agent/contracts/presentation";
 import type {
   ChatMessage,
@@ -96,7 +87,6 @@ import {
   type CodexNativeMcpSetupStatus,
 } from "./mcpSetup";
 import {
-  buildCodexNativeSkillInstructionBlock,
   buildCodexNativeSkillRequest,
   resolveExplicitCodexNativeSkillIds,
   resolveCodexNativeSkills,
@@ -125,14 +115,8 @@ export {
   resolveCodexNativeRuntimeCwd,
 } from "./runtimeCwd";
 import { getCanonicalSkillFilePath } from "../agent/skills/nativeSkillPaths";
-import { withPlanInvestigationSkill } from "../agent/skills/planBindings";
-import { getAllSkills } from "../agent/skills";
 import { resolveDocumentOutcomePolicy } from "../agent/documents/outcomePolicy";
-import {
-  loadLatestDocumentForRun,
-  loadLatestPlanDocumentForExecution,
-} from "../agent/documents/store";
-import { loadPlanArtifact } from "../agent/plans/store";
+import { loadLatestDocumentForRun } from "../agent/documents/store";
 import { areEquivalentLocalPaths } from "../utils/localPath";
 import {
   acquireLocalDocumentPathLease,
@@ -148,13 +132,8 @@ import {
   withConversationWriteLock,
 } from "../shared/conversationWriteFence";
 import { enqueueConversationCleanupJob } from "../core/conversations/conversationCleanupJobs";
-import {
-  recordMcpPlanEvidence,
-  PlanExecutionRunSession,
-} from "../agent/plans/runSession";
 import { evaluatePreparedActionContract } from "../agent/contracts/actionEvaluation";
 import { isCodexNativeItemType } from "./nativeActivityStages";
-import type { PlanExecutionLedger } from "../agent/plans/types";
 
 const CODEX_APP_SERVER_SERVICE_NAME = "llm_for_zotero";
 export const NO_CODEX_APP_SERVER_THREAD_TO_COMPACT_MESSAGE =
@@ -1670,7 +1649,6 @@ function buildCodexNativeScopedMcpScope(params: {
   model?: string;
   codexPath?: string;
   reasoning?: ReasoningConfig;
-  planContext?: import("../agent/plans/types").PlanRuntimeContext;
   actionContract?: import("../agent/contracts/types").AgentActionContract;
   actionPreparation?: import("../agent/contracts/actionPreparation").ActionPreparation;
   sourceMessageTimestamp?: number;
@@ -1707,7 +1685,6 @@ function buildCodexNativeScopedMcpScope(params: {
     model: params.model,
     codexPath: params.codexPath,
     reasoning: params.reasoning,
-    planContext: params.planContext,
     executionContext:
       params.preparedRequest?.executionContext || params.executionContext,
     actionContract: params.actionContract,
@@ -1727,7 +1704,6 @@ export function buildCodexNativeScopedMcpScopeForTests(params: {
   model?: string;
   codexPath?: string;
   reasoning?: ReasoningConfig;
-  planContext?: import("../agent/plans/types").PlanRuntimeContext;
   actionContract?: import("../agent/contracts/types").AgentActionContract;
   actionPreparation?: import("../agent/contracts/actionPreparation").ActionPreparation;
   sourceMessageTimestamp?: number;
@@ -1739,7 +1715,6 @@ export function buildCodexNativeScopedMcpScopeForTests(params: {
 export function buildZoteroEnvironmentManifest(params: {
   actionPreparation?: import("../agent/contracts/actionPreparation").ActionPreparation;
   actionContract?: import("../agent/contracts/types").AgentActionContract;
-  planContext?: import("../agent/plans/types").PlanRuntimeContext;
   scope: CodexNativeConversationScope;
   mcpEnabled: boolean;
   mcpReady: boolean;
@@ -1765,7 +1740,7 @@ export function buildZoteroEnvironmentManifest(params: {
     : params.priorReadContextBlock || "";
   const lines = [
     "Zotero environment for this turn:",
-    params.actionContract || params.planContext?.phase === "planning"
+    params.actionContract
       ? renderResolvedActionContract(params.actionContract)
       : "The connected Codex runtime owns ordinary invocation approval. Zotero separately enforces the current library, filesystem, command, durable-journal, and conversation boundaries on every MCP call. Tool arguments cannot expand those host grants.",
     params.actionPreparation
@@ -2583,7 +2558,6 @@ function registerNativeApprovalRequestHandlers(params: {
   redactText?: (value: string) => string;
   isTurnStillLive?: () => void;
   signal?: AbortSignal;
-  planning?: boolean;
   /**
    * Called once for every decision the host returns about an effect Codex
    * wants to run itself, so the turn can receipt and journal it.
@@ -2616,9 +2590,9 @@ function registerNativeApprovalRequestHandlers(params: {
           signal: controller.signal,
         };
         // Every decision about a Codex-run effect is receipted here, which is
-        // the one place all of them pass through: the approval card, the
-        // planning-mode refusal, and the default denial when no host surface
-        // answered. An aborted turn is the exception — nothing was decided.
+        // the one place all of them pass through: the approval card and the
+        // default denial when no host surface answered. An aborted turn is the
+        // exception — nothing was decided.
         const reportApprovalEffect = async (
           response: unknown,
         ): Promise<void> => {
@@ -2643,12 +2617,6 @@ function registerNativeApprovalRequestHandlers(params: {
               (record.turnId && record.turnId !== identity?.turnId))
           )
             throw new Error("Stale native request");
-          if (params.planning && isCodexNativeBuiltInApprovalRequest(request)) {
-            const planningResponse =
-              resolveCodexNativeApprovalRequest(request).response;
-            await reportApprovalEffect(planningResponse);
-            return planningResponse;
-          }
           const questions = readNativeQuestions(request);
           const response = params.onApprovalRequest
             ? await params.onApprovalRequest(request)
@@ -2994,17 +2962,10 @@ export async function runCodexAppServerNativeTurn(input: {
   onUsage?: (usage: UsageStats) => void;
   onItemStarted?: (event: CodexNativeItemEvent) => void;
   onItemCompleted?: (event: CodexNativeItemEvent) => void;
-  onPlanDelta?: (event: CodexNativePlanDelta) => void | Promise<void>;
-  onPlanArtifact?: (
-    artifact: import("../agent/plans/types").PlanArtifact,
-  ) => void | Promise<void>;
   onPlanUpdated?: (event: {
     explanation?: string;
     steps: Array<{ content: string; status?: string }>;
   }) => void | Promise<void>;
-  onPlanExecutionUpdated?: (
-    ledger: PlanExecutionLedger,
-  ) => void | Promise<void>;
   onHostEvent?: (
     event: import("../agent/types").AgentEvent,
   ) => void | Promise<void>;
@@ -3023,9 +2984,6 @@ export async function runCodexAppServerNativeTurn(input: {
 }): Promise<CodexNativeTurnResult> {
   const params = {
     ...input,
-    get planContext() {
-      return input.executionRequest.planContext;
-    },
     get actionContract() {
       return input.executionRequest.actionContract;
     },
@@ -3040,17 +2998,6 @@ export async function runCodexAppServerNativeTurn(input: {
     throw new Error(
       "The prepared semantic request belongs to another conversation.",
     );
-  let planContext = params.planContext;
-  if (planContext?.phase === "planning") {
-    planContext = {
-      ...planContext,
-      nativePlanning: {
-        attemptId: `native-plan-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-        threadId: "pending",
-        ephemeral: Boolean(params.skillContext?.localDocuments?.length),
-      },
-    };
-  }
   const expectedGeneration = Number.isFinite(params.conversationGeneration)
     ? Number(params.conversationGeneration)
     : getConversationWriteGeneration(params.scope.conversationKey);
@@ -3100,27 +3047,7 @@ export async function runCodexAppServerNativeTurn(input: {
       const currentTurnHasLocalPdfs = Boolean(
         params.skillContext?.localDocuments?.length,
       );
-      if (planContext?.phase === "planning") {
-        await assertNativePlanningSupported(proc);
-        await withConversationWriteLock(
-          params.scope.conversationKey,
-          async () => {
-            if (
-              params.signal?.aborted ||
-              areConversationWritesFrozen(params.scope.conversationKey) ||
-              !isConversationWriteGenerationCurrent(
-                params.scope.conversationKey,
-                expectedGeneration,
-              )
-            )
-              throw createNativeClientAbortError();
-            if (planContext?.phase === "planning")
-              await beginNativePlanningAttempt(planContext);
-          },
-        );
-      }
       const permissionExecution = await resolveCodexPermissionExecution({
-        planning: planContext?.phase === "planning",
         proc,
         cwd: codexNativeRuntimeCwd,
         fresh: true,
@@ -3158,7 +3085,6 @@ export async function runCodexAppServerNativeTurn(input: {
         redactText,
         isTurnStillLive: assertApprovalTurnStillLive,
         signal: params.signal,
-        planning: planContext?.phase === "planning",
         onApprovalEffect: async (decision) => {
           const receipt = await recordExternalRuntimeEffect({
             ...decision,
@@ -3200,7 +3126,6 @@ export async function runCodexAppServerNativeTurn(input: {
       };
       let successfulHostToolResults = 0;
       let submittedDocument = false;
-      let latestPlanLedger: PlanExecutionLedger | undefined;
       const publishHost = async (
         event: import("../agent/types").AgentEvent,
       ) => {
@@ -3210,15 +3135,7 @@ export async function runCodexAppServerNativeTurn(input: {
         );
         await params.eventJournal.append(safeEvent);
         await params.onHostEvent?.(safeEvent);
-        if (safeEvent.type === "plan_execution_updated") {
-          latestPlanLedger = safeEvent.ledger;
-          await params.onPlanExecutionUpdated?.(safeEvent.ledger);
-        }
       };
-      const planSession = new PlanExecutionRunSession(
-        params.executionRequest,
-        publishHost,
-      );
       const scopedMcpScope = buildCodexNativeScopedMcpScope({
         preparedRequest: params.executionRequest,
         scope: scopeWithProfile,
@@ -3227,7 +3144,6 @@ export async function runCodexAppServerNativeTurn(input: {
         model: params.model,
         codexPath,
         reasoning: params.reasoning,
-        planContext,
         actionContract: params.actionContract,
         actionPreparation: params.actionPreparation,
         sourceMessageTimestamp: params.sourceMessageTimestamp,
@@ -3319,7 +3235,6 @@ export async function runCodexAppServerNativeTurn(input: {
       let mcpWarning = "";
       let mcpStatus: CodexNativeMcpSetupStatus | undefined;
       let unregisterGuardianReviews: () => void = () => undefined;
-      let approvedExecutionSession: PlanExecutionRunSession | undefined;
       try {
         const reasoningParams = resolveCodexAppServerReasoningParams(
           params.reasoning,
@@ -3343,7 +3258,6 @@ export async function runCodexAppServerNativeTurn(input: {
           thread: NativeThreadResolution;
           input: unknown;
           skillIds: string[];
-          planInstructions?: string;
         }): Promise<CodexNativeTurnResult> => {
           // A thread may have been prepared while Clear was waiting on an
           // earlier provider/database operation. Re-check immediately before
@@ -3354,19 +3268,6 @@ export async function runCodexAppServerNativeTurn(input: {
           turnStarted = new Promise<void>((resolve) => {
             resolveTurnStarted = resolve;
           });
-          if (planContext?.phase === "planning" && planContext.nativePlanning) {
-            planContext = {
-              ...planContext,
-              nativePlanning: {
-                ...planContext.nativePlanning,
-                threadId: args.thread.threadId,
-              },
-            };
-            scopedMcpScope.planContext = planContext;
-            if (scopedMcp)
-              updateScopedZoteroMcpScope(scopedMcp.token, { planContext });
-          }
-          let completedProposal: CodexNativePlanProposal | undefined;
           await publishAuthority();
           unregisterGuardianReviews = registerNativeGuardianReviewHandlers({
             proc,
@@ -3388,7 +3289,7 @@ export async function runCodexAppServerNativeTurn(input: {
               }),
             ),
           );
-          const pendingPlanEvidence: Promise<void>[] = [];
+          const pendingMcpActivity: Promise<void>[] = [];
           // One turn, two names per Zotero MCP call; this is where they meet.
           const mcpCallCorrelation = createCodexNativeMcpCallCorrelator(
             mcpThreadConfig?.serverName,
@@ -3439,12 +3340,8 @@ export async function runCodexAppServerNativeTurn(input: {
                 .append(
                   buildCodexMcpToolActivityEvent(redactedEvent, correlationId),
                 )
-                .then(() => publishAuthority())
-                .then(() => recordMcpPlanEvidence(planContext, redactedEvent))
-                .then(async (ledger) => {
-                  if (ledger) await params.onPlanExecutionUpdated?.(ledger);
-                });
-              pendingPlanEvidence.push(pending);
+                .then(() => publishAuthority());
+              pendingMcpActivity.push(pending);
               // Observe rejection immediately, but retain the original promise until
               // the turn drains all evidence before reporting completion.
               void pending.catch(() => undefined);
@@ -3479,17 +3376,6 @@ export async function runCodexAppServerNativeTurn(input: {
                 const turnResult = await proc.sendRequest("turn/start", {
                   threadId: args.thread.threadId,
                   input: args.input,
-                  // Plan mode is retired: an ordinary turn names no plan.
-                  ...(args.planInstructions
-                    ? {
-                        additionalContext: {
-                          zotero_plan: {
-                            kind: "application",
-                            value: args.planInstructions,
-                          },
-                        },
-                      }
-                    : {}),
                   model: params.model,
                   ...(codexNativeRuntimeCwd
                     ? { cwd: codexNativeRuntimeCwd }
@@ -3497,8 +3383,7 @@ export async function runCodexAppServerNativeTurn(input: {
                   ...permissionExecution.turn,
                   ...reasoningParams,
                   collaborationMode: {
-                    mode:
-                      planContext?.phase === "planning" ? "plan" : "default",
+                    mode: "default",
                     settings: {
                       model: params.model,
                       reasoning_effort: reasoningParams.effort ?? null,
@@ -3520,30 +3405,11 @@ export async function runCodexAppServerNativeTurn(input: {
                   },
                 });
                 resolveTurnStarted();
-                if (
-                  planContext?.phase === "planning" &&
-                  planContext.nativePlanning
-                ) {
-                  planContext = {
-                    ...planContext,
-                    nativePlanning: { ...planContext.nativePlanning, turnId },
-                  };
-                  scopedMcpScope.planContext = planContext;
-                }
                 if (scopedMcp)
                   updateScopedZoteroMcpScope(scopedMcp.token, {
                     runId: turnId,
-                    planContext,
                   });
                 return turnId;
-              },
-              onPlanDelta: (event) => {
-                assertTurnStillLive();
-                return params.onPlanDelta?.(redactTerminalValue(event));
-              },
-              onPlanCompleted: (proposal) => {
-                assertTurnStillLive();
-                completedProposal = redactTerminalValue(proposal);
               },
               onTextDelta: params.onDelta
                 ? (delta) =>
@@ -3608,32 +3474,10 @@ export async function runCodexAppServerNativeTurn(input: {
               processOptions: { codexPath },
             });
             flushStreamText();
-            if (planContext?.phase === "planning") {
-              assertTurnStillLive();
-              if (!completedProposal)
-                throw new Error(
-                  "Codex did not finish a native plan proposal. Continue planning to complete it.",
-                );
-              const planning = planContext;
-              const proposal = completedProposal;
-              const artifact = await withConversationWriteLock(
-                params.scope.conversationKey,
-                async () => {
-                  assertTurnStillLive();
-                  return finalizeNativePlanProposal({
-                    plan: planning,
-                    conversationKey: params.scope.conversationKey,
-                    proposal,
-                  });
-                },
-              );
-              assertTurnStillLive();
-              await params.onPlanArtifact?.(artifact);
-            }
           } finally {
             resolveTurnStarted();
             unregisterMcpToolActivity();
-            await Promise.all(Array.from(pendingPlanEvidence));
+            await Promise.all(Array.from(pendingMcpActivity));
           }
           const historyVerified = currentTurnHasLocalPdfs
             ? undefined
@@ -3706,76 +3550,14 @@ export async function runCodexAppServerNativeTurn(input: {
                 apiBase: params.codexPath,
                 skillContext,
               });
-        documentRequest.planContext = planContext;
         documentRequest.actionContract = params.actionContract;
         documentRequest.executionContext =
           params.executionRequest.executionContext;
-        const approvedPlanArtifact =
-          planContext?.phase === "executing"
-            ? await loadPlanArtifact(planContext.planId, planContext.revision)
-            : null;
-        // An approved investigation always executes with the skill that owns
-        // the research loop's rules, unless skills are off for this turn.
-        const turnSkillIds =
-          codexNativeSkillMode === "off"
-            ? resolvedSkills.matchedSkillIds
-            : withPlanInvestigationSkill(
-                resolvedSkills.matchedSkillIds,
-                approvedPlanArtifact?.contract,
-                getAllSkills(),
-              );
-        const turnSkillInstructionBlock =
-          turnSkillIds.length === resolvedSkills.matchedSkillIds.length
-            ? resolvedSkills.instructionBlock
-            : buildCodexNativeSkillInstructionBlock(
-                turnSkillIds,
-                getAllSkills(),
-                {
-                  rawPdfMode: Boolean(skillContext?.localDocuments?.length),
-                },
-              );
-        params.executionRequest.planContext = planContext;
-        approvedExecutionSession = planSession;
-        const initialized = await planSession.initialize();
-        if (initialized.kind === "failed")
-          throw new Error(initialized.userMessage);
-        planContext = params.executionRequest.planContext;
-        documentRequest.planContext = planContext;
-        documentRequest.actionContract = params.executionRequest.actionContract;
-        scopedMcpScope.planContext = planContext;
-        scopedMcpScope.actionContract = documentRequest.actionContract;
-        if (scopedMcp)
-          updateScopedZoteroMcpScope(scopedMcp.token, {
-            planContext,
-            actionContract: documentRequest.actionContract,
-          });
-        const approvedExecutionInstructions =
-          latestPlanLedger && approvedPlanArtifact
-            ? buildApprovedPlanExecutionInstructions(
-                latestPlanLedger,
-                approvedPlanArtifact.contract,
-              )
-            : "";
-        const revisionBase =
-          planContext?.phase === "planning" && planContext.revision > 1
-            ? await loadPlanArtifact(
-                planContext.planId,
-                planContext.revision - 1,
-              )
-            : null;
-        const plannedSpec =
-          approvedPlanArtifact?.contract?.deliverable.kind === "document"
-            ? approvedPlanArtifact.contract.deliverable.spec
-            : undefined;
-        let documentOutcomePolicy = resolveDocumentOutcomePolicy({
+        const turnSkillIds = resolvedSkills.matchedSkillIds;
+        const turnSkillInstructionBlock = resolvedSkills.instructionBlock;
+        const documentOutcomePolicy = resolveDocumentOutcomePolicy({
           request: documentRequest,
-          plannedDocumentKind: plannedSpec?.kind,
-          plannedResearch: Boolean(
-            approvedPlanArtifact?.contract?.investigation,
-          ),
         });
-        if (planContext?.phase === "planning")
-          documentOutcomePolicy = { ...documentOutcomePolicy, required: false };
         documentRequest.documentOutcomePolicy = documentOutcomePolicy;
         scopedMcpScope.documentOutcomePolicy = documentOutcomePolicy;
         if (scopedMcp) {
@@ -3805,18 +3587,6 @@ export async function runCodexAppServerNativeTurn(input: {
             )}. Remove the skill selection or update/restart Codex before retrying.`,
           );
         }
-        const planInstructions = [
-          revisionBase
-            ? `Revise this host-persisted prior proposal and contract using the user feedback. Preserve unchanged scope and requirements: ${JSON.stringify(revisionBase)}`
-            : "",
-          planContext?.phase === "planning"
-            ? "Zotero planning handoff: use native request_user_input for material choices and complete your native plan proposal for review. Before the final proposal, call prepare_plan_execution with the typed contract and required execution steps. This only stages requirements; never execute effects during planning. The native update_plan checklist is progress only. Use research contracts and document deliverables when requested. For an ordinary literature review use narrative/adaptive reading of the frozen scope and the three execution requirements: verified paper understanding, research coverage, and document publication. No arbitrary paper quotas."
-            : approvedPlanArtifact
-              ? `Execute this exact approved Zotero plan and its durable requirements. Use task_update and research_update according to the shared tool contracts; completion requires native evidence. Approved plan: ${JSON.stringify(approvedPlanArtifact)}. ${approvedExecutionInstructions}`
-              : "",
-        ]
-          .filter(Boolean)
-          .join("\n\n");
         const skillInstructionBlock = [
           codexNativeSkillMode === "legacy" ? turnSkillInstructionBlock : "",
           buildNativeDocumentOutcomeInstruction(documentOutcomePolicy),
@@ -3846,7 +3616,6 @@ export async function runCodexAppServerNativeTurn(input: {
         const developerEnvironmentText = buildZoteroEnvironmentManifest({
           actionPreparation: params.actionPreparation,
           actionContract: params.actionContract,
-          planContext,
           scope: scopeWithProfile,
           mcpEnabled,
           mcpReady: optimisticMcpReady,
@@ -4003,7 +3772,6 @@ export async function runCodexAppServerNativeTurn(input: {
           buildZoteroEnvironmentManifest({
             actionPreparation: params.actionPreparation,
             actionContract: params.actionContract,
-            planContext,
             scope: scopeWithProfile,
             mcpEnabled,
             mcpReady,
@@ -4022,7 +3790,6 @@ export async function runCodexAppServerNativeTurn(input: {
           zoteroEnvironmentText: buildZoteroEnvironmentManifest({
             actionPreparation: params.actionPreparation,
             actionContract: params.actionContract,
-            planContext,
             scope: scopeWithProfile,
             mcpEnabled,
             mcpReady,
@@ -4099,16 +3866,11 @@ export async function runCodexAppServerNativeTurn(input: {
           thread,
           input: nativeInput,
           skillIds: activatedSkillIds,
-          planInstructions,
         });
         const loadRequiredDocument = async (
           candidate: CodexNativeTurnResult,
         ) =>
-          planContext?.phase === "executing"
-            ? loadLatestPlanDocumentForExecution(planContext.executionId)
-            : candidate.turnId
-              ? loadLatestDocumentForRun(candidate.turnId)
-              : null;
+          candidate.turnId ? loadLatestDocumentForRun(candidate.turnId) : null;
         let document =
           documentOutcomePolicy.required || submittedDocument
             ? await loadRequiredDocument(result)
@@ -4123,7 +3885,6 @@ export async function runCodexAppServerNativeTurn(input: {
               },
             ],
             skillIds: activatedSkillIds,
-            planInstructions,
           });
           document = await loadRequiredDocument(result);
         }
@@ -4150,16 +3911,11 @@ export async function runCodexAppServerNativeTurn(input: {
           currentAuthority(),
           hostReceipts,
         );
-        let planDecision = await planSession.evaluateFinal({
-          canCorrect: true,
-          successfulToolResultCount: successfulHostToolResults,
-        });
         const progress = scopedMcp?.getState()?.actionProgress;
         const corrections = [
           actionEvaluation.correction && (progress?.correctionCount || 0) < 1
             ? actionEvaluation.correction
             : "",
-          planDecision.kind === "correct" ? planDecision.correction : "",
         ].filter(Boolean);
         if (corrections.length) {
           if (progress && actionEvaluation.correction)
@@ -4168,7 +3924,6 @@ export async function runCodexAppServerNativeTurn(input: {
             thread,
             input: [{ type: "text", text: corrections.join("\n") }],
             skillIds: activatedSkillIds,
-            planInstructions,
           });
           if (documentOutcomePolicy.required || submittedDocument) {
             document = (await loadRequiredDocument(result)) || document;
@@ -4177,17 +3932,12 @@ export async function runCodexAppServerNativeTurn(input: {
             currentAuthority(),
             hostReceipts,
           );
-          planDecision = await planSession.evaluateFinal({
-            canCorrect: false,
-            successfulToolResultCount: successfulHostToolResults,
-          });
         }
         const verificationFailure = [
           actionEvaluation.state !== "satisfied" &&
           actionEvaluation.state !== "cancelled"
             ? actionEvaluation.failure
             : "",
-          planDecision.kind === "fail" ? planDecision.failure : "",
         ]
           .filter(Boolean)
           .join("\n");
@@ -4253,25 +4003,6 @@ export async function runCodexAppServerNativeTurn(input: {
         return { ...result, agentRunId: params.eventJournal.runId };
       } catch (error) {
         scopedMcp?.clear();
-        const interruptedSession = approvedExecutionSession;
-        if (interruptedSession) {
-          await withConversationWriteLock(
-            params.scope.conversationKey,
-            async () => {
-              if (
-                areConversationWritesFrozen(params.scope.conversationKey) ||
-                !isConversationWriteGenerationCurrent(
-                  params.scope.conversationKey,
-                  expectedGeneration,
-                )
-              )
-                return;
-              await interruptedSession.interrupt(
-                error instanceof Error ? error.message : String(error),
-              );
-            },
-          );
-        }
         throw error;
       } finally {
         unregisterGuardianReviews();
@@ -4298,24 +4029,5 @@ export async function runCodexAppServerNativeTurn(input: {
     throw new Error(redactedMessage);
   } finally {
     pathLease.release();
-  }
-}
-
-const nativePlanningSupported = new WeakSet<CodexAppServerProcess>();
-async function assertNativePlanningSupported(
-  proc: CodexAppServerProcess,
-): Promise<void> {
-  if (nativePlanningSupported.has(proc)) return;
-  try {
-    const result = (await proc.sendRequest("collaborationMode/list", {})) as {
-      data?: Array<{ mode?: string }>;
-    };
-    if (!result.data?.some((mode) => mode.mode === "plan"))
-      throw new Error("Plan mode is not advertised");
-    nativePlanningSupported.add(proc);
-  } catch {
-    throw new Error(
-      "This Codex app-server does not support native Plan mode. Update Codex CLI and restart its connection.",
-    );
   }
 }

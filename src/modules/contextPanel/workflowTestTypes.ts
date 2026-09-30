@@ -730,17 +730,6 @@ export type WorkflowTestApi = {
   exerciseDuplicatePanelSetup: (
     panelId: string,
   ) => Promise<WorkflowTestDuplicatePanelSetupDiagnostics>;
-  /** Approve a reviewable plan the way the review card does and start its execution. */
-  approvePlanForExecution: (input: {
-    planId: string;
-    revision: number;
-    expectedDigest?: string;
-  }) => Promise<{
-    executionId: string;
-    planDigest: string;
-    activeTaskId?: string;
-    provider: "original" | "codex" | "claude";
-  }>;
   /** Flight 0: the research quality report and run timings for one execution. */
   researchFlightReport: (input: { executionId: string }) => Promise<{
     report: import("../../agent/research/flightReport").ResearchFlightReport;

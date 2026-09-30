@@ -9,12 +9,7 @@ import type {
   TaskEvidence,
 } from "../src/agent/plans/types";
 import type { AgentActionReceipt } from "../src/agent/contracts/types";
-import {
-  buildReasoningAssertionEvidence,
-  createTaskUpdateTool,
-} from "../src/agent/tools/control/taskUpdate";
-import { hasApprovedFullReadAuthorization } from "../src/agent/tools/read/paperRead";
-import type { AgentToolContext } from "../src/agent/types";
+import { createTaskUpdateTool } from "../src/agent/tools/control/taskUpdate";
 
 function task(overrides: Partial<ExecutionTask> = {}): ExecutionTask {
   return {
@@ -104,31 +99,6 @@ function evidence(
 }
 
 describe("PlanExecutionCoordinator invariants", function () {
-  it("ignores a surplus reasoning assertion when verified evidence owns completion", function () {
-    const readTask = task({
-      expectedEffect: "read",
-      completionRequirements: [
-        {
-          requirementId: "read-requirement",
-          kind: "verified_read",
-          criterionIds: ["read-complete"],
-          contractDigest: "sha256:test",
-        },
-      ],
-    });
-
-    assert.isUndefined(
-      buildReasoningAssertionEvidence({
-        executionId: "execution-1",
-        task: readTask,
-        status: "completed",
-        assertion: "The requested reads are complete.",
-        createdAt: 3,
-      }),
-      "surplus narrative must not become completion evidence",
-    );
-  });
-
   it("accepts the single-task shorthand and an atomic batch", function () {
     const validated = createTaskUpdateTool().validate({
       task: { taskId: "execution-1:step-1", status: "completed" },
@@ -147,49 +117,6 @@ describe("PlanExecutionCoordinator invariants", function () {
     assert.isTrue(batch.ok);
     if (batch.ok) assert.lengthOf(batch.value.tasks, 2);
   });
-
-  it("carries approved exhaustive-read authority into the synthetic execution turn", function () {
-    const request = {
-      planContext: {
-        phase: "executing",
-        planId: "plan-1",
-        revision: 1,
-        executionId: "execution-1",
-        approvedDigest: "sha256:test",
-        provider: "original",
-      },
-      actionContract: {
-        version: 2,
-        id: "contract-1",
-        writeDisposition: "none",
-        interpretationSource: "classifier",
-        obligations: [
-          {
-            id: "read-full-1",
-            capability: "zotero.read",
-            operation: "read_full",
-            proofDomain: "zotero_state",
-            coverage: "one",
-            targetKind: "papers",
-            constraints: { readMode: "full" },
-          },
-        ],
-      },
-    } as AgentToolContext["request"];
-    assert.isTrue(hasApprovedFullReadAuthorization(request));
-    assert.isFalse(
-      hasApprovedFullReadAuthorization({
-        ...request,
-        planContext: {
-          phase: "planning",
-          planId: "plan-1",
-          revision: 1,
-          provider: "original",
-        },
-      }),
-    );
-  });
-
   it("rejects a model assertion and an unverified receipt for a mutation task", function () {
     const mutationTask = task();
     assert.throws(

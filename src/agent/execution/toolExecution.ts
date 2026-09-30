@@ -20,7 +20,6 @@ import {
 } from "../context/taskPaperLedgerRecorder";
 import type { TaskPaperLedgerDelta } from "../context/taskPaperLedger";
 import { openDeclaredOutcomes, type OutcomeEvidence } from "../loop/outcomes";
-import type { PlanExecutionRunSession } from "../plans/runSession";
 import { canonicalJson } from "../services/libraryMutation/canonicalJson";
 import { sha256Text } from "../store/journalRecoveryBlobStore";
 import {
@@ -107,8 +106,6 @@ export type ToolExecutionDeps = {
   adapterCapabilities: AgentModelCapabilities;
   /** The turn's action-contract session, which records tool receipts. */
   actionContractSession: ActionContractRunSession;
-  /** The turn's plan session, which records tool results and progress. */
-  activePlanSession: PlanExecutionRunSession;
   /** The paper-evidence frontier that caches and trims paper reads. */
   paperEvidenceFrontier: PaperEvidenceFrontier;
   /** The turn's resource plan, whose signature keys evidence reuse. */
@@ -163,7 +160,7 @@ export type ToolExecutionDeps = {
   /**
    * Hands each call's outcome evidence to the turn's ledger owner.
    *
-   * Supplied only on ordinary Original Agent turns; a Plan turn records none.
+   * Supplied only on ordinary Original Agent turns.
    */
   recordOutcomeEvidence?: (evidence: OutcomeEvidence) => Promise<void>;
 };
@@ -336,14 +333,6 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
       args: call.arguments,
       toolLabel,
       workCategory,
-      executionId:
-        deps.request.planContext?.phase === "executing"
-          ? deps.request.planContext.executionId
-          : undefined,
-      taskId:
-        deps.request.planContext?.phase === "executing"
-          ? deps.request.planContext.activeTaskId
-          : undefined,
     });
     deps.toolsUsedThisTurn.push(call.name);
     const cachedPaperEvidence =
@@ -594,14 +583,6 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
       actionReceipts: toolResult.actionReceipts,
       content: toolResult.content,
       artifacts: toolResult.artifacts,
-      executionId:
-        deps.request.planContext?.phase === "executing"
-          ? deps.request.planContext.executionId
-          : undefined,
-      taskId:
-        deps.request.planContext?.phase === "executing"
-          ? deps.request.planContext.activeTaskId
-          : undefined,
     });
     if (paperLedgerDelta) {
       await deps.emit(buildPaperLedgerUpdateEvent(paperLedgerDelta));
@@ -676,14 +657,6 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
     await deps.actionContractSession.recordToolReceipts(
       toolResult.actionReceipts,
     );
-    await deps.activePlanSession.recordToolResult({
-      toolName: toolResult.name,
-      executionClass: executedCall.toolDefinition?.spec.executionClass,
-      input: executedCall.input,
-      result: toolResult,
-      artifacts: toolResult.artifacts,
-      runId: deps.runId,
-    });
     return executedCall;
   };
   const buildToolDelivery = async (
@@ -735,12 +708,7 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
     return {
       callId,
       name: toolResult.name,
-      content: {
-        ...contentWithReceipt,
-        ...(deps.activePlanSession.workflowProgress()
-          ? { planProgress: deps.activePlanSession.workflowProgress() }
-          : {}),
-      },
+      content: contentWithReceipt,
       followupMessages,
     };
   };
@@ -783,10 +751,7 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
     // while preserving the provider call ID solely for result delivery.
     let preparedAction = options.preparedAction;
     if (!preparedAction && options.modelCallId && !options.inheritedApproval) {
-      const next = await deps.registry.getNextWorkflowStep(
-        deps.request,
-        deps.activePlanSession.activeWorkflowObligationIds(),
-      );
+      const next = await deps.registry.getNextWorkflowStep(deps.request);
       if (next.kind === "action" && next.prepared.call.name === call.name)
         preparedAction = next.prepared;
     }
@@ -858,11 +823,7 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
               canCorrect: true,
             },
           );
-          const planDecision = await deps.activePlanSession.evaluateFinal({
-            canCorrect: true,
-          });
-          const accepted =
-            actionDecision.kind === "accept" && planDecision.kind === "accept";
+          const accepted = actionDecision.kind === "accept";
           // An accepted document ends the turn only when nothing else was
           // requested: a later call of this step, or a part the model
           // declared that still needs more than the answer, has to run with
@@ -876,11 +837,7 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
                 ? actionDecision.correction
                 : actionDecision.kind === "fail"
                   ? actionDecision.failure
-                  : planDecision.kind === "correct"
-                    ? planDecision.correction
-                    : planDecision.kind === "fail"
-                      ? planDecision.failure
-                      : openTasks.map((task) => task.description).join("; ");
+                  : openTasks.map((task) => task.description).join("; ");
             return {
               toolResult,
               delivery: options.suppressModelDelivery

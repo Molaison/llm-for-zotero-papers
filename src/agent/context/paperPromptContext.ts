@@ -27,7 +27,6 @@ export async function preparePaperPromptContext(
   } = {},
 ): Promise<PaperPromptContext> {
   const result: PaperPromptContext = { blocks: [], quoteCitations: [] };
-  if (request.planContext?.phase === "executing") return result;
   const scope = request.turnPaperScope;
   const papers = scope.papers
     .filter(

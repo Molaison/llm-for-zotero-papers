@@ -1,7 +1,7 @@
 /**
  * The Task progress store: one record per conversation of what the current
  * task is doing — its run state, the per-paper ledger, the scope it covers,
- * and the plan steps while a plan runs.
+ * and the steps an action, Codex or the run's outcomes hold.
  *
  * The store owns no DOM. Writers are the turn owners (the agent engine, the
  * Codex callbacks, the request lifecycle); readers are the Task progress
@@ -30,10 +30,6 @@ import type {
   OutcomeException,
   RunEndState,
 } from "../../../agent/execution/types";
-import type {
-  PlanExecutionLedger,
-  PlanEvent,
-} from "../../../agent/plans/types";
 import type { QuoteCitation } from "../../../shared/types";
 
 export type TaskRunState =
@@ -47,16 +43,6 @@ export type TaskRunState =
   | "cancelled"
   /** The answer's stream broke off. */
   | "interrupted";
-
-export type TaskProgressResearch = Extract<
-  PlanEvent,
-  { type: "plan_research_progress" }
->["progress"];
-
-export type TaskProgressPlan = {
-  ledger: PlanExecutionLedger;
-  research?: TaskProgressResearch;
-};
 
 export type TaskProgressStepStatus = ExecutionTaskStatus;
 
@@ -83,9 +69,8 @@ export type TaskProgressStep = {
 };
 
 /**
- * Steps that are not an in-plugin plan: a built-in action's progress, the
- * checklist Codex keeps with its `update_plan` tool, or the outcomes a run's
- * ledger holds.
+ * A run's steps: a built-in action's progress, the checklist Codex keeps
+ * with its own plan tool, or the outcomes a run's ledger holds.
  */
 export type TaskProgressChecklist = {
   source: "action" | "codex" | "outcomes";
@@ -131,8 +116,6 @@ export type TaskProgressRecord = {
   turnByRunId: Record<string, number>;
   ledger: TaskPaperLedger;
   scope: TaskProgressScope | null;
-  /** The live plan, or null when none runs. */
-  plan: TaskProgressPlan | null;
   /**
    * An action's, Codex's or a run's outcome steps, kept until the next
    * question starts.
@@ -218,7 +201,6 @@ function emptyRecord(conversationKey: number): TaskProgressRecord {
     turnByRunId: {},
     ledger: createTaskPaperLedger(),
     scope: null,
-    plan: null,
     checklist: null,
     planSeen: false,
     collapseSeq: 0,
@@ -468,27 +450,6 @@ export function displayedTaskRunState(
     : record.runState;
 }
 
-/** The live plan's steps, or null once no plan runs. */
-export function setTaskPlan(
-  conversationKey: number,
-  plan: TaskProgressPlan | null,
-): void {
-  const existing = records.get(normalizeKey(conversationKey));
-  if (!plan && !existing?.plan) return;
-  const record = writable(conversationKey);
-  if (!record) return;
-  if (
-    plan &&
-    record.plan &&
-    record.plan.ledger === plan.ledger &&
-    record.plan.research === plan.research
-  )
-    return;
-  record.plan = plan;
-  if (plan) record.planSeen = true;
-  changed(record);
-}
-
 /**
  * The scope the latest turn attached. A new signature drops the old listing;
  * the same signature keeps it, so a view can resolve a listing once.
@@ -633,7 +594,7 @@ export function endTaskAction(
   changed(record);
 }
 
-/** Codex's own plan for a run: its `update_plan` checklist, as it stands. */
+/** Codex's own plan for a run: its checklist, as it stands. */
 export function setTaskChecklist(
   conversationKey: number,
   params: {

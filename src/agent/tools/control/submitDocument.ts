@@ -1,8 +1,4 @@
 import {
-  requirePlanMaterialTask,
-  attachPlanMaterialEvidence,
-} from "../../plans/materialEvidence";
-import {
   materialRefFromDocument,
   resolveMaterialOutput,
   recordMaterialOutput,
@@ -14,7 +10,6 @@ import type {
 } from "../../types";
 import { readOnlyInvocationPlan } from "../../authorization/invocationPlan";
 import { DirectDocumentFinalizer } from "../../documents/directFinalization";
-import { PlanDocumentFinalizer } from "../../documents/planFinalization";
 import type { MaterialRef } from "../../documents/materialRef";
 import type {
   DocumentAssetProvenance,
@@ -26,7 +21,7 @@ import type {
 import type { ZoteroGateway } from "../../services/zoteroGateway";
 import { fail, ok, validateObject } from "../shared";
 
-export type SubmitPlanDocumentResult = {
+type SubmitPlanDocumentResult = {
   documentId: string;
   contentHash: string;
   materialRef: MaterialRef;
@@ -275,7 +270,6 @@ function validateSubmitPlanDocument(
 export function createSubmitDocumentTool(
   gateway: ZoteroGateway,
 ): AgentToolDefinition<SubmitPlanDocumentInput, SubmitPlanDocumentResult> {
-  const planFinalizer = new PlanDocumentFinalizer(gateway);
   const directFinalizer = new DirectDocumentFinalizer(gateway);
   return {
     spec: {
@@ -298,7 +292,7 @@ export function createSubmitDocumentTool(
           materialOutputId: {
             type: "string",
             description:
-              "Only for an intermediate authored output listed in the frozen workflow's materialOutputs and used by later actions. Omit this field when publishing the approved final document in chat, even if its Plan step has a materialOutputId label.",
+              "Only for an intermediate authored output listed in the frozen workflow's materialOutputs and used by later actions. Omit this field when publishing the final document in chat.",
           },
           documentKind: {
             type: "string",
@@ -310,8 +304,7 @@ export function createSubmitDocumentTool(
               "guide",
               "custom",
             ],
-            description:
-              "Document shape for direct Agent submissions. Approved Plans use their frozen document specification.",
+            description: "Document shape.",
           },
           integrityPolicy: {
             type: "string",
@@ -485,12 +478,10 @@ export function createSubmitDocumentTool(
       workCategory: "generation",
     },
     /**
-     * The plan machinery itself. Its calls are how a plan is drafted and
-     * advanced, and the plan card already shows the reader the outcome, so a
-     * row for each of them would report the trace's own plumbing.
+     * The document card already shows the reader what a call submitted, so a
+     * row for each call would report the trace's own plumbing.
      */
     presentation: { hiddenInTrace: true },
-    isAvailable: (request) => request.planContext?.phase !== "planning",
     guidance: {
       matches: (request) => request.documentOutcomePolicy?.required === true,
       instruction:
@@ -504,49 +495,20 @@ export function createSubmitDocumentTool(
           "This host-owned control submits an already prepared workflow document.",
       }),
     execute: async (input, context) => {
-      const policy = context.request.documentOutcomePolicy;
-      const plan = context.request.planContext;
       const material = resolveMaterialOutput(
         context.request,
         input.materialOutputId,
       );
-      if (material) await requirePlanMaterialTask(context.request, material.id);
-      const { document } =
-        plan?.phase === "executing" && !material
-          ? await (async () => {
-              if (!policy?.required) {
-                throw new Error(
-                  "The approved Plan does not contain a document deliverable",
-                );
-              }
-              if (!plan.activeTaskId) {
-                throw new Error("No active plan task can accept the document");
-              }
-              return planFinalizer.finalize({
-                executionId: plan.executionId,
-                activeTaskId: plan.activeTaskId,
-                input,
-              });
-            })()
-          : await directFinalizer.finalize({
-              request: context.request,
-              runId:
-                context.runId ||
-                (() => {
-                  throw new Error(
-                    "Direct document run identity is unavailable",
-                  );
-                })(),
-              input,
-            });
-      if (material) {
-        recordMaterialOutput(context.request, material, document);
-        await attachPlanMaterialEvidence(
-          context.request,
-          material.id,
-          document,
-        );
-      }
+      const { document } = await directFinalizer.finalize({
+        request: context.request,
+        runId:
+          context.runId ||
+          (() => {
+            throw new Error("Direct document run identity is unavailable");
+          })(),
+        input,
+      });
+      if (material) recordMaterialOutput(context.request, material, document);
       const materialRef = materialRefFromDocument(document);
       return {
         // The model reads the reference from the payload; the host reads it

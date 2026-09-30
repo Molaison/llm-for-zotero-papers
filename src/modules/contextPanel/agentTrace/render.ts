@@ -39,8 +39,6 @@ import type {
   AgentTraceRequestSummary,
   AgentStage,
   AgentWorkCategory,
-  PlanArtifact,
-  PlanExecutionLedger,
 } from "../../../agent/types";
 import { SKILL_ACTIVATION_TRACE_LABEL } from "../../../agent/workCategory";
 import type { GeneratedChatImage } from "../../../shared/types";
@@ -73,6 +71,11 @@ import { applyStableAnimationPhase } from "../stableAnimationPhase";
 import { isCodexPlanChecklistEvent } from "../taskProgress/codexPlan";
 import { PLAN_STATUS_SYMBOLS } from "../taskProgress/planSteps";
 import { openStandalonePlanDocumentWindow } from "../standalonePlanDocumentWindow";
+import {
+  readStoredPlanEvent,
+  type StoredPlanArtifact,
+  type StoredPlanExecution,
+} from "./storedPlanEvents";
 import {
   disposeStreamingMarkdown,
   renderStreamingMarkdownInto,
@@ -391,8 +394,12 @@ function resolveTracePlanPhase(
 ): "planning" | "executing" | null {
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const payload = events[index]?.payload;
-    if (payload?.type === "plan_execution_updated") return "executing";
-    if (payload?.type === "plan_ready" || payload?.type === "plan_updated") {
+    const planEvent = readStoredPlanEvent(payload);
+    if (planEvent?.type === "plan_execution_updated") return "executing";
+    if (
+      planEvent?.type === "plan_ready" ||
+      planEvent?.type === "plan_updated"
+    ) {
       return "planning";
     }
     if (payload?.type === "status") {
@@ -4714,33 +4721,36 @@ function appendSharedAgentTraceEvent(
   ctx: AgentTraceAdapterContext,
   entry: AgentRunEventRecord,
 ): boolean {
-  switch (entry.payload.type) {
-    case "plan_scope_amended":
-      ctx.items.push({
-        type: "action",
-        row: {
-          kind: "plan",
-          icon: "↳",
-          text:
-            `Scope amended${entry.payload.authority === "user" ? "" : " automatically"} (${entry.payload.previousItemCount} to ` +
-            `${entry.payload.newItemCount}; ${entry.payload.authority}): ` +
-            entry.payload.rationale,
+  // An old plan run's scope amendment, as its run recorded it.
+  const amended = readStoredPlanEvent(entry.payload);
+  if (amended?.type === "plan_scope_amended") {
+    ctx.items.push({
+      type: "action",
+      row: {
+        kind: "plan",
+        icon: "↳",
+        text:
+          `Scope amended${amended.authority === "user" ? "" : " automatically"} (${amended.previousItemCount} to ` +
+          `${amended.newItemCount}; ${amended.authority}): ` +
+          amended.rationale,
+      },
+      details: [
+        {
+          label: "Mode",
+          value: amended.mode,
+          kind: "text",
         },
-        details: [
-          {
-            label: "Mode",
-            value: entry.payload.mode,
-            kind: "text",
-          },
-          {
-            label: "Amendment",
-            value: entry.payload.amendmentId,
-            kind: "text",
-          },
-        ],
-        detailKey: `plan-amendment:${entry.payload.amendmentId}`,
-      });
-      return true;
+        {
+          label: "Amendment",
+          value: amended.amendmentId,
+          kind: "text",
+        },
+      ],
+      detailKey: `plan-amendment:${amended.amendmentId}`,
+    });
+    return true;
+  }
+  switch (entry.payload.type) {
     case "material_finalized": {
       const announced = readMaterialAnnouncement(entry.payload);
       if (!announced) return true;
@@ -5635,19 +5645,19 @@ function disposePlanCard(node: HTMLElement): void {
  * built from it is read-only.
  */
 type PlanProjection = {
-  artifact?: PlanArtifact;
-  ledger?: PlanExecutionLedger;
+  artifact?: StoredPlanArtifact;
+  ledger?: StoredPlanExecution;
 };
 
 function getPlanProjection(
   events: AgentRunEventRecord[],
 ): PlanProjection | null {
-  let artifact: PlanArtifact | undefined;
-  let ledger: PlanExecutionLedger | undefined;
+  let artifact: StoredPlanArtifact | undefined;
+  let ledger: StoredPlanExecution | undefined;
   for (const record of events) {
-    const event = record.payload;
-    if (event.type === "plan_execution_updated") ledger = event.ledger;
-    else if (event.type === "plan_ready" || event.type === "plan_updated")
+    const event = readStoredPlanEvent(record.payload);
+    if (event?.type === "plan_execution_updated") ledger = event.ledger;
+    else if (event?.type === "plan_ready" || event?.type === "plan_updated")
       artifact = event.artifact;
   }
   return artifact || ledger ? { artifact, ledger } : null;
@@ -5702,7 +5712,7 @@ function planEnd(projection: PlanProjection): {
 function renderPlanProposal(
   doc: Document,
   events: AgentRunEventRecord[],
-  artifact: PlanArtifact,
+  artifact: StoredPlanArtifact,
 ): HTMLElement {
   const markdown = doc.createElement("div");
   markdown.className = "llm-plan-markdown";
@@ -5748,7 +5758,7 @@ function renderPlanProposal(
  */
 function renderEndedPlanTasks(
   doc: Document,
-  ledger: PlanExecutionLedger,
+  ledger: StoredPlanExecution,
 ): HTMLElement {
   const list = doc.createElement("div");
   list.className = "llm-plan-task-list";

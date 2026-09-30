@@ -1,6 +1,4 @@
 import { resolveNoteEditModelRequest } from "./model/noteEditingPolicy";
-import { buildPaperDisplayLabels } from "../shared/paperDisplayLabels";
-import { listScopeSnapshotItems } from "./research/store";
 import { ensureModelCapabilities } from "../modelCapabilities";
 import { reanchorQuoteCitationsToClaims } from "../services/quotes/claimAnchoring";
 import type { QuoteCitation } from "../shared/types";
@@ -84,15 +82,10 @@ import {
   normalizeHistoryMessages,
   renderAgentPromptEnvelope,
 } from "./model/messageBuilder";
-import { resolvePlanSkillRoutingReceipt } from "./model/semanticSkillRouting";
-import { withPlanInvestigationSkill } from "./skills/planBindings";
 import {
   buildAdapterToolCallResult,
   type ToolWorkflowOutcome,
 } from "./model/toolArtifactDelivery";
-import { PlanExecutionRunSession } from "./plans/runSession";
-import { loadPlanArtifact } from "./plans/store";
-import type { PlanEvent } from "./plans/types";
 import {
   acquireLocalDocumentPathLease,
   AgentEventLocalDocumentStreamRedactor,
@@ -175,7 +168,6 @@ import type {
   AgentUserMessage,
   ResolvedAgentRuntimeRequest,
 } from "./types";
-import { buildAgentStageEvent } from "./stageEvents";
 
 type AgentRuntimeDeps = {
   registry: AgentToolRegistry;
@@ -211,19 +203,15 @@ function createConfirmationRequestId(): string {
 }
 
 /**
- * What a plan event says about the planning stage.
- *
- * A revision still being drafted opens the stage and a reviewable plan closes
- * it. Every other plan event reports work inside a stage rather than a
- * transition of one: an execution ledger advancing would otherwise close a
- * stage nothing had opened, once per task.
+ * A turn starts with no intent, action contract, progress or preparation of
+ * its own; the tools it calls establish what it does.
  */
-const PLANNING_STAGE_STATUS_BY_PLAN_EVENT: Readonly<
-  Partial<Record<PlanEvent["type"], "started" | "completed">>
-> = {
-  plan_updated: "started",
-  plan_ready: "completed",
-};
+function clearTurnIntent(request: AgentRuntimeRequest): void {
+  request.actionContract = undefined;
+  request.actionProgress = undefined;
+  request.actionPreparation = undefined;
+  request.classifiedIntent = undefined;
+}
 
 /**
  * End states a run records even when it has no outcome: each one says the
@@ -291,26 +279,11 @@ export class AgentRuntime {
     request.conversationGeneration ??= getConversationWriteGeneration(
       request.conversationKey,
     );
-    if (request.planContext?.phase === "executing") {
-      const plan = request.planContext;
-      const artifact = await loadPlanArtifact(plan.planId, plan.revision);
-      if (
-        !artifact ||
-        artifact.digest !== plan.approvedDigest ||
-        artifact.status !== "approved"
-      )
-        throw new Error(
-          "The approved plan is unavailable or changed. No action was authorized.",
-        );
-      request.actionContract = artifact.actionContract;
-      request.classifiedIntent = artifact.actionContract?.intent;
-    } else {
-      request.actionContract = undefined;
-      request.actionProgress = undefined;
-      request.actionPreparation = undefined;
-      request.classifiedIntent = undefined;
-      request.skillRoutingReceipt = undefined;
-    }
+    request.actionContract = undefined;
+    request.actionProgress = undefined;
+    request.actionPreparation = undefined;
+    request.classifiedIntent = undefined;
+    request.skillRoutingReceipt = undefined;
     if (options.signal?.aborted)
       throw new Error("Agent preparation was cancelled.");
     request.executionContext ||= createAgentExecutionContext(
@@ -456,7 +429,6 @@ export class AgentRuntime {
     let webSourceRunId: string | undefined;
     let runTerminalized = false;
     let redactRunTerminalText = (value: string) => value;
-    let planSession: PlanExecutionRunSession | undefined;
     // The run's event stream, once it is open. An ending before then has no
     // stream to record its stop rule in.
     let emitRunEvent: ((event: AgentEvent) => Promise<void>) | undefined;
@@ -484,11 +456,9 @@ export class AgentRuntime {
       executionCheckpointWrites = write.catch(() => undefined);
       return write;
     };
-    // Outcome evidence and the end state belong to ordinary turns; a Plan
-    // turn keeps the Plan's own ledger.
+    // Outcome evidence and the end state belong to ordinary turns.
     const recordsOutcomes = () =>
-      request.executionContext?.permissionOwner === "original_agent" &&
-      !request.planContext;
+      request.executionContext?.permissionOwner === "original_agent";
     const recordOutcomeEvidence = async (
       evidence: OutcomeEvidence,
     ): Promise<void> => {
@@ -635,18 +605,6 @@ export class AgentRuntime {
         }
       };
       emitRunEvent = emit;
-      /**
-       * Plan events and the planning stage they move, in one place.
-       *
-       * Both the plan session and every plan tool publish through this, so
-       * the stage can never be stamped on one path and missed on the other.
-       */
-      const emitPlanEvent = async (event: PlanEvent) => {
-        const status = PLANNING_STAGE_STATUS_BY_PLAN_EVENT[event.type];
-        if (status)
-          await emit(buildAgentStageEvent({ stage: "planning", status }));
-        await emit(event);
-      };
       if (request.workflowCheckpoint)
         await emit({
           type: "provider_event",
@@ -658,11 +616,6 @@ export class AgentRuntime {
         contracts: this.registry,
         emit,
       });
-      const activePlanSession = new PlanExecutionRunSession(
-        request,
-        emitPlanEvent,
-      );
-      planSession = activePlanSession;
 
       const context: AgentToolContext = {
         request,
@@ -682,7 +635,6 @@ export class AgentRuntime {
               content,
             })),
         checkpointActionProgress: () => actionContractSession.checkpoint(),
-        publishPlanEvent: emitPlanEvent,
         publishSkillActivation: (id) =>
           emit({ type: "status", text: `Skill activated: ${id}` }),
         updateExecutionCheckpoint,
@@ -695,87 +647,30 @@ export class AgentRuntime {
         request.conversationKey,
       );
       setToolResultReadAvailability(request, false);
-      // Approved Plans retain their frozen skill binding. Ordinary turns carry
-      // only explicitly forced skills; the model loads any other guidance from
-      // the installed inventory with load_skill, so no request precedes it.
-      let turnIntent: {
-        skillIds: string[];
-        classifiedIntent: AgentRuntimeRequest["classifiedIntent"] | null;
-      };
-      let approvedPlanArtifact: Awaited<ReturnType<typeof loadPlanArtifact>> =
-        null;
-      if (request.planContext?.phase === "executing") {
-        approvedPlanArtifact = await loadPlanArtifact(
-          request.planContext.planId,
-          request.planContext.revision,
-        );
-        const reused = await resolvePlanSkillRoutingReceipt(
-          approvedPlanArtifact?.skillRoutingReceipt,
-          getAllSkills(),
-        );
-        if (reused.changedExplicitSkillIds.length) {
-          throw new Error(
-            `Explicit plan skill changed after approval (${reused.changedExplicitSkillIds.join(", ")}); revise and approve the plan again`,
-          );
-        }
-        if (reused.changedAutomaticSkillIds.length) {
-          await emit({
-            type: "provider_event",
-            providerType: "plan_skill_routing",
-            payload: {
-              status: "changed_automatic_skills_omitted",
-              skillIds: reused.changedAutomaticSkillIds,
-            },
-          });
-        }
-        turnIntent = {
-          skillIds: reused.skillIds,
-          classifiedIntent:
-            approvedPlanArtifact?.actionContract?.intent || null,
-        };
-      } else {
-        request.actionContract = undefined;
-        request.actionProgress = undefined;
-        request.actionPreparation = undefined;
-        request.classifiedIntent = undefined;
-        request.userTextSignals = computeUserTextSignals(request.userText);
-        turnIntent = { skillIds: [], classifiedIntent: null };
-      }
-      request.classifiedIntent = turnIntent.classifiedIntent || undefined;
+      // A turn carries only explicitly forced skills; the model loads any
+      // other guidance from the installed inventory with load_skill, so no
+      // request precedes it.
+      clearTurnIntent(request);
+      request.userTextSignals = computeUserTextSignals(request.userText);
       request.skillRoutingReceipt = undefined;
-      let matchedSkills = withPlanInvestigationSkill(
-        getMatchedSkillIds(request, turnIntent.skillIds),
-        approvedPlanArtifact?.contract,
-        getAllSkills(),
-      );
-      if (request.planContext?.phase !== "executing") {
-        const forcedSkillIds = new Set(request.forcedSkillIds || []);
-        request.loadedSkillRecords = (
-          await Promise.all(
-            getAllSkills()
-              .filter((skill) => matchedSkills.includes(skill.id))
-              .map(async (skill) => ({
-                ...(
-                  await loadSkill(
-                    skill,
-                    getBuiltinSkillInstructionById(skill.id),
-                  )
-                ).loadedSkill,
-                source: forcedSkillIds.has(skill.id)
-                  ? ("forced" as const)
-                  : ("loaded" as const),
-              })),
-          )
-        ).sort((left, right) => left.id.localeCompare(right.id));
-      }
-      const plannedSpec =
-        approvedPlanArtifact?.contract?.deliverable.kind === "document"
-          ? approvedPlanArtifact.contract.deliverable.spec
-          : undefined;
+      const matchedSkills = getMatchedSkillIds(request, []);
+      const forcedSkillIds = new Set(request.forcedSkillIds || []);
+      request.loadedSkillRecords = (
+        await Promise.all(
+          getAllSkills()
+            .filter((skill) => matchedSkills.includes(skill.id))
+            .map(async (skill) => ({
+              ...(
+                await loadSkill(skill, getBuiltinSkillInstructionById(skill.id))
+              ).loadedSkill,
+              source: forcedSkillIds.has(skill.id)
+                ? ("forced" as const)
+                : ("loaded" as const),
+            })),
+        )
+      ).sort((left, right) => left.id.localeCompare(right.id));
       request.documentOutcomePolicy = resolveDocumentOutcomePolicy({
         request,
-        plannedDocumentKind: plannedSpec?.kind,
-        plannedResearch: Boolean(approvedPlanArtifact?.contract?.investigation),
       });
       if (!adapter.supportsTools(request)) {
         if (request.documentOutcomePolicy.required) {
@@ -819,9 +714,7 @@ export class AgentRuntime {
       });
       context.resourceSignature = resourceContextPlan.resourceSignature;
       request.contextCache = resourceContextPlan.contextCache;
-      const paperEvidenceFrontier = new PaperEvidenceFrontier({
-        planExecuting: request.planContext?.phase === "executing",
-      });
+      const paperEvidenceFrontier = new PaperEvidenceFrontier();
       const preservedTurnHandleRecords: AgentToolResultHandleRecord[] = [];
       const transcriptCompatibilityKey = PORTABLE_TRANSCRIPT_KEY;
       let transcriptSegment = await loadAgentTranscriptSegment({
@@ -1091,30 +984,6 @@ export class AgentRuntime {
           (intent) => intent.operation === "file_write",
         ),
       );
-      const planInitialization = await activePlanSession.initialize();
-      if (planInitialization.kind === "failed") {
-        const text = planInitialization.userMessage;
-        await emit({ type: "final", text });
-        await terminateRun("failed", text, "plan_initialization_failed");
-        return {
-          kind: "completed",
-          runId,
-          text,
-          usedFallback: false,
-        };
-      }
-      if (request.planContext?.phase === "executing") {
-        // The plan session resolved the approved skill bindings (forced
-        // choices and skills loaded while planning) against their frozen
-        // version and fingerprint; a changed forced binding already failed
-        // initialization above. Render the compatible ones.
-        const boundSkillIds = (request.loadedSkillRecords || []).map(
-          (record) => record.id,
-        );
-        matchedSkills = Array.from(
-          new Set([...matchedSkills, ...boundSkillIds]),
-        );
-      }
       const actionContractInitialization =
         await actionContractSession.initialize({
           checkpoint: interruptedActionCheckpoint,
@@ -1133,17 +1002,6 @@ export class AgentRuntime {
           text,
           usedFallback: false,
         };
-      }
-      if (request.planContext?.phase === "planning") {
-        await emit({
-          type: "status",
-          text: "Planning the request and reviewing context",
-        });
-      } else if (request.planContext?.phase === "executing") {
-        await emit({
-          type: "status",
-          text: "Executing the approved plan",
-        });
       }
       const noteWritePolicy = requiresFileNoteWrite
         ? getNotesDirectoryConfig()
@@ -1169,28 +1027,6 @@ export class AgentRuntime {
           screenshotCount: request.screenshots?.length || 0,
         },
       });
-      const displaySnapshot =
-        approvedPlanArtifact?.contract?.investigation?.scopeSnapshot;
-      if (displaySnapshot) {
-        const papers = await listScopeSnapshotItems(displaySnapshot.snapshotId);
-        const displayLabels = Object.fromEntries(
-          buildPaperDisplayLabels(
-            papers.map((paper) => ({
-              ...paper,
-              identity: `${paper.libraryID}:${paper.itemKey}`,
-            })),
-          ),
-        );
-        request.metadata = {
-          ...request.metadata,
-          paperDisplayLabels: displayLabels,
-        };
-        await emit({
-          type: "provider_event",
-          providerType: "paper_display_labels",
-          payload: { version: 1, displayLabels },
-        });
-      }
       const captureInstructionInventory =
         request.metadata?.instructionHarnessInventory === true;
       let renderedPrompt = await renderAgentPromptEnvelope(
@@ -1430,16 +1266,13 @@ export class AgentRuntime {
       // Rejected input never ran, so it is a repair opportunity, not a failing
       // tool. It gets its own, more forgiving cap.
       let consecutiveInputRejectionRounds = 0;
-      const extendedRunLimits =
-        request.planContext?.phase === "executing" ||
-        request.metadata?.hostRecordedBatchJob === true;
+      const extendedRunLimits = request.metadata?.hostRecordedBatchJob === true;
       const { maxRounds, maxToolCallsPerRound } =
         resolveAgentLimits(extendedRunLimits);
       const finalAnswerController = new AgentFinalAnswerController(
         request,
         actionContractSession,
         transcriptMessagesForPrompt,
-        activePlanSession,
       );
       let toolCallOverflowCorrectionUsed = false;
       const shouldFlushStreamBuffer = (value: string): boolean => {
@@ -1472,12 +1305,6 @@ export class AgentRuntime {
         }
         const redactedFinalText =
           turnPathRedactor.redactTerminalText(finalText);
-        if (status === "failed") {
-          await activePlanSession.interrupt(
-            redactedFinalText ||
-              "The agent run ended before the plan completed",
-          );
-        }
         const finalMaterialRef = options.documentId
           ? finalizedMaterialRefs.get(options.documentId)
           : undefined;
@@ -1620,12 +1447,7 @@ export class AgentRuntime {
         statusText: string,
       ): Promise<{ step: AgentModelStep; stepStreamedText: string }> => {
         if (params.signal?.aborted) {
-          // A stop between steps interrupts an approved plan's active task
-          // as a stop in flight does, so the plan can be resumed; the run is
-          // finished here, so the catch below no longer does it.
-          await activePlanSession
-            .interrupt("The user stopped the approved plan execution")
-            .catch(() => undefined);
+          // The run is finished here, so the catch below no longer does it.
           await terminateRun(
             "cancelled",
             turnPathRedactor.redactTerminalText(currentAnswerText),
@@ -1966,7 +1788,6 @@ export class AgentRuntime {
         writeAllowed,
         adapterCapabilities,
         actionContractSession,
-        activePlanSession,
         paperEvidenceFrontier,
         resourceContextPlan,
         persistToolResultHandles,
@@ -2076,94 +1897,6 @@ export class AgentRuntime {
         await actionContractSession.checkpoint();
         return outcome.toolResult;
       };
-      const advanceHostWorkflow =
-        async (): Promise<AgentRuntimeOutcome | null> => {
-          while (true) {
-            const next = await this.registry.getNextWorkflowStep(
-              request,
-              activePlanSession.activeWorkflowObligationIds(),
-            );
-            if (next.kind === "blocked")
-              return await completeRun(
-                next.reason,
-                "failed",
-                "host_workflow_blocked",
-              );
-            if (next.kind === "model") return null;
-            if (next.kind === "complete") {
-              if (!workflowSummaries.length) return null;
-              const intent = request.classifiedIntent;
-              const canReport =
-                Boolean(finalizedMaterial) ||
-                (intent?.retrievalIntent === "none" &&
-                  intent.externalSearchIntent === "none" &&
-                  intent.deliverableIntent === "chat");
-              if (!canReport) return null;
-              const decision = await actionContractSession.evaluateFinal({
-                canCorrect: false,
-              });
-              if (decision.kind !== "accept")
-                return await completeRun(
-                  decision.kind === "fail"
-                    ? decision.failure
-                    : decision.correction,
-                  "failed",
-                  "host_workflow_rejected",
-                );
-              const planDecision = await activePlanSession.evaluateFinal({
-                canCorrect: false,
-              });
-              if (planDecision.kind !== "accept") return null;
-              const text =
-                workflowSummaries.join("\n\n") ||
-                actionContractSession.receiptStatus() ||
-                "The requested actions are verified complete.";
-              newTranscriptMessages.push({
-                role: "assistant",
-                content: finalizedMaterial?.finalText || text,
-              });
-              return await completeRun(
-                text,
-                "completed",
-                "host_workflow_complete",
-              );
-            }
-            const prepared = next.prepared;
-            await emit({
-              type: "status",
-              text: "Applying the next resolved action",
-            });
-            const result = await toolExecution.executeToolWorkflow(
-              prepared.call,
-              0,
-              {
-                suppressModelDelivery: true,
-                preparedAction: prepared,
-              },
-            );
-            if (result.failed)
-              return await completeRun(
-                result.finalText || "The action failed.",
-                "failed",
-                "host_action_failed",
-              );
-            const message: AgentUserMessage = {
-              role: "user",
-              content: JSON.stringify({
-                type: "host_workflow_progress",
-                instruction:
-                  "This is verified host execution evidence. Continue only unfinished work within the frozen request; do not repeat these completed actions.",
-                summary: prepared.summary,
-                actionReceipts: result.toolResult.actionReceipts,
-                progress: request.actionProgress,
-                planProgress: activePlanSession.workflowProgress(),
-              }),
-            };
-            continuationSession.appendHostMessage(message);
-            newTranscriptMessages.push(message);
-            await persistTranscriptCheckpoint({ requireAccepted: true });
-          }
-        };
       if (referencesClarified) {
         // The first model call must see the resolved authority, not the
         // pre-clarification prompt that correctly prohibited effects.
@@ -2236,11 +1969,6 @@ export class AgentRuntime {
           segmentRound <= maxRounds;
           segmentRound += 1
         ) {
-          const hostOutcome =
-            approvedPlanArtifact && approvedPlanArtifact.version <= 4
-              ? await advanceHostWorkflow()
-              : null;
-          if (hostOutcome) return hostOutcome;
           round += 1;
           let stepResult: { step: AgentModelStep; stepStreamedText: string };
           try {
@@ -2677,14 +2405,6 @@ export class AgentRuntime {
         segment += 1;
       }
     } catch (error) {
-      if (!runTerminalized)
-        await planSession
-          ?.interrupt(
-            params.signal?.aborted
-              ? "The user stopped the approved plan execution"
-              : "The provider or runtime failed before the approved plan completed",
-          )
-          .catch(() => undefined);
       if (webSourceRunId && !runTerminalized) {
         const message = redactRunTerminalText(
           error instanceof Error ? error.message : String(error),

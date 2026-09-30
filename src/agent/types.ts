@@ -58,24 +58,6 @@ import type {
 } from "./execution/types";
 
 export type {
-  ApprovedPlanGrant,
-  ExecutionTask,
-  ExecutionTaskKind,
-  PlanArtifact,
-  PlanArtifactStatus,
-  PlanEvent,
-  PlanExecutionLedger,
-  PlanExecutionStatus,
-  PlanProvider,
-  PlanRuntimeContext,
-  PlanStep,
-  PlanStepEffect,
-  TaskEvidence,
-  TaskEvidenceKind,
-  TaskTransitionRequest,
-} from "./plans/types";
-
-export type {
   AgentActionCapability,
   AgentActionContract,
   AgentActionEvidence,
@@ -459,7 +441,6 @@ export type ToolSpec = ToolSpecBase &
   );
 
 export type AgentEvent =
-  | PlanEvent
   | {
       type: "execution_checkpoint";
       checkpoint: ExecutionCheckpoint;
@@ -539,7 +520,8 @@ export type AgentEvent =
       status?: "running" | "completed";
       kind?: "assistant_message";
       /**
-       * Codex's `update_plan` checklist, on the one event with the item id
+       * Codex's own checklist (see `taskProgress/codexPlan.ts`), on the one
+       * event with the item id
        * `codex-plan-checklist`: shown in the Task progress Steps block, never
        * as a trace row.
        */
@@ -901,7 +883,7 @@ export type AgentExecutionContext = Readonly<{
   conversationKey: number;
   conversationGeneration: number;
   chatLibraryID?: number;
-  permissionOwner: "original_agent" | "approved_plan" | "external_runtime";
+  permissionOwner: "original_agent" | "external_runtime";
   workspaceSnapshot: Readonly<{
     activePaper?: Readonly<{
       libraryID: number;
@@ -943,11 +925,6 @@ export type AgentExecutionContext = Readonly<{
     /** Explicit host-process execution capability, independent of file roots. */
     hostCommandExecution?: boolean;
   }>;
-  approvedPlanBinding?: Readonly<{
-    planId: string;
-    revision: number;
-    approvedDigest: string;
-  }>;
 }>;
 
 export type AgentRuntimeRequestInput = AgentRequest & {
@@ -984,9 +961,12 @@ export type AgentRuntimeRequestInput = AgentRequest & {
   actionPreparation?: import("./contracts/actionPreparation").ActionPreparation;
   clarificationHistory?: Array<{ question: string; answer: string }>;
 
-  /** One-shot Plan collaboration state owned by the durable plan store. */
   /** Host-loaded prior workflow evidence; never inferred from conversation prose. */
   workflowCheckpoint?: import("./contracts/workflowCheckpoint").ActionContractCheckpoint;
+  /**
+   * The plan context the research tools read. Plan mode is retired, so no
+   * caller sets it.
+   */
   planContext?: PlanRuntimeContext;
   /** Validated per-turn skill routing identity; never provider-authored authority. */
   skillRoutingReceipt?: SkillRoutingReceipt;
@@ -1395,7 +1375,10 @@ export type AgentToolContext = {
   ) => Promise<AgentToolResult>;
   /** Persist the current contract ledger at a durable composite checkpoint. */
   checkpointActionProgress?: () => Promise<void>;
-  /** Publish a normalized, durable plan/task projection event. */
+  /**
+   * Where the research tools publish their plan events. Plan mode is retired,
+   * so no runtime provides it.
+   */
   publishPlanEvent?: (event: PlanEvent) => Promise<void>;
   /**
    * Apply one change to the turn's ordinary-work checkpoint through the

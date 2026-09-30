@@ -210,12 +210,6 @@ export class DirectDocumentFinalizer {
     const stableDocumentId = material
       ? materialDocumentId(params.request, material.id)
       : undefined;
-    if (params.request.planContext?.phase === "planning") {
-      throw new Error("Direct document finalization is not authorized");
-    }
-    if (params.request.planContext?.phase === "executing" && !material) {
-      throw new Error("Plan document finalization must use the approved spec");
-    }
     const policy: DocumentOutcomePolicy = configuredPolicy?.required
       ? configuredPolicy
       : {

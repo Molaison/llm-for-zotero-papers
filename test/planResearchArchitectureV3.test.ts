@@ -7,8 +7,6 @@ import {
 } from "../src/agent/contracts/operationCatalog";
 import type { AgentActionContract } from "../src/agent/contracts/types";
 import { decodePlanDocument } from "../src/agent/documents/decoders";
-import { buildAgentInitialMessages } from "../src/agent/model/messageBuilder";
-import { PLANNING_PHASE_GUIDANCE } from "../src/agent/plans/planningGuidance";
 import {
   decodeActionContract,
   decodePlanContract,
@@ -24,10 +22,6 @@ import {
   decodeTaskEvidence,
 } from "../src/agent/plans/decoders";
 import { extractVerifiedReadSources } from "../src/agent/context/readEvidence";
-import {
-  buildPlanFinalCorrection,
-  shouldOfferPlanFinalCorrection,
-} from "../src/agent/plans/runSession";
 import { listExecutionTaskEvidence } from "../src/agent/plans/store";
 import type { ExecutionTask, TaskEvidence } from "../src/agent/plans/types";
 import type { TrustedReadObservation } from "../src/agent/context/readObservationTypes";
@@ -59,10 +53,8 @@ import {
   selectPreferredReadingAttachment,
   selectPreferredVerifiedReads,
 } from "../src/agent/tools/plan/researchUpdate";
-import { createSubmitPlanDocumentTool } from "../src/agent/tools/plan/submitPlanDocument";
+import { createSubmitDocumentTool } from "../src/agent/tools/control/submitDocument";
 import { createTaskUpdateTool } from "../src/agent/tools/control/taskUpdate";
-import { createUpdatePlanTool } from "../src/agent/tools/plan/updatePlan";
-import { resolvedAgentRequest } from "./helpers/resolvedAgentRequest";
 
 const policy = resolveResearchPolicy("plan_research");
 
@@ -344,132 +336,6 @@ describe("Plan Mode research architecture v3", function () {
       /locator was not emitted/,
     );
   });
-
-  it("injects the persisted prior plan into a revision prompt", async function () {
-    const priorPlan = {
-      version: 5 as const,
-      planId: "plan-1",
-      conversationKey: 1,
-      provider: "original" as const,
-      revision: 1,
-      digest: "sha256:plan",
-      status: "superseded" as const,
-      explanation: "Screen ten papers, then deep-read three.",
-      contract: decodePlanContract({
-        investigation: investigation(),
-        deliverable: { kind: "answer" },
-        researchPolicy: policy,
-      }),
-      contractDigest: "sha256:contract",
-      steps: [
-        {
-          planStepId: "screen",
-          content: "Screen the frozen corpus",
-          activeForm: "Screening the frozen corpus",
-          acceptanceCriteria: [
-            {
-              criterionId: "screened",
-              description: "Every paper is screened",
-              verifier: "research_coverage" as const,
-            },
-          ],
-          completionRequirements: [],
-          expectedEffect: "read" as const,
-        },
-      ],
-      createdAt: 1,
-      updatedAt: 2,
-    };
-    const messages = await buildAgentInitialMessages(
-      resolvedAgentRequest({
-        conversationKey: 1,
-        mode: "agent",
-        userText: "Revise only the evidence strategy.",
-        planContext: {
-          phase: "planning",
-          planId: "plan-1",
-          revision: 2,
-          provider: "original",
-        },
-        metadata: { priorPlanArtifact: priorPlan },
-      }),
-      [],
-      [],
-    );
-    const prompt = messages
-      .map((message) =>
-        typeof message.content === "string" ? message.content : "",
-      )
-      .join("\n");
-    assert.include(prompt, "HOST-PERSISTED PLAN REVISION BASE");
-    assert.include(prompt, "Screen ten papers, then deep-read three.");
-    assert.include(prompt, '"planStepId":"screen"');
-    assert.include(prompt, "Do not rediscover or reconstruct this plan");
-  });
-
-  it("directs an unfinished document plan to the terminal document tool", function () {
-    const correction = buildPlanFinalCorrection(
-      "The document task is incomplete",
-      true,
-    );
-    assert.include(correction, "Call submit_document now");
-    assert.include(correction, "do not try to complete");
-    assert.include(correction, "host finalizer owns References");
-    assert.notInclude(
-      correction,
-      "Continue the approved plan. Use task_update",
-    );
-  });
-
-  it("keeps document submission behind unfinished prerequisite tasks", function () {
-    const correction = buildPlanFinalCorrection(
-      "The deep-reading task is incomplete",
-      true,
-      false,
-    );
-    assert.include(correction, "Complete the current approved task");
-    assert.include(correction, "task_update");
-    assert.include(correction, "Once the document task becomes active");
-    assert.notInclude(correction, "Call submit_document now");
-  });
-
-  it("keeps host-advanced research corrections off task_update", function () {
-    const correction = buildPlanFinalCorrection(
-      "The deep-reading task is incomplete",
-      true,
-      false,
-      false,
-    );
-    assert.include(correction, "host advances its task state");
-    assert.include(correction, "continue with the active research tool");
-    assert.notInclude(correction, "task_update");
-    assert.notInclude(correction, "Call submit_document now");
-  });
-
-  it("renews the Plan final correction only after a successful tool step", function () {
-    assert.isTrue(
-      shouldOfferPlanFinalCorrection({
-        canCorrect: true,
-        successfulToolResultCount: 0,
-        lastCorrectionSuccessfulToolCount: -1,
-      }),
-    );
-    assert.isFalse(
-      shouldOfferPlanFinalCorrection({
-        canCorrect: true,
-        successfulToolResultCount: 0,
-        lastCorrectionSuccessfulToolCount: 0,
-      }),
-    );
-    assert.isTrue(
-      shouldOfferPlanFinalCorrection({
-        canCorrect: true,
-        successfulToolResultCount: 2,
-        lastCorrectionSuccessfulToolCount: 0,
-      }),
-    );
-  });
-
   it("canonicalizes host-owned research and document verifier placement", function () {
     const steps = canonicalizePlanVerifierOwnership({
       contract: decodePlanContract({
@@ -566,32 +432,7 @@ describe("Plan Mode research architecture v3", function () {
     );
   });
 
-  it("advertises an exact document contract and bounded host inventory updates", function () {
-    const updatePlan = createUpdatePlanTool();
-    const contractSchema = (updatePlan.spec.inputSchema as any).properties
-      .contract;
-    assert.isFalse(contractSchema.additionalProperties);
-    assert.deepEqual(
-      contractSchema.properties.deliverable.properties.kind.enum,
-      ["answer", "document", "completion_report"],
-    );
-    assert.deepEqual(
-      contractSchema.properties.deliverable.properties.spec.properties.kind
-        .enum,
-      [
-        "research_brief",
-        "literature_review",
-        "comparison",
-        "report",
-        "guide",
-        "custom",
-      ],
-    );
-    assert.equal(
-      contractSchema.properties.investigation.properties.criteria.minItems,
-      0,
-    );
-
+  it("advertises bounded host inventory updates", function () {
     const researchUpdate = createResearchUpdateTool({} as ZoteroGateway);
     assert.isTrue(researchUpdate.validate({ operation: "inventory_scope" }).ok);
     assert.isTrue(
@@ -648,12 +489,6 @@ describe("Plan Mode research architecture v3", function () {
         `the operation catalog names ${operation}`,
       );
     }
-    assert.include(
-      PLANNING_PHASE_GUIDANCE,
-      "resolve it with one bounded metadata query",
-    );
-    assert.include(PLANNING_PHASE_GUIDANCE, "omit include");
-    assert.include(PLANNING_PHASE_GUIDANCE, "never invent a paper quota");
     const paperSchema = (researchUpdate.spec.inputSchema as any).properties
       .papers.items;
     assert.deepEqual(paperSchema.required, ["libraryID", "itemKey"]);
@@ -711,90 +546,6 @@ describe("Plan Mode research architecture v3", function () {
         ],
       }).ok,
       "compound work can persist a batch through the shared transition owner",
-    );
-    assert.include(
-      taskUpdate.guidance?.instruction || "",
-      "reasoningAssertion",
-    );
-    const hostOwnedRequest = resolvedAgentRequest({
-      conversationKey: 1,
-      mode: "agent",
-      userText: "Execute the approved review",
-      model: "test-model",
-      planContext: {
-        phase: "executing",
-        planId: "plan-1",
-        revision: 1,
-        executionId: "execution-1",
-        approvedDigest: "sha256:plan",
-        provider: "original",
-      },
-      metadata: {
-        planExecutionLedger: {
-          version: 1,
-          executionId: "execution-1",
-          planId: "plan-1",
-          revision: 1,
-          planDigest: "sha256:plan",
-          conversationKey: 1,
-          attempt: 1,
-          provider: "original",
-          grant: {
-            version: 1,
-            planId: "plan-1",
-            revision: 1,
-            planDigest: "sha256:plan",
-            conversationKey: 1,
-            conversationGeneration: 1,
-            approvedAt: 1,
-          },
-          status: "running",
-          activeTaskId: "task-1",
-          tasks: [
-            {
-              version: 2,
-              taskId: "task-1",
-              executionId: "execution-1",
-              planStepId: "s1",
-              kind: "required_step",
-              content: "Read every paper",
-              activeForm: "Reading every paper",
-              acceptanceCriteria: [],
-              expectedEffect: "read",
-              completionRequirements: [
-                {
-                  requirementId: "task-1:verified",
-                  kind: "verified_read",
-                  criterionIds: [],
-                  contractDigest: "sha256:plan",
-                },
-              ],
-              obligationIds: [],
-              status: "in_progress",
-              attemptCount: 1,
-              evidenceIds: [],
-              failureReasons: [],
-              createdAt: 1,
-              updatedAt: 1,
-            },
-          ],
-          createdAt: 1,
-          updatedAt: 1,
-        },
-      },
-    });
-    assert.isFalse(
-      taskUpdate.isAvailable?.(hostOwnedRequest),
-      "host-verifiable workflows must not advertise task_update",
-    );
-    const mutationLedger = hostOwnedRequest.metadata!
-      .planExecutionLedger as any;
-    mutationLedger.tasks[0].expectedEffect = "mutation";
-    mutationLedger.tasks[0].completionRequirements[0].kind =
-      "mutation_receipts";
-    assert.isFalse(
-      taskUpdate.isAvailable?.(hostOwnedRequest),
-      "Receipt-verified mutations must also have one host task owner",
     );
     assert.match(
       (taskUpdate.spec.inputSchema as any).properties.task.properties
@@ -1620,7 +1371,7 @@ describe("Plan Mode research architecture v3", function () {
   });
 
   it("keeps quote verification host-owned and deeply decodes certificates", function () {
-    const tool = createSubmitPlanDocumentTool({} as ZoteroGateway);
+    const tool = createSubmitDocumentTool({} as ZoteroGateway);
     const required = tool.spec.inputSchema.required as string[];
     assert.include(required, "quotes");
     assert.notInclude(required, "quoteVerified");

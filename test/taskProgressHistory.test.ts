@@ -381,3 +381,132 @@ describe("task progress history rebuild of outcome ledgers", function () {
     );
   });
 });
+
+describe("task progress history rebuild of an old plan conversation", function () {
+  const KEY = 640093;
+  const step = (index: number, status: string) => ({
+    version: 2,
+    taskId: `execution-old:task-${index}`,
+    executionId: "execution-old",
+    planStepId: `step-${index}`,
+    kind: "required_step",
+    content: `Step ${index}`,
+    activeForm: `Doing step ${index}`,
+    acceptanceCriteria: [],
+    expectedEffect: "reasoning",
+    obligationIds: [],
+    status,
+    attemptCount: 1,
+    evidenceIds: [],
+    failureReasons: [],
+    createdAt: 1,
+    updatedAt: 2,
+  });
+  const artifact = {
+    version: 2,
+    planId: "plan-old",
+    revision: 1,
+    conversationKey: KEY,
+    provider: "original",
+    status: "approved",
+    explanation: "Read the papers, then compare them.",
+    steps: [
+      { id: "step-1", content: "Step 1", status: "pending" },
+      { id: "step-2", content: "Step 2", status: "pending" },
+    ],
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  const ledger = {
+    version: 2,
+    executionId: "execution-old",
+    planId: "plan-old",
+    revision: 1,
+    planDigest: "sha256:plan",
+    conversationKey: KEY,
+    attempt: 1,
+    provider: "original",
+    status: "running",
+    activeTaskId: "execution-old:task-2",
+    tasks: [step(1, "completed"), step(2, "in_progress")],
+    createdAt: 1,
+    updatedAt: 2,
+  };
+  // Stored before plan mode was removed: the types no longer name them.
+  const planEvent = (seq: number, payload: Record<string, unknown>) =>
+    record(
+      "run-plan",
+      seq,
+      payload as unknown as AgentRunEventRecord["payload"],
+    );
+  const events = [
+    planEvent(1, { type: "plan_updated", artifact }),
+    planEvent(2, { type: "plan_ready", artifact }),
+    planEvent(3, { type: "plan_execution_updated", ledger }),
+    planEvent(4, {
+      type: "plan_research_progress",
+      progress: { stage: "reading", papers: 3 },
+    }),
+    planEvent(5, {
+      type: "plan_scope_amended",
+      amendmentId: "amendment-1",
+      executionId: "execution-old",
+      mode: "safe",
+      rationale: "One more paper",
+      previousItemCount: 2,
+      newItemCount: 3,
+      authority: "user",
+    }),
+    record("run-plan", 6, {
+      type: "paper_ledger_update",
+      callId: "p1",
+      delta: ledgerDelta("p1", [[1, "read", "Read in the plan."]], "run-plan"),
+    }),
+  ];
+
+  function stored(): Message[] {
+    return [
+      { role: "user", text: "Compare the three papers", timestamp: 1 },
+      {
+        role: "assistant",
+        text: "Compared.",
+        timestamp: 2,
+        runMode: "agent",
+        agentRunId: "run-plan",
+      },
+    ];
+  }
+
+  afterEach(function () {
+    setTaskProgressHistoryLoaderForTests();
+    chatHistory.delete(KEY);
+    loadedConversationKeys.delete(KEY);
+    clearAllTaskProgress();
+  });
+
+  it("rebuilds without steps, keeps its row, and never throws on plan events", async function () {
+    const history = buildTaskProgressHistory(
+      stored(),
+      new Map([["run-plan", events]]),
+      1,
+    );
+    assert.deepEqual(
+      history.runs.map((run) => [run.runId, run.turn, run.deltas.length]),
+      [["run-plan", 1, 1]],
+    );
+    assert.isTrue(history.planSeen, "a plan that ran keeps the row");
+    assert.isNull(history.checklist, "a plan is no Task progress steps source");
+
+    setTaskProgressHistoryLoaderForTests(async () => events);
+    chatHistory.set(KEY, stored());
+    loadedConversationKeys.add(KEY);
+    ensureTaskProgressHydrated(KEY, 1);
+    await waitForTaskProgressHydrationForTests(KEY);
+    const rebuilt = getTaskProgress(KEY)!;
+    assert.isTrue(rebuilt.hydrated, "the rebuild ran to the end");
+    assert.equal(rebuilt.runState, "completed");
+    assert.equal(rebuilt.ledger.papers["1:1"].state, "read");
+    assert.isNull(rebuilt.checklist);
+    assert.isTrue(rebuilt.planSeen);
+  });
+});

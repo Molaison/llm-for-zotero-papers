@@ -1,6 +1,5 @@
 {
   "visible": [
-    "amend_plan",
     "annotate_pdf",
     "approve_research_expansion",
     "approve_research_mutation",
@@ -20,7 +19,6 @@
     "note_write",
     "note_write_batch",
     "paper_read",
-    "prepare_plan_execution",
     "read_attachment",
     "request_user_input",
     "research_update",
@@ -28,9 +26,8 @@
     "submit_document",
     "task_update",
     "undo",
-    "update_plan",
     "zotero_script"
   ],
-  "internal": ["submit_plan_document"],
-  "specBytes": 50025
+  "internal": [],
+  "specBytes": 35141
 }

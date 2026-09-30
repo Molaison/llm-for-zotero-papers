@@ -8,11 +8,11 @@
  */
 
 import { DatabaseSync } from "node:sqlite";
-import { initAgentPlanStore } from "../../src/agent/plans/store";
 import type {
   ExecutionTask,
   PlanExecutionLedger,
 } from "../../src/agent/plans/types";
+import { initDormantPlanTables } from "../../src/agent/store/dormantPlanTables";
 
 const STEPS = [
   "Read the selected paper",
@@ -136,7 +136,7 @@ export async function installPlanStoreZotero(
       },
     },
   } as unknown as typeof Zotero;
-  await initAgentPlanStore();
+  await initDormantPlanTables();
   return () => {
     db.close();
     globalScope.Zotero = previousZotero;

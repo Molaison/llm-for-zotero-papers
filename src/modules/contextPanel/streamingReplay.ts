@@ -10,7 +10,6 @@ import {
   chatHistory,
   tryBeginRequest,
   nextRequestId,
-  recordLivePlanExecution,
   finishRequest,
   initializedConversationComposeContextKeys,
   selectedCollectionContextCache,
@@ -22,18 +21,21 @@ import { getConversationWriteGeneration } from "../../shared/conversationWriteFe
 import { createBlockStreamCoalescer } from "./blockStreamCoalescer";
 import { persistChatScrollSnapshotForConversationKey } from "./chatScrollSnapshots";
 import type { AgentEvent, AgentRunEventRecord } from "../../agent/types";
-import type { PlanExecutionLedger } from "../../agent/plans/types";
+import type {
+  ExecutionCheckpoint,
+  ExecutionCheckpointTask,
+} from "../../agent/execution/types";
 import type { Message } from "./types";
 import {
   beginTaskRun,
   clearTaskProgress,
   getTaskProgress,
+  setTaskOutcomes,
 } from "./taskProgress/store";
 import { flushTaskProgressPanels } from "./taskProgress/panel";
 
-/** Anything a plan card could once be operated with: Resume, approve, revise. */
-const PLAN_CONTROL_SELECTOR =
-  ".llm-plan-recovery-card, .llm-plan-container:not(.llm-plan-document-card) button, .llm-plan-container:not(.llm-plan-document-card) textarea";
+/** The run events Task progress rebuilds from; streaming text reads none. */
+const RUN_EVENTS_TABLE = "llm_for_zotero_agent_run_events";
 
 export type StreamingReplayResult = {
   historyTurns: number;
@@ -56,6 +58,7 @@ export type StreamingReplayResult = {
   streamingQuoteMarkersAbsent: boolean;
   refreshedQuoteVisible: boolean;
   refreshedQuoteMarkersAbsent: boolean;
+  /** Task progress history reads while only text streams. */
   ledgerReadsDuringText: number;
   geometryReadsDuringText: number;
   renderMs: number[];
@@ -65,20 +68,9 @@ export type StreamingReplayResult = {
   inputFrameMs: number[];
   typingFrameMs: number[];
   composerPreserved: boolean;
-  /** No Resume or other plan control appears, not even for an interrupted plan. */
-  noPlanControls: boolean;
-  singleExecutionProgress: boolean;
-  completedProgressNodes: number;
-  reopenedProgressNodes: number;
-  pausedProgressNodes: number[];
-  resumeStartsProgress: boolean;
-  inactiveProgressReads: number;
-  /** Steps block shown in the Task progress drawer while the plan runs. */
+  /** Steps block shown in the Task progress drawer while the run works. */
   stepsVisibleWhileRunning: boolean;
-  /** The Task progress row after the plan completed and the answer landed. */
-  rowVisibleAfterCompletion: boolean;
-  rowStateAfterCompletion: string;
-  /** Floating plan capsules seen anywhere in the document, ever. */
+  /** Floating progress capsules seen anywhere in the document, ever. */
   floatingCapsuleNodes: number;
 };
 
@@ -134,52 +126,33 @@ export async function exerciseStreamingReplay(
   };
   history.push(user, message);
   chatHistory.set(key, history);
-  const ledger = {
+  const outcome = (
+    local: string,
+    description: string,
+    status: ExecutionCheckpointTask["status"],
+  ): ExecutionCheckpointTask => ({
+    taskId: `${runId}:task:${local}`,
+    description,
+    dependencies: [],
+    status,
+    journalActionIds: [],
+    verifiedReceiptIds: [],
+    readEvidenceIds: [],
+    materialRefs: [],
+    createdAt: 1,
+    updatedAt: 1,
+    effect: "read",
+    origin: "model",
+  });
+  const checkpoint: ExecutionCheckpoint = {
     version: 1,
     executionId: runId,
-    planId: runId,
-    revision: 1,
     conversationKey: key,
-    planDigest: "fixture",
-    attempt: 1,
-    provider: "original",
-    status: "running",
-    grant: {
-      version: 1,
-      planId: runId,
-      revision: 1,
-      planDigest: "fixture",
-      conversationKey: key,
-      conversationGeneration: 0,
-      authority: "user",
-      approvedAt: 1,
-    },
-    activeTaskId: "read",
+    conversationGeneration: getConversationWriteGeneration(key),
+    tasks: [outcome("read", "Read the corpus", "in_progress")],
     createdAt: 1,
-    startedAt: 1,
     updatedAt: 1,
-    evidence: [],
-    tasks: [
-      {
-        version: 1,
-        taskId: "read",
-        planStepId: "read",
-        executionId: runId,
-        kind: "required_step",
-        content: "Read the corpus",
-        activeForm: "Reading the corpus",
-        acceptanceCriteria: [],
-        expectedEffect: "read",
-        obligationIds: [],
-        status: "in_progress",
-        attemptCount: 1,
-        evidenceIds: [],
-        failureReasons: [],
-        createdAt: 1,
-        updatedAt: 1,
-      },
-    ],
-  } as PlanExecutionLedger;
+  };
   const records: AgentRunEventRecord[] = [];
   const push = (_runId: string, event: AgentEvent) =>
     records.push({
@@ -189,7 +162,7 @@ export async function exerciseStreamingReplay(
       payload: event,
       createdAt: Date.now(),
     });
-  push(runId, { type: "plan_execution_updated", ledger });
+  push(runId, { type: "execution_checkpoint", checkpoint });
   // Recorded command evidence exercises the outcome card without running a command.
   push(runId, {
     type: "tool_result",
@@ -239,9 +212,10 @@ export async function exerciseStreamingReplay(
   const requestId = nextRequestId();
   if (!tryBeginRequest(key, requestId, null))
     throw new Error("Fixture request is already busy");
-  recordLivePlanExecution(key, requestId, runId, ledger);
-  // What the runtime's onStart does: the run is working from here on.
+  // What the runtime's onStart does: the run is working from here on, and
+  // its declared parts are its steps.
   beginTaskRun(key, { runId, turnIndex: input.historyTurns + 1 });
+  setTaskOutcomes(key, runId, checkpoint);
   refreshConversationPanels(body, item);
   await Zotero.Promise.delay(100);
   // The scope listing resolves asynchronously from the library index; let it
@@ -258,7 +232,7 @@ export async function exerciseStreamingReplay(
     box.querySelector<HTMLElement>(
       `.llm-message-wrapper[data-message-timestamp="${message.timestamp}"]`,
     )!;
-  // Plan steps render only in the Task progress drawer; no capsule, ever.
+  // Steps render only in the Task progress drawer; no capsule, ever.
   const countFloating = () =>
     doc.querySelectorAll(
       ".llm-plan-progress-floating, .llm-plan-container-execution",
@@ -326,16 +300,7 @@ export async function exerciseStreamingReplay(
     inputFrameMs: [],
     typingFrameMs: [],
     composerPreserved: false,
-    singleExecutionProgress: false,
-    completedProgressNodes: -1,
-    reopenedProgressNodes: -1,
-    pausedProgressNodes: [],
-    resumeStartsProgress: true,
-    inactiveProgressReads: 0,
-    noPlanControls: !box.querySelector(PLAN_CONTROL_SELECTOR),
     stepsVisibleWhileRunning,
-    rowVisibleAfterCompletion: false,
-    rowStateAfterCompletion: "",
     floatingCapsuleNodes: 0,
   };
   // Text chunks must do no Task progress work: neither the row nor the
@@ -353,8 +318,7 @@ export async function exerciseStreamingReplay(
   }
   const query = Zotero.DB.queryAsync;
   Zotero.DB.queryAsync = async function (sql: string, ...args: unknown[]) {
-    if (sql.includes("llm_for_zotero_plan_executions"))
-      result.ledgerReadsDuringText++;
+    if (sql.includes(RUN_EVENTS_TABLE)) result.ledgerReadsDuringText++;
     return (query as Function).call(Zotero.DB, sql, ...args);
   } as typeof query;
   const measured = Array.from(
@@ -478,16 +442,15 @@ export async function exerciseStreamingReplay(
     const task = progress?.querySelector(
       ".llm-plan-task-list",
     )?.firstElementChild;
-    const changed = {
-      ...ledger,
+    const changed: ExecutionCheckpoint = {
+      ...checkpoint,
       updatedAt: 2,
-      tasks: ledger.tasks.map((task) => ({
-        ...task,
-        activeForm: "Checking corpus coverage",
-        updatedAt: 2,
-      })),
+      tasks: [
+        ...checkpoint.tasks,
+        outcome("coverage", "Checking corpus coverage", "pending"),
+      ],
     };
-    await handle({ type: "plan_execution_updated", ledger: changed });
+    await handle({ type: "execution_checkpoint", checkpoint: changed });
     stepsShown();
     result.progressUpdatePreserved =
       Boolean(progress) &&
@@ -540,29 +503,6 @@ export async function exerciseStreamingReplay(
     result.statusVisible = Boolean(
       ui.status?.textContent?.includes("Streaming replay status"),
     );
-    let nextUpdate = 3;
-    for (const status of [
-      "waiting_for_user",
-      "blocked",
-      "interrupted",
-    ] as const) {
-      await handle({
-        type: "plan_execution_updated",
-        ledger: { ...changed, status, updatedAt: nextUpdate++ },
-      });
-      result.pausedProgressNodes.push(stepsShown() ? 1 : 0);
-      await handle({
-        type: "plan_execution_updated",
-        ledger: { ...changed, status: "running", updatedAt: nextUpdate++ },
-      });
-      result.resumeStartsProgress &&= stepsShown();
-    }
-    await handle({
-      type: "plan_execution_updated",
-      ledger: { ...changed, status: "interrupted", updatedAt: nextUpdate++ },
-    });
-    result.noPlanControls &&=
-      !stepsShown() && !box.querySelector(PLAN_CONTROL_SELECTOR);
     const quote =
       "The source quotation remains readable while the answer is still arriving.";
     const answer = `Final replay answer with **evidence**.\n\n> ${quote}\n>\n> (Workflow, 2026)\n\nThe explanation continues.`;
@@ -613,58 +553,6 @@ export async function exerciseStreamingReplay(
     result.finalAnswerVisible = Boolean(
       box.textContent?.includes("Final replay answer with evidence."),
     );
-    // Older and resumed turns can share an execution ID. Restoring these
-    // interrupted history entries must not recreate live progress.
-    const resumedRunId = `${runId}-resumed`;
-    agentRunTraceCache.set(resumedRunId, [
-      {
-        ...records[0],
-        runId: resumedRunId,
-        payload: {
-          type: "plan_execution_updated",
-          ledger: { ...changed, status: "interrupted", updatedAt: 4 },
-        },
-      },
-    ]);
-    history.push(
-      { ...user, text: "Approved plan", timestamp: user.timestamp + 2 },
-      {
-        ...message,
-        text: "[Cancelled]",
-        agentRunId: resumedRunId,
-        streaming: false,
-        timestamp: user.timestamp + 3,
-      },
-    );
-    refreshConversationPanels(body, item);
-    result.singleExecutionProgress = !stepsShown() && countFloating() === 0;
-    agentRunTraceCache.delete(resumedRunId);
-    history.splice(-2);
-    await handle({
-      type: "plan_execution_updated",
-      ledger: { ...changed, status: "completed", updatedAt: nextUpdate++ },
-    });
-    result.completedProgressNodes = stepsShown() ? 1 : 0;
-    finishRequest(key, requestId);
-    // A stale restored streaming flag and running snapshot are never live authority.
-    message.streaming = true;
-    agentRunTraceCache.set(runId, [
-      { ...records[0], payload: { type: "plan_execution_updated", ledger } },
-    ]);
-    Zotero.DB.queryAsync = async function (sql: string, ...args: unknown[]) {
-      if (
-        /SELECT.*|FROM/s.test(sql) &&
-        sql.includes("llm_for_zotero_plan_executions")
-      )
-        result.inactiveProgressReads++;
-      return (query as Function).call(Zotero.DB, sql, ...args);
-    } as typeof query;
-    refreshConversationPanels(body, item);
-    await Zotero.Promise.delay(100);
-    result.reopenedProgressNodes = stepsShown() ? 1 : 0;
-    // The row outlives the plan and shows the run completed.
-    result.rowVisibleAfterCompletion = !trigger.hidden && trigger.isConnected;
-    result.rowStateAfterCompletion = trigger.dataset.state || "";
     result.floatingCapsuleNodes = floatingCapsuleNodes + countFloating();
     return result;
   } finally {
@@ -700,8 +588,8 @@ function buildChatReplayChunk(n: number): string {
 /**
  * Ordinary Chat streaming, driven exactly the way streamingResponse.ts drives
  * it: append the delta to the message, then refresh that one assistant
- * message. Agent-only instrumentation (plan progress, trace focus, ledger
- * reads) has no counterpart here and is reported as clean.
+ * message. Agent-only instrumentation (Task progress steps, trace focus,
+ * history reads) has no counterpart here and is reported as clean.
  */
 async function exerciseChatStreamingReplay(
   panel: { body: HTMLElement; item: Zotero.Item },
@@ -777,16 +665,7 @@ async function exerciseChatStreamingReplay(
     inputFrameMs: [],
     typingFrameMs: [],
     composerPreserved: false,
-    noPlanControls: true,
-    singleExecutionProgress: true,
-    completedProgressNodes: 0,
-    reopenedProgressNodes: 0,
-    pausedProgressNodes: [],
-    resumeStartsProgress: true,
-    inactiveProgressReads: 0,
     stepsVisibleWhileRunning: true,
-    rowVisibleAfterCompletion: true,
-    rowStateAfterCompletion: "completed",
     floatingCapsuleNodes: 0,
   };
   const deps = buildAgentEngineDepsForTests(

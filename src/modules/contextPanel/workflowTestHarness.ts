@@ -199,7 +199,6 @@ import {
   loadLatestPlanDocumentForExecution,
   loadPlanDocumentOutbox,
 } from "../../agent/documents/store";
-import { planExecutionCoordinator } from "../../agent/plans/coordinator";
 import {
   loadPlanArtifact,
   loadPlanExecutionLedger,
@@ -1751,31 +1750,6 @@ async function exerciseDuplicatePanelSetup(
     turnNavigatorCountBefore,
     turnNavigatorCountAfter: panel.body.querySelectorAll(".llm-turn-navigator")
       .length,
-  };
-}
-
-async function approvePlanForExecution(input: {
-  planId: string;
-  revision: number;
-  expectedDigest?: string;
-}) {
-  assertWorkflowTestEnabled();
-  const artifact = await loadPlanArtifact(input.planId, input.revision);
-  if (!artifact) throw new Error("Plan revision not found");
-  const ledger = await planExecutionCoordinator.approve({
-    planId: input.planId,
-    revision: input.revision,
-    expectedDigest: input.expectedDigest || artifact.digest,
-    conversationGeneration: getConversationWriteGeneration(
-      artifact.conversationKey,
-    ),
-    actionContract: artifact.actionContract,
-  });
-  return {
-    executionId: ledger.executionId,
-    planDigest: ledger.planDigest,
-    activeTaskId: ledger.activeTaskId,
-    provider: ledger.provider,
   };
 }
 
@@ -5868,7 +5842,6 @@ export function installWorkflowTestHarness(targetAddon: {
     startNewPanelConversation,
     togglePanelConversationMode,
     exerciseDuplicatePanelSetup,
-    approvePlanForExecution,
     researchFlightReport,
     exercisePanelDraftStateRefresh,
     selectPanelModelEntry,

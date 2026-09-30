@@ -5,10 +5,7 @@ import {
   nativeQuestionAnswers,
 } from "../../codexAppServer/nativeQuestions";
 import { createCoalescedFrameScheduler } from "./setupHandlers/controllers/uiSchedulingController";
-import {
-  syncTaskProgressPanel,
-  syncTaskProgressPlan,
-} from "./taskProgress/panel";
+import { syncTaskProgressPanel } from "./taskProgress/panel";
 import {
   applyTaskPaperUpdate,
   beginTaskRun,
@@ -258,8 +255,6 @@ import {
   activeContextPanelStateSync,
   getCancelledRequestId,
   getPendingRequestId,
-  getLivePlanExecution,
-  recordLivePlanExecution,
   getAbortController,
   getConversationWriteGeneration,
   isConversationWriteGenerationCurrent,
@@ -381,9 +376,7 @@ import {
   validateLoadedConversationQuoteMessages,
 } from "./quoteValidation/scheduling";
 import { applyStableAnimationPhase } from "./stableAnimationPhase";
-import type { AgentActionContract } from "../../agent/contracts/types";
 import { stripReceiptStatusForDisplay } from "../../agent/contracts/actionEvaluation";
-import { planExecutionCoordinator } from "../../agent/plans/coordinator";
 import { renderRenderedMarkdownInto } from "./renderedMarkdown";
 import { disposeStreamingMarkdown } from "./streamingMarkdown";
 import { getWebSourceAnchorsFromTrace } from "../../webAccess/attribution";
@@ -1752,11 +1745,9 @@ async function publishPersistedPlanDocumentIfPresent(params: {
   });
   if (!document) return;
   await announceFinalizedMaterialForRun(params.agentRunId, document);
-  // Delivery may complete the final durable Plan task, and it is also what
-  // announces the finalized material. Refresh this conversation's views once
-  // both are durable, so progress cards reload the committed ledger and the
-  // trace paints the material row, without rebuilding unrelated chats that
-  // the user may be reading.
+  // Delivery is what announces the finalized material. Refresh this
+  // conversation's views once it is durable, so the trace paints the material
+  // row, without rebuilding unrelated chats that the user may be reading.
   refreshActiveConversationPanels(params.conversationKey);
 }
 
@@ -3371,8 +3362,6 @@ function syncRequestUIForConversation(
     primaryBody,
     primaryItem,
     (body) => {
-      // Plan steps render only in the Task progress drawer.
-      syncTaskProgressPlan(conversationKey);
       activeContextPanelStateSync.get(body)?.();
     },
   );
@@ -3674,9 +3663,6 @@ type CodexNativeTurnCallbacks = Pick<
   | "onItemStarted"
   | "onItemCompleted"
   | "onPlanUpdated"
-  | "onPlanDelta"
-  | "onPlanArtifact"
-  | "onPlanExecutionUpdated"
   | "onMcpToolActivity"
   | "onHostEvent"
   | "onMcpSetupWarning"
@@ -3706,8 +3692,6 @@ function buildCodexNativeTurnCallbacks(ctx: {
   handleUsage: (usage: UsageStats) => void;
   conversationKey: number;
   conversationGeneration: number;
-  planContext?: import("../../agent/plans/types").PlanRuntimeContext;
-  actionContract?: AgentActionContract;
   classifiedIntent?: import("../../agent/types").ClassifiedTurnIntent;
   skillRoutingReceipt?: import("../../agent/types").AgentRuntimeRequest["skillRoutingReceipt"];
   actionPreparation?: import("../../agent/contracts/actionPreparation").ActionPreparation;
@@ -3722,7 +3706,6 @@ function buildCodexNativeTurnCallbacks(ctx: {
     handleReasoning,
     handleUsage,
   } = ctx;
-  const executionRequestId = getPendingRequestId(ctx.conversationKey);
   const isLive = () =>
     !areConversationWritesFrozen(ctx.conversationKey) &&
     isConversationWriteGenerationCurrent(
@@ -3743,15 +3726,6 @@ function buildCodexNativeTurnCallbacks(ctx: {
   }
   const noteAnswering = () =>
     markTaskAnswering(ctx.conversationKey, assistantMessage.agentRunId);
-  if (ctx.planContext)
-    codexActivityTrace?.appendPlanEvent({
-      type: "provider_event",
-      providerType: "codex_plan_context",
-      payload: {
-        planContext: ctx.planContext,
-        actionContract: ctx.actionContract,
-      },
-    });
   return {
     eventJournal: createAgentRunEventJournal({
       conversationKey: ctx.conversationKey,
@@ -3801,20 +3775,6 @@ function buildCodexNativeTurnCallbacks(ctx: {
         setStatusSafely(`Codex: ${itemType} completed`, "sending");
       }
     },
-    onPlanDelta: (event) => {
-      if (isLive()) handleDelta(event.delta);
-    },
-    onPlanArtifact: (artifact) => {
-      if (!isLive()) return;
-      flushResponseStream("event");
-      codexActivityTrace?.appendPlanEvent({
-        type:
-          artifact.status === "awaiting_approval"
-            ? "plan_ready"
-            : "plan_updated",
-        artifact,
-      });
-    },
     onPlanUpdated: (event) => {
       if (!isLive()) return;
       // Codex's plan is the run's steps in Task progress; the trace keeps it
@@ -3828,25 +3788,10 @@ function buildCodexNativeTurnCallbacks(ctx: {
         });
       }
     },
-    onPlanExecutionUpdated: (ledger) => {
-      if (!isLive()) return;
-      if (assistantMessage.agentRunId)
-        recordLivePlanExecution(
-          ctx.conversationKey,
-          executionRequestId,
-          assistantMessage.agentRunId,
-          ledger,
-        );
-      flushResponseStream("event");
-      codexActivityTrace?.appendPlanEvent({
-        type: "plan_execution_updated",
-        ledger,
-      });
-    },
     onHostEvent: (event) => {
       if (!isLive()) return;
       flushResponseStream("event");
-      codexActivityTrace?.appendPlanEvent(event);
+      codexActivityTrace?.appendHostEvent(event);
     },
     onMcpToolActivity: (event) => {
       if (!isLive()) return;
@@ -3864,38 +3809,6 @@ function buildCodexNativeTurnCallbacks(ctx: {
         assistantMessage.quoteCitations,
         event.quoteCitations,
       );
-      if (event.phase === "completed" && event.ok) {
-        void (async () => {
-          // The row says which research job it advanced; the panel never asks
-          // which tool ran.
-          if (event.researchJobId && ctx.planContext?.phase === "executing") {
-            const { loadResearchJobForExecution } =
-              await import("../../agent/research/store");
-            const job = await loadResearchJobForExecution(
-              ctx.planContext.executionId,
-            );
-            if (job) {
-              codexActivityTrace?.appendPlanEvent({
-                type: "plan_research_progress",
-                progress: {
-                  researchJobId: job.researchJobId,
-                  executionId: job.executionId,
-                  parentTaskId: job.parentTaskId,
-                  stage: job.activeStage,
-                  totalItems: job.totalItems,
-                  screenedItems: job.screenedItems,
-                  candidateItems: job.candidateItems,
-                  deepReadCompleted: job.deepReadCompleted,
-                  deepReadPlanned: job.deepReadPlanned,
-                  coverageStatus: job.coverageStatus,
-                },
-              });
-            }
-          }
-        })().catch((error) =>
-          appLogger.warn("LLM: Failed to synchronize MCP plan state", error),
-        );
-      }
       const label =
         sanitizeText(event.toolLabel || "").trim() ||
         sanitizeText(event.toolName || "")
@@ -3955,63 +3868,6 @@ function buildCodexNativeTurnCallbacks(ctx: {
 
 export const buildCodexNativeTurnCallbacksForTests =
   buildCodexNativeTurnCallbacks;
-
-async function finalizeCodexPlanExecution(params: {
-  planContext?: import("../../agent/plans/types").PlanRuntimeContext;
-  answer: string;
-  assistantMessage: Message;
-  trace: ReturnType<typeof createCodexNativeActivityTraceController> | null;
-}): Promise<void> {
-  if (params.planContext?.phase !== "executing") return;
-  const { loadLatestPlanDocumentForExecution } =
-    await import("../../agent/documents/store");
-  const document = await loadLatestPlanDocumentForExecution(
-    params.planContext.executionId,
-  );
-  if (document) {
-    params.assistantMessage.text = document.visibleMarkdown;
-    params.assistantMessage.documentId = document.documentId;
-    params.assistantMessage.planDocumentId = document.documentId;
-    return;
-  }
-  const { loadPlanExecutionLedger } = await import("../../agent/plans/store");
-  let ledger = await loadPlanExecutionLedger(params.planContext.executionId);
-  const active = ledger?.tasks.find(
-    (task) => task.taskId === ledger?.activeTaskId,
-  );
-  const otherRequiredComplete = ledger?.tasks
-    .filter(
-      (task) => task.kind === "required_step" && task.taskId !== active?.taskId,
-    )
-    .every((task) => task.status === "completed" || task.status === "skipped");
-  if (active?.expectedEffect === "reasoning" && otherRequiredComplete) {
-    ledger = await planExecutionCoordinator.attachEvidence({
-      version: 1,
-      evidenceId: `${ledger!.executionId}:${active.taskId}:reasoning:codex-final`,
-      executionId: ledger!.executionId,
-      taskId: active.taskId,
-      kind: "reasoning_assertion",
-      verified: true,
-      summary: sanitizeText(params.answer).slice(0, 2000),
-      reference: `codex:${params.assistantMessage.agentRunId || params.assistantMessage.timestamp}:final`,
-      createdAt: Date.now(),
-    });
-    ledger = await planExecutionCoordinator.requestTransition({
-      executionId: ledger.executionId,
-      taskId: active.taskId,
-      toStatus: "completed",
-      requestedBy: "codex",
-      reason: "Bounded final reasoning assertion",
-    });
-    params.trace?.appendPlanEvent({
-      type: "plan_execution_updated",
-      ledger,
-    });
-  }
-  await planExecutionCoordinator.assertCanFinalize(
-    params.planContext.executionId,
-  );
-}
 
 function createPanelUpdateHelpers(
   body: Element,
@@ -7806,7 +7662,6 @@ export type BuildAgentRuntimeRequestParams = {
   forcedSkillIds?: string[];
   effectiveRequestConfig: EffectiveRequestConfig;
   history: ChatMessage[];
-  planContext?: import("../../agent/plans/types").PlanRuntimeContext;
 };
 
 function buildActiveNoteRuntimeContext(
@@ -8160,39 +8015,11 @@ async function buildAgentRuntimeRequest(
     // is temporarily unavailable.
   }
   const conversationInstanceID = registeredConversation?.instanceID;
-  const executingPlan =
-    params.planContext?.phase === "executing"
-      ? await import("../../agent/plans/store").then(async (store) => {
-          const ledger = await store.loadPlanExecutionLedger(
-            params.planContext?.phase === "executing"
-              ? params.planContext.executionId
-              : "",
-          );
-          const artifact = ledger
-            ? await store.loadPlanArtifact(ledger.planId, ledger.revision)
-            : null;
-          if (!ledger || !artifact || artifact.digest !== ledger.planDigest) {
-            throw new Error("The approved plan grant could not be verified");
-          }
-          return { ledger, artifact };
-        })
-      : null;
-  const priorPlanArtifact =
-    params.planContext?.phase === "planning" && params.planContext.revision > 1
-      ? await import("../../agent/plans/store").then((store) =>
-          store.loadPlanArtifact(
-            params.planContext!.planId,
-            params.planContext!.revision - 1,
-          ),
-        )
-      : null;
   return {
     conversationKey: params.conversationKey,
     conversationGeneration: params.conversationGeneration,
     mode: "agent",
     userText: params.userText,
-    planContext: params.planContext,
-    actionContract: executingPlan?.artifact.actionContract,
     conversationKind,
     activeItemId: activeNoteSession?.noteId || baseItem?.id,
     activePaperContext: activePaperContext
@@ -8268,9 +8095,6 @@ async function buildAgentRuntimeRequest(
       claudeHistoryLength: params.history.length,
       notesDirectoryConfig: getNotesDirectoryConfig() || undefined,
       conversationInstanceID,
-      planExecutionLedger: executingPlan?.ledger,
-      approvedPlanContract: executingPlan?.artifact.contract,
-      priorPlanArtifact,
     },
   };
 }
@@ -8627,7 +8451,6 @@ async function sendAgentQuestion(opts: {
   forcedSkillIds?: string[];
   pdfUploadSystemMessages?: string[];
   conversationSystem?: ConversationSystem;
-  planContext?: import("../../agent/plans/types").PlanRuntimeContext;
 }): Promise<void> {
   const ownershipLease = capturePanelOperationLease(opts.body);
   const isOwnershipCurrent = (operation: string) =>
@@ -8846,7 +8669,6 @@ export async function sendQuestion(
         forcedSkillIds: opts.forcedSkillIds,
         pdfUploadSystemMessages: opts.pdfUploadSystemMessages,
         conversationSystem: effectiveConversationSystem,
-        planContext: opts.planContext,
         requestId: thisRequestId,
         onProviderDispatch: opts.onProviderDispatch,
       });
@@ -9830,7 +9652,6 @@ export async function sendQuestion(
             localDocuments,
             screenshots: allSendImages,
             forcedSkillIds: opts.forcedSkillIds,
-            planContext: opts.planContext,
             effectiveRequestConfig,
             history: llmHistory,
           });
@@ -9840,7 +9661,6 @@ export async function sendQuestion(
           });
         })
       : undefined;
-    const codexPlanActionContract = codexExecutionRequest?.actionContract;
     if (await stopInactiveRequest()) return;
     if (
       !notifyProviderDispatch(
@@ -9899,8 +9719,6 @@ export async function sendQuestion(
               handleUsage,
               conversationKey,
               conversationGeneration,
-              planContext: opts.planContext,
-              actionContract: codexPlanActionContract,
               classifiedIntent: codexExecutionRequest?.classifiedIntent,
               skillRoutingReceipt: codexExecutionRequest?.skillRoutingReceipt,
               actionPreparation: codexExecutionRequest?.actionPreparation,
@@ -9911,10 +9729,7 @@ export async function sendQuestion(
             assistantMessage.documentId = result.documentId;
           }
           return {
-            text:
-              opts.planContext?.phase === "planning"
-                ? "The plan is ready for review."
-                : result.text,
+            text: result.text,
             completion: { status: "complete" as const },
           };
         })()
@@ -9927,15 +9742,6 @@ export async function sendQuestion(
           onReasoning: handleReasoning,
           onUsage: handleUsage,
         });
-    if (isCodexNativeTurn) {
-      await finalizeCodexPlanExecution({
-        planContext: opts.planContext,
-        answer: modelOutcome.text,
-        assistantMessage,
-        trace: codexActivityTrace,
-      });
-    }
-
     if (
       getCancelledRequestId(conversationKey) >= thisRequestId ||
       Boolean(getAbortController(conversationKey)?.signal.aborted)
@@ -10335,7 +10141,6 @@ function updateMountedAssistantViews(
     )
       return false;
   }
-  let hasAgentTrace = false;
   for (const message of messages) {
     const view = views.get(message)!;
     const events = message.agentRunId
@@ -10343,7 +10148,6 @@ function updateMountedAssistantViews(
       : message.pendingAgentTraceEvents || [];
     let interleaved = false;
     if (view.trace) {
-      hasAgentTrace = true;
       const trace = renderAgentTrace({
         doc: box.ownerDocument,
         panelItem: item,
@@ -10400,7 +10204,6 @@ function updateMountedAssistantViews(
     }
     if (view.answer) view.answer.hidden = interleaved;
   }
-  if (hasAgentTrace) syncTaskProgressPlan(getConversationKey(item));
   scheduleChatScrollReconciliation(getConversationKey(item), box);
   return true;
 }
@@ -12105,7 +11908,6 @@ export function refreshChat(
     }
   }
 
-  syncTaskProgressPlan(conversationKey);
   syncTaskProgressPanel(body);
   syncUserContextAlignmentWidths(body);
   syncConversationTurnNavigator(body, history, {

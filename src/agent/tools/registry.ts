@@ -2,7 +2,6 @@ import { defaultInvocationPlan } from "../authorization/invocationPlan";
 import { RETIRED_TOOL_HINTS } from "../context/toolNames";
 import type { ActionContractService } from "../contracts/actionContract";
 import { operationCatalogEntry } from "../contracts/operationCatalog";
-import type { PlanAmendmentService } from "../plans/amendments";
 import {
   isMalformedToolArgumentsDiagnostic,
   isMalformedToolName,
@@ -153,13 +152,8 @@ const MODEL_TOOL_DESCRIPTIONS: Readonly<Record<string, string>> = {
     "Ask up to three questions when required input cannot be found.",
   submit_document:
     "Persist validated Markdown and evidence as a versioned material reference.",
-  update_plan: "Create or revise a read-only explicit Plan artifact.",
-  prepare_plan_execution:
-    "Stage the exact execution contract and required steps for native Plan review. The user remains the sole authority for the later run.",
   research_update:
     "Persist verified research claims, relationships, work, and evidence.",
-  amend_plan:
-    "Propose an explicit change to approved Plan scope for renewed review.",
   approve_research_expansion: "Review a bounded research-scope expansion.",
   approve_research_mutation:
     "Review exact effects derived during approved research.",
@@ -180,10 +174,7 @@ function modelToolSpec(spec: ToolSpec): ToolSpec {
 export class AgentToolRegistry {
   private readonly tools = new Map<string, AgentToolDefinition<any, any>>();
 
-  constructor(
-    private readonly actionContracts?: ActionContractService,
-    private readonly planAmendments?: PlanAmendmentService,
-  ) {}
+  constructor(private readonly actionContracts?: ActionContractService) {}
 
   async createActionContract(
     request: AgentRuntimeRequest,
@@ -400,7 +391,6 @@ export class AgentToolRegistry {
       context,
       options,
       this.actionContracts,
-      this.planAmendments,
     ).prepare(validation.value);
   }
 }

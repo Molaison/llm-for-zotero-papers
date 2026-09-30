@@ -6,13 +6,8 @@ import {
   composeAgentModelInput,
   renderAgentPromptEnvelope,
 } from "../src/agent/model/messageBuilder";
-import type {
-  PlanExecutionLedger,
-  PlanRuntimeContext,
-} from "../src/agent/plans/types";
 import { buildZoteroEnvironmentManifest } from "../src/codexAppServer/nativeClient";
 import { AGENT_ACTION_CONTRACT } from "../src/shared/instructionContracts";
-import { COVERAGE_DISCLOSURE_REQUIREMENT } from "../src/agent/documents/draftValidation";
 import type { AgentModelMessage } from "../src/agent/types";
 import { resolvedAgentRequest } from "./helpers/resolvedAgentRequest";
 import {
@@ -287,318 +282,6 @@ describe("agent prompt envelope", function () {
       );
     });
   });
-
-  it("tells the model that host-verifiable research and document tasks advance without task_update", async function () {
-    const ledger: PlanExecutionLedger = {
-      version: 1,
-      executionId: "execution-host-owned",
-      planId: "plan-host-owned",
-      revision: 1,
-      planDigest: "sha256:host-owned",
-      conversationKey: 705,
-      attempt: 1,
-      provider: "original",
-      grant: {
-        version: 1,
-        planId: "plan-host-owned",
-        revision: 1,
-        planDigest: "sha256:host-owned",
-        conversationKey: 705,
-        conversationGeneration: 1,
-        approvedAt: 1,
-      },
-      status: "running",
-      activeTaskId: "read",
-      tasks: [
-        {
-          version: 2,
-          taskId: "read",
-          executionId: "execution-host-owned",
-          planStepId: "s1",
-          kind: "required_step",
-          content: "Read every paper",
-          activeForm: "Reading every paper",
-          acceptanceCriteria: [],
-          expectedEffect: "read",
-          completionRequirements: [
-            {
-              requirementId: "read:verified",
-              kind: "verified_read",
-              criterionIds: [],
-              contractDigest: "sha256:host-owned",
-            },
-          ],
-          obligationIds: [],
-          status: "in_progress",
-          attemptCount: 1,
-          evidenceIds: [],
-          failureReasons: [],
-          createdAt: 1,
-          updatedAt: 1,
-        },
-        {
-          version: 2,
-          taskId: "document",
-          executionId: "execution-host-owned",
-          planStepId: "s2",
-          kind: "required_step",
-          content: "Publish the review",
-          activeForm: "Publishing the review",
-          acceptanceCriteria: [],
-          expectedEffect: "artifact",
-          completionRequirements: [
-            {
-              requirementId: "document:integrity",
-              kind: "document_integrity",
-              criterionIds: [],
-              contractDigest: "sha256:host-owned",
-            },
-            {
-              requirementId: "document:published",
-              kind: "document_published",
-              criterionIds: [],
-              contractDigest: "sha256:host-owned",
-            },
-          ],
-          obligationIds: [],
-          status: "pending",
-          attemptCount: 0,
-          evidenceIds: [],
-          failureReasons: [],
-          createdAt: 1,
-          updatedAt: 1,
-        },
-      ],
-      createdAt: 1,
-      updatedAt: 1,
-    };
-    const request = resolvedAgentRequest({
-      conversationKey: 705,
-      mode: "agent",
-      userText: "Execute the approved review",
-      model: "test-model",
-      planContext: {
-        phase: "executing",
-        planId: ledger.planId,
-        revision: ledger.revision,
-        executionId: ledger.executionId,
-        approvedDigest: ledger.planDigest,
-        provider: "original",
-      },
-      metadata: { planExecutionLedger: ledger },
-    });
-
-    const messages = await buildAgentInitialMessages(request, [], []);
-    const prompt = messages.map(messageText).join("\n");
-    assert.include(prompt, "Do not call task_update for these tasks");
-    assert.include(
-      prompt,
-      "verified reads, mutation receipts, and finalized material",
-    );
-    assert.notInclude(
-      prompt,
-      "After evidence exists, call task_update with only the task",
-    );
-  });
-
-  it("keeps host-owned execution identities out of the final answer", async function () {
-    const ledger: PlanExecutionLedger = {
-      version: 1,
-      executionId: "execution-secret",
-      planId: "plan-secret",
-      revision: 1,
-      planDigest: "sha256:secret",
-      conversationKey: 703,
-      attempt: 1,
-      provider: "original",
-      grant: {
-        version: 1,
-        planId: "plan-secret",
-        revision: 1,
-        planDigest: "sha256:secret",
-        conversationKey: 703,
-        conversationGeneration: 1,
-        approvedAt: 1,
-      },
-      status: "running",
-      tasks: [],
-      createdAt: 1,
-      updatedAt: 1,
-    };
-    const request = resolvedAgentRequest({
-      conversationKey: 703,
-      mode: "agent",
-      userText: "Execute the approved plan",
-      model: "test-model",
-      planContext: {
-        phase: "executing",
-        planId: ledger.planId,
-        revision: ledger.revision,
-        executionId: ledger.executionId,
-        approvedDigest: ledger.planDigest,
-        provider: "original",
-      },
-      metadata: { planExecutionLedger: ledger },
-    });
-
-    const messages = await buildAgentInitialMessages(request, [], []);
-    const prompt = messages.map(messageText).join("\n");
-    assert.include(
-      prompt,
-      "Your final answer should answer the original request naturally",
-    );
-    assert.include(prompt, "Do not expose plan IDs");
-    assert.include(prompt, "the host renders progress separately");
-  });
-
-  it("exposes the exact approved document contract during execution", async function () {
-    const ledger: PlanExecutionLedger = {
-      version: 1,
-      executionId: "execution-document",
-      planId: "plan-document",
-      revision: 1,
-      planDigest: "sha256:document",
-      conversationKey: 704,
-      attempt: 1,
-      provider: "original",
-      grant: {
-        version: 1,
-        planId: "plan-document",
-        revision: 1,
-        planDigest: "sha256:document",
-        conversationKey: 704,
-        conversationGeneration: 1,
-        approvedAt: 1,
-      },
-      status: "running",
-      tasks: [],
-      createdAt: 1,
-      updatedAt: 1,
-    };
-    const request = resolvedAgentRequest({
-      conversationKey: 704,
-      mode: "agent",
-      userText: "Execute the approved plan",
-      model: "test-model",
-      planContext: {
-        phase: "executing",
-        planId: ledger.planId,
-        revision: ledger.revision,
-        executionId: ledger.executionId,
-        approvedDigest: ledger.planDigest,
-        provider: "original",
-      },
-      metadata: {
-        planExecutionLedger: ledger,
-        approvedPlanContract: {
-          deliverable: {
-            kind: "document",
-            spec: {
-              kind: "literature_review",
-              title: "Exact approved review title",
-              requiredSections: ["Findings", "Scope and limitations"],
-              requiresReferences: true,
-              requiresCoverageSection: true,
-              allowFigures: false,
-              citationStyle: {
-                styleId: "apa",
-                styleTitle: "APA",
-                locale: "en-US",
-              },
-            },
-          },
-        },
-      },
-    });
-    const messages = await buildAgentInitialMessages(request, [], []);
-    const prompt = messages.map(messageText).join("\n");
-    assert.include(prompt, "Exact title: Exact approved review title");
-    assert.include(
-      prompt,
-      "Required sections: Findings; Scope and limitations",
-    );
-    assert.include(prompt, "submit_document.title must match");
-    assert.include(prompt, COVERAGE_DISCLOSURE_REQUIREMENT);
-    assert.notInclude(prompt, "Coverage section required");
-  });
-
-  it("lets the approved investigation own reading guidance instead of the chat turn rule", async function () {
-    const ledger: PlanExecutionLedger = {
-      version: 1,
-      executionId: "execution-investigation",
-      planId: "plan-investigation",
-      revision: 1,
-      planDigest: "sha256:investigation",
-      conversationKey: 706,
-      attempt: 1,
-      provider: "original",
-      grant: {
-        version: 1,
-        planId: "plan-investigation",
-        revision: 1,
-        planDigest: "sha256:investigation",
-        conversationKey: 706,
-        conversationGeneration: 1,
-        approvedAt: 1,
-      },
-      status: "running",
-      tasks: [],
-      createdAt: 1,
-      updatedAt: 1,
-    };
-    const request = resolvedAgentRequest({
-      conversationKey: 706,
-      mode: "agent",
-      userText: "Execute the approved plan",
-      model: "test-model",
-      planContext: {
-        phase: "executing",
-        planId: ledger.planId,
-        revision: ledger.revision,
-        executionId: ledger.executionId,
-        approvedDigest: ledger.planDigest,
-        provider: "original",
-      },
-      classifiedIntent: classifiedFixture({
-        semantic: semanticFixture({
-          reading: { source: "document_text", coverage: "targeted" },
-        }),
-      }),
-      metadata: {
-        planExecutionLedger: ledger,
-        approvedPlanContract: {
-          deliverable: { kind: "answer" },
-          investigation: {
-            question: "How is belief updating modeled?",
-            subquestions: [],
-            criteria: [],
-            reviewMode: "narrative",
-            readingStrategy: "adaptive",
-            scopeAmendmentPolicy: "fixed",
-            scope: { libraryID: 1, kind: "items", itemKeys: ["AAAA1111"] },
-            requiredEvidenceDepth: "body",
-            estimatedDeepReadPapers: 0,
-            approvedLargeCorpus: false,
-          },
-        },
-      },
-    });
-    const messages = await buildAgentInitialMessages(request, [], []);
-    const prompt = messages.map(messageText).join("\n");
-    assert.notInclude(prompt, "TURN RULE");
-    assert.notInclude(prompt, "The shared reading intent requires");
-    assert.include(
-      prompt,
-      "Reading guidance (owned by the approved investigation)",
-    );
-    assert.include(
-      prompt,
-      "narrative review, adaptive reading, body evidence depth",
-    );
-    assert.include(prompt, "paper_read mode 'overview'");
-    assert.include(prompt, "No per-turn read budget applies");
-  });
-
   it("distinguishes omitted transcript history from an explicit empty override", async function () {
     const request = resolvedAgentRequest({
       conversationKey: 701,
@@ -909,16 +592,13 @@ describe("agent prompt envelope direct workflow", function () {
     "A write result with a verified receipt already confirms the change; do not re-read the target to confirm it.";
 
   /** The Original Agent's "## Direct agent workflow" system block. */
-  async function directWorkflowBlock(
-    planContext?: PlanRuntimeContext,
-  ): Promise<string> {
+  async function directWorkflowBlock(): Promise<string> {
     const rendered = await renderAgentPromptEnvelope(
       resolvedAgentRequest({
         conversationKey: 912_101,
         mode: "agent",
         model: "test-model",
         userText: "Summarize this paper and save it as a note",
-        ...(planContext ? { planContext } : {}),
       }),
       [],
       [],
@@ -930,32 +610,14 @@ describe("agent prompt envelope direct workflow", function () {
     return block!;
   }
 
-  const executing: PlanRuntimeContext = {
-    phase: "executing",
-    planId: "plan-direct-workflow",
-    revision: 1,
-    executionId: "execution-direct-workflow",
-    approvedDigest: "sha256:direct-workflow",
-    provider: "original",
-  };
-
   it("tells the model a verified write receipt already confirms the change", async function () {
     assert.include(await directWorkflowBlock(), RECEIPT_CONFIRMS);
-    assert.include(await directWorkflowBlock(executing), RECEIPT_CONFIRMS);
   });
 
-  it("asks only an ordinary turn to declare the parts of a compound request", async function () {
+  it("asks a turn to declare the parts of a compound request", async function () {
     const DECLARE_PARTS =
       "When a request asks for more than one outcome, such as summarizing a paper and saving it as a note, declare each part with task_update in your first step, together with that step's first tool calls. The host marks each part done from the tools' results; never mark one done yourself.";
-    const planning: PlanRuntimeContext = {
-      phase: "planning",
-      planId: "plan-direct-workflow",
-      revision: 1,
-      provider: "original",
-    };
     assert.include(await directWorkflowBlock(), DECLARE_PARTS);
-    assert.notInclude(await directWorkflowBlock(executing), DECLARE_PARTS);
-    assert.notInclude(await directWorkflowBlock(planning), DECLARE_PARTS);
   });
 
   it("keeps the receipt sentence out of the Codex client's instructions", function () {

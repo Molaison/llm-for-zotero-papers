@@ -83,25 +83,10 @@ export class ActionContractRunSession {
         },
       });
     try {
-      if (this.request.planContext?.phase === "executing") {
-        // PlanExecutionRunSession has restored either the initial frozen
-        // contract or a separately approved research-derived contract. An
-        // absent contract is intentional and must not be inferred from the
-        // synthetic execution prompt.
-        if (
-          params.checkpoint &&
-          this.request.actionContract?.id === params.checkpoint.contract.id &&
-          params.checkpoint.progress.contractId ===
-            this.request.actionContract.id
-        )
-          this.request.actionProgress = params.checkpoint.progress;
-      } else {
-        this.request.workflowCheckpoint ||= params.checkpoint || undefined;
-        this.request.actionPreparation = { state: "resolving", issues: [] };
-        this.request.actionContract =
-          (await this.contracts.createActionContract(this.request)) ||
-          undefined;
-      }
+      this.request.workflowCheckpoint ||= params.checkpoint || undefined;
+      this.request.actionPreparation = { state: "resolving", issues: [] };
+      this.request.actionContract =
+        (await this.contracts.createActionContract(this.request)) || undefined;
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       if (error instanceof ActionReferenceResolutionError) {
@@ -140,19 +125,17 @@ export class ActionContractRunSession {
         this.request.actionProgress =
           this.contracts.createActionProgress(contract);
       }
-      if (this.request.planContext?.phase !== "executing") {
-        try {
-          await carryWorkflowProgress(
-            this.request,
-            contract,
-            this.request.actionProgress!,
-          );
-        } catch (error) {
-          return {
-            kind: "failed",
-            userMessage: `Prior workflow evidence could not be reused: ${String(error)}`,
-          };
-        }
+      try {
+        await carryWorkflowProgress(
+          this.request,
+          contract,
+          this.request.actionProgress!,
+        );
+      } catch (error) {
+        return {
+          kind: "failed",
+          userMessage: `Prior workflow evidence could not be reused: ${String(error)}`,
+        };
       }
       await this.emitSnapshot();
     }

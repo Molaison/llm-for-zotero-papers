@@ -739,51 +739,10 @@ export function createCodexNativeActivityTraceController(
     }
   };
 
-  const appendPlanEvent = (event: AgentEvent): void => {
-    if (event.type === "provider_event") {
-      events.push(createEvent(event));
-      sync();
-      return;
-    }
-    if (event.type === "plan_scope_amended") {
-      events.push(createEvent(event));
-      sync();
-      return;
-    }
-    if (event.type === "plan_research_progress") {
-      const priorIndex = events.findIndex(
-        (entry) =>
-          entry.payload.type === "plan_research_progress" &&
-          entry.payload.progress.researchJobId === event.progress.researchJobId,
-      );
-      const record = createEvent(event);
-      if (priorIndex >= 0) events[priorIndex] = record;
-      else events.push(record);
-      sync();
-      return;
-    }
-    if (
-      event.type !== "plan_updated" &&
-      event.type !== "plan_ready" &&
-      event.type !== "plan_execution_updated"
-    ) {
-      return;
-    }
-    const eventPlanId =
-      event.type === "plan_execution_updated"
-        ? event.ledger.planId
-        : event.artifact.planId;
-    const priorIndex = events.findIndex(
-      (entry) =>
-        ((entry.payload.type === "plan_updated" ||
-          entry.payload.type === "plan_ready") &&
-          entry.payload.artifact.planId === eventPlanId) ||
-        (entry.payload.type === "plan_execution_updated" &&
-          entry.payload.ledger.planId === eventPlanId),
-    );
-    const record = createEvent(event);
-    if (priorIndex >= 0) events[priorIndex] = record;
-    else events.push(record);
+  /** A host event the turn published: its provider events join the trace. */
+  const appendHostEvent = (event: AgentEvent): void => {
+    if (event.type !== "provider_event") return;
+    events.push(createEvent(event));
     sync();
   };
 
@@ -827,9 +786,9 @@ export function createCodexNativeActivityTraceController(
       });
     },
     appendAgentMessageDelta,
-    appendPlanEvent,
+    appendHostEvent,
     /**
-     * Keep Codex's `update_plan` checklist as the run's one plan event. It is
+     * Keep Codex's own checklist as the run's one plan event. It is
      * persisted with the run for Task progress (live and reopened) and never
      * renders as a trace row.
      */

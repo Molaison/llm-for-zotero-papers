@@ -12,22 +12,12 @@ export type RunStopRule =
   | "tools_unsupported_fallback"
   // A /compact request ended the turn without a model step.
   | "manual_compaction"
-  // The plan session could not bind the plan this turn plans or executes.
-  | "plan_initialization_failed"
   // The action contract could not be set up or restored for this turn.
   | "action_contract_initialization_failed"
   // A prepared action asked the user for input and got no usable answer.
   | "awaiting_clarification"
   // The user answered, but the prepared action's references stay unresolved.
   | "references_unresolved"
-  // The host workflow's next step is blocked.
-  | "host_workflow_blocked"
-  // The host workflow finished, but the action contract rejected the result.
-  | "host_workflow_rejected"
-  // The host workflow finished and reported its verified actions.
-  | "host_workflow_complete"
-  // A host-prepared action failed or could not be verified.
-  | "host_action_failed"
   // The protected prompt stays above the input budget after compaction.
   | "prompt_budget_exceeded"
   // A tool the provider ran through its callback ended the run.

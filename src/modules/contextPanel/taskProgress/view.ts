@@ -10,8 +10,8 @@
  * its content, up to the space above that strip or the height the user
  * dragged it to (remembered for the session, in memory only). It lists every
  * paper in the turn's scope in order, windowed, with what was read from each
- * and where the answer cites it; while a plan, a built-in action or Codex's
- * own plan runs, its steps lead the drawer.
+ * and where the answer cites it; while a built-in action, Codex's own plan
+ * or a run's declared outcomes are in progress, their steps lead the drawer.
  *
  * Opening and closing animate the drawer's height between measured pixel
  * heights (CSS cannot transition to `auto`); with reduced motion, or without
@@ -37,13 +37,7 @@ import {
   canOpenTaskPaperPassage,
   type TaskPaperPassageTarget,
 } from "./passageSource";
-import {
-  countPlanSteps,
-  isLivePlanExecutionStatus,
-  renderChecklistSteps,
-  renderPlanSteps,
-  resolveTaskPaperLabel,
-} from "./planSteps";
+import { renderChecklistSteps, resolveTaskPaperLabel } from "./planSteps";
 import {
   displayedTaskRunState,
   getTaskProgress,
@@ -254,12 +248,8 @@ export function countTaskProgress(
   return counts;
 }
 
-/** The steps the row counts: a live plan's, else the checklist's. */
+/** The steps the row counts: the checklist's. */
 function currentSteps(record: TaskProgressRecord | null) {
-  const ledger = record?.plan?.ledger;
-  if (ledger && isLivePlanExecutionStatus(ledger.status)) {
-    return countPlanSteps(ledger);
-  }
   const checklist = record?.checklist;
   if (checklist && checklist.total > 0) {
     return { completed: checklist.done, total: checklist.total };
@@ -1419,8 +1409,6 @@ export function mountTaskProgressView(params: {
     if (head.textContent !== text) head.textContent = text;
     if (head.hidden !== !preparing) head.hidden = !preparing;
     if (note.hidden !== input.recordsReads) note.hidden = input.recordsReads;
-    const plan = current?.plan;
-    const live = Boolean(plan && isLivePlanExecutionStatus(plan.ledger.status));
     // A ledger that only recorded its ending has no steps to show.
     const checklist =
       current?.checklist &&
@@ -1428,10 +1416,8 @@ export function mountTaskProgressView(params: {
         current.checklist.steps.length)
         ? current.checklist
         : null;
-    if (steps.hidden !== (!live && !checklist))
-      steps.hidden = !live && !checklist;
-    if (live && plan) renderPlanSteps(doc, steps, plan);
-    else if (checklist)
+    if (steps.hidden !== !checklist) steps.hidden = !checklist;
+    if (checklist)
       renderChecklistSteps(doc, steps, checklist, { resolvePaperLabel });
     else if (steps.firstChild) steps.replaceChildren();
   };

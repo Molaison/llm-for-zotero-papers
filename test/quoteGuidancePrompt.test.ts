@@ -14,7 +14,6 @@ import {
 import { buildAgentStableResourceContextBlock } from "../src/agent/context/resourceContextPlan";
 import { AGENT_PERSONA_INSTRUCTIONS } from "../src/agent/model/agentPersona";
 import { buildAgentInitialMessages } from "../src/agent/model/messageBuilder";
-import { createUpdatePlanTool } from "../src/agent/tools/plan/updatePlan";
 import {
   buildGenericSourceQuoteCitationGuidance,
   buildPaperQuoteCitationGuidance,
@@ -150,12 +149,7 @@ describe("quote guidance prompts", function () {
     assert.equal(countOccurrences(text, BALANCED_EVIDENCE_GUIDANCE), 1);
   });
 
-  it("uses readable paper mentions across chat, planning, and native instructions while preserving citation rules", async function () {
-    const planSchema = createUpdatePlanTool().spec.inputSchema;
-    assert.include(
-      (planSchema.properties as any).explanation.description,
-      "User-visible explanation rendered directly in the plan card",
-    );
+  it("uses readable paper mentions across chat and native instructions while preserving citation rules", async function () {
     const messages = await buildAgentInitialMessages(request(), [], []);
     const manifest = buildZoteroEnvironmentManifest({
       scope: {

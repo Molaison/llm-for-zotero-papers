@@ -10,7 +10,6 @@ import {
   projectLegacyPlanEffects,
 } from "../src/agent/plans/effectSpecification";
 import type { PlanArtifact } from "../src/agent/plans/types";
-import { createUpdatePlanTool } from "../src/agent/tools/plan/updatePlan";
 
 function effectSpecification() {
   return {
@@ -176,17 +175,6 @@ function artifactV5() {
 }
 
 describe("Plan v5 concrete effect specifications", function () {
-  it("exposes effect IDs and specifications without semantic action indexes", function () {
-    const schema = createUpdatePlanTool().spec.inputSchema as any;
-    assert.property(schema.properties, "effectSpecification");
-    assert.notProperty(schema.properties.contract.properties, "effects");
-    assert.property(schema.properties.steps.items.properties, "effectIds");
-    assert.notProperty(
-      schema.properties.steps.items.properties,
-      "actionIndexes",
-    );
-  });
-
   it("decodes stable effects, explicit dependencies, exact material versions, and deferred approval", function () {
     const artifact = decodePlanArtifact(artifactV5());
     assert.equal(artifact.version, 5);

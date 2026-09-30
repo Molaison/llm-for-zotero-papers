@@ -27,13 +27,6 @@ import { createPaperReadTool } from "../src/agent/tools/read/paperRead";
 import { createLibraryRetrieveTool } from "../src/agent/tools/read/libraryRetrieve";
 import { createLiteratureSearchTool } from "../src/agent/tools/read/literatureSearch";
 import { createFileIOTool } from "../src/agent/tools/write/fileIO";
-import { createResearchUpdateTool } from "../src/agent/tools/plan/researchUpdate";
-import { createAmendPlanTool } from "../src/agent/tools/plan/amendPlan";
-import { createUpdatePlanTool } from "../src/agent/tools/plan/updatePlan";
-import {
-  EXECUTING_PHASE_GUIDANCE,
-  PLANNING_PHASE_GUIDANCE,
-} from "../src/agent/plans/planningGuidance";
 import { ChangeJournalTestDb } from "./helpers/changeJournalTestDb";
 import {
   readOnlyInvocationPlan,
@@ -760,7 +753,6 @@ describe("Zotero MCP server", function () {
   for (const scenario of [
     "audit failure",
     "changed payload",
-    "planning turn",
     "aborted turn",
     "partial effect",
     "completion audit failure",
@@ -816,15 +808,12 @@ describe("Zotero MCP server", function () {
           : null;
       const controller = new AbortController();
       const scoped =
-        scenario === "planning turn" || scenario === "aborted turn"
+        scenario === "aborted turn"
           ? registerScopedZoteroMcpScope({
               runtimeAuthority: "claude",
               conversationKey: 430,
               kind: "global",
               libraryID: 1,
-              ...(scenario === "planning turn"
-                ? { planContext: { phase: "planning" } as never }
-                : {}),
               signal: controller.signal,
             })
           : undefined;
@@ -1344,20 +1333,14 @@ describe("Zotero MCP server", function () {
     }
   });
 
-  it("preserves workflow continuation instructions and host progress across MCP", async function () {
+  it("preserves workflow continuation instructions across MCP", async function () {
     const registry = new AgentToolRegistry();
     const tool = createReadTool("library_read");
     const checkpoint = {
       reason: "research_batch_durable" as const,
       instruction: "Record the remaining manifest, then verify coverage.",
     };
-    const event = {
-      type: "plan_execution_updated",
-      ledger: { executionId: "progress" },
-    } as any;
-    const published: unknown[] = [];
-    tool.execute = async (_input, context) => {
-      await context.publishPlanEvent?.(event);
+    tool.execute = async () => {
       return {
         content: { durablePapers: 1 },
         continuationCheckpoint: checkpoint,
@@ -1369,9 +1352,6 @@ describe("Zotero MCP server", function () {
       conversationKey: 7003,
       libraryID: 1,
       kind: "global",
-      publishHostEvent: async (value) => {
-        published.push(value);
-      },
     });
     try {
       const response = await invokeMcpEndpoint({
@@ -1388,90 +1368,10 @@ describe("Zotero MCP server", function () {
         JSON.parse(response[2]).result.content[0].text,
       );
       assert.deepEqual(payload.continuationCheckpoint, checkpoint);
-      assert.deepEqual(published, [event]);
     } finally {
       scope.clear();
     }
   });
-
-  it("gives native Plan the same research procedure as the local agent", async function () {
-    const registry = new AgentToolRegistry();
-    const research = createResearchUpdateTool({} as never);
-    registry.register(research);
-    registerMcpServer({ toolRegistry: registry, zoteroGateway: {} as never });
-    const scope = registerScopedZoteroMcpScope({
-      conversationKey: 7004,
-      libraryID: 1,
-      kind: "global",
-      planContext: {
-        phase: "planning",
-        planId: "procedure",
-        revision: 1,
-        nativePlanning: { attemptId: "attempt" },
-      } as any,
-    });
-    try {
-      const response = await invokeMcpEndpoint({
-        token: getOrCreateZoteroMcpBearerToken(),
-        headers: { [ZOTERO_MCP_SCOPE_HEADER]: scope.token },
-        body: { jsonrpc: "2.0", id: 1, method: "tools/list" },
-      });
-      const tool = JSON.parse(response[2]).result.tools.find(
-        (entry: any) => entry.name === "research_update",
-      );
-      assert.include(tool.description, research.guidance!.instruction);
-      // Codex code-mode declarations can collapse deep nested objects to
-      // `unknown`. The discoverable description must retain their contract.
-      assert.include(tool.description, JSON.stringify(tool.inputSchema));
-    } finally {
-      scope.clear();
-    }
-  });
-
-  it("carries each plan-phase section on that phase's anchor tool", async function () {
-    const registry = new AgentToolRegistry();
-    registry.register(createUpdatePlanTool());
-    registry.register(createAmendPlanTool({} as never, {} as never));
-    registerMcpServer({ toolRegistry: registry, zoteroGateway: {} as never });
-    async function listed(nativePlanning: boolean, conversationKey: number) {
-      const scope = registerScopedZoteroMcpScope({
-        conversationKey,
-        libraryID: 1,
-        kind: "global",
-        planContext: {
-          phase: "planning",
-          planId: "procedure",
-          revision: 1,
-          ...(nativePlanning
-            ? { nativePlanning: { attemptId: "attempt" } }
-            : {}),
-        } as any,
-      });
-      try {
-        const response = await invokeMcpEndpoint({
-          token: getOrCreateZoteroMcpBearerToken(),
-          headers: { [ZOTERO_MCP_SCOPE_HEADER]: scope.token },
-          body: { jsonrpc: "2.0", id: 1, method: "tools/list" },
-        });
-        return JSON.parse(response[2]).result.tools as Array<{
-          name: string;
-          description: string;
-        }>;
-      } finally {
-        scope.clear();
-      }
-    }
-    const planning = await listed(false, 7005);
-    const updatePlan = planning.find((entry) => entry.name === "update_plan");
-    assert.include(updatePlan!.description, PLANNING_PHASE_GUIDANCE);
-    assert.notInclude(updatePlan!.description, EXECUTING_PHASE_GUIDANCE);
-    // Native planning advertises the execution tools up front.
-    const native = await listed(true, 7006);
-    const amendPlan = native.find((entry) => entry.name === "amend_plan");
-    assert.include(amendPlan!.description, EXECUTING_PHASE_GUIDANCE);
-    assert.notInclude(amendPlan!.description, PLANNING_PHASE_GUIDANCE);
-  });
-
   it("carries single-owner reading guidance on the paper_read and library_retrieve descriptions", async function () {
     const registry = new AgentToolRegistry();
     const paperRead = createPaperReadTool(

@@ -1,7 +1,6 @@
 import { assert } from "chai";
 import type { TaskPaperScopeEntry } from "../src/agent/context/taskPaperScopeListing";
 import type { TaskPaperReadEvent } from "../src/agent/context/taskPaperLedger";
-import type { PlanExecutionLedger } from "../src/agent/plans/types";
 import {
   applyTaskPaperUpdate,
   beginTaskAction,
@@ -18,7 +17,6 @@ import {
   markTaskAnswering,
   markTaskWaiting,
   setTaskOutcomes,
-  setTaskPlan,
   setTaskScope,
 } from "../src/modules/contextPanel/taskProgress/store";
 import { OUTCOME_REASONS } from "../src/agent/loop/outcomes";
@@ -398,44 +396,6 @@ describe("task progress view", function () {
       "Reads are recorded in Agent mode.",
     );
   });
-
-  it("counts plan steps while a plan runs", function () {
-    seedScope(10);
-    const harness = track(mount());
-    beginTaskRun(KEY, { runId: "run-a" });
-    const task = (id: string, status: string) => ({
-      taskId: id,
-      kind: "required_step",
-      status,
-      content: `Step ${id}`,
-      activeForm: `Doing ${id}`,
-      acceptanceCriteria: [],
-      evidenceIds: [],
-      failureReasons: [],
-    });
-    setTaskPlan(KEY, {
-      ledger: {
-        executionId: "e1",
-        planId: "p1",
-        revision: 1,
-        status: "running",
-        createdAt: 1,
-        updatedAt: 1,
-        tasks: [task("a", "completed"), task("b", "in_progress")],
-      } as unknown as PlanExecutionLedger,
-    });
-    harness.view.flush();
-    assert.equal(harness.count(), "1/2 steps · 0 of 10 read");
-    harness.row.dispatchFakeEvent("click");
-    const steps = harness.drawer.findByClass("llm-task-progress-steps")!;
-    assert.isFalse((steps as any).hidden);
-    assert.include(collectFakeText(steps), "Doing b");
-    setTaskPlan(KEY, null);
-    harness.view.flush();
-    assert.isTrue((steps as any).hidden, "steps show only while live");
-    assert.isFalse((harness.row as any).hidden, "the row stays");
-  });
-
   it("unrolls in the chat shell, windows the list and grows it on scroll", function () {
     seedScope(200);
     const harness = track(mount());

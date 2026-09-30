@@ -1,7 +1,3 @@
-import {
-  isLivePlanExecutionStatus,
-  renderPlanSteps,
-} from "../src/modules/contextPanel/taskProgress/planSteps";
 import { assert } from "chai";
 import { createApplyTagsTool } from "../src/agent/tools/write/applyTags";
 import { createFileIOTool } from "../src/agent/tools/write/fileIO";
@@ -532,13 +528,13 @@ describe("native host authority trace", function () {
     assert.notInclude(collectFakeText(next), "Loading agent activity");
     assert.lengthOf(next.findAllByClass("llm-agent-activity-details"), 1);
   });
-  it("retains semantic events instead of discarding them as non-Plan events", function () {
+  it("retains the semantic provider events a turn publishes as host events", function () {
     const message: any = { role: "assistant", text: "", timestamp: 1 };
     const trace = createCodexNativeActivityTraceControllerForTests(
       message,
       () => {},
     );
-    trace.appendPlanEvent({
+    trace.appendHostEvent({
       type: "provider_event",
       providerType: "agent_semantic_intent",
       payload: { intent: { id: "intent-1" } },
@@ -1455,16 +1451,6 @@ describe("agentTrace render", function () {
       );
     }
   });
-
-  it("shows Steps only for starting or running Plan execution states", function () {
-    assert.isTrue(isLivePlanExecutionStatus("pending"));
-    assert.isTrue(isLivePlanExecutionStatus("running"));
-    assert.isFalse(isLivePlanExecutionStatus("interrupted"));
-    assert.isFalse(isLivePlanExecutionStatus("waiting_for_user"));
-    assert.isFalse(isLivePlanExecutionStatus("completed"));
-    assert.isFalse(isLivePlanExecutionStatus("failed"));
-  });
-
   it("formats compact Codex-style activity durations", function () {
     assert.equal(formatAgentActivityDuration(250), "1s");
     assert.equal(formatAgentActivityDuration(259_000), "4m 19s");
@@ -2230,219 +2216,6 @@ describe("agentTrace render", function () {
     );
     assert.isNull(executing.findByClass("llm-at-planning-drive"));
   });
-
-  it("renders a live execution as the overlay Steps block, never in the trace", function () {
-    const makeTask = (
-      id: string,
-      status: "completed" | "in_progress" | "pending",
-      content: string,
-    ) => ({
-      version: 1 as const,
-      taskId: id,
-      executionId: "execution-pill",
-      planStepId: id,
-      kind: "required_step" as const,
-      content,
-      activeForm: status === "in_progress" ? "Drafting the brief" : content,
-      acceptanceCriteria: [`${content} is complete`],
-      expectedEffect: "artifact" as const,
-      obligationIds: [],
-      status,
-      attemptCount: status === "pending" ? 0 : 1,
-      evidenceIds: status === "completed" ? [`evidence-${id}`] : [],
-      failureReasons: [],
-      createdAt: 1,
-      updatedAt: 2,
-    });
-    const events: AgentRunEventRecord[] = [
-      {
-        runId: "run-plan-pill",
-        seq: 1,
-        eventType: "plan_execution_updated",
-        payload: {
-          type: "plan_execution_updated",
-          ledger: {
-            version: 1,
-            executionId: "execution-pill",
-            planId: "plan-pill",
-            revision: 1,
-            planDigest: "digest",
-            conversationKey: 1,
-            attempt: 1,
-            provider: "original",
-            grant: {
-              version: 1,
-              planId: "plan-pill",
-              revision: 1,
-              planDigest: "digest",
-              conversationKey: 1,
-              conversationGeneration: 1,
-              approvedAt: 1,
-            },
-            status: "running",
-            activeTaskId: "step-2",
-            tasks: [
-              makeTask("step-1", "completed", "Search the library"),
-              makeTask("step-2", "in_progress", "Draft the document"),
-              makeTask("step-3", "pending", "Finalize references"),
-            ],
-            evidence: [],
-            startedAt: 1,
-            updatedAt: 2,
-          },
-        },
-        createdAt: 2,
-      },
-    ];
-
-    const trace = renderAgentTrace({
-      doc: fakeDocument,
-      message: { role: "assistant", text: "", timestamp: 2, streaming: true },
-      events,
-    }) as unknown as FakeElement;
-    assert.isNull(
-      trace.findByClass("llm-plan-container-execution"),
-      "even stale streaming history cannot mount progress",
-    );
-    const host = fakeDocument.createElement(
-      "section",
-    ) as unknown as FakeElement;
-    renderPlanSteps(fakeDocument, host as unknown as HTMLElement, {
-      ledger: (events[0].payload as any).ledger,
-    });
-    const block = host.findByClass("llm-task-progress-steps-body");
-    assert.exists(block);
-    assert.equal(
-      block?.getAttribute("data-llm-plan-execution-id"),
-      "execution-pill",
-    );
-    assert.equal(
-      block?.getAttribute("data-llm-plan-execution-status"),
-      "running",
-    );
-    assert.include(collectFakeText(block), "Steps");
-    assert.include(collectFakeText(block), "In progress");
-    assert.include(collectFakeText(block), "Drafting the brief");
-    assert.include(collectFakeText(block), "Search the library");
-    assert.include(collectFakeText(block), "Finalize references");
-    assert.exists(block?.findByClass("llm-plan-task-list"));
-    const progress = block?.findByClass("llm-plan-progress");
-    assert.equal(progress?.attributes.role, "progressbar");
-    assert.equal(progress?.attributes["aria-valuemin"], "0");
-    assert.equal(progress?.attributes["aria-valuemax"], "3");
-    assert.equal(progress?.attributes["aria-valuenow"], "1");
-    assert.equal(
-      (block?.findByClass("llm-plan-progress-fill")?.style as any)?.width,
-      "33%",
-    );
-    assert.isNull(host.findByClass("llm-plan-progress-trigger"));
-    assert.isNull(host.findByClass("llm-plan-progress-floating"));
-  });
-
-  it("patches the Steps block in place across live execution updates", function () {
-    const renderProgress = (
-      status: "running" | "completed",
-      updatedAt: number,
-      host: FakeElement,
-    ) =>
-      (() => {
-        const events: AgentRunEventRecord[] = [
-          {
-            runId: "run-stable-progress",
-            seq: updatedAt,
-            eventType: "plan_execution_updated",
-            payload: {
-              type: "plan_execution_updated",
-              ledger: {
-                version: 1,
-                executionId: "execution-stable-progress",
-                planId: "plan-stable-progress",
-                revision: 1,
-                planDigest: "digest",
-                conversationKey: 1,
-                attempt: 1,
-                provider: "original",
-                grant: {
-                  version: 1,
-                  planId: "plan-stable-progress",
-                  revision: 1,
-                  planDigest: "digest",
-                  conversationKey: 1,
-                  conversationGeneration: 1,
-                  approvedAt: 1,
-                },
-                status,
-                activeTaskId: status === "running" ? "step-1" : undefined,
-                tasks: [
-                  {
-                    version: 1,
-                    taskId: "step-1",
-                    executionId: "execution-stable-progress",
-                    planStepId: "step-1",
-                    kind: "required_step",
-                    content: "Draft the document",
-                    activeForm: "Drafting the document",
-                    acceptanceCriteria: ["The document is complete"],
-                    expectedEffect: "artifact",
-                    obligationIds: [],
-                    status: status === "running" ? "in_progress" : "completed",
-                    attemptCount: 1,
-                    evidenceIds:
-                      status === "completed" ? ["evidence-step-1"] : [],
-                    failureReasons: [],
-                    createdAt: 1,
-                    updatedAt,
-                  },
-                ],
-                evidence: [],
-                startedAt: 1,
-                completedAt: status === "completed" ? updatedAt : undefined,
-                updatedAt,
-              },
-            },
-            createdAt: updatedAt,
-          },
-        ];
-        const trace = renderAgentTrace({
-          doc: fakeDocument,
-          message: {
-            role: "assistant",
-            text: "",
-            timestamp: updatedAt,
-            streaming: status === "running",
-          },
-          events,
-        }) as unknown as FakeElement;
-        assert.isNull(trace.findByClass("llm-plan-container-execution"));
-        renderPlanSteps(fakeDocument, host as unknown as HTMLElement, {
-          ledger: (events[0].payload as any).ledger,
-        });
-        return host.findByClass("llm-task-progress-steps-body")!;
-      })();
-
-    const host = fakeDocument.createElement(
-      "section",
-    ) as unknown as FakeElement;
-    const first = renderProgress("running", 2, host);
-    const firstTask = first.findByClass("llm-plan-task")!;
-    firstTask.open = true;
-    const updated = renderProgress("running", 3, host);
-    assert.strictEqual(updated, first, "the block is patched, not replaced");
-    assert.strictEqual(
-      updated.findByClass("llm-plan-task"),
-      firstTask,
-      "task rows are matched by id",
-    );
-    assert.isTrue(firstTask.open, "an opened task row stays open");
-    const completed = renderProgress("completed", 4, host);
-    assert.strictEqual(completed, first);
-    assert.equal(
-      completed.getAttribute("data-llm-plan-execution-status"),
-      "completed",
-    );
-    assert.include(collectFakeText(completed), "Done");
-  });
-
   for (const status of [
     "pending",
     "running",

@@ -1,7 +1,7 @@
+import { initDormantPlanTables } from "../src/agent/store/dormantPlanTables";
 import { assert } from "chai";
 import { DatabaseSync } from "node:sqlite";
 import {
-  initAgentPlanStore,
   savePlanArtifact,
   savePlanExecutionLedger,
 } from "../src/agent/plans/store";
@@ -112,7 +112,7 @@ describe("research stage authority through durable stores", function () {
       },
     };
     try {
-      await initAgentPlanStore();
+      await initDormantPlanTables();
       await initResearchStore();
       await savePlanExecutionLedger(execution());
       const policy = resolveResearchPolicy("plan_research");

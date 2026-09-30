@@ -1,5 +1,4 @@
 import { scheduleChatContentScroll } from "../chatScrollSnapshots";
-import { getPendingRequestId, recordLivePlanExecution } from "../state";
 import {
   applyTaskPaperUpdate,
   beginTaskRun,
@@ -296,7 +295,6 @@ export function createAgentTurnEventHandler(
     pushTraceEvent,
     scheduleQueueDrain,
   } = ctx;
-  const executionRequestId = getPendingRequestId(conversationKey);
   // Task progress follows the run: working from its start, the paper ledger
   // as reads land, answering at the first answer text, ✓ at final.
   let taskRunBegun = false;
@@ -310,17 +308,6 @@ export function createAgentTurnEventHandler(
   };
   return async (event: AgentEvent): Promise<void> => {
     ensureTaskRun();
-    if (
-      event.type === "plan_execution_updated" &&
-      assistantMessage.agentRunId
-    ) {
-      recordLivePlanExecution(
-        conversationKey,
-        executionRequestId,
-        assistantMessage.agentRunId,
-        event.ledger,
-      );
-    }
     if (assistantMessage.agentRunId) {
       pushTraceEvent(assistantMessage.agentRunId, event);
     }
@@ -469,13 +456,7 @@ export function createAgentTurnEventHandler(
           });
         }
         setStatusSafely(
-          isGenericAgentStatusText(event.text)
-            ? runtimeRequest.planContext?.phase === "planning"
-              ? "Planning"
-              : runtimeRequest.planContext?.phase === "executing"
-                ? "Executing"
-                : "Working"
-            : event.text,
+          isGenericAgentStatusText(event.text) ? "Working" : event.text,
           "sending",
         );
         if (isCompactingStatus) {
@@ -1087,7 +1068,6 @@ type BuildAgentRuntimeRequestParamsShape = {
   localDocuments?: readonly LocalDocumentResource[];
   screenshots: string[] | undefined;
   forcedSkillIds?: string[];
-  planContext?: import("../../../agent/plans/types").PlanRuntimeContext;
   effectiveRequestConfig: EffectiveRequestConfigShape;
   history: ChatMessage[];
 };
@@ -1444,7 +1424,6 @@ export async function sendAgentTurn(
     modelAttachments?: ChatAttachment[];
     localDocuments?: readonly LocalDocumentResource[];
     forcedSkillIds?: string[];
-    planContext?: import("../../../agent/plans/types").PlanRuntimeContext;
   },
   deps: AgentEngineDeps,
 ): Promise<void> {
@@ -1479,7 +1458,6 @@ export async function sendAgentTurn(
     modelAttachments,
     localDocuments,
     forcedSkillIds,
-    planContext,
   } = opts;
   const conversationKey = deps.getConversationKey(item);
   const ui = deps.getPanelRequestUI(body);
@@ -1789,7 +1767,6 @@ export async function sendAgentTurn(
     localDocuments,
     screenshots: images,
     forcedSkillIds,
-    planContext,
     effectiveRequestConfig,
     history: llmHistory,
   });

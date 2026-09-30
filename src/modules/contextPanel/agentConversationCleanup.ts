@@ -21,7 +21,7 @@ import {
 } from "../../agent/store/changeJournal";
 import { clearAgentRuntimeTraceState } from "./agentState";
 import { clearTaskProgress } from "./taskProgress/store";
-import { clearPlanConversationRowsInTransaction } from "../../agent/plans/store";
+import { clearDormantPlanRowsInTransaction } from "../../agent/store/dormantPlanTables";
 import { clearResearchConversationRowsInTransaction } from "../../agent/research/store";
 import { clearPlanDocumentConversationRowsInTransaction } from "../../agent/documents/store";
 
@@ -162,7 +162,7 @@ export async function clearPersistedAgentConversationRowsInTransaction(
      WHERE scope_key = ? OR origin_conversation_key = ?`,
     [`conversation:${key}`, key],
   );
-  await clearPlanConversationRowsInTransaction(key).catch((error) => {
+  await clearDormantPlanRowsInTransaction(key).catch((error) => {
     if (/no such table|no table/i.test(String(error))) return;
     throw error;
   });

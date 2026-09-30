@@ -26,16 +26,12 @@ import { PlanAmendmentService } from "../plans/amendments";
 import { PdfFigureExtractionService } from "../services/pdfFigureExtractionService";
 import { PdfPageService } from "../services/pdfPageService";
 import type { AgentToolDefinition } from "../types";
-import { createAmendPlanTool } from "./plan/amendPlan";
 import { createApproveResearchExpansionTool } from "./plan/approveResearchExpansion";
 import { createApproveResearchMutationTool } from "./plan/approveResearchMutation";
-import { createPreparePlanExecutionTool } from "./plan/preparePlanExecution";
 import { createRequestUserInputTool } from "./control/requestUserInput";
 import { createResearchUpdateTool } from "./plan/researchUpdate";
 import { createSubmitDocumentTool } from "./control/submitDocument";
-import { createSubmitPlanDocumentTool } from "./plan/submitPlanDocument";
 import { createTaskUpdateTool } from "./control/taskUpdate";
-import { createUpdatePlanTool } from "./plan/updatePlan";
 import { SEARCH_CONDITION_SCHEMA } from "./searchConditions";
 import { fail, ok, PAPER_CONTEXT_REF_SCHEMA, validateObject } from "./shared";
 import { createAnnotatePdfTool } from "./write/annotatePdf";
@@ -592,10 +588,8 @@ function createLibraryDeleteTool(tools: {
 export function createBuiltInToolRegistry(
   deps: BuiltInAgentToolDeps,
 ): AgentToolRegistry {
-  const planAmendments = new PlanAmendmentService(deps.zoteroGateway);
   const registry = new AgentToolRegistry(
     new ActionContractService(deps.zoteroGateway),
-    planAmendments,
   );
   registry.register(
     createWorkflowScriptTool((request) =>
@@ -689,15 +683,15 @@ export function createBuiltInToolRegistry(
         registry.listToolDefinitionsForRequest(request),
     }),
   );
-  registry.register(createUpdatePlanTool(deps.zoteroGateway));
-  registry.register(createPreparePlanExecutionTool(deps.zoteroGateway));
   registry.register(createRequestUserInputTool());
   registry.register(createTaskUpdateTool());
   registry.register(createSubmitDocumentTool(deps.zoteroGateway));
-  registry.register(createSubmitPlanDocumentTool(deps.zoteroGateway));
   registry.register(createResearchUpdateTool(deps.zoteroGateway));
-  registry.register(createApproveResearchExpansionTool(planAmendments));
-  registry.register(createAmendPlanTool(deps.zoteroGateway, planAmendments));
+  registry.register(
+    createApproveResearchExpansionTool(
+      new PlanAmendmentService(deps.zoteroGateway),
+    ),
+  );
   registry.register(createApproveResearchMutationTool());
 
   registerPreparedLibraryActions(registry, deps.zoteroGateway);
