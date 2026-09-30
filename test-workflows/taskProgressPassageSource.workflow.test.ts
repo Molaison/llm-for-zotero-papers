@@ -6,6 +6,7 @@
  * stays as it was (the paper expanded, the drawer open).
  */
 import { assert } from "chai";
+import { getReaderContextPanelForTab } from "../src/modules/contextPanel/readerPopupPanelRouting";
 import type {
   WorkflowTestApi,
   WorkflowTestFixture,
@@ -31,8 +32,10 @@ describe("workflow: task progress passage source", function () {
   const prefs: Array<[string, unknown]> = [
     ["extensions.zotero.llmforzotero.enableAgentMode", true],
     ["extensions.zotero.llmforzotero.lastUsedRuntimeMode", "agent"],
+    ["extensions.zotero.llmforzotero.sidebarLayout", "independent"],
   ];
   const saved = new Map<string, unknown>();
+  const layoutPref = "extensions.zotero.llmforzotero.sidebarLayout";
   let api: WorkflowTestApi;
   let win: any;
   let libraryID: number;
@@ -95,6 +98,80 @@ describe("workflow: task progress passage source", function () {
     for (const reader of [...((Zotero as any).Reader._readers || [])]) {
       if (ids.has(reader.itemID)) await reader.close?.();
     }
+  }
+
+  function activeDetails(): any {
+    const readerPane = getReaderContextPanelForTab(
+      win.document,
+      win.Zotero_Tabs.selectedID,
+    );
+    if (readerPane) return readerPane;
+    return Array.from(win.document.querySelectorAll("item-details")).find(
+      (node: any) =>
+        node.tabType === "library" && node.getBoundingClientRect().width > 0,
+    );
+  }
+
+  /** The chat in the library tab's item pane, opened in the independent layout. */
+  async function openLibrarySidebarChat(): Promise<() => HTMLElement> {
+    Zotero.Prefs.set(layoutPref, "independent", true);
+    win.Zotero_Tabs.select("zotero-pane");
+    await win.ZoteroPane.selectItem(fixtures[0].parentItemId);
+    const details = activeDetails();
+    assert.isOk(details, "native item details is visible");
+    const section = () =>
+      details.querySelector(".llm-dedicated-chat-pane") as HTMLElement;
+    const rootOf = () => section()?.querySelector("#llm-main") as HTMLElement;
+    const mainVisible = () =>
+      (rootOf()?.getBoundingClientRect().height || 0) > 0;
+    if (
+      win.document.documentElement.getAttribute("data-llm-pane-view") !==
+        "chat" ||
+      details.sidenav._collapsed ||
+      !mainVisible()
+    ) {
+      const paneID = section()?.dataset.pane;
+      const button: any = Array.from(
+        details.sidenav.querySelectorAll("[data-pane]"),
+      ).find((node: any) => node.getAttribute("data-pane") === paneID);
+      assert.isOk(button, "the plugin's rail icon exists");
+      button.dispatchEvent(
+        new win.MouseEvent("click", { bubbles: true, detail: 1, button: 0 }),
+      );
+    }
+    await until(
+      () =>
+        win.document.documentElement.getAttribute("data-llm-pane-view") ===
+          "chat" &&
+        !details.sidenav._collapsed &&
+        mainVisible(),
+      "the sidebar chat is open",
+    );
+    // The pane may still be rebuilding for the selected item: a click on a
+    // panel about to be replaced is lost, so it is repeated until it takes.
+    const deadline = Date.now() + 20000;
+    while (
+      rootOf()?.dataset.conversationKind !== "global" &&
+      Date.now() < deadline
+    ) {
+      (
+        rootOf().querySelector("#llm-library-chat-tab") as HTMLElement
+      ).dispatchEvent(
+        new win.MouseEvent("click", { bubbles: true, cancelable: true }),
+      );
+      const settleBy = Date.now() + 2000;
+      while (
+        rootOf()?.dataset.conversationKind !== "global" &&
+        Date.now() < settleBy
+      )
+        await Zotero.Promise.delay(40);
+    }
+    assert.equal(
+      rootOf()?.dataset.conversationKind,
+      "global",
+      "Library chat opens",
+    );
+    return rootOf;
   }
 
   before(async function () {
@@ -330,6 +407,139 @@ describe("workflow: task progress passage source", function () {
     } finally {
       handle.finish();
       restore();
+      await closeReaders();
+    }
+  });
+
+  // The library tab's sidebar panel is rebuilt when its tab is selected
+  // again, and the reader tab's sidebar mounts its own panel on the same
+  // Library chat: each new view takes the card up as the user left it.
+  it("keeps the card open, with the paper expanded, across the reader tab and back", async function () {
+    const rootOf = await openLibrarySidebarChat();
+    const handle = await api.startTaskProgressReplay({
+      surface: "embedded",
+      historyTurns: 2,
+      user: {
+        selectedCollectionContexts: [
+          { collectionId: collection.id, name: collection.name, libraryID },
+        ],
+      },
+    });
+    const conversation = String(handle.conversationKey);
+    const key = (itemId: number) => `${libraryID}:${itemId}`;
+    const paperOf = (root: HTMLElement | null) =>
+      (root?.querySelector(
+        `.llm-task-paper[data-item-id="${fixtures[0].parentItemId}"]`,
+      ) || null) as HTMLElement | null;
+    const stateOf = (root: HTMLElement | null) => {
+      const drawer = root?.querySelector(
+        "#llm-task-progress-drawer",
+      ) as HTMLElement | null;
+      const paper = paperOf(root);
+      const details = paper?.querySelector(
+        ".llm-task-paper-details",
+      ) as HTMLElement | null;
+      return {
+        conversation: root?.dataset.itemId,
+        kind: root?.dataset.conversationKind,
+        drawer: drawer?.dataset.state,
+        expanded: paper
+          ?.querySelector(".llm-task-paper-summary")
+          ?.getAttribute("aria-expanded"),
+        details: Boolean(
+          details &&
+          !details.hidden &&
+          details.querySelector(".llm-task-paper-open"),
+        ),
+      };
+    };
+    const asLeft = {
+      conversation,
+      kind: "global",
+      drawer: "open",
+      expanded: "true",
+      details: true,
+    };
+    try {
+      await handle.emit({
+        type: "paper_ledger_update",
+        callId: "retrieve-1",
+        delta: {
+          version: 1,
+          callId: "retrieve-1",
+          toolName: "library_retrieve",
+          papers: fixtures.map((fixture, index) => ({
+            key: key(fixture.parentItemId),
+            libraryID,
+            itemId: fixture.parentItemId,
+            contextItemId: fixture.pdfAttachmentId,
+            title: TITLES[index],
+            text: "pdf_text" as const,
+            state: "read" as const,
+          })),
+          reads: [
+            {
+              key: key(fixtures[0].parentItemId),
+              callId: "retrieve-1",
+              toolName: "library_retrieve",
+              granularity: "section",
+              method: "bm25",
+              label: "Results",
+              snippet: MINERU_SNIPPET,
+            },
+          ],
+        },
+      } as never);
+    } finally {
+      // The answer is done before the user opens the card.
+      handle.finish();
+    }
+    try {
+      const row = rootOf().querySelector("#llm-task-progress") as HTMLElement;
+      await until(() => {
+        api.flushTaskProgress();
+        return !row.hidden;
+      }, "the card shows in Library chat");
+      row.click();
+      await until(() => Boolean(paperOf(rootOf())), "the paper lists");
+      (
+        paperOf(rootOf())!.querySelector(
+          ".llm-task-paper-summary",
+        ) as HTMLElement
+      ).click();
+      await until(
+        () => JSON.stringify(stateOf(rootOf())) === JSON.stringify(asLeft),
+        () => `the drawer opens: ${JSON.stringify(stateOf(rootOf()))}`,
+      );
+
+      (
+        paperOf(rootOf())!.querySelector(".llm-task-paper-open") as HTMLElement
+      ).click();
+      await until(
+        () => activeReader()?.itemID === fixtures[0].pdfAttachmentId,
+        "the reader tab opens",
+        30000,
+      );
+      const readerRoot = () =>
+        activeDetails()?.querySelector("#llm-main") as HTMLElement | null;
+      await until(
+        () => JSON.stringify(stateOf(readerRoot())) === JSON.stringify(asLeft),
+        () =>
+          `the reader's sidebar shows the card as left: ${JSON.stringify(stateOf(readerRoot()))}`,
+      );
+
+      win.Zotero_Tabs.select("zotero-pane");
+      await until(
+        () =>
+          win.Zotero_Tabs.selectedID === "zotero-pane" &&
+          JSON.stringify(stateOf(rootOf())) === JSON.stringify(asLeft),
+        () =>
+          `back in the library tab, the card is as left: ${JSON.stringify(stateOf(rootOf()))}`,
+      );
+      // It stays so: nothing closes it a moment later.
+      await Zotero.Promise.delay(600);
+      assert.deepEqual(stateOf(rootOf()), asLeft);
+    } finally {
       await closeReaders();
     }
   });

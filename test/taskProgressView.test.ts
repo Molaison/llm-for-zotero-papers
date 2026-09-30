@@ -1161,7 +1161,8 @@ describe("task progress view", function () {
     harness.row.dispatchFakeEvent("click");
     assert.equal(harness.drawer.style[MAX_VAR], "350px", "reopens at it");
     const other = track(mount({}, { layout: fakeLayout({ ms: 0 }).layout }));
-    other.row.dispatchFakeEvent("click");
+    // Another view of the conversation comes back open, as it was left.
+    assert.isTrue(other.view.isOpen());
     assert.equal(
       other.drawer.style[MAX_VAR],
       "350px",
@@ -1185,5 +1186,185 @@ describe("task progress view", function () {
     harness.grip.dispatchFakeEvent("dblclick");
     assert.isNull(getRememberedTaskProgressDrawerHeight());
     assert.equal(harness.drawer.style[MAX_VAR], "", "back to its content");
+  });
+
+  describe("per-conversation card state", function () {
+    const OTHER = KEY + 1;
+    function seedOther() {
+      setTaskScope(OTHER, {
+        signature: "other",
+        libraryID: 1,
+        contexts: { collections: [{ collectionId: 6 }] },
+        label: "Other",
+        listing: {
+          libraryID: 1,
+          wholeLibrary: false,
+          entries: scopeEntries(5),
+          totalItems: 5,
+          listedItems: 5,
+          truncated: false,
+        },
+      });
+    }
+    const globalInput = (conversationKey: number): TaskProgressViewInput => ({
+      conversationKey,
+      recordsReads: true,
+      visibility: {
+        conversationKind: "global",
+        isWebChat: false,
+        isNoteSession: false,
+        collectionCount: 1,
+        tagCount: 0,
+        paperCount: 0,
+      },
+    });
+    const expandedKeys = (harness: Harness) =>
+      harness
+        .items()
+        .filter(
+          (item) =>
+            item
+              .findByClass("llm-task-paper-summary")!
+              .getAttribute("aria-expanded") === "true",
+        )
+        .map((item) => item.dataset.key);
+    function openAndExpand(harness: Harness, index: number) {
+      harness.row.dispatchFakeEvent("click");
+      const item = harness.items()[index];
+      item.findByClass("llm-task-paper-summary")!.dispatchFakeEvent("click");
+    }
+
+    it("comes back open, expanded, windowed and scrolled on a new mount, without motion", function () {
+      seedScope(200);
+      const first = track(mount());
+      openAndExpand(first, 1);
+      Object.assign(first.body, {
+        scrollHeight: 4000,
+        clientHeight: 600,
+        scrollTop: 3300,
+      });
+      first.body.dispatchFakeEvent("scroll");
+      assert.equal(first.view.renderedRowCount(), 2 * TASK_PROGRESS_WINDOW);
+      first.view.dispose();
+
+      // The panel is rebuilt (a tab switch): the new view takes it up again.
+      const again = track(
+        mount({}, { layout: fakeLayout({ ms: 200 }).layout }),
+      );
+      assert.isTrue(again.view.isOpen(), "the drawer is open");
+      assert.equal(again.drawer.dataset.state, "open", "with no motion");
+      assert.isFalse((again.drawer as any).hidden);
+      assert.equal(again.row.getAttribute("aria-expanded"), "true");
+      assert.deepEqual(expandedKeys(again), ["1:2"], "the paper is expanded");
+      const details = again
+        .items()[1]
+        .findByClass("llm-task-paper-details")! as any;
+      assert.isFalse(details.hidden, "with its details");
+      assert.equal(again.view.renderedRowCount(), 2 * TASK_PROGRESS_WINDOW);
+      assert.equal(again.body.scrollTop, 3300, "at the same place");
+    });
+
+    it("keeps the user's own close on the next mount", function () {
+      seedScope(5);
+      const first = track(mount());
+      openAndExpand(first, 0);
+      first.row.dispatchFakeEvent("click");
+      assert.isFalse(first.view.isOpen());
+      first.view.dispose();
+      const closed = track(mount());
+      assert.isFalse(closed.view.isOpen(), "the user closed it");
+      closed.row.dispatchFakeEvent("click");
+      assert.deepEqual(
+        expandedKeys(closed),
+        ["1:1"],
+        "the paper stays expanded",
+      );
+    });
+
+    it("stays closed after the answer starts, mounted or not", function () {
+      seedScope(5);
+      beginTaskRun(KEY, { runId: "run-a" });
+      const first = track(mount());
+      first.row.dispatchFakeEvent("click");
+      markTaskAnswering(KEY, "run-a");
+      assert.isFalse(first.view.isOpen(), "the answer collapses it");
+      first.view.dispose();
+      assert.isFalse(track(mount()).view.isOpen(), "and it stays collapsed");
+
+      beginTaskRun(KEY, { runId: "run-b" });
+      const reopened = track(mount());
+      reopened.row.dispatchFakeEvent("click");
+      assert.isTrue(reopened.view.isOpen());
+      reopened.view.dispose();
+      // No view shows the conversation when its next answer starts.
+      markTaskAnswering(KEY, "run-b");
+      assert.isFalse(track(mount()).view.isOpen(), "collapsed while away");
+    });
+
+    it("forgets the state when the conversation's record is cleared", function () {
+      seedScope(5);
+      const first = track(mount());
+      openAndExpand(first, 0);
+      first.view.dispose();
+      clearTaskProgress(KEY);
+      seedScope(5);
+      const fresh = track(mount());
+      assert.isFalse(fresh.view.isOpen());
+      fresh.row.dispatchFakeEvent("click");
+      assert.deepEqual(expandedKeys(fresh), [], "nothing expanded");
+    });
+
+    it("drops the expanded papers of a record cleared under a mounted view", function () {
+      seedScope(5);
+      const harness = track(mount());
+      openAndExpand(harness, 0);
+      clearTaskProgress(KEY);
+      seedScope(5);
+      harness.view.flush();
+      if (!harness.view.isOpen()) harness.row.dispatchFakeEvent("click");
+      assert.deepEqual(
+        expandedKeys(harness),
+        [],
+        "the rebuilt list starts folded",
+      );
+      // Its next write must not bring the old expansion back either.
+      harness.row.dispatchFakeEvent("click");
+      harness.view.dispose();
+      const again = track(mount());
+      again.row.dispatchFakeEvent("click");
+      assert.deepEqual(expandedKeys(again), []);
+    });
+
+    it("keeps each conversation's own state when the panel switches", function () {
+      seedScope(200);
+      seedOther();
+      const harness = track(mount());
+      openAndExpand(harness, 2);
+      harness.view.setInput(globalInput(OTHER));
+      assert.isFalse(
+        harness.view.isOpen(),
+        "another conversation starts closed",
+      );
+      harness.row.dispatchFakeEvent("click");
+      assert.deepEqual(expandedKeys(harness), [], "with nothing expanded");
+      harness
+        .items()[4]
+        .findByClass("llm-task-paper-summary")!
+        .dispatchFakeEvent("click");
+      harness.row.dispatchFakeEvent("click");
+      assert.isFalse(harness.view.isOpen());
+
+      harness.view.setInput(globalInput(KEY));
+      assert.isTrue(
+        harness.view.isOpen(),
+        "the first conversation is open again",
+      );
+      assert.equal(harness.drawer.dataset.state, "open");
+      assert.deepEqual(expandedKeys(harness), ["1:3"]);
+      harness.view.setInput(globalInput(OTHER));
+      assert.isFalse(harness.view.isOpen(), "the other one was closed");
+      harness.row.dispatchFakeEvent("click");
+      assert.deepEqual(expandedKeys(harness), ["1:5"]);
+    });
   });
 });

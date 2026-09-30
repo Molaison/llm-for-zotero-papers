@@ -7,6 +7,8 @@ import {
   clearAllTaskProgress,
   clearTaskProgress,
   completeTaskRun,
+  getTaskProgressViewMemo,
+  rememberTaskProgressView,
   endTaskRun,
   beginTaskAction,
   endTaskAction,
@@ -379,5 +381,36 @@ describe("task progress store", function () {
     beginTaskRun(7);
     assert.isFalse(getTaskProgress(7)!.hydrated);
     assert.notEqual(getTaskProgress(7)!.epoch, epoch);
+  });
+
+  it("keeps a conversation's card state only as long as its record", function () {
+    rememberTaskProgressView(3, { open: true });
+    assert.isNull(getTaskProgressViewMemo(3), "no record, nothing to remember");
+    beginTaskRun(3, { runId: "run-a" });
+    rememberTaskProgressView(3, { open: true, expanded: ["1:2"] });
+    rememberTaskProgressView(3, { scrollTop: 120 });
+    assert.deepInclude(getTaskProgressViewMemo(3), {
+      open: true,
+      expanded: ["1:2"],
+      scrollTop: 120,
+    });
+    const copy = getTaskProgressViewMemo(3)!;
+    copy.expanded.push("1:9");
+    assert.deepEqual(getTaskProgressViewMemo(3)!.expanded, ["1:2"], "a copy");
+    clearTaskProgress(3);
+    assert.isNull(getTaskProgressViewMemo(3), "cleared with its record");
+    beginTaskRun(4, { runId: "run-b" });
+    rememberTaskProgressView(4, { open: true });
+    clearAllTaskProgress();
+    assert.isNull(getTaskProgressViewMemo(4), "cleared with every record");
+    // An evicted record takes its card state with it.
+    beginTaskRun(100, { runId: "run-evicted" });
+    completeTaskRun(100, { runId: "run-evicted" });
+    rememberTaskProgressView(100, { open: true });
+    for (let key = 101; key <= 100 + TASK_PROGRESS_MAX_CONVERSATIONS; key++) {
+      beginTaskRun(key, { runId: `run-${key}` });
+    }
+    assert.isNull(getTaskProgress(100));
+    assert.isNull(getTaskProgressViewMemo(100), "evicted with its record");
   });
 });

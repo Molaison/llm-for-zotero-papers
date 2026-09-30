@@ -123,6 +123,28 @@ const records = new Map<number, TaskProgressRecord>();
 let nextEpoch = 1;
 const listeners = new Set<(conversationKey: number) => void>();
 
+/**
+ * How the user left a conversation's Task progress card: the drawer open or
+ * closed, the papers expanded, how far the list was windowed and scrolled.
+ * Every view of the conversation takes it up when it mounts (a panel rebuilt
+ * on a tab switch, the reader's sidebar, the standalone window). Session
+ * memory only, never persisted; it lives and dies with the conversation's
+ * record, and a write never repaints a view.
+ */
+export type TaskProgressViewMemo = {
+  open: boolean;
+  /** Paper row keys. */
+  expanded: string[];
+  /** Rows the list had grown to. */
+  limit: number;
+  /** The drawer body's scroll offset while open. */
+  scrollTop: number;
+  /** The record's collapseSeq when this was written: an answer started since closes it. */
+  collapseSeq: number;
+};
+
+const viewMemos = new Map<number, TaskProgressViewMemo>();
+
 function normalizeKey(value: unknown): number {
   const key = Math.floor(Number(value || 0));
   return Number.isFinite(key) && key > 0 ? key : 0;
@@ -144,6 +166,7 @@ function evict(): void {
     if (victim === undefined) victim = records.keys().next().value;
     if (victim === undefined) return;
     records.delete(victim);
+    viewMemos.delete(victim);
   }
 }
 
@@ -690,6 +713,32 @@ export function taskTurnIndexFor(
   return userMessage ? 0 : count;
 }
 
+export function getTaskProgressViewMemo(
+  conversationKey: number,
+): TaskProgressViewMemo | null {
+  const memo = viewMemos.get(normalizeKey(conversationKey));
+  return memo ? { ...memo, expanded: [...memo.expanded] } : null;
+}
+
+/** Merge into the conversation's card state; only while its record exists. */
+export function rememberTaskProgressView(
+  conversationKey: number,
+  patch: Partial<TaskProgressViewMemo>,
+): void {
+  const key = normalizeKey(conversationKey);
+  const record = key ? records.get(key) : undefined;
+  if (!record) return;
+  const previous = viewMemos.get(key);
+  viewMemos.set(key, {
+    open: patch.open ?? previous?.open ?? false,
+    expanded: [...(patch.expanded ?? previous?.expanded ?? [])],
+    limit: patch.limit ?? previous?.limit ?? 0,
+    scrollTop: patch.scrollTop ?? previous?.scrollTop ?? 0,
+    collapseSeq:
+      patch.collapseSeq ?? previous?.collapseSeq ?? record.collapseSeq,
+  });
+}
+
 /** Bumped by every clear; a rebuild started before a clear is dropped. */
 const clearCounts = new Map<number, number>();
 let clearAllCount = 0;
@@ -703,6 +752,7 @@ export function clearTaskProgress(conversationKey: number): void {
   const key = normalizeKey(conversationKey);
   if (!key) return;
   clearCounts.set(key, (clearCounts.get(key) || 0) + 1);
+  viewMemos.delete(key);
   const record = records.get(key);
   if (!record) return;
   records.delete(key);
@@ -714,6 +764,7 @@ export function clearAllTaskProgress(): void {
   clearAllCount += 1;
   const keys = Array.from(records.keys());
   records.clear();
+  viewMemos.clear();
   for (const key of keys) notify(key);
 }
 

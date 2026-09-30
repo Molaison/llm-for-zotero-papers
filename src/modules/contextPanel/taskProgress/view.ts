@@ -44,6 +44,8 @@ import {
 } from "./planSteps";
 import {
   getTaskProgress,
+  getTaskProgressViewMemo,
+  rememberTaskProgressView,
   subscribeTaskProgress,
   type TaskProgressRecord,
   type TaskRunState,
@@ -726,13 +728,51 @@ export function mountTaskProgressView(params: {
   let limit = TASK_PROGRESS_WINDOW;
   let rowsByKey = new Map<string, PaperRowRefs>();
   let orderedRefs: PaperRowRefs[] = [];
-  const expanded = new Set<string>();
+  let expanded = new Set<string>();
+  /** The conversation's remembered card was open: reopen it once shown. */
+  let restorePending = false;
+  /** The record the local state belongs to; 0 before there is one. */
+  let seenEpoch = 0;
   const mineruKnown = new Set<string>();
   const mineruAsked = new Set<string>();
   const flashTimers = new Set<unknown>();
 
   const record = () =>
     input.conversationKey ? getTaskProgress(input.conversationKey) : null;
+
+  /**
+   * A record cleared under the view (the conversation deleted, a turn edited)
+   * takes its expanded papers and window with it, as it took its memo.
+   */
+  const adoptRecord = (current: TaskProgressRecord | null) => {
+    const epoch = current?.epoch ?? 0;
+    if (epoch === seenEpoch) return;
+    if (seenEpoch) {
+      expanded = new Set();
+      limit = TASK_PROGRESS_WINDOW;
+      for (const refs of rowsByKey.values()) refs.li.remove();
+      rowsByKey = new Map();
+      orderedRefs = [];
+    }
+    seenEpoch = epoch;
+  };
+
+  /**
+   * Keep how the user left the card, for the next view of this conversation
+   * (a panel rebuilt on a tab switch, the reader's sidebar, another window).
+   */
+  const remember = () => {
+    const key = input.conversationKey;
+    if (!key || disposed) return;
+    rememberTaskProgressView(key, {
+      open,
+      expanded: Array.from(expanded),
+      limit,
+      collapseSeq: seenCollapseSeq,
+      // A closed drawer keeps the place it was left at.
+      ...(open ? { scrollTop: Math.round(Number(body.scrollTop) || 0) } : {}),
+    });
+  };
 
   const computeVisible = (current: TaskProgressRecord | null) =>
     Boolean(input.conversationKey) &&
@@ -816,10 +856,15 @@ export function mountTaskProgressView(params: {
     settleTimer = deps.setTimeout(settle, ms + SETTLE_GRACE_MS);
   };
 
-  const applyOpen = (next: boolean, animated = true) => {
+  const applyOpen = (
+    next: boolean,
+    animated = true,
+    options: { remember?: boolean } = {},
+  ) => {
     open = next;
     row.setAttribute("aria-expanded", next ? "true" : "false");
     moveDrawer(next ? "open" : "closed", animated);
+    if (options.remember !== false) remember();
   };
 
   const onTransitionEnd = (event: Event) => {
@@ -1264,6 +1309,7 @@ export function mountTaskProgressView(params: {
       details.hidden = !next;
       if (next) renderDetails(refs);
       else details.replaceChildren();
+      remember();
     });
     if (expanded.has(model.key)) {
       summary.setAttribute("aria-expanded", "true");
@@ -1328,6 +1374,7 @@ export function mountTaskProgressView(params: {
     if (disposed) return;
     lastPaint = deps.now();
     const current = record();
+    adoptRecord(current);
     paintedVersion = current?.version ?? -1;
     visible = computeVisible(current);
     // Unchanged values are not written: a same-value write is still a DOM
@@ -1381,8 +1428,29 @@ export function mountTaskProgressView(params: {
         applyOpen(false);
       }
     }
+    if (restorePending) {
+      restorePending = false;
+      restoreOpen(current);
+    }
     renderHead(current);
     if (open) renderList(current);
+  };
+
+  /**
+   * Reopen the drawer as this conversation's card was left, without motion:
+   * unless an answer started since, which collapses it as it would have here.
+   */
+  const restoreOpen = (current: TaskProgressRecord | null) => {
+    const key = input.conversationKey;
+    const memo = key ? getTaskProgressViewMemo(key) : null;
+    if (!memo?.open || open || !current) return;
+    if (memo.collapseSeq !== current.collapseSeq) return;
+    seenCollapseSeq = current.collapseSeq;
+    renderHead(current);
+    renderList(current);
+    applyOpen(true, false, { remember: false });
+    body.scrollTop = memo.scrollTop;
+    remember();
   };
 
   const schedule = () => {
@@ -1410,10 +1478,13 @@ export function mountTaskProgressView(params: {
     paint();
   };
 
-  /** Close without motion (the row hid, or the panel switched chats). */
-  const closeAtOnce = () => {
+  /**
+   * Close without motion: the row hid (remembered), or the panel moved on to
+   * another conversation (the one left keeps its state).
+   */
+  const closeAtOnce = (options: { remember?: boolean } = {}) => {
     endDrag();
-    if (open) applyOpen(false, false);
+    if (open) applyOpen(false, false, options);
     else if (drawerState === "closing") settle();
   };
 
@@ -1466,6 +1537,10 @@ export function mountTaskProgressView(params: {
   };
   const onScroll = () => {
     if (!open) return;
+    growWindow();
+    remember();
+  };
+  const growWindow = () => {
     const total = buildTaskProgressPaperRows(record()).length;
     if (limit >= total) return;
     const remaining =
@@ -1479,6 +1554,7 @@ export function mountTaskProgressView(params: {
   const unsubscribe = subscribeTaskProgress((key) => {
     if (key !== input.conversationKey) return;
     const current = record();
+    adoptRecord(current);
     // The answer started: collapse now, not at the next coalesced paint.
     if (current && current.collapseSeq !== seenCollapseSeq) {
       seenCollapseSeq = current.collapseSeq;
@@ -1502,17 +1578,23 @@ export function mountTaskProgressView(params: {
     setInput(next) {
       if (disposed) return;
       const switched = next.conversationKey !== input.conversationKey;
+      if (switched) closeAtOnce({ remember: false });
       input = next;
       if (switched) {
-        closeAtOnce();
         for (const refs of rowsByKey.values()) refs.li.remove();
         rowsByKey = new Map();
         orderedRefs = [];
-        expanded.clear();
         mineruKnown.clear();
         mineruAsked.clear();
-        limit = TASK_PROGRESS_WINDOW;
+        // The conversation shown now comes back as its card was left.
+        const memo = next.conversationKey
+          ? getTaskProgressViewMemo(next.conversationKey)
+          : null;
+        expanded = new Set(memo?.expanded || []);
+        limit = Math.max(TASK_PROGRESS_WINDOW, memo?.limit || 0);
+        restorePending = Boolean(memo?.open);
         seenCollapseSeq = record()?.collapseSeq ?? 0;
+        seenEpoch = record()?.epoch ?? 0;
       }
       flush();
     },
