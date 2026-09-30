@@ -19,7 +19,7 @@ import {
   startTaskProgressReplay,
 } from "./streamingReplay";
 import { flushTaskProgressPanels } from "./taskProgress/panel";
-import { getTaskProgress } from "./taskProgress/store";
+import { clearAllTaskProgress, getTaskProgress } from "./taskProgress/store";
 import { resetTaskProgressDrawerHeight } from "./taskProgress/view";
 import { createCodexStreamingScrollReplay } from "./codexStreamingScrollReplay";
 import {
@@ -1143,6 +1143,10 @@ async function renderStartupPanelForItem(
 
 function clearWorkflowConversationRuntimeState(): void {
   chatHistory.clear();
+  // Task progress records derive from the history cleared here; a record an
+  // earlier case left "running" would otherwise hold one of the store's six
+  // slots into every later case.
+  clearAllTaskProgress();
   selectedRuntimeModeCache.clear();
   loadedConversationKeys.clear();
   activeConversationModeByLibrary.clear();
