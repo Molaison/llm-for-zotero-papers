@@ -135,7 +135,9 @@ export function resolveMaterialOutput(
     [];
   if (!outputs.length) {
     if (outputId)
-      throw new Error("No authored output with that identity was requested.");
+      throw new Error(
+        "No authored output with that identity was requested; omit materialOutputId to submit the final document.",
+      );
     return undefined;
   }
   const output = outputId

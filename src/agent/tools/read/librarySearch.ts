@@ -598,7 +598,7 @@ export function createLibrarySearchTool(
             : "";
         if (!text) {
           return fail(
-            "text is required for search mode. Use library_search({ entity:'items', mode:'search', text:'<terms>' }), or pass conditions[] for an advanced search.",
+            "text is required for search mode. Use library_search({ entity:'items', mode:'search', text:'<terms>' }), or pass conditions[] for an advanced search. To list the items of a collection or tag, use mode:'list' with filters.",
           );
         }
       }

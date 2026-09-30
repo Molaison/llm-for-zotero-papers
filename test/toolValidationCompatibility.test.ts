@@ -1,5 +1,7 @@
 import { assert } from "chai";
 import { createLibrarySearchTool } from "../src/agent/tools/read/librarySearch";
+import { createLibraryReadTool } from "../src/agent/tools/read/libraryRead";
+import { resolveMaterialOutput } from "../src/agent/documents/workflowMaterial";
 import { createFileIOTool } from "../src/agent/tools/write/fileIO";
 import type { AgentToolContext } from "../src/agent/types";
 import { createMalformedToolArgumentsDiagnostic } from "../src/agent/toolArgumentDiagnostics";
@@ -132,6 +134,9 @@ describe("tool validation compatibility", function () {
     assert.isFalse(missingSearchText.ok);
     if (!missingSearchText.ok) {
       assert.include(missingSearchText.error, "text is required");
+      // Live runs sent filters without text to list a collection, three
+      // times in a row; the rejection names the mode that does that.
+      assert.include(missingSearchText.error, "mode:'list' with filters");
     }
 
     const badCollectionMode = tool.validate({
@@ -149,6 +154,22 @@ describe("tool validation compatibility", function () {
       assert.include(missingShape.error, "entity and mode are required");
       assert.include(missingShape.error, "{ entity:'items', mode:'search'");
     }
+  });
+
+  it("points a rejected tags section and a stray materialOutputId at what works", function () {
+    const read = createLibraryReadTool({} as never);
+    const tags = read.validate({ itemIds: [1], sections: ["tags"] });
+    assert.isFalse(tags.ok);
+    if (!tags.ok) {
+      assert.include(tags.error, "library_search with include:['tags']");
+    }
+    const other = read.validate({ itemIds: [1], sections: ["bogus"] });
+    assert.isFalse(other.ok);
+    if (!other.ok) assert.notInclude(other.error, "include:['tags']");
+    assert.throws(
+      () => resolveMaterialOutput({} as never, "review-draft"),
+      /omit materialOutputId to submit the final document/,
+    );
   });
 
   it("normalizes file_io canonical and deprecated alias shapes", async function () {

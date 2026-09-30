@@ -158,7 +158,10 @@ export function createLibraryReadTool(
         }
         return fail(
           `None of the provided sections are valid: ${JSON.stringify(rawSections.slice(0, 5))}. ` +
-            `Valid sections: metadata, notes, content, annotations, attachments, collections.`,
+            `Valid sections: metadata, notes, content, annotations, attachments, collections.` +
+            (rawSections.includes("tags")
+              ? " Item tags come from library_search with include:['tags']."
+              : ""),
         );
       }
       const hasItemIds = Object.prototype.hasOwnProperty.call(args, "itemIds");
