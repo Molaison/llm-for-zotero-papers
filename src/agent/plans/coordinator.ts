@@ -930,34 +930,45 @@ export class PlanExecutionCoordinator {
     ) {
       throw new Error("Approved plan identity changed");
     }
-    const receiptEffects =
-      artifact?.version === 5 && artifact.effectSpecification
-        ? params.receipts.map((receipt) => {
-            const effectIds = matchPlanEffectReceipt({
-              specification: artifact.effectSpecification!,
-              activeEffectIds: task.effectIds || [],
-              receipt,
-            });
-            if (!effectIds.length) {
-              throw new Error(
-                `Receipt '${receipt.id}' does not match an active approved effect`,
-              );
-            }
-            return {
-              receiptId: receipt.id,
-              effectIds,
-              effectTargets: effectIds.map((effectId) => ({
-                effectId,
-                targetIds: planEffectTargets(
-                  artifact.effectSpecification!.effects.find(
-                    (effect) => effect.effectId === effectId,
-                  )!,
-                ),
-              })),
-            };
-          })
-        : undefined;
-    return updatePlanTask({ ...params, kind: "receipts", receiptEffects });
+    let receipts = params.receipts;
+    let receiptEffects;
+    if (artifact?.version === 5 && artifact.effectSpecification) {
+      const specification = artifact.effectSpecification;
+      const matched = params.receipts.flatMap((receipt) => {
+        const effectIds = matchPlanEffectReceipt({
+          specification,
+          activeEffectIds: task.effectIds || [],
+          receipt,
+        });
+        if (effectIds.length) return [{ receipt, effectIds }];
+        // A read needs no approval: it counts only toward a read effect the
+        // plan named. Only an unmatched write ran outside the approved plan.
+        if (receipt.capability === "zotero.read") return [];
+        throw new Error(
+          `Receipt '${receipt.id}' does not match an active approved effect`,
+        );
+      });
+      if (!matched.length) return ledger;
+      receipts = matched.map((entry) => entry.receipt);
+      receiptEffects = matched.map(({ receipt, effectIds }) => ({
+        receiptId: receipt.id,
+        effectIds,
+        effectTargets: effectIds.map((effectId) => ({
+          effectId,
+          targetIds: planEffectTargets(
+            specification.effects.find(
+              (effect) => effect.effectId === effectId,
+            )!,
+          ),
+        })),
+      }));
+    }
+    return updatePlanTask({
+      ...params,
+      receipts,
+      kind: "receipts",
+      receiptEffects,
+    });
   }
 
   async attachEvidence(

@@ -65,6 +65,57 @@ describe("document finalization persistence", function () {
     db.close();
   });
 
+  it("ignores a read receipt no approved effect names, and still rejects an unmatched write", async function () {
+    // A real paper_read full inside an approved plan emits a read_full
+    // receipt; treating it as an unauthorized effect crashed the whole run.
+    const plan = await createDocumentPlan();
+    const taskId = plan.tasks[0].taskId;
+    const read = {
+      version: 2,
+      id: "read_full:fallback",
+      proposalId: "read_full:fallback",
+      proofDomain: "zotero_state",
+      capability: "zotero.read",
+      operation: "read_full",
+      verification: "verified",
+      status: "observed",
+      requestedTargets: [],
+      appliedTargets: [],
+      alreadySatisfiedTargets: [],
+      rejectedTargets: [],
+      reasons: [],
+      verifiedFacts: ["read_mode:full"],
+    };
+    const coordinator = new PlanExecutionCoordinator();
+    const after = await coordinator.attachReceiptEvidence({
+      executionId: plan.executionId,
+      taskId,
+      receipts: [read as never],
+    });
+    assert.deepEqual(after.tasks, plan.tasks);
+    assert.isEmpty(await listTaskEvidence(plan.executionId, taskId));
+    let failure = "";
+    try {
+      await coordinator.attachReceiptEvidence({
+        executionId: plan.executionId,
+        taskId,
+        receipts: [
+          {
+            ...read,
+            id: "note:1",
+            proposalId: "note:1",
+            capability: "zotero.notes",
+            operation: "note_create",
+            status: "applied",
+          } as never,
+        ],
+      });
+    } catch (error) {
+      failure = String(error);
+    }
+    assert.match(failure, /does not match an active approved effect/);
+  });
+
   it("rejects a draft step whose material no later save consumes, before approval", async function () {
     // A live literature-review plan added such a step; its material_integrity
     // could never be satisfied, so publication waited on it forever.
