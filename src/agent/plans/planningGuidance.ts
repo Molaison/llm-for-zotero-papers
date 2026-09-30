@@ -23,7 +23,7 @@ export const PLANNING_PHASE_GUIDANCE = [
   "- Omit effectSpecification unless the user explicitly requested an effectful action.",
   "- Describe each requested write in effectSpecification with a stable effectId, exact operation, host-resolved target identities, normalized parameters, restrictions, dependencies, and any exact or producer-bound material. Bind every mutation step to its effectIds.",
   "- Use a deferredEffect only when research must choose the exact targets; it receives a separate later approval.",
-  "- For generated content that will be saved, add an earlier artifact step with materialOutputId and material_integrity, then bind the save effect to that producer step.",
+  "- For generated content that a write effect saves, add an earlier artifact step with materialOutputId and material_integrity, then bind the save effect to that producer step; a formal document needs no draft step.",
 ].join("\n");
 
 /** How to change or extend an approved plan; rendered only while executing. */

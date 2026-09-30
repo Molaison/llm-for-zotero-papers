@@ -355,12 +355,36 @@ function validatePlanStepContract(params: {
     );
   }
   validatePlanEffectBindings(params.effectSpecification, params.steps);
+  // Material evidence exists only for a draft a later save effect consumes;
+  // without that consumer nothing can satisfy the step and execution stalls.
+  const consumedMaterials = new Set(
+    [
+      ...params.effectSpecification.effects,
+      ...params.effectSpecification.deferredEffects,
+    ].flatMap((effect) =>
+      effect.materialBindings.flatMap((binding) =>
+        "producedByStepId" in binding
+          ? [JSON.stringify([binding.producedByStepId, binding.outputId])]
+          : [],
+      ),
+    ),
+  );
   const requirementOwners = new Map<PlanCompletionRequirementKind, number[]>();
   params.steps.forEach((step, index) => {
     for (const requirement of step.completionRequirements || []) {
       const owners = requirementOwners.get(requirement.kind) || [];
       owners.push(index);
       requirementOwners.set(requirement.kind, owners);
+      if (
+        requirement.kind === "material_integrity" &&
+        !consumedMaterials.has(
+          JSON.stringify([step.planStepId, step.materialOutputId]),
+        )
+      ) {
+        throw new Error(
+          "material_integrity is only for an artifact step whose materialOutputId a later save effect binds; a formal document is finalized in the final artifact step with document_integrity and document_published",
+        );
+      }
       if (
         requirement.kind === "mutation_receipts" &&
         step.expectedEffect !== "mutation"

@@ -1,6 +1,7 @@
 import { assert } from "chai";
 import { DatabaseSync } from "node:sqlite";
 import { createDocumentPlan } from "./helpers/documentPlan";
+import { PlanExecutionCoordinator } from "../src/agent/plans/coordinator";
 import { PlanDocumentFinalizer } from "../src/agent/documents/planFinalization";
 import { DirectDocumentFinalizer } from "../src/agent/documents/directFinalization";
 import { deliverPendingPlanDocumentMessage } from "../src/agent/documents/publication";
@@ -62,6 +63,69 @@ describe("document finalization persistence", function () {
   afterEach(function () {
     globals.Zotero = original;
     db.close();
+  });
+
+  it("rejects a draft step whose material no later save consumes, before approval", async function () {
+    // A live literature-review plan added such a step; its material_integrity
+    // could never be satisfied, so publication waited on it forever.
+    const spec = {
+      kind: "literature_review" as const,
+      title: "Review",
+      requiredSections: ["Review"],
+      requiresReferences: false,
+      requiresCoverageSection: false,
+      allowFigures: false,
+      citationStyle: {
+        styleId: "http://www.zotero.org/styles/apa",
+        styleTitle: "APA",
+        locale: "en-US",
+      },
+    };
+    let failure = "";
+    try {
+      await new PlanExecutionCoordinator().updateDraft({
+        planId: "draft-material-plan",
+        conversationKey: 41,
+        provider: "original",
+        revision: 1,
+        ready: true,
+        now: 1,
+        contract: { deliverable: { kind: "document", spec } },
+        steps: [
+          {
+            content: "Draft the review",
+            expectedEffect: "artifact",
+            materialOutputId: "review-draft",
+            acceptanceCriteria: [
+              {
+                criterionId: "draft",
+                description: "The draft is stored",
+                verifier: "material_integrity",
+              },
+            ],
+          },
+          {
+            content: "Publish the review",
+            expectedEffect: "artifact",
+            acceptanceCriteria: [
+              {
+                criterionId: "integrity",
+                description: "The review is complete",
+                verifier: "document_integrity",
+              },
+              {
+                criterionId: "published",
+                description: "The review is published",
+                verifier: "document_published",
+              },
+            ],
+          },
+        ],
+      });
+    } catch (error) {
+      failure = String(error);
+    }
+    assert.match(failure, /material_integrity is only for an artifact step/);
   });
 
   it("does not direct final publication through the intermediate material route", async function () {
