@@ -109,6 +109,11 @@ const DONE_RECEIPT_STATUSES: ReadonlySet<string> = new Set([
   "partial",
   "observed",
 ]);
+const NOTE_CONTENT_OPERATIONS: ReadonlySet<string> = new Set([
+  "note_create",
+  "note_edit",
+  "note_append",
+]);
 const INTERRUPTING_STOP_RULES: ReadonlySet<RunStopRule> = new Set<RunStopRule>([
   "interrupted_by_error",
   "stream_interrupted_again",
@@ -151,6 +156,16 @@ function acceptsWrite(task: Task, write: Write): boolean {
     task.effect === "mutation" &&
     (!task.capability || task.capability === write.capability) &&
     covers(task, write.requestedTargets)
+  );
+}
+
+/** A verified note body: written content the host can point to. */
+function isNoteContent(receipt: AgentActionReceipt): boolean {
+  return (
+    receipt.capability === "zotero.notes" &&
+    NOTE_CONTENT_OPERATIONS.has(receipt.operation) &&
+    receipt.verification === "verified" &&
+    DONE_RECEIPT_STATUSES.has(receipt.status)
   );
 }
 
@@ -397,6 +412,17 @@ function applyReceipt(
       chosen.has(index) ? bindReceipt(task, receipt, now) : undefined,
     );
   }
+  // Written content saved as a note is the artifact a part asked for.
+  const artifact = isNoteContent(receipt)
+    ? checkpoint.tasks.findIndex(
+        (task) => task.status === "pending" && task.effect === "artifact",
+      )
+    : -1;
+  if (artifact >= 0) {
+    return mapTasks(checkpoint, now, (task, index) =>
+      index === artifact ? bindReceipt(task, receipt, now) : undefined,
+    );
+  }
   const targets = unique(receipt.requestedTargets);
   const host: Task = {
     ...newTask(
@@ -497,8 +523,10 @@ function applyAnswer(
   checkpoint: ExecutionCheckpoint,
   now: number,
 ): EvidenceResult {
+  // Content written in the accepted answer is the artifact a part asked for.
   return mapTasks(checkpoint, now, (task) =>
-    task.status === "pending" && (!task.effect || task.effect === "answer")
+    task.status === "pending" &&
+    (!task.effect || task.effect === "answer" || task.effect === "artifact")
       ? { ...task, status: "completed", updatedAt: now }
       : undefined,
   );
@@ -554,9 +582,15 @@ export function declareOutcomes(
       );
     }
     const targets = outcomeTargets(declaration.targets);
+    // A part that names a write capability is a write, whatever effect it
+    // claims: models declare "save it as a note" as an artifact too.
+    const effect =
+      declaration.capability && isWrite({ capability: declaration.capability })
+        ? "mutation"
+        : declaration.effect;
     created.push({
       ...newTask(taskId, description, now),
-      effect: declaration.effect,
+      effect,
       origin: "model",
       ...(declaration.capability ? { capability: declaration.capability } : {}),
       ...(targets.length ? { targets } : {}),

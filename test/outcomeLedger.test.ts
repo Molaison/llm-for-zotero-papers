@@ -1645,3 +1645,72 @@ describe("outcome ledger: review cases", function () {
     assert.notEqual(outcomeProgressSignature(bound.checkpoint), before);
   });
 });
+
+describe("outcome ledger: how models declare saves (live run, 2026-09-30)", function () {
+  it("records a part that names a write capability as a write, whatever effect it claims", function () {
+    const ledger = ledgerWith({
+      taskId: "save",
+      description: "Save the summary as a note",
+      effect: "artifact",
+      capability: "zotero.notes",
+    });
+    assert.equal(ledger.tasks[0].effect, "mutation");
+    const bound = apply(ledger, { kind: "receipt", receipt: receipt() });
+    assert.lengthOf(bound.checkpoint.tasks, 1, "no separate host outcome");
+    assert.equal(bound.checkpoint.tasks[0].status, "completed");
+    assert.lengthOf(openDeclaredOutcomes(bound.checkpoint), 0);
+  });
+
+  it("closes an artifact part with a verified note write when no write part takes it", function () {
+    const ledger = ledgerWith({
+      taskId: "summary",
+      description: "Write the summary",
+      effect: "artifact",
+    });
+    const bound = apply(ledger, { kind: "receipt", receipt: receipt() });
+    assert.lengthOf(bound.checkpoint.tasks, 1, "no separate host outcome");
+    assert.equal(bound.checkpoint.tasks[0].status, "completed");
+    assert.deepEqual(bound.checkpoint.tasks[0].verifiedReceiptIds, [
+      "receipt-1",
+    ]);
+  });
+
+  it("leaves an artifact part to a write part that takes the note receipt, and closes it with the answer", function () {
+    const ledger = ledgerWith(
+      {
+        taskId: "summary",
+        description: "Write the summary",
+        effect: "artifact",
+      },
+      { taskId: "save", description: "Save it", effect: "mutation" },
+    );
+    const saved = apply(ledger, { kind: "receipt", receipt: receipt() });
+    assert.deepEqual(
+      saved.checkpoint.tasks.map((task) => task.status),
+      ["pending", "completed"],
+    );
+    const answered = apply(saved.checkpoint, { kind: "answer" });
+    assert.deepEqual(
+      answered.checkpoint.tasks.map((task) => task.status),
+      ["completed", "completed"],
+    );
+  });
+
+  it("does not close an artifact part with a write that is not note content", function () {
+    const ledger = ledgerWith({
+      taskId: "summary",
+      description: "Write the summary",
+      effect: "artifact",
+    });
+    const bound = apply(ledger, {
+      kind: "receipt",
+      receipt: receipt({ capability: "zotero.tags", operation: "add_tags" }),
+    });
+    assert.equal(bound.checkpoint.tasks[0].status, "pending");
+    assert.lengthOf(
+      bound.checkpoint.tasks,
+      2,
+      "the tag write is its own outcome",
+    );
+  });
+});

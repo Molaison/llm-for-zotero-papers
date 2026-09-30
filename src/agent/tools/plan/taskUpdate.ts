@@ -365,7 +365,7 @@ const OUTCOME_MARK_STATUSES: ReadonlySet<ExecutionTaskStatus> = new Set([
 const EXPECTED_EFFECT_REQUIRED =
   "Give each new task an expectedEffect: read, artifact, mutation, or reasoning.";
 const HOST_MARKS_DONE =
-  "The host marks tasks done from the tools' results; nothing changed.";
+  "Nothing changed: the host marks parts done from the tools' results, so progress needs no task_update call. Continue the work, or answer when it is done.";
 
 function actionCapability(
   value: string | undefined,
