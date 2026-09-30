@@ -1,6 +1,8 @@
 import { callLLM, callLLMStream } from "../../utils/llmClient";
 import { appLogger } from "../../core/logging";
 import { resolveRetrievalQueryPlan } from "../../services/retrieval/retrievalQueryPlan";
+import { getRecentRetrievalTimings } from "../../services/retrieval/retrievalTiming";
+import type { ZoteroGateway } from "../../agent/services/zoteroGateway";
 import { createAgentModelAdapter } from "../../agent/model/factory";
 import { resolveAgentRuntimeRequest } from "../../agent/context/resolvedAgentRequest";
 import { createProviderRequestScope } from "../../utils/providerTransport";
@@ -5445,11 +5447,126 @@ async function cleanupFixture(
 }
 
 export function installWorkflowTestHarness(targetAddon: {
-  api: { workflowTest?: WorkflowTestApi };
+  api: {
+    workflowTest?: WorkflowTestApi;
+    agent?: { getZoteroGateway(): ZoteroGateway };
+  };
 }): void {
   if (__env__ !== "test" && __env__ !== "development") return;
   targetAddon.api.workflowTest = {
     planRetrievalQuery: resolveRetrievalQueryPlan,
+    async libraryRetrieveBench(input) {
+      const { LibraryRetrieveService } =
+        await import("../../agent/services/libraryRetrieveService");
+      const { PdfService } = await import("../../agent/services/pdfService");
+      const agentApi = targetAddon.api.agent;
+      if (!agentApi) throw new Error("Agent subsystem is not installed");
+      const service = new LibraryRetrieveService(
+        agentApi.getZoteroGateway(),
+        new PdfService(),
+      );
+      const startedAt = Date.now();
+      const result = await service.retrieve({
+        query: input.query,
+        depth: input.depth || "evidence",
+        intent: input.intent,
+        scope: input.collectionIds?.length
+          ? {
+              libraryID: Zotero.Libraries.userLibraryID,
+              collectionIds: input.collectionIds,
+            }
+          : { libraryID: Zotero.Libraries.userLibraryID },
+        // No model, apiBase or apiKey: the planner falls back to the literal
+        // query, so the numbers measure retrieval, not an LLM.
+      });
+      const elapsedMs = Date.now() - startedAt;
+      const [timing] = getRecentRetrievalTimings(1);
+      return {
+        elapsedMs,
+        timing: timing || null,
+        paperItemIds: result.paperMatches.map((match) => Number(match.itemId)),
+        snippetItemIds: result.snippets.map((snippet) =>
+          Number(snippet.itemId),
+        ),
+        snippetTexts: result.snippets.map((snippet) => snippet.snippet),
+        snippetCount: result.snippets.length,
+        warnings: result.warnings,
+        queryCoverage: result.resourcePool.queryCoverage,
+      };
+    },
+    getRecentRetrievalTimings: (limit) => getRecentRetrievalTimings(limit),
+    libraryTextIndexStatus: async () => {
+      const { libraryTextIndexScheduler } =
+        await import("../../services/libraryTextIndex");
+      return libraryTextIndexScheduler.getStatus(
+        Zotero.Libraries.userLibraryID,
+      );
+    },
+    setLibraryTextIndexUserIdle: async (idle) => {
+      const { setUserIdleForTests } =
+        await import("../../services/libraryTextIndex/userIdle");
+      const { libraryTextIndexScheduler } =
+        await import("../../services/libraryTextIndex");
+      setUserIdleForTests(idle);
+      libraryTextIndexScheduler.onUserIdleChange(idle !== false);
+    },
+    waitForLibraryTextIndexIdle: async (timeoutMs) => {
+      // The scaffold's tester is never "user idle"; force it so prefetch drains.
+      const { setUserIdleForTests } =
+        await import("../../services/libraryTextIndex/userIdle");
+      const { libraryTextIndexScheduler } =
+        await import("../../services/libraryTextIndex");
+      setUserIdleForTests(true);
+      libraryTextIndexScheduler.onUserIdleChange(true);
+      return libraryTextIndexScheduler.waitForIdle(timeoutMs);
+    },
+    libraryTextIndexCoverage: async (attachmentIds) => {
+      const { getLibraryTextIndexStore } =
+        await import("../../services/libraryTextIndex/store");
+      const store = await getLibraryTextIndexStore();
+      if (!store) throw new Error("library text index store unavailable");
+      const coverage = await store.getCoverage(attachmentIds);
+      return {
+        indexed: [...coverage.indexed],
+        missing: coverage.missing,
+        failed: coverage.failed,
+      };
+    },
+    forgetLibraryTextIndexDocuments: async (attachmentIds) => {
+      const { getLibraryTextIndexStore } =
+        await import("../../services/libraryTextIndex/store");
+      const store = await getLibraryTextIndexStore();
+      if (!store) throw new Error("library text index store unavailable");
+      await store.removeFromQueue(attachmentIds);
+      await store.deleteDocuments(attachmentIds);
+    },
+    reconcileLibraryTextIndex: async () => {
+      const { libraryTextIndexScheduler } =
+        await import("../../services/libraryTextIndex");
+      return libraryTextIndexScheduler.reconcile(
+        Zotero.Libraries.userLibraryID,
+      );
+    },
+    loadPaperContextForTest: async (attachmentId) => {
+      const { pdfTextCache } =
+        await import("../../services/paperContent/contextCache");
+      const { ensurePDFTextCached } =
+        await import("../../services/paperContent/pdfContext");
+      const item = Zotero.Items.get(attachmentId);
+      if (!item) throw new Error(`No attachment ${attachmentId}`);
+      // A fresh load, as when a question first reads this paper.
+      pdfTextCache.delete(attachmentId);
+      await ensurePDFTextCached(item);
+    },
+    async clearPaperTextCacheForBench() {
+      const { pdfTextCache, pdfTextLoadingTasks } =
+        await import("../../services/paperContent/contextCache");
+      const { invalidateRetrievalCandidates } =
+        await import("../../services/retrieval/cacheInvalidation");
+      pdfTextCache.clear();
+      pdfTextLoadingTasks.clear();
+      invalidateRetrievalCandidates();
+    },
     async checkProviderConversationTransport(input) {
       const params = {
         ...input,

@@ -9,6 +9,7 @@ import type {
   ResearchScopeSpec,
 } from "./types";
 import type { TagContextRef } from "../../shared/types";
+import { readAttachmentFileState } from "../../utils/attachmentFileState";
 
 function itemByLibraryAndKey(
   libraryID: number,
@@ -58,28 +59,15 @@ export async function getResearchItemFingerprints(
             getFilePathAsync?: () => Promise<string | false>;
           })
         | null;
-      let fileState: { size?: number; lastModified?: number } | undefined;
-      try {
-        const path = await attachmentItem?.getFilePathAsync?.();
-        const stat = path
-          ? await (globalThis as unknown as { IOUtils?: any }).IOUtils?.stat?.(
-              path,
-            )
-          : undefined;
-        if (stat) {
-          fileState = {
-            size: Number.isFinite(Number(stat.size))
-              ? Number(stat.size)
-              : undefined,
-            lastModified: Number.isFinite(Number(stat.lastModified))
-              ? Number(stat.lastModified)
-              : undefined,
-          };
-        }
-      } catch {
-        // Some linked or remote attachments have no local file. Zotero's own
-        // attachment sync fingerprint remains part of the source identity.
-      }
+      const state = await readAttachmentFileState(attachmentItem);
+      // Null state: linked or remote attachments with no local file. Zotero's
+      // own attachment sync fingerprint remains part of the source identity.
+      const fileState = state
+        ? {
+            size: state.size ?? undefined,
+            lastModified: state.mtime ?? undefined,
+          }
+        : undefined;
       return {
         key: String(attachmentItem?.key || ""),
         modified: Number(attachmentItem?.attachmentModificationTime || 0),

@@ -774,6 +774,27 @@ const zhCN: Record<string, string> = {
   "Semantic Search": "语义搜索",
   "Uses vector embeddings for meaning-aware search. When disabled, only keyword matching (BM25) is used.":
     "使用向量嵌入进行语义搜索。禁用后仅使用关键词匹配（BM25）。",
+  "Library index": "文献库索引",
+  "Keep a local full-text index of your library so library-wide questions answer from the index instead of re-reading PDFs. Fills from the questions you ask and, while Zotero is idle, in the background.":
+    "在本地保存文献库的全文索引，使针对整个文献库的问题直接从索引中作答，而无需重新读取 PDF。索引会随你的提问逐步填充，并在 Zotero 空闲时于后台补全。",
+  "Index size limit (MB)": "索引大小上限（MB）",
+  "Least-recently-searched papers are dropped from the index above this size.":
+    "超过此大小时，最久未被检索的论文会从索引中移除。",
+  "Rebuild index": "重建索引",
+  "Clear index": "清除索引",
+  "Clear library index": "清除文献库索引",
+  "This deletes the local index database and all embedding files. Your library and PDFs are not touched. Library questions will be slower until the index refills.":
+    "这将删除本地索引数据库和所有嵌入文件。你的文献库和 PDF 不受影响。在索引重新填充之前，文献库问答会变慢。",
+  "Index is off": "索引已关闭",
+  "Indexed {indexed} of {eligible} papers":
+    "已索引 {indexed}/{eligible} 篇论文",
+  "{count} queued": "{count} 篇待处理",
+  "{count} could not be indexed": "{count} 篇无法索引",
+  "{used} of {budget}": "{used} / {budget}",
+  "Building…": "正在构建…",
+  "Working…": "处理中…",
+  "Could not clear the index. Close other programs that may be using it and try again.":
+    "无法清除索引。请关闭可能正在使用它的其他程序后重试。",
   English: "英语",
   "中文 (简体)": "中文（简体）",
   Off: "关",

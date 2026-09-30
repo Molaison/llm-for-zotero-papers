@@ -16,6 +16,7 @@ import {
 import {
   CHUNK_OVERLAP,
   EMBEDDING_BATCH_SIZE,
+  EMBEDDING_BATCH_TIMEOUT_MS,
   CHUNK_TARGET_LENGTH,
   RETRIEVAL_TOP_K_PER_PAPER,
   RRF_K,
@@ -42,7 +43,11 @@ import {
 } from "../quotes/quoteCitations";
 import { readNoteSnapshot } from "../notes/noteSnapshot";
 import { readAttachmentBytes } from "../attachmentStorage";
-import { pdfTextCache, pdfTextLoadingTasks } from "./contextCache";
+import {
+  notifyPdfContextLoaded,
+  pdfTextCache,
+  pdfTextLoadingTasks,
+} from "./contextCache";
 import {
   buildAndWriteManifest,
   buildManifest,
@@ -413,7 +418,10 @@ async function cacheTextAttachment(
 
 async function cachePDFText(
   item: Zotero.Item,
-  options?: { sourceMode?: PaperContentSourceMode },
+  options?: {
+    sourceMode?: PaperContentSourceMode;
+    preferFulltextCache?: boolean;
+  },
 ) {
   if (pdfTextCache.has(item.id)) return;
 
@@ -466,7 +474,7 @@ async function cachePDFText(
     }
 
     // 2. Fallback to Zotero.PDFWorker
-    if (!pdfText && pdfItem) {
+    const tryPdfWorker = async (pdfItem: Zotero.Item) => {
       try {
         const result = await Zotero.PDFWorker.getFullText(pdfItem.id);
         if (result && result.text) {
@@ -484,15 +492,28 @@ async function cachePDFText(
       } catch (e) {
         appLogger.warn("PDF extraction failed:", e);
       }
-    }
+    };
 
     // 3. Fallback to Zotero's full-text cache/index. PDFWorker can return no
     // text even when Zotero already has indexed text for the attachment.
-    if (!pdfText && pdfItem) {
+    const tryFulltextCache = async (pdfItem: Zotero.Item) => {
       const cachedText = await readZoteroFulltextCache(pdfItem);
       if (cachedText) {
         pdfText = cachedText;
         sourceType = "zotero-fulltext-cache";
+      }
+    };
+
+    // Background indexing (preferFulltextCache) swaps steps 2 and 3 so it
+    // almost never runs pdf.js; interactive callers keep the page-aware
+    // PDFWorker text first.
+    if (!pdfText && pdfItem) {
+      if (options?.preferFulltextCache) {
+        await tryFulltextCache(pdfItem);
+        if (!pdfText) await tryPdfWorker(pdfItem);
+      } else {
+        await tryPdfWorker(pdfItem);
+        if (!pdfText) await tryFulltextCache(pdfItem);
       }
     }
 
@@ -653,7 +674,12 @@ async function cachePDFText(
 
 export async function ensurePDFTextCached(
   item: Zotero.Item,
-  options?: { sourceMode?: PaperContentSourceMode },
+  options?: {
+    sourceMode?: PaperContentSourceMode;
+    preferFulltextCache?: boolean;
+    /** Background index loads: fill the cache without firing the write-through hook. */
+    silentLoad?: boolean;
+  },
 ): Promise<void> {
   const cached = pdfTextCache.get(item.id);
   if (cached && cachedContextMatchesSourceMode(cached, options?.sourceMode)) {
@@ -679,6 +705,11 @@ export async function ensurePDFTextCached(
   const task = (async () => {
     try {
       await cachePDFText(item, options);
+      // Fresh loads with text only; cache hits and waits on an existing task return before this.
+      const loaded = pdfTextCache.get(item.id);
+      if (loaded && loaded.chunks.length && !options?.silentLoad) {
+        notifyPdfContextLoaded(item.id);
+      }
     } finally {
       pdfTextLoadingTasks.delete(item.id);
     }
@@ -771,6 +802,14 @@ export function invalidateCachedContextText(itemId: number): void {
   // text and scores after a MinerU refresh.  Lazy import to avoid circular
   // dependency (multiContextPlanner imports from pdfContext).
   invalidateRetrievalCandidates(normalizedItemId);
+  // Re-index the new text. Lazy import: indexer.ts imports this module.
+  void import("../libraryTextIndex/scheduler")
+    .then(({ libraryTextIndexScheduler }) =>
+      libraryTextIndexScheduler.enqueue([normalizedItemId], "textInvalidated"),
+    )
+    .catch((error) =>
+      appLogger.debug("LLM index: re-index enqueue failed", error),
+    );
   // Clear embedding cache — chunks will change when MinerU content is refreshed,
   // so cached embeddings are stale. Do NOT delete MinerU files themselves:
   // this function is called right after writeMineruCacheFiles(), so deleting
@@ -1796,11 +1835,21 @@ function cosineSimilarity(a: number[], b: number[]): number {
   return dot / (Math.sqrt(normA) * Math.sqrt(normB));
 }
 
-async function embedTexts(texts: string[]): Promise<number[][]> {
+/**
+ * Embeds a paper's chunks in batches. Each batch gets the longer batch timeout,
+ * not the query default: a slow local provider may need well over 30 s for
+ * 16 chunks. `embed` is injectable for tests.
+ */
+export async function embedTexts(
+  texts: string[],
+  embed: typeof callEmbeddings = callEmbeddings,
+): Promise<number[][]> {
   const all: number[][] = [];
   for (let i = 0; i < texts.length; i += EMBEDDING_BATCH_SIZE) {
     const batch = texts.slice(i, i + EMBEDDING_BATCH_SIZE);
-    const batchEmbeddings = await callEmbeddings(batch);
+    const batchEmbeddings = await embed(batch, {
+      timeoutMs: EMBEDDING_BATCH_TIMEOUT_MS,
+    });
     all.push(...batchEmbeddings);
   }
   return all;

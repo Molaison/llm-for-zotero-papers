@@ -3,6 +3,9 @@ import type { ConversationSystem, QuoteCitation } from "../../shared/types";
 import type { WorkflowTestFinalRequestSnapshot } from "./workflowTestHooks";
 import type { RuntimeConversationSystem } from "./runtimeSystemControls";
 import type { resolveRetrievalQueryPlan } from "../../services/retrieval/retrievalQueryPlan";
+import type { RetrievalTimingReport } from "../../services/retrieval/retrievalTiming";
+import type { LibraryTextIndexStatus } from "../../services/libraryTextIndex/scheduler";
+import type { LibraryRetrieveResult } from "../../agent/services/libraryRetrieveService";
 
 export type WorkflowTestFixture = {
   parentItemId: number;
@@ -442,8 +445,53 @@ export type WorkflowTestConversationHistoryTexts = {
   stored: Array<{ role: string; text: string }>;
 };
 
+/**
+ * One library retrieval run by the workflow bench: wall-clock time, the
+ * phase report the service recorded, and what came back.
+ */
+export type LibraryRetrieveBenchResult = {
+  elapsedMs: number;
+  timing: RetrievalTimingReport | null;
+  paperItemIds: number[];
+  snippetItemIds: number[];
+  snippetTexts: string[];
+  snippetCount: number;
+  warnings: string[];
+  queryCoverage: LibraryRetrieveResult["resourcePool"]["queryCoverage"];
+};
+
 export type WorkflowTestApi = {
   planRetrievalQuery: typeof resolveRetrievalQueryPlan;
+  libraryRetrieveBench: (input: {
+    query: string;
+    collectionIds?: number[];
+    depth?: "evidence" | "verify";
+    intent?: "enumerate" | "verify" | "summarize";
+  }) => Promise<LibraryRetrieveBenchResult>;
+  getRecentRetrievalTimings: (limit?: number) => RetrievalTimingReport[];
+  // Library text index status for the user library.
+  libraryTextIndexStatus: () => Promise<LibraryTextIndexStatus>;
+  // Overrides the user-idle signal that gates the prefetch lane (null = real).
+  setLibraryTextIndexUserIdle: (idle: boolean | null) => Promise<void>;
+  // Forces user idle so prefetch drains, then waits until nothing is runnable.
+  waitForLibraryTextIndexIdle: (timeoutMs: number) => Promise<boolean>;
+  // The plugin's own index instances (a test bundle's imports are separate
+  // module copies with their own scheduler and connection).
+  libraryTextIndexCoverage: (
+    attachmentIds: number[],
+  ) => Promise<{ indexed: number[]; missing: number[]; failed: number[] }>;
+  forgetLibraryTextIndexDocuments: (attachmentIds: number[]) => Promise<void>;
+  reconcileLibraryTextIndex: () => Promise<{
+    enqueued: number;
+    removed: number;
+    stale: number;
+    skippedForBudget: number;
+  }>;
+  // Loads one attachment's text through the question path (fires write-through).
+  loadPaperContextForTest: (attachmentId: number) => Promise<void>;
+  // Drops every loaded paper text and retrieval candidate so the next
+  // retrieval starts as if no paper had been read this session.
+  clearPaperTextCacheForBench: () => Promise<void>;
   checkProviderConversationTransport: (params: {
     conversationKey: number;
     model: string;

@@ -922,6 +922,135 @@
           <html:div id="__addonRef__-semantic-search-mount"></html:div>
         </html:div>
 
+        <html:div
+          id="__addonRef__-library-text-index-section"
+          style="display: flex; flex-direction: column; gap: 4px"
+        >
+          <html:label
+            style="
+              display: inline-flex;
+              align-items: center;
+              gap: 8px;
+              font-weight: 600;
+              font-size: 12px;
+              color: var(--fill-primary, inherit);
+            "
+          >
+            <html:input
+              id="__addonRef__-library-text-index-enabled"
+              type="checkbox"
+            ></html:input>
+            <html:span id="__addonRef__-library-text-index-label"
+              >Library index</html:span
+            >
+          </html:label>
+          <html:span
+            id="__addonRef__-library-text-index-hint"
+            style="
+              font-size: 11px;
+              color: var(--fill-secondary, #888);
+              margin-top: 1px;
+              display: block;
+            "
+          >
+            Keep a local full-text index of your library so library-wide
+            questions answer from the index instead of re-reading PDFs. Fills
+            from the questions you ask and, while Zotero is idle, in the
+            background.
+          </html:span>
+          <html:div
+            style="
+              display: flex;
+              align-items: center;
+              gap: 10px;
+              flex-wrap: wrap;
+              margin-top: 6px;
+            "
+          >
+            <html:label
+              id="__addonRef__-library-text-index-budget-label"
+              for="__addonRef__-library-text-index-budget"
+              style="
+                font-weight: 600;
+                font-size: 12px;
+                color: var(--fill-primary, inherit);
+              "
+              >Index size limit (MB)</html:label
+            >
+            <html:input
+              id="__addonRef__-library-text-index-budget"
+              type="number"
+              min="50"
+              step="50"
+              style="
+                width: 90px;
+                padding: 4px 8px;
+                font-size: 12px;
+                border-radius: 6px;
+              "
+            ></html:input>
+          </html:div>
+          <html:span
+            id="__addonRef__-library-text-index-budget-hint"
+            style="
+              font-size: 11px;
+              color: var(--fill-secondary, #888);
+              margin-top: 1px;
+              display: block;
+            "
+          >
+            Least-recently-searched papers are dropped from the index above this
+            size.
+          </html:span>
+          <html:span
+            id="__addonRef__-library-text-index-status"
+            style="
+              font-size: 11px;
+              color: var(--fill-secondary, #888);
+              margin-top: 6px;
+              display: block;
+            "
+          ></html:span>
+          <html:div
+            style="
+              display: flex;
+              align-items: center;
+              gap: 8px;
+              flex-wrap: wrap;
+              margin-top: 2px;
+            "
+          >
+            <html:button
+              id="__addonRef__-library-text-index-rebuild"
+              type="button"
+              style="
+                font-size: 11px;
+                padding: 2px 8px;
+                border-radius: 4px;
+                border: 1px solid var(--stroke-secondary, #c8c8c8);
+                background: transparent;
+                color: inherit;
+                cursor: pointer;
+              "
+              >Rebuild index</html:button
+            >
+            <html:button
+              id="__addonRef__-library-text-index-clear"
+              type="button"
+              style="
+                font-size: 11px;
+                padding: 2px 8px;
+                border-radius: 4px;
+                border: 1px solid var(--stroke-secondary, #c8c8c8);
+                background: transparent;
+                color: inherit;
+                cursor: pointer;
+              "
+              >Clear index</html:button
+            >
+          </html:div>
+        </html:div>
+
         <html:div style="display: flex; flex-direction: column; gap: 4px">
           <html:label
             for="__addonRef__-locale-select"

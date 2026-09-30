@@ -86,6 +86,9 @@ declare namespace _ZoteroTypes {
       "mineruSyncEnabled": boolean;
       "mineruMaxAutoPages": number;
       "mineruExcludePatterns": string;
+      "libraryTextIndexEnabled": boolean;
+      "libraryTextIndexVectors": boolean;
+      "libraryTextIndexBudgetMB": number;
     };
   }
 }
