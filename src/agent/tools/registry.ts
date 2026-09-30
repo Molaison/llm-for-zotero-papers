@@ -122,9 +122,7 @@ const MODEL_TOOL_DESCRIPTIONS: Readonly<Record<string, string>> = {
   library_retrieve:
     "Retrieve ranked paper evidence from a library scope with explicit coverage.",
   paper_read:
-    "Read papers by overview, targeted, full, figures, visual, or visible-page mode. For figure crops use mode:figures and figureLabels (e.g. ['Figure 1']); extracts from the source PDF without requiring MinerU. Preserve the active attachment; a sibling PDF's cache is not the same source.",
-  literature_search:
-    "Search scholarly sources and save candidates; import only on request.",
+    "Read Zotero paper content. For figure crops use mode:figures and figureLabels (e.g. ['Figure 1']); extracts from the source PDF without requiring MinerU. Preserve the active attachment; a sibling PDF's cache is not the same source.",
   library_update:
     "Change tags, metadata, memberships, parents, or Related links; kind:'collection' creates, renames, moves, or deletes a collection, kind:'attachment' renames, relinks, or deletes one, kind:'savedSearch' saves or deletes one. A membership move removes its named source.",
   context_read:
@@ -154,7 +152,7 @@ const MODEL_TOOL_DESCRIPTIONS: Readonly<Record<string, string>> = {
     "Persist validated Markdown and evidence as a versioned material reference.",
   update_plan: "Create or revise a read-only explicit Plan artifact.",
   prepare_plan_execution:
-    "Stage the exact execution contract and required steps for native Plan review. Acceptance checks may be typed objects or concise strings; the host converts strings into typed evidence requirements. The user remains the sole authority for the later run.",
+    "Stage the exact execution contract and required steps for native Plan review. The user remains the sole authority for the later run.",
   task_update:
     "Update tracked work; completion requires host-verifiable evidence.",
   research_update:

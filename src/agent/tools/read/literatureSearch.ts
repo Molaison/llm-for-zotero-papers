@@ -53,22 +53,14 @@ type LiteratureSearchInput = {
   libraryID?: number;
 };
 
-/**
- * Plan turns carry a classified external-search intent. Ordinary chat turns
- * carry none, so a cheap user-text signal for paper discovery or import
- * delivers the discovery-versus-import rules there.
- */
 export function matchesLiteratureSearchGuidance(
-  request: Pick<AgentRuntimeRequest, "classifiedIntent" | "userTextSignals">,
+  request: Pick<AgentRuntimeRequest, "classifiedIntent">,
 ): boolean {
   const intent = request.classifiedIntent?.externalSearchIntent;
   if (intent !== undefined) {
     return intent === "literature" || intent === "both";
   }
-  const signals = request.userTextSignals;
-  return Boolean(
-    signals && (signals.mentionsLiteratureSearch || signals.mentionsImport),
-  );
+  return false;
 }
 
 export const LITERATURE_SEARCH_GUIDANCE: NonNullable<
@@ -196,7 +188,7 @@ export function createLiteratureSearchTool(
     spec: {
       name: "literature_search",
       description:
-        "Search scholarly sources and return saved candidates for ranking. Discovery then uses literature_review; explicit imports use library_import directly. Use workflow:'review', mode:'metadata' for external metadata review.",
+        "Search scholarly sources and save ranked candidates. For discovery or recommendations, call literature_review to show the selection card; discovery never imports silently. An explicit import request uses library_import directly; metadata review uses workflow:'review', mode:'metadata'.",
       inputSchema: {
         type: "object",
         required: ["mode"],

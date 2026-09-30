@@ -490,7 +490,36 @@ describe("user skill bootstrap upgrades", function () {
     const shipped = parseSkill(BUILTIN_SKILL_FILES[`${name}.md`]);
     assert.equal(parseSkill(upgraded).version, shipped.version);
     assert.equal(parseSkill(upgraded).instruction, shipped.instruction);
+    assert.deepEqual(parseSkill(upgraded).contexts, shipped.contexts);
   }
+  it("patches old shipped analyze-figures contexts on a customized copy", async function () {
+    const customized = readFileSync(
+      new URL(
+        "./fixtures/skillUpgrades/analyze-figures-v10.md",
+        import.meta.url,
+      ),
+      "utf8",
+    ).replace(
+      "## Requested persistence",
+      "My own figure rule.\n\n## Requested persistence",
+    );
+    const files: Record<string, string> = {};
+    installMockSkillEnvironment(
+      "/tmp/llm-for-zotero-customized-analyze-figures",
+      files,
+      new Map<string, string>(),
+    );
+    const filePath = getCanonicalSkillFilePath("analyze-figures");
+    files[filePath] = customized;
+    await initUserSkills();
+    assert.include(files[filePath], "My own figure rule.");
+    assert.deepEqual(parseSkill(files[filePath]).contexts, [
+      "single-paper",
+      "paper-set",
+      "library-corpus",
+      "visual-input",
+    ]);
+  });
   // Exact pre-edit copies of the previously shipped version of every skill
   // whose rules moved to a single owner. An unmodified install must upgrade
   // both without a stored hash (bootstrap raw hash) and with one (tracked
@@ -501,6 +530,7 @@ describe("user skill bootstrap upgrades", function () {
     "compare-papers-v7",
     "write-note-v16",
     "analyze-figures-v9",
+    "analyze-figures-v10",
   ] as const) {
     const name = fixture.replace(/-v\d+$/, "");
     const readFixture = () =>

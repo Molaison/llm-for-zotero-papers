@@ -161,7 +161,7 @@ const BUILTIN_BOOTSTRAP_RAW_HASHES: Partial<
     "6upxur",
     "qs8z4b",
   ],
-  "analyze-figures.md": ["msvqtf", "17o1bpl", "gdr4uu"],
+  "analyze-figures.md": ["msvqtf", "17o1bpl", "gdr4uu", "e0ebpu"],
   "simple-paper-qa.md": ["yu43tj", "1r2ban6", "1181x3a", "12lfm6n"],
   "evidence-based-qa.md": [
     "en0khz",
@@ -219,7 +219,7 @@ const BUILTIN_FRONTMATTER_PATCH_OPTIONS: Partial<
     historicalContexts: ["single-paper,paper-set"],
   },
   "analyze-figures.md": {
-    historicalContexts: ["single-paper"],
+    historicalContexts: ["single-paper", "single-paper,visual-input"],
   },
 };
 

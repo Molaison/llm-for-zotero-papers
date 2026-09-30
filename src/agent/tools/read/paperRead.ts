@@ -1085,9 +1085,9 @@ function readPaperReadModeFromArgs(args: unknown): string {
 type PaperReadGuidance = NonNullable<AgentToolDefinition["guidance"]>;
 
 /**
- * Paper reading has a turn scope whenever a paper, a selected passage, a
- * collection, or a tag is in context. A zero-context library chat has none,
- * so the reading rules stay out of that turn until a paper is scoped.
+ * The reading rules apply whenever the turn can reach paper_read: a paper, a
+ * selected passage, a collection, or a tag in context, or a library (global)
+ * conversation, where the model may read explicitly targeted papers.
  */
 export function matchesPaperReadGuidance(
   request: Parameters<PaperReadGuidance["matches"]>[0],
@@ -1095,6 +1095,7 @@ export function matchesPaperReadGuidance(
   const scope = request.turnPaperScope;
   if (!scope) return false;
   return (
+    scope.conversationKind === "global" ||
     scope.papers.length > 0 ||
     scope.selectedPassagePaperRefs.length > 0 ||
     scope.collections.length > 0 ||

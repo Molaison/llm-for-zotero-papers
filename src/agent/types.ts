@@ -968,7 +968,6 @@ export type AgentRuntimeRequestInput = AgentRequest & {
     mentionsTrash: boolean;
     mentionsAttachment: boolean;
     mentionsImport: boolean;
-    mentionsLiteratureSearch: boolean;
   };
   /** Legacy or approved-Plan obligations; absent on fresh ordinary turns. */
   actionContract?: AgentActionContract;

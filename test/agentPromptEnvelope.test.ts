@@ -848,6 +848,30 @@ describe("agent prompt envelope evidence sufficiency", function () {
     }
   });
 
+  it("delivers paper_read guidance in a library chat with nothing selected", async function () {
+    const paperRead = createPaperReadTool(
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+    );
+    const messages = await buildAgentInitialMessages(
+      resolvedAgentRequest({
+        conversationKey: 4103,
+        mode: "agent",
+        conversationKind: "global",
+        libraryID: 1,
+        userText: "What does the Smith 2020 paper report?",
+        model: "test-model",
+      }),
+      [paperRead],
+      [],
+    );
+    const prompt = messages.map(messageText).join("\n");
+    assert.include(prompt, paperRead.guidance!.instruction);
+    assert.include(prompt, "answer_now");
+  });
+
   it("explains the answer_now retrieval state in paper-scoped paper_read guidance", async function () {
     const paperRead = createPaperReadTool(
       {} as never,

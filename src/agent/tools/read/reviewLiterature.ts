@@ -21,8 +21,7 @@ export function createLiteratureReviewTool(
   return {
     spec: {
       name: "literature_review",
-      description:
-        "Present ranked saved candidates for selection without import.",
+      description: "Show the selection card for ranked saved candidates.",
       executionClass: "read",
       workCategory: "retrieval",
       inputSchema: {

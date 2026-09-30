@@ -29,9 +29,7 @@ export function createReadAttachmentTool(
     spec: {
       name: "read_attachment",
       description:
-        "Read a non-PDF attachment (Markdown, HTML, TXT, DOCX) by " +
-        "target.contextItemId; attachFile:true sends the whole file after user review. " +
-        "For PDFs use paper_read.",
+        "Read a non-PDF attachment by target; attachFile:true sends the whole file after user review. For PDFs use paper_read.",
       inputSchema: {
         type: "object",
         additionalProperties: false,

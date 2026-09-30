@@ -1,8 +1,8 @@
 ---
 id: analyze-figures
 description: Extract, crop, or analyze figures, tables, and diagrams from papers
-version: 11
-contexts: single-paper,paper-set,library-corpus,visual-input
+version: 10
+contexts: single-paper,visual-input
 activation: auto
 ---
 

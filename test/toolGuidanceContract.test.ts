@@ -407,7 +407,6 @@ describe("tool guidance contracts", function () {
       mentionsTrash: false,
       mentionsAttachment: false,
       mentionsImport: false,
-      mentionsLiteratureSearch: false,
     };
     const chat = (signals: Partial<typeof noSignals>) =>
       ({
@@ -434,21 +433,14 @@ describe("tool guidance contracts", function () {
       ),
     );
     assert.isFalse(guidanceFor("library_import").matches(chat({}), ctx));
-    // Discovery-versus-import rules reach chat on a discovery or import
-    // signal; ordinary paper questions do not carry them.
-    assert.isTrue(
-      guidanceFor("literature_search").matches(
-        chat({ mentionsLiteratureSearch: true }),
-        ctx,
-      ),
-    );
-    assert.isTrue(
+    // Discovery-versus-import rules ride the literature_search description;
+    // its long-form guidance has no chat signal.
+    assert.isFalse(
       guidanceFor("literature_search").matches(
         chat({ mentionsImport: true }),
         ctx,
       ),
     );
-    assert.isFalse(guidanceFor("literature_search").matches(chat({}), ctx));
     // library_update carries the attachment guidance; the attachment signal
     // is the only chat signal that reaches it.
     assert.isTrue(
@@ -478,7 +470,6 @@ describe("tool guidance contracts", function () {
         mentionsTrash: false,
         mentionsAttachment: false,
         mentionsImport: false,
-        mentionsLiteratureSearch: false,
       },
     );
     assert.isTrue(computeUserTextSignals("把回收站里的论文恢复").mentionsTrash);
@@ -495,19 +486,6 @@ describe("tool guidance contracts", function () {
       computeUserTextSignals("restore it from the trash").mentionsTrash,
     );
     assert.isTrue(computeUserTextSignals("import ref 5").mentionsImport);
-    for (const discovery of [
-      "can you find related papers from internet to me",
-      "Recommend five recent studies on grid cells",
-      "search for literature on head-direction cells",
-      "which papers are citing this one?",
-      "帮我找一些相关论文",
-      "推荐几篇关于海马的文献",
-    ]) {
-      assert.isTrue(
-        computeUserTextSignals(discovery).mentionsLiteratureSearch,
-        discovery,
-      );
-    }
     assert.isTrue(
       computeUserTextSignals("rename the attachment").mentionsAttachment,
     );
@@ -516,15 +494,12 @@ describe("tool guidance contracts", function () {
       mentionsTrash: false,
       mentionsAttachment: false,
       mentionsImport: false,
-      mentionsLiteratureSearch: false,
     };
     for (const prose of [
       "Explain the main result.",
       "What is the importance of this finding?",
       "This is an important paper",
       "Emergent properties of the network",
-      "Find the sample size in this paper",
-      "Search this paper for the decoding accuracy",
     ]) {
       assert.deepEqual(computeUserTextSignals(prose), none, prose);
     }
@@ -589,7 +564,7 @@ describe("persona reading strategy contract", function () {
     );
   });
 
-  it("delivers paper-reading guidance whenever a paper, passage, collection, or tag is in scope", function () {
+  it("delivers paper-reading guidance in library chats and whenever a paper, passage, collection, or tag is in scope", function () {
     const registry = stubRegistry();
     const paperRead = registry.getTool("paper_read")!.guidance!;
     const retrieve = registry.getTool("library_retrieve")!.guidance!;
@@ -609,22 +584,31 @@ describe("persona reading strategy contract", function () {
       }) as any;
     const ctx = { matchedSkillIds: [] };
     const paper = { paper: { itemId: 1, contextItemId: 2 } };
-    // Zero-context library chat: no paper-reading guidance.
-    assert.isFalse(paperRead.matches(scope({}), ctx));
+    // A library (global) chat can reach paper_read with explicit targets, so
+    // the reading rules ride along even when nothing is selected.
+    assert.isTrue(paperRead.matches(scope({}), ctx));
+    // Without a turn scope, or in a paper conversation with nothing in scope,
+    // paper_read has no reachable paper.
     assert.isFalse(paperRead.matches({ conversationKey: 1 } as any, ctx));
+    const inPaperChat = (overrides: Record<string, unknown>) =>
+      scope({ conversationKind: "paper", ...overrides });
+    assert.isFalse(paperRead.matches(inPaperChat({}), ctx));
+    assert.isTrue(paperRead.matches(inPaperChat({ papers: [paper] }), ctx));
     assert.isTrue(
       paperRead.matches(
-        scope({ conversationKind: "paper", papers: [paper] }),
+        inPaperChat({ selectedPassagePaperRefs: [paper] }),
         ctx,
       ),
     );
     assert.isTrue(
-      paperRead.matches(scope({ selectedPassagePaperRefs: [paper] }), ctx),
+      paperRead.matches(
+        inPaperChat({ collections: [{ collectionId: 3 }] }),
+        ctx,
+      ),
     );
     assert.isTrue(
-      paperRead.matches(scope({ collections: [{ collectionId: 3 }] }), ctx),
+      paperRead.matches(inPaperChat({ tags: [{ name: "x" }] }), ctx),
     );
-    assert.isTrue(paperRead.matches(scope({ tags: [{ name: "x" }] }), ctx));
     // Library evidence rules follow library-level turns, including a
     // zero-context library chat, and stay out of a single-paper chat.
     assert.isTrue(retrieve.matches(scope({}), ctx));
