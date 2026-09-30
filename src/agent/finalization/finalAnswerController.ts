@@ -19,6 +19,10 @@ import {
 } from "../../webAccess/attribution";
 import type { PlanExecutionRunSession } from "../plans/runSession";
 import { literaturePaperIdentities } from "../services/literatureDiscovery";
+import {
+  openDeclaredOutcomes,
+  outcomeProgressSignature,
+} from "../loop/outcomes";
 
 export type AgentFinalAnswerToolRecord = {
   name: string;
@@ -128,6 +132,8 @@ export class AgentFinalAnswerController {
   private webAttributionCorrectionUsed = false;
   private documentCorrectionUsed = false;
   private readonly literatureReviewCorrections = new Set<string>();
+  /** The ledger's progress when the last outcome correction was given. */
+  private outcomeCorrectionSignature?: string;
 
   constructor(
     private readonly request: AgentRuntimeRequest,
@@ -199,6 +205,11 @@ export class AgentFinalAnswerController {
       return planDecision.kind === "correct"
         ? { kind: "correct", correction: planDecision.correction }
         : { kind: "fail", userMessage: planDecision.failure };
+    }
+
+    const outcomeCorrection = this.openOutcomeCorrection(params.canCorrect);
+    if (outcomeCorrection) {
+      return { kind: "correct", correction: outcomeCorrection };
     }
 
     if (
@@ -297,6 +308,23 @@ export class AgentFinalAnswerController {
       userMessage:
         "I used web access for this task, but could not safely attach valid paragraph-level sources to the answer.",
     };
+  }
+
+  /**
+   * The correction that sends an ordinary turn back to the parts the model
+   * declared and has not finished. It is given again only after new
+   * evidence moved the ledger since the last one.
+   */
+  private openOutcomeCorrection(canCorrect: boolean): string | undefined {
+    if (!canCorrect || this.request.planContext) return undefined;
+    const checkpoint = this.request.executionCheckpoint;
+    const open = openDeclaredOutcomes(checkpoint);
+    if (!open.length) return undefined;
+    const signature = outcomeProgressSignature(checkpoint);
+    if (signature === this.outcomeCorrectionSignature) return undefined;
+    this.outcomeCorrectionSignature = signature;
+    const parts = open.map((task) => `“${task.description}”`).join("; ");
+    return `Before answering, finish the parts of this request you declared that are still open: ${parts}. Do them now with the tools. If one cannot be done, call task_update with status skipped or blocked and the reason, then answer.`;
   }
 
   private shouldCorrectShallowLibraryAnswer(params: {

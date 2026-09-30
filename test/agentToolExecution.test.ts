@@ -16,6 +16,7 @@ import { stateChangeInvocationPlan } from "../src/agent/authorization/invocation
 import type { AgentPendingReadActivity } from "../src/agent/context/resourceContextPlan";
 import type { MaterialRef } from "../src/agent/documents/materialRef";
 import type { AgentToolResultHandleRecord } from "../src/agent/store/toolResultHandles";
+import type { OutcomeEffect } from "../src/agent/execution/types";
 import type {
   AgentEvent,
   AgentModelCapabilities,
@@ -104,20 +105,24 @@ function registerDocumentTool(registry: AgentToolRegistry): void {
   } as never);
 }
 
-/** An ordinary-turn checkpoint holding one task per description and status. */
+/** An ordinary-turn checkpoint holding one declared part per entry. */
 function checkpointWith(
-  tasks: Array<[description: string, status: ExecutionTaskStatus]>,
+  tasks: Array<
+    [description: string, status: ExecutionTaskStatus, effect: OutcomeEffect]
+  >,
 ): ExecutionCheckpoint {
   return {
     version: 1,
     executionId: "run-collaborator",
     conversationKey: 970_001,
     conversationGeneration: 0,
-    tasks: tasks.map(([description, status], index) => ({
+    tasks: tasks.map(([description, status, effect], index) => ({
       taskId: `task-${index + 1}`,
       description,
       dependencies: [],
       status,
+      effect,
+      origin: "model" as const,
       journalActionIds: [],
       verifiedReceiptIds: [],
       readEvidenceIds: [],
@@ -184,7 +189,9 @@ async function createHarness(registry: AgentToolRegistry): Promise<Harness> {
     signal: undefined,
     checkpointActionProgress: async () => undefined,
     publishPlanEvent: async () => undefined,
-    publishExecutionCheckpoint: async () => undefined,
+    updateExecutionCheckpoint: async (
+      apply: (checkpoint: ExecutionCheckpoint) => ExecutionCheckpoint,
+    ) => apply(request.executionCheckpoint!),
   } as unknown as AgentToolContext;
   const deps: ToolExecutionDeps = {
     registry,
@@ -562,7 +569,7 @@ describe("agent tool execution collaborator", function () {
     }
   });
 
-  it("hands an accepted document back while declared tasks remain open, naming only those", async function () {
+  it("hands an accepted document back while declared parts beyond the answer remain open, naming only those", async function () {
     const restoreDb = installMockDb();
     try {
       const registry = new AgentToolRegistry(createTestActionContractService());
@@ -572,11 +579,12 @@ describe("agent tool execution collaborator", function () {
       // evaluations accept the document.
       harness.request.classifiedIntent = undefined;
       harness.request.executionCheckpoint = checkpointWith([
-        ["Summarize the paper", "in_progress"],
-        ["Save the summary as a note", "pending"],
-        ["Read the paper", "completed"],
-        ["Ask which collection to use", "waiting_for_user"],
-        ["Check the citation style", "blocked"],
+        ["Summarize the paper", "pending", "answer"],
+        ["Save the summary as a note", "pending", "mutation"],
+        ["Tag the paper", "pending", "mutation"],
+        ["Read the paper", "completed", "read"],
+        ["Ask which collection to use", "blocked", "mutation"],
+        ["Check the citation style", "skipped", "artifact"],
       ]);
       const toolExecution = createToolExecution(harness.deps);
 
@@ -589,17 +597,18 @@ describe("agent tool execution collaborator", function () {
       assert.isUndefined(open.stopRun, "open work keeps the turn running");
       assert.deepEqual(open.delivery?.content, {
         content: { documentId: "doc-1" },
-        remainingWork: "Summarize the paper; Save the summary as a note",
+        remainingWork: "Save the summary as a note; Tag the paper",
         finalizedDocumentId: "doc-1",
         instruction:
           "The document is finalized and preserved. Complete any remaining requested work with this finalized document, passing its documentId where a tool accepts one; do not regenerate it.",
         actionReceipts: [],
       });
 
+      // The document itself answers a declared reasoning part.
       harness.request.executionCheckpoint = checkpointWith([
-        ["Read the paper", "completed"],
-        ["Ask which collection to use", "waiting_for_user"],
-        ["Check the citation style", "blocked"],
+        ["Summarize the paper", "pending", "answer"],
+        ["Read the paper", "completed", "read"],
+        ["Ask which collection to use", "blocked", "mutation"],
       ]);
       const closed = await toolExecution.executeToolWorkflow(
         { id: "call-submit-2", name: "submit_document", arguments: {} },

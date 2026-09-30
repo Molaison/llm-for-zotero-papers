@@ -19,6 +19,7 @@ import {
   buildPaperLedgerUpdateEvent,
 } from "../context/taskPaperLedgerRecorder";
 import type { TaskPaperLedgerDelta } from "../context/taskPaperLedger";
+import { openDeclaredOutcomes, type OutcomeEvidence } from "../loop/outcomes";
 import type { PlanExecutionRunSession } from "../plans/runSession";
 import { canonicalJson } from "../services/libraryMutation/canonicalJson";
 import { sha256Text } from "../store/journalRecoveryBlobStore";
@@ -40,6 +41,7 @@ import {
   setToolResultReadAvailability,
 } from "./toolResultLifecycle";
 import type {
+  AgentActionProposal,
   AgentActionReceipt,
   AgentConfirmationResolution,
   AgentEvent,
@@ -158,6 +160,12 @@ export type ToolExecutionDeps = {
    * source:'tool_result' reads.
    */
   setToolResultReadAvailable: (available: boolean) => void;
+  /**
+   * Hands each call's outcome evidence to the turn's ledger owner.
+   *
+   * Supplied only on ordinary Original Agent turns; a Plan turn records none.
+   */
+  recordOutcomeEvidence?: (evidence: OutcomeEvidence) => Promise<void>;
 };
 
 /** The tool-execution collaborator of one turn. */
@@ -191,6 +199,67 @@ export type ToolExecution = {
     },
   ) => Promise<ToolWorkflowOutcome>;
 };
+
+/**
+ * The outcome evidence one executed call carries: the papers it read, each
+ * receipt, the material it finalized, and a write the user declined.
+ */
+async function outcomeEvidenceOf(params: {
+  toolResult: AgentToolResult;
+  toolDefinition?: import("../types").AgentToolDefinition<any, any>;
+  input: unknown;
+  context: AgentToolContext;
+  paperLedgerDelta: TaskPaperLedgerDelta | null;
+  observationIds: readonly string[];
+}): Promise<OutcomeEvidence[]> {
+  const { toolResult } = params;
+  const evidence: OutcomeEvidence[] = [];
+  const readTargets = (params.paperLedgerDelta?.papers || [])
+    .filter((paper) => paper.state === "read" || paper.state === "skimmed")
+    .map((paper) => `item:${paper.itemId}`);
+  if (toolResult.ok && (readTargets.length || params.observationIds.length)) {
+    evidence.push({
+      kind: "read",
+      targets: readTargets,
+      observationIds: params.observationIds,
+    });
+  }
+  for (const receipt of toolResult.actionReceipts || []) {
+    evidence.push({ kind: "receipt", receipt });
+  }
+  if (toolResult.materialRef) {
+    evidence.push({ kind: "material", materialRef: toolResult.materialRef });
+  }
+  if (
+    isUserDeniedToolResult(toolResult) &&
+    params.toolDefinition?.describeAction
+  ) {
+    let proposals: AgentActionProposal[] = [];
+    try {
+      proposals =
+        (await params.toolDefinition.describeAction(
+          params.input as never,
+          params.context,
+        )) || [];
+    } catch {
+      proposals = [];
+    }
+    if (proposals.length) {
+      evidence.push({
+        kind: "declined",
+        callId: toolResult.callId,
+        proposals: proposals.map(
+          ({ capability, operation, requestedTargets }) => ({
+            capability,
+            operation,
+            requestedTargets,
+          }),
+        ),
+      });
+    }
+  }
+  return evidence;
+}
 
 /**
  * Builds the tool-execution collaborator for one turn.
@@ -382,6 +451,7 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
     // frontier may replace it with a handle below), and emitted right after
     // this call's tool_result.
     let paperLedgerDelta: TaskPaperLedgerDelta | null = null;
+    let attestedObservationIds: string[] = [];
     if (
       !cachedPaperEvidence &&
       toolResult.ok &&
@@ -398,6 +468,9 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
       });
       const observations = attested.observations;
       paperLedgerDelta = attested.paperLedgerDelta;
+      attestedObservationIds = observations.map(
+        (observation) => observation.observationId,
+      );
       if (observations.length) {
         const merged = new Map(
           (deps.request.documentReadObservations || []).map((entry) => [
@@ -588,6 +661,17 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
         error: item.error,
         callId: toolResult.callId,
       });
+    }
+    if (deps.recordOutcomeEvidence) {
+      const evidence = await outcomeEvidenceOf({
+        toolResult,
+        toolDefinition: executedCall.toolDefinition,
+        input: executedCall.input,
+        context: deps.context,
+        paperLedgerDelta,
+        observationIds: attestedObservationIds,
+      });
+      for (const entry of evidence) await deps.recordOutcomeEvidence(entry);
     }
     await deps.actionContractSession.recordToolReceipts(
       toolResult.actionReceipts,
@@ -780,13 +864,11 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
           const accepted =
             actionDecision.kind === "accept" && planDecision.kind === "accept";
           // An accepted document ends the turn only when nothing else was
-          // requested: a later call of this step, or a task the model
-          // declared and has not closed, still has to run with it.
-          const openTasks = (
-            deps.request.executionCheckpoint?.tasks || []
-          ).filter(
-            (task) =>
-              task.status === "pending" || task.status === "in_progress",
+          // requested: a later call of this step, or a part the model
+          // declared that still needs more than the answer, has to run with
+          // it. A declared reasoning part is answered by the document itself.
+          const openTasks = openDeclaredOutcomes(
+            deps.request.executionCheckpoint,
           );
           if (!accepted || options.followingCallCount || openTasks.length) {
             const remainingWork =

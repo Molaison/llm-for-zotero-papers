@@ -1403,10 +1403,14 @@ export type AgentToolContext = {
   checkpointActionProgress?: () => Promise<void>;
   /** Publish a normalized, durable plan/task projection event. */
   publishPlanEvent?: (event: PlanEvent) => Promise<void>;
-  /** Persist one complete ordinary-work checkpoint through the run trace. */
-  publishExecutionCheckpoint?: (
-    checkpoint: ExecutionCheckpoint,
-  ) => Promise<void>;
+  /**
+   * Apply one change to the turn's ordinary-work checkpoint through the
+   * runtime, its only writer, which publishes it when it changed. Resolves to
+   * the checkpoint after the change.
+   */
+  updateExecutionCheckpoint?: (
+    apply: (checkpoint: ExecutionCheckpoint) => ExecutionCheckpoint,
+  ) => Promise<ExecutionCheckpoint>;
   /** Host-owned v5 Plan scope resolved from the approved artifact and ledger. */
   loadApprovedPlanEffectContext?: () => Promise<
     | Readonly<{

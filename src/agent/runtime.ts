@@ -67,6 +67,13 @@ import {
 } from "./documents/workflowMaterial";
 import { AgentFinalAnswerController } from "./finalization/finalAnswerController";
 import type { RunStopRule } from "./loop/stopRules";
+import {
+  applyOutcomeEvidence,
+  decideRunEnd,
+  settleOutcomes,
+  type OutcomeEvidence,
+} from "./loop/outcomes";
+import { isExplicitContinueCommand } from "./continuation/continueCommand";
 import type { AgentModelAdapter } from "./model/adapter";
 import { resolveCapabilitiesContentInputs } from "./model/contentCapabilities";
 import { buildAnswerContinuationInstruction } from "./model/completion";
@@ -127,7 +134,11 @@ import {
 } from "./store/transcriptStore";
 import { resolveAgentToolCallWorkCategory } from "./workCategory";
 import { AgentToolRegistry } from "./tools/registry";
-import { latestExecutionCheckpoint } from "./execution/checkpoint";
+import {
+  createEmptyExecutionCheckpoint,
+  latestExecutionCheckpoint,
+} from "./execution/checkpoint";
+import type { ExecutionCheckpoint, RunEndState } from "./execution/types";
 import { createAgentExecutionContext } from "./execution/context";
 import { loadMaterialOutcomesForConversation } from "./execution/materialOutcomes";
 import {
@@ -156,6 +167,7 @@ import type {
   AgentModelMessage,
   AgentModelStep,
   AgentPendingAction,
+  AgentRunEventRecord,
   AgentRunStatus,
   AgentRuntimeOutcome,
   AgentRuntimeRequest,
@@ -215,6 +227,13 @@ const PLANNING_STAGE_STATUS_BY_PLAN_EVENT: Readonly<
   plan_updated: "started",
   plan_ready: "completed",
 };
+
+/**
+ * End states a run records even when it has no outcome: each one says the
+ * run stopped short of a plain ending, which the run row alone cannot tell.
+ */
+const END_STATES_RECORDED_WITHOUT_OUTCOMES: ReadonlySet<RunEndState> =
+  new Set<RunEndState>(["blocked", "interrupted", "completed_with_exceptions"]);
 
 export class AgentRuntime {
   private readonly registry: AgentToolRegistry;
@@ -444,16 +463,84 @@ export class AgentRuntime {
     // The run's event stream, once it is open. An ending before then has no
     // stream to record its stop rule in.
     let emitRunEvent: ((event: AgentEvent) => Promise<void>) | undefined;
+    // The turn's outcome ledger has one writer. task_update and the evidence
+    // recorder both apply their change here, one change at a time, and each
+    // change that moves the ledger is published once.
+    let executionCheckpointWrites: Promise<unknown> = Promise.resolve();
+    const updateExecutionCheckpoint = (
+      apply: (checkpoint: ExecutionCheckpoint) => ExecutionCheckpoint,
+    ): Promise<ExecutionCheckpoint> => {
+      const write = executionCheckpointWrites.then(async () => {
+        const current =
+          request.executionCheckpoint ||
+          createEmptyExecutionCheckpoint(request.executionContext!, this.now());
+        const next = apply(current);
+        if (next !== current) {
+          request.executionCheckpoint = next;
+          await emitRunEvent?.({
+            type: "execution_checkpoint",
+            checkpoint: next,
+          });
+        }
+        return next;
+      });
+      executionCheckpointWrites = write.catch(() => undefined);
+      return write;
+    };
+    // Outcome evidence and the end state belong to ordinary turns; a Plan
+    // turn keeps the Plan's own ledger.
+    const recordsOutcomes = () =>
+      request.executionContext?.permissionOwner === "original_agent" &&
+      !request.planContext;
+    const recordOutcomeEvidence = async (
+      evidence: OutcomeEvidence,
+    ): Promise<void> => {
+      try {
+        await updateExecutionCheckpoint(
+          (checkpoint) =>
+            applyOutcomeEvidence(checkpoint, evidence, this.now()).checkpoint,
+        );
+      } catch (error) {
+        logRuntimeWarning(
+          "LLM Agent: recording outcome evidence failed",
+          error,
+        );
+      }
+    };
     /**
-     * The one path inside runTurn that finishes a run. The rule that ended it
-     * is recorded first, so every ending can be told apart afterwards; then
-     * the run's terminal status and text are written.
+     * The one path inside runTurn that finishes a run. The ledger is settled
+     * with the run's end state, then the rule that ended it is recorded, so
+     * every ending can be told apart afterwards; then the run's terminal
+     * status and text are written.
      */
     const terminateRun = async (
       status: Exclude<AgentRunStatus, "running">,
       finalText: string | undefined,
       stopRule: RunStopRule,
     ): Promise<void> => {
+      if (recordsOutcomes()) {
+        try {
+          const end = decideRunEnd(request.executionCheckpoint, {
+            status,
+            stopRule,
+          });
+          if (
+            request.executionCheckpoint?.tasks.length ||
+            END_STATES_RECORDED_WITHOUT_OUTCOMES.has(end)
+          ) {
+            await updateExecutionCheckpoint((checkpoint) =>
+              settleOutcomes(checkpoint, end, this.now()),
+            );
+          }
+        } catch (error) {
+          // Like the stop rule below, the end state is a record of the
+          // ending: failing to write it must not change the ending.
+          logRuntimeWarning(
+            "LLM Agent: settling the outcome ledger failed",
+            error,
+          );
+        }
+      }
       try {
         await emitRunEvent?.({
           type: "provider_event",
@@ -601,8 +688,7 @@ export class AgentRuntime {
         publishPlanEvent: emitPlanEvent,
         publishSkillActivation: (id) =>
           emit({ type: "status", text: `Skill activated: ${id}` }),
-        publishExecutionCheckpoint: (checkpoint) =>
-          emit({ type: "execution_checkpoint", checkpoint }),
+        updateExecutionCheckpoint,
         loadApprovedPlanEffectContext: async () => {
           const specification = activePlanSession.approvedEffectSpecification();
           if (!specification) return undefined;
@@ -833,6 +919,7 @@ export class AgentRuntime {
           );
       let recoveryMessage: AgentModelMessage | null = null;
       let interruptedActionCheckpoint: ActionContractCheckpoint | null = null;
+      let interruptedTraceEvents: readonly AgentRunEventRecord[] | undefined;
       if (interruptedPriorRun) {
         const [actions, latestTranscriptSegment, interruptedTrace] =
           await Promise.all([
@@ -843,14 +930,19 @@ export class AgentRuntime {
             loadLatestAgentTranscriptSegment(request.conversationKey),
             getAgentRunTrace(interruptedPriorRun.runId),
           ]);
+        interruptedTraceEvents = interruptedTrace.events;
         interruptedActionCheckpoint = readLatestActionContractCheckpoint(
           interruptedTrace.events.map((event) => event.payload),
         );
         const ordinaryCheckpoint = latestExecutionCheckpoint(
           interruptedTrace.events,
         );
+        // A run left running when Zotero closed never settled its ledger, so
+        // it is restored as it stood. A ledger its run settled comes back
+        // only through a continue command, below.
         if (
           ordinaryCheckpoint &&
+          !ordinaryCheckpoint.end &&
           request.executionContext?.permissionOwner === "original_agent" &&
           ordinaryCheckpoint.conversationKey === request.conversationKey &&
           ordinaryCheckpoint.conversationGeneration ===
@@ -877,6 +969,32 @@ export class AgentRuntime {
         transcriptMessagesForPrompt = compatibilityMatches
           ? [...transcriptMessagesForPrompt, recoveryMessage]
           : [recoveryMessage];
+      }
+      // An interrupted ledger resumes only when the whole message asks to
+      // continue; any other message starts with no ledger.
+      if (
+        !request.executionCheckpoint &&
+        latestPriorRun &&
+        recordsOutcomes() &&
+        isExplicitContinueCommand(request.userText)
+      ) {
+        const priorEvents =
+          interruptedTraceEvents ??
+          (await getAgentRunTrace(latestPriorRun.runId)).events;
+        const interruptedLedger = latestExecutionCheckpoint(priorEvents);
+        if (
+          interruptedLedger?.end?.state === "interrupted" &&
+          interruptedLedger.conversationKey === request.conversationKey &&
+          interruptedLedger.conversationGeneration ===
+            request.executionContext?.conversationGeneration
+        ) {
+          const { end, ...ledger } = interruptedLedger;
+          request.executionCheckpoint = ledger;
+          request.executionContext = {
+            ...request.executionContext!,
+            executionId: ledger.executionId,
+          };
+        }
       }
       // An interrupted run already carries the material and batch block inside
       // its one-time recovery note. Every other turn gets it as a prompt-only
@@ -1894,6 +2012,9 @@ export class AgentRuntime {
         setToolResultReadAvailable: (available) => {
           toolResultReadAvailable = available;
         },
+        recordOutcomeEvidence: recordsOutcomes()
+          ? recordOutcomeEvidence
+          : undefined,
       });
       // A prepared effect already has its native identities and arguments. It
       // uses the same permission, journal and receipt path as any model call.
@@ -2172,6 +2293,12 @@ export class AgentRuntime {
           const { step, stepStreamedText } = stepResult;
           const terminalOutcome = providerTerminalOutcomes.shift();
           if (terminalOutcome) {
+            if (
+              !terminalOutcome.failed &&
+              terminalOutcome.documentId &&
+              recordsOutcomes()
+            )
+              await recordOutcomeEvidence({ kind: "answer" });
             return await completeRun(
               terminalOutcome.finalText || currentAnswerText,
               terminalOutcome.failed ? "failed" : "completed",
@@ -2372,6 +2499,8 @@ export class AgentRuntime {
             const answerPrefix = keptAnswerVisibleText;
             keptAnswerVisibleText = "";
             keptAnswerModelText = "";
+            if (recordsOutcomes())
+              await recordOutcomeEvidence({ kind: "answer" });
             return await emitFinalStep(
               step,
               `${answerPrefix}${stepStreamedText}`,
@@ -2483,6 +2612,9 @@ export class AgentRuntime {
                 });
               }
               await persistTranscriptCheckpoint();
+              // A finalized document that ends the turn is its answer.
+              if (!outcome.failed && outcome.documentId && recordsOutcomes())
+                await recordOutcomeEvidence({ kind: "answer" });
               return await completeRun(
                 stopFinalText,
                 outcome.failed ? "failed" : "completed",

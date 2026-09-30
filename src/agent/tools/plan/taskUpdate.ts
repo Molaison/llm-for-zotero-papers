@@ -22,7 +22,6 @@ import { ACTION_CAPABILITIES } from "../../contracts/operationCatalog";
 import type { AgentActionCapability } from "../../contracts/types";
 import {
   assertCheckpointOwner,
-  createEmptyExecutionCheckpoint,
   ordinaryExecutionTaskId,
 } from "../../execution/checkpoint";
 import type { ExecutionCheckpoint, OutcomeEffect } from "../../execution/types";
@@ -520,25 +519,24 @@ export function createTaskUpdateTool(): AgentToolDefinition<
             "task_update requires an ordinary Original Agent execution or an approved Plan",
           );
         }
-        if (!context.runId || !context.publishExecutionCheckpoint) {
+        if (!context.runId || !context.updateExecutionCheckpoint) {
           throw new Error(
             "Ordinary task progress requires durable run checkpoint persistence",
           );
         }
-        const now = Date.now();
-        const current =
-          context.request.executionCheckpoint ||
-          createEmptyExecutionCheckpoint(execution, now);
-        assertCheckpointOwner(current, execution);
-        const { checkpoint, ignored } = applyOrdinaryTaskUpdates(
-          current,
-          input.tasks,
-          now,
+        let ignored = false;
+        const checkpoint = await context.updateExecutionCheckpoint(
+          (current) => {
+            assertCheckpointOwner(current, execution);
+            const applied = applyOrdinaryTaskUpdates(
+              current,
+              input.tasks,
+              Date.now(),
+            );
+            ignored = applied.ignored;
+            return applied.checkpoint;
+          },
         );
-        if (checkpoint !== current) {
-          await context.publishExecutionCheckpoint(checkpoint);
-          context.request.executionCheckpoint = checkpoint;
-        }
         return ignored ? { checkpoint, note: HOST_MARKS_DONE } : { checkpoint };
       }
       if (

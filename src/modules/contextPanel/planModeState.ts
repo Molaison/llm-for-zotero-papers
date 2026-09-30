@@ -4,6 +4,9 @@ import type {
   PlanRuntimeContext,
 } from "../../agent/plans/types";
 import { loadLatestResumablePlanExecutionForConversation } from "../../agent/plans/store";
+import { isExplicitContinueCommand } from "../../agent/continuation/continueCommand";
+
+export { isExplicitContinueCommand };
 
 export const PLAN_APPROVED_EVENT = "llm-plan-approved";
 export const PLAN_REVISE_EVENT = "llm-plan-revise";
@@ -21,36 +24,6 @@ const composeStates = new Map<number, ComposePlanState>();
 const pendingExecutions = new Map<number, PlanRuntimeContext>();
 /** Contexts staged by an approval or Resume click, not read back from the store. */
 const stagedContexts = new WeakSet<PlanRuntimeContext>();
-
-const CONTINUE_COMMANDS = new Set([
-  "continue",
-  "resume",
-  "go on",
-  "keep going",
-  "proceed",
-  "continue the plan",
-  "resume the plan",
-  "继续",
-  "继续执行",
-  "繼續",
-  "繼續執行",
-]);
-
-/**
- * Whether a whole message asks for a stored plan execution to continue.
- *
- * Case, surrounding space and trailing punctuation are ignored; nothing else
- * is: "continue with a different question" is a new request, and resuming
- * the plan with it would swallow the question.
- */
-export function isExplicitContinueCommand(text: string): boolean {
-  const command = text
-    .trim()
-    .replace(/[\s\p{P}]+$/u, "")
-    .replace(/\s+/g, " ")
-    .toLowerCase();
-  return CONTINUE_COMMANDS.has(command);
-}
 
 function createPlanId(conversationKey: number): string {
   return `plan-${conversationKey}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;

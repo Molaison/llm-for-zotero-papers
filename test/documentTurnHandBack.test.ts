@@ -210,6 +210,36 @@ describe("a finalized document hands the turn back while requested work remains"
     );
     assert.equal(environment.library.nativeSaves(), 1);
     assert.equal(answerText(turn), documentText(turn));
+    const [save] = turn.request?.executionCheckpoint?.tasks || [];
+    assert.equal(save?.status, "completed", "the note's receipt closed it");
+    assert.deepEqual(turn.request?.executionCheckpoint?.end, {
+      state: "completed",
+    });
+  });
+
+  it("ends the turn on submit_document when only a declared reasoning part is open", async function () {
+    const turn = await runTurn([
+      toolCallStep("task-1", "task_update", {
+        tasks: [
+          {
+            taskId: "explain",
+            description: "Explain how the drift was measured",
+            status: "pending",
+            expectedEffect: "reasoning",
+          },
+        ],
+      }),
+      stepOf(submitDocumentCall("submit-1")),
+    ]);
+
+    assert.equal(turn.outcome.kind, "completed");
+    assert.equal(turn.steps, 2, "the document is the answer the part needs");
+    assert.equal(answerText(turn), documentText(turn));
+    const [explain] = turn.request?.executionCheckpoint?.tasks || [];
+    assert.equal(explain?.status, "completed");
+    assert.deepEqual(turn.request?.executionCheckpoint?.end, {
+      state: "completed",
+    });
   });
 
   it("ends a document-only turn on submit_document, as before", async function () {

@@ -123,21 +123,31 @@ describe("task_update ordinary declarations", function () {
   function context(
     executionCheckpoint?: ExecutionCheckpoint,
   ): AgentToolContext {
+    const request = resolvedAgentRequest({
+      conversationKey: 41,
+      mode: "agent",
+      userText: "Summarize this paper and save it as a note",
+      libraryID: 1,
+      executionContext,
+      ...(executionCheckpoint ? { executionCheckpoint } : {}),
+    });
     return {
-      request: resolvedAgentRequest({
-        conversationKey: 41,
-        mode: "agent",
-        userText: "Summarize this paper and save it as a note",
-        libraryID: 1,
-        executionContext,
-        ...(executionCheckpoint ? { executionCheckpoint } : {}),
-      }),
+      request,
       runId: "run-1",
       item: null,
       currentAnswerText: "",
       modelName: "test",
-      publishExecutionCheckpoint: async (checkpoint) => {
-        published.push(structuredClone(checkpoint));
+      // The runtime's one ledger writer, reduced to its contract.
+      updateExecutionCheckpoint: async (apply) => {
+        const current =
+          request.executionCheckpoint ||
+          createEmptyExecutionCheckpoint(executionContext, 10);
+        const next = apply(current);
+        if (next !== current) {
+          request.executionCheckpoint = next;
+          published.push(structuredClone(next));
+        }
+        return next;
       },
     };
   }

@@ -2,7 +2,16 @@ import { semanticFixture } from "./helpers/semanticIntent";
 import { assert } from "chai";
 import { AgentFinalAnswerController } from "../src/agent/finalization/finalAnswerController";
 import type { AgentFinalActionSession } from "../src/agent/finalization/finalAnswerController";
-import type { AgentRuntimeRequest } from "../src/agent/types";
+import {
+  applyOutcomeEvidence,
+  declareOutcomes,
+} from "../src/agent/loop/outcomes";
+import { createEmptyExecutionCheckpoint } from "../src/agent/execution/checkpoint";
+import type {
+  AgentRuntimeRequest,
+  ExecutionCheckpoint,
+  PlanRuntimeContext,
+} from "../src/agent/types";
 
 function makeRequest(
   overrides: Partial<AgentRuntimeRequest> = {},
@@ -433,5 +442,157 @@ describe("AgentFinalAnswerController", function () {
     assert.notProperty(decision, "actionContractRejection");
     assert.equal(decision.assistantContent, "An unsupported current claim.");
     assert.include(decision.correction, "Correct the web attribution");
+  });
+});
+
+describe("AgentFinalAnswerController declared outcomes", function () {
+  const execution: NonNullable<AgentRuntimeRequest["executionContext"]> = {
+    version: 1,
+    executionId: "execution-gate",
+    conversationKey: 1,
+    conversationGeneration: 0,
+    permissionOwner: "original_agent",
+    workspaceSnapshot: { selectedPapers: [], selectedCollections: [] },
+    configuredAccess: { libraryIDs: [1], outputDirectories: [] },
+  };
+  const SAVE = "Save it as a note on (Smith, 2021)";
+
+  function declared(): ExecutionCheckpoint {
+    return declareOutcomes(
+      createEmptyExecutionCheckpoint(execution, 1),
+      [
+        {
+          taskId: "save",
+          description: SAVE,
+          effect: "mutation",
+          capability: "zotero.notes",
+        },
+        { taskId: "tag", description: "Tag it", effect: "mutation" },
+        { taskId: "explain", description: "Explain it", effect: "answer" },
+      ],
+      2,
+    );
+  }
+
+  async function decide(
+    controller: AgentFinalAnswerController,
+    canCorrect = true,
+  ) {
+    return controller.evaluate({
+      candidateText: "Saved.",
+      canCorrect,
+      toolExecutionRecords: [],
+    });
+  }
+
+  it("asks to finish the declared parts still open, quoting each", async function () {
+    const controller = new AgentFinalAnswerController(
+      makeRequest({
+        executionContext: execution,
+        executionCheckpoint: declared(),
+      }),
+      acceptingActionSession(),
+      [],
+    );
+    const decision = await decide(controller);
+    assert.equal(decision.kind, "correct");
+    if (decision.kind !== "correct") return;
+    assert.equal(
+      decision.correction,
+      `Before answering, finish the parts of this request you declared that are still open: “${SAVE}”; “Tag it”. Do them now with the tools. If one cannot be done, call task_update with status skipped or blocked and the reason, then answer.`,
+    );
+  });
+
+  it("corrects again only after new evidence since the last correction", async function () {
+    const request = makeRequest({
+      executionContext: execution,
+      executionCheckpoint: declared(),
+    });
+    const controller = new AgentFinalAnswerController(
+      request,
+      acceptingActionSession(),
+      [],
+    );
+    assert.equal((await decide(controller)).kind, "correct");
+    assert.equal(
+      (await decide(controller)).kind,
+      "accept",
+      "nothing moved, so the answer is accepted",
+    );
+    request.executionCheckpoint = applyOutcomeEvidence(
+      request.executionCheckpoint!,
+      {
+        kind: "receipt",
+        receipt: {
+          version: 2,
+          id: "receipt-tags",
+          proposalId: "proposal-tags",
+          proofDomain: "zotero_state",
+          capability: "zotero.tags",
+          operation: "apply_tags",
+          verification: "verified",
+          status: "applied",
+          requestedTargets: ["item:1"],
+          appliedTargets: ["item:1"],
+          alreadySatisfiedTargets: [],
+          rejectedTargets: [],
+          reasons: [],
+          verifiedFacts: [],
+        },
+      },
+      3,
+    ).checkpoint;
+    const again = await decide(controller);
+    assert.equal(again.kind, "correct", "the tags receipt is new evidence");
+    if (again.kind !== "correct") return;
+    assert.include(again.correction, `“${SAVE}”`);
+    assert.notInclude(again.correction, "“Tag it”");
+  });
+
+  it("never corrects for an answer part, a Plan turn, or when it cannot correct", async function () {
+    const answerOnly = declareOutcomes(
+      createEmptyExecutionCheckpoint(execution, 1),
+      [{ taskId: "explain", description: "Explain it", effect: "answer" }],
+      2,
+    );
+    const plan: PlanRuntimeContext = {
+      phase: "executing",
+      planId: "plan-gate",
+      revision: 1,
+      executionId: "execution-plan-gate",
+      approvedDigest: "sha256:gate",
+      provider: "original",
+    };
+    for (const [request, canCorrect] of [
+      [
+        makeRequest({
+          executionContext: execution,
+          executionCheckpoint: answerOnly,
+        }),
+        true,
+      ],
+      [
+        makeRequest({
+          executionContext: execution,
+          executionCheckpoint: declared(),
+          planContext: plan,
+        }),
+        true,
+      ],
+      [
+        makeRequest({
+          executionContext: execution,
+          executionCheckpoint: declared(),
+        }),
+        false,
+      ],
+    ] as const) {
+      const controller = new AgentFinalAnswerController(
+        request,
+        acceptingActionSession(),
+        [],
+      );
+      assert.equal((await decide(controller, canCorrect)).kind, "accept");
+    }
   });
 });
