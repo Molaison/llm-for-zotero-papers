@@ -7,6 +7,7 @@ import type {
 } from "../../types";
 import { LiteratureSearchService } from "../../services/literatureSearchService";
 import { identifyLiteratureCandidates } from "../../services/literatureDiscovery";
+import { LITERATURE_REVIEW_SPEC } from "./reviewLiterature";
 import {
   isExplicitLiteratureImport,
   isLiteratureDiscovery,
@@ -379,12 +380,19 @@ export function createLiteratureSearchTool(
           : { results }) as object),
       };
       if (input.mode === "metadata") return content;
+      // Route explicit imports only where the literature intent is unknown
+      // and the caller can open the card (MCP never offers literature_review).
+      const routeImports =
+        !context.request.classifiedIntent?.semantic?.literature &&
+        (!context.isToolVisible ||
+          context.isToolVisible(LITERATURE_REVIEW_SPEC));
       return identifyLiteratureCandidates(
         content,
         context,
         !isExplicitLiteratureImport(context.request) &&
           (isLiteratureDiscovery(context.request) ||
             input.workflow === "review"),
+        routeImports,
       );
     },
     createResultReviewAction: (input, result, context) =>

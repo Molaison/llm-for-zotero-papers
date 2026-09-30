@@ -5,6 +5,7 @@ import { createLiteratureReviewTool } from "../src/agent/tools/read/reviewLitera
 import { clearAgentToolResultHandleStore } from "../src/agent/store/toolResultHandles";
 import { AgentFinalAnswerController } from "../src/agent/finalization/finalAnswerController";
 import { resolvedAgentRequest } from "./helpers/resolvedAgentRequest";
+import { createBuiltInToolRegistry } from "../src/agent/tools";
 import type { AgentToolContext, AgentToolResult } from "../src/agent/types";
 
 describe("ranked literature discovery workflow", function () {
@@ -69,6 +70,21 @@ describe("ranked literature discovery workflow", function () {
     globalThis.Zotero = originalZotero;
     clearAgentToolResultHandleStore();
   });
+
+  // The runtime records the facade's validated (delegated) input.
+  function validatedImportInput(identifiers: string[]) {
+    const registry = createBuiltInToolRegistry({
+      zoteroGateway: gateway as never,
+      pdfService: {} as never,
+      pdfPageService: {} as never,
+      retrievalService: {} as never,
+    });
+    const parsed = registry
+      .getTool("library_import")!
+      .validate({ kind: "identifiers", identifiers });
+    if (!parsed.ok) throw new Error(parsed.error);
+    return parsed.value;
+  }
 
   async function search(context = makeContext()) {
     const tool = createLiteratureSearchTool(gateway as never);
@@ -240,7 +256,7 @@ describe("ranked literature discovery workflow", function () {
     assert.equal(second.kind, "fail");
   });
 
-  it("accepts an unclassified search that ended in library_import without a card", async function () {
+  it("accepts an unclassified search that ended in importing its candidates", async function () {
     // The search result offered the import branch; completion must honor it
     // instead of demanding the selection card after the papers were imported.
     const context = makeContext();
@@ -255,11 +271,62 @@ describe("ranked literature discovery workflow", function () {
       canCorrect: true,
       toolExecutionRecords: [
         { name: "literature_search", ok: true, content },
-        { name: "library_import", ok: true, content: { succeeded: 3 } },
+        {
+          name: "library_import",
+          ok: true,
+          input: validatedImportInput(["https://doi.org/10.1000/CANDIDATE-2"]),
+          content: { succeeded: 1 },
+        },
       ],
     });
     assert.equal(verdict.kind, "accept");
   });
+
+  for (const [label, record] of [
+    [
+      "an import of papers outside the candidate set",
+      {
+        name: "library_import",
+        ok: true,
+        input: { kind: "identifiers", identifiers: ["10.9999/unrelated"] },
+      },
+    ],
+    [
+      "a failed import of a candidate",
+      {
+        name: "library_import",
+        ok: false,
+        input: { kind: "identifiers", identifiers: ["10.1000/candidate-2"] },
+      },
+    ],
+    [
+      "a non-identifier import",
+      {
+        name: "library_import",
+        ok: true,
+        input: { kind: "files", filePaths: ["/tmp/candidate-2.pdf"] },
+      },
+    ],
+  ] as const) {
+    it(`still requires the card after ${label}`, async function () {
+      const context = makeContext();
+      const content = await search(context);
+      const controller = new AgentFinalAnswerController(
+        context.request,
+        { evaluateFinal: async () => ({ kind: "accept" }) },
+        [],
+      );
+      const verdict = await controller.evaluate({
+        candidateText: "Imported the papers.",
+        canCorrect: true,
+        toolExecutionRecords: [
+          { name: "literature_search", ok: true, content },
+          record,
+        ],
+      });
+      assert.equal(verdict.kind, "correct");
+    });
+  }
 
   it("still requires the card when a classified discovery turn imports", async function () {
     const context = makeContext();
@@ -278,7 +345,11 @@ describe("ranked literature discovery workflow", function () {
       canCorrect: true,
       toolExecutionRecords: [
         { name: "literature_search", ok: true, content },
-        { name: "library_import", ok: true, content: { succeeded: 3 } },
+        {
+          name: "library_import",
+          ok: true,
+          input: { kind: "identifiers", identifiers: ["10.1000/candidate-2"] },
+        },
       ],
     });
     assert.equal(verdict.kind, "correct");
@@ -418,8 +489,13 @@ describe("ranked literature discovery workflow", function () {
     assert.isAtLeast(importAt, 0, nextStep);
     assert.isAtLeast(reviewAt, 0, nextStep);
     assert.isBelow(importAt, reviewAt, nextStep);
-    assert.match(nextStep, /If the user asked to import/);
+    assert.match(
+      nextStep,
+      /If the user asked to import or add papers to Zotero without asking to choose them first/,
+    );
     assert.match(nextStep, /targetCollectionId/);
+    assert.match(nextStep, /already in the library/);
+    assert.match(nextStep, /only when the user named a new one/);
     assert.match(nextStep, /Otherwise/);
     assert.notInclude(nextStep, "Never import during discovery or finish");
   });
@@ -465,18 +541,34 @@ describe("ranked literature discovery workflow", function () {
     assert.isUndefined(content.nextStep);
   });
 
-  it("keeps a classified discovery turn on the selection card only", async function () {
+  it("keeps a classified discovery turn on the base selection-card text", async function () {
     const context = makeContext();
     context.request.classifiedIntent = classifiedFixture({
       externalSearchIntent: "literature",
       semantic: semanticFixture({ literature: "discover" }),
     });
     const content = await search(context);
-    const nextStep = String(content.nextStep);
-    assert.notInclude(nextStep, "library_import");
-    assert.match(nextStep, /^Assess titles and abstracts/);
-    assert.include(nextStep, "call literature_review");
-    assert.include(nextStep, "Discovery never imports");
+    assert.equal(
+      content.nextStep,
+      `Assess titles and abstracts and select 5 genuinely relevant papers in ranked order. Respect the user's topic and these constraints: {"batchSize":5}. Assess unused saved candidates first; search further if needed. To expand a provider list, increase its retrieval limit rather than repeating the same bounded request. Call literature_review with sessionId '${content.sessionId}', revision 0, NEW candidateSetId/candidateIndex selections and evidence-based relevance reasons. Do not repeat displayed papers or dump the raw pool. If fewer qualify, explain shortfallReason; use outcome 'no_more' when no further relevant matches were found, or 'search_failed' for a retrieval failure. Empty selections with an explanation are allowed. Never import during discovery or finish with prose instead of the card.`,
+    );
+  });
+
+  it("offers no card route to a caller that cannot see literature_review", async function () {
+    // MCP clients never see literature_review; the routing must not send
+    // them there (the answer path returns no nextStep, as before).
+    const context = makeContext();
+    context.isToolVisible = (spec) => spec.name !== "literature_review";
+    const tool = createLiteratureSearchTool(gateway as never);
+    const parsed = tool.validate({
+      mode: "search",
+      workflow: "answer",
+      query: "hippocampal replay",
+    });
+    if (!parsed.ok) throw new Error(parsed.error);
+    const content = (await tool.execute(parsed.value, context)) as any;
+    assert.isString(content.candidateSetId);
+    assert.isUndefined(content.nextStep);
   });
 
   it("requires the current expansion even when an earlier card was presented", async function () {

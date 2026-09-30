@@ -1539,6 +1539,66 @@ describe("Zotero MCP server", function () {
     assert.include(description, "mode:'metadata'");
   });
 
+  it("returns MCP literature_search results without a literature_review route", async function () {
+    // Fresh MCP turns are unclassified, like chat turns; the import/card
+    // routing is only for callers that can see literature_review.
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        results: [
+          {
+            id: "https://openalex.org/W1",
+            display_name: "Hippocampal replay",
+            doi: "https://doi.org/10.1000/replay-1",
+            publication_year: 2024,
+            authorships: [{ author: { display_name: "Fixture Author" } }],
+          },
+        ],
+      }),
+    })) as typeof fetch;
+    const registry = new AgentToolRegistry();
+    registry.register(
+      createLiteratureSearchTool({
+        resolveMetadataItem: () => null,
+        getEditableArticleMetadata: () => null,
+        getCollectionSummary: () => null,
+      } as never),
+    );
+    registerMcpServer({ toolRegistry: registry, zoteroGateway: {} as never });
+    const scope = registerScopedZoteroMcpScope({
+      conversationKey: 1859,
+      libraryID: 1,
+      kind: "global",
+    });
+    try {
+      const response = await invokeMcpEndpoint({
+        token: getOrCreateZoteroMcpBearerToken(),
+        headers: { [ZOTERO_MCP_SCOPE_HEADER]: scope.token },
+        body: {
+          jsonrpc: "2.0",
+          id: 1859,
+          method: "tools/call",
+          params: {
+            name: "literature_search",
+            arguments: { mode: "search", query: "hippocampal replay" },
+          },
+        },
+      });
+      const payload = JSON.parse(response[2]);
+      assert.isUndefined(payload.result.isError, JSON.stringify(payload));
+      const text = payload.result.content[0].text as string;
+      const body = JSON.parse(text).result;
+      assert.isString(body.candidateSetId, text);
+      assert.isUndefined(body.nextStep, text);
+      assert.notInclude(text, "literature_review");
+    } finally {
+      scope.clear();
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("keeps Codex direct-path PDF turns on the metadata/write MCP surface", async function () {
     let executionCount = 0;
     const registry = new AgentToolRegistry(
