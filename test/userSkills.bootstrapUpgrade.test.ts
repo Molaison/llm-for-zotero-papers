@@ -547,6 +547,7 @@ describe("user skill bootstrap upgrades", function () {
     "analyze-figures-v9",
     "analyze-figures-v10",
     "import-cited-reference-v3",
+    "import-cited-reference-v4",
   ] as const) {
     const name = fixture.replace(/-v\d+$/, "");
     // The canonical path follows the skill id, which can differ from the
