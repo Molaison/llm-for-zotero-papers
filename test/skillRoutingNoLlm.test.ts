@@ -1,6 +1,7 @@
 import { assert } from "chai";
 import {
   BUILTIN_SKILL_FILES,
+  fingerprintSkillInstruction,
   getAllSkills,
   parseSkill,
   setUserSkills,
@@ -323,6 +324,29 @@ describe("skill routing without a model call", function () {
       assert.notProperty(result, "toolGuidance");
     });
 
+    it("omits guidance for tools the calling client cannot see (MCP profile)", async function () {
+      const registry = createBuiltInToolRegistry({
+        zoteroGateway: {} as never,
+        pdfService: {} as never,
+        pdfPageService: {} as never,
+        retrievalService: {} as never,
+      });
+      const request = resolveAgentRuntimeRequest({
+        conversationKey: 1,
+        mode: "agent",
+        userText: "Save a note.",
+        libraryID: 1,
+      });
+      const result = (await registry
+        .getTool("load_skill")!
+        .execute({ id: "write-note" }, {
+          request,
+          isToolVisible: (spec: { name: string }) => spec.name !== "note_write",
+        } as unknown as AgentToolContext)) as Record<string, unknown>;
+      assert.isTrue(result.found);
+      assert.notProperty(result, "toolGuidance");
+    });
+
     it("adds nothing for a skill no tool guidance is tied to", async function () {
       const registry = createBuiltInToolRegistry({
         zoteroGateway: {} as never,
@@ -358,13 +382,39 @@ describe("skill routing without a model call", function () {
       harness = undefined;
     });
 
-    it("still renders the literature-review block", async function () {
-      const ledger = await harness!.approve();
+    function builtInRegistry() {
+      return createBuiltInToolRegistry({
+        zoteroGateway: {} as never,
+        pdfService: {} as never,
+        pdfPageService: {} as never,
+        retrievalService: {} as never,
+      });
+    }
+
+    async function binding(id: string, source: "loaded" | "forced") {
+      const skill = getAllSkills().find((entry) => entry.id === id)!;
+      return {
+        id,
+        version: skill.version,
+        instructionFingerprint: await fingerprintSkillInstruction(
+          skill.instruction,
+        ),
+        source,
+      } as const;
+    }
+
+    /** Runs the executing turn up to its first model request. */
+    async function runExecutingTurn(
+      ledger: Awaited<ReturnType<ResearchHarness["approve"]>>,
+      registry: AgentToolRegistry,
+      onFirstStep?: (params: AgentStepParams) => Promise<void>,
+    ): Promise<{ prompt: string; finalText: string }> {
       await initAgentTraceStore();
       await initConversationKeyLedgerStore();
       let prompt = "";
+      let finalText = "";
       const runtime = new AgentRuntime({
-        registry: new AgentToolRegistry(),
+        registry,
         adapterFactory: () => ({
           getCapabilities: () => ({
             streaming: false,
@@ -374,6 +424,7 @@ describe("skill routing without a model call", function () {
           supportsTools: () => true,
           async runStep(params: AgentStepParams): Promise<AgentModelStep> {
             prompt = promptText(params.messages);
+            await onFirstStep?.(params);
             throw new Error("prompt captured");
           },
         }),
@@ -398,11 +449,118 @@ describe("skill routing without a model call", function () {
               provider: "original",
             },
           },
+          onEvent: (event) => {
+            if (event.type === "final") finalText = event.text;
+          },
         })
         .catch((error) => {
           if (!String(error).includes("prompt captured")) throw error;
         });
+      return { prompt, finalText };
+    }
+
+    it("still renders the literature-review block", async function () {
+      const ledger = await harness!.approve();
+      const { prompt } = await runExecutingTurn(
+        ledger,
+        new AgentToolRegistry(),
+      );
       assert.include(prompt, "### Skill: literature-review");
     });
+
+    it("renders a skill loaded while planning, with its note guidance once", async function () {
+      const ledger = await harness!.approve(
+        {},
+        { skillBindings: [await binding("write-note", "loaded")] },
+      );
+      const registry = builtInRegistry();
+      let reload: Record<string, unknown> | undefined;
+      const { prompt } = await runExecutingTurn(
+        ledger,
+        registry,
+        async (params) => {
+          reload = (await registry
+            .getTool("load_skill")!
+            .execute({ id: "write-note" }, {
+              request: params.request,
+            } as unknown as AgentToolContext)) as Record<string, unknown>;
+        },
+      );
+      assert.include(prompt, "### Skill: write-note");
+      assert.include(prompt, "### Skill: literature-review");
+      assert.include(prompt, NOTE_WRITE_GUIDANCE.instruction);
+      assert.isTrue(reload?.found);
+      assert.notProperty(reload, "toolGuidance", "already rendered");
+    });
+
+    it("refuses to run when an explicit skill changed after approval", async function () {
+      const ledger = await harness!.approve(
+        {},
+        { skillBindings: [await binding("compare-papers", "forced")] },
+      );
+      setUserSkills(
+        getAllSkills().map((skill) =>
+          skill.id === "compare-papers"
+            ? { ...skill, instruction: `${skill.instruction}\n\nEdited.` }
+            : skill,
+        ),
+      );
+      const { prompt, finalText } = await runExecutingTurn(
+        ledger,
+        new AgentToolRegistry(),
+      );
+      assert.equal(prompt, "", "the model is never called");
+      assert.include(
+        finalText,
+        "The forced skill 'compare-papers' changed or is unavailable",
+      );
+    });
+  });
+
+  it("returns guidance that became applicable after the render, once", async function () {
+    const registry = createBuiltInToolRegistry({
+      zoteroGateway: {} as never,
+      pdfService: {} as never,
+      pdfPageService: {} as never,
+      retrievalService: {} as never,
+    });
+    const request = resolveAgentRuntimeRequest({
+      conversationKey: 1,
+      mode: "agent",
+      userText: "Compare these papers.",
+      libraryID: 1,
+    });
+    const rendered = await renderAgentPromptEnvelope(
+      request,
+      registry.listToolDefinitionsForRequest(request),
+      [],
+    );
+    // What the runtime records after rendering.
+    request.deliveredToolGuidance = [
+      ...rendered.inventory.toolGuidanceInstructions,
+    ];
+    assert.notInclude(
+      request.deliveredToolGuidance,
+      NOTE_WRITE_GUIDANCE.instruction,
+    );
+    // A note obligation approved mid-turn, as approve_research_mutation does.
+    request.actionContract = {
+      obligations: [{ capability: "zotero.notes" }],
+    } as never;
+    const loadSkill = registry.getTool("load_skill")!;
+    const context = { request } as unknown as AgentToolContext;
+    const first = (await loadSkill.execute(
+      { id: "compare-papers" },
+      context,
+    )) as Record<string, unknown>;
+    assert.include(
+      first.toolGuidance as string,
+      NOTE_WRITE_GUIDANCE.instruction,
+    );
+    const second = (await loadSkill.execute(
+      { id: "write-note" },
+      context,
+    )) as Record<string, unknown>;
+    assert.notProperty(second, "toolGuidance");
   });
 });

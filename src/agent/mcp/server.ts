@@ -2029,6 +2029,7 @@ function createToolContext(
       kind: "external_runtime",
       standalone: !scope?.runtimeAuthority,
     },
+    isToolVisible: (spec) => isMcpToolVisibleInScope(spec, scope),
     signal: scope?.signal,
     runId,
     item,

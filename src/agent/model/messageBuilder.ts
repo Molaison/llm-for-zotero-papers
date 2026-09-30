@@ -424,6 +424,8 @@ type AgentPromptInventoryState = Readonly<{
   fixedPrompt: string;
   tools: readonly AgentToolDefinition<any, any>[];
   matchedSkillInstructions: readonly string[];
+  /** Tool guidance instructions rendered into this turn's guidance block. */
+  toolGuidanceInstructions: readonly string[];
   dynamicGuidance: string;
   stableResourceBlock: string;
   turnResource: string;
@@ -495,7 +497,7 @@ function buildSystemPrompt(sections: PromptSection[]): string {
     .join("\n\n");
 }
 
-function collectToolGuidanceInstructions(
+function collectMatchingToolGuidance(
   request: AgentRuntimeRequest,
   tools: AgentToolDefinition<any, any>[],
   matchedSkillIds: ReadonlyArray<string>,
@@ -514,8 +516,11 @@ function collectToolGuidanceInstructions(
     const instruction = guidance.instruction.trim();
     if (instruction) instructions.add(instruction);
   }
+  return [...instructions];
+}
 
-  if (!instructions.size) return [];
+function buildToolGuidanceSection(instructions: readonly string[]): string[] {
+  if (!instructions.length) return [];
   return [
     "The following stable tool guidance is provided because the user's message may be relevant to these capabilities. " +
       "Use your judgement: only invoke a tool if it directly addresses what the user is asking for. " +
@@ -595,11 +600,16 @@ export async function renderAgentPromptEnvelope(
   } = {},
 ): Promise<RenderedAgentPromptEnvelope> {
   const continuityNotes = await loadAgentTurnMemory(request.conversationKey);
+  const toolGuidanceInstructions = collectMatchingToolGuidance(
+    request,
+    tools,
+    matchedSkillIds,
+  );
   const dynamicGuidanceInstructions = [
     request.workingDirectory
       ? `Command working directory retained from this conversation: ${request.workingDirectory}. run_command uses it when cwd is omitted; pass cwd explicitly to change it. This directory does not confer filesystem permission.`
       : "",
-    ...collectToolGuidanceInstructions(request, tools, matchedSkillIds),
+    ...buildToolGuidanceSection(toolGuidanceInstructions),
   ];
   const matchedSkillInstructions = collectSkillGuidanceInstructions(
     request,
@@ -733,6 +743,7 @@ export async function renderAgentPromptEnvelope(
       fixedPrompt,
       tools: Object.freeze([...tools]),
       matchedSkillInstructions: Object.freeze([...matchedSkillInstructions]),
+      toolGuidanceInstructions: Object.freeze([...toolGuidanceInstructions]),
       dynamicGuidance: buildTurnGuidanceBlock(dynamicGuidanceInstructions),
       stableResourceBlock,
       turnResource: turnGuidanceBlock

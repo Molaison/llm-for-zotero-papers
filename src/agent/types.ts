@@ -960,6 +960,11 @@ export type AgentRuntimeRequestInput = AgentRequest & {
   materialOutcomes?: readonly MaterialOutcomeEntry[];
   /** Exact skill instructions loaded or forced by the host for this workflow. */
   loadedSkillRecords?: LoadedSkillRecord[];
+  /**
+   * Tool guidance instructions the model has already received this turn: the
+   * rendered prompt's guidance plus any load_skill returned. Host-set only.
+   */
+  deliveredToolGuidance?: string[];
   /** Legacy stored-artifact compatibility; absent on fresh ordinary turns. */
   classifiedIntent?: ClassifiedTurnIntent;
   /** Cheap chat-path keyword signal for tool-guidance matching only; never grants authority. */
@@ -1297,6 +1302,12 @@ export type AgentToolContext = {
   readCurrentTurnActions?: () => import("./authorization/types").ActionReviewInput["currentTurnActions"];
   /** Announce instructions loaded during the current run through its durable trace. */
   publishSkillActivation?: (id: string) => Promise<void>;
+  /**
+   * Whether a tool is offered to the calling client. MCP sets it from the
+   * active profile so load_skill never returns guidance for a hidden tool;
+   * absent means every tool offered on the request.
+   */
+  isToolVisible?: (spec: ToolSpec) => boolean;
   /** Host-injected Auto reviewer, shared by normal and nested operation assessment. */
   reviewAction?: import("./authorization/types").ActionReviewer;
   /** Host-owned authority; never decoded from model or MCP tool arguments. */

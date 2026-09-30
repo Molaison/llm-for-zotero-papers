@@ -552,6 +552,8 @@ export class PdfFigureExtractionService {
         mode: "figures",
         status: "no_figures",
         query,
+        guidance:
+          "No figure was selected, so no extraction ran. Call paper_read mode:'figures' again with figureLabels (for example ['Figure 1'], or [] for all figures).",
         figures: [],
         artifacts: [],
         warnings: [

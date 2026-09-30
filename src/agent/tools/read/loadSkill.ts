@@ -28,30 +28,45 @@ export type LoadSkillToolOptions = {
 };
 
 /**
- * Tool guidance that becomes active only because `skillId` is active, minus
- * guidance the turn already rendered for the skills active before this load
- * (forced, plan-pinned, or loaded earlier in the turn). The system prompt is
- * rendered once per turn, so this is the only way a skill loaded mid-turn
- * brings its tool rules with it.
+ * Tool guidance the model gains by loading `skillId`. The prompt's guidance
+ * block is rendered once per turn, so this is how a skill loaded mid-turn
+ * brings the tool rules tied to it.
+ *
+ * When the host recorded what it already delivered this turn
+ * (`deliveredToolGuidance`: the rendered guidance plus earlier load_skill
+ * returns), every instruction that matches with the loaded skill active is
+ * returned minus that set; this also covers guidance that became applicable
+ * after the render, such as a note obligation approved mid-turn. Without a
+ * record (an MCP call) only guidance tied to the skill is returned: it
+ * matches with the skill and not with the skills active before the load.
  */
 function collectSkillToolGuidance(
   skillId: string,
   request: AgentRuntimeRequest,
   activeSkillIds: ReadonlyArray<string>,
   tools: ReadonlyArray<AgentToolDefinition<any, any>>,
-): string | undefined {
+): string[] {
+  const delivered = request.deliveredToolGuidance
+    ? new Set(request.deliveredToolGuidance)
+    : undefined;
+  const withSkill = [...new Set([...activeSkillIds, skillId])];
   const instructions = new Set<string>();
   for (const tool of tools) {
     const guidance = tool.guidance;
     if (!guidance) continue;
-    if (!guidance.matches(request, { matchedSkillIds: [skillId] })) continue;
-    if (guidance.matches(request, { matchedSkillIds: activeSkillIds }))
-      continue;
     const instruction = guidance.instruction.trim();
-    if (instruction) instructions.add(instruction);
+    if (!instruction) continue;
+    if (!guidance.matches(request, { matchedSkillIds: withSkill })) continue;
+    if (delivered) {
+      if (delivered.has(instruction)) continue;
+    } else {
+      if (!guidance.matches(request, { matchedSkillIds: [skillId] })) continue;
+      if (guidance.matches(request, { matchedSkillIds: activeSkillIds }))
+        continue;
+    }
+    instructions.add(instruction);
   }
-  if (!instructions.size) return undefined;
-  return ["Tool guidance for this skill:", ...instructions].join("\n\n");
+  return [...instructions];
 }
 
 /**
@@ -117,12 +132,27 @@ export function createLoadSkillTool(
       if (context?.request) {
         const records = context.request.loadedSkillRecords || [];
         if (options.getToolDefinitions) {
-          toolGuidance = collectSkillToolGuidance(
+          const isToolVisible = context.isToolVisible;
+          const instructions = collectSkillToolGuidance(
             skill.id,
             context.request,
             records.map((record) => record.id),
-            options.getToolDefinitions(context.request),
+            options
+              .getToolDefinitions(context.request)
+              .filter((tool) => !isToolVisible || isToolVisible(tool.spec)),
           );
+          if (instructions.length) {
+            toolGuidance = [
+              "Tool guidance for this skill:",
+              ...instructions,
+            ].join("\n\n");
+            if (context.request.deliveredToolGuidance) {
+              context.request.deliveredToolGuidance = [
+                ...context.request.deliveredToolGuidance,
+                ...instructions,
+              ];
+            }
+          }
         }
         const alreadyLoaded = records.some(
           (record) =>

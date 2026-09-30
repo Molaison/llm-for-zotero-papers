@@ -638,7 +638,7 @@ export class AgentRuntime {
       }
       request.classifiedIntent = turnIntent.classifiedIntent || undefined;
       request.skillRoutingReceipt = undefined;
-      const matchedSkills = withPlanInvestigationSkill(
+      let matchedSkills = withPlanInvestigationSkill(
         getMatchedSkillIds(request, turnIntent.skillIds),
         approvedPlanArtifact?.contract,
         getAllSkills(),
@@ -959,6 +959,18 @@ export class AgentRuntime {
           usedFallback: false,
         };
       }
+      if (request.planContext?.phase === "executing") {
+        // The plan session resolved the approved skill bindings (forced
+        // choices and skills loaded while planning) against their frozen
+        // version and fingerprint; a changed forced binding already failed
+        // initialization above. Render the compatible ones.
+        const boundSkillIds = (request.loadedSkillRecords || []).map(
+          (record) => record.id,
+        );
+        matchedSkills = Array.from(
+          new Set([...matchedSkills, ...boundSkillIds]),
+        );
+      }
       const actionContractInitialization =
         await actionContractSession.initialize({
           checkpoint: interruptedActionCheckpoint,
@@ -1043,6 +1055,9 @@ export class AgentRuntime {
           contentInputs: resolveCapabilitiesContentInputs(adapterCapabilities),
         },
       );
+      request.deliveredToolGuidance = [
+        ...renderedPrompt.inventory.toolGuidanceInstructions,
+      ];
       const initialTranscriptMessages = promptTranscriptMessages();
       const messages = composeAgentModelInput(renderedPrompt.envelope, {
         transcriptMessages: initialTranscriptMessages,
@@ -1996,6 +2011,12 @@ export class AgentRuntime {
             contentInputs:
               resolveCapabilitiesContentInputs(adapterCapabilities),
           },
+        );
+        request.deliveredToolGuidance = Array.from(
+          new Set([
+            ...(request.deliveredToolGuidance || []),
+            ...renderedPrompt.inventory.toolGuidanceInstructions,
+          ]),
         );
         continuationSession.restartWithMessages(
           composeAgentModelInput(renderedPrompt.envelope, {
