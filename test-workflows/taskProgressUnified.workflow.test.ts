@@ -306,8 +306,10 @@ describe("workflow: task progress unified", function () {
       tp().row.click();
       codex.answer("The methods differ in imaging windows.");
       await codex.finish();
-      api.flushTaskProgress();
-      assert.equal(tp().row.dataset.state, "completed");
+      await until(() => {
+        api.flushTaskProgress();
+        return tp().row.dataset.state === "completed";
+      }, "the finished Codex plan shows as completed");
 
       // Reopened after a restart: the steps come back from the stored run,
       // and the trace still renders no checklist row.
