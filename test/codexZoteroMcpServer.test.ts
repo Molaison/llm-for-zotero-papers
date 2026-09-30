@@ -1169,6 +1169,37 @@ describe("Zotero MCP server", function () {
     assert.equal(executed, 1);
   });
 
+  it("points a client that calls a retired tool name at its replacement", async function () {
+    const registry = new AgentToolRegistry(
+      new ActionContractService({ getItem: () => null } as never),
+    );
+    registry.register(createReadTool("paper_read"));
+    registry.register(createWriteTool("undo"));
+    registerMcpServer({ toolRegistry: registry, zoteroGateway: {} as never });
+    const cases: Array<[string, string]> = [
+      ["read_paper", "paper_read"],
+      ["undo_last_action", "undo"],
+    ];
+    for (const [index, [retired, replacement]] of cases.entries()) {
+      const response = await invokeMcpEndpoint({
+        token: getOrCreateZoteroMcpBearerToken(),
+        body: {
+          jsonrpc: "2.0",
+          id: 440 + index,
+          method: "tools/call",
+          params: { name: retired, arguments: {} },
+        },
+      });
+      const payload = JSON.parse(response[2]);
+      assert.equal(payload.result.isError, true);
+      assert.equal(
+        payload.result.content[0].text,
+        `Unknown tool: ${retired}. This tool was renamed; call ${replacement} instead.`,
+      );
+      assert.notInclude(payload.result.content[0].text, "Codex");
+    }
+  });
+
   it("uses Zotero's configured HTTP port and rejects unauthenticated calls", async function () {
     const registry = new AgentToolRegistry(
       new ActionContractService({ getItem: () => null } as never),
@@ -1588,7 +1619,7 @@ describe("Zotero MCP server", function () {
       assert.equal(rawReaderPayload.result.isError, true);
       assert.include(
         rawReaderPayload.result.content[0].text,
-        "not available in Codex native mode",
+        "is not available through the Zotero MCP server",
       );
 
       for (const method of ["resources/list", "resources/templates/list"]) {

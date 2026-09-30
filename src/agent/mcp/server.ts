@@ -69,7 +69,10 @@ import type {
   VerifiedReadSource,
 } from "../plans/types";
 import { createTrustedReadObservations } from "../plans/readObservation";
-import { isRawPdfRetrievalTool } from "../context/toolNames";
+import {
+  isRawPdfRetrievalTool,
+  RETIRED_TOOL_HINTS,
+} from "../context/toolNames";
 import { resolveActiveLibraryID } from "../../utils/zoteroLibraryScope";
 import { resolveAgentToolCallWorkCategory } from "../workCategory";
 import { getNotesDirectoryConfig } from "../../utils/notesDirectoryConfig";
@@ -2288,14 +2291,18 @@ async function handleToolsCall(
   };
 
   if (!tool || !isMcpExposedTool(tool.spec)) {
-    completeActivity({ ok: false, error: "Tool unavailable in native mode" });
+    const replacement = Object.prototype.hasOwnProperty.call(
+      RETIRED_TOOL_HINTS,
+      name,
+    )
+      ? RETIRED_TOOL_HINTS[name]
+      : undefined;
+    const text = replacement
+      ? `Unknown tool: ${name}. This tool was renamed; call ${replacement} instead.`
+      : `Zotero MCP tool ${name} is not available through the Zotero MCP server.`;
+    completeActivity({ ok: false, error: text });
     return {
-      content: [
-        {
-          type: "text",
-          text: `Zotero MCP tool is not available in Codex native mode: ${name}`,
-        },
-      ],
+      content: [{ type: "text", text }],
       isError: true,
     };
   }
