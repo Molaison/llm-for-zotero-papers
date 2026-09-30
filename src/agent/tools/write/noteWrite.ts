@@ -50,10 +50,7 @@ import {
   ok,
   validateObject,
 } from "../shared";
-import {
-  buildNoteChangeResultCards,
-  resolveVerifiedNoteEditCompletion,
-} from "./noteChangePresentation";
+import { buildNoteChangeResultCards } from "./noteChangePresentation";
 import { buildSavedNoteResultCards } from "./noteResultPresentation";
 import { readAgentConversationAnswer } from "../../store/transcriptStore";
 
@@ -629,10 +626,6 @@ export function createNoteWriteTool(
         },
       },
     },
-    resolveTerminalResult: (input, result, context) =>
-      input.mode === "edit"
-        ? resolveVerifiedNoteEditCompletion(result, context)
-        : null,
     acceptInheritedApproval: async (_input, approval) => {
       // Accept review-mode approvals from literature_search review cards
       // that chain a save_note operation
