@@ -154,16 +154,29 @@ function isLive(state: TaskRunState): boolean {
   return state === "working" || state === "answering";
 }
 
-function evict(): void {
+/**
+ * Evict idle records first, then the oldest, but never `keep`: the record the
+ * caller is making room for. When every other record is live, the newcomer
+ * was the only idle one, so it was dropped the moment it was created and its
+ * conversation could never show progress.
+ */
+function evict(keep: number): void {
   while (records.size > TASK_PROGRESS_MAX_CONVERSATIONS) {
     let victim: number | undefined;
     for (const [key, record] of records) {
-      if (!isLive(record.runState)) {
+      if (key !== keep && !isLive(record.runState)) {
         victim = key;
         break;
       }
     }
-    if (victim === undefined) victim = records.keys().next().value;
+    if (victim === undefined) {
+      for (const key of records.keys()) {
+        if (key !== keep) {
+          victim = key;
+          break;
+        }
+      }
+    }
     if (victim === undefined) return;
     records.delete(victim);
     viewMemos.delete(victim);
@@ -200,7 +213,7 @@ function writable(conversationKey: number): TaskProgressRecord | null {
   }
   const created = emptyRecord(key);
   records.set(key, created);
-  evict();
+  evict(key);
   return records.get(key) || null;
 }
 

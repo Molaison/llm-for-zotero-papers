@@ -155,6 +155,20 @@ describe("task progress store", function () {
     assert.isNull(getTaskProgress(1));
   });
 
+  it("never evicts the conversation it makes room for, even when every other one is live", function () {
+    // Six runs that never reported an end (a full workflow suite leaves such
+    // records behind) must not keep a new conversation from ever showing.
+    for (let key = 1; key <= TASK_PROGRESS_MAX_CONVERSATIONS; key++) {
+      beginTaskRun(key, { runId: `live${key}` });
+    }
+    const newcomer = TASK_PROGRESS_MAX_CONVERSATIONS + 1;
+    completeTaskRun(newcomer, { runId: "new" });
+    assert.isNotNull(getTaskProgress(newcomer));
+    const kept = listTaskProgressConversations();
+    assert.lengthOf(kept, TASK_PROGRESS_MAX_CONVERSATIONS);
+    assert.notInclude(kept, 1, "the oldest record makes room");
+  });
+
   it("remembers that a plan ran after its steps are gone", function () {
     const ledger = {
       executionId: "e1",
