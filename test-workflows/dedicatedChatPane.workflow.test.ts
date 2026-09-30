@@ -568,7 +568,14 @@ describe("workflow: dedicated native chat pane", function () {
     const section = details.querySelector(".llm-dedicated-chat-pane");
     const root = section.querySelector("#llm-main");
     const input = section.querySelector("#llm-input");
+    const previousDraft = input.value;
+    // Type the draft the way a user does. The composer stores the draft on
+    // every input event, and the panel reloads the stored draft whenever the
+    // pointer enters it. Setting .value alone leaves the store holding the
+    // previous test's draft, which then replaces this one as soon as the
+    // cursor rests over the pane.
     input.value = "Keep this draft across layout changes";
+    input.dispatchEvent(new win.Event("input", { bubbles: true }));
     const openPreferences = async () => {
       preferences = (Zotero.Utilities.Internal as any).openPreferences(
         "llmforzotero-preferences",
@@ -667,6 +674,11 @@ describe("workflow: dedicated native chat pane", function () {
       assert.strictEqual(section.querySelector("#llm-main"), root);
       assert.equal(input.value, "Keep this draft across layout changes");
     } finally {
+      const currentInput = section.querySelector("#llm-input");
+      if (currentInput) {
+        currentInput.value = previousDraft;
+        currentInput.dispatchEvent(new win.Event("input", { bubbles: true }));
+      }
       preferences?.close();
       Zotero.Prefs.set(prefKey, original || "stacked", true);
     }
