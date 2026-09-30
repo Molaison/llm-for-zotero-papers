@@ -546,8 +546,12 @@ describe("user skill bootstrap upgrades", function () {
     "write-note-v16",
     "analyze-figures-v9",
     "analyze-figures-v10",
+    "import-cited-reference-v3",
   ] as const) {
     const name = fixture.replace(/-v\d+$/, "");
+    // The canonical path follows the skill id, which can differ from the
+    // shipped filename (import-cited-reference.md ships id import-to-library).
+    const skillId = parseSkill(BUILTIN_SKILL_FILES[`${name}.md`]).id;
     const readFixture = () =>
       readFileSync(
         new URL(`./fixtures/skillUpgrades/${fixture}.md`, import.meta.url),
@@ -560,7 +564,7 @@ describe("user skill bootstrap upgrades", function () {
         files,
         new Map<string, string>(),
       );
-      const filePath = getCanonicalSkillFilePath(name);
+      const filePath = getCanonicalSkillFilePath(skillId);
       files[filePath] = readFixture();
       await initUserSkills();
       assertUpgradedToShipped(files[filePath], name);
@@ -574,7 +578,7 @@ describe("user skill bootstrap upgrades", function () {
         files,
         prefs,
       );
-      const filePath = getCanonicalSkillFilePath(name);
+      const filePath = getCanonicalSkillFilePath(skillId);
       files[filePath] = raw;
       prefs.set(
         BODY_HASH_PREF_KEY,

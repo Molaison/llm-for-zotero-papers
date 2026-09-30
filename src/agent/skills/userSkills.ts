@@ -221,7 +221,7 @@ const BUILTIN_BOOTSTRAP_RAW_HASHES: Partial<
   ],
   "write-note.md": ["17lvl1z", "172xn8t", "nvca0f", "1c1s5yg"],
   "literature-review.md": ["kbrknh", "nxpr5d", "1cnjf9i", "3tk61l", "1ptwzpw"],
-  "import-cited-reference.md": ["19bomz1"],
+  "import-cited-reference.md": ["19bomz1", "e9tjej"],
 };
 
 const BUILTIN_BOOTSTRAP_BODY_HASHES: Partial<
