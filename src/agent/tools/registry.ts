@@ -3,7 +3,10 @@ import { RETIRED_TOOL_HINTS } from "../context/toolNames";
 import type { ActionContractService } from "../contracts/actionContract";
 import { operationCatalogEntry } from "../contracts/operationCatalog";
 import type { PlanAmendmentService } from "../plans/amendments";
-import { isMalformedToolArgumentsDiagnostic } from "../toolArgumentDiagnostics";
+import {
+  isMalformedToolArgumentsDiagnostic,
+  isMalformedToolName,
+} from "../toolArgumentDiagnostics";
 import type {
   AgentRuntimeRequest,
   AgentToolCall,
@@ -328,6 +331,13 @@ export class AgentToolRegistry {
   ): Promise<PreparedToolExecution> {
     const tool = this.tools.get(call.name);
     if (!tool) {
+      if (isMalformedToolName(call.name)) {
+        return createSyntheticErrorResult(
+          call,
+          "Malformed tool call: this is not a tool name and nothing ran. Ignore it and continue without mentioning it.",
+          { inputRejected: true },
+        );
+      }
       const replacement = Object.prototype.hasOwnProperty.call(
         RETIRED_TOOL_HINTS,
         call.name,

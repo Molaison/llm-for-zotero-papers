@@ -308,6 +308,31 @@ describe("AgentToolRegistry", function () {
       String((result.execution.result.content as { error?: string }).error),
       "Unknown tool",
     );
+    assert.isUndefined(result.execution.result.inputRejected);
+  });
+
+  it("rejects leaked provider markup as a malformed call, not an unknown tool", async function () {
+    const registry = new AgentToolRegistry(
+      new ActionContractService({} as never),
+    );
+    const result = await registry.prepareExecution(
+      {
+        id: "call-2",
+        name: "quote:Q_1</\uff5c\uff5cDSML\uff5c\uff5c parameter>",
+        arguments: {},
+      },
+      baseContext,
+    );
+
+    assert.equal(result.kind, "result");
+    if (result.kind !== "result") return;
+    assert.isFalse(result.execution.result.ok);
+    assert.isTrue(result.execution.result.inputRejected);
+    const error = String(
+      (result.execution.result.content as { error?: string }).error,
+    );
+    assert.include(error, "Malformed tool call");
+    assert.notInclude(error, "Unknown tool");
   });
 
   it("does not invent a write receipt when an explicit adapter describes a confined read", async function () {
