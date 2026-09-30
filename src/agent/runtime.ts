@@ -2012,12 +2012,11 @@ export class AgentRuntime {
               resolveCapabilitiesContentInputs(adapterCapabilities),
           },
         );
-        request.deliveredToolGuidance = Array.from(
-          new Set([
-            ...(request.deliveredToolGuidance || []),
-            ...renderedPrompt.inventory.toolGuidanceInstructions,
-          ]),
-        );
+        // The restart replaces the earlier prompt, so only this render's
+        // guidance has reached the model.
+        request.deliveredToolGuidance = [
+          ...renderedPrompt.inventory.toolGuidanceInstructions,
+        ];
         continuationSession.restartWithMessages(
           composeAgentModelInput(renderedPrompt.envelope, {
             transcriptMessages: promptTranscriptMessages(),
