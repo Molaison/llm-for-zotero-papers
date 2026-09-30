@@ -1209,7 +1209,6 @@ export function createPaperReadTool(
       executionClass: "read",
       workCategory: "retrieval",
       exposure: "model",
-      tier: "normal",
     },
     guidance: PAPER_READ_GUIDANCE,
     presentation: {

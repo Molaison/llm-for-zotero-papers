@@ -87,7 +87,6 @@ export function createRenamedTool<TInput, TResult>(params: {
   description: string;
   label?: string;
   exposure?: "model" | "internal";
-  tier?: "normal" | "advanced";
   guidance?: AgentToolDefinition<TInput, TResult>["guidance"];
 }): AgentToolDefinition<TInput, TResult> {
   const { tool } = params;
@@ -99,7 +98,6 @@ export function createRenamedTool<TInput, TResult>(params: {
       name: params.name,
       description: params.description,
       exposure: params.exposure || "model",
-      tier: params.tier || tool.spec.tier || "normal",
     },
     presentation: tool.presentation
       ? {
@@ -142,7 +140,6 @@ export function createDelegatingTool<TResult = unknown>(params: {
   workCategory: AgentWorkCategory;
   label: string;
   summaries?: NonNullable<AgentToolDefinition["presentation"]>["summaries"];
-  tier?: "normal" | "advanced";
   guidance?: AgentToolDefinition<DelegatedInput<any>, TResult>["guidance"];
   /**
    * Every tool this facade can route to. The facade performs no effect of its
@@ -166,7 +163,6 @@ export function createDelegatingTool<TResult = unknown>(params: {
       executionClass: params.executionClass,
       workCategory: params.workCategory,
       exposure: "model",
-      tier: params.tier || "normal",
     },
     guidance: params.guidance,
     presentation: {

@@ -151,15 +151,6 @@ const LIBRARY_DELETE_GUIDANCE: ToolGuidance = {
     "\n\nTo bring something back from the trash, call library_delete with mode:'restore' and itemIds, collectionIds, or savedSearchIds. Restoring a collection restores its subcollections too. Deleting a collection trashes it rather than erasing it, so a collection the user deleted earlier can still be restored this way.",
 };
 
-function markToolTier<TInput, TResult>(
-  tool: AgentToolDefinition<TInput, TResult>,
-  tier: "normal" | "advanced",
-): AgentToolDefinition<TInput, TResult> {
-  tool.spec.tier = tier;
-  tool.spec.exposure = "model";
-  return tool;
-}
-
 function createLibraryUpdateTool(tools: {
   applyTags: AgentToolDefinition<any, any>;
   moveToCollection: AgentToolDefinition<any, any>;
@@ -690,9 +681,9 @@ export function createBuiltInToolRegistry(
   );
   registry.register(createUndoTool(deps.zoteroGateway));
   registry.register(createAnnotatePdfTool(deps.zoteroGateway));
-  registry.register(markToolTier(fileIO, "advanced"));
-  registry.register(markToolTier(runCommand, "advanced"));
-  registry.register(markToolTier(zoteroScript, "advanced"));
+  registry.register(fileIO);
+  registry.register(runCommand);
+  registry.register(zoteroScript);
   registry.register(createContextReadTool());
   registry.register(
     createLoadSkillTool({

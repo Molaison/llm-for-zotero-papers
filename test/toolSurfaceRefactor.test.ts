@@ -346,12 +346,12 @@ describe("semantic tool surface", function () {
     assert.exists(registry.getTool("web_read"));
     assert.notInclude(names, "web_search");
     assert.notInclude(names, "web_read");
+    // Filesystem, shell and script tools are ordinary model-visible tools; no
+    // tier label distinguishes them.
     for (const name of ["file_io", "run_command", "zotero_script"]) {
-      assert.equal(
-        tools.find((tool) => tool.name === name)?.tier,
-        "advanced",
-        `${name} should be advanced`,
-      );
+      const tool = tools.find((entry) => entry.name === name);
+      assert.exists(tool, `${name} should be model-visible`);
+      assert.notProperty(tool, "tier");
     }
   });
 

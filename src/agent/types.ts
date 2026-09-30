@@ -438,12 +438,6 @@ type ToolSpecBase = {
    */
   exposure?: "model" | "internal";
   /**
-   * Advanced tools remain model-visible when exposure is "model", but get
-   * stricter policy/trace treatment because they can touch local files,
-   * shell commands, or direct Zotero scripts.
-   */
-  tier?: "normal" | "advanced";
-  /**
    * Advertise the tool only to the in-plugin Agent runtime. External bridges,
    * MCP, and public tool catalogs must not expose it.
    */
