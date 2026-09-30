@@ -1,5 +1,24 @@
+import type { AgentActionCapability } from "../contracts/types";
 import type { MaterialRef } from "../documents/materialRef";
 import type { ExecutionTaskStatus } from "../plans/types";
+
+/** What completes an outcome. */
+export type OutcomeEffect = "read" | "artifact" | "mutation" | "answer";
+
+/** Targets a receipt rejected or could not do, with the host's reason. */
+export type OutcomeException = Readonly<{
+  targets: readonly string[];
+  reason: string;
+}>;
+
+/** How a run ended, refined beyond its persisted terminal status. */
+export type RunEndState =
+  | "completed"
+  | "completed_with_exceptions"
+  | "blocked"
+  | "interrupted"
+  | "cancelled"
+  | "failed";
 
 export type ExecutionCheckpointTask = Readonly<{
   taskId: string;
@@ -12,6 +31,26 @@ export type ExecutionCheckpointTask = Readonly<{
   materialRefs: readonly MaterialRef[];
   createdAt: number;
   updatedAt: number;
+  /** Absent on a task from before outcomes, which counts as `"answer"`. */
+  effect?: OutcomeEffect;
+  /** A mutation's kind of write that completes it; absent means any write. */
+  capability?: AgentActionCapability;
+  /** Host outcomes only: the receipt's operation, for the label. */
+  operation?: string;
+  /** Declared by the model, or created by the host from a write. */
+  origin?: "model" | "host";
+  /** Receipt-form targets (`item:12`); none: whatever the evidence names. */
+  targets?: readonly string[];
+  /**
+   * Targets a verified receipt applied or found already satisfied, or a read
+   * attested.
+   */
+  doneTargets?: readonly string[];
+  exceptions?: readonly OutcomeException[];
+  /** Every receipt bound here, verified or not, so none binds twice. */
+  receiptIds?: readonly string[];
+  /** Why the model marked it skipped or blocked, or why the host settled it. */
+  reason?: string;
 }>;
 
 /**
@@ -29,6 +68,8 @@ export type ExecutionCheckpoint = Readonly<{
   tasks: readonly ExecutionCheckpointTask[];
   createdAt: number;
   updatedAt: number;
+  /** Set when the run that owns this ledger ended. */
+  end?: Readonly<{ state: RunEndState }>;
 }>;
 
 export type ExecutionEvidenceInventory = Readonly<{
