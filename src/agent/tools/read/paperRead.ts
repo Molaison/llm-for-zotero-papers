@@ -1126,7 +1126,7 @@ export function createPaperReadTool(
   figureExtractionService?: PaperReadFigureExtractionService,
   fullReadAnalyzer?: ExhaustiveBatchAnalyzer,
 ): AgentToolDefinition<PaperReadInput, unknown> {
-  const pageRenderer = createPdfPageRenderer(pdfPageService, zoteroGateway);
+  const pageRenderer = createPdfPageRenderer(pdfPageService);
   return {
     spec: {
       name: "paper_read",

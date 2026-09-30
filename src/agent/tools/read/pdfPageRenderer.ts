@@ -6,7 +6,6 @@ import type {
 } from "../../types";
 import type { PdfPageService } from "../../services/pdfPageService";
 import { parsePageSelectionValue } from "../../services/pdfPageService";
-import type { ZoteroGateway } from "../../services/zoteroGateway";
 import { fail, normalizePositiveInt, ok, validateObject } from "../shared";
 import {
   normalizeTarget,
@@ -22,7 +21,6 @@ export type PdfPageRenderInput = {
   pages?: number[];
   capture?: boolean;
   neighborPages?: number;
-  scope?: "whole_document";
 };
 
 function normalizePages(value: unknown): number[] | undefined {
@@ -54,7 +52,6 @@ export type PdfPageRenderer = {
 
 export function createPdfPageRenderer(
   pdfPageService: PdfPageService,
-  zoteroGateway: ZoteroGateway,
 ): PdfPageRenderer {
   return {
     validate: (args) => {
@@ -70,17 +67,11 @@ export function createPdfPageRenderer(
         pages: normalizePages(args.pages),
         capture: args.capture === true,
         neighborPages: normalizePositiveInt(args.neighborPages),
-        scope: args.scope === "whole_document" ? "whole_document" : undefined,
       };
-      if (
-        !input.capture &&
-        !input.pages?.length &&
-        !input.question &&
-        input.scope !== "whole_document"
-      ) {
+      if (!input.capture && !input.pages?.length && !input.question) {
         return fail(
           "Provide at least one of: question (to search pages), pages (to render), " +
-            "capture (to screenshot active view), or scope:'whole_document'.",
+            "or capture (to screenshot active view).",
         );
       }
       return ok(input);
@@ -132,22 +123,6 @@ export function createPdfPageRenderer(
       let previewPages = pages;
       let description =
         'Review the selected pages below, then click "Send to model" to send them for inspection.';
-      if (input.scope === "whole_document" && !pages.length) {
-        const pageCount = await pdfPageService.getPageCountForTarget({
-          request: context.request,
-          paperContext: input.target?.paperContext,
-          itemId: input.target?.itemId,
-          contextItemId: input.target?.contextItemId,
-          attachmentId: input.target?.attachmentId,
-          name: input.target?.name,
-        });
-        pages = Array.from({ length: pageCount }, (_value, index) => index);
-        previewPages = pages.slice(0, 12);
-        description =
-          pageCount > previewPages.length
-            ? `This will send all ${pageCount} pages. Previewing the first ${previewPages.length} pages below.`
-            : `This will send all ${pageCount} pages for inspection.`;
-      }
 
       // If only question provided (no pages), search first
       if (!pages.length && input.question) {
@@ -284,19 +259,6 @@ export function createPdfPageRenderer(
           topK: 3,
         });
         pages = searchResult.pages.map((p) => p.pageIndex);
-      }
-
-      // Resolve whole document
-      if (input.scope === "whole_document" && !pages.length) {
-        const pageCount = await pdfPageService.getPageCountForTarget({
-          request: context.request,
-          paperContext: input.target?.paperContext,
-          itemId: input.target?.itemId,
-          contextItemId: input.target?.contextItemId,
-          attachmentId: input.target?.attachmentId,
-          name: input.target?.name,
-        });
-        pages = Array.from({ length: pageCount }, (_value, index) => index);
       }
 
       // Render pages

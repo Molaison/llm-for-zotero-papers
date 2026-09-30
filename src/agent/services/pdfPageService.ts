@@ -1825,47 +1825,6 @@ export class PdfPageService {
     return { target, pages };
   }
 
-  async getPageCountForTarget(
-    params: ResolvePdfTargetInput & {
-      request: AgentRuntimeRequest;
-    },
-  ): Promise<number> {
-    const savedTabId = getLastKnownSelectedTabId();
-    try {
-      const target = await this.resolveTarget(params);
-      if (target.source !== "library" || !target.contextItemId) {
-        throw new Error(
-          "Page-count inspection is currently supported for Zotero library PDFs.",
-        );
-      }
-      const reader = await openReaderForItem(target.contextItemId, {
-        pageIndex: 0,
-        pageLabel: "1",
-      });
-      if (!reader) {
-        throw new Error(
-          "Could not open the Zotero PDF reader for this attachment",
-        );
-      }
-      const app = await waitForPdfDocument(reader);
-      const pdfDocument = unwrapWrappedJsObject(
-        app?.pdfDocument as { numPages?: number } | null | undefined,
-      );
-      const rawCount = Number(
-        (pdfDocument && (pdfDocument as { numPages?: number }).numPages) ??
-          (app as { pdfDocument?: { numPages?: number } })?.pdfDocument
-            ?.numPages ??
-          0,
-      );
-      if (!Number.isFinite(rawCount) || rawCount <= 0) {
-        throw new Error("Could not determine the total number of PDF pages");
-      }
-      return Math.floor(rawCount);
-    } finally {
-      restoreNonReaderTab(savedTabId);
-    }
-  }
-
   getUserExplicitPageSelection(
     request: AgentRuntimeRequest,
   ): ParsedPageSelection | null {
