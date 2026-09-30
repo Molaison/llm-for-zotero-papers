@@ -2354,12 +2354,13 @@ export class AgentRuntime {
           let roundHadSuccessfulToolResult = false;
           let roundHadToolFailure = false;
           let roundHadInputRejection = false;
-          for (const call of calls) {
+          for (const [index, call] of calls.entries()) {
             const outcome = await toolExecution.executeToolWorkflow(
               call,
               round,
               {
                 modelCallId: call.id,
+                followingCallCount: calls.length - index - 1,
               },
             );
             if (outcome.toolResult.ok) roundHadSuccessfulToolResult = true;

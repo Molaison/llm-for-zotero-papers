@@ -21,6 +21,8 @@ import type {
   AgentModelCapabilities,
   AgentRuntimeRequest,
   AgentToolContext,
+  ExecutionCheckpoint,
+  ExecutionTaskStatus,
 } from "../src/agent/types";
 import { classifiedFixture } from "./helpers/semanticIntent";
 import { installMockDb } from "./helpers/agentRuntimeMockDb";
@@ -81,6 +83,51 @@ function registerWriteTool(registry: AgentToolRegistry): void {
       effect: "applied",
     }),
   } as never);
+}
+
+function registerDocumentTool(registry: AgentToolRegistry): void {
+  registry.register({
+    spec: {
+      name: "submit_document",
+      description: "submit",
+      inputSchema: { type: "object" },
+      executionClass: "read",
+      workCategory: "generation",
+    },
+    validate: (args: unknown) => ({ ok: true, value: args as never }),
+    execute: async () => ({ content: { documentId: "doc-1" } }),
+    resolveTerminalResult: async () => ({
+      finalText: "The document is ready.",
+      documentId: "doc-1",
+      providerTranscript: "tool_only",
+    }),
+  } as never);
+}
+
+/** An ordinary-turn checkpoint holding one task per description and status. */
+function checkpointWith(
+  tasks: Array<[description: string, status: ExecutionTaskStatus]>,
+): ExecutionCheckpoint {
+  return {
+    version: 1,
+    executionId: "run-collaborator",
+    conversationKey: 970_001,
+    conversationGeneration: 0,
+    tasks: tasks.map(([description, status], index) => ({
+      taskId: `task-${index + 1}`,
+      description,
+      dependencies: [],
+      status,
+      journalActionIds: [],
+      verifiedReceiptIds: [],
+      readEvidenceIds: [],
+      materialRefs: [],
+      createdAt: 1,
+      updatedAt: 1,
+    })),
+    createdAt: 1,
+    updatedAt: 1,
+  };
 }
 
 type Harness = {
@@ -480,22 +527,7 @@ describe("agent tool execution collaborator", function () {
     const restoreDb = installMockDb();
     try {
       const registry = new AgentToolRegistry(createTestActionContractService());
-      registry.register({
-        spec: {
-          name: "submit_document",
-          description: "submit",
-          inputSchema: { type: "object" },
-          executionClass: "read",
-          workCategory: "generation",
-        },
-        validate: (args: unknown) => ({ ok: true, value: args as never }),
-        execute: async () => ({ content: { documentId: "doc-1" } }),
-        resolveTerminalResult: async () => ({
-          finalText: "The document is ready.",
-          documentId: "doc-1",
-          providerTranscript: "tool_only",
-        }),
-      } as never);
+      registerDocumentTool(registry);
       const harness = await createHarness(registry);
       const toolExecution = createToolExecution(harness.deps);
 
@@ -525,6 +557,59 @@ describe("agent tool execution collaborator", function () {
           "The material is finalized and preserved. Complete the remaining authorized actions using this finalized payload; do not regenerate the document.",
         actionReceipts: [],
       });
+    } finally {
+      restoreDb();
+    }
+  });
+
+  it("hands an accepted document back while declared tasks remain open, naming only those", async function () {
+    const restoreDb = installMockDb();
+    try {
+      const registry = new AgentToolRegistry(createTestActionContractService());
+      registerDocumentTool(registry);
+      const harness = await createHarness(registry);
+      // An ordinary turn carries no semantic intent, so both final
+      // evaluations accept the document.
+      harness.request.classifiedIntent = undefined;
+      harness.request.executionCheckpoint = checkpointWith([
+        ["Summarize the paper", "in_progress"],
+        ["Save the summary as a note", "pending"],
+        ["Read the paper", "completed"],
+        ["Ask which collection to use", "waiting_for_user"],
+        ["Check the citation style", "blocked"],
+      ]);
+      const toolExecution = createToolExecution(harness.deps);
+
+      const open = await toolExecution.executeToolWorkflow(
+        { id: "call-submit", name: "submit_document", arguments: {} },
+        1,
+        { modelCallId: "provider-submit" },
+      );
+
+      assert.isUndefined(open.stopRun, "open work keeps the turn running");
+      assert.deepEqual(open.delivery?.content, {
+        content: { documentId: "doc-1" },
+        remainingWork: "Summarize the paper; Save the summary as a note",
+        finalizedDocumentId: "doc-1",
+        instruction:
+          "The document is finalized and preserved. Complete any remaining requested work with this finalized document, passing its documentId where a tool accepts one; do not regenerate it.",
+        actionReceipts: [],
+      });
+
+      harness.request.executionCheckpoint = checkpointWith([
+        ["Read the paper", "completed"],
+        ["Ask which collection to use", "waiting_for_user"],
+        ["Check the citation style", "blocked"],
+      ]);
+      const closed = await toolExecution.executeToolWorkflow(
+        { id: "call-submit-2", name: "submit_document", arguments: {} },
+        1,
+        { modelCallId: "provider-submit-2", followingCallCount: 0 },
+      );
+
+      assert.isTrue(closed.stopRun, "with nothing open the document ends it");
+      assert.equal(closed.finalText, "The document is ready.");
+      assert.equal(closed.documentId, "doc-1");
     } finally {
       restoreDb();
     }

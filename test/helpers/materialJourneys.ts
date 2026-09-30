@@ -181,7 +181,13 @@ export async function runJourneyTurn(params: {
   conversationKey: number;
   userText: string;
   sourceMessageTimestamp: number;
-  steps: AgentModelStep[];
+  /**
+   * A step may be computed from the messages the model was given, for a script
+   * that names an identity the host minted earlier in the same turn.
+   */
+  steps: Array<
+    AgentModelStep | ((messages: AgentModelMessage[]) => AgentModelStep)
+  >;
   approve?: boolean;
 }): Promise<JourneyTurn> {
   const events: AgentEvent[] = [];
@@ -206,7 +212,7 @@ export async function runJourneyTurn(params: {
           throw new Error(
             `The journey script ends at ${params.steps.length} steps; the model was asked to generate a step ${index}.`,
           );
-        return step;
+        return typeof step === "function" ? step(stepParams.messages) : step;
       },
     }),
   });
@@ -308,7 +314,7 @@ export function installDirectJourneyLibrary(): DirectJourneyLibrary {
   };
 }
 
-function createDirectJourneyRegistry(): AgentToolRegistry {
+export function createDirectJourneyRegistry(): AgentToolRegistry {
   const noteGateway = {
     getItem: (itemId: number) => (globalThis.Zotero as any).Items.get(itemId),
     getCollectionSummary: () => null,

@@ -186,6 +186,8 @@ export type ToolExecution = {
       suppressModelDelivery?: boolean;
       inheritedApproval?: AgentInheritedApproval;
       checkpointedWorkflow?: boolean;
+      /** Calls after this one in the same model step, still to run. */
+      followingCallCount?: number;
     },
   ) => Promise<ToolWorkflowOutcome>;
 };
@@ -667,6 +669,7 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
       suppressModelDelivery?: boolean;
       inheritedApproval?: AgentInheritedApproval;
       checkpointedWorkflow?: boolean;
+      followingCallCount?: number;
     } = {},
   ): Promise<ToolWorkflowOutcome> => {
     if (deps.signal?.aborted) throw new Error("Aborted");
@@ -774,10 +777,18 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
           const planDecision = await deps.activePlanSession.evaluateFinal({
             canCorrect: true,
           });
-          if (
-            actionDecision.kind !== "accept" ||
-            planDecision.kind !== "accept"
-          ) {
+          const accepted =
+            actionDecision.kind === "accept" && planDecision.kind === "accept";
+          // An accepted document ends the turn only when nothing else was
+          // requested: a later call of this step, or a task the model
+          // declared and has not closed, still has to run with it.
+          const openTasks = (
+            deps.request.executionCheckpoint?.tasks || []
+          ).filter(
+            (task) =>
+              task.status === "pending" || task.status === "in_progress",
+          );
+          if (!accepted || options.followingCallCount || openTasks.length) {
             const remainingWork =
               actionDecision.kind === "correct"
                 ? actionDecision.correction
@@ -787,7 +798,7 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
                     ? planDecision.correction
                     : planDecision.kind === "fail"
                       ? planDecision.failure
-                      : "";
+                      : openTasks.map((task) => task.description).join("; ");
             return {
               toolResult,
               delivery: options.suppressModelDelivery
@@ -798,10 +809,11 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
                     toolDefinition,
                     {
                       content: contentForModel || toolResult.content,
-                      remainingWork,
+                      ...(remainingWork ? { remainingWork } : {}),
                       finalizedDocumentId: terminal.documentId,
-                      instruction:
-                        "The material is finalized and preserved. Complete the remaining authorized actions using this finalized payload; do not regenerate the document.",
+                      instruction: accepted
+                        ? "The document is finalized and preserved. Complete any remaining requested work with this finalized document, passing its documentId where a tool accepts one; do not regenerate it."
+                        : "The material is finalized and preserved. Complete the remaining authorized actions using this finalized payload; do not regenerate the document.",
                     },
                   ),
             };
