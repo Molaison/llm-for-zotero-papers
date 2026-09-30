@@ -66,6 +66,7 @@ import {
   materialRefFromDocument,
 } from "./documents/workflowMaterial";
 import { AgentFinalAnswerController } from "./finalization/finalAnswerController";
+import type { RunStopRule } from "./loop/stopRules";
 import type { AgentModelAdapter } from "./model/adapter";
 import { resolveCapabilitiesContentInputs } from "./model/contentCapabilities";
 import { buildAnswerContinuationInstruction } from "./model/completion";
@@ -155,6 +156,7 @@ import type {
   AgentModelMessage,
   AgentModelStep,
   AgentPendingAction,
+  AgentRunStatus,
   AgentRuntimeOutcome,
   AgentRuntimeRequest,
   AgentRuntimeRequestInput,
@@ -439,6 +441,33 @@ export class AgentRuntime {
     let runTerminalized = false;
     let redactRunTerminalText = (value: string) => value;
     let planSession: PlanExecutionRunSession | undefined;
+    // The run's event stream, once it is open. An ending before then has no
+    // stream to record its stop rule in.
+    let emitRunEvent: ((event: AgentEvent) => Promise<void>) | undefined;
+    /**
+     * The one path inside runTurn that finishes a run. The rule that ended it
+     * is recorded first, so every ending can be told apart afterwards; then
+     * the run's terminal status and text are written.
+     */
+    const terminateRun = async (
+      status: Exclude<AgentRunStatus, "running">,
+      finalText: string | undefined,
+      stopRule: RunStopRule,
+    ): Promise<void> => {
+      try {
+        await emitRunEvent?.({
+          type: "provider_event",
+          providerType: "agent_run_stop",
+          payload: { rule: stopRule, status },
+        });
+      } catch (error) {
+        // The record is diagnostic: an observer failing on it must not change
+        // how the run ends.
+        logRuntimeWarning("LLM Agent: recording the stop rule failed", error);
+      }
+      await persistIfLive(() => finishAgentRun(runId, status, finalText));
+      runTerminalized = true;
+    };
     try {
       const latestPriorRun = await getLatestAgentRunForConversation(
         request.conversationKey,
@@ -521,6 +550,7 @@ export class AgentRuntime {
           if (writeAllowed()) await params.onEvent?.(redactedEvent);
         }
       };
+      emitRunEvent = emit;
       /**
        * Plan events and the planning stage they move, in one place.
        *
@@ -680,8 +710,7 @@ export class AgentRuntime {
         if (request.documentOutcomePolicy.required) {
           const failure =
             "The requested document cannot be produced because this model does not support Agent tools. Choose a tool-capable model and retry.";
-          await persistIfLive(() => finishAgentRun(runId, "failed", failure));
-          runTerminalized = true;
+          await terminateRun("failed", failure, "tools_unsupported_document");
           throw new Error(failure);
         }
         const reason =
@@ -690,8 +719,11 @@ export class AgentRuntime {
           type: "fallback",
           reason,
         });
-        await persistIfLive(() => finishAgentRun(runId, "completed"));
-        runTerminalized = true;
+        await terminateRun(
+          "completed",
+          undefined,
+          "tools_unsupported_fallback",
+        );
         return {
           kind: "fallback",
           runId,
@@ -918,8 +950,7 @@ export class AgentRuntime {
           await emit({ type: "context_compacted", automatic: false });
         }
         await emit({ type: "final", text });
-        await persistIfLive(() => finishAgentRun(runId, "completed", text));
-        runTerminalized = true;
+        await terminateRun("completed", text, "manual_compaction");
         return {
           kind: "completed",
           runId,
@@ -974,8 +1005,7 @@ export class AgentRuntime {
       if (planInitialization.kind === "failed") {
         const text = planInitialization.userMessage;
         await emit({ type: "final", text });
-        await persistIfLive(() => finishAgentRun(runId, "failed", text));
-        runTerminalized = true;
+        await terminateRun("failed", text, "plan_initialization_failed");
         return {
           kind: "completed",
           runId,
@@ -1002,8 +1032,11 @@ export class AgentRuntime {
       if (actionContractInitialization.kind === "failed") {
         const text = actionContractInitialization.userMessage;
         await emit({ type: "final", text });
-        await persistIfLive(() => finishAgentRun(runId, "failed", text));
-        runTerminalized = true;
+        await terminateRun(
+          "failed",
+          text,
+          "action_contract_initialization_failed",
+        );
         return {
           kind: "completed",
           runId,
@@ -1332,7 +1365,8 @@ export class AgentRuntime {
       const finalizedMaterialRefs = new Map<string, MaterialRef>();
       const completeRun = async (
         finalText: string,
-        status: "completed" | "failed" = "completed",
+        status: "completed" | "failed",
+        stopRule: RunStopRule,
         options: {
           emitFinalEvent?: boolean;
           webAttribution?: WebAttributionAssessment;
@@ -1397,10 +1431,7 @@ export class AgentRuntime {
             );
           }
         }
-        await persistIfLive(() =>
-          finishAgentRun(runId, status, redactedFinalText),
-        );
-        runTerminalized = true;
+        await terminateRun(status, redactedFinalText, stopRule);
         // The tools' citations name the sentence the retrieval picked, not the
         // sentence the answer went on to make. Re-anchor them to the claim that
         // cites them, so a chip opens the line the reader is looking at.
@@ -1489,7 +1520,9 @@ export class AgentRuntime {
             currentAnswerText = finalText;
           }
         }
-        return await completeRun(finalText, "completed", { webAttribution });
+        return await completeRun(finalText, "completed", "final_answer", {
+          webAttribution,
+        });
       };
       const providerTerminalOutcomes: ToolWorkflowOutcome[] = [];
       const runModelStep = async (
@@ -1497,14 +1530,11 @@ export class AgentRuntime {
         statusText: string,
       ): Promise<{ step: AgentModelStep; stepStreamedText: string }> => {
         if (params.signal?.aborted) {
-          await persistIfLive(() =>
-            finishAgentRun(
-              runId,
-              "cancelled",
-              turnPathRedactor.redactTerminalText(currentAnswerText),
-            ),
+          await terminateRun(
+            "cancelled",
+            turnPathRedactor.redactTerminalText(currentAnswerText),
+            "cancelled_before_step",
           );
-          runTerminalized = true;
           throw new Error("Aborted");
         }
         await emit({
@@ -1893,6 +1923,7 @@ export class AgentRuntime {
             readToolError(clarification.toolResult) ||
               "The requested action is still awaiting your input.",
             "failed",
+            "awaiting_clarification",
           );
         if (
           (
@@ -1903,6 +1934,7 @@ export class AgentRuntime {
             request.actionPreparation.issues.join("\n") ||
               "The requested references remain unresolved.",
             "failed",
+            "references_unresolved",
           );
         referencesClarified = true;
       }
@@ -1953,7 +1985,11 @@ export class AgentRuntime {
               activePlanSession.activeWorkflowObligationIds(),
             );
             if (next.kind === "blocked")
-              return await completeRun(next.reason, "failed");
+              return await completeRun(
+                next.reason,
+                "failed",
+                "host_workflow_blocked",
+              );
             if (next.kind === "model") return null;
             if (next.kind === "complete") {
               if (!workflowSummaries.length) return null;
@@ -1973,6 +2009,7 @@ export class AgentRuntime {
                     ? decision.failure
                     : decision.correction,
                   "failed",
+                  "host_workflow_rejected",
                 );
               const planDecision = await activePlanSession.evaluateFinal({
                 canCorrect: false,
@@ -1986,7 +2023,11 @@ export class AgentRuntime {
                 role: "assistant",
                 content: finalizedMaterial?.finalText || text,
               });
-              return await completeRun(text);
+              return await completeRun(
+                text,
+                "completed",
+                "host_workflow_complete",
+              );
             }
             const prepared = next.prepared;
             await emit({
@@ -2005,6 +2046,7 @@ export class AgentRuntime {
               return await completeRun(
                 result.finalText || "The action failed.",
                 "failed",
+                "host_action_failed",
               );
             const message: AgentUserMessage = {
               role: "user",
@@ -2113,7 +2155,11 @@ export class AgentRuntime {
             );
           } catch (err) {
             if (err instanceof AgentPromptBudgetError) {
-              return await completeRun(err.message, "failed");
+              return await completeRun(
+                err.message,
+                "failed",
+                "prompt_budget_exceeded",
+              );
             }
             throw err;
           }
@@ -2123,6 +2169,7 @@ export class AgentRuntime {
             return await completeRun(
               terminalOutcome.finalText || currentAnswerText,
               terminalOutcome.failed ? "failed" : "completed",
+              "provider_terminal_outcome",
               { documentId: terminalOutcome.documentId },
             );
           }
@@ -2162,6 +2209,7 @@ export class AgentRuntime {
                 return await completeRun(
                   `${turnPathRedactor.redactTerminalText(keptAnswerModelText)}${note}`,
                   "completed",
+                  "answer_continuation_limit",
                 );
               }
               answerContinuations += 1;
@@ -2197,6 +2245,7 @@ export class AgentRuntime {
                 return await completeRun(
                   "The response stream failed again after one automatic retry. Durable Plan progress was preserved; continue when the connection is available.",
                   "failed",
+                  "stream_interrupted_again",
                 );
               }
               streamRecoveryUsed = true;
@@ -2226,7 +2275,11 @@ export class AgentRuntime {
                     : customLimit?.mode === "custom"
                       ? `The custom per-response output limit (${customLimit.tokens} tokens) repeatedly prevented the model from completing the required structured step. Raise the limit in Advanced settings, then continue; durable Plan progress was preserved.`
                       : "The provider repeatedly reached its output limit before completing the required structured step. Durable Plan progress was preserved; continue the plan to resume from the pending work unit.";
-              return await completeRun(exhaustionMessage, "failed");
+              return await completeRun(
+                exhaustionMessage,
+                "failed",
+                "incomplete_step_limit",
+              );
             }
             const assistantMessage: AgentAssistantMessage =
               step.assistantMessage || {
@@ -2304,7 +2357,11 @@ export class AgentRuntime {
                   finalDecision.actionContractRejection,
                 );
               }
-              return await completeRun(finalDecision.userMessage, "failed");
+              return await completeRun(
+                finalDecision.userMessage,
+                "failed",
+                "final_gate_rejected",
+              );
             }
             const answerPrefix = keptAnswerVisibleText;
             keptAnswerVisibleText = "";
@@ -2330,6 +2387,7 @@ export class AgentRuntime {
               return await completeRun(
                 `${overflowMessage} Please narrow the request and try again.`,
                 "failed",
+                "tool_call_overflow",
               );
             }
             toolCallOverflowCorrectionUsed = true;
@@ -2422,6 +2480,7 @@ export class AgentRuntime {
               return await completeRun(
                 stopFinalText,
                 outcome.failed ? "failed" : "completed",
+                outcome.failed ? "tool_action_failed" : "terminal_tool",
                 {
                   documentId: outcome.documentId,
                 },
@@ -2444,12 +2503,16 @@ export class AgentRuntime {
             consecutiveInputRejectionRounds >= 6
           ) {
             await persistTranscriptCheckpoint();
+            const stopRule: RunStopRule =
+              consecutiveInputRejectionRounds >= 6
+                ? "repeated_input_rejections"
+                : "repeated_tool_errors";
             const finalText =
               currentAnswerText ||
-              (consecutiveInputRejectionRounds >= 6
+              (stopRule === "repeated_input_rejections"
                 ? "Agent stopped after repeated invalid tool inputs. Please adjust the request and try again."
                 : "Agent stopped after repeated tool errors. Please adjust the request and try again.");
-            return await completeRun(finalText, "failed");
+            return await completeRun(finalText, "failed", stopRule);
           }
           if (continuationCheckpoint) {
             await restartFromSemanticCheckpoint({
@@ -2484,7 +2547,11 @@ export class AgentRuntime {
           const finalText =
             currentAnswerText ||
             `Agent stopped after segment ${segment} produced no new successful tool result. The completed transcript was saved; narrow or redirect the request before continuing.`;
-          return await completeRun(finalText, "failed");
+          return await completeRun(
+            finalText,
+            "failed",
+            "segment_without_progress",
+          );
         }
         for (const fingerprint of newFingerprints) {
           seenProgressFingerprints.add(fingerprint);
@@ -2512,12 +2579,12 @@ export class AgentRuntime {
         const message = redactRunTerminalText(
           error instanceof Error ? error.message : String(error),
         );
-        await persistIfLive(() =>
-          finishAgentRun(
-            webSourceRunId!,
-            params.signal?.aborted ? "cancelled" : "failed",
-            params.signal?.aborted ? message : INTERRUPTED_AGENT_RUN_MARKER,
-          ),
+        await terminateRun(
+          params.signal?.aborted ? "cancelled" : "failed",
+          params.signal?.aborted ? message : INTERRUPTED_AGENT_RUN_MARKER,
+          params.signal?.aborted
+            ? "cancelled_in_flight"
+            : "interrupted_by_error",
         ).catch(() => undefined);
       }
       throw error;
