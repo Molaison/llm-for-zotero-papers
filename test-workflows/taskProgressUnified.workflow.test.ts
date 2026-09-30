@@ -332,6 +332,106 @@ describe("workflow: task progress unified", function () {
     }
   });
 
+  it("lists the context bar's papers before any question, and removes them from both", async function () {
+    const panel = await api.renderPanelForItem(fixtures[3].parentItemId);
+    const restore = showOnScreen(panel.panelId);
+    try {
+      const tp = () => view(panel.panelId);
+      const composer = () =>
+        api.readTaskProgressComposerContexts({ panelId: panel.panelId });
+      api.flushTaskProgress();
+      assert.isTrue(tp().row.hidden, "one paper: no card");
+
+      // A folder plus one paper added on its own; nothing sent yet.
+      await api.setTaskProgressComposerContexts({
+        panelId: panel.panelId,
+        paperContexts: [
+          {
+            libraryID,
+            itemId: fixtures[1].parentItemId,
+            contextItemId: fixtures[1].pdfAttachmentId,
+            title: TITLES[1],
+          },
+        ],
+        collectionContexts: [
+          { collectionId: collection.id, name: collection.name, libraryID },
+        ],
+      });
+      await until(
+        () => {
+          api.flushTaskProgress();
+          return !tp().row.hidden && tp().count() === "4 papers in scope";
+        },
+        () =>
+          `the card lists the context bar before a question: ${JSON.stringify({
+            hidden: tp().row.hidden,
+            count: tp().count(),
+          })}`,
+      );
+      tp().row.click();
+      await until(() => {
+        api.flushTaskProgress();
+        return tp().items().length === 4;
+      }, "the four papers list");
+      const removeFor = (index: number) =>
+        tp()
+          .items()
+          .find(
+            (item) => item.dataset.itemId === `${fixtures[index].parentItemId}`,
+          )
+          ?.querySelector(".llm-task-paper-remove") as HTMLButtonElement;
+      assert.isTrue(removeFor(3).hidden, "the chat's own paper stays");
+      assert.isFalse(removeFor(1).hidden);
+
+      // Remove the paper added on its own (it also came with the folder).
+      removeFor(1).click();
+      await until(
+        () => {
+          api.flushTaskProgress();
+          return tp().items().length === 3;
+        },
+        () => `the removed paper leaves the list (${tp().items().length})`,
+      );
+      let bar = await composer();
+      assert.notInclude(bar.paperItemIds, fixtures[1].parentItemId);
+      assert.deepEqual(bar.collections[0].excludedItemIds, [
+        fixtures[1].parentItemId,
+      ]);
+      assert.include(bar.chipLabels[0], "1 excluded");
+
+      // Remove a paper that came only with the folder.
+      removeFor(0).click();
+      await until(() => {
+        api.flushTaskProgress();
+        return tp().items().length === 2;
+      }, "the folder's paper leaves the list");
+      bar = await composer();
+      assert.sameMembers(bar.collections[0].excludedItemIds, [
+        fixtures[1].parentItemId,
+        fixtures[0].parentItemId,
+      ]);
+      assert.include(bar.chipLabels[0], "2 excluded");
+      await until(
+        () => tp().drawer.dataset.state === "open",
+        "the card settles open",
+      );
+      assert.closeTo(
+        tp().drawer.getBoundingClientRect().height,
+        (
+          tp().root.querySelector(
+            ".llm-task-progress-drawer-body",
+          ) as HTMLElement
+        ).getBoundingClientRect().height + 1,
+        1,
+        "the card fits its remaining papers",
+      );
+      await capture(panel.panelId, "tp-context-sync.png");
+    } finally {
+      await api.setTaskProgressComposerContexts({ panelId: panel.panelId });
+      restore();
+    }
+  });
+
   it("restores counts and paper states when a stored conversation is reopened, and deletion clears them", async function () {
     const panel = await api.renderPanelForItem(fixtures[2].parentItemId);
     const restore = showOnScreen(panel.panelId);

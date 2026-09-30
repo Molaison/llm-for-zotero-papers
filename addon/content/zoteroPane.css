@@ -229,6 +229,8 @@
     --stroke-secondary,
     rgba(120, 120, 120, 0.26)
   );
+  /* Task progress card: the border sets it apart in light themes. */
+  --llm-task-progress-shadow: none;
   --llm-popup-overlay-bg: rgba(0, 0, 0, 0.22);
   --llm-history-paper-chip-text: #1d4ed8;
   --llm-history-paper-chip-bg: rgba(59, 130, 246, 0.12);
@@ -301,6 +303,8 @@
     black 8%
   );
   --llm-popup-surface-border: rgba(255, 255, 255, 0.12);
+  /* Task progress card: lifted off the dark pane. */
+  --llm-task-progress-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
   --llm-popup-overlay-bg: rgba(0, 0, 0, 0.48);
   --llm-history-paper-chip-text: #93c5fd;
   --llm-history-paper-chip-bg: rgba(59, 130, 246, 0.15);
@@ -374,52 +378,6 @@
   padding: 6px 0 8px;
 }
 
-/* Independent row 1: the toggle stays centered between symmetric side
-   tracks, with the chat's close button at the right end. Stacked keeps its
-   native section chrome and never shows the button. */
-:root[data-llm-sidebar-layout="independent"]
-  .llm-dedicated-chat-pane
-  .llm-header-toggle-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
-}
-
-:root[data-llm-sidebar-layout="independent"]
-  .llm-dedicated-chat-pane
-  .llm-header-toggle-row
-  > .llm-header-mode-tabs {
-  grid-column: 2;
-}
-
-.llm-dedicated-chat-pane .llm-dedicated-chat-close {
-  grid-column: 3;
-  justify-self: end;
-  width: 28px;
-  min-width: 28px;
-  height: 28px;
-  min-height: 28px;
-  padding: 0;
-  font-size: 0;
-}
-
-:root:not([data-llm-sidebar-layout="independent"])
-  .llm-dedicated-chat-pane
-  .llm-dedicated-chat-close {
-  display: none;
-}
-
-.llm-dedicated-chat-pane .llm-dedicated-chat-close::before {
-  content: "";
-  display: block;
-  width: 16px;
-  height: 16px;
-  background-color: currentColor;
-  mask-image: url("icons/action-close.svg");
-  mask-repeat: no-repeat;
-  mask-position: center;
-  mask-size: 16px 16px;
-}
-
 /*
  * Row 2: new chat, history, and runtime systems on the left, panel actions on
  * the right, with the pane divider closing the header off from the chat. The
@@ -433,7 +391,6 @@
   column-gap: 4px;
   margin-inline: -2px;
   padding: 0 2px 6px;
-  border-bottom: var(--material-panedivider);
 }
 
 :root:not([data-llm-pane-view="stacked"])
@@ -1277,6 +1234,8 @@
     --stroke-secondary,
     rgba(120, 120, 120, 0.26)
   );
+  /* Task progress card: the border sets it apart in light themes. */
+  --llm-task-progress-shadow: none;
   --llm-popup-overlay-bg: rgba(0, 0, 0, 0.22);
   --llm-history-paper-chip-text: #1d4ed8;
   --llm-history-paper-chip-bg: rgba(59, 130, 246, 0.12);
@@ -1295,6 +1254,8 @@
     black 8%
   );
   --llm-popup-surface-border: rgba(255, 255, 255, 0.12);
+  /* Task progress card: lifted off the dark pane. */
+  --llm-task-progress-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
   --llm-popup-overlay-bg: rgba(0, 0, 0, 0.48);
   --llm-history-paper-chip-text: #93c5fd;
   --llm-history-paper-chip-bg: rgba(59, 130, 246, 0.15);
@@ -7676,6 +7637,12 @@ label.llm-search-results-item:hover {
     --llm-diff-remove-bg: rgba(226, 88, 88, 0.13);
     --llm-diff-remove-strong: rgba(226, 88, 88, 0.34);
     --llm-diff-remove-fg: #ea7c7c;
+    --llm-task-progress-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+  }
+
+  /* A standalone window the user switched to light keeps a flat card. */
+  #llmforzotero-standalone-chat-root[data-standalone-theme="light"] .llm-panel {
+    --llm-task-progress-shadow: none;
   }
 }
 
@@ -14662,15 +14629,9 @@ item-pane-sidenav .llm-persistent-rail-entry[hidden] {
    the messages below shrink (never below a strip of chat) and stay mounted.
    Theme tokens only; they follow Zotero's light and dark hooks. */
 
-/* The row is the separation under the header while it shows: the header's
-   divider gives way (it stays whenever the row is hidden). */
-.llm-panel[data-task-progress-row="shown"] > .llm-header .llm-header-nav-row {
-  border-bottom-color: transparent;
-}
-
 /* One container: a rounded card at the top of the chat shell. Collapsed it is
    just its header; clicking the header unrolls the drawer inside the same
-   card. Its surface is the header's tint over the pane. */
+   card. It has the pane's own colour: border and, in dark themes, shadow. */
 .llm-task-progress-card {
   --llm-task-progress-ease: cubic-bezier(0.23, 1, 0.32, 1);
   position: relative;
@@ -14680,16 +14641,16 @@ item-pane-sidenav .llm-persistent-rail-entry[hidden] {
   flex-direction: column;
   box-sizing: border-box;
   min-height: 0;
-  margin: 2px 2px 6px;
+  margin: 0 2px 6px;
   overflow: clip;
   /* The plugin's popup-surface stroke: themed light and dark, in the panel
      and the standalone window (--stroke-secondary is unset in Zotero 10). */
   border: 1px solid var(--llm-popup-surface-border);
   border-radius: 12px;
-  background:
-    linear-gradient(var(--fill-quinary), var(--fill-quinary)),
-    var(--material-sidepane, var(--material-background));
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.16);
+  /* The pane's own colour; the border (and, in dark themes, the shadow)
+     sets the card apart. The drawer shares this one surface. */
+  background: var(--material-sidepane, var(--material-background));
+  box-shadow: var(--llm-task-progress-shadow, none);
   color: var(--fill-primary);
 }
 
@@ -14914,6 +14875,31 @@ item-pane-sidenav .llm-persistent-rail-entry[hidden] {
   flex-direction: column;
 }
 
+/* The card is the third header row: the same gap under the actions row as
+   between the toggle and the actions (the panel's own gap is taken back). */
+.llm-panel:not([data-standalone="true"])
+  .llm-chat-shell.llm-task-progress-present {
+  margin-top: -8px;
+}
+
+:root:not([data-llm-pane-view="stacked"])
+  .llm-dedicated-chat-pane
+  .llm-panel:not([data-standalone="true"])
+  .llm-chat-shell.llm-task-progress-present {
+  margin-top: -12px;
+}
+
+/* The card's dark-theme shadow reaches ~20px past it: where the shell has
+   no native resize grip (the independent pane, the standalone window), let
+   it paint past the shell's edges instead of being cut off. */
+:root:not([data-llm-pane-view="stacked"])
+  .llm-dedicated-chat-pane
+  .llm-chat-shell.llm-task-progress-present,
+[data-standalone="true"] .llm-chat-shell.llm-task-progress-present {
+  overflow: clip;
+  overflow-clip-margin: 24px;
+}
+
 .llm-chat-shell.llm-task-progress-present > .llm-messages {
   flex: 1 1 0;
   height: auto;
@@ -15079,9 +15065,65 @@ item-pane-sidenav .llm-persistent-rail-entry[hidden] {
   list-style: none;
 }
 
+/* Papers are a list inside the card: one line each, hairlines between,
+   a status ring, the title, what was read, and a chevron. */
 .llm-task-paper {
+  position: relative;
   margin: 0;
   padding: 0;
+}
+
+/* Remove from the task: shown on the row's hover or focus, over its
+   summary text, left of the chevron. */
+.llm-task-paper-remove {
+  appearance: none;
+  position: absolute;
+  /* Centred on the title's line: the summary's 9px top padding plus half a
+     12px line at 1.35, less half the 22px button. */
+  top: calc(9px + var(--llm-fs-12) * 0.675 - 11px);
+  right: 30px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fill-secondary);
+  cursor: pointer;
+}
+
+.llm-task-paper-remove:hover,
+.llm-task-paper-remove:focus-visible {
+  outline: none;
+  background: color-mix(in srgb, var(--fill-primary) 8%, transparent);
+  color: var(--fill-primary);
+}
+
+.llm-task-paper:hover > .llm-task-paper-remove:not([hidden]),
+.llm-task-paper:focus-within > .llm-task-paper-remove:not([hidden]) {
+  display: inline-flex;
+}
+
+/* Hovered, a removable row makes room for its × beside the chevron: the
+   title and then the summary give way (the summary truncates, never hides). */
+.llm-task-paper-removable:hover .llm-task-paper-grid,
+.llm-task-paper-removable:focus-within .llm-task-paper-grid {
+  grid-template-columns: 18px auto minmax(0, 1fr) minmax(0, max-content) 44px;
+}
+
+.llm-task-paper-removable:hover .llm-task-paper-chevron,
+.llm-task-paper-removable:focus-within .llm-task-paper-chevron {
+  justify-self: end;
+}
+
+.llm-task-paper + .llm-task-paper {
+  border-top: 1px solid
+    color-mix(in srgb, var(--llm-popup-surface-border) 70%, transparent);
 }
 
 .llm-task-paper-summary {
@@ -15093,7 +15135,7 @@ item-pane-sidenav .llm-persistent-rail-entry[hidden] {
   min-height: 0;
   max-height: none;
   margin: 0;
-  padding: 7px 12px 7px 6px;
+  padding: 9px 8px 9px 10px;
   border: 0;
   border-radius: 0;
   background: none;
@@ -15101,14 +15143,15 @@ item-pane-sidenav .llm-persistent-rail-entry[hidden] {
   font: inherit;
   text-align: left;
   cursor: pointer;
+  transition: background-color 200ms ease;
 }
 
 .llm-task-paper-grid {
   display: grid;
-  grid-template-columns: 28px 12px minmax(0, 1fr) auto;
-  align-items: start;
+  grid-template-columns: 18px auto minmax(0, 1fr) minmax(0, max-content) 18px;
+  align-items: center;
   column-gap: 8px;
-  row-gap: 1px;
+  row-gap: 3px;
   width: 100%;
   min-width: 0;
   line-height: 1.35;
@@ -15125,47 +15168,75 @@ item-pane-sidenav .llm-persistent-rail-entry[hidden] {
 
 .llm-task-paper-index {
   grid-row: 1;
-  grid-column: 1;
-  padding-top: 1px;
+  grid-column: 2;
+  min-width: 14px;
   color: var(--fill-tertiary);
-  font-size: var(--llm-fs-11);
+  font-size: var(--llm-fs-10);
   font-variant-numeric: tabular-nums;
   text-align: right;
 }
 
+/* The paper's status ring: empty when only listed, outlined when matched,
+   half-filled when skimmed, filled with a check once read, and in the cite
+   colour once the answer cites it. */
 .llm-task-paper-dot {
+  position: relative;
   grid-row: 1;
-  grid-column: 2;
+  grid-column: 1;
   box-sizing: border-box;
-  width: 9px;
-  height: 9px;
-  margin-top: 4px;
-  border: 1.5px solid var(--fill-tertiary);
+  width: 16px;
+  height: 16px;
+  border: 1.5px solid var(--llm-popup-surface-border);
   border-radius: 50%;
-  opacity: 0.6;
 }
 
 .llm-task-paper[data-state="matched"] .llm-task-paper-dot {
   border-color: var(--fill-secondary);
-  opacity: 1;
 }
 
 .llm-task-paper[data-state="skimmed"] .llm-task-paper-dot {
   border-color: var(--color-accent);
   background: linear-gradient(90deg, var(--color-accent) 50%, transparent 50%);
-  opacity: 1;
 }
 
-.llm-task-paper[data-state="read"] .llm-task-paper-dot {
-  border-color: var(--color-accent);
+.llm-task-paper[data-state="read"] .llm-task-paper-dot,
+.llm-task-paper[data-state="cited"] .llm-task-paper-dot {
+  border: 0;
   background: var(--color-accent);
-  opacity: 1;
 }
 
 .llm-task-paper[data-state="cited"] .llm-task-paper-dot {
-  border-color: var(--llm-context-icon-note-color);
   background: var(--llm-context-icon-note-color);
-  opacity: 1;
+}
+
+.llm-task-paper[data-state="read"] .llm-task-paper-dot::after,
+.llm-task-paper[data-state="cited"] .llm-task-paper-dot::after {
+  position: absolute;
+  top: 3px;
+  left: 5.5px;
+  width: 3.5px;
+  height: 7px;
+  border: solid var(--material-sidepane, var(--material-background));
+  border-width: 0 1.8px 1.8px 0;
+  transform: rotate(45deg);
+  content: "";
+}
+
+.llm-task-paper-chevron {
+  display: inline-flex;
+  grid-row: 1;
+  grid-column: 5;
+  align-items: center;
+  justify-content: center;
+  color: var(--fill-tertiary);
+}
+
+.llm-task-paper-chevron svg {
+  transition: transform 300ms var(--llm-task-progress-ease, ease);
+}
+
+.llm-task-paper-summary[aria-expanded="true"] .llm-task-paper-chevron svg {
+  transform: rotate(180deg);
 }
 
 .llm-task-paper-title {
@@ -15178,22 +15249,25 @@ item-pane-sidenav .llm-persistent-rail-entry[hidden] {
   white-space: nowrap;
 }
 
-.llm-task-paper[data-state="listed"] .llm-task-paper-title {
-  color: var(--fill-secondary);
-}
-
 .llm-task-paper-tail {
   grid-row: 1;
   grid-column: 4;
-  padding-top: 2px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   color: var(--fill-secondary);
   font-size: var(--llm-fs-10);
   white-space: nowrap;
 }
 
+/* The paper's details line shows once the row is opened. */
+.llm-task-paper-summary:not([aria-expanded="true"]) .llm-task-paper-meta {
+  display: none;
+}
+
 .llm-task-paper-meta {
   grid-row: 2;
-  grid-column: 3 / 5;
+  grid-column: 3 / 6;
   min-width: 0;
   overflow: hidden;
   color: var(--fill-tertiary);
@@ -15214,7 +15288,7 @@ item-pane-sidenav .llm-persistent-rail-entry[hidden] {
 /* A paper's reads unroll under it along a thin guide line, one after
    another. */
 .llm-task-paper-details {
-  margin: 0 14px 8px 44px;
+  margin: 0 14px 10px 18px;
   padding: 0 0 2px 12px;
   border-left: 1px solid var(--llm-popup-surface-border);
   font-size: var(--llm-fs-12);

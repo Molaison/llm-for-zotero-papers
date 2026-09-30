@@ -9,6 +9,7 @@ import type {
   TagContextRef,
 } from "../../shared/types";
 import { isAbsoluteLocalPath } from "../../utils/localPath";
+import { normalizeExcludedItemIds } from "../../services/context/normalizers";
 
 export type TurnPaperKey = `${number}:${number}:${number}`;
 
@@ -220,10 +221,14 @@ function normalizeCollections(
     const key = `${collectionLibraryID}:${collectionId}`;
     if (seen.has(key)) continue;
     seen.add(key);
+    const excludedItemIds = normalizeExcludedItemIds(
+      collection.excludedItemIds,
+    );
     out.push({
       collectionId,
       libraryID: collectionLibraryID,
       name: normalizeText(collection.name) || `Collection ${collectionId}`,
+      ...(excludedItemIds ? { excludedItemIds } : {}),
     });
   }
   return { ok: true, collections: out };
@@ -267,12 +272,14 @@ function normalizeTags(
     ].join(":");
     if (seen.has(key)) continue;
     seen.add(key);
+    const excludedItemIds = normalizeExcludedItemIds(tag.excludedItemIds);
     out.push({
       name,
       libraryID: tagLibraryID,
       normalizedName: normalizedName || undefined,
       scope,
       includeAutomatic: tag.includeAutomatic === true || undefined,
+      ...(excludedItemIds ? { excludedItemIds } : {}),
     });
   }
   return { ok: true, tags: out };

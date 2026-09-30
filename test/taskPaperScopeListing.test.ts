@@ -192,6 +192,19 @@ describe("taskPaperScopeListing", function () {
     assert.equal(listing.entries[2].text, "none");
   });
 
+  it("leaves out papers the user removed from the task", function () {
+    const listing = listTaskPaperScope(fakeSnapshot(), {
+      collections: [{ collectionId: 10 }],
+      excludedItemIds: [2],
+    });
+    assert.deepEqual(
+      listing.entries.map((entry) => entry.itemId),
+      [1],
+      "the folder's other paper stays; the removed one is gone",
+    );
+    assert.equal(listing.totalItems, 1);
+  });
+
   it("does not expand subcollections, as retrieval does not", function () {
     const listing = listTaskPaperScope(fakeSnapshot(), {
       collections: [{ collectionId: 10 }],
@@ -283,6 +296,14 @@ describe("taskPaperScopeListing", function () {
           tags: [{ name: "drift" }, { name: "place cells" }],
         },
       ],
+      [
+        "papers removed in Task progress",
+        {
+          collections: [{ collectionId: 10 }],
+          tags: [{ name: "Learning" }],
+          excludedItemIds: [2, 4],
+        },
+      ],
     ];
 
     for (const [label, contexts] of cases) {
@@ -299,6 +320,7 @@ describe("taskPaperScopeListing", function () {
             scope: tag.scope,
             includeAutomatic: tag.includeAutomatic,
           })),
+          excludedItemIds: contexts.excludedItemIds,
         });
         assert.deepEqual(
           resolveTaskPaperScopeItemIds(fakeSnapshot(), contexts),

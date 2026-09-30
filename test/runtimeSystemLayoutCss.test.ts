@@ -75,8 +75,8 @@ describe("runtime system control layout", function () {
     assert.include(modeTabRule, "min-width: 64px");
     assert.include(modeTabRule, "padding-inline: 12px");
 
-    // Row 2: actions, closed off from the chat by the pane divider.
-    assert.include(navRowRule, "border-bottom: var(--material-panedivider)");
+    // Row 2: actions, with no divider under them (none above the chat).
+    assert.notInclude(navRowRule, "border-bottom");
     assert.include(dividerRule, "width: 1px");
     assert.include(dividerRule, "height: 16px");
     assert.include(

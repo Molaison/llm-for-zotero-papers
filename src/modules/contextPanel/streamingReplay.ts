@@ -12,6 +12,10 @@ import {
   nextRequestId,
   recordLivePlanExecution,
   finishRequest,
+  initializedConversationComposeContextKeys,
+  selectedCollectionContextCache,
+  selectedPaperContextCache,
+  selectedTagContextCache,
 } from "./state";
 import { agentRunTraceCache } from "./agentState";
 import { getConversationWriteGeneration } from "../../shared/conversationWriteFence";
@@ -995,6 +999,15 @@ export async function startTaskProgressReplay(
   user.agentRunId = runId;
   history.push(user, message);
   chatHistory.set(key, history);
+  // The context bar holds what the question carried, as it does after a send.
+  const hold = <T>(cache: Map<number, T[]>, list: readonly T[] | undefined) => {
+    if (list?.length) cache.set(key, [...list]);
+    else cache.delete(key);
+  };
+  hold(selectedPaperContextCache, user.paperContexts);
+  hold(selectedCollectionContextCache, user.selectedCollectionContexts);
+  hold(selectedTagContextCache, user.selectedTagContexts);
+  initializedConversationComposeContextKeys.add(key);
   // The synthetic history replaces the conversation's, so does its ledger.
   clearTaskProgress(key);
   const requestId = nextRequestId();

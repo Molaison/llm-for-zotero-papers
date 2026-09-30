@@ -1,6 +1,9 @@
 import { appLogger } from "../../core/logging";
 import { copyNoteEditingSelectedTextContext } from "./noteEditing/selectionController";
 import { syncTaskProgressPanel } from "./taskProgress/panel";
+import { TASK_PROGRESS_REMOVE_PAPER_EVENT } from "./taskProgress/view";
+import { resolveTaskPaperScopeItemIds } from "../../agent/context/taskPaperScopeListing";
+import { libraryIndexService } from "../../services/libraryIndexService";
 import { createNoteConversationItem } from "../../services/notes/conversationItem";
 /* eslint-disable @typescript-eslint/no-require-imports */
 import { createElement } from "../../utils/domHelpers";
@@ -4117,6 +4120,16 @@ export function setupHandlers(
     list.appendChild(chip);
   };
 
+  /** A folder or tag chip's name, with the papers removed in Task progress. */
+  const withExcludedCount = (name: string, excluded?: number[]) =>
+    excluded?.length
+      ? `${name} · ${
+          excluded.length === 1
+            ? t("1 excluded")
+            : t("{count} excluded").replace("{count}", `${excluded.length}`)
+        }`
+      : name;
+
   const appendCollectionChip = (
     ownerDoc: Document,
     list: HTMLDivElement,
@@ -4154,7 +4167,7 @@ export function setupHandlers(
       ownerDoc,
       "span",
       "llm-collection-chip-title",
-      { textContent: ref.name },
+      { textContent: withExcludedCount(ref.name, ref.excludedItemIds) },
     );
     chipLabel.append(chipIcon, chipTitle);
     const removeBtn = createElement(
@@ -4198,7 +4211,7 @@ export function setupHandlers(
     });
     const chipIcon = createContextIcon(ownerDoc, "tag", "llm-tag-chip-icon");
     const chipTitle = createElement(ownerDoc, "span", "llm-tag-chip-title", {
-      textContent: ref.name,
+      textContent: withExcludedCount(ref.name, ref.excludedItemIds),
     });
     chipLabel.append(chipIcon, chipTitle);
     const removeBtn = createElement(
@@ -4219,6 +4232,12 @@ export function setupHandlers(
   };
 
   const updatePaperPreview = () => {
+    renderPaperPreview();
+    // Task progress lists what the context bar holds: follow every change.
+    syncTaskProgressPanel(body);
+  };
+
+  const renderPaperPreview = () => {
     if (!item || !paperPreview || !paperPreviewList) return;
     closePaperChipMenu();
     const itemId = item.id;
@@ -4692,6 +4711,77 @@ export function setupHandlers(
     schedulePanelStateRefresh();
   };
   requestAutoLoadedPaperContextRefresh = updatePaperPreviewPreservingScroll;
+
+  // Task progress lists the context bar's papers and can remove one. A paper
+  // added on its own loses its chip; a paper that came with a folder or a tag
+  // is excluded from that folder or tag (the chip stays and counts it), so
+  // retrieval and the next question leave it out.
+  body.addEventListener(TASK_PROGRESS_REMOVE_PAPER_EVENT, (event: Event) => {
+    void removeTaskProgressPaper(event);
+  });
+  const removeTaskProgressPaper = async (event: Event) => {
+    if (!item) return;
+    const owner = item;
+    const itemId = Math.floor(
+      Number((event as CustomEvent<{ itemId?: number }>).detail?.itemId || 0),
+    );
+    if (!(itemId > 0)) return;
+    const autoLoaded = resolveAutoLoadedPaperContext();
+    if (autoLoaded?.itemId === itemId) return;
+    const papers = getManualPaperContextsForItem(item.id, autoLoaded);
+    const removed = papers.filter((paper) => paper.itemId === itemId);
+    let changed = false;
+    if (removed.length) {
+      for (const paper of removed) {
+        paperContextModeOverrides.delete(`${item.id}:${buildPaperKey(paper)}`);
+      }
+      const next = papers.filter((paper) => paper.itemId !== itemId);
+      if (next.length) selectedPaperContextCache.set(item.id, next);
+      else clearSelectedPaperState(item.id);
+      changed = true;
+    }
+    // A folder or tag that also brings the paper keeps it out from now on.
+    const collections = selectedCollectionContextCache.get(item.id) || [];
+    const tags = selectedTagContextCache.get(item.id) || [];
+    const libraryID =
+      collections[0]?.libraryID || tags[0]?.libraryID || item.libraryID;
+    const snapshot =
+      collections.length || tags.length
+        ? await libraryIndexService.getSnapshot(libraryID).catch(() => null)
+        : null;
+    // The panel moved on to another conversation while the index loaded.
+    if (item !== owner) return;
+    if (snapshot) {
+      const holds = (
+        contexts: Parameters<typeof resolveTaskPaperScopeItemIds>[1],
+      ) => resolveTaskPaperScopeItemIds(snapshot, contexts).includes(itemId);
+      const exclude = <T extends { excludedItemIds?: number[] }>(ref: T): T =>
+        ({
+          ...ref,
+          excludedItemIds: [...(ref.excludedItemIds || []), itemId],
+        }) as T;
+      let excluded = false;
+      const nextCollections = collections.map((ref) => {
+        if (!holds({ collections: [ref] })) return ref;
+        excluded = true;
+        return exclude(ref);
+      });
+      const nextTags = tags.map((ref) => {
+        if (!holds({ tags: [ref] })) return ref;
+        excluded = true;
+        return exclude(ref);
+      });
+      if (excluded) {
+        if (collections.length)
+          selectedCollectionContextCache.set(item.id, nextCollections);
+        if (tags.length) selectedTagContextCache.set(item.id, nextTags);
+        changed = true;
+      }
+    }
+    if (!changed) return;
+    initializedConversationComposeContextKeys.add(item.id);
+    updatePaperPreviewPreservingScroll();
+  };
   const updateFilePreviewPreservingScroll = () => {
     schedulePanelStateRefresh();
   };

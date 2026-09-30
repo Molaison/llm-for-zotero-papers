@@ -44,7 +44,6 @@ const zhCN: Record<string, string> = {
   "Item note": "条目笔记",
   "Standalone note": "独立笔记",
   "Library chat": "文献库对话",
-  "Close chat": "关闭对话",
   "Paper chat": "论文对话",
   "Note chat": "笔记对话",
   "New chat": "新对话",
@@ -1244,6 +1243,9 @@ const zhCN: Record<string, string> = {
   Revision: "修订",
   "Required task completion": "必需任务完成度",
   "1 paper in scope": "范围内 1 篇论文",
+  "1 excluded": "已排除 1 篇",
+  "{count} excluded": "已排除 {count} 篇",
+  "Remove from this task": "从本任务中移除",
 
   // ── Language setting ────────────────────────────────────────────────────
   Language: "语言",

@@ -2114,6 +2114,13 @@ export class LibraryRetrieveService {
         itemIds: explicitItemIds,
         collectionIds,
         tagContexts: [...tagContexts],
+        // Papers the user removed from the task in Task progress.
+        excludedItemIds: [
+          ...selectedCollections.flatMap(
+            (collection) => collection.excludedItemIds || [],
+          ),
+          ...selectedTags.flatMap((tag) => tag.excludedItemIds || []),
+        ],
       });
       const cappedIds = resolved.itemIds.slice(0, input.maxMetadataItems);
       // Materialize each unique target exactly once, after the complete union

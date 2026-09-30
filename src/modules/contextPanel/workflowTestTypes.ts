@@ -610,6 +610,23 @@ export type WorkflowTestApi = {
     panelId?: string;
     surface?: "embedded" | "standalone";
   }) => Promise<void>;
+  /** Fill a panel's context bar (papers, folders, tags) and redraw it. */
+  setTaskProgressComposerContexts: (input: {
+    panelId?: string;
+    surface?: "embedded" | "standalone";
+    paperContexts?: import("../../shared/types").PaperContextRef[];
+    collectionContexts?: import("../../shared/types").CollectionContextRef[];
+    tagContexts?: import("../../shared/types").TagContextRef[];
+  }) => Promise<void>;
+  /** A panel's context bar: its papers, folder exclusions and chip labels. */
+  readTaskProgressComposerContexts: (input: {
+    panelId?: string;
+    surface?: "embedded" | "standalone";
+  }) => Promise<{
+    paperItemIds: number[];
+    collections: Array<{ collectionId: number; excludedItemIds: number[] }>;
+    chipLabels: string[];
+  }>;
   /** Repaint every mounted Task progress view now. */
   flushTaskProgress: () => void;
   getTaskProgressSnapshot: (conversationKey: number) => {

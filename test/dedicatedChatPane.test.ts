@@ -1,5 +1,4 @@
 import { assert } from "chai";
-import { readFileSync } from "node:fs";
 import { installDedicatedChatPane } from "../src/modules/contextPanel/dedicatedChatPane";
 
 function harness() {
@@ -83,9 +82,7 @@ function harness() {
             ? options.nav === false
               ? null
               : nav
-            : selector === "#llm-dedicated-chat-close"
-              ? null
-              : target,
+            : target,
       };
       let stopped = false;
       listeners.get("click")?.({
@@ -99,27 +96,6 @@ function harness() {
       // Native navigation expands the pane unless capture intercepted the click.
       if (!stopped && options.nav !== false && !options.button)
         nav._collapsed = false;
-    },
-    /** Click the chat header's × inside a native item-details host. */
-    closeChat() {
-      const host = { sidenav: nav };
-      const button = {
-        closest: (selector: string) =>
-          selector === "item-details" ? host : button,
-      };
-      let stopped = false;
-      listeners.get("click")?.({
-        target: {
-          closest: (selector: string) =>
-            selector === "#llm-dedicated-chat-close" ? button : null,
-        },
-        button: 0,
-        preventDefault() {},
-        stopImmediatePropagation() {
-          stopped = true;
-        },
-      } as unknown as Event);
-      return stopped;
     },
   };
 }
@@ -232,54 +208,5 @@ describe("dedicated chat pane navigation", function () {
     h.notify("select");
     h.flush();
     assert.equal(h.refreshCount(), 2);
-  });
-
-  it("closes the Independent chat from its header × exactly like the rail icon", function () {
-    const h = harness();
-    h.click("plugin-namespaced-chat");
-    assert.equal(h.attributes.get("data-llm-pane-view"), "chat");
-    assert.isFalse(h.nav._collapsed);
-    assert.isTrue(h.closeChat(), "the click is handled");
-    assert.equal(h.attributes.get("data-llm-pane-view"), "details");
-    assert.isTrue(h.nav._collapsed, "the native pane collapses");
-    h.click("plugin-namespaced-chat");
-    assert.equal(h.attributes.get("data-llm-pane-view"), "chat");
-    assert.isFalse(h.nav._collapsed, "the rail icon reopens it");
-    h.dispose();
-  });
-
-  it("leaves the stacked layout alone when a header × is clicked", function () {
-    const h = harness();
-    h.attributes.set("data-llm-sidebar-layout", "stacked");
-    h.attributes.set("data-llm-pane-view", "stacked");
-    h.nav._collapsed = false;
-    assert.isFalse(h.closeChat());
-    assert.equal(h.attributes.get("data-llm-pane-view"), "stacked");
-    assert.isFalse(h.nav._collapsed);
-    h.dispose();
-  });
-
-  it("builds the × only for native chat sections, shown only in Independent", function () {
-    const buildUi = readFileSync("src/modules/contextPanel/buildUI.ts", "utf8");
-    assert.match(
-      buildUi,
-      /if \(body\.closest\("\.llm-dedicated-chat-pane"\)\) \{[\s\S]*?"llm-btn-icon llm-dedicated-chat-close"[\s\S]*?title: t\("Close chat"\)[\s\S]*?setAttribute\("aria-label", t\("Close chat"\)\)[\s\S]*?toggleRow\.append\(closeBtn\)/,
-    );
-    const css = readFileSync("addon/content/zoteroPane.css", "utf8");
-    assert.match(
-      css,
-      /:root\[data-llm-sidebar-layout="independent"\]\s+\.llm-dedicated-chat-pane\s+\.llm-header-toggle-row \{[\s\S]*?grid-template-columns: minmax\(0, 1fr\) auto minmax\(0, 1fr\);/,
-      "symmetric side tracks keep the toggle centered",
-    );
-    assert.match(
-      css,
-      /:root:not\(\[data-llm-sidebar-layout="independent"\]\)\s+\.llm-dedicated-chat-pane\s+\.llm-dedicated-chat-close \{\s*display: none;/,
-      "hidden outside Independent",
-    );
-    assert.match(
-      css,
-      /\.llm-dedicated-chat-pane \.llm-dedicated-chat-close \{[\s\S]*?width: 28px;[\s\S]*?height: 28px;/,
-    );
-    assert.include(css, 'mask-image: url("icons/action-close.svg")');
   });
 });

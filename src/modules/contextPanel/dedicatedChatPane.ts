@@ -76,18 +76,6 @@ export function installDedicatedChatPane(
   const onClick = (event: Event) => {
     if ((event as MouseEvent).button !== 0) return;
     const target = event.target as Element | null;
-    const closeButton = target?.closest?.("#llm-dedicated-chat-close");
-    if (closeButton) {
-      const host = closeButton.closest("item-details") as
-        | (Element & { sidenav?: ChatSidenav })
-        | null;
-      if (
-        host?.sidenav &&
-        root.getAttribute("data-llm-sidebar-layout") === "independent"
-      )
-        closeChatView(event, host.sidenav);
-      return;
-    }
     const button = target?.closest?.("[data-pane]");
     const sidenav = button?.closest("item-pane-sidenav") as
       | (Element & {

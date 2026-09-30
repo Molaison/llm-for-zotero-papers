@@ -2,7 +2,7 @@
  * When the Task progress row shows, and what scope a turn covers.
  *
  * The row shows for library chat, for any turn that attached a folder or a
- * tag, for a turn over more than three papers, and for the rest of a
+ * tag, for a paper chat over five papers or more, and for the rest of a
  * conversation once a plan ran in it. It never shows in WebChat or in a note
  * chat. Everything here is pure.
  */
@@ -13,8 +13,8 @@ import type {
   TagContextRef,
 } from "../../../shared/types";
 
-/** More papers than this in one turn show the row in a paper chat. */
-export const TASK_PROGRESS_PAPER_THRESHOLD = 3;
+/** A paper chat shows the row from this many papers (its own included). */
+export const TASK_PROGRESS_PAPER_THRESHOLD = 5;
 
 export type TaskProgressVisibilityInput = {
   conversationKind: "global" | "paper" | "";
@@ -38,7 +38,7 @@ export function shouldShowTaskProgress(
   return (
     input.collectionCount > 0 ||
     input.tagCount > 0 ||
-    input.paperCount > TASK_PROGRESS_PAPER_THRESHOLD
+    input.paperCount >= TASK_PROGRESS_PAPER_THRESHOLD
   );
 }
 
@@ -119,7 +119,16 @@ export function resolveTaskProgressTurnScope(params: {
     });
     if (tag.name) names.push(`#${tag.name}`);
   }
+  const excludedItemIds = [
+    ...new Set(
+      [
+        ...(message.selectedCollectionContexts || []),
+        ...(message.selectedTagContexts || []),
+      ].flatMap((context) => context.excludedItemIds || []),
+    ),
+  ].sort((a, b) => a - b);
   const contexts: TaskPaperScopeContexts = {};
+  if (excludedItemIds.length) contexts.excludedItemIds = excludedItemIds;
   if (papers.length) contexts.papers = papers;
   if (collections.length) contexts.collections = collections;
   if (tags.length) contexts.tags = tags;
@@ -139,6 +148,7 @@ export function resolveTaskProgressTurnScope(params: {
         tag.normalizedName || tag.name,
         tag.includeAutomatic === true,
       ]),
+      excludedItemIds,
     ]),
   };
 }

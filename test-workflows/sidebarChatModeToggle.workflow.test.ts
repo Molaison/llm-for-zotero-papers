@@ -206,8 +206,8 @@ describe("workflow: sidebar chat mode toggle", function () {
       );
       assert.equal(
         view.getComputedStyle(navRow!).borderBottomStyle,
-        "solid",
-        "the actions row closes the header with a divider",
+        "none",
+        "no divider under the actions row",
       );
 
       // The standalone window's wording.

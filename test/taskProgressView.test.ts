@@ -1,5 +1,6 @@
 import { assert } from "chai";
 import type { TaskPaperScopeEntry } from "../src/agent/context/taskPaperScopeListing";
+import type { TaskPaperReadEvent } from "../src/agent/context/taskPaperLedger";
 import type { PlanExecutionLedger } from "../src/agent/plans/types";
 import {
   applyTaskPaperUpdate,
@@ -24,6 +25,8 @@ import {
   TASK_PROGRESS_WINDOW,
   createTaskProgressDrawer,
   createTaskProgressRow,
+  cleanTaskPaperSnippet,
+  formatTaskPaperPassageLabel,
   formatTaskProgressCount,
   getRememberedTaskProgressDrawerHeight,
   mountTaskProgressView,
@@ -353,6 +356,20 @@ describe("task progress view", function () {
     assert.equal(pill().textContent, "Cancelled");
   });
 
+  it("offers removal for the context bar's papers, never the chat's own paper", function () {
+    seedScope(3);
+    const harness = track(mount({ basePaperItemId: 2 }));
+    harness.view.flush();
+    harness.row.dispatchFakeEvent("click");
+    const [first, own, third] = harness.items();
+    const removeOf = (item: FakeElement) =>
+      item.findByClass("llm-task-paper-remove") as any;
+    assert.isFalse(removeOf(first).hidden);
+    assert.isTrue(removeOf(own).hidden, "the paper chat's own paper stays");
+    assert.isFalse(removeOf(third).hidden);
+    assert.include(first.className, "llm-task-paper-removable");
+  });
+
   it("lists only the scope in plain chat, with the Agent-mode note", function () {
     seedScope(12);
     const harness = track(mount({ recordsReads: false }));
@@ -477,9 +494,13 @@ describe("task progress view", function () {
     assert.isFalse((details as any).hidden);
     assert.equal(summary.getAttribute("aria-expanded"), "true");
     const text = collectFakeText(details);
-    assert.include(text, "Question 1");
-    assert.include(text, "Retrieve Library · Results · BM25");
+    // Where it was read, and what: no tool, method or question heading when
+    // a single question read the paper.
+    assert.include(text, "Results");
     assert.include(text, "Drift grows with time.");
+    assert.notInclude(text, "Retrieve Library");
+    assert.notInclude(text, "BM25");
+    assert.notInclude(text, "Question");
     third.findByClass("llm-task-paper-summary")!.dispatchFakeEvent("click");
     assert.include(
       collectFakeText(third.findByClass("llm-task-paper-details")),
@@ -493,6 +514,45 @@ describe("task progress view", function () {
     summary.dispatchFakeEvent("click");
     assert.isTrue((details as any).hidden);
     assert.equal(summary.getAttribute("aria-expanded"), "false");
+  });
+
+  it("labels a read by its section, never by the paper's own title", function () {
+    const read = (patch: Partial<TaskPaperReadEvent>): TaskPaperReadEvent => ({
+      key: "1:1",
+      callId: "c",
+      toolName: "library_retrieve",
+      granularity: "passage",
+      ...patch,
+    });
+    const title = "Emergence of stable striatal ensembles";
+    assert.equal(
+      formatTaskPaperPassageLabel(read({ label: "Methods §2.3" }), title),
+      "Methods §2.3",
+    );
+    assert.equal(
+      formatTaskPaperPassageLabel(
+        read({ label: "Emergence of stable striatal ensembles" }),
+        title,
+      ),
+      "Passage",
+    );
+    assert.equal(
+      formatTaskPaperPassageLabel(read({ granularity: "abstract" }), title),
+      "Abstract",
+    );
+    assert.equal(
+      formatTaskPaperPassageLabel(
+        read({ granularity: "full", label: "12/40 chunks" }),
+        title,
+      ),
+      "Full text",
+    );
+    assert.equal(
+      cleanTaskPaperSnippet(
+        "# Emergence of stable ensembles\nMeng-jun Sheng, Di $\\mathbf { L }$ Lu and Mu-ming Poo",
+      ),
+      "Emergence of stable ensembles Meng-jun Sheng, Di Lu and Mu-ming Poo",
+    );
   });
 
   it("closes on Escape and returns focus to the row", function () {
@@ -669,7 +729,6 @@ describe("task progress view", function () {
     const details = collectFakeText(
       first.findByClass("llm-task-paper-details")!,
     );
-    assert.include(details, "Question 1");
     assert.include(details, "Earlier passage.");
     assert.notInclude(details, "not read for this question");
   });

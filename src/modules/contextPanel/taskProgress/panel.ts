@@ -13,7 +13,6 @@ import {
   type TaskPaperScopeListing,
 } from "../../../agent/context/taskPaperScopeListing";
 import { libraryIndexService } from "../../../services/libraryIndexService";
-import { t } from "../../../utils/i18n";
 import {
   navigateChatToMessage,
   reconcileChatScroll,
@@ -23,7 +22,11 @@ import {
   getCancelledRequestId,
   getLivePlanExecution,
   getPendingRequestId,
+  initializedConversationComposeContextKeys,
   isRequestPending,
+  selectedCollectionContextCache,
+  selectedPaperContextCache,
+  selectedTagContextCache,
   subscribeRequestActivity,
 } from "../state";
 import { agentRunTraceCache } from "../agentState";
@@ -50,6 +53,7 @@ import {
 import {
   resolveTaskProgressTurnScope,
   shouldShowTaskProgress,
+  type TaskProgressTurnContexts,
 } from "./visibility";
 
 type MountedPanel = {
@@ -60,6 +64,26 @@ type MountedPanel = {
 };
 
 const panels = new Map<Element, MountedPanel>();
+
+/**
+ * What the context bar holds for a conversation: the papers, folders and tags
+ * the next question will carry. Once the composer is set up for the
+ * conversation this is the Task progress scope, before and after sending;
+ * until then the latest question's contexts stand in.
+ */
+function composerContexts(
+  conversationKey: number,
+): TaskProgressTurnContexts | null {
+  if (!initializedConversationComposeContextKeys.has(conversationKey)) {
+    return null;
+  }
+  return {
+    paperContexts: selectedPaperContextCache.get(conversationKey) || [],
+    selectedCollectionContexts:
+      selectedCollectionContextCache.get(conversationKey) || [],
+    selectedTagContexts: selectedTagContextCache.get(conversationKey) || [],
+  };
+}
 
 function latestUserMessage(conversationKey: number): Message | undefined {
   const history = chatHistory.get(conversationKey) || [];
@@ -310,7 +334,8 @@ function resolvePanelInput(body: Element): TaskProgressViewInput | null {
     );
   }
   const scope = resolveTaskProgressTurnScope({
-    message: latestUserMessage(conversationKey),
+    message:
+      composerContexts(conversationKey) || latestUserMessage(conversationKey),
     conversationKind,
     libraryID,
     basePaperItemId,
@@ -331,20 +356,43 @@ function resolvePanelInput(body: Element): TaskProgressViewInput | null {
       planSeen: Boolean(record?.planSeen),
     })
   ) {
-    const wholeLibrary =
-      conversationKind === "global" &&
-      !scope.paperCount &&
-      !scope.collectionCount &&
-      !scope.tagCount;
+    const nothingAdded =
+      !scope.paperCount && !scope.collectionCount && !scope.tagCount;
+    const listed =
+      record?.scope?.signature === scope.signature &&
+      Boolean(record.scope.listing);
     setTaskScope(conversationKey, {
       signature: scope.signature,
       libraryID,
       contexts: scope.contexts,
-      label: scope.label || (wholeLibrary ? t("Whole library") : ""),
+      label: scope.label,
+      // Nothing added to the context bar: no papers are listed (the agent
+      // may still find some; those join the list as it reads them).
+      ...(nothingAdded && !listed
+        ? {
+            listing: {
+              libraryID,
+              wholeLibrary: true,
+              entries: [],
+              totalItems: 0,
+              listedItems: 0,
+              truncated: false,
+            },
+          }
+        : {}),
     });
-    ensureScopeListing(conversationKey, scope.signature, libraryID);
+    if (!nothingAdded) {
+      ensureScopeListing(conversationKey, scope.signature, libraryID);
+    }
   }
-  return { conversationKey, recordsReads, visibility };
+  return {
+    conversationKey,
+    recordsReads,
+    visibility,
+    ...(conversationKind === "paper" && basePaperItemId > 0
+      ? { basePaperItemId }
+      : {}),
+  };
 }
 
 /** The longest of a computed `transition-duration` + `-delay` list, in ms. */

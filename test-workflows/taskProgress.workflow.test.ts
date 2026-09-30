@@ -370,52 +370,61 @@ describe("workflow: task progress", function () {
     return surface === "standalone" ? "standalone" : "embedded";
   }
 
-  /** The row is for multi-paper work: hidden for one paper, shown for four. */
+  /**
+   * In a paper chat the card is for multi-paper work: hidden for one paper
+   * and for four, shown from five (the chat's own paper counts).
+   */
   async function assertPaperChatThreshold(
     rootOf: () => HTMLElement,
     surface: Surface,
     shotWindow: any,
   ) {
-    const single = await api.startTaskProgressReplay({
-      surface: surfaceOf(surface),
-      user: {},
-    });
-    try {
-      api.flushTaskProgress();
-      assert.isTrue(
-        part(rootOf()).row.hidden,
-        `a one-paper chat has no row (${surface})`,
+    const noHeaderDivider = (label: string) => {
+      if (surface === "standalone") return;
+      const navRow = rootOf().querySelector(
+        ".llm-header-nav-row",
+      ) as HTMLElement;
+      const style = (
+        rootOf().ownerDocument.defaultView as any
+      ).getComputedStyle(navRow);
+      assert.equal(
+        style.borderBottomStyle,
+        "none",
+        `no divider under the header ${label} (${surface})`,
       );
-      if (surface !== "standalone") {
-        // Hidden row: the header keeps its divider above the chat.
-        const navRow = rootOf().querySelector(
-          ".llm-header-nav-row",
-        ) as HTMLElement;
-        const style = (
-          rootOf().ownerDocument.defaultView as any
-        ).getComputedStyle(navRow);
-        assert.equal(style.borderBottomStyle, "solid");
-        assert.notMatch(
-          style.borderBottomColor,
-          /rgba\([^)]*,\s*0\)$/,
-          `the header divider shows without the row (${surface})`,
+    };
+    for (const papers of [[], [1, 2, 3]]) {
+      const small = await api.startTaskProgressReplay({
+        surface: surfaceOf(surface),
+        user: papers.length
+          ? { paperContexts: papers.map((index) => paperRef(index)) }
+          : {},
+      });
+      try {
+        api.flushTaskProgress();
+        assert.isTrue(
+          part(rootOf()).row.hidden,
+          `a ${papers.length + 1}-paper chat has no card (${surface})`,
         );
+        noHeaderDivider("without the card");
+      } finally {
+        small.finish();
       }
-    } finally {
-      single.finish();
     }
     const four = await api.startTaskProgressReplay({
       surface: surfaceOf(surface),
-      user: { paperContexts: [paperRef(1), paperRef(2), paperRef(3)] },
+      user: {
+        paperContexts: [paperRef(1), paperRef(2), paperRef(3), paperRef(4)],
+      },
     });
     try {
       await until(
         () => {
           api.flushTaskProgress();
-          return part(rootOf()).count() === "0 of 4 read";
+          return part(rootOf()).count() === "0 of 5 read";
         },
         () =>
-          `a four-paper chat shows the row (${surface}): ${JSON.stringify({
+          `a five-paper chat shows the card (${surface}): ${JSON.stringify({
             count: part(rootOf()).count(),
             hidden: part(rootOf()).row.hidden,
             snapshot: api.getTaskProgressSnapshot(four.conversationKey),
@@ -423,6 +432,7 @@ describe("workflow: task progress", function () {
             itemId: rootOf().dataset.itemId,
           })}`,
       );
+      noHeaderDivider("with the card");
       const root = rootOf();
       const view = part(root);
       assert.isFalse(view.row.hidden);
@@ -439,10 +449,10 @@ describe("workflow: task progress", function () {
         return Boolean(
           api.getTaskProgressSnapshot(four.conversationKey)?.listingLoaded,
         );
-      }, "the four papers list");
+      }, "the five papers list");
       view.row.click();
       await settle(view, "open", `short list (${surface})`);
-      assert.lengthOf(view.items(), 4);
+      assert.lengthOf(view.items(), 5);
       assertAttached(view, surface);
       assertChatBelow(view, root, surface);
       assert.isAtMost(
@@ -617,7 +627,11 @@ describe("workflow: task progress", function () {
       ) as HTMLElement;
       assert.isFalse(details.hidden, "a paper expands");
       assert.include(details.textContent!, SNIPPETS[2]);
-      assert.include(details.textContent!, "Question 5");
+      // One question read it: no question heading, no tool or method names.
+      assert.notInclude(details.textContent!, "Question");
+      assert.notInclude(details.textContent!, "Retrieve Library");
+      await Zotero.Promise.delay(450); // the reads fade in
+      await capture(shotWindow, `tp-paper-details-${surface}.png`);
       // Scrolling the drawer never moves the chat below it.
       view.body.scrollTop +=
         readItem.getBoundingClientRect().top -

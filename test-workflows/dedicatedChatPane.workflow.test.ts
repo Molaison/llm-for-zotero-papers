@@ -101,8 +101,8 @@ describe("workflow: dedicated native chat pane", function () {
     );
     assert.equal(
       win.getComputedStyle(navRow).borderBottomStyle,
-      "solid",
-      `the actions row carries the header divider (${layout})`,
+      "none",
+      `no divider under the actions row (${layout})`,
     );
     // The toggle opens the header, a few pixels under the panel's top.
     const panelTop = section
@@ -485,71 +485,6 @@ describe("workflow: dedicated native chat pane", function () {
     }
   });
 
-  it("closes chat from the × in its header and keeps the draft for the rail icon", async function () {
-    const details = await openChatPane();
-    const section = details.querySelector(".llm-dedicated-chat-pane");
-    const root = section.querySelector("#llm-main");
-    const row = section.querySelector(".llm-header-toggle-row");
-    const close = row.querySelector("#llm-dedicated-chat-close");
-    assert.isOk(close, "row 1 carries the close button");
-    assert.equal(close.title, "Close chat");
-    assert.equal(close.getAttribute("aria-label"), "Close chat");
-    const closeRect = close.getBoundingClientRect();
-    const rowRect = row.getBoundingClientRect();
-    const tabs = row
-      .querySelector(".llm-header-mode-tabs")
-      .getBoundingClientRect();
-    assert.closeTo(closeRect.width, 28, 0.5);
-    assert.closeTo(closeRect.height, 28, 0.5);
-    assert.closeTo(
-      closeRect.right,
-      rowRect.right,
-      2.5,
-      "at the row's right end (the header's shared icon-button margins)",
-    );
-    assert.closeTo(
-      tabs.left + tabs.width / 2,
-      rowRect.left + rowRect.width / 2,
-      1,
-      "the toggle stays centered",
-    );
-    const input = section.querySelector("#llm-input") as HTMLTextAreaElement;
-    const previousDraft = input.value;
-    const draft = "Keep this draft after the close button";
-    input.value = draft;
-    input.dispatchEvent(new win.Event("input", { bubbles: true }));
-    try {
-      close.dispatchEvent(
-        new win.MouseEvent("click", { bubbles: true, detail: 1, button: 0 }),
-      );
-      await Zotero.Promise.delay(100);
-      assert.equal(
-        win.document.documentElement.getAttribute("data-llm-pane-view"),
-        "details",
-        "the × closes the chat view",
-      );
-      assert.isTrue(details.sidenav._collapsed, "and collapses the pane");
-      assert.strictEqual(section.querySelector("#llm-main"), root);
-      await clickPane("llm-context-panel");
-      await until(
-        () =>
-          !details.sidenav._collapsed &&
-          section.querySelector("#llm-main")?.getBoundingClientRect().height >
-            0,
-        "the rail icon reopens chat",
-      );
-      assert.equal(
-        section.querySelector("#llm-input").value,
-        draft,
-        "reopening keeps the draft",
-      );
-    } finally {
-      const currentInput = section.querySelector("#llm-input");
-      currentInput.value = previousDraft;
-      currentInput.dispatchEvent(new win.Event("input", { bubbles: true }));
-    }
-  });
-
   it("uses the whole native pane and restores details through their icon", async function () {
     const details = await openChatPane();
     const section = details.querySelector(
@@ -762,13 +697,6 @@ describe("workflow: dedicated native chat pane", function () {
       assert.isTrue(
         section.querySelector("collapsible-section").collapsible,
         "stacked section is collapsible",
-      );
-      assert.equal(
-        section
-          .querySelector("#llm-dedicated-chat-close")
-          .getBoundingClientRect().width,
-        0,
-        "Stacked does not show the ×",
       );
       assert.strictEqual(
         section.querySelector("#llm-main"),

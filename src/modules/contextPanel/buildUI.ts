@@ -244,24 +244,6 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
     id: "llm-header-toggle-row",
   });
   toggleRow.append(chatModeTabs);
-  // The Independent layout's full-pane chat closes from its own header, the
-  // same way its rail icon does (dedicatedChatPane owns the click). CSS shows
-  // it only in the Independent layout; the standalone window never gets it.
-  if (body.closest(".llm-dedicated-chat-pane")) {
-    const closeBtn = createElement(
-      doc,
-      "button",
-      "llm-btn-icon llm-dedicated-chat-close",
-      {
-        id: "llm-dedicated-chat-close",
-        type: "button",
-        title: t("Close chat"),
-      },
-    );
-    closeBtn.setAttribute("aria-label", t("Close chat"));
-    toggleRow.append(closeBtn);
-  }
-
   historyBar.append(historyNewBtn, historyToggle, headerRuntimeControls);
 
   headerInfo.append(title, historyBar);

@@ -600,6 +600,11 @@ async function resolveCollectionScopePapers(params: {
     params.question,
     params.queryPlan,
   );
+  // Papers the user removed from the task in Task progress.
+  const excludedItemIds = new Set<number>([
+    ...collectionContexts.flatMap((context) => context.excludedItemIds || []),
+    ...tagContexts.flatMap((context) => context.excludedItemIds || []),
+  ]);
   const candidates: CollectionPaperCandidate[] = [];
   const scopeLines: string[] = [];
   const manifestSeenPaperKeys = new Set<string>();
@@ -617,6 +622,7 @@ async function resolveCollectionScopePapers(params: {
     const itemIds = collection ? collectCollectionItemIds(collectionId) : [];
     let collectionPaperCount = 0;
     for (const itemId of itemIds) {
+      if (excludedItemIds.has(itemId)) continue;
       const item = Zotero.Items.get(itemId);
       if (!item?.isRegularItem?.()) continue;
       const paperContext = buildPaperRefFromRegularItem(item);
@@ -654,6 +660,7 @@ async function resolveCollectionScopePapers(params: {
     const items = await collectTagContextItems(tagContext);
     let tagPaperCount = 0;
     for (const item of items) {
+      if (excludedItemIds.has(Number(item.id))) continue;
       const paperContext = buildPaperRefFromRegularItem(item);
       if (!paperContext) continue;
       tagPaperCount += 1;

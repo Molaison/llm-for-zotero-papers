@@ -82,7 +82,10 @@ import type {
   ResolvedSelectedTextAnchor,
   SelectedTextContext,
 } from "../shared/types";
-import { synthesizeSelectedTextContexts } from "../services/context/normalizers";
+import {
+  normalizeExcludedItemIds,
+  synthesizeSelectedTextContexts,
+} from "../services/context/normalizers";
 import { formatSelectedTextLocator } from "../services/context/selectedTextAnchorFormatting";
 import {
   buildTurnContextEnvelope,
@@ -1533,12 +1536,14 @@ function normalizeCollectionRefs(
   collectionId: number;
   name: string;
   libraryID: number;
+  excludedItemIds?: number[];
 }> {
   if (!Array.isArray(list)) return [];
   const refs: Array<{
     collectionId: number;
     name: string;
     libraryID: number;
+    excludedItemIds?: number[];
   }> = [];
   for (const entry of list) {
     if (!entry || typeof entry !== "object") continue;
@@ -1550,10 +1555,12 @@ function normalizeCollectionRefs(
     const libraryID =
       typeof record.libraryID === "number" ? Math.floor(record.libraryID) : 0;
     if (!collectionId || !libraryID) continue;
+    const excludedItemIds = normalizeExcludedItemIds(record.excludedItemIds);
     refs.push({
       collectionId,
       libraryID,
       name: trimText(record.name, 180) || `Collection ${collectionId}`,
+      ...(excludedItemIds ? { excludedItemIds } : {}),
     });
     if (refs.length >= limit) break;
   }
@@ -1569,6 +1576,7 @@ function normalizeTagRefs(
   normalizedName?: string;
   scope?: "allTagged" | "untagged";
   includeAutomatic?: boolean;
+  excludedItemIds?: number[];
 }> {
   if (!Array.isArray(list)) return [];
   const refs: Array<{
@@ -1577,6 +1585,7 @@ function normalizeTagRefs(
     normalizedName?: string;
     scope?: "allTagged" | "untagged";
     includeAutomatic?: boolean;
+    excludedItemIds?: number[];
   }> = [];
   const seen = new Set<string>();
   for (const entry of list) {
@@ -1605,12 +1614,14 @@ function normalizeTagRefs(
       : `${libraryID}:tag:${normalizedName || name.toLowerCase()}`;
     if (seen.has(key)) continue;
     seen.add(key);
+    const excludedItemIds = normalizeExcludedItemIds(record.excludedItemIds);
     refs.push({
       name,
       libraryID,
       normalizedName: normalizedName || undefined,
       scope,
       includeAutomatic: includeAutomatic || undefined,
+      ...(excludedItemIds ? { excludedItemIds } : {}),
     });
     if (refs.length >= limit) break;
   }

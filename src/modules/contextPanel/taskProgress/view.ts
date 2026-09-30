@@ -66,6 +66,12 @@ const ROW_ID = "llm-task-progress";
 const DRAWER_ID = "llm-task-progress-drawer";
 /** On the shell from the moment the drawer unrolls until it is rolled up. */
 const SHOWN_CLASS = "llm-task-progress-shown";
+/**
+ * Dispatched (bubbling) when the user removes a paper from the list; the
+ * panel that owns the context bar removes or excludes it.
+ */
+export const TASK_PROGRESS_REMOVE_PAPER_EVENT =
+  "llm-task-progress-remove-paper";
 /** On the chat shell while the Task progress card is in it. */
 const PRESENT_CLASS = "llm-task-progress-present";
 /** On the panel while the drag handle is held. */
@@ -302,44 +308,64 @@ export function formatTaskProgressCount(
   return parts.join(" · ");
 }
 
-const TOOL_LABELS: Record<string, string> = {
-  library_retrieve: "Retrieve Library",
-  library_search: "Search Library",
-  search_paper: "Search Paper",
-  query_library: "Query Library",
-  library_read: "Read Library",
-  paper_read: "Read Paper",
-  read_paper: "Read Paper",
-  read_attachment: "Read Attachment",
-  view_pdf_pages: "View PDF Pages",
-};
-
 const GRANULARITY_LABELS: Record<TaskPaperReadEvent["granularity"], string> = {
   metadata: "Title/abstract match",
   abstract: "Abstract",
   outline: "Outline",
-  section: "Section",
+  section: "Passage",
   passage: "Passage",
   full: "Full text",
   figure: "Figure",
   page: "Page",
 };
 
-function formatMethod(method: string | undefined): string {
-  if (!method) return "";
-  const lower = method.toLowerCase();
-  if (lower === "bm25") return "BM25";
-  return lower.replace(/_/g, " ");
+function looseText(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
 }
 
-/** "Retrieve Library · Methods §2.3 · BM25" */
-export function formatTaskPaperRead(read: TaskPaperReadEvent): string {
-  const tool = t(
-    TOOL_LABELS[read.toolName] ||
-      read.toolName.replace(/_/g, " ").replace(/^\w/, (c) => c.toUpperCase()),
-  );
-  const where = read.label || t(GRANULARITY_LABELS[read.granularity] || "");
-  return [tool, where, formatMethod(read.method)].filter(Boolean).join(" · ");
+/**
+ * Where in the paper a read came from: its section ("Methods §2.3",
+ * "Abstract", "p. 4"), or the kind of read when no section is known. A label
+ * that only repeats the paper's title says nothing and is dropped.
+ */
+export function formatTaskPaperPassageLabel(
+  read: TaskPaperReadEvent,
+  paperTitle = "",
+): string {
+  const kind = t(GRANULARITY_LABELS[read.granularity] || "Passage");
+  const label = (read.label || "").trim();
+  const title = looseText(paperTitle);
+  const loose = looseText(label);
+  const repeatsTitle =
+    Boolean(title && loose) &&
+    (loose === title || title.startsWith(loose) || loose.startsWith(title));
+  if (!label || repeatsTitle || read.granularity === "full") return kind;
+  if (read.granularity === "outline") return `${kind}: ${label}`;
+  return label;
+}
+
+/** A snippet as prose: no Markdown heading marks, no TeX, one line. */
+export function cleanTaskPaperSnippet(snippet: string): string {
+  return snippet
+    .replace(/(^|\n)\s*#{1,6}\s+/g, "$1")
+    .replace(/\$\$[\s\S]*?\$\$|\$[^$\n]*\$/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** The reads worth showing: what was actually read, once each. */
+function visibleReads(reads: readonly TaskPaperReadEvent[]) {
+  const seen = new Set<string>();
+  return reads.filter((read) => {
+    if (read.granularity === "metadata") return false;
+    const key = `${read.granularity}\u0000${read.label || ""}\u0000${read.snippet || ""}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function sourceLabel(row: TaskProgressPaperRow, mineruKnown: boolean): string {
@@ -578,6 +604,7 @@ export function createTaskProgressDrawer(doc: Document): HTMLElement {
 
 type PaperRowRefs = {
   li: HTMLElement;
+  remove: HTMLButtonElement;
   summary: HTMLButtonElement;
   index: HTMLElement;
   title: HTMLElement;
@@ -618,6 +645,8 @@ export type TaskProgressDrawerState = "closed" | "opening" | "open" | "closing";
 
 export type TaskProgressViewInput = {
   conversationKey: number | null;
+  /** The paper chat's own paper: listed, never removable. */
+  basePaperItemId?: number;
   visibility: Omit<TaskProgressVisibilityInput, "planSeen">;
   /** False in plain chat: reads are not recorded, only the scope lists. */
   recordsReads: boolean;
@@ -920,28 +949,43 @@ export function mountTaskProgressView(params: {
       .map(Number)
       .filter((turn) => Number.isFinite(turn))
       .sort((a, b) => a - b);
-    let anyReads = false;
     const citations: Array<{ id: string; quote: string; turn: number }> = [];
+    const readsByTurn = new Map(
+      turns.map((turn) => [turn, visibleReads(model.entry!.turns[turn].reads)]),
+    );
+    // Question headings only help when more than one question read it.
+    const headed =
+      turns.filter((turn) => readsByTurn.get(turn)!.length).length > 1;
     for (const turn of turns) {
       const turnRecord = model.entry!.turns[turn];
-      if (turnRecord.reads.length) {
-        anyReads = true;
-        children.push(
-          el(
-            doc,
-            "div",
-            "llm-task-paper-turn",
-            turn > 0 ? format("Question {number}", { number: turn }) : "",
-          ),
-        );
-        for (const read of turnRecord.reads) {
+      const reads = readsByTurn.get(turn)!;
+      if (reads.length) {
+        if (headed && turn > 0) {
+          children.push(
+            el(
+              doc,
+              "div",
+              "llm-task-paper-turn",
+              format("Question {number}", { number: turn }),
+            ),
+          );
+        }
+        for (const read of reads) {
           const item = el(doc, "div", "llm-task-paper-read");
           item.append(
-            el(doc, "div", "llm-task-paper-how", formatTaskPaperRead(read)),
+            el(
+              doc,
+              "div",
+              "llm-task-paper-how",
+              formatTaskPaperPassageLabel(read, model.title),
+            ),
           );
-          if (read.snippet) {
+          const snippet = read.snippet
+            ? cleanTaskPaperSnippet(read.snippet)
+            : "";
+          if (snippet) {
             item.append(
-              el(doc, "blockquote", "llm-task-paper-snippet", read.snippet),
+              el(doc, "blockquote", "llm-task-paper-snippet", snippet),
             );
           }
           children.push(item);
@@ -1040,6 +1084,14 @@ export function mountTaskProgressView(params: {
     const source = sourceLabel(model, mineruKnown.has(model.key));
     if (refs.source.textContent !== source) refs.source.textContent = source;
     refs.source.hidden = !source;
+    // Papers the context bar added can be removed; the paper chat's own
+    // paper and papers the agent found on its own cannot.
+    const removable =
+      model.inScope && model.itemId !== (input.basePaperItemId || 0);
+    if (refs.remove.hidden !== !removable) {
+      refs.remove.hidden = !removable;
+      refs.li.classList.toggle("llm-task-paper-removable", removable);
+    }
     refs.summary.setAttribute(
       "aria-label",
       `${model.index}. ${model.title}, ${t(STATE_LABELS[model.state])}`,
@@ -1084,14 +1136,67 @@ export function mountTaskProgressView(params: {
     meta.append(el(doc, "span", "llm-task-paper-meta-text"), source);
     // Gecko lays a button's children out in an anonymous block, so the grid
     // lives on an inner span.
+    const chevron = el(doc, "span", "llm-task-paper-chevron");
+    chevron.setAttribute("aria-hidden", "true");
+    chevron.append(
+      svg(
+        doc,
+        "svg",
+        {
+          width: "14",
+          height: "14",
+          viewBox: "0 0 24 24",
+          fill: "none",
+          stroke: "currentColor",
+          "stroke-width": "2.2",
+          "stroke-linecap": "round",
+          "stroke-linejoin": "round",
+        },
+        [svg(doc, "path", { d: "M6 9l6 6 6-6" })],
+      ),
+    );
     const grid = el(doc, "span", "llm-task-paper-grid");
-    grid.append(index, dot, title, tail, meta);
+    grid.append(dot, index, title, tail, chevron, meta);
     summary.append(grid);
     const details = el(doc, "div", "llm-task-paper-details");
     details.hidden = true;
-    li.append(summary, details);
+    const remove = el(doc, "button", "llm-task-paper-remove");
+    remove.type = "button";
+    remove.hidden = true;
+    remove.title = t("Remove from this task");
+    remove.setAttribute("aria-label", t("Remove from this task"));
+    remove.append(
+      svg(
+        doc,
+        "svg",
+        {
+          width: "12",
+          height: "12",
+          viewBox: "0 0 24 24",
+          fill: "none",
+          stroke: "currentColor",
+          "stroke-width": "2.4",
+          "stroke-linecap": "round",
+        },
+        [svg(doc, "path", { d: "M18 6L6 18M6 6l12 12" })],
+      ),
+    );
+    remove.addEventListener("click", (event: Event) => {
+      event.preventDefault?.();
+      event.stopPropagation?.();
+      const View = (doc.defaultView as any)?.CustomEvent;
+      if (typeof View !== "function") return;
+      li.dispatchEvent(
+        new View(TASK_PROGRESS_REMOVE_PAPER_EVENT, {
+          bubbles: true,
+          detail: { itemId: refs.row.itemId },
+        }),
+      );
+    });
+    li.append(summary, remove, details);
     const refs: PaperRowRefs = {
       li,
+      remove,
       summary,
       index,
       title,

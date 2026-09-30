@@ -29,6 +29,10 @@ import {
   loadedConversationKeys,
   nextRequestId,
   tryBeginRequest,
+  initializedConversationComposeContextKeys,
+  selectedCollectionContextCache,
+  selectedPaperContextCache,
+  selectedTagContextCache,
 } from "./state";
 import { createStreamingResponse } from "./streamingResponse";
 import { waitForTaskProgressHydrationForTests } from "./taskProgress/history";
@@ -330,6 +334,53 @@ export async function seedTaskProgressConversation(
  * The panel then loads the conversation from disk and syncs, as it does
  * when a conversation is shown again, and the record is rebuilt.
  */
+/**
+ * Put papers, folders and tags in a panel's context bar, as the @ picker or a
+ * drop does, and redraw the bar (Task progress follows it).
+ */
+export async function setTaskProgressComposerContexts(
+  panel: Panel,
+  input: {
+    paperContexts?: import("../../shared/types").PaperContextRef[];
+    collectionContexts?: import("../../shared/types").CollectionContextRef[];
+    tagContexts?: import("../../shared/types").TagContextRef[];
+  },
+): Promise<void> {
+  const { body, item } = panel;
+  const set = <T>(cache: Map<number, T[]>, list: T[] | undefined) => {
+    if (list?.length) cache.set(item.id, [...list]);
+    else cache.delete(item.id);
+  };
+  set(selectedPaperContextCache, input.paperContexts);
+  set(selectedCollectionContextCache, input.collectionContexts);
+  set(selectedTagContextCache, input.tagContexts);
+  initializedConversationComposeContextKeys.add(item.id);
+  refreshConversationPanels(body, item);
+  await Zotero.Promise.delay(50);
+  flushTaskProgressPanels();
+}
+
+/** What a panel's context bar holds (item ids and folder/tag exclusions). */
+export function readTaskProgressComposerContexts(panel: Panel) {
+  const id = panel.item.id;
+  return {
+    paperItemIds: (selectedPaperContextCache.get(id) || []).map(
+      (paper) => paper.itemId,
+    ),
+    collections: (selectedCollectionContextCache.get(id) || []).map(
+      (collection) => ({
+        collectionId: collection.collectionId,
+        excludedItemIds: collection.excludedItemIds || [],
+      }),
+    ),
+    chipLabels: Array.from(
+      panel.body.querySelectorAll(
+        ".llm-collection-chip-title, .llm-tag-chip-title",
+      ),
+    ).map((node) => (node as Element).textContent || ""),
+  };
+}
+
 export async function reopenTaskProgressConversation(
   panel: Panel,
 ): Promise<void> {
@@ -341,6 +392,12 @@ export async function reopenTaskProgressConversation(
   clearTaskProgress(key);
   chatHistory.delete(key);
   loadedConversationKeys.delete(key);
+  // A restart starts with an empty context bar; the composer then sets it up
+  // again from the conversation's history.
+  selectedPaperContextCache.delete(key);
+  selectedCollectionContextCache.delete(key);
+  selectedTagContextCache.delete(key);
+  initializedConversationComposeContextKeys.delete(key);
   await ensureConversationLoaded(item);
   refreshChat(body, item);
   flushTaskProgressPanels();

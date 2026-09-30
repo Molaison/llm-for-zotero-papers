@@ -21,8 +21,10 @@ import { getTaskProgress } from "./taskProgress/store";
 import { resetTaskProgressDrawerHeight } from "./taskProgress/view";
 import { createCodexStreamingScrollReplay } from "./codexStreamingScrollReplay";
 import {
+  readTaskProgressComposerContexts,
   reopenTaskProgressConversation,
   seedTaskProgressConversation,
+  setTaskProgressComposerContexts,
   startCodexTaskProgressReplay,
   startTaskProgressAction,
 } from "./taskProgressReplay";
@@ -5764,6 +5766,14 @@ export function installWorkflowTestHarness(targetAddon: {
     reopenTaskProgressConversation: async (input) => {
       const panel = await resolveTaskProgressPanel(input);
       await reopenTaskProgressConversation(panel);
+    },
+    setTaskProgressComposerContexts: async (input) => {
+      const panel = await resolveTaskProgressPanel(input);
+      await setTaskProgressComposerContexts(panel, input);
+    },
+    readTaskProgressComposerContexts: async (input) => {
+      const panel = await resolveTaskProgressPanel(input);
+      return readTaskProgressComposerContexts(panel);
     },
     flushTaskProgress: () => {
       assertWorkflowTestEnabled();

@@ -1,6 +1,7 @@
 import { resolveAgentToolPresentationLabel } from "../toolPresentation";
 import { createJournalId } from "../store/changeJournal";
 import { createAbortController } from "../../utils/apiHelpers";
+import { normalizeExcludedItemIds } from "../../services/context/normalizers";
 /**
  * MCP (Model Context Protocol) server for the llm-for-zotero plugin.
  *
@@ -625,7 +626,13 @@ function normalizeCollectionContexts(
     const key = `${libraryID}:${collectionId}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push({ collectionId, libraryID, name });
+    const excludedItemIds = normalizeExcludedItemIds(value?.excludedItemIds);
+    out.push({
+      collectionId,
+      libraryID,
+      name,
+      ...(excludedItemIds ? { excludedItemIds } : {}),
+    });
   }
   return out.length ? out : undefined;
 }
@@ -659,12 +666,14 @@ function normalizeTagContexts(
       : `${libraryID}:tag:${normalizedName || name.toLowerCase()}`;
     if (seen.has(key)) continue;
     seen.add(key);
+    const excludedItemIds = normalizeExcludedItemIds(value?.excludedItemIds);
     out.push({
       name,
       libraryID,
       normalizedName: normalizedName || undefined,
       scope,
       includeAutomatic: includeAutomatic || undefined,
+      ...(excludedItemIds ? { excludedItemIds } : {}),
     });
   }
   return out.length ? out : undefined;

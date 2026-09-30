@@ -33,6 +33,8 @@ export type TaskPaperScopeSnapshot = Pick<
 >;
 
 export type TaskPaperScopeContexts = {
+  /** Papers the user removed from the task: left out of the listing. */
+  excludedItemIds?: readonly number[];
   papers?: ReadonlyArray<{ itemId: number; libraryID?: number }>;
   collections?: ReadonlyArray<{ collectionId: number; libraryID?: number }>;
   tags?: ReadonlyArray<{
@@ -136,9 +138,11 @@ export function resolveTaskPaperScopeItemIds(
   contexts: TaskPaperScopeContexts,
 ): number[] {
   const libraryID = snapshot.libraryID;
+  const excluded = new Set(contexts.excludedItemIds || []);
   const union = new Set<number>();
   const add = (ids: Iterable<number>) => {
     for (const id of ids) {
+      if (excluded.has(id)) continue;
       if (isScopePaper(snapshot.itemById.get(id))) union.add(id);
     }
   };
