@@ -126,7 +126,7 @@ const MODEL_TOOL_DESCRIPTIONS: Readonly<Record<string, string>> = {
   library_update:
     "Change tags, metadata, memberships, parents, or Related links; kind:'collection' creates, renames, moves, or deletes a collection, kind:'attachment' renames, relinks, or deletes one, kind:'savedSearch' saves or deletes one. A membership move removes its named source.",
   context_read:
-    "Read exact stored context. source:'conversation': omit messageId to list chat messages, set it to read one. source:'tool_result': read a trh_ handle; omit path for metadata. Continue with offset or textOffset=nextTextOffset.",
+    "Read stored context. source:'conversation': omit messageId to list chat messages, set it to read one. source:'tool_result': read a trh_ handle; omit path for metadata. Continue with offset or textOffset=nextTextOffset.",
   note_write:
     "Write a Zotero note. sourceMessageId reuses an exact answer; documentId reuses finalized material. Markdown file:// images from paper_read figure crops are imported and verified as embedded images; do not reimplement embedding with scripts. First call load_skill('write-note').",
   note_write_batch:
@@ -135,17 +135,17 @@ const MODEL_TOOL_DESCRIPTIONS: Readonly<Record<string, string>> = {
     "Format Zotero CSL citations or bibliographies, or export with a translator.",
   library_settings: "Read or change supported Zotero settings and sync state.",
   library_import:
-    "Add Zotero items from identifiers, local files, or explicit manual metadata.",
+    "Add items by DOI, ISBN, arXiv ID, PMID, or ADS bibcode, from local files, or from manual metadata.",
   library_delete:
     "Trash or restore Zotero objects, or merge duplicates into a named master.",
-  undo: "Undo the latest reversible journaled action in this chat; count or actionIds revert several, dryRun lists them with conflicts.",
+  undo: "Undo the latest reversible action in this chat; count or actionIds revert several, dryRun lists them with conflicts.",
   annotate_pdf:
     "Add a PDF highlight and optional comment using PDF-space rectangles.",
   file_io: "Read or write local files, including partial text and images.",
   run_command: "Run a host shell command and return its output and status.",
   zotero_script: "Run Zotero JavaScript with declared access and effect.",
   load_skill:
-    "Load exact instructions for an installed skill ID; this grants no authority.",
+    "Load an installed skill's exact instructions; grants no authority.",
   request_user_input:
     "Ask up to three questions when required input cannot be found.",
   submit_document:

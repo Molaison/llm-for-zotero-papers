@@ -62,17 +62,6 @@ export function createMergeItemsTool(
       workCategory: "zotero_action",
     },
 
-    guidance: {
-      matches: (request) =>
-        Boolean(
-          request.classifiedIntent?.actionIntents.some(
-            (action) => action.operation === "merge_items",
-          ),
-        ),
-      instruction:
-        "To merge duplicates: first use library_search({ entity:'items', mode:'duplicates' }) to find duplicate groups, then use library_read to compare metadata and decide which item is the best master, then call library_delete({ mode:'merge', ... }) with the master and the others. The master keeps all children (attachments, notes, tags, collections) from the merged items.",
-    },
-
     presentation: {
       label: "Merge Items",
       summaries: {

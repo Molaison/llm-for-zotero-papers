@@ -167,21 +167,6 @@ export function createUpdateMetadataTool(
       workCategory: "zotero_action",
     },
 
-    guidance: {
-      matches: (request) =>
-        Boolean(
-          request.classifiedIntent?.actionIntents.some(
-            (action) => action.operation === "update_metadata",
-          ),
-        ),
-      instruction:
-        "When the user asks to fix, correct, or enrich metadata from external sources, " +
-        "use literature_search with workflow:'review' and mode:'metadata' first to fetch canonical data, " +
-        "then let the review card handle the update. " +
-        "Only call library_update kind:'metadata' directly when the user provides specific field values to set " +
-        "(e.g. 'change the title to XYZ').",
-    },
-
     presentation: {
       label: "Update Metadata",
       summaries: {

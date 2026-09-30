@@ -81,20 +81,6 @@ export function createImportLocalFilesTool(
       workCategory: "external_system",
     },
 
-    guidance: {
-      matches: (request) =>
-        Boolean(
-          request.classifiedIntent?.actionIntents.some(
-            (action) => action.operation === "import_local_files",
-          ),
-        ),
-      instruction:
-        "Use library_import kind:'files' to import local files (PDFs, etc.) from the user's filesystem into Zotero. " +
-        "First use run_command to list files (for example `dir %USERPROFILE%\\\\Desktop\\\\*.pdf` on Windows or `ls ~/Desktop/*.pdf` on macOS/Linux) to discover file paths, then call library_import kind:'files' with the paths. " +
-        "A bibliography file (.ris, .bib, .enw, .nbib, RDF) has its references imported as items; other files are attached. PDFs go through metadata recognition. " +
-        "Optionally specify a targetCollectionId to organize imported items into a collection.",
-    },
-
     presentation: {
       label: "Import Local Files",
       summaries: {
