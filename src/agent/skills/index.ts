@@ -49,7 +49,6 @@ export {
 export type {
   PlanSkillRoutingReceipt,
   SkillRequestedScope,
-  SkillRouterResponseV1,
   SkillRoutingReceipt,
   ValidatedSkillActivation,
 } from "./routingTypes";

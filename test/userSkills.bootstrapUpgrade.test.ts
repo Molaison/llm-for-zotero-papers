@@ -422,9 +422,9 @@ describe("user skill bootstrap upgrades", function () {
     assert.notInclude(upgraded, "conversation_read");
   });
 
-  it("migrates declarative supersession without replacing legacy match metadata", function () {
-    // No shipped skill declares supersedes any more; the patcher still carries
-    // the key forward from a shipped file that does.
+  it("neither adds nor strips the retired supersedes key and keeps legacy match metadata", function () {
+    // supersedes is retired: a shipped file declaring it no longer propagates
+    // the key, and a user file that still carries it keeps its line verbatim.
     const shipped = BUILTIN_SKILL_FILES["evidence-based-qa.md"].replace(
       "activation: auto\n",
       "activation: auto\nsupersedes: older-skill\n",
@@ -435,8 +435,20 @@ describe("user skill bootstrap upgrades", function () {
     );
     const patched = patchSkillFrontmatter(old, shipped);
     assert.isString(patched);
-    assert.include(patched as string, "supersedes: older-skill");
+    assert.notInclude(patched as string, "supersedes:");
     assert.include(patched as string, "match:");
+    assert.equal(
+      parseSkill(patched as string).version,
+      parseSkill(shipped).version,
+    );
+
+    const userCopy = old.replace(
+      "match: legacy fixture only",
+      "match: legacy fixture only\nsupersedes: user-kept",
+    );
+    const patchedUserCopy = patchSkillFrontmatter(userCopy, shipped);
+    assert.isString(patchedUserCopy);
+    assert.include(patchedUserCopy as string, "supersedes: user-kept");
   });
   for (const [name, version] of [["evidence-based-qa", 7]] as const) {
     it(`upgrades the unmodified baseline ${name} skill without stored hashes`, async function () {

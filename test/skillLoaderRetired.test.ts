@@ -90,8 +90,34 @@ describe("retired shipped skills", function () {
       evidence.description,
       "including broad summaries of one paper",
     );
-    assert.deepEqual(evidence.supersedes, []);
+    assert.notProperty(evidence, "supersedes");
     assert.include(evidence.contexts, "single-paper");
+  });
+
+  it("parses a user skill that still carries the retired supersedes key", function () {
+    const skill = parseSkill(
+      [
+        "---",
+        "id: my-qa",
+        "description: Answer questions about one paper",
+        "version: 3",
+        "contexts: single-paper",
+        "activation: both",
+        "supersedes: simple-paper-qa, older-skill",
+        "---",
+        "Body instructions.",
+      ].join("\n"),
+    );
+    assert.deepEqual(skill, {
+      id: "my-qa",
+      name: "my-qa",
+      description: "Answer questions about one paper",
+      version: 3,
+      contexts: ["single-paper"],
+      activation: "both",
+      instruction: "Body instructions.",
+      source: "personal",
+    });
   });
 
   it("skips a stale customized profile copy on load, without throwing, and logs once", async function () {

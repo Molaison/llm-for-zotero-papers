@@ -21,7 +21,6 @@ function skill(overrides: Partial<AgentSkill> = {}): AgentSkill {
     version: 3,
     contexts: ["single-paper", "note"],
     activation: "both",
-    supersedes: [],
     instruction: "Full instructions that must not appear in inventory.",
     source: "system",
     ...overrides,

@@ -20,7 +20,6 @@ function makeSkill(id: string, instruction: string): AgentSkill {
 
     contexts: ["any"],
     activation: "auto",
-    supersedes: [],
     instruction,
     source: "system",
   };
