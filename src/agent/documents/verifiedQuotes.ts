@@ -53,6 +53,9 @@ export async function resolveVerifiedQuotes(params: {
     if (itemId && !readers.has(itemId)) readers.set(itemId, reader);
   }
   const verifiedQuotes: PlanVerifiedQuote[] = [];
+  // Quotes whose PDF is not open are named together at the end, so one
+  // rejection says everything the next draft has to change.
+  const unopened: string[] = [];
   for (const quoteId of tokenIds) {
     const quote = mappings.get(quoteId)!;
     const identity = `${quote.libraryID}:${quote.itemKey}`;
@@ -103,9 +106,8 @@ export async function resolveVerifiedQuotes(params: {
     });
     const reader = readers.get(Number(attachment.id));
     if (!reader) {
-      throw new ToolInputRejection(
-        `Quote ${quoteId} requires the source PDF to be open for strict PDF.js verification`,
-      );
+      unopened.push(quoteId);
+      continue;
     }
     const verification = await verifyCompleteQuoteInLivePdf(
       reader,
@@ -145,6 +147,15 @@ export async function resolveVerifiedQuotes(params: {
           verification.certificate.sourceMatchPageOccurrence,
       },
     });
+  }
+  if (unopened.length) {
+    const named =
+      unopened.length === 1
+        ? `Quote ${unopened[0]} needs its source PDF open in Zotero for strict PDF.js verification, and it is not open.`
+        : `Quotes ${unopened.slice(0, -1).join(", ")} and ${unopened[unopened.length - 1]} need their source PDFs open in Zotero for strict PDF.js verification, and they are not open.`;
+    throw new ToolInputRejection(
+      `${named} Support those claims with [[cite:…]] tokens instead, or leave the quotations out; nothing was published.`,
+    );
   }
   const quotesById = new Map(
     verifiedQuotes.map((quote) => [quote.quoteId, quote]),

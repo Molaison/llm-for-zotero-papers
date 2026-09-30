@@ -384,6 +384,53 @@ describe("DirectDocumentFinalizer", function () {
     });
   }
 
+  it("names every quote whose PDF is not open in one rejection, with what to do instead", async function () {
+    const originalLookup = Zotero.Items.getByLibraryAndKey;
+    (Zotero.Items as any).getByLibraryAndKey = (
+      libraryID: number,
+      key: string,
+    ) =>
+      key === "PDF11111" && libraryID === 1
+        ? { id: 102, parentID: 101, isAttachment: () => true }
+        : originalLookup(libraryID, key);
+    (Zotero as any).Reader = { _readers: [] };
+    const observed = {
+      ...observation,
+      attachmentItemKey: "PDF11111",
+      pageIndex: 0,
+      sourceFingerprint: "pdfjs:unopened",
+    };
+    const policy: DocumentOutcomePolicy = {
+      required: true,
+      documentKind: "custom",
+      integrityPolicy: "research_grounded",
+      trigger: "document_intent",
+    };
+    const quote = (quoteId: string, text: string) => ({
+      quoteId,
+      text,
+      libraryID: 1,
+      itemKey: "AAAA1111",
+      attachmentItemKey: "PDF11111",
+      evidenceRefs: [observed.observationId],
+    });
+    await expectRejected(
+      finalizer.finalize({
+        request: request(policy, [observed]),
+        runId: "unopened-quotes",
+        input: {
+          ...input({
+            markdown:
+              "# Finding\n\n[[quote:Q1]]\n\n[[quote:Q2]]\n[[cite:C1]]\n\n## Scope and limitations\n\nOne paper.",
+            citations: [groundedCitation],
+          }),
+          quotes: [quote("Q1", "First sentence."), quote("Q2", "Second one.")],
+        },
+      }),
+      /Quotes Q1 and Q2 need their source PDFs open[\s\S]*\[\[cite:/,
+    );
+  });
+
   it("rejects literature reviews without verified research evidence", async function () {
     const policy: DocumentOutcomePolicy = {
       required: true,
