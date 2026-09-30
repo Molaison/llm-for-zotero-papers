@@ -46,9 +46,6 @@ export type BatchLibrary = {
   zoteroGateway: Record<string, unknown>;
 };
 
-/** Kept for the auto-tag undo tests, which only read tags. */
-export type BatchTagGateway = BatchLibrary;
-
 type ItemState = {
   title: string;
   fields: Record<string, string>;
