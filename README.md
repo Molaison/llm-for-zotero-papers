@@ -258,10 +258,10 @@ Agent Mode is disabled by default. Enable it in `Preferences`, then toggle
 `Agent (beta)` in the context bar.
 
 It can read and search your library, draft notes, update metadata or tags with
-confirmation, and undo recent write actions in the same session.
+confirmation, and undo recent write actions from the conversation.
 
 When enabled, the LLM can act on your Zotero library with read tools, write
-tools, confirmation cards, and session undo.
+tools, confirmation cards, and undo.
 
 Long agent runs are cache-aware. The plugin keeps stable Zotero context and
 previously read evidence separate from the changing chat transcript, tracks which
@@ -270,15 +270,18 @@ turns when the model context fills up. This lets follow-up questions reuse
 grounded evidence when it is still relevant, while still asking the agent to read
 again when the needed source or coverage layer is missing.
 
-| Tool area                | Examples                                                                                                                                          |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Library and PDF reading  | Search items and collections, read metadata, read papers, search paper passages, render PDF pages, inspect attachments                            |
-| Scholarly discovery      | Search CrossRef and Semantic Scholar for metadata, recommendations, references, and citations                                                     |
-| General web research     | Search the current public web with Tavily, read relevant pages, and show source links with the answer                                             |
-| Library writes           | Apply tags, update metadata, move items, manage collections, manage attachments, merge duplicates, trash items, import identifiers or local files |
-| Notes                    | Edit the active Zotero note or create a new note in plain text, Markdown, or HTML                                                                 |
-| Filesystem and scripting | Read/write allowed local files, run analysis commands, or execute Zotero JavaScript with write confirmations                                      |
-| Safety                   | Undo the most recent write action in the conversation, with the last 10 entries kept per session                                                  |
+| Tool area                | Tools                                                                                                                                              | What they do                                                                                                                                                          |
+| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Library and PDF reading  | `library_search`, `library_read`, `library_retrieve`, `paper_read`, `read_attachment`, `context_read`                                              | Search items and collections, read metadata, read papers, search paper passages, render PDF pages, inspect attachments and the chat context                           |
+| Scholarly discovery      | `literature_search`, `literature_review`                                                                                                           | Search OpenAlex, arXiv, and Europe PMC for papers, recommendations, references, and citations, then present ranked candidates                                         |
+| General web research     | `web_search`, `web_read`                                                                                                                           | Search the current public web with Tavily, read relevant pages, and show source links with the answer (only when a Tavily key is set)                                 |
+| Library writes           | `library_update`, `library_import`, `library_delete`, `annotate_pdf`                                                                               | Apply tags, update metadata, move items, manage collections and attachments, merge duplicates, trash items, import identifiers or local files, highlight PDF passages |
+| Citations and settings   | `library_cite`, `library_settings`                                                                                                                 | Format citations and bibliographies with Zotero's citation engine, and read or change the Zotero preferences the agent may touch                                      |
+| Notes and documents      | `note_write`, `note_write_batch`, `submit_document`                                                                                                | Create, append to, or edit Zotero notes, write one note on each of many items, and finalize longer documents                                                          |
+| Filesystem and scripting | `file_io`, `run_command`, `zotero_script`                                                                                                          | Read/write local files, run analysis commands, or execute Zotero JavaScript with write confirmations                                                                  |
+| Skills and questions     | `load_skill`, `request_user_input`                                                                                                                 | Load a skill's instructions when the task needs them, and ask you a question when a choice is ambiguous                                                               |
+| Plans                    | `update_plan`, `amend_plan`, `prepare_plan_execution`, `task_update`, `research_update`, `approve_research_expansion`, `approve_research_mutation` | Draft a plan for your approval, then track and report its execution                                                                                                   |
+| Safety                   | `undo`                                                                                                                                             | Undo recorded write actions from the conversation's durable change history, one at a time or several newest-first                                                     |
 
 The design philosophy is simple: read tools are unrestricted; write tools stay
 reviewable and undoable.
@@ -335,10 +338,10 @@ reviews, note writing, and cited-reference import.
   <img src="./assets/skills.png" alt="Screenshot of the Skills management portal" width="512" />
 </p>
 
-Skills are customizable guidance files that shape how Agent Mode approaches
-different types of requests. The agent sees each skill's description and loads
-a skill's instructions when it matches your request; choosing a skill with `/`
-applies it directly.
+Skills are customizable guidance files that shape how Agent Mode approaches different types of requests.
+The agent sees only each skill's name and description at the start of a turn.
+There is no automatic pre-selection step: the agent calls `load_skill` to read a skill's full instructions when it decides the task needs them.
+Choosing a skill with `/` applies it directly, and an approved plan keeps the exact skill versions it was approved with.
 
 > Skills require **Agent Mode**. They have no effect in standard chat mode.
 
@@ -879,6 +882,6 @@ Use ordinary `tools/call` requests; no Zotero chat, private turn token, or addit
 Specify `libraryID` for predictable targeting, or omit it to resolve the currently selected library once for that call.
 Invalid arguments, unavailable targets, native read-only restrictions, and execution or verification failures remain errors.
 Writes retain durable recovery records and native Zotero verification; preserve returned action IDs for recovery.
-Standalone `undo_last_action` requires `actionId`, and `revert_changes` requires `actionIds` (which cannot be combined with `count`).
+Standalone clients recover through the `undo` tool: pass `actionId` to undo one action, or `actionIds` to revert several (which cannot be combined with `count`).
 Do not blindly repeat a write after a timeout or uncertain outcome: inspect native state and the returned recovery information first.
 This interface does not promise exactly-once execution across repeated HTTP requests.
