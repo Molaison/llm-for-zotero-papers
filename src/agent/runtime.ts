@@ -83,7 +83,10 @@ import {
   type ToolWorkflowOutcome,
 } from "./model/toolArtifactDelivery";
 import { PlanExecutionRunSession } from "./plans/runSession";
-import { loadPlanArtifact } from "./plans/store";
+import {
+  loadLatestResumablePlanExecutionForConversation,
+  loadPlanArtifact,
+} from "./plans/store";
 import type { PlanEvent } from "./plans/types";
 import {
   acquireLocalDocumentPathLease,
@@ -788,6 +791,14 @@ export class AgentRuntime {
       const resumableBatches = await listResumableBatches(
         request.conversationKey,
       );
+      // A stored plan execution runs only when the user answers it or asks to
+      // continue it, so an ordinary turn can start while one waits. Only such
+      // a turn names it: a planning or executing turn is the plan's own.
+      const unfinishedPlan = request.planContext
+        ? null
+        : await loadLatestResumablePlanExecutionForConversation(
+            request.conversationKey,
+          );
       let recoveryMessage: AgentModelMessage | null = null;
       let interruptedActionCheckpoint: ActionContractCheckpoint | null = null;
       if (interruptedPriorRun) {
@@ -835,17 +846,22 @@ export class AgentRuntime {
           ? [...transcriptMessagesForPrompt, recoveryMessage]
           : [recoveryMessage];
       }
-      // An interrupted run already carries this block inside its one-time
-      // recovery note. Every other turn gets it as a prompt-only host
-      // message: the ledger is recomputed from run events at every turn
+      // An interrupted run already carries the material and batch block inside
+      // its one-time recovery note. Every other turn gets it as a prompt-only
+      // host message: the ledger is recomputed from run events at every turn
       // start, so persisting the block would only stack identical -- and,
-      // once the material is saved, stale -- copies in the transcript.
-      const materialRecoveryMessage = recoveryMessage
-        ? null
-        : buildTurnStartRecoveryMessage({
-            materialOutcomes: request.materialOutcomes,
-            resumableBatches,
-          });
+      // once the material is saved, stale -- copies in the transcript. The
+      // unfinished-plan line always travels in the prompt-only message, even
+      // beside that note, because the note itself is persisted.
+      const turnStartRecoveryMessage = buildTurnStartRecoveryMessage(
+        recoveryMessage
+          ? { unfinishedPlan }
+          : {
+              materialOutcomes: request.materialOutcomes,
+              resumableBatches,
+              unfinishedPlan,
+            },
+      );
       const conversationReferenceMessage = buildConversationReferenceMessage(
         transcriptSegment.messages,
       );
@@ -860,7 +876,7 @@ export class AgentRuntime {
             ? [conversationReferenceMessage]
             : []),
           ...(retainedActionMessage ? [retainedActionMessage] : []),
-          ...(materialRecoveryMessage ? [materialRecoveryMessage] : []),
+          ...(turnStartRecoveryMessage ? [turnStartRecoveryMessage] : []),
         ];
       };
 

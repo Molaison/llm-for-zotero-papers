@@ -347,6 +347,7 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
       }
       pendingPlanExecution = await takePendingPlanExecution(
         request.conversationKey,
+        rawSubmittedText,
       );
       planContext = pendingPlanExecution || planContext;
       deps.closeSlashMenu();

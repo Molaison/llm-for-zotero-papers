@@ -6,9 +6,11 @@ import type {
   AgentRuntimeRequest,
 } from "../types";
 import type { ResumableBatch } from "../store/batchItemStore";
+import type { PlanExecutionLedger } from "../plans/types";
 import { formatResumableBatchRecoveryLines } from "./batchOutcomes";
 import { formatMaterialOutcomeRecoveryLines } from "./materialOutcomes";
 import type { MaterialOutcomeEntry } from "./types";
+import { formatUnfinishedPlanRecoveryLines } from "./unfinishedPlan";
 
 export function isManualCompactRequest(request: AgentRuntimeRequest): boolean {
   return /^\/compact(?:\s|$)/i.test((request.userText || "").trim());
@@ -76,23 +78,25 @@ export function readLatestTranscriptGoal(
 /**
  * What a turn has to know about work the conversation left unfinished.
  *
- * Both sections answer the same question -- what already exists, so that the
+ * Every section answers the same question -- what already exists, so that the
  * model continues it instead of making it again -- so they travel as one host
  * message. A second message would stack another block into every prompt for
- * as long as either stayed outstanding. Returns null when nothing is
+ * as long as any stayed outstanding. Returns null when nothing is
  * outstanding.
  */
 export function buildTurnStartRecoveryMessage(params: {
   materialOutcomes?: readonly MaterialOutcomeEntry[];
   resumableBatches?: readonly ResumableBatch[];
+  unfinishedPlan?: PlanExecutionLedger | null;
 }): AgentModelMessage | null {
   const lines = [
     ...formatMaterialOutcomeRecoveryLines(params.materialOutcomes || []),
     ...formatResumableBatchRecoveryLines(params.resumableBatches || []),
+    ...formatUnfinishedPlanRecoveryLines(params.unfinishedPlan),
   ];
-  // Transient: the ledger and the batch rows behind it are read again at every
-  // turn start, so this message must never be copied into the transcript or
-  // one of its checkpoints.
+  // Transient: the ledger, the batch rows and the plan execution behind it are
+  // read again at every turn start, so this message must never be copied into
+  // the transcript or one of its checkpoints.
   return lines.length
     ? { role: "user", content: lines.join("\n"), transient: true }
     : null;

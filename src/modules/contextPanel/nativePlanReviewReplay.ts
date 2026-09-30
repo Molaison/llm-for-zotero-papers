@@ -283,7 +283,13 @@ export async function exerciseNativePlanReview() {
       await Zotero.Promise.delay(20);
     const approved = await loadPlanArtifact(planId, 1);
     const ledger = await loadLatestPlanExecutionForPlan(planId, 1);
-    const executionContext = await takePendingPlanExecution(key);
+    // Approval stages the execution only after its transaction commits, and
+    // the stored copy alone does not run for an empty message.
+    let executionContext = await takePendingPlanExecution(key, "");
+    while (!executionContext && Date.now() < deadline) {
+      await Zotero.Promise.delay(20);
+      executionContext = await takePendingPlanExecution(key, "");
+    }
     return {
       stagedStatus,
       heading,

@@ -2716,11 +2716,11 @@ describe("transactional Plan task transitions", function () {
     assert.deepEqual(together, separate);
   });
 
-  it("reattaches the durable non-terminal execution after in-memory state is gone", async function () {
+  it("reattaches the durable non-terminal execution on continue after in-memory state is gone", async function () {
     const resumable = { ...execution(), conversationKey: 9041 };
     await savePlanExecutionLedger(resumable);
 
-    assert.deepInclude(await takePendingPlanExecution(9041), {
+    assert.deepInclude(await takePendingPlanExecution(9041, "continue"), {
       phase: "executing",
       executionId: resumable.executionId,
       planId: resumable.planId,
@@ -2740,7 +2740,7 @@ describe("transactional Plan task transitions", function () {
         updatedAt: 3,
       })),
     });
-    assert.isUndefined(await takePendingPlanExecution(9041));
+    assert.isUndefined(await takePendingPlanExecution(9041, "continue"));
   });
 
   it("commits document delivery and terminal Plan progress together", async function () {

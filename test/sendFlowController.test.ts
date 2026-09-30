@@ -30,6 +30,12 @@ import type { LocalDocumentResource } from "../src/shared/types";
 import { resolvePromptText as resolveProductionPromptText } from "../src/modules/contextPanel/textUtils";
 import { createPaperPortalItem } from "../src/modules/contextPanel/portalScope";
 import { buildTurnPaperScope } from "../src/agent/context/turnPaperScope";
+import { savePlanExecutionLedger } from "../src/agent/plans/store";
+import { clearPlanModeState } from "../src/modules/contextPanel/planModeState";
+import {
+  installPlanStoreZotero,
+  storedPlanExecution,
+} from "./helpers/planStoreDb";
 
 describe("sendFlowController", function () {
   const item = { id: 101 } as unknown as Zotero.Item;
@@ -3147,6 +3153,53 @@ describe("sendFlowController", function () {
     assert.equal(owner, 0);
     assert.deepEqual(queued, ["queued follow-up", "later follow-up"]);
     assert.equal(inputBox.value, "draft typed while waiting");
+  });
+
+  it("runs an ordinary message as its own turn while a stored plan waits, and resumes the plan on continue", async function () {
+    const stored = storedPlanExecution("interrupted", item.id);
+    const restoreZotero = await installPlanStoreZotero({
+      Prefs: { get: () => undefined },
+      Items: { get: () => null },
+    });
+    clearPlanModeState(item.id);
+    try {
+      await savePlanExecutionLedger(stored);
+      const sends: Array<{ planContext: unknown; displayQuestion: unknown }> =
+        [];
+      const { controller, inputBox } = createBaseDeps({
+        isAgentMode: () => true,
+        getSelectedTextContextEntries: () => [],
+        sendQuestion: async (opts: any) => {
+          opts.onProviderDispatch?.();
+          sends.push({
+            planContext: opts.planContext,
+            displayQuestion: opts.displayQuestion,
+          });
+        },
+      });
+
+      inputBox.value = "What is the sample size of this study?";
+      await controller.doSend();
+      inputBox.value = "Continue.";
+      await controller.doSend();
+
+      assert.lengthOf(sends, 2);
+      assert.isUndefined(
+        sends[0].planContext,
+        "an unrelated question must not be absorbed by the stored plan",
+      );
+      assert.equal(
+        sends[0].displayQuestion,
+        "What is the sample size of this study?",
+      );
+      assert.deepInclude(sends[1].planContext as object, {
+        phase: "executing",
+        executionId: stored.executionId,
+      });
+    } finally {
+      clearPlanModeState(item.id);
+      restoreZotero();
+    }
   });
 
   it("restores the captured draft when preparation fails", async function () {
