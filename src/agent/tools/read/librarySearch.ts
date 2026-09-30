@@ -42,13 +42,36 @@ export function matchesLibraryLevelTurn(
 export const LIBRARY_SEARCH_GUIDANCE: ToolGuidance = {
   matches: matchesLibraryLevelTurn,
   instruction:
-    "Use library_search to resolve named library targets. Bounded results supply native identities and metadata; they never grant permission. If a descriptive name still matches several candidates, ask the user instead of guessing." +
-    "\n\nFor anything the simple filters cannot express, pass conditions[] — Zotero's own advanced-search vocabulary. Each clause is {condition, operator, value}. Useful conditions: fulltextContent (the PDF text), abstractNote, DOI, ISBN, publisher, publicationTitle, dateAdded, dateModified, note, annotationText, citationKey, retracted, itemType, tag, collection. If a condition and operator do not pair up, the error lists the operators that condition accepts — read it and retry rather than falling back to a plain text search." +
-    "\n\nTwo rules that decide whether an advanced search works at all:" +
-    "\n- fulltextContent, annotationText and childNote match a child item (an attachment or a note), so pass resolveToParents:true or those matches are dropped and the search looks empty." +
-    "\n- joinMode:'all' is the default; use joinMode:'any' for an OR search. There are no grouping blocks, because opening one in Zotero flips every other condition in the query to OR." +
-    "\n\nTo see the trash, pass filters:{ deleted:true }. That is the only way to enumerate trashed items, and it is what you need before calling library_delete with mode:'restore'.",
+    "Use library_search to resolve named library targets; results never grant permission. If a name still matches several candidates, ask the user instead of guessing. For what the simple filters cannot express, pass conditions[] (Zotero advanced search); only filters:{deleted:true} lists trashed items.",
 };
+
+/**
+ * Result-time rules for advanced searches, carried on a failed or empty
+ * conditions[] search rather than on every library-level turn.
+ */
+export const LIBRARY_SEARCH_CONDITIONS_GUIDANCE =
+  "Each conditions[] clause is {condition, operator, value}. Useful conditions: fulltextContent (the PDF text), abstractNote, DOI, ISBN, publisher, publicationTitle, dateAdded, dateModified, note, annotationText, citationKey, retracted, itemType, tag, collection. When an error lists the operators a condition accepts, retry with one of them rather than falling back to a plain text search. fulltextContent, annotationText and childNote match a child item (an attachment or a note), so pass resolveToParents:true or those matches are dropped and the search looks empty. joinMode:'all' is the default; use joinMode:'any' for an OR search (there are no grouping blocks).";
+
+/** Result-time trash rule, carried on an empty item search of live items. */
+export const LIBRARY_SEARCH_TRASH_GUIDANCE =
+  "Trashed items are excluded from this search. To see the trash, repeat it with filters:{deleted:true}; that is the only way to enumerate trashed items, and it is what you need before calling library_delete with mode:'restore'.";
+
+function withEmptySearchGuidance<T extends Record<string, unknown>>(
+  payload: T,
+  input: QueryLibraryInput,
+): T | (T & { guidance: string }) {
+  if (input.entity !== "items") return payload;
+  if (!Array.isArray(payload.results) || payload.results.length > 0) {
+    return payload;
+  }
+  const guidance = [
+    input.conditions ? LIBRARY_SEARCH_CONDITIONS_GUIDANCE : "",
+    input.filters?.deleted === true ? "" : LIBRARY_SEARCH_TRASH_GUIDANCE,
+  ]
+    .filter(Boolean)
+    .join(" ");
+  return guidance ? { ...payload, guidance } : payload;
+}
 
 type QueryLibraryInput = {
   entity: QueryLibraryEntity;
@@ -666,28 +689,42 @@ export function createLibrarySearchTool(
         throw new Error("No active library available");
       }
       if (input.conditions) {
-        const result = await zoteroGateway.searchItemsByConditions({
-          libraryID,
-          conditions: input.conditions,
-          joinMode: input.joinMode,
-          resolveToParents: input.resolveToParents,
-          includeTrashed: input.filters?.deleted === true,
-          limit: input.limit,
-          offset: input.offset,
-        });
-        return {
-          entity: input.entity,
-          mode: input.mode,
-          results: result.items,
-          totalCount: result.totalCount,
-          returnedCount: result.returnedCount,
-          offset: result.offset,
-          // Present only when more remains, so its absence is a reliable
-          // signal that the walk is finished.
-          nextOffset: result.nextOffset,
-          limited: result.nextOffset !== undefined,
-          warnings: [],
-        };
+        let result: Awaited<
+          ReturnType<ZoteroGateway["searchItemsByConditions"]>
+        >;
+        try {
+          result = await zoteroGateway.searchItemsByConditions({
+            libraryID,
+            conditions: input.conditions,
+            joinMode: input.joinMode,
+            resolveToParents: input.resolveToParents,
+            includeTrashed: input.filters?.deleted === true,
+            limit: input.limit,
+            offset: input.offset,
+          });
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          throw new Error(
+            `${message}\n\n${LIBRARY_SEARCH_CONDITIONS_GUIDANCE}`,
+          );
+        }
+        return withEmptySearchGuidance(
+          {
+            entity: input.entity,
+            mode: input.mode,
+            results: result.items,
+            totalCount: result.totalCount,
+            returnedCount: result.returnedCount,
+            offset: result.offset,
+            // Present only when more remains, so its absence is a reliable
+            // signal that the walk is finished.
+            nextOffset: result.nextOffset,
+            limited: result.nextOffset !== undefined,
+            warnings: [],
+          },
+          input,
+        );
       }
       if (input.entity === "notes") {
         if (input.mode === "search") {
@@ -785,14 +822,17 @@ export function createLibrarySearchTool(
           excludeContextItemId:
             zoteroGateway.getActiveContextItem(context.item)?.id || null,
         });
-        return withResultCounts(
-          {
-            entity: input.entity,
-            mode: input.mode,
-            results: result.results,
-            warnings: result.warnings,
-          },
-          { totalCount: result.totalCount },
+        return withEmptySearchGuidance(
+          withResultCounts(
+            {
+              entity: input.entity,
+              mode: input.mode,
+              results: result.results,
+              warnings: result.warnings,
+            },
+            { totalCount: result.totalCount },
+          ),
+          input,
         );
       }
       if (input.mode === "list") {

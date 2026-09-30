@@ -522,9 +522,7 @@ function collectMatchingToolGuidance(
 function buildToolGuidanceSection(instructions: readonly string[]): string[] {
   if (!instructions.length) return [];
   return [
-    "The following stable tool guidance is provided because the user's message may be relevant to these capabilities. " +
-      "Use your judgement: only invoke a tool if it directly addresses what the user is asking for. " +
-      "Do NOT invoke a tool just because its guidance appears here — the user's actual intent takes priority.",
+    "Tool guidance for this turn: call a tool only when it serves the user's request, never just because its guidance appears here.",
     ...instructions,
   ];
 }

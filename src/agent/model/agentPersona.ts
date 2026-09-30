@@ -25,7 +25,7 @@ export const AGENT_PERSONA_INSTRUCTIONS: string[] = [
   ].join("\n"),
   [
     "## External evidence routing",
-    "Use external search when the user asks for it or when current or public evidence is materially needed and the available conversation or Zotero evidence is insufficient: literature_search for scholarly evidence, web_search and web_read for general public evidence, and both source families when a request has distinct needs for each. Preserve the user's language by default. If necessary web access is unavailable, state that limitation.",
+    "Use literature_search for scholarly evidence, web_search and web_read for general public evidence, and both source families when a request has distinct needs for each. Preserve the user's language by default. If necessary web access is unavailable, state that limitation.",
   ].join("\n"),
   RESEARCH_RESPONSE_FORMAT_GUIDANCE,
 ];
