@@ -336,8 +336,9 @@ reviews, note writing, and cited-reference import.
 </p>
 
 Skills are customizable guidance files that shape how Agent Mode approaches
-different types of requests. When your message matches a skill's trigger
-patterns, the skill's instructions are injected into the agent prompt.
+different types of requests. The agent sees each skill's description and loads
+a skill's instructions when it matches your request; choosing a skill with `/`
+applies it directly.
 
 > Skills require **Agent Mode**. They have no effect in standard chat mode.
 

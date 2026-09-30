@@ -904,7 +904,7 @@ activation: auto
   Custom skill template.
 
   - name/id/description: shown in the "/" slash menu and native skill pickers
-  - description: the multilingual semantic router uses this to decide relevance
+  - description: the agent reads this in the skill inventory to decide when to load the skill
   - contexts: any, single-paper, paper-set, library-corpus, note, or visual-input
   - activation: auto, manual, or both
   - version: increment when you make significant changes

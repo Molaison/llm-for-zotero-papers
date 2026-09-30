@@ -161,14 +161,12 @@ import type {
   ResolvedAgentRuntimeRequest,
 } from "./types";
 import { buildAgentStageEvent } from "./stageEvents";
-import { selectAutomaticSkills } from "./model/automaticSkillSelection";
 
 type AgentRuntimeDeps = {
   registry: AgentToolRegistry;
   adapterFactory: (request: ResolvedAgentRuntimeRequest) => AgentModelAdapter;
   paperContextResolver?: AgentRequestPaperContextResolver;
   now?: () => number;
-  skillSelector?: typeof selectAutomaticSkills;
   /** Overridable so a failing re-anchoring can be exercised in tests. */
   reanchorCitations?: typeof reanchorQuoteCitationsToClaims;
 };
@@ -217,7 +215,6 @@ export class AgentRuntime {
   private readonly adapterFactory: AgentRuntimeDeps["adapterFactory"];
   private readonly paperContextResolver?: AgentRequestPaperContextResolver;
   private readonly now: () => number;
-  private readonly skillSelector: typeof selectAutomaticSkills;
   private readonly reanchorCitations: typeof reanchorQuoteCitationsToClaims;
   private readonly pendingConfirmations = new Map<
     string,
@@ -229,7 +226,6 @@ export class AgentRuntime {
     this.adapterFactory = deps.adapterFactory;
     this.paperContextResolver = deps.paperContextResolver;
     this.now = deps.now || (() => Date.now());
-    this.skillSelector = deps.skillSelector || selectAutomaticSkills;
     this.reanchorCitations =
       deps.reanchorCitations || reanchorQuoteCitationsToClaims;
   }
@@ -594,13 +590,12 @@ export class AgentRuntime {
         request.conversationKey,
       );
       setToolResultReadAvailability(request, false);
-      // Approved Plans retain their frozen skill binding. Ordinary turns select
-      // guidance before the main model; skill routing never predicts actions.
+      // Approved Plans retain their frozen skill binding. Ordinary turns carry
+      // only explicitly forced skills; the model loads any other guidance from
+      // the installed inventory with load_skill, so no request precedes it.
       let turnIntent: {
         skillIds: string[];
         classifiedIntent: AgentRuntimeRequest["classifiedIntent"] | null;
-        degraded: boolean;
-        routingReceipt?: AgentRuntimeRequest["skillRoutingReceipt"];
       };
       let approvedPlanArtifact: Awaited<ReturnType<typeof loadPlanArtifact>> =
         null;
@@ -632,7 +627,6 @@ export class AgentRuntime {
           skillIds: reused.skillIds,
           classifiedIntent:
             approvedPlanArtifact?.actionContract?.intent || null,
-          degraded: false,
         };
       } else {
         request.actionContract = undefined;
@@ -640,25 +634,10 @@ export class AgentRuntime {
         request.actionPreparation = undefined;
         request.classifiedIntent = undefined;
         request.userTextSignals = computeUserTextSignals(request.userText);
-        request.skillRoutingReceipt = undefined;
-        const started = this.now();
-        const selected = adapter.supportsTools(request)
-          ? await this.skillSelector(request, getAllSkills(), params.signal)
-          : { skillIds: [], status: "selected" as const };
-        if (adapter.supportsTools(request))
-          await emit({
-            type: "provider_event",
-            providerType: "agent_skill_selection",
-            payload: { ...selected, elapsedMs: this.now() - started },
-          });
-        turnIntent = {
-          skillIds: selected.skillIds,
-          classifiedIntent: null,
-          degraded: false,
-        };
+        turnIntent = { skillIds: [], classifiedIntent: null };
       }
       request.classifiedIntent = turnIntent.classifiedIntent || undefined;
-      request.skillRoutingReceipt = turnIntent.routingReceipt;
+      request.skillRoutingReceipt = undefined;
       const matchedSkills = withPlanInvestigationSkill(
         getMatchedSkillIds(request, turnIntent.skillIds),
         approvedPlanArtifact?.contract,

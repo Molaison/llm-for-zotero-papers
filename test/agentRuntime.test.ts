@@ -1042,13 +1042,12 @@ describe("AgentRuntime", function () {
     }
   });
 
-  it("loads semantic skill choices before the first main-model step without creating action authority", async function () {
+  it("loads forced skills before the first main-model step without creating action authority", async function () {
     const restoreDb = installMockDb();
     setUserSkills(
       Object.values(BUILTIN_SKILL_FILES).map((raw) => parseSkill(raw)),
     );
     const events: AgentEvent[] = [];
-    let selected = false;
     let observed = false;
     try {
       const adapter = new MockAdapter([], {
@@ -1057,7 +1056,6 @@ describe("AgentRuntime", function () {
         multimodal: false,
       });
       adapter.runStep = async (params) => {
-        assert.isTrue(selected);
         assert.includeMembers(
           params.request.loadedSkillRecords!.map((skill) => skill.id),
           ["analyze-figures", "write-note"],
@@ -1081,13 +1079,6 @@ describe("AgentRuntime", function () {
       const runtime = new AgentRuntime({
         registry: new AgentToolRegistry(),
         adapterFactory: () => adapter,
-        skillSelector: async () => {
-          selected = true;
-          return {
-            status: "selected",
-            skillIds: ["analyze-figures", "write-note"],
-          };
-        },
       });
       await runtime.runTurn({
         request: {
@@ -1095,6 +1086,7 @@ describe("AgentRuntime", function () {
           libraryID: 1,
           mode: "agent",
           userText: "Save a crop in a note",
+          forcedSkillIds: ["analyze-figures", "write-note"],
           model: "test",
           apiKey: "test",
           apiBase: "",
@@ -1107,13 +1099,20 @@ describe("AgentRuntime", function () {
         },
       });
       assert.isTrue(observed);
+      assert.isFalse(
+        events.some(
+          (event) =>
+            event.type === "provider_event" &&
+            event.providerType === "agent_skill_selection",
+        ),
+      );
     } finally {
       setUserSkills([]);
       restoreDb();
     }
   });
 
-  it("emits explicitly forced slash skills when automatic routing is unavailable", async function () {
+  it("emits explicitly forced slash skills", async function () {
     const restoreDb = installMockDb();
     setUserSkills(
       Object.values(BUILTIN_SKILL_FILES).map((raw) => parseSkill(raw)),

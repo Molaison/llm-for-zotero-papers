@@ -113,12 +113,12 @@ export function getBuiltinSkillInstructionById(
 }
 
 /**
- * Resolves explicit choices with semantic skill-only selections or stored Plan bindings.
- * The main model can load additional guidance through `load_skill` during a turn.
+ * Resolves explicit choices with stored Plan bindings. No model call selects
+ * skills; the main model loads other guidance through `load_skill`.
  *
  * Sources of activation, unioned:
  *   1. `forcedSkillIds` — explicit user selection from the slash menu.
- *   2. Automatic or stored skill IDs passed in via `classifiedIds`.
+ *   2. Stored Plan skill IDs passed in via `classifiedIds`.
  */
 export function getMatchedSkillIds(
   request: SkillRoutingRequest &
