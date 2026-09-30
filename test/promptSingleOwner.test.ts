@@ -116,7 +116,7 @@ describe("prompt rules have a single owner", function () {
     assert.isAtLeast(
       Array.from(owners.keys()).filter((key) => key.startsWith("skill:"))
         .length,
-      8,
+      7,
     );
     assert.isTrue(owners.has("persona"));
     assert.isTrue(owners.has("messageBuilder"));

@@ -281,7 +281,6 @@ describe("quote guidance prompts", function () {
 
   it("keeps stock skills free of the shared citation policy", function () {
     const skills = [
-      "../src/agent/skills/simple-paper-qa.md",
       "../src/agent/skills/compare-papers.md",
       "../src/agent/skills/evidence-based-qa.md",
       "../src/agent/skills/literature-review.md",

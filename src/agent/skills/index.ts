@@ -19,7 +19,6 @@ import type { SkillRoutingRequest } from "./contextEligibility";
 import libraryAnalysisRaw from "./library-analysis.md";
 import comparePapersRaw from "./compare-papers.md";
 import analyzeFiguresRaw from "./analyze-figures.md";
-import simplePaperQaRaw from "./simple-paper-qa.md";
 import evidenceBasedQaRaw from "./evidence-based-qa.md";
 import writeNoteRaw from "./write-note.md";
 import literatureReviewRaw from "./literature-review.md";
@@ -79,7 +78,6 @@ export const BUILTIN_SKILL_FILES: Record<string, string> = {
   "library-analysis.md": libraryAnalysisRaw,
   "compare-papers.md": comparePapersRaw,
   "analyze-figures.md": analyzeFiguresRaw,
-  "simple-paper-qa.md": simplePaperQaRaw,
   "evidence-based-qa.md": evidenceBasedQaRaw,
   "write-note.md": writeNoteRaw,
   "literature-review.md": literatureReviewRaw,

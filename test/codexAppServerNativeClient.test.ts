@@ -992,7 +992,7 @@ describe("Codex app-server native client", function () {
   });
 
   it("keeps automatic skill routing off on a PDF turn without an explicit skill", async function () {
-    setUserSkills([parseSkill(BUILTIN_SKILL_FILES["simple-paper-qa.md"])]);
+    setUserSkills([parseSkill(BUILTIN_SKILL_FILES["evidence-based-qa.md"])]);
     const processKey = "native-direct-pdf-no-automatic-skill";
     const requests: Array<{
       method: string;
@@ -1068,7 +1068,7 @@ describe("Codex app-server native client", function () {
   it("activates only an explicitly selected skill on a PDF turn", async function () {
     setUserSkills([
       parseSkill(BUILTIN_SKILL_FILES["write-note.md"]),
-      parseSkill(BUILTIN_SKILL_FILES["simple-paper-qa.md"]),
+      parseSkill(BUILTIN_SKILL_FILES["evidence-based-qa.md"]),
     ]);
     const processKey = "native-direct-pdf-explicit-skill";
     const requests: Array<{
@@ -1083,7 +1083,7 @@ describe("Codex app-server native client", function () {
       process.platform === "darwin"
         ? writeNoteSkillPath.replace(/^\/tmp\//, "/private/tmp/")
         : writeNoteSkillPath;
-    const simplePaperQaSkillPath = `${expectedCwd}/.agents/skills/simple-paper-qa/SKILL.md`;
+    const evidenceSkillPath = `${expectedCwd}/.agents/skills/evidence-based-qa/SKILL.md`;
     const proc = createNativeLifecycleTestProcess({
       newThreadIds: ["thread-pdf-explicit-skill"],
       requests,
@@ -1104,8 +1104,8 @@ describe("Codex app-server native client", function () {
                 enabled: true,
               },
               {
-                name: "simple-paper-qa",
-                path: simplePaperQaSkillPath,
+                name: "evidence-based-qa",
+                path: evidenceSkillPath,
                 enabled: true,
               },
             ],
@@ -1185,7 +1185,7 @@ describe("Codex app-server native client", function () {
     });
     assert.isFalse(
       turnInput.some(
-        (input) => input.type === "skill" && input.name === "simple-paper-qa",
+        (input) => input.type === "skill" && input.name === "evidence-based-qa",
       ),
     );
     assert.deepEqual(activatedSkills, ["write-note"]);
@@ -3112,7 +3112,7 @@ describe("Codex app-server native client", function () {
 
   it("submits explicit skill selections as structured native Codex skill inputs", async function () {
     setUserSkills([
-      parseSkill(BUILTIN_SKILL_FILES["simple-paper-qa.md"]),
+      parseSkill(BUILTIN_SKILL_FILES["analyze-figures.md"]),
       parseSkill(BUILTIN_SKILL_FILES["evidence-based-qa.md"]),
     ]);
     const processKey = "native-auto-skill-input-test";
@@ -3266,7 +3266,7 @@ describe("Codex app-server native client", function () {
     const turnStartText = JSON.stringify(turnStartParams);
     assert.include(turnStartText, "what method did they use in this paper");
     assert.notInclude(turnStartText, "$evidence-based-qa");
-    assert.notInclude(turnStartText, "$simple-paper-qa");
+    assert.notInclude(turnStartText, "$analyze-figures");
     assert.notInclude(
       JSON.stringify(threadStartParams),
       "LLM-for-Zotero skills active for this turn",

@@ -69,7 +69,8 @@ function setBodyHashes(hashes: Record<string, string>): void {
 }
 
 // ---------------------------------------------------------------------------
-// Obsolete skill files (consolidated into write-note.md)
+// Obsolete skill files (note skills consolidated into write-note.md;
+// simple-paper-qa retired in favour of evidence-based-qa)
 // ---------------------------------------------------------------------------
 
 // Each entry carries the filename plus hashes of the exact raw file contents we
@@ -126,6 +127,35 @@ const OBSOLETE_SKILL_FILES: ReadonlyArray<{
     filename: "note-template.md",
     bootstrapRawHashes: ["128vd1c", "m675pz", "v55hyg"],
   },
+  // simple-paper-qa was retired in favour of evidence-based-qa, whose
+  // description now covers broad summaries of one paper. Hashes cover every
+  // committed version of the file (v1-v10).
+  {
+    filename: "simple-paper-qa.md",
+    bootstrapRawHashes: [
+      "gfjvxt",
+      "1w32fwi",
+      "x02wmo",
+      "tz1pi3",
+      "1r2ban6",
+      "1yqxw4",
+      "14ok99f",
+      "2vt80m",
+      "14c21tp",
+      "1vf0uap",
+      "326eei",
+      "e821k0",
+      "168pnq0",
+      "19icn0l",
+      "en8n9t",
+      "1181x3a",
+      "19mtsg3",
+      "a3hatz",
+      "yu43tj",
+      "12lfm6n",
+      "1620eqd",
+    ],
+  },
 ];
 
 const OBSOLETE_SKILL_FILENAMES = new Set(
@@ -138,7 +168,11 @@ const OBSOLETE_SKILL_IDS = new Set([
   "note-from-paper",
   "note-editing",
   "note-template",
+  "simple-paper-qa",
 ]);
+
+/** Obsolete IDs already reported by loadUserSkills; each is logged once. */
+const loggedObsoleteSkillIds = new Set<string>();
 
 // Exact raw-content hashes for prior shipped versions of built-ins whose
 // version increased in this release. On the first run with hash tracking, we
@@ -162,7 +196,6 @@ const BUILTIN_BOOTSTRAP_RAW_HASHES: Partial<
     "qs8z4b",
   ],
   "analyze-figures.md": ["msvqtf", "17o1bpl", "gdr4uu", "e0ebpu"],
-  "simple-paper-qa.md": ["yu43tj", "1r2ban6", "1181x3a", "12lfm6n"],
   "evidence-based-qa.md": [
     "en0khz",
     "vyeyap",
@@ -175,6 +208,7 @@ const BUILTIN_BOOTSTRAP_RAW_HASHES: Partial<
     "1xglfq0",
     "qdqcm0",
     "90zxig",
+    "1qkh4mt",
   ],
   "write-note.md": ["17lvl1z", "172xn8t", "nvca0f", "1c1s5yg"],
   "literature-review.md": ["kbrknh", "nxpr5d", "1cnjf9i", "3tk61l", "1ptwzpw"],
@@ -206,6 +240,7 @@ const BUILTIN_BOOTSTRAP_BODY_HASHES: Partial<
     "zjwar9",
     "49orr",
     "13yvvl6",
+    "1l4p1x2",
   ],
 };
 
@@ -502,7 +537,8 @@ export async function initUserSkills(): Promise<void> {
   await migrateLegacyFlatSkills(io, seeded);
 
   // ── Step 1: Remove obsolete canonical skill files ───────────────────────
-  // Old note skills were consolidated into write-note.md. Delete only if:
+  // Old note skills were consolidated into write-note.md and simple-paper-qa
+  // was retired in favour of evidence-based-qa. Delete only if:
   //   (a) we have a stored hash proving the file is unmodified, OR
   //   (b) bootstrap — no stored hash (pre-hash install) AND the raw file
   //       still matches a known shipped fingerprint.
@@ -763,9 +799,12 @@ export async function loadUserSkills(): Promise<AgentSkill[]> {
         OBSOLETE_SKILL_FILENAMES.has(filename) ||
         OBSOLETE_SKILL_IDS.has(skill.id)
       ) {
-        appLogger.debug(
-          `[llm-for-zotero] Skipping obsolete preserved skill file: ${filePath}`,
-        );
+        if (!loggedObsoleteSkillIds.has(skill.id)) {
+          loggedObsoleteSkillIds.add(skill.id);
+          appLogger.info(
+            `[llm-for-zotero] Skipping retired skill ${skill.id} (preserved customized copy, not loaded): ${filePath}`,
+          );
+        }
         continue;
       }
 
@@ -868,7 +907,6 @@ activation: auto
   - description: the multilingual semantic router uses this to decide relevance
   - contexts: any, single-paper, paper-set, library-corpus, note, or visual-input
   - activation: auto, manual, or both
-  - supersedes: optional comma-separated skill IDs this workflow replaces
   - version: increment when you make significant changes
 
   The text below is injected into the agent's current-turn guidance when

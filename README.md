@@ -343,16 +343,15 @@ patterns, the skill's instructions are injected into the agent prompt.
 
 Built-in skills:
 
-| Skill                    | What it guides the agent to do                                      |
-| ------------------------ | ------------------------------------------------------------------- |
-| `simple-paper-qa`        | Answer general questions about a paper efficiently                  |
-| `evidence-based-qa`      | Find specific methods, results, or evidence with targeted retrieval |
-| `analyze-figures`        | Interpret figures and tables using MinerU-extracted images          |
-| `compare-papers`         | Compare multiple papers using batched reads and focused retrieval   |
-| `library-analysis`       | Summarize or analyze your entire library without context overflow   |
-| `literature-review`      | Conduct a structured literature review                              |
-| `write-note`             | Write Zotero notes or Markdown notes in configured local folders    |
-| `import-cited-reference` | Import papers cited in the current PDF into Zotero                  |
+| Skill                    | What it guides the agent to do                                    |
+| ------------------------ | ----------------------------------------------------------------- |
+| `evidence-based-qa`      | Answer paper questions, from broad summaries to specific evidence |
+| `analyze-figures`        | Interpret figures and tables using MinerU-extracted images        |
+| `compare-papers`         | Compare multiple papers using batched reads and focused retrieval |
+| `library-analysis`       | Summarize or analyze your entire library without context overflow |
+| `literature-review`      | Conduct a structured literature review                            |
+| `write-note`             | Write Zotero notes or Markdown notes in configured local folders  |
+| `import-cited-reference` | Import papers cited in the current PDF into Zotero                |
 
 To create a custom skill, open the **Standalone Window**, click the **Skills**
 icon, choose **"+ New skill"**, edit the skill file, and save. Skills are stored

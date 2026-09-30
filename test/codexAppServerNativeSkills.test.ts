@@ -118,7 +118,7 @@ describe("Codex native skills", function () {
 
   it("uses the same context-count eligibility for native paper and library turns", async function () {
     setUserSkills([
-      parseSkill(BUILTIN_SKILL_FILES["simple-paper-qa.md"]),
+      parseSkill(BUILTIN_SKILL_FILES["evidence-based-qa.md"]),
       parseSkill(BUILTIN_SKILL_FILES["library-analysis.md"]),
     ]);
 
@@ -134,9 +134,9 @@ describe("Codex native skills", function () {
       userText: "summarize this paper",
       model: "",
       apiBase: "",
-      skillContext: { forcedSkillIds: ["simple-paper-qa"] },
+      skillContext: { forcedSkillIds: ["evidence-based-qa"] },
     });
-    assert.deepEqual(paperTurn.matchedSkillIds, ["simple-paper-qa"]);
+    assert.deepEqual(paperTurn.matchedSkillIds, ["evidence-based-qa"]);
 
     const libraryTurn = await resolveCodexNativeSkills({
       scope: {

@@ -3452,8 +3452,8 @@ describe("semantic tool surface", function () {
     );
   });
 
-  it("matches simple-paper-qa for understand-this-paper typo requests", function () {
-    setUserSkills([parseSkill(BUILTIN_SKILL_FILES["simple-paper-qa.md"])]);
+  it("matches evidence-based-qa for understand-this-paper typo requests", function () {
+    setUserSkills([parseSkill(BUILTIN_SKILL_FILES["evidence-based-qa.md"])]);
     assert.include(
       getMatchedSkillIds(
         resolvedSkillRequest({
@@ -3463,9 +3463,9 @@ describe("semantic tool surface", function () {
             { itemId: 1, contextItemId: 2, title: "Paper" },
           ],
         }),
-        ["simple-paper-qa"],
+        ["evidence-based-qa"],
       ),
-      "simple-paper-qa",
+      "evidence-based-qa",
     );
   });
 

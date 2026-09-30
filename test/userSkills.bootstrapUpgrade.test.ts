@@ -423,21 +423,22 @@ describe("user skill bootstrap upgrades", function () {
   });
 
   it("migrates declarative supersession without replacing legacy match metadata", function () {
-    const old = BUILTIN_SKILL_FILES["evidence-based-qa.md"]
-      .replace(/version: \d+/, "version: 6\nmatch: legacy fixture only")
-      .replace("supersedes: simple-paper-qa\n", "");
-    const patched = patchSkillFrontmatter(
-      old,
-      BUILTIN_SKILL_FILES["evidence-based-qa.md"],
+    // No shipped skill declares supersedes any more; the patcher still carries
+    // the key forward from a shipped file that does.
+    const shipped = BUILTIN_SKILL_FILES["evidence-based-qa.md"].replace(
+      "activation: auto\n",
+      "activation: auto\nsupersedes: older-skill\n",
     );
+    const old = BUILTIN_SKILL_FILES["evidence-based-qa.md"].replace(
+      /version: \d+/,
+      "version: 6\nmatch: legacy fixture only",
+    );
+    const patched = patchSkillFrontmatter(old, shipped);
     assert.isString(patched);
-    assert.include(patched as string, "supersedes: simple-paper-qa");
+    assert.include(patched as string, "supersedes: older-skill");
     assert.include(patched as string, "match:");
   });
-  for (const [name, version] of [
-    ["simple-paper-qa", 8],
-    ["evidence-based-qa", 7],
-  ] as const) {
+  for (const [name, version] of [["evidence-based-qa", 7]] as const) {
     it(`upgrades the unmodified baseline ${name} skill without stored hashes`, async function () {
       const baseDir = `/tmp/llm-for-zotero-baseline-${name}-upgrade`;
       const raw = readFileSync(
@@ -489,6 +490,7 @@ describe("user skill bootstrap upgrades", function () {
   function assertUpgradedToShipped(upgraded: string, name: string) {
     const shipped = parseSkill(BUILTIN_SKILL_FILES[`${name}.md`]);
     assert.equal(parseSkill(upgraded).version, shipped.version);
+    assert.equal(parseSkill(upgraded).description, shipped.description);
     assert.equal(parseSkill(upgraded).instruction, shipped.instruction);
     assert.deepEqual(parseSkill(upgraded).contexts, shipped.contexts);
   }
@@ -525,8 +527,8 @@ describe("user skill bootstrap upgrades", function () {
   // both without a stored hash (bootstrap raw hash) and with one (tracked
   // body hash); a missing hash leaves the user on the stale copy.
   for (const fixture of [
-    "simple-paper-qa-v9",
     "evidence-based-qa-v8",
+    "evidence-based-qa-v9",
     "compare-papers-v7",
     "write-note-v16",
     "analyze-figures-v9",

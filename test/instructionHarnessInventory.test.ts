@@ -44,11 +44,6 @@ const STOCK_SKILL_WORKFLOW_MARKERS: Record<string, string[]> = {
     "one durable paper understanding for every item",
     "Finish with `submit_document`",
   ],
-  "simple-paper-qa.md": [
-    "retrieve evidence, then answer",
-    "clarification of supplied text",
-    "citation anchors",
-  ],
   "write-note.md": [
     "## Note template",
     "Checklist before writing the note",
