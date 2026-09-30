@@ -111,4 +111,15 @@ describe("plan phase guidance", function () {
       assert.include(EXECUTING_PHASE_GUIDANCE, rule);
     }
   });
+
+  it("owns the research-loop rules so a customized review skill cannot drop them", async function () {
+    for (const rule of [
+      "never re-enumerate or re-verify it with library_search",
+      "do not recover old tool handles or reread completed papers",
+      "do not call inventory_scope again between durable groups",
+    ]) {
+      assert.include(EXECUTING_PHASE_GUIDANCE, rule);
+    }
+    assert.include(await fixedPrompt(executing), EXECUTING_PHASE_GUIDANCE);
+  });
 });
