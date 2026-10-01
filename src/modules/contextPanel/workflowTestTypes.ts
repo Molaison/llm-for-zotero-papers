@@ -596,6 +596,13 @@ export type WorkflowTestApi = {
   }) => ReturnType<
     typeof import("./agentDeliveryReplay").exerciseAgentDeliveryReplay
   >;
+  /** A long job over a folder's papers; only the model is scripted. */
+  exerciseLongJobReplay: (input: {
+    panelId: string;
+    collection: import("../../shared/types").CollectionContextRef;
+    papers: Array<{ itemId: number; title: string }>;
+    inputTokenCap: number;
+  }) => ReturnType<typeof import("./longJobReplay").exerciseLongJobReplay>;
   exerciseStreamingReplay: (input: {
     panelId: string;
     historyTurns: number;

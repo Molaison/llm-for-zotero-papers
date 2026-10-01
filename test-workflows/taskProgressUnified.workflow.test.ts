@@ -803,4 +803,76 @@ describe("workflow: task progress unified", function () {
       restore();
     }
   });
+  it("pages a long job over a folder, with Task progress counting each page's papers", async function () {
+    const folder = new Zotero.Collection();
+    (folder as { libraryID: number }).libraryID = libraryID;
+    folder.name = `Drift long job ${Date.now()}`;
+    await folder.saveTx();
+    const extra: WorkflowTestFixture[] = [];
+    try {
+      for (const title of ["Drift in the cortex", "Drift in songbirds"]) {
+        const fixture = await api.createPaperWithPdfFixture({
+          title,
+          pdfTitle: title,
+          pages: [`${title} evidence.`],
+        });
+        extra.push(fixture);
+      }
+      const papers = [...fixtures.slice(0, TITLES.length), ...extra];
+      for (const fixture of papers) {
+        const paper = Zotero.Items.get(fixture.parentItemId);
+        paper.addToCollection(folder.id);
+        await paper.saveTx();
+      }
+      const panel = await api.renderPanelForItem(papers[0].parentItemId);
+      const restore = showOnScreen(panel.panelId);
+      try {
+        const result = await api.exerciseLongJobReplay({
+          panelId: panel.panelId,
+          collection: {
+            collectionId: folder.id,
+            name: folder.name,
+            libraryID,
+          },
+          papers: papers.map((fixture) => ({
+            itemId: fixture.parentItemId,
+            title: Zotero.Items.get(fixture.parentItemId).getField("title"),
+          })),
+          inputTokenCap: 40_000,
+        });
+        assert.equal(result.runStatus, "completed", JSON.stringify(result));
+        const pages = result.pages.filter(
+          (page) => typeof (page as { page?: unknown }).page === "number",
+        );
+        assert.isAtLeast(pages.length, 2, JSON.stringify(result.pages));
+        assert.include(result.pages[result.pages.length - 1], {
+          complete: true,
+          papers: 6,
+        });
+        // The job's step counts its papers as each page is read.
+        const counts = result.stepLabels.flatMap((label) => {
+          const match = / · (\d+) of 6$/.exec(label);
+          return match ? [Number(match[1])] : [];
+        });
+        assert.equal(counts[counts.length - 1], 6, JSON.stringify(result));
+        assert.isAtLeast(new Set(counts).size, 3, JSON.stringify(counts));
+        assert.deepEqual(
+          counts,
+          [...counts].sort((a, b) => a - b),
+          "the count only advances",
+        );
+        assert.isTrue(
+          result.rowCounts.some((count) => count.endsWith("6 papers in scope")),
+          JSON.stringify(result.rowCounts),
+        );
+        await capture(panel.panelId, "tp-long-job-paged.png");
+      } finally {
+        restore();
+        await api.clickPanelDelete(panel.panelId).catch(() => undefined);
+      }
+    } finally {
+      for (const fixture of extra) await api.cleanupFixture(fixture);
+      await folder.eraseTx().catch(() => undefined);
+    }
+  });
 });

@@ -20,6 +20,11 @@ export function resolveAdaptiveReadingBudget(params: {
   usedContextTokens: number;
   outputReserveTokens: number;
   paperCount: number;
+  /**
+   * A long job's page share: a paper read while a page is open gets no more
+   * than its share of the page, however few papers the call names.
+   */
+  maxTokensPerPaper?: number;
 }): AdaptiveReadingBudget {
   const contextWindowTokens = Math.max(
     1,
@@ -42,9 +47,13 @@ export function resolveAdaptiveReadingBudget(params: {
     0,
     Math.floor(remainingInputTokens * 0.8),
   );
+  const pageShare =
+    params.maxTokensPerPaper && params.maxTokensPerPaper > 0
+      ? Math.floor(params.maxTokensPerPaper)
+      : Number.POSITIVE_INFINITY;
   const tokensPerPaper = Math.max(
     1,
-    Math.floor(allocatedReadingTokens / paperCount),
+    Math.min(Math.floor(allocatedReadingTokens / paperCount), pageShare),
   );
   return {
     contextWindowTokens,

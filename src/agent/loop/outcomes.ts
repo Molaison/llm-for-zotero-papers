@@ -436,20 +436,23 @@ function applyRead(
   const shallow = unique(evidence.shallow || []);
   const noText = unique(evidence.noText || []);
   const observationIds = unique(evidence.observationIds);
+  const anyRead = unique([...read, ...shallow]);
   const bound = new Set(
     checkpoint.tasks.flatMap((task) => task.readEvidenceIds),
   );
-  const alreadyApplied = observationIds.length
-    ? observationIds.every((id) => bound.has(id))
-    : !read.length && !shallow.length && !noText.length;
-  if (alreadyApplied) return unchanged(checkpoint);
-  const anyRead = unique([...read, ...shallow]);
+  const replayed =
+    observationIds.length > 0 && observationIds.every((id) => bound.has(id));
   return mapTasks(checkpoint, now, (task) => {
     if (task.status !== "pending" || task.effect !== "read") return undefined;
+    // A read reaches each part that names its papers, once: one another part
+    // already holds still ticks a part declared after it (a back-fill, or a
+    // re-read the cache answered).
     if (task.targets?.length) {
       return readTargetsInto(task, read, noText, observationIds, now);
     }
-    // Finding that a paper has no text reads nothing.
+    // A part that names no papers completes on a new read only, and finding
+    // that a paper has no text reads nothing.
+    if (replayed) return undefined;
     return anyRead.length || observationIds.length
       ? readAnyInto(task, anyRead, observationIds, now)
       : undefined;
@@ -669,6 +672,23 @@ export function declareOutcomes(
     tasks: [...checkpoint.tasks, ...created],
     updatedAt: now,
   };
+}
+
+/**
+ * Whether `next` declares a read part over named papers that `previous` did
+ * not have: such a part takes the reads its turn already made (a back-fill).
+ */
+export function declaresReadPart(
+  previous: ExecutionCheckpoint,
+  next: ExecutionCheckpoint,
+): boolean {
+  const known = new Set(previous.tasks.map((task) => task.taskId));
+  return next.tasks.some(
+    (task) =>
+      !known.has(task.taskId) &&
+      task.effect === "read" &&
+      Boolean(task.targets?.length),
+  );
 }
 
 /** Apply skipped, blocked or cancelled marks; `ignored` lists refused ones. */

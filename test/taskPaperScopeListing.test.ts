@@ -263,7 +263,15 @@ describe("taskPaperScopeListing", function () {
           tags: [{ name: "Learning" }],
           excludedItemIds: [6],
         }),
-        { wholeLibrary: false, itemIds: [1, 2], withText: 1 },
+        {
+          wholeLibrary: false,
+          itemIds: [1, 2],
+          withText: 1,
+          papers: {
+            1: { title: "Drift in CA1", text: "pdf" },
+            2: { title: "Paper 2", text: "none" },
+          },
+        },
       );
     });
 

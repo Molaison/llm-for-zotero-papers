@@ -25,6 +25,12 @@ import { PaperEvidenceFrontier } from "./context/paperEvidenceFrontier";
 import { preparePaperPromptContext } from "./context/paperPromptContext";
 import { PassageCitationCollector } from "./context/passageCitationCollector";
 import {
+  buildPaperDigest,
+  collectPaperEvidence,
+  renderPaperDigests,
+  type PaperDigest,
+} from "./context/paperDigests";
+import {
   AgentPromptBudgetError,
   enforceAgentPromptBudget,
   resolveAgentPromptBudgetLimits,
@@ -58,11 +64,21 @@ import type { MaterialRef } from "./documents/materialRef";
 import { AgentFinalAnswerController } from "./finalization/finalAnswerController";
 import type { RunStopRule } from "./loop/stopRules";
 import {
+  LongJobPager,
+  priorPaperTokens,
+  readLongJob,
+  renderLongJobMessage,
+  renderLongJobRecord,
+} from "./loop/longJob";
+import {
   applyOutcomeEvidence,
+  declaresReadPart,
   decideRunEnd,
+  OUTCOME_REASONS,
   settleOutcomes,
   type OutcomeEvidence,
 } from "./loop/outcomes";
+import { estimateContextMessagesTokens } from "../utils/modelInputCap";
 import { isExplicitContinueCommand } from "./continuation/continueCommand";
 import type { AgentModelAdapter } from "./model/adapter";
 import { resolveCapabilitiesContentInputs } from "./model/contentCapabilities";
@@ -92,6 +108,7 @@ import {
 import { listJournalActions } from "./store/changeJournal";
 import { recordAgentTurn } from "./store/conversationMemory";
 import {
+  createAgentToolResultHandleRecord,
   hasAgentToolResultHandles,
   hydrateAgentToolResultHandles,
   upsertAgentToolResultHandles,
@@ -444,6 +461,8 @@ export class AgentRuntime {
     // a delta from it; the first change, and the one after a publication
     // that failed, is published whole.
     let publishedCheckpoint: ExecutionCheckpoint | undefined;
+    // The turn's reads, so a read part declared after them still takes them.
+    const turnReads: OutcomeEvidence[] = [];
     const updateExecutionCheckpoint = (
       apply: (checkpoint: ExecutionCheckpoint) => ExecutionCheckpoint,
     ): Promise<ExecutionCheckpoint> => {
@@ -451,7 +470,11 @@ export class AgentRuntime {
         const current =
           request.executionCheckpoint ||
           createEmptyExecutionCheckpoint(request.executionContext!, this.now());
-        const next = apply(current);
+        let next = apply(current);
+        if (next !== current && declaresReadPart(current, next)) {
+          for (const read of turnReads)
+            next = applyOutcomeEvidence(next, read, this.now()).checkpoint;
+        }
         if (next !== current) {
           request.executionCheckpoint = next;
           if (emitRunEvent) {
@@ -472,6 +495,7 @@ export class AgentRuntime {
     const recordOutcomeEvidence = async (
       evidence: OutcomeEvidence,
     ): Promise<void> => {
+      if (evidence.kind === "read") turnReads.push(evidence);
       try {
         await updateExecutionCheckpoint(
           (checkpoint) =>
@@ -1171,6 +1195,24 @@ export class AgentRuntime {
         newTranscriptMessages.splice(0, newTranscriptMessages.length);
         return committed.writeResult;
       };
+      // A long job (loop/longJob.ts): when the papers a turn's parts name do
+      // not fit one pass, the host pages them.
+      const scopePaper = (target: string) =>
+        request.turnScopePapers?.papers?.[Number(target.replace(/^item:/, ""))];
+      const longJob = new LongJobPager((target) =>
+        priorPaperTokens(scopePaper(target)?.text),
+      );
+      const longJobDigests = new Map<string, PaperDigest>();
+      // The message that carries every digest and the next page. Every
+      // restart sends it again, so no restart loses the job's results.
+      let longJobMessage: AgentUserMessage | null = null;
+      // While a page is open: each page paper's share, which caps a read.
+      let longJobReadShare = 0;
+      // How many of the turn's reads the pager has seen, so each round
+      // tells it only the papers its own read calls carried.
+      let longJobReadsSeen = 0;
+      // How many batches of per-paper results the transcript holds.
+      let longJobRecords = 0;
       const restartFromSemanticCheckpoint = async (params: {
         sourceMessages: AgentModelMessage[];
         handleRecords?: AgentToolResultHandleRecord[];
@@ -1197,6 +1239,7 @@ export class AgentRuntime {
               ...[
                 conversationReferenceMessage,
                 buildRetainedActionMessage(transcriptSegment.messages),
+                longJobMessage,
               ].filter((message): message is AgentUserMessage =>
                 Boolean(message),
               ),
@@ -1489,6 +1532,9 @@ export class AgentRuntime {
         request.runtimeContextBudget = {
           contextWindowTokens: stepContextWindow,
           usedContextTokens: stepContextTokens,
+          ...(longJobReadShare > 0
+            ? { maxTokensPerPaper: longJobReadShare }
+            : {}),
         };
         if (stepContextTokens > 0 && stepContextWindow > 0) {
           await emit({
@@ -1811,6 +1857,231 @@ export class AgentRuntime {
           length: text.length,
           text,
         });
+      };
+      /**
+       * After a tool round: page the turn's long job. When a page ends, the
+       * reads of the job's papers become per-paper digests (each within its
+       * share of the input budget, with handles to the full results), the
+       * provider session restarts from a checkpoint that carries every digest
+       * and the next page, and the page's digests are persisted with the
+       * transcript, so they outlive the turn.
+       */
+      const advanceLongJob = async (): Promise<void> => {
+        if (!recordsOutcomes()) return;
+        const budgetTokens = providerReplaySoftLimit;
+        const roundReads = turnReads
+          .slice(longJobReadsSeen)
+          .flatMap((read) =>
+            read.kind === "read"
+              ? [
+                  ...read.targets,
+                  ...(read.shallow || []),
+                  ...(read.noText || []),
+                ]
+              : [],
+          );
+        longJobReadsSeen = turnReads.length;
+        const boundary = longJob.check({
+          checkpoint: request.executionCheckpoint,
+          promptTokens: estimateContextMessagesTokens(messages),
+          budgetTokens,
+          requests: round,
+          reads: roundReads,
+        });
+        if (!boundary) return;
+        const job = readLongJob(request.executionCheckpoint, longJob.following);
+        if (!job) return;
+        // Every job paper whose reads are in this prompt, and every settled
+        // one without a digest yet (a paper with no text).
+        const evidence = collectPaperEvidence(messages);
+        const itemOf = (target: string) => Number(target.replace(/^item:/, ""));
+        const toDigest = job.targets.filter(
+          (target) =>
+            evidence.has(itemOf(target)) || boundary.digest.includes(target),
+        );
+        const digested: PaperDigest[] = [];
+        let digestShare = 0;
+        if (toDigest.length) {
+          // Handles to the results the restart drops, for the checkpoint and
+          // for each digest.
+          const handles = new Map<string, string>();
+          const handleRecords: AgentToolResultHandleRecord[] = [];
+          for (const message of messages) {
+            if (message.role !== "tool") continue;
+            let content: unknown = message.content;
+            try {
+              content = JSON.parse(message.content);
+            } catch {
+              // A result that is not JSON is stored as written.
+            }
+            const record = createAgentToolResultHandleRecord({
+              conversationKey: request.conversationKey,
+              toolName: message.name,
+              toolCallId: message.tool_call_id,
+              resourceSignature: resourceContextPlan.resourceSignature,
+              content,
+              createdAt: this.now(),
+            });
+            if (!record) continue;
+            handles.set(message.tool_call_id, record.handle);
+            handleRecords.push(record);
+          }
+          // Restart first, without the job's message, so the digests share
+          // and the next page is planned from the prompt the page will
+          // start from, not from the checkpoint's budget.
+          longJobMessage = null;
+          await restartFromSemanticCheckpoint({
+            sourceMessages: messages,
+            handleRecords,
+          });
+          // The job's results take at most half of what the restarted
+          // prompt leaves, so every page keeps the other half to read in.
+          const baseTokens = estimateContextMessagesTokens(messages);
+          digestShare = Math.max(
+            0,
+            Math.min(
+              longJob.costPerPaper(job),
+              Math.floor(
+                (budgetTokens - baseTokens) /
+                  (2 * Math.max(1, job.targets.length)),
+              ),
+            ),
+          );
+          for (const target of toDigest) {
+            const found = evidence.get(itemOf(target));
+            const earlier = longJobDigests.get(target);
+            const excerpts = [
+              ...(earlier?.excerpts || []),
+              ...(found?.excerpts || []).filter(
+                (excerpt) =>
+                  !earlier?.excerpts.some(
+                    (known) =>
+                      known.text === excerpt.text &&
+                      known.section === excerpt.section,
+                  ),
+              ),
+            ];
+            const digest = buildPaperDigest(
+              itemOf(target),
+              {
+                title:
+                  found?.title || earlier?.title || scopePaper(target)?.title,
+                excerpts,
+                noText:
+                  Boolean(found?.noText || earlier?.noText) && !excerpts.length,
+                calls: found?.calls || [],
+              },
+              [
+                ...new Set([
+                  ...(earlier?.handles || []),
+                  ...(found?.calls || []).flatMap((call) => {
+                    const handle = handles.get(call.callId);
+                    return handle ? [handle] : [];
+                  }),
+                ]),
+              ],
+              digestShare,
+            );
+            longJobDigests.set(target, digest);
+            digested.push(digest);
+          }
+        }
+        const results = renderPaperDigests(
+          job.targets.flatMap((target) => {
+            const digest = longJobDigests.get(target);
+            return digest ? [digest] : [];
+          }),
+        );
+        const render = (
+          next: Parameters<typeof renderLongJobMessage>[0]["next"],
+        ) =>
+          renderLongJobMessage({
+            checkpoint: request.executionCheckpoint,
+            partIds: longJob.following,
+            results,
+            next,
+            titleOf: (target) =>
+              scopePaper(target)?.title || longJobDigests.get(target)?.title,
+            noTextReason: OUTCOME_REASONS.noText,
+          });
+        // The page starts from the prompt as it stands plus the job's message.
+        const next = longJob.plan({
+          checkpoint: request.executionCheckpoint,
+          promptTokens: estimateContextMessagesTokens([
+            ...messages,
+            { role: "user", content: render({ complete: true }) },
+          ]),
+          budgetTokens,
+          requests: round,
+        });
+        longJobReadShare = "complete" in next ? 0 : next.readShare;
+        longJobMessage = {
+          role: "user",
+          transient: true,
+          content: render(next),
+        };
+        await emit({
+          type: "provider_event",
+          providerType: "agent_long_job_page",
+          payload:
+            "complete" in next
+              ? {
+                  complete: true,
+                  papers: job.targets.length,
+                  digested: digested.length,
+                }
+              : {
+                  page: next.number,
+                  papers: next.targets.length,
+                  left: next.left,
+                  costPerPaper: next.costPerPaper,
+                  measured: next.measured,
+                  room: next.room,
+                  budgetTokens: next.budgetTokens,
+                  promptTokens: next.promptTokens,
+                  fitBound: next.fitBound,
+                  costBound: next.costBound,
+                  papersPerRequest: next.papersPerRequest,
+                  requestsPerPage: next.requestsPerPage,
+                  readsPerPage: next.readsPerPage,
+                  digested: digested.length,
+                  digestShare,
+                  readShare: next.readShare,
+                },
+        });
+        continuationSession.appendHostMessage(longJobMessage);
+        if (!digested.length) return;
+        // The page's per-paper results outlive the turn: Stop, a restart of
+        // Zotero and "continue" find them in the transcript, and a handle
+        // keeps them readable once older history is compacted.
+        longJobRecords += 1;
+        const recordText = renderLongJobRecord(
+          longJobRecords,
+          renderPaperDigests(digested),
+        );
+        const record = createAgentToolResultHandleRecord({
+          conversationKey: request.conversationKey,
+          toolName: "long_job_results",
+          toolCallId: `${runId}:results-${longJobRecords}`,
+          resourceSignature: resourceContextPlan.resourceSignature,
+          content: {
+            itemIds: digested.map((digest) => digest.itemId),
+            results: recordText,
+          },
+          createdAt: this.now(),
+        });
+        if (record) await persistToolResultHandles([record]);
+        newTranscriptMessages.push({
+          role: "user",
+          retainedTool: {
+            name: "long_job_results",
+            callId: `${runId}:results-${longJobRecords}`,
+            ...(record ? { handle: record.handle } : {}),
+            category: "retrieval",
+          },
+          content: recordText,
+        });
+        await persistTranscriptCheckpoint();
       };
       let round = 0;
       let segment = 1;
@@ -2183,6 +2454,7 @@ export class AgentRuntime {
             return await completeRun(finalText, "failed", stopRule);
           }
           await persistTranscriptCheckpoint();
+          await advanceLongJob();
         }
 
         const newFingerprints = toolExecutionRecords

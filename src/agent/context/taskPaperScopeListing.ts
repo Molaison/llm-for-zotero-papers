@@ -83,6 +83,10 @@ export type TaskPaperScopeSet = {
   itemIds: number[];
   /** How many of them have a PDF to read their text from. */
   withText: number;
+  /** Each paper's title and text hint, for naming a page and sizing it. */
+  papers?: Readonly<
+    Record<number, Readonly<{ title: string; text: TaskPaperScopeTextHint }>>
+  >;
 };
 
 export const TASK_PAPER_SCOPE_WHOLE_LIBRARY_CAP = 2000;
@@ -282,12 +286,20 @@ export function resolveTaskPaperScopeSet(
   const itemIds = wholeLibrary
     ? liveRegularItemIds(snapshot)
     : resolveTaskPaperScopeItemIds(snapshot, contexts);
-  return {
-    wholeLibrary,
-    itemIds,
-    withText: itemIds.filter((itemId) => textHint(snapshot, itemId) === "pdf")
-      .length,
-  };
+  const papers: Record<
+    number,
+    { title: string; text: TaskPaperScopeTextHint }
+  > = {};
+  let withText = 0;
+  for (const itemId of itemIds) {
+    const text = textHint(snapshot, itemId);
+    if (text === "pdf") withText += 1;
+    papers[itemId] = {
+      title: snapshot.itemById.get(itemId)?.title || "",
+      text,
+    };
+  }
+  return { wholeLibrary, itemIds, withText, papers };
 }
 
 /**

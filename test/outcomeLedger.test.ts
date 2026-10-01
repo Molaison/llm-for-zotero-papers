@@ -1933,6 +1933,25 @@ describe("outcome ledger: parts over the turn's paper scope", function () {
     );
   });
 
+  it("a read another part already holds still reaches a part declared after it", function () {
+    // The read completed a part that names no papers before the scope part
+    // was declared; replaying it (a back-fill, or a re-read the cache
+    // answers) ticks the new part, and replaying it again changes nothing.
+    const evidence = textRead(["item:10"], ["obs-1"]);
+    const looked = apply(
+      ledgerWith({ taskId: "look", description: "Look it up", effect: "read" }),
+      evidence,
+    ).checkpoint;
+    const declared = frozen(declareOutcomes(looked, [readScope], 40));
+    const replayed = apply(declared, evidence);
+    assert.isTrue(replayed.changed);
+    assert.deepEqual(find(replayed.checkpoint, "read-all").doneTargets, [
+      "item:10",
+    ]);
+    const again = apply(replayed.checkpoint, evidence);
+    assert.isFalse(again.changed);
+  });
+
   it("a scope-wide write part closes paper by paper from the receipts", function () {
     const note = (id: string, target: string) =>
       receipt({

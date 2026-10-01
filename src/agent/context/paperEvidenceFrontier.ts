@@ -54,6 +54,8 @@ type CachedCall = {
   unavailable: boolean;
   references: PaperEvidenceReference[];
   failOpenContent?: Record<string, unknown>;
+  /** The call whose result this is. */
+  sourceToolCallId: string;
 };
 
 export type PaperEvidenceResult = {
@@ -61,6 +63,8 @@ export type PaperEvidenceResult = {
   frontier: PaperEvidenceProgress["frontier"];
   originalContent?: unknown;
   toolResultHandle?: string;
+  /** For a reused identical call: the call whose result it reuses. */
+  sourceToolCallId?: string;
 };
 
 type ProcessParams = {
@@ -481,6 +485,7 @@ export class PaperEvidenceFrontier {
     this.readsThisTurn += 1;
     if (cached.failOpenContent) {
       return {
+        sourceToolCallId: cached.sourceToolCallId,
         frontier: "advanced",
         content: {
           ...cached.failOpenContent,
@@ -514,6 +519,7 @@ export class PaperEvidenceFrontier {
       readsThisTurn: this.readsThisTurn,
     });
     return {
+      sourceToolCallId: cached.sourceToolCallId,
       frontier,
       content: {
         mode: paperReadMode(params.input),
@@ -666,6 +672,7 @@ export class PaperEvidenceFrontier {
         ...(hasUnidentifiedEvidence
           ? { failOpenContent: processedContent }
           : {}),
+        sourceToolCallId: params.toolCallId,
       },
     );
     return {

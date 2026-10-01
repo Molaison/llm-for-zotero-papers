@@ -938,6 +938,8 @@ export type AgentRuntimeRequestInput = AgentRequest & {
   runtimeContextBudget?: Readonly<{
     contextWindowTokens: number;
     usedContextTokens: number;
+    /** While a long job's page is open: each page paper's share of it. */
+    maxTokensPerPaper?: number;
   }>;
   item?: Zotero.Item | null;
   history?: ChatMessage[];

@@ -18,6 +18,7 @@ import type { AgentPendingReadActivity } from "../src/agent/context/resourceCont
 import type { MaterialRef } from "../src/agent/documents/materialRef";
 import type { AgentToolResultHandleRecord } from "../src/agent/store/toolResultHandles";
 import type { OutcomeEffect } from "../src/agent/execution/types";
+import type { OutcomeEvidence } from "../src/agent/loop/outcomes";
 import type {
   AgentEvent,
   AgentModelCapabilities,
@@ -543,6 +544,77 @@ describe("agent tool execution collaborator", function () {
       assert.isNull(
         harness.finalizedMaterial.value,
         "a read finalizes no material",
+      );
+    } finally {
+      restoreDb();
+    }
+  });
+
+  it("attests a re-read the paper evidence cache answers with its first read's evidence", async function () {
+    const restoreDb = installMockDb();
+    try {
+      const registry = new AgentToolRegistry(createTestActionContractService());
+      registry.register({
+        spec: {
+          name: "paper_read",
+          description: "Read one paper",
+          inputSchema: { type: "object" },
+          executionClass: "read",
+          workCategory: "retrieval",
+        },
+        validate: (args: unknown) => ({ ok: true, value: args as never }),
+        execute: async () => ({
+          mode: "targeted",
+          results: [],
+          papers: [
+            {
+              paperContext: { itemId: 11, contextItemId: 1011, libraryID: 1 },
+              passages: [
+                { text: "Place cells drift.", sectionLabel: "Results" },
+              ],
+            },
+          ],
+        }),
+      } as never);
+      const harness = await createHarness(registry);
+      const recorded: OutcomeEvidence[] = [];
+      harness.deps.recordOutcomeEvidence = async (evidence) => {
+        recorded.push(evidence);
+      };
+      const toolExecution = createToolExecution(harness.deps);
+      const read = (id: string) =>
+        toolExecution.executeToolWorkflow(
+          {
+            id,
+            name: "paper_read",
+            arguments: {
+              mode: "targeted",
+              query: "drift",
+              target: { itemId: 11, contextItemId: 1011, libraryID: 1 },
+            },
+          },
+          1,
+          { modelCallId: id },
+        );
+      await read("read-1");
+      const reread = await read("read-2");
+      assert.equal(
+        (reread.toolResult.content as { cacheStatus?: string }).cacheStatus,
+        "identical_call_reused",
+        "the cache answered the re-read",
+      );
+      const reads = recorded.filter((entry) => entry.kind === "read");
+      assert.lengthOf(reads, 2);
+      assert.deepEqual(reads[0], {
+        kind: "read",
+        targets: ["item:11"],
+        observationIds: (reads[0] as { observationIds: string[] })
+          .observationIds,
+      });
+      assert.deepEqual(
+        reads[1],
+        reads[0],
+        "the re-read attests its papers again",
       );
     } finally {
       restoreDb();

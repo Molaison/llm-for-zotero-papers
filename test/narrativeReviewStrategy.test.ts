@@ -34,6 +34,32 @@ describe("narrative literature-review strategy", function () {
       largeWindow.tokensPerPaper * 4,
     );
   });
+  it("gives a paper read while a long job's page is open no more than its page share", function () {
+    const open = {
+      contextWindowTokens: 128_000,
+      usedContextTokens: 20_000,
+      outputReserveTokens: 16_000,
+    };
+    const alone = resolveAdaptiveReadingBudget({ ...open, paperCount: 1 });
+    const paged = resolveAdaptiveReadingBudget({
+      ...open,
+      paperCount: 1,
+      maxTokensPerPaper: 6_000,
+    });
+    assert.isAbove(alone.tokensPerPaper, 6_000);
+    assert.equal(paged.tokensPerPaper, 6_000);
+    assert.equal(paged.maxCharactersPerPaper, 24_000);
+    const shared = resolveAdaptiveReadingBudget({
+      ...open,
+      paperCount: 30,
+      maxTokensPerPaper: 6_000,
+    });
+    assert.isBelow(
+      shared.tokensPerPaper,
+      6_000,
+      "a smaller capacity share still wins",
+    );
+  });
   it("binds durable evidence to citations by paper identity without model-visible IDs", function () {
     const clusters = bindCitationEvidenceRefs(
       [

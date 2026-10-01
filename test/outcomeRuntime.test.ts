@@ -7,6 +7,14 @@ import { createTaskUpdateTool } from "../src/agent/tools/control/taskUpdate";
 import { createNoteWriteTool } from "../src/agent/tools/write/noteWrite";
 import { OUTCOME_REASONS } from "../src/agent/loop/outcomes";
 import { ExecutionCheckpointFold } from "../src/agent/execution/checkpointEvents";
+import { estimateContextMessagesTokens } from "../src/utils/modelInputCap";
+import {
+  loadAgentTranscriptSegment,
+  PORTABLE_TRANSCRIPT_KEY,
+} from "../src/agent/store/transcriptStore";
+
+const estimatePrompt = (messages: AgentModelMessage[]) =>
+  estimateContextMessagesTokens(messages);
 import type { TaskPaperScopeSet } from "../src/agent/context/taskPaperScopeListing";
 import { createTestActionContractService } from "./helpers/actionContractService";
 import {
@@ -245,11 +253,8 @@ async function runTurn(params: {
   scope?: TaskPaperScopeSet;
   /** Counts each time the host resolves the scope. */
   onResolveScope?: () => void;
-  /** Contexts the user attached to the question. */
-  attached?: Pick<
-    AgentRuntimeRequestInput,
-    "selectedPaperContexts" | "selectedCollectionContexts"
-  >;
+  /** Contexts the user attached to the question, and other request fields. */
+  attached?: Partial<AgentRuntimeRequestInput>;
 }): Promise<Turn> {
   const events: AgentEvent[] = [];
   const prompts: AgentModelMessage[][] = [];
@@ -277,7 +282,8 @@ async function runTurn(params: {
         request = resolved;
         if (requests === 0 && resolved.executionCheckpoint)
           initialCheckpoint = structuredClone(resolved.executionCheckpoint);
-        prompts.push(stepParams.messages);
+        // The session restarts and appends in place: keep each step's view.
+        prompts.push([...stepParams.messages]);
         const step = params.steps[requests];
         requests += 1;
         if (!step)
@@ -993,6 +999,27 @@ describe("parts over the turn's paper scope in runtime turns", function () {
     );
   });
 
+  it("a part declared after its papers were read takes those reads", async function () {
+    const turn = await runTurn({
+      conversationKey,
+      userText: "Read every paper in my library",
+      scope: scope([101, 102], 2),
+      steps: [
+        stepOf(read("read-101", 101)),
+        stepOf(declare("declare-1", [readAll]), read("read-102", 102)),
+        finalStep("Both papers are read."),
+      ],
+    });
+    assert.deepEqual(
+      outcome(checkpoints(turn)[0], "read-all").doneTargets,
+      ["item:101"],
+      "the read before the declaration ticks its paper at once",
+    );
+    const ledger = settled(turn);
+    assert.equal(outcome(ledger, "read-all").status, "completed");
+    assert.deepEqual(ledger.end, { state: "completed" });
+  });
+
   it("an abstract-depth read alone leaves the part open and the answer is corrected once", async function () {
     const turn = await runTurn({
       conversationKey,
@@ -1049,5 +1076,308 @@ describe("parts over the turn's paper scope in runtime turns", function () {
     assert.deepEqual(task.targets, ["item:101", "item:102"]);
     assert.equal(task.status, "completed");
     assert.deepEqual(after.end, { state: "completed" });
+  });
+});
+
+describe("long jobs in runtime turns", function () {
+  let environment: DirectJourneyEnvironment;
+  let conversationKey = 995_000;
+  const PAPERS = Array.from({ length: 30 }, (_, index) => 2001 + index);
+  const READ_ALL = "Read each paper in Drift";
+
+  /** A paper's read: its finding first, sized like its text. */
+  function paperText(itemId: number): string {
+    const size = itemId <= 2010 ? 4_000 : 10_000;
+    const text = `Finding ${itemId}: drift was measured in this paper. `;
+    return text + "Representational drift details. ".repeat(size / 31);
+  }
+
+  beforeEach(async function () {
+    environment = await installDirectJourneyEnvironment();
+    libraryUpdateReceipt = undefined;
+    conversationKey += 10;
+    scriptedPaperRead = (input) => {
+      const itemId = Number((input.target as { itemId?: number })?.itemId);
+      return {
+        mode: "targeted",
+        results: [],
+        papers: [
+          {
+            paperContext: {
+              itemId,
+              contextItemId: itemId + 1000,
+              libraryID: 1,
+            },
+            passages: [
+              {
+                text: paperText(itemId),
+                sectionLabel: "Results",
+                pageLabel: "3",
+              },
+            ],
+          },
+        ],
+      };
+    };
+  });
+
+  afterEach(function () {
+    environment.restore();
+    scriptedPaperRead = undefined;
+  });
+
+  /** The model: declare the part, then read each page the host names. */
+  function pagedModel(): ScriptStep {
+    let declared = false;
+    const asked = new Set<number>();
+    return (messages: AgentModelMessage[]) => {
+      if (!declared) {
+        declared = true;
+        return stepOf(
+          declare("declare-1", [
+            {
+              taskId: "read-all",
+              description: READ_ALL,
+              expectedEffect: "read",
+              scope: true,
+            },
+          ]),
+        );
+      }
+      const host = [...messages]
+        .reverse()
+        .map((message) => promptText([message]))
+        .find((text) => text.startsWith("Long job"));
+      if (!host || host.startsWith("Long job complete"))
+        return finalStep("Every paper is summarized from its results.");
+      const page = [...host.matchAll(/^- itemId=(\d+)/gm)]
+        .map((match) => Number(match[1]))
+        .filter((itemId) => !asked.has(itemId))
+        .slice(0, 8);
+      for (const itemId of page) asked.add(itemId);
+      return stepOf(
+        ...page.map((itemId) => ({
+          id: `read-${itemId}`,
+          name: "paper_read",
+          arguments: {
+            target: { itemId, contextItemId: itemId + 1000, libraryID: 1 },
+          },
+        })),
+      );
+    };
+  }
+
+  function pageEvents(turn: Turn): Record<string, unknown>[] {
+    return turn.events.flatMap((event) =>
+      event.type === "provider_event" &&
+      event.providerType === "agent_long_job_page"
+        ? [event.payload || {}]
+        : [],
+    );
+  }
+
+  /** What the model was sent at the first request of page `number`. */
+  function pageStart(turn: Turn, number: number): AgentModelMessage[] {
+    const start = turn.prompts.find((messages) =>
+      promptText(messages).includes(`Page ${number}:`),
+    );
+    assert.exists(start, `page ${number} was sent`);
+    return start!;
+  }
+
+  it("pages a 30-paper job in pages sized from the measured cost, and answers from every paper's digest", async function () {
+    const model = pagedModel();
+    const turn = await runTurn({
+      conversationKey,
+      userText: "Read every paper in Drift and summarize each",
+      scope: {
+        wholeLibrary: false,
+        itemIds: PAPERS,
+        withText: PAPERS.length,
+        papers: Object.fromEntries(
+          PAPERS.map((itemId) => [
+            itemId,
+            { title: `Paper ${itemId}`, text: "pdf" as const },
+          ]),
+        ),
+      },
+      attached: {
+        selectedCollectionContexts: [
+          { collectionId: 9, name: "Drift", libraryID: 1 },
+        ],
+        advanced: { inputTokenCap: 30_000 },
+      },
+      steps: Array.from({ length: 40 }, () => model),
+    });
+
+    assert.equal(turn.outcome?.kind, "completed", String(turn.error || ""));
+    const ledger = settled(turn);
+    const part = outcome(ledger, "read-all");
+    assert.equal(part.status, "completed");
+    assert.lengthOf(part.doneTargets!, 30);
+
+    const pages = pageEvents(turn);
+    const sized = pages.filter((page) => typeof page.page === "number");
+    assert.isAtLeast(sized.length, 3, JSON.stringify(pages));
+    assert.deepEqual(pages[pages.length - 1], {
+      complete: true,
+      papers: 30,
+      digested: (pages[pages.length - 1] as { digested: number }).digested,
+    });
+    // The first page is sized from the priors, the rest from what the
+    // papers measurably cost and how the model read them. Every page holds
+    // the smaller of what the room allows and what keeps the job's input
+    // least, and is planned from the prompt it starts from.
+    assert.include(sized[0], {
+      page: 1,
+      left: 30,
+      measured: false,
+      costPerPaper: 12_000,
+      papersPerRequest: 3,
+      requestsPerPage: 1,
+    });
+    for (const page of sized) {
+      const room = page.room as number;
+      const cost = page.costPerPaper as number;
+      const R = page.promptTokens as number;
+      assert.equal(page.fitBound, Math.floor(room / cost) - 1);
+      // Whole requests of m papers, r* = sqrt(2·o·R / (m·c)) of them.
+      const m = page.papersPerRequest as number;
+      const r = page.readsPerPage as number;
+      const best = Math.sqrt(
+        (2 * (page.requestsPerPage as number) * R) / (m * cost),
+      );
+      assert.isAtMost(Math.abs(r - Math.max(1, best)), 0.51);
+      assert.isAtMost(
+        Math.abs((page.costBound as number) - Math.max(1, m * r)),
+        0.51 + 0.01 * r,
+      );
+      assert.equal(
+        page.papers,
+        Math.min(
+          page.left as number,
+          Math.max(
+            1,
+            Math.min(page.fitBound as number, page.costBound as number),
+          ),
+        ),
+        JSON.stringify(page),
+      );
+      assert.isBelow(R, page.budgetTokens as number);
+      const sent = estimatePrompt(pageStart(turn, page.page as number));
+      assert.isAtMost(
+        Math.abs(sent - R),
+        200,
+        `page ${page.page} is planned from the prompt it starts from: ${sent} vs ${R}`,
+      );
+    }
+    assert.isTrue(
+      sized.some((page) => page.papers === page.fitBound),
+      "on this small window the room decides some pages",
+    );
+    const measuredCosts = sized
+      .filter((page) => page.measured)
+      .map((page) => page.costPerPaper as number);
+    assert.isAtLeast(measuredCosts.length, 2);
+    assert.isAbove(
+      Math.max(...measuredCosts),
+      Math.min(...measuredCosts),
+      "the larger papers raise the measured cost, and the pages shrink",
+    );
+
+    // The context stays bounded: what the model saw at the start of the
+    // third page differs from the first by no more than the digests.
+    const first = estimatePrompt(pageStart(turn, 1));
+    const third = estimatePrompt(pageStart(turn, 3));
+    const digests = 30 * (sized[2].digestShare as number);
+    assert.isBelow(third, 20_250);
+    assert.isAtMost(
+      Math.abs(third - first),
+      digests + 2_400,
+      "no more than the digests (at most half the room) and one checkpoint",
+    );
+
+    // The final step sees every paper's digest, with its id and anchors.
+    const finalPrompt = promptText(turn.prompts[turn.prompts.length - 1]);
+    assert.include(finalPrompt, "Long job complete");
+    for (const itemId of PAPERS) {
+      assert.include(finalPrompt, `itemId=${itemId}`);
+      assert.include(finalPrompt, `Finding ${itemId}`);
+    }
+    assert.include(finalPrompt, "Results, p. 3");
+
+    // Each page's results are persisted with the transcript, each batch
+    // with a handle: they outlive the turn, as after Stop or a restart.
+    const stored = await loadAgentTranscriptSegment({
+      conversationKey,
+      compatibilityKey: PORTABLE_TRANSCRIPT_KEY,
+    });
+    const records = stored.messages.filter(
+      (message) =>
+        message.role === "user" &&
+        message.retainedTool?.name === "long_job_results",
+    );
+    assert.isAtLeast(records.length, sized.length - 1);
+    const recorded = records.map((message) => promptText([message])).join("\n");
+    for (const itemId of PAPERS) {
+      assert.include(recorded, `itemId=${itemId}`);
+      assert.include(recorded, `Finding ${itemId}`);
+    }
+    const handles = records.map(
+      (message) =>
+        (message as { retainedTool?: { handle?: string } }).retainedTool
+          ?.handle,
+    );
+    assert.isTrue(handles.every(Boolean), "every batch keeps a handle");
+    // The next question sees each batch inline, or by its handle once the
+    // older history is compacted.
+    const next = await runTurn({
+      conversationKey,
+      userText: "Which paper measured drift first?",
+      steps: [finalStep("Paper 2001 did.")],
+    });
+    const history = promptText(next.prompts[0]);
+    for (const [index, handle] of handles.entries()) {
+      assert.isTrue(
+        history.includes(handle!) ||
+          history.includes(`for this job, batch ${index + 1} `),
+        `batch ${index + 1}`,
+      );
+    }
+  });
+
+  it("leaves a job that fits one pass to the model, with no host page", async function () {
+    const turn = await runTurn({
+      conversationKey,
+      userText: "Read these papers",
+      scope: {
+        wholeLibrary: false,
+        itemIds: PAPERS.slice(0, 2),
+        withText: 2,
+      },
+      steps: [
+        stepOf(
+          declare("declare-1", [
+            {
+              taskId: "read-all",
+              description: READ_ALL,
+              expectedEffect: "read",
+              scope: true,
+            },
+          ]),
+          ...PAPERS.slice(0, 2).map((itemId) => ({
+            id: `read-${itemId}`,
+            name: "paper_read",
+            arguments: {
+              target: { itemId, contextItemId: itemId + 1000, libraryID: 1 },
+            },
+          })),
+        ),
+        finalStep("Both papers are read."),
+      ],
+    });
+    assert.deepEqual(pageEvents(turn), []);
+    assert.notInclude(promptText(turn.prompts[1]), "Long job");
+    assert.deepEqual(settled(turn).end, { state: "completed" });
   });
 });

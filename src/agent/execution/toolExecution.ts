@@ -282,6 +282,10 @@ async function outcomeEvidenceOf(params: {
  * three closures inside `runTurn`; the state they shared is now `deps`.
  */
 export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
+  // The read evidence of each call this turn, so a re-read the paper
+  // evidence cache answers attests its papers again (a part declared since
+  // the first read still takes them).
+  const readEvidenceByCall = new Map<string, OutcomeEvidence>();
   /**
    * Stores a result the model reads only part of under a trh_ handle that
    * context_read pages for the rest of the conversation. Undefined when no
@@ -735,7 +739,16 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
         paperLedgerDelta,
         observationIds: attestedObservationIds,
       });
-      for (const entry of evidence) await deps.recordOutcomeEvidence(entry);
+      const source = cachedPaperEvidence?.sourceToolCallId
+        ? readEvidenceByCall.get(cachedPaperEvidence.sourceToolCallId)
+        : undefined;
+      if (source) evidence.push(source);
+      for (const entry of evidence) {
+        if (entry.kind === "read" && !cachedPaperEvidence) {
+          readEvidenceByCall.set(toolResult.callId, entry);
+        }
+        await deps.recordOutcomeEvidence(entry);
+      }
     }
     deps.actionContractSession.recordToolReceipts(toolResult.actionReceipts);
     return executedCall;
