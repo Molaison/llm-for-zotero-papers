@@ -413,6 +413,20 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
     }
     const { toolResult } = executedCall;
     let readActivityContent = toolResult.content;
+    // A submitted document may include only assets a successful call of this
+    // turn emitted, such as a figure crop paper_read returned.
+    if (toolResult.ok && toolResult.artifacts?.length) {
+      const artifactsByPath = new Map(
+        (deps.request.documentArtifactObservations || []).map((artifact) => [
+          artifact.storedPath,
+          artifact,
+        ]),
+      );
+      for (const artifact of toolResult.artifacts) {
+        artifactsByPath.set(artifact.storedPath, artifact);
+      }
+      deps.request.documentArtifactObservations = [...artifactsByPath.values()];
+    }
     // Recorded at attestation, from the original content (the paper
     // frontier may replace it with a handle below), and emitted right after
     // this call's tool_result.

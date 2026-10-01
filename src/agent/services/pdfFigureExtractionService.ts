@@ -42,6 +42,11 @@ type FigureExtractionParams = {
   selection?: PdfFigureSelection;
   context: AgentToolContext;
   paperContexts: NonNullable<PdfTarget["paperContext"]>[];
+  /**
+   * Host-only. Plain chat sends figure crops as images and never publishes a
+   * document, so it skips the source-PDF hash that document assets need.
+   */
+  documentAssets?: false;
 };
 
 type FigureCropPageService = PdfPageService & {
@@ -570,6 +575,28 @@ export class PdfFigureExtractionService {
     const warnings: string[] = [];
     const expectedFigures: ExpectedPdfFigure[] = [];
     const missingFigures: ExpectedPdfFigure[] = [];
+    // A document asset names its source PDF by content, so each attachment's
+    // PDF is read and hashed once in this call; nothing outlives the call.
+    const sourcePdfDigests = new Map<number, Promise<string>>();
+    const sourcePdfDigest = (attachmentId: number): Promise<string> => {
+      let digest = sourcePdfDigests.get(attachmentId);
+      if (!digest) {
+        digest = (async () => {
+          const sourcePath =
+            await Zotero.Items.get(attachmentId)?.getFilePathAsync();
+          if (!sourcePath)
+            throw new Error("The figure source PDF is unavailable");
+          const io = (
+            globalThis as unknown as {
+              IOUtils: { read: (path: string) => Promise<Uint8Array> };
+            }
+          ).IOUtils;
+          return `sha256:${await sha256Bytes(await io.read(sourcePath))}`;
+        })();
+        sourcePdfDigests.set(attachmentId, digest);
+      }
+      return digest;
+    };
 
     for (const paperContext of params.paperContexts) {
       const attachmentId = Math.floor(Number(paperContext.contextItemId || 0));
@@ -589,30 +616,31 @@ export class PdfFigureExtractionService {
         : null;
       const manifestHash = buildPdfFigureCropManifestHash(manifest);
       const pdfFingerprint = buildPdfFigureCropPdfFingerprint(paperContext);
+      // Every figure carries the asset a submitted document needs. When the
+      // asset cannot be described, the figure stays readable without one.
       const recordFigures = async (rows: ExtractedPdfFigure[]) => {
         let sourceFingerprint = pdfFingerprint;
-        const needsDocumentAssets =
-          params.context.authorization?.kind === "external_runtime";
-        if (needsDocumentAssets && rows.length) {
-          const attachment = Zotero.Items.get(attachmentId);
-          const sourcePath = await attachment?.getFilePathAsync();
-          if (!sourcePath)
-            throw new Error("The figure source PDF is unavailable");
-          const io = (
-            globalThis as unknown as {
-              IOUtils: { read: (path: string) => Promise<Uint8Array> };
+        let documentAssets: PlanDocumentAsset[] = [];
+        if (rows.length && params.documentAssets !== false) {
+          try {
+            const digest = await sourcePdfDigest(attachmentId);
+            for (const figure of rows) {
+              documentAssets.push(
+                await describeDocumentFigure(figure, paperContext, digest),
+              );
             }
-          ).IOUtils;
-          sourceFingerprint = `sha256:${await sha256Bytes(await io.read(sourcePath))}`;
+            sourceFingerprint = digest;
+          } catch (error) {
+            documentAssets = [];
+            warnings.push(
+              `Figures from ${paperContext.title || "this paper"} have no documentAsset, so submit_document cannot include them: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+          }
         }
-        for (const figure of rows) {
-          const documentAsset = needsDocumentAssets
-            ? await describeDocumentFigure(
-                figure,
-                paperContext,
-                sourceFingerprint,
-              )
-            : undefined;
+        for (const [index, figure] of rows.entries()) {
+          const documentAsset = documentAssets[index];
           figures.push({
             ...figure,
             paperContext,

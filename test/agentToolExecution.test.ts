@@ -26,7 +26,18 @@ import type {
   ExecutionCheckpoint,
   ExecutionTaskStatus,
 } from "../src/agent/types";
-import { installMockDb } from "./helpers/agentRuntimeMockDb";
+import { createSubmitDocumentTool } from "../src/agent/tools/control/submitDocument";
+import {
+  initPlanDocumentStore,
+  loadPlanDocument,
+} from "../src/agent/documents/store";
+import type { PlanDocumentAsset } from "../src/agent/documents/types";
+import { sha256Bytes } from "../src/agent/store/journalRecoveryBlobStore";
+import type { ZoteroGateway } from "../src/agent/services/zoteroGateway";
+import {
+  installAgentStoreSqlite,
+  installMockDb,
+} from "./helpers/agentRuntimeMockDb";
 import { createTestActionContractService } from "./helpers/actionContractService";
 
 const CAPABILITIES: AgentModelCapabilities = {
@@ -103,6 +114,182 @@ function registerDocumentTool(registry: AgentToolRegistry): void {
       providerTranscript: "tool_only",
     }),
   } as never);
+}
+
+/** A 1x1 PNG: the bytes of a host-cropped figure. */
+const CROP_BYTES = Uint8Array.from(
+  Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a/aYAAAAASUVORK5CYII=",
+    "base64",
+  ),
+);
+const CROP_PATH = "/tmp/figure-crops/figure-1-p2.png";
+const FIGURE_CAPTION = "Figure 1. Assemblies drift across days.";
+
+/**
+ * The paper and its PDF as Zotero knows them, and the files a figure document
+ * reads (the crop) and writes (its durable asset copy).
+ */
+function installFigureLibrary(): {
+  files: Map<string, Uint8Array>;
+} & (() => void) {
+  const zotero = (globalThis as unknown as { Zotero: Record<string, unknown> })
+    .Zotero;
+  const items = new Map<number, Record<string, unknown>>([
+    [11, { id: 11, key: "PAPER001", libraryID: 1 }],
+    [22, { id: 22, key: "PDF00001", libraryID: 1, parentID: 11 }],
+  ]);
+  zotero.Items = { get: (id: number) => items.get(id) || null };
+  zotero.DataDirectory = { dir: "/tmp/zotero-data" };
+  const globalScope = globalThis as unknown as { IOUtils?: unknown };
+  const originalIOUtils = globalScope.IOUtils;
+  const files = new Map<string, Uint8Array>([[CROP_PATH, CROP_BYTES]]);
+  globalScope.IOUtils = {
+    read: async (path: string) => {
+      const bytes = files.get(path);
+      if (!bytes) throw new Error(`missing ${path}`);
+      return bytes;
+    },
+    write: async (path: string, bytes: Uint8Array) => {
+      files.set(path, new Uint8Array(bytes));
+    },
+    makeDirectory: async () => undefined,
+  };
+  const restore = () => {
+    if (originalIOUtils === undefined) delete globalScope.IOUtils;
+    else globalScope.IOUtils = originalIOUtils;
+  };
+  return Object.assign(restore, { files });
+}
+
+/**
+ * An ordinary in-plugin turn that has read one figure, with the real
+ * submit_document registered. paper_read answers in the shape the figure
+ * extraction service returns: the crop row with the asset a document may
+ * carry, and the artifact the host records for it.
+ */
+async function startFigureTurn() {
+  const restoreDb = installMockDb();
+  const restoreDocuments = installAgentStoreSqlite();
+  const library = installFigureLibrary();
+  const restore = () => {
+    library();
+    restoreDocuments();
+    restoreDb();
+  };
+  try {
+    await initPlanDocumentStore();
+    const contentHash = `sha256:${await sha256Bytes(CROP_BYTES)}`;
+    const sourceFingerprint = `sha256:${"b".repeat(64)}`;
+    const asset: PlanDocumentAsset = {
+      assetId: "PDF00001-figure-1-p2",
+      contentHash,
+      mimeType: "image/png",
+      byteLength: CROP_BYTES.byteLength,
+      width: 1,
+      height: 1,
+      caption: FIGURE_CAPTION,
+      durablePath: CROP_PATH,
+      provenance: {
+        origin: "extracted",
+        libraryID: 1,
+        itemKey: "PAPER001",
+        attachmentItemKey: "PDF00001",
+        sourceFingerprint,
+        pageIndex: 1,
+        extractionToolVersion: "pdf-figure-crop:test",
+      },
+    };
+    const registry = new AgentToolRegistry(createTestActionContractService());
+    registry.register({
+      spec: {
+        name: "paper_read",
+        description: "read a paper",
+        inputSchema: { type: "object" },
+        executionClass: "read",
+        workCategory: "retrieval",
+      },
+      validate: (args: unknown) => ({ ok: true, value: args as never }),
+      execute: async () => ({
+        content: {
+          mode: "figures",
+          status: "ok",
+          figures: [
+            {
+              label: "Figure 1",
+              cropPath: CROP_PATH,
+              captionText: FIGURE_CAPTION,
+              pageIndex: 1,
+              sourceFingerprint,
+              paperContext: { itemId: 11, contextItemId: 22 },
+              documentAsset: asset,
+            },
+          ],
+        },
+        artifacts: [
+          {
+            kind: "image",
+            mimeType: "image/png",
+            storedPath: CROP_PATH,
+            contentHash,
+            title: "Figure 1",
+            pageIndex: 1,
+            pageLabel: "2",
+          },
+        ],
+      }),
+    } as never);
+    // A document without citations formats none.
+    registry.register(
+      createSubmitDocumentTool({
+        formatStructuredCitations: () => ({
+          styleId: "apa",
+          styleTitle: "APA",
+          locale: "en-US",
+          clusters: [],
+          bibliographyEntries: [],
+        }),
+      } as unknown as ZoteroGateway),
+    );
+    const harness = await createHarness(registry);
+    const toolExecution = createToolExecution(harness.deps);
+    await toolExecution.executeToolWorkflow(
+      {
+        id: "call-figure",
+        name: "paper_read",
+        arguments: {
+          mode: "figures",
+          target: { itemId: 11, contextItemId: 22 },
+        },
+      },
+      1,
+      { modelCallId: "call-figure" },
+    );
+    const submit = (assets: PlanDocumentAsset[]) =>
+      toolExecution.executeToolWorkflow(
+        {
+          id: "call-submit",
+          name: "submit_document",
+          arguments: {
+            documentKind: "report",
+            integrityPolicy: "authored",
+            title: "Drift figure",
+            markdown: "# Drift figure\n\nThe figure shows the drift.",
+            citations: [],
+            quotes: [],
+            assets,
+            groundingReviewed: "passed",
+            groundingIssues: [],
+          },
+        },
+        2,
+        { modelCallId: "call-submit" },
+      );
+    return { asset, harness, files: library.files, submit, restore };
+  } catch (error) {
+    restore();
+    throw error;
+  }
 }
 
 /** An ordinary-turn checkpoint holding one declared part per entry. */
@@ -655,6 +842,73 @@ describe("agent tool execution collaborator", function () {
       );
     } finally {
       restoreDb();
+    }
+  });
+
+  it("lets an ordinary turn's document include a figure its own figure read returned", async function () {
+    const turn = await startFigureTurn();
+    try {
+      assert.deepEqual(
+        (turn.harness.request.documentArtifactObservations || []).map(
+          (artifact) => [artifact.storedPath, artifact.contentHash],
+        ),
+        [[CROP_PATH, turn.asset.contentHash]],
+        "the turn records the figure read's artifact",
+      );
+
+      const submitted = await turn.submit([turn.asset]);
+
+      assert.isTrue(
+        submitted.toolResult.ok,
+        JSON.stringify(submitted.toolResult.content),
+      );
+      const { documentId } = submitted.toolResult.content as {
+        documentId: string;
+      };
+      const published = (await loadPlanDocument(documentId))?.assets || [];
+      assert.lengthOf(published, 1, "the published document has the figure");
+      assert.include(published[0], {
+        assetId: turn.asset.assetId,
+        caption: FIGURE_CAPTION,
+        contentHash: turn.asset.contentHash,
+      });
+      assert.notEqual(
+        published[0].durablePath,
+        CROP_PATH,
+        "the document keeps its own copy of the crop",
+      );
+      assert.deepEqual(turn.files.get(published[0].durablePath), CROP_BYTES);
+    } finally {
+      turn.restore();
+    }
+  });
+
+  it("still refuses a document asset no tool call emitted", async function () {
+    const turn = await startFigureTurn();
+    try {
+      // A crop on disk that no call in this turn returned.
+      const unrecordedPath = "/tmp/figure-crops/figure-2-p4.png";
+      turn.files.set(unrecordedPath, CROP_BYTES);
+
+      const refused = await turn.submit([
+        {
+          ...turn.asset,
+          assetId: "PDF00001-figure-2-p4",
+          durablePath: unrecordedPath,
+        },
+      ]);
+
+      assert.isFalse(refused.toolResult.ok);
+      assert.deepEqual(refused.toolResult.content, {
+        error:
+          "Document asset PDF00001-figure-2-p4 was not emitted by a successful host tool call",
+      });
+      assert.isNull(
+        turn.harness.finalizedMaterial.value,
+        "nothing is published",
+      );
+    } finally {
+      turn.restore();
     }
   });
 });
