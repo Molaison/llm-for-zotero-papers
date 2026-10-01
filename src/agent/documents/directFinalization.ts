@@ -18,7 +18,6 @@ import type {
   PlanDocumentOutboxRecord,
   SubmitPlanDocumentInput,
 } from "./types";
-import { rejectMaterialOutputId } from "./workflowMaterial";
 import { ToolInputRejection } from "../tools/execution/failure";
 import { normalizeNoteSourceText } from "../../services/notes/noteRendering";
 
@@ -197,7 +196,6 @@ export class DirectDocumentFinalizer {
     now?: number;
   }): Promise<{ document: PlanDocument; outbox: PlanDocumentOutboxRecord }> {
     const configuredPolicy = params.request.documentOutcomePolicy;
-    rejectMaterialOutputId(params.input.materialOutputId);
     const policy: DocumentOutcomePolicy = configuredPolicy?.required
       ? configuredPolicy
       : {

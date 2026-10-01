@@ -259,7 +259,6 @@ export type PlanDocumentOutboxRecord = Readonly<{
 }>;
 
 export type SubmitPlanDocumentInput = Readonly<{
-  materialOutputId?: string;
   /** The document's shape. */
   documentKind?: DocumentSpec["kind"];
   /** Use research_grounded when claims depend on retrieved literature evidence. */

@@ -80,16 +80,6 @@ export async function loadMaterialRef(
   }
   return document;
 }
-/**
- * A submission may not name a workflow material output: those came from the
- * classifier-era intent, and no turn has one now.
- */
-export function rejectMaterialOutputId(outputId?: string): void {
-  if (outputId)
-    throw new Error(
-      "No authored output with that identity was requested; omit materialOutputId to submit the final document.",
-    );
-}
 
 /** Binds a save proposal to the material receipt and the frozen native parent. */
 export async function resolveWorkflowNoteDocument(

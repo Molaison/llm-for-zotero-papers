@@ -240,10 +240,6 @@ function validateSubmitPlanDocument(
       return fail("integrityPolicy is not supported");
     }
     return ok({
-      materialOutputId:
-        args.materialOutputId === undefined
-          ? undefined
-          : requiredString(args.materialOutputId, "materialOutputId"),
       documentKind:
         args.documentKind as SubmitPlanDocumentInput["documentKind"],
       integrityPolicy:
@@ -271,7 +267,7 @@ export function createSubmitDocumentTool(
     spec: {
       name: "submit_document",
       description:
-        "Finalize the required Agent document. Use internal [[cite:C1]] tokens in Markdown and provide Zotero item mappings; research-grounded documents also require the host-issued evidence IDs returned by read tools. This tool validates and persists the exact authored content. A workflow material output remains available for dependent save actions; a final document becomes the visible answer.",
+        "Finalize the required Agent document. Use internal [[cite:C1]] tokens in Markdown and provide Zotero item mappings; research-grounded documents also require the host-issued evidence IDs returned by read tools. This tool validates and persists the exact authored content, which becomes the visible answer.",
       inputSchema: {
         type: "object",
         additionalProperties: false,
@@ -285,11 +281,6 @@ export function createSubmitDocumentTool(
           "groundingIssues",
         ],
         properties: {
-          materialOutputId: {
-            type: "string",
-            description:
-              "Only for an intermediate authored output listed in the frozen workflow's materialOutputs and used by later actions. Omit this field when publishing the final document in chat.",
-          },
           documentKind: {
             type: "string",
             enum: [
@@ -481,7 +472,7 @@ export function createSubmitDocumentTool(
     guidance: {
       matches: (request) => request.documentOutcomePolicy?.required === true,
       instruction:
-        "This turn requires durable authored content. For workflow material, first verify its prerequisite actions and read its source papers, then call submit_document with materialOutputId. Save the returned documentId through the authorized action without reconstructing its content. For a final document, finish the requested work and call submit_document once. Write complete Markdown with natural headings. Put [[cite:C1]] tokens at supported claims; citations are required for a literature review and optional for other authored documents. Identify each citation source by libraryID and itemKey; the host binds its durable research evidence, so omit evidenceRefs unless a strict quote or page locator requires a specific record. Record grounding concerns in groundingIssues. The host replaces any draft References section with a Zotero CSL bibliography. Never place internal citation tokens outside this terminal submission.",
+        "This turn requires durable authored content. Finish the requested work and call submit_document once; to save the document, pass its returned documentId to the save tool instead of reconstructing its content. Write complete Markdown with natural headings. Put [[cite:C1]] tokens at supported claims; citations are required for a literature review and optional for other authored documents. Identify each citation source by libraryID and itemKey; the host binds its durable research evidence, so omit evidenceRefs unless a strict quote or page locator requires a specific record. Record grounding concerns in groundingIssues. The host replaces any draft References section with a Zotero CSL bibliography. Never place internal citation tokens outside this terminal submission.",
     },
     validate: validateSubmitPlanDocument,
     planInvocation: () =>

@@ -1,7 +1,7 @@
 import { assert } from "chai";
 import { createLibrarySearchTool } from "../src/agent/tools/read/librarySearch";
 import { createLibraryReadTool } from "../src/agent/tools/read/libraryRead";
-import { rejectMaterialOutputId } from "../src/agent/documents/workflowMaterial";
+import { createSubmitDocumentTool } from "../src/agent/tools/control/submitDocument";
 import { createFileIOTool } from "../src/agent/tools/write/fileIO";
 import type { AgentToolContext } from "../src/agent/types";
 import { createMalformedToolArgumentsDiagnostic } from "../src/agent/toolArgumentDiagnostics";
@@ -156,7 +156,7 @@ describe("tool validation compatibility", function () {
     }
   });
 
-  it("points a rejected tags section and a stray materialOutputId at what works", function () {
+  it("points a rejected tags section at what works and ignores a stray materialOutputId", function () {
     const read = createLibraryReadTool({} as never);
     const tags = read.validate({ itemIds: [1], sections: ["tags"] });
     assert.isFalse(tags.ok);
@@ -166,11 +166,30 @@ describe("tool validation compatibility", function () {
     const other = read.validate({ itemIds: [1], sections: ["bogus"] });
     assert.isFalse(other.ok);
     if (!other.ok) assert.notInclude(other.error, "include:['tags']");
-    assert.throws(
-      () => rejectMaterialOutputId("review-draft"),
-      /omit materialOutputId to submit the final document/,
+    // Workflow material outputs are gone: the schema no longer offers the
+    // field, and a stale call that still sends it submits the final document.
+    const submit = createSubmitDocumentTool({} as never);
+    assert.notProperty(
+      (submit.spec.inputSchema as { properties: object }).properties,
+      "materialOutputId",
     );
-    assert.doesNotThrow(() => rejectMaterialOutputId(undefined));
+    const parsed = submit.validate({
+      materialOutputId: "review-draft",
+      title: "Review",
+      markdown: "# Review\n\nText.",
+      citations: [],
+      quotes: [],
+      assets: [],
+      groundingReviewed: "passed",
+      groundingIssues: [],
+    });
+    assert.isTrue(parsed.ok, parsed.ok ? "" : parsed.error);
+    if (parsed.ok) assert.notProperty(parsed.value, "materialOutputId");
+    assert.notInclude(
+      submit.guidance?.instruction || "",
+      "materialOutputId",
+      "the guidance does not describe the removed field",
+    );
   });
 
   it("normalizes file_io canonical and deprecated alias shapes", async function () {
