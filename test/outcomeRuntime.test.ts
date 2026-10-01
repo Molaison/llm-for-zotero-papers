@@ -26,7 +26,6 @@ import type {
   AgentToolCall,
   ExecutionCheckpoint,
   ExecutionCheckpointTask,
-  PlanRuntimeContext,
 } from "../src/agent/types";
 
 /**
@@ -233,7 +232,6 @@ async function runTurn(params: {
   steps: ScriptStep[];
   approve?: boolean;
   signal?: AbortSignal;
-  planContext?: PlanRuntimeContext;
 }): Promise<Turn> {
   const events: AgentEvent[] = [];
   const prompts: AgentModelMessage[][] = [];
@@ -278,7 +276,6 @@ async function runTurn(params: {
         apiKey: "test",
         apiBase: "https://example.invalid",
         metadata: { sourceMessageTimestamp: timestamp },
-        ...(params.planContext ? { planContext: params.planContext } : {}),
       },
       signal: params.signal,
       onEvent: (event) => {

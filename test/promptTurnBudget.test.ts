@@ -13,7 +13,7 @@ import {
 /**
  * Per-turn prompt budget: serialized tools + fixed system prompt + the
  * per-turn user message (dynamic guidance, resource context and request), for
- * the five common turn shapes, with the bundled skill inventory installed. The
+ * the three common turn shapes, with the bundled skill inventory installed. The
  * caps are what this same measurement gives at ff8eaf7e (the commit before the
  * agent tool consolidation), so moving always-on rules into per-turn guidance
  * cannot silently grow a turn.
@@ -22,8 +22,6 @@ const TURN_BUDGETS: Record<string, number> = {
   global: 34_641,
   paper: 34_764,
   collection: 34_739,
-  planning: 46_938,
-  executing: 62_526,
 };
 
 const TURNS: Record<string, Record<string, unknown>> = {
@@ -52,29 +50,6 @@ const TURNS: Record<string, Record<string, unknown>> = {
     selectedCollectionContexts: [
       { collectionId: 9, libraryID: 1, name: "Grid cells" },
     ],
-  },
-  planning: {
-    conversationKey: 4,
-    mode: "agent",
-    userText: "Write a literature review of this collection",
-    libraryID: 1,
-    conversationKind: "global",
-    planContext: { phase: "planning", planId: "p", revision: 1 },
-  },
-  executing: {
-    conversationKey: 5,
-    mode: "agent",
-    userText: "Execute the approved review",
-    libraryID: 1,
-    conversationKind: "global",
-    planContext: {
-      phase: "executing",
-      planId: "p",
-      revision: 1,
-      executionId: "e",
-      approvedDigest: "d",
-      provider: "original",
-    },
   },
 };
 
