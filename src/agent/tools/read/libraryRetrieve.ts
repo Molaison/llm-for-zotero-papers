@@ -1,6 +1,6 @@
-import type { AgentRuntimeRequest, AgentToolDefinition } from "../../types";
-import { resolveAgentPromptBudgetLimits } from "../../context/promptBudget";
+import type { AgentToolDefinition } from "../../types";
 import { buildLibraryRetrieveModelView } from "../../services/libraryRetrieveModelView";
+import { modelViewRoomTokens } from "./modelViewRoom";
 import { matchesLibraryLevelTurn } from "./librarySearch";
 import {
   LIBRARY_RETRIEVE_DEFAULT_BUDGETS,
@@ -216,26 +216,6 @@ export const LIBRARY_RETRIEVE_GUIDANCE: NonNullable<
 export const LIBRARY_RETRIEVE_COVERAGE_GUIDANCE =
   "This coverage is not complete: do not present sampled, metadata-only, abstract-only, or partial coverage as exhaustive; name what was not read.";
 
-/**
- * The share of the model's input budget one library_retrieve view may take:
- * a turn also carries its prompt, its history and further reads, and a
- * library question often makes two or three retrieve calls.
- */
-export const LIBRARY_RETRIEVE_VIEW_ROOM_SHARE = 0.25;
-
-function libraryRetrieveViewRoomTokens(request: AgentRuntimeRequest): number {
-  const limits = resolveAgentPromptBudgetLimits({
-    ...request,
-    inputTokenCap: request.advanced?.inputTokenCap,
-    profileOverride: request.advanced?.profileOverride,
-    outputTokenLimit: request.advanced?.outputTokenLimit,
-  });
-  return Math.max(
-    1,
-    Math.floor(limits.softLimitTokens * LIBRARY_RETRIEVE_VIEW_ROOM_SHARE),
-  );
-}
-
 function hasIncompleteCoverage(result: LibraryRetrieveResult): boolean {
   const contract = result.answerContract;
   const receipt = result.coverageReceipt;
@@ -371,7 +351,7 @@ export function createLibraryRetrieveTool(
       buildLibraryRetrieveModelView({
         input,
         result,
-        roomTokens: libraryRetrieveViewRoomTokens(context.request),
+        roomTokens: modelViewRoomTokens(context.request),
       }),
     presentation: {
       label: "Retrieve Library",

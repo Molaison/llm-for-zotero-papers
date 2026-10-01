@@ -19,6 +19,8 @@ import {
   parseSearchCondition,
 } from "../searchConditions";
 import { readOnlyInvocationPlan } from "../../authorization/invocationPlan";
+import { buildLibraryListModelView } from "../../services/libraryListModelView";
+import { modelViewRoomTokens } from "./modelViewRoom";
 
 type ToolGuidance = NonNullable<AgentToolDefinition["guidance"]>;
 
@@ -655,6 +657,16 @@ export function createLibrarySearchTool(
         domains: ["zotero_library"],
         reason: "The structured library query reads Zotero records only.",
       }),
+    // An item list shows every row briefly and the requested fields for the
+    // top rows; the whole list stays behind a handle.
+    buildModelView: (input, result, context) =>
+      input.entity === "items" && input.mode === "list" && !input.conditions
+        ? buildLibraryListModelView({
+            input,
+            result: result as never,
+            roomTokens: modelViewRoomTokens(context.request),
+          })
+        : null,
     execute: async (input, context) => {
       if (input.entity === "itemTypes") {
         // Item-type definitions are global Zotero metadata, not library data.

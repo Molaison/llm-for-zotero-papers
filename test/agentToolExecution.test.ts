@@ -40,6 +40,7 @@ import {
 } from "./helpers/agentRuntimeMockDb";
 import { createTestActionContractService } from "./helpers/actionContractService";
 import { createLibraryRetrieveTool } from "../src/agent/tools/read/libraryRetrieve";
+import { createLibrarySearchTool } from "../src/agent/tools/read/librarySearch";
 import { createContextReadTool } from "../src/agent/tools/read/contextRead";
 import {
   clearAgentToolResultHandleStore,
@@ -1228,6 +1229,152 @@ describe("library_retrieve model view delivery", function () {
       const delivered = outcome.delivery!.content as Record<string, any>;
       assert.lengthOf(delivered.snippets, 70);
       assert.notProperty(delivered, "toolResultHandle");
+    } finally {
+      restoreDb();
+    }
+  });
+});
+
+describe("library_search list model view delivery", function () {
+  /** A collection of `count` papers as the gateway lists and reads them. */
+  function listGateway(count: number) {
+    const fields = (index: number) => ({
+      title: `Paper ${index}`,
+      abstractNote: "",
+      publicationTitle: "Journal of Drift",
+      date: "2020",
+      volume: "",
+      issue: "",
+      pages: "",
+      DOI: "",
+      url: "",
+      extra: "",
+    });
+    return {
+      resolveLibraryID: () => 1,
+      getItem: (id: number) => ({ id, key: `ITEM${id}` }),
+      getEditableArticleMetadata: (item: { id: number } | null) =>
+        item
+          ? {
+              itemId: item.id,
+              itemType: "journalArticle",
+              title: `Paper ${item.id}`,
+              fields: fields(item.id),
+              creators: [
+                { creatorType: "author", lastName: `Author${item.id}` },
+              ],
+            }
+          : null,
+      listItemsByFilters: async () => ({
+        items: Array.from({ length: count }, (_, i) => ({
+          itemId: i + 1,
+          itemType: "journalArticle",
+          title: `Paper ${i + 1}`,
+          firstCreator: `Author${i + 1}`,
+          year: "2020",
+          attachments: [],
+          tags: [],
+          collectionIds: [6],
+        })),
+        totalCount: count,
+      }),
+    };
+  }
+
+  it("sends the model every listed item briefly, the top rows whole, and keeps the whole list behind a handle", async function () {
+    const restoreDb = installMockDb();
+    const restoreItems = installRetrievedItems(100);
+    clearAgentToolResultHandleStore();
+    try {
+      const registry = new AgentToolRegistry(createTestActionContractService());
+      registry.register(createLibrarySearchTool(listGateway(100) as never));
+      const harness = await createHarness(registry);
+      harness.deps.persistToolResultHandles = async (records) => {
+        await upsertAgentToolResultHandles(records);
+      };
+      const outcome = await createToolExecution(
+        harness.deps,
+      ).executeToolWorkflow(
+        {
+          id: "call-list",
+          name: "library_search",
+          arguments: {
+            entity: "items",
+            mode: "list",
+            filters: { collectionId: 6 },
+            include: ["metadata"],
+            limit: 100,
+          },
+        },
+        1,
+        { modelCallId: "call-list" },
+      );
+      const view = outcome.delivery!.content as Record<string, any>;
+      assert.lengthOf(view.results, 25);
+      assert.lengthOf(view.moreResults, 75);
+      assert.equal(view.omitted.results, 75);
+      assert.lengthOf(
+        view.documentEvidenceRefs,
+        100,
+        "a paper listed briefly keeps its evidence ref, so a document can cite it",
+      );
+      assert.match(view.toolResultHandle, /^trh_/);
+      const event = harness.events.find(
+        (entry) => entry.type === "tool_result",
+      ) as Extract<AgentEvent, { type: "tool_result" }>;
+      assert.lengthOf(
+        (event.content as { results: unknown[] }).results,
+        100,
+        "the UI and ledgers read the whole list",
+      );
+
+      const contextRead = createContextReadTool();
+      const input = contextRead.validate({
+        source: "tool_result",
+        handle: view.toolResultHandle,
+        path: "results",
+        offset: view.results.length,
+      });
+      assert.isTrue(input.ok);
+      const page = (await contextRead.execute(
+        (input as { value: never }).value,
+        harness.deps.context,
+      )) as Record<string, any>;
+      assert.equal(page.items[0].itemId, 26, "from the first row shown brief");
+      assert.property(page.items[0], "metadata", "whole rows");
+    } finally {
+      clearAgentToolResultHandleStore();
+      restoreItems();
+      restoreDb();
+    }
+  });
+
+  it("leaves other library_search modes whole", async function () {
+    const restoreDb = installMockDb();
+    try {
+      const registry = new AgentToolRegistry(createTestActionContractService());
+      registry.register(
+        createLibrarySearchTool({
+          ...listGateway(40),
+          listCollectionSummaries: () => [],
+        } as never),
+      );
+      const harness = await createHarness(registry);
+      const outcome = await createToolExecution(
+        harness.deps,
+      ).executeToolWorkflow(
+        {
+          id: "call-collections",
+          name: "library_search",
+          arguments: { entity: "collections", mode: "list" },
+        },
+        1,
+        { modelCallId: "call-collections" },
+      );
+      assert.notProperty(
+        outcome.delivery!.content as Record<string, unknown>,
+        "toolResultHandle",
+      );
     } finally {
       restoreDb();
     }

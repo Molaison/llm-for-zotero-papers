@@ -58,13 +58,21 @@ function candidate(value: unknown): Candidate | null {
 function directRows(result: unknown): unknown[] {
   const output = record(result);
   if (!output) return [];
-  return ["results", "papers", "paperMatches", "items", "snippets"].flatMap(
-    (key) =>
-      Array.isArray(output[key])
-        ? (output[key] as unknown[])
-        : record(output[key])
-          ? Object.values(output[key] as Record<string, unknown>)
-          : [],
+  // moreResults: the rows a sized list view shows briefly (only views carry
+  // it), so the evidence refs of a briefly listed paper stay with it.
+  return [
+    "results",
+    "moreResults",
+    "papers",
+    "paperMatches",
+    "items",
+    "snippets",
+  ].flatMap((key) =>
+    Array.isArray(output[key])
+      ? (output[key] as unknown[])
+      : record(output[key])
+        ? Object.values(output[key] as Record<string, unknown>)
+        : [],
   );
 }
 
