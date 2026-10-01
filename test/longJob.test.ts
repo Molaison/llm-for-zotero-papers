@@ -164,6 +164,36 @@ describe("long job", function () {
       assert.deepEqual([...job.settled], []);
     });
 
+    it("counts only papers: a part over folders is no long job", function () {
+      const ledger = declareOutcomes(
+        createEmptyExecutionCheckpoint(executionContext, 1),
+        [
+          {
+            taskId: "delete",
+            description: "Delete the empty folders",
+            effect: "mutation",
+            capability: "zotero.collections",
+            targets: ["11", "12", "collection:13"],
+          },
+          {
+            taskId: "file",
+            description: "File the papers in Drift",
+            effect: "mutation",
+            capability: "zotero.collections",
+            targets: ["collection:9", "item:5", "item:6"],
+          },
+        ],
+        2,
+      );
+      const job = readLongJob(ledger)!;
+      assert.deepEqual(job.partIds, [ledger.tasks[1].taskId]);
+      assert.deepEqual(job.targets, ["item:5", "item:6"]);
+      assert.isNull(
+        readLongJob({ ...ledger, tasks: [ledger.tasks[0]] }),
+        "folders alone are no job",
+      );
+    });
+
     it("keeps following a part the pager pages after it closes", function () {
       const ledger = read(jobLedger(items(2)), items(2));
       assert.isNull(readLongJob(ledger), "a closed part is no open job");

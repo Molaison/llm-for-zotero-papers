@@ -18,12 +18,17 @@ import {
 } from "../src/agent/loop/outcomes";
 import type { RunStopRule } from "../src/agent/loop/stopRules";
 import type {
+  AgentActionCapability,
   AgentActionProposal,
   AgentActionReceipt,
   AgentExecutionContext,
   ExecutionCheckpoint,
   ExecutionCheckpointTask,
 } from "../src/agent/types";
+import {
+  DISCOVER_IMPORT,
+  RENAME_DELETE_FOLDER,
+} from "./helpers/liveLedgerRuns";
 
 const executionContext: AgentExecutionContext = {
   version: 1,
@@ -1991,5 +1996,268 @@ describe("outcome ledger: parts over the turn's paper scope", function () {
     task = find(ledger, "note-all");
     assert.equal(task.status, "completed");
     assert.deepEqual(task.doneTargets, ["item:10", "item:30", "item:20"]);
+  });
+});
+
+describe("outcome ledger: how models declare folder writes and imports (live run, 2026-10-01)", function () {
+  type LiveTask = {
+    taskId: string;
+    description: string;
+    expectedEffect: string;
+    expectedCapability?: string;
+    targetIds?: string[];
+  };
+
+  /** The parts task_update records from these arguments. */
+  function declared(...tasks: LiveTask[]): ExecutionCheckpoint {
+    return ledgerWith(
+      ...tasks.map(
+        (task): OutcomeDeclaration => ({
+          taskId: task.taskId,
+          description: task.description,
+          effect: task.expectedEffect as OutcomeDeclaration["effect"],
+          // task_update keeps only an action capability.
+          ...(task.expectedCapability?.startsWith("zotero.")
+            ? {
+                capability: task.expectedCapability as AgentActionCapability,
+              }
+            : {}),
+          ...(task.targetIds ? { targets: task.targetIds } : {}),
+        }),
+      ),
+    );
+  }
+
+  function receiptsInto(
+    ledger: ExecutionCheckpoint,
+    receipts: readonly AgentActionReceipt[],
+  ): ExecutionCheckpoint {
+    return receipts.reduce(
+      (current, entry) =>
+        apply(current, { kind: "receipt", receipt: entry }).checkpoint,
+      ledger,
+    );
+  }
+
+  const ended = (ledger: ExecutionCheckpoint) =>
+    decideRunEnd(ledger, { status: "completed", stopRule: "final_answer" });
+
+  it("closes a rename part that names its folder by a bare id, and leaves the delete receipt to the delete part", function () {
+    const ledger = declared(...RENAME_DELETE_FOLDER.taskUpdate.tasks);
+    assert.deepEqual(
+      find(ledger, "rename").targets,
+      ["11"],
+      "under zotero.collections a bare id may name an item or a folder",
+    );
+    const [rename, remove] = RENAME_DELETE_FOLDER.receipts;
+    const after = receiptsInto(ledger, RENAME_DELETE_FOLDER.receipts);
+    assert.lengthOf(after.tasks, 2, "no host outcome");
+    assert.include(find(after, "rename"), { status: "completed" });
+    assert.deepEqual(find(after, "rename").doneTargets, ["11"]);
+    assert.deepEqual(find(after, "rename").verifiedReceiptIds, [rename.id]);
+    assert.include(find(after, "delete"), { status: "completed" });
+    assert.deepEqual(find(after, "delete").verifiedReceiptIds, [remove.id]);
+    assert.equal(ended(after), "completed");
+  });
+
+  it("matches a bare id to the one target a receipt names with it, and not when it names two", function () {
+    const ledger = declared({
+      taskId: "file",
+      description: "Add paper 5 to Drift",
+      expectedEffect: "mutation",
+      expectedCapability: "zotero.collections",
+      targetIds: ["5"],
+    });
+    const move = (targets: string[]) =>
+      receipt({
+        id: `move-${targets.join("-")}`,
+        capability: "zotero.collections",
+        operation: "move_to_collection",
+        requestedTargets: targets,
+        appliedTargets: targets,
+      });
+    const moved = receiptsInto(ledger, [move(["item:5"])]);
+    assert.include(find(moved, "file"), { status: "completed" });
+    assert.deepEqual(find(moved, "file").doneTargets, ["5"]);
+    const both = receiptsInto(ledger, [move(["item:5", "collection:5"])]);
+    assert.equal(
+      find(both, "file").status,
+      "pending",
+      "a receipt naming item 5 and folder 5 leaves the bare 5 unresolved",
+    );
+    assert.lengthOf(both.tasks, 2, "the write is its own host outcome");
+  });
+
+  it("still reads a bare id as an item under every other capability and in a read part", function () {
+    const ledger = declared(
+      {
+        taskId: "tag",
+        description: "Tag paper 11",
+        expectedEffect: "mutation",
+        expectedCapability: "zotero.tags",
+        targetIds: ["11"],
+      },
+      {
+        taskId: "read",
+        description: "Read paper 11",
+        expectedEffect: "read",
+        targetIds: ["11"],
+      },
+    );
+    assert.deepEqual(find(ledger, "tag").targets, ["item:11"]);
+    assert.deepEqual(find(ledger, "read").targets, ["item:11"]);
+  });
+
+  it('leaves out a target no receipt can carry, such as "new collection" or a DOI', function () {
+    const ledger = declared(...DISCOVER_IMPORT.taskUpdate.tasks, {
+      taskId: "tag",
+      description: "Tag the two papers",
+      expectedEffect: "mutation",
+      expectedCapability: "zotero.tags",
+      targetIds: ["10.1101/2025.02.04.636428", "doi:10.1101/x", "item:517"],
+    });
+    assert.notProperty(find(ledger, "import"), "targets");
+    assert.deepEqual(find(ledger, "tag").targets, ["item:517"]);
+  });
+
+  it("closes the import part with the import, and the search and folder parts as before", function () {
+    const ledger = declared(...DISCOVER_IMPORT.taskUpdate.tasks);
+    const [create, imported] = DISCOVER_IMPORT.receipts;
+    const searched = apply(ledger, {
+      kind: "read",
+      targets: [],
+      observationIds: ["obs-search"],
+    }).checkpoint;
+    const after = receiptsInto(searched, DISCOVER_IMPORT.receipts);
+    assert.lengthOf(after.tasks, 3, "no host outcome");
+    assert.deepEqual(
+      after.tasks.map((task) => task.status),
+      ["completed", "completed", "completed"],
+    );
+    assert.deepEqual(find(after, "collection").verifiedReceiptIds, [create.id]);
+    assert.deepEqual(find(after, "import").verifiedReceiptIds, [imported.id]);
+    assert.equal(ended(after), "completed");
+  });
+
+  it("closes a part asking for a folder's papers with the import that filed them there", function () {
+    const imported = DISCOVER_IMPORT.receipts[1];
+    for (const targetIds of [["9"], ["collection:9"], ["517", "519"]]) {
+      const after = receiptsInto(
+        declared(
+          {
+            taskId: "import",
+            description: "Import the two papers",
+            expectedEffect: "mutation",
+            expectedCapability: "zotero.import",
+          },
+          {
+            taskId: "file",
+            description: "File them in the new folder",
+            expectedEffect: "mutation",
+            expectedCapability: "zotero.collections",
+            targetIds,
+          },
+        ),
+        [imported],
+      );
+      assert.lengthOf(after.tasks, 2, JSON.stringify(targetIds));
+      assert.deepEqual(
+        after.tasks.map((task) => task.status),
+        ["completed", "completed"],
+        JSON.stringify(targetIds),
+      );
+      assert.deepEqual(find(after, "file").verifiedReceiptIds, [imported.id]);
+    }
+    const elsewhere = receiptsInto(
+      declared({
+        taskId: "file",
+        description: "File them in Drift",
+        expectedEffect: "mutation",
+        expectedCapability: "zotero.collections",
+        targetIds: ["collection:10"],
+      }),
+      [imported],
+    );
+    assert.equal(
+      find(elsewhere, "file").status,
+      "pending",
+      "an import into folder 9 is no membership in folder 10",
+    );
+    const anyFolder = receiptsInto(
+      declared({
+        taskId: "file",
+        description: "Put the imported papers in the new folder",
+        expectedEffect: "mutation",
+        expectedCapability: "zotero.collections",
+      }),
+      [imported],
+    );
+    assert.include(find(anyFolder, "file"), { status: "completed" });
+    assert.lengthOf(anyFolder.tasks, 1, "no host outcome");
+  });
+
+  it("gives the membership only to a part that asks for folders or names it, never to a second vague part", function () {
+    const vague = (taskId: string, description: string): LiveTask => ({
+      taskId,
+      description,
+      expectedEffect: "mutation",
+    });
+    const after = receiptsInto(
+      declared(
+        vague("import", "Import the two papers"),
+        vague("tag", "Tag them as drift"),
+      ),
+      [DISCOVER_IMPORT.receipts[1]],
+    );
+    assert.deepEqual(
+      after.tasks.map((task) => task.status),
+      ["completed", "pending"],
+      "one import closes one part that names no capability",
+    );
+  });
+
+  it("ends completed when the model marks skipped a part the import already did, and with exceptions when no receipt did", function () {
+    const parts = (folder: string): LiveTask[] => [
+      DISCOVER_IMPORT.taskUpdate.tasks[1],
+      {
+        taskId: "import",
+        description: "Import the two papers",
+        expectedEffect: "mutation",
+        expectedCapability: "zotero.import",
+      },
+      {
+        taskId: "file",
+        description: "File them in the new folder",
+        expectedEffect: "mutation",
+        expectedCapability: "zotero.collections",
+        targetIds: [folder],
+      },
+    ];
+    const skip: OutcomeModelMark[] = [
+      {
+        taskId: "file",
+        status: "skipped",
+        reason: "The import already filed them in the folder.",
+      },
+    ];
+    const done = receiptsInto(
+      declared(...parts("9")),
+      DISCOVER_IMPORT.receipts,
+    );
+    const marked = markOutcomes(done, skip, 40);
+    assert.deepEqual(marked.ignored, [taskId("file")]);
+    assert.include(find(marked.checkpoint, "file"), { status: "completed" });
+    assert.equal(ended(marked.checkpoint), "completed");
+
+    const unproven = markOutcomes(
+      receiptsInto(
+        declared(...parts("collection:10")),
+        DISCOVER_IMPORT.receipts,
+      ),
+      skip,
+      40,
+    ).checkpoint;
+    assert.include(find(unproven, "file"), { status: "skipped" });
+    assert.equal(ended(unproven), "completed_with_exceptions");
   });
 });

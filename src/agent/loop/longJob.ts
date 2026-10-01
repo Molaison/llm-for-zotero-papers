@@ -156,12 +156,17 @@ export type LongJobPage = Readonly<{
   readShare: number;
 }>;
 
+/** The papers a part names; folders and other targets are no job's. */
+function paperTargets(task: Task): string[] {
+  return (task.targets || []).filter((target) => target.startsWith("item:"));
+}
+
 /** A model part that names papers to read or write. */
 function isJobPart(task: Task): boolean {
   return (
     task.origin === "model" &&
     (task.effect === "read" || task.effect === "mutation") &&
-    Boolean(task.targets?.length)
+    paperTargets(task).length > 0
   );
 }
 
@@ -180,10 +185,10 @@ export function readLongJob(
       (task.status === "pending" || followed.has(task.taskId)),
   );
   if (!parts.length) return null;
-  const targets = [...new Set(parts.flatMap((task) => task.targets || []))];
+  const targets = [...new Set(parts.flatMap(paperTargets))];
   const naming = parts.map((task) => ({
     pending: task.status === "pending",
-    targets: new Set(task.targets),
+    targets: new Set(paperTargets(task)),
     accounted: new Set([
       ...(task.doneTargets || []),
       ...(task.exceptions || []).flatMap((entry) => entry.targets),

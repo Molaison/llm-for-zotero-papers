@@ -151,20 +151,72 @@ function union(
   return unique([...(base || []), ...added]);
 }
 
-/** Receipt-form targets: a bare item id becomes `item:<id>`. */
-function outcomeTargets(values: readonly string[] | undefined): string[] {
+/** A bare Zotero id, as models write one. */
+const BARE_ID = /^[1-9]\d*$/;
+
+/** The kinds of target the host's receipts and reads name: `item:5`, … */
+const TARGET_KINDS: ReadonlySet<string> = new Set([
+  "item",
+  "collection",
+  "saved-search",
+  "attachment",
+  "note",
+  "file",
+  "search",
+  "setting",
+  "tag",
+  "tags",
+]);
+
+/**
+ * A part's targets in the forms receipts and reads name. A bare id is an
+ * item's (`item:<id>`), except under zotero.collections, whose writes name
+ * items (filing papers) and folders (renaming one) alike: there it stays
+ * bare and matches whichever of the two a receipt names (`resolveTarget`).
+ * A target that is no such form, such as "new collection" or a DOI, names
+ * nothing a receipt can carry, so it is left out, and a part left with none
+ * tracks its capability's writes, as a part without targets does.
+ */
+function outcomeTargets(
+  values: readonly string[] | undefined,
+  capability?: AgentActionCapability,
+): string[] {
   return unique(
     (values || [])
       .map((value) => String(value).trim())
       .filter(Boolean)
-      .map((value) => (/^[1-9]\d*$/.test(value) ? `item:${value}` : value)),
+      .flatMap((value) => {
+        if (BARE_ID.test(value))
+          return [
+            capability === "zotero.collections" ? value : `item:${value}`,
+          ];
+        const kind = /^([a-z][a-z-]*):\S/.exec(value)?.[1];
+        return kind && TARGET_KINDS.has(kind) ? [value] : [];
+      }),
   );
+}
+
+/**
+ * The target among `named` that a part's declared target means: itself, or,
+ * for a bare id, the one target named with that id. A bare id two targets
+ * share (item 5 and folder 5) means neither.
+ */
+function resolveTarget(
+  declared: string,
+  named: readonly string[],
+): string | undefined {
+  if (named.includes(declared)) return declared;
+  if (!BARE_ID.test(declared)) return undefined;
+  const matches = named.filter(
+    (target) => target.slice(target.indexOf(":") + 1) === declared,
+  );
+  return matches.length === 1 ? matches[0] : undefined;
 }
 
 function covers(task: Task, targets: readonly string[]): boolean {
   return (
     !task.targets?.length ||
-    task.targets.some((target) => targets.includes(target))
+    task.targets.some((target) => resolveTarget(target, targets) !== undefined)
   );
 }
 
@@ -302,10 +354,13 @@ function bindReceipt(
   now: number,
 ): Task {
   const targets = task.targets || [];
+  // The part's own targets a receipt's list names, in the part's own form.
   const own = (values: readonly string[]): string[] =>
     unique(
       targets.length
-        ? values.filter((value) => targets.includes(value))
+        ? targets.filter(
+            (target) => resolveTarget(target, values) !== undefined,
+          )
         : values,
     );
   const proves =
@@ -459,6 +514,40 @@ function applyRead(
   });
 }
 
+/**
+ * The writes one receipt proves, each as the parts see it: the receipt
+ * itself, and for an import that files its items in a folder, that
+ * membership too: a zotero.collections write over the folder and the items,
+ * under the same receipt. The import's postcondition checked that every
+ * imported item is in the folder, so a receipt that proves the import
+ * proves the membership. The membership goes only to a part that asks for
+ * folder writes or names the folder or the items.
+ */
+function provenWrites(receipt: AgentActionReceipt): AgentActionReceipt[] {
+  const folder = receipt.normalizedParameters?.destinationCollectionId;
+  if (
+    receipt.capability !== "zotero.import" ||
+    !Number.isInteger(folder) ||
+    Number(folder) <= 0
+  )
+    return [receipt];
+  const membership = `collection:${folder}`;
+  const add = (targets: readonly string[]) =>
+    targets.length ? unique([membership, ...targets]) : [];
+  return [
+    receipt,
+    {
+      ...receipt,
+      capability: "zotero.collections",
+      requestedTargets: unique([membership, ...receipt.requestedTargets]),
+      appliedTargets: add(receipt.appliedTargets),
+      alreadySatisfiedTargets: receipt.appliedTargets.length
+        ? receipt.alreadySatisfiedTargets
+        : add(receipt.alreadySatisfiedTargets),
+    },
+  ];
+}
+
 function applyReceipt(
   checkpoint: ExecutionCheckpoint,
   receipt: AgentActionReceipt,
@@ -467,19 +556,32 @@ function applyReceipt(
   if (!isWrite(receipt) || isBound(checkpoint, receipt.id)) {
     return unchanged(checkpoint);
   }
-  const candidates = checkpoint.tasks.flatMap((task, index) =>
-    RECEIPT_CANDIDATE_STATUSES.has(task.status) && acceptsWrite(task, receipt)
-      ? [index]
-      : [],
-  );
-  const targeted = candidates.filter(
-    (index) => checkpoint.tasks[index].targets?.length,
-  );
-  const chosen = new Set(targeted.length ? targeted : candidates.slice(0, 1));
-  if (chosen.size) {
-    return mapTasks(checkpoint, now, (task, index) =>
-      chosen.has(index) ? bindReceipt(task, receipt, now) : undefined,
+  // Each write the receipt proves binds every part that names its targets,
+  // else the first part without targets that takes it.
+  const chosen = new Map<number, AgentActionReceipt>();
+  for (const write of provenWrites(receipt)) {
+    const membership = write !== receipt;
+    const candidates = checkpoint.tasks.flatMap((task, index) =>
+      !chosen.has(index) &&
+      RECEIPT_CANDIDATE_STATUSES.has(task.status) &&
+      acceptsWrite(task, write) &&
+      (!membership ||
+        task.capability === "zotero.collections" ||
+        Boolean(task.targets?.length))
+        ? [index]
+        : [],
     );
+    const targeted = candidates.filter(
+      (index) => checkpoint.tasks[index].targets?.length,
+    );
+    for (const index of targeted.length ? targeted : candidates.slice(0, 1))
+      chosen.set(index, write);
+  }
+  if (chosen.size) {
+    return mapTasks(checkpoint, now, (task, index) => {
+      const write = chosen.get(index);
+      return write ? bindReceipt(task, write, now) : undefined;
+    });
   }
   // Written content saved as a note is the artifact a part asked for.
   const artifact = isNoteContent(receipt)
@@ -650,7 +752,7 @@ export function declareOutcomes(
         `New task ${taskId} requires an effect: read, artifact, mutation, or answer`,
       );
     }
-    const targets = outcomeTargets(declaration.targets);
+    const targets = outcomeTargets(declaration.targets, declaration.capability);
     // A part that names a write capability is a write, whatever effect it
     // claims: models declare "save it as a note" as an artifact too.
     const effect =

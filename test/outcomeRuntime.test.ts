@@ -18,6 +18,10 @@ const estimatePrompt = (messages: AgentModelMessage[]) =>
 import type { TaskPaperScopeSet } from "../src/agent/context/taskPaperScopeListing";
 import { createTestActionContractService } from "./helpers/actionContractService";
 import {
+  DISCOVER_IMPORT,
+  RENAME_DELETE_FOLDER,
+} from "./helpers/liveLedgerRuns";
+import {
   PARENT_ITEM_ID,
   finalStep,
   installDirectJourneyEnvironment,
@@ -81,6 +85,9 @@ type Turn = {
 /** The receipt the scripted `library_update` call is finalized with. */
 let libraryUpdateReceipt: AgentActionReceipt | undefined;
 
+/** Receipts the scripted library writes return in turn, before the above. */
+let liveReceipts: AgentActionReceipt[] = [];
+
 /** What the scripted `paper_read` returns, when a case scripts it. */
 let scriptedPaperRead:
   | ((input: Record<string, unknown>) => unknown)
@@ -127,11 +134,15 @@ function registry(): AgentToolRegistry {
     (itemId) => (globalThis.Zotero as any).Items.get(itemId) || null,
   );
   const finalize = service.finalize.bind(service);
-  service.finalize = (async (prepared, params) =>
-    libraryUpdateReceipt &&
-    prepared.proposals.some((proposal) => proposal.id === "library-update")
-      ? [libraryUpdateReceipt]
-      : finalize(prepared, params)) as typeof service.finalize;
+  service.finalize = (async (prepared, params) => {
+    if (
+      prepared.proposals.some((proposal) => proposal.id === "library-update")
+    ) {
+      const next = liveReceipts.shift() || libraryUpdateReceipt;
+      if (next) return [next];
+    }
+    return finalize(prepared, params);
+  }) as typeof service.finalize;
   const tools = new AgentToolRegistry(service);
   tools.register(createSubmitDocumentTool(submitDocumentGateway));
   tools.register(
@@ -215,6 +226,28 @@ function registry(): AgentToolRegistry {
       content: { updated: 8, failed: 2 },
       effect: "partial",
     }),
+  } as never);
+  tools.register({
+    spec: {
+      name: "library_import",
+      description: "Import papers into Zotero",
+      inputSchema: { type: "object" },
+      executionClass: "external_effect",
+    },
+    describeAction: () => [
+      {
+        id: "library-update",
+        proofDomain: "zotero_state",
+        capability: "zotero.import",
+        operation: "import_identifiers",
+        source: "library_mutation",
+        requestedTargets: [],
+        destinationCollectionIds: [],
+      },
+    ],
+    effectOperations: ["import_identifiers"],
+    validate: (args: unknown) => ({ ok: true, value: args as never }),
+    execute: async () => ({ content: { succeeded: 2 }, effect: "applied" }),
   } as never);
   return tools;
 }
@@ -1379,5 +1412,123 @@ describe("long jobs in runtime turns", function () {
     assert.deepEqual(pageEvents(turn), []);
     assert.notInclude(promptText(turn.prompts[1]), "Long job");
     assert.deepEqual(settled(turn).end, { state: "completed" });
+  });
+});
+
+describe("live runs that made every change, as runtime turns (2026-10-01)", function () {
+  let environment: DirectJourneyEnvironment;
+  let conversationKey = 996_000;
+
+  beforeEach(async function () {
+    environment = await installDirectJourneyEnvironment();
+    libraryUpdateReceipt = undefined;
+    liveReceipts = [];
+    conversationKey += 10;
+  });
+
+  afterEach(function () {
+    environment.restore();
+    liveReceipts = [];
+  });
+
+  function call(
+    id: string,
+    name: string,
+    args: Record<string, unknown>,
+  ): AgentToolCall {
+    return { id, name, arguments: args };
+  }
+
+  /** Each outcome as [local id, origin, status]. */
+  function parts(ledger: ExecutionCheckpoint): string[][] {
+    return ledger.tasks.map((task) => [
+      task.taskId.slice(task.taskId.indexOf(":task:") + 6),
+      String(task.origin),
+      task.status,
+    ]);
+  }
+
+  it("library.rename_delete_folder ends completed, each folder change closing its own part", async function () {
+    liveReceipts = [...RENAME_DELETE_FOLDER.receipts];
+    const turn = await runTurn({
+      conversationKey,
+      userText: RENAME_DELETE_FOLDER.userText,
+      steps: [
+        stepOf(
+          call("declare-1", "task_update", RENAME_DELETE_FOLDER.taskUpdate),
+        ),
+        stepOf(
+          call("rename-1", "library_update", {
+            kind: "collection",
+            action: "rename",
+            collectionId: 11,
+            newName: "New name loopmupsn7f0",
+          }),
+          call("delete-1", "library_update", {
+            kind: "collection",
+            action: "delete",
+            collectionId: 12,
+            deleteItems: false,
+          }),
+        ),
+        finalStep("Renamed the folder and deleted the empty one."),
+      ],
+    });
+    assert.equal(turn.outcome?.kind, "completed", String(turn.error || ""));
+    const ledger = settled(turn);
+    assert.deepEqual(ledger.end, { state: "completed" });
+    assert.deepEqual(parts(ledger), [
+      ["rename", "model", "completed"],
+      ["delete", "model", "completed"],
+    ]);
+    const [rename, remove] = RENAME_DELETE_FOLDER.receipts;
+    assert.deepEqual(outcome(ledger, "rename").verifiedReceiptIds, [rename.id]);
+    assert.deepEqual(outcome(ledger, "delete").verifiedReceiptIds, [remove.id]);
+  });
+
+  it("library.discover_import ends completed, the import closing the part that asked for it", async function () {
+    liveReceipts = [...DISCOVER_IMPORT.receipts];
+    const turn = await runTurn({
+      conversationKey,
+      userText: DISCOVER_IMPORT.userText,
+      steps: [
+        stepOf(call("declare-1", "task_update", DISCOVER_IMPORT.taskUpdate)),
+        // The literature search stands as one read.
+        stepOf(
+          paperRead("search-1"),
+          call("create-1", "library_update", {
+            kind: "collection",
+            action: "create",
+            name: "Drift new loopmupsn7f0",
+          }),
+        ),
+        stepOf(
+          call("import-1", "library_import", {
+            kind: "identifiers",
+            identifiers: [
+              "10.1101/2025.02.04.636428",
+              "10.1101/2025.10.21.683686",
+            ],
+            targetCollectionId: 9,
+          }),
+        ),
+        finalStep("Both papers are in the new folder."),
+      ],
+    });
+    assert.equal(turn.outcome?.kind, "completed", String(turn.error || ""));
+    const ledger = settled(turn);
+    assert.deepEqual(ledger.end, { state: "completed" });
+    assert.deepEqual(parts(ledger), [
+      ["search", "model", "completed"],
+      ["collection", "model", "completed"],
+      ["import", "model", "completed"],
+    ]);
+    const [create, imported] = DISCOVER_IMPORT.receipts;
+    assert.deepEqual(outcome(ledger, "collection").verifiedReceiptIds, [
+      create.id,
+    ]);
+    assert.deepEqual(outcome(ledger, "import").verifiedReceiptIds, [
+      imported.id,
+    ]);
   });
 });
