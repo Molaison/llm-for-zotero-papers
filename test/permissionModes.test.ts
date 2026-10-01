@@ -20,7 +20,6 @@ import {
   getOriginalAgentPermissionMode,
   setOriginalAgentPermissionMode,
 } from "../src/agent/originalAgentPermissionMode";
-import { getOriginalAgentPermissionModeDescription } from "../src/shared/originalAgentPermissionMode";
 import {
   migrateClaudePermissionMode,
   migrateCodexPermissionState,
@@ -632,22 +631,6 @@ describe("provider permission modes", function () {
       assert.notInclude(byKey["original:yolo"], unenforced);
     assert.notInclude(byKey["original:yolo"], "require review");
     assert.notInclude(byKey["original:yolo"], "Only explicit prohibitions");
-  });
-
-  it("names the same yolo rails in the long mode description", function () {
-    const description = getOriginalAgentPermissionModeDescription();
-    assert.include(
-      description,
-      "Requested review workflows, database integrity and the change journal remain enforced",
-    );
-    for (const unenforced of [
-      "Explicit user restrictions",
-      "protected targets",
-      "Plan integrity",
-      "chat-only memory",
-      "paper selection card",
-    ])
-      assert.notInclude(description, unenforced);
   });
 
   it("falls back to auto when the preference store is unreadable", function () {

@@ -136,7 +136,7 @@ describe("central authorization from concrete proposals", function () {
     it(`${mode}: judgment never bypasses hard rails`, function () {
       assert.equal(
         authorizeOriginalAction(
-          action("apply_tags", { riskSignals: ["protected_target"] }),
+          action("apply_tags", { riskSignals: ["raw_database"] }),
           { mode },
         ).kind,
         "block",
@@ -212,7 +212,7 @@ describe("central authorization from concrete proposals", function () {
     );
     assert.equal(
       authorizeOriginalAction(
-        action("apply_tags", { riskSignals: ["ambiguous_target"] }),
+        action("apply_tags", { riskSignals: ["scope_expansion"] }),
         { mode: "auto" },
       ).kind,
       "execute",

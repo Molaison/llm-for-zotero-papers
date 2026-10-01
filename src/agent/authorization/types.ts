@@ -36,12 +36,9 @@ export type ActionConstraint = Readonly<
 >;
 
 export type ActionRiskSignal =
-  | "ambiguous_target"
   | "scope_expansion"
   | "exclusive_replacement"
-  | "sensitive_egress"
   | "broad_delete"
-  | "protected_target"
   | "privilege_escalation"
   | "package_system_modification"
   | "download_to_shell"

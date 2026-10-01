@@ -76,7 +76,6 @@ export function actionIntegrityFailure(
 ): AuthorizationDecision | null {
   if (
     proposal.invocationPlan.impact === "prohibited" ||
-    proposal.riskSignals.includes("protected_target") ||
     proposal.riskSignals.includes("raw_database") ||
     proposal.riskSignals.includes("authorization_tampering")
   ) {

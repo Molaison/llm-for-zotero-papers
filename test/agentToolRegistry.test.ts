@@ -781,7 +781,6 @@ describe("AgentToolRegistry", function () {
           ? prohibitedInvocationPlan({
               domains: ["filesystem"],
               targets: [input.target],
-              riskSignals: ["protected_target"],
               reason: "The target is a protected filesystem root.",
             })
           : stateChangeInvocationPlan({
