@@ -6,6 +6,7 @@ import { createSubmitDocumentTool } from "../src/agent/tools/control/submitDocum
 import { createTaskUpdateTool } from "../src/agent/tools/control/taskUpdate";
 import { createNoteWriteTool } from "../src/agent/tools/write/noteWrite";
 import { OUTCOME_REASONS } from "../src/agent/loop/outcomes";
+import { ExecutionCheckpointFold } from "../src/agent/execution/checkpointEvents";
 import type { TaskPaperScopeSet } from "../src/agent/context/taskPaperScopeListing";
 import { createTestActionContractService } from "./helpers/actionContractService";
 import {
@@ -24,6 +25,7 @@ import type {
   AgentModelStep,
   AgentRuntimeOutcome,
   AgentRuntimeRequest,
+  AgentRuntimeRequestInput,
   AgentToolCall,
   ExecutionCheckpoint,
   ExecutionCheckpointTask,
@@ -241,6 +243,13 @@ async function runTurn(params: {
   signal?: AbortSignal;
   /** The papers the host resolves for the turn's scope. */
   scope?: TaskPaperScopeSet;
+  /** Counts each time the host resolves the scope. */
+  onResolveScope?: () => void;
+  /** Contexts the user attached to the question. */
+  attached?: Pick<
+    AgentRuntimeRequestInput,
+    "selectedPaperContexts" | "selectedCollectionContexts"
+  >;
 }): Promise<Turn> {
   const events: AgentEvent[] = [];
   const prompts: AgentModelMessage[][] = [];
@@ -249,7 +258,12 @@ async function runTurn(params: {
   let requests = 0;
   const runtime = new AgentRuntime({
     ...(params.scope
-      ? { resolveTurnScopePapers: async () => params.scope }
+      ? {
+          resolveTurnScopePapers: async () => {
+            params.onResolveScope?.();
+            return params.scope;
+          },
+        }
       : {}),
     registry: registry(),
     adapterFactory: (resolved) => ({
@@ -288,6 +302,7 @@ async function runTurn(params: {
         apiKey: "test",
         apiBase: "https://example.invalid",
         metadata: { sourceMessageTimestamp: timestamp },
+        ...params.attached,
       },
       signal: params.signal,
       onEvent: (event) => {
@@ -313,10 +328,19 @@ async function runTurn(params: {
   };
 }
 
+/** The ledger after each of the run's ledger events, whole or delta. */
 function checkpoints(turn: Turn): ExecutionCheckpoint[] {
-  return turn.events.flatMap((event) =>
-    event.type === "execution_checkpoint" ? [event.checkpoint] : [],
-  );
+  const fold = new ExecutionCheckpointFold();
+  return turn.events.flatMap((event) => {
+    if (
+      event.type !== "execution_checkpoint" &&
+      event.type !== "execution_checkpoint_delta"
+    )
+      return [];
+    const checkpoint = fold.apply(event);
+    assert.exists(checkpoint, "every ledger event folds onto the one before");
+    return [checkpoint!];
+  });
 }
 
 function settled(turn: Turn): ExecutionCheckpoint {
@@ -883,6 +907,25 @@ describe("parts over the turn's paper scope in runtime turns", function () {
       "item:103",
     ]);
     assert.isTrue(outcome(declared, "read-all").scope);
+    // The model reads the part back as counts; the papers stay with the host.
+    assert.include(
+      promptText(turn.prompts[1]),
+      '"parts":[{"taskId":"read-all","status":"pending","done":0,"total":3,"scope":true}]',
+    );
+    assert.notInclude(promptText(turn.prompts[1]), '"item:10');
+    // The ledger is published whole once, then as deltas.
+    const ledgerEvents = turn.events.filter(
+      (event) =>
+        event.type === "execution_checkpoint" ||
+        event.type === "execution_checkpoint_delta",
+    );
+    assert.deepEqual(
+      ledgerEvents.map((event) => event.type),
+      [
+        "execution_checkpoint",
+        ...Array(ledgerEvents.length - 1).fill("execution_checkpoint_delta"),
+      ],
+    );
     // Each change is published once; the outline read changed nothing.
     assert.deepEqual(
       checkpoints(turn).map((checkpoint) => {
@@ -913,6 +956,41 @@ describe("parts over the turn's paper scope in runtime turns", function () {
       { targets: ["item:103"], reason: OUTCOME_REASONS.noText },
     ]);
     assert.deepEqual(ledger.end, { state: "completed_with_exceptions" });
+  });
+
+  it("states and resolves no scope for one paper, and does for two", async function () {
+    const paper = (itemId: number) => ({
+      itemId,
+      contextItemId: itemId + 1000,
+      title: `Paper ${itemId}`,
+      libraryID: 1,
+    });
+    let resolved = 0;
+    const one = await runTurn({
+      conversationKey,
+      userText: "Summarize this paper",
+      scope: scope([101], 1),
+      onResolveScope: () => (resolved += 1),
+      attached: { selectedPaperContexts: [paper(101)] },
+      steps: [finalStep("A summary.")],
+    });
+    assert.equal(resolved, 0, "a one-paper chat waits for no snapshot");
+    assert.notInclude(promptText(one.prompts[0]), "Paper scope:");
+    assert.isUndefined(one.request?.turnScopePapers);
+
+    const two = await runTurn({
+      conversationKey: conversationKey + 1,
+      userText: "Compare these papers",
+      scope: { wholeLibrary: false, itemIds: [101, 102], withText: 2 },
+      onResolveScope: () => (resolved += 1),
+      attached: { selectedPaperContexts: [paper(101), paper(102)] },
+      steps: [finalStep("A comparison.")],
+    });
+    assert.equal(resolved, 1);
+    assert.include(
+      promptText(two.prompts[0]),
+      "\nPaper scope: listed papers — 2 papers, 2 with full text\n",
+    );
   });
 
   it("an abstract-depth read alone leaves the part open and the answer is corrected once", async function () {

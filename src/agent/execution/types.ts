@@ -69,6 +69,41 @@ export type ExecutionCheckpointTask = Readonly<{
   reason?: string;
 }>;
 
+/** Entries a list gained: it had `from` entries and now ends with `add`. */
+export type ExecutionCheckpointListDelta<T = unknown> = Readonly<{
+  from: number;
+  add: readonly T[];
+}>;
+
+/** How one outcome changed since the run's previous ledger event. */
+export type ExecutionCheckpointTaskDelta = Readonly<{
+  taskId: string;
+  /** A new outcome, whole: a frozen scope is stored here, once. */
+  task?: ExecutionCheckpointTask;
+  /** Fields with a new value. */
+  set?: Partial<ExecutionCheckpointTask>;
+  /** Fields it no longer has. */
+  unset?: readonly string[];
+  /** Lists that only gained entries, by field. */
+  grow?: Readonly<Record<string, ExecutionCheckpointListDelta>>;
+  /** Exceptions that only gained targets, and new reasons. */
+  exceptions?: Readonly<{
+    grow?: readonly (ExecutionCheckpointListDelta<string> & { at: number })[];
+    add?: readonly (OutcomeException & { at: number })[];
+  }>;
+}>;
+
+/**
+ * One change to a run's ledger since its previous ledger event; folding a
+ * run's events in order gives back each ledger (`checkpointEvents.ts`).
+ */
+export type ExecutionCheckpointDelta = Readonly<{
+  executionId: string;
+  updatedAt: number;
+  tasks: readonly ExecutionCheckpointTaskDelta[];
+  end?: Readonly<{ state: RunEndState }>;
+}>;
+
 /**
  * Durable progress for ordinary agent work.
  *

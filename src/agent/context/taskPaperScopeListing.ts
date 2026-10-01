@@ -213,6 +213,16 @@ export function taskPaperScopeContextsOf(
   return contexts;
 }
 
+/**
+ * Whether a turn states its scope and freezes parts over it: a folder, a tag,
+ * the whole library (nothing attached), or two papers or more. A one-paper
+ * chat needs neither the line nor the wait for the library index.
+ */
+export function statesTurnPaperScope(scope: TurnPaperScope): boolean {
+  if (scope.collections.length || scope.tags.length) return true;
+  return new Set(scope.papers.map(({ paper }) => paper.itemId)).size !== 1;
+}
+
 function hasScopeContexts(contexts: TaskPaperScopeContexts): boolean {
   return Boolean(
     contexts.papers?.length ||

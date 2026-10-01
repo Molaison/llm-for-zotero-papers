@@ -152,18 +152,19 @@ describe("task_update ordinary declarations", function () {
     };
   }
 
-  async function call(
-    ctx: AgentToolContext,
-    args: unknown,
-  ): Promise<{ checkpoint: ExecutionCheckpoint; note?: string }> {
+  /** What the model reads back: each part, compact. */
+  type Answer = { parts: Record<string, unknown>[]; note?: string };
+
+  async function call(ctx: AgentToolContext, args: unknown): Promise<Answer> {
     const tool = createTaskUpdateTool();
     const validated = tool.validate(args);
     if (!validated.ok) throw new Error(validated.error);
-    return (await tool.execute(validated.value, ctx)) as {
-      checkpoint: ExecutionCheckpoint;
-      note?: string;
-    };
+    return (await tool.execute(validated.value, ctx)) as Answer;
   }
+
+  /** The ledger the host keeps, after the latest call. */
+  const ledgerOf = (ctx: AgentToolContext): ExecutionCheckpoint =>
+    ctx.request.executionCheckpoint!;
 
   async function rejectionOf(promise: Promise<unknown>): Promise<Error> {
     try {
@@ -230,9 +231,13 @@ describe("task_update ordinary declarations", function () {
     });
 
     assert.lengthOf(published, 1);
-    assert.deepEqual(result.checkpoint, published[0]);
+    assert.deepEqual(result, {
+      parts: [
+        { taskId: "save", status: "pending", done: 0, total: 1 },
+        { taskId: "explain", status: "pending" },
+      ],
+    });
     assert.deepEqual(ctx.request.executionCheckpoint, published[0]);
-    assert.notProperty(result, "note");
     assert.deepEqual(
       published[0].tasks.map((task) => [
         task.taskId,
@@ -257,11 +262,11 @@ describe("task_update ordinary declarations", function () {
   });
 
   it("ignores an expectedCapability that is not an action capability", async function () {
-    const result = await call(context(), {
+    await call(context(), {
       tasks: [{ ...declareSave, expectedCapability: "zotero.everything" }],
     });
-    assert.notProperty(result.checkpoint.tasks[0], "capability");
-    assert.equal(result.checkpoint.tasks[0].effect, "mutation");
+    assert.notProperty(published[0].tasks[0], "capability");
+    assert.equal(published[0].tasks[0].effect, "mutation");
   });
 
   it("refuses a new part without expectedEffect with the exact message, and publishes nothing", async function () {
@@ -287,8 +292,14 @@ describe("task_update ordinary declarations", function () {
 
     for (const repeat of [declareSave, { taskId: "save" }]) {
       const result = await call(ctx, { tasks: [repeat] });
-      assert.equal(result.note, NOTHING_CHANGED, JSON.stringify(repeat));
-      assert.strictEqual(result.checkpoint, declared);
+      assert.deepEqual(
+        result,
+        {
+          parts: [{ taskId: "save", status: "pending", done: 0, total: 1 }],
+          note: NOTHING_CHANGED,
+        },
+        JSON.stringify(repeat),
+      );
     }
     assert.lengthOf(published, 1, "only the declaration was published");
     assert.strictEqual(ctx.request.executionCheckpoint, declared);
@@ -316,17 +327,27 @@ describe("task_update ordinary declarations", function () {
     const result = await call(ctx, {
       skipped: [{ taskId: "save", reason: "The library is read-only" }],
     });
-    assert.notProperty(result, "note");
+    assert.deepEqual(result, {
+      parts: [
+        {
+          taskId: "save",
+          status: "skipped",
+          done: 0,
+          total: 1,
+          reason: "The library is read-only",
+        },
+      ],
+    });
     assert.lengthOf(published, 2);
     assert.deepEqual(
-      [result.checkpoint.tasks[0].status, result.checkpoint.tasks[0].reason],
+      [published[1].tasks[0].status, published[1].tasks[0].reason],
       ["skipped", "The library is read-only"],
     );
     assert.deepEqual(ctx.request.executionCheckpoint, published[1]);
   });
 
   it("never takes evidence identities from an ordinary task", async function () {
-    const result = await call(context(), {
+    await call(context(), {
       tasks: [
         {
           ...declareSave,
@@ -343,7 +364,7 @@ describe("task_update ordinary declarations", function () {
         },
       ],
     });
-    const [task] = result.checkpoint.tasks;
+    const [task] = published[0].tasks;
     assert.equal(task.status, "pending");
     assert.deepEqual(task.journalActionIds, []);
     assert.deepEqual(task.verifiedReceiptIds, []);
@@ -436,8 +457,9 @@ describe("task_update ordinary declarations", function () {
     }
 
     it("freezes every paper of the turn's scope into the part, in scope order", async function () {
-      const result = await call(scoped([30, 10, 20]), { tasks: [readAll] });
-      const [task] = result.checkpoint.tasks;
+      const ctx = scoped([30, 10, 20]);
+      await call(ctx, { tasks: [readAll] });
+      const [task] = ledgerOf(ctx).tasks;
       assert.deepEqual(task.targets, ["item:30", "item:10", "item:20"]);
       assert.isTrue(task.scope);
       assert.equal(task.effect, "read");
@@ -454,13 +476,13 @@ describe("task_update ordinary declarations", function () {
       };
       const repeated = await call(ctx, { tasks: [readAll] });
       assert.equal(repeated.note, NOTHING_CHANGED);
-      assert.deepEqual(repeated.checkpoint.tasks[0].targets, [
+      assert.deepEqual(ledgerOf(ctx).tasks[0].targets, [
         "item:30",
         "item:10",
         "item:20",
       ]);
       // A part declared after the change takes the scope as it is now.
-      const later = await call(ctx, {
+      await call(ctx, {
         tasks: [
           {
             taskId: "note-all",
@@ -472,7 +494,7 @@ describe("task_update ordinary declarations", function () {
         ],
       });
       assert.deepEqual(
-        later.checkpoint.tasks.map((task) => task.targets),
+        ledgerOf(ctx).tasks.map((task) => task.targets),
         [
           ["item:30", "item:10", "item:20"],
           ["item:10", "item:40"],
@@ -490,12 +512,12 @@ describe("task_update ordinary declarations", function () {
         [
           context(),
           { tasks: [readAll] },
-          "This turn's paper scope lists no papers; name the part's papers in targetIds.",
+          "This turn states no paper scope to cover; name the part's papers in targetIds.",
         ],
         [
           scoped([]),
           { tasks: [readAll] },
-          "This turn's paper scope lists no papers; name the part's papers in targetIds.",
+          "This turn states no paper scope to cover; name the part's papers in targetIds.",
         ],
       ] as const) {
         const error = await rejectionOf(call(ctx, args));
@@ -503,6 +525,78 @@ describe("task_update ordinary declarations", function () {
         assert.equal(error.message, message);
       }
       assert.lengthOf(published, 0);
+    });
+
+    it("answers with each part's counts and never its frozen papers", async function () {
+      const ctx = scoped(
+        Array.from({ length: 212 }, (_, index) => 1001 + index),
+      );
+      const result = await call(ctx, { tasks: [readAll] });
+      assert.deepEqual(result, {
+        parts: [
+          {
+            taskId: "read-all",
+            status: "pending",
+            done: 0,
+            total: 212,
+            scope: true,
+          },
+        ],
+      });
+      assert.notInclude(JSON.stringify(result), "item:");
+      assert.lengthOf(
+        ledgerOf(ctx).tasks[0].targets!,
+        212,
+        "the host keeps them",
+      );
+    });
+
+    it("counts a part's exceptions and names at most three of their reasons", async function () {
+      const ledger = declareOutcomes(
+        createEmptyExecutionCheckpoint(executionContext, 10),
+        [
+          {
+            taskId: "tag",
+            description: "Tag the papers",
+            effect: "mutation",
+            capability: "zotero.tags",
+            targets: ["item:1", "item:2", "item:3", "item:4", "item:5"],
+          },
+        ],
+        20,
+      );
+      const excepted: ExecutionCheckpoint = {
+        ...ledger,
+        tasks: [
+          {
+            ...ledger.tasks[0],
+            doneTargets: ["item:1"],
+            exceptions: [
+              { targets: ["item:2"], reason: "Read-only library" },
+              { targets: ["item:3"], reason: "Item in trash" },
+              { targets: ["item:4"], reason: "Locked" },
+              { targets: ["item:5"], reason: "Not applied" },
+            ],
+          },
+        ],
+      };
+      const result = await call(context(excepted), {
+        tasks: [
+          {
+            taskId: "explain",
+            description: "Explain what changed",
+            expectedEffect: "reasoning",
+          },
+        ],
+      });
+      assert.deepEqual(result.parts[0], {
+        taskId: "tag",
+        status: "pending",
+        done: 1,
+        total: 5,
+        exceptions: 4,
+        reasons: ["Read-only library", "Item in trash", "Locked"],
+      });
     });
 
     it("takes scope as true or false only", function () {

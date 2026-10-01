@@ -19,6 +19,7 @@
  * Rebuilding is lazy (a panel sync asks), once per record, and never for a
  * conversation being deleted or whose key is retired.
  */
+import { ExecutionCheckpointFold } from "../../../agent/execution/checkpointEvents";
 import { listAgentRunEventsForRuns } from "../../../agent/store/traceStore";
 import type { AgentRunEventRecord, AgentEvent } from "../../../agent/types";
 import type { TaskPaperLedgerDelta } from "../../../agent/context/taskPaperLedger";
@@ -48,6 +49,7 @@ export const TASK_PROGRESS_HISTORY_EVENT_TYPES = [
   "plan_ready",
   "plan_execution_updated",
   "execution_checkpoint",
+  "execution_checkpoint_delta",
 ] as const;
 
 const PLAN_EVENT_TYPES = new Set<string>([
@@ -84,12 +86,16 @@ export function buildTaskProgressHistory(
     if (message.role !== "assistant" || !runId || question < 1) continue;
     const events = eventsByRun.get(runId) || [];
     const deltas: TaskPaperLedgerDelta[] = [];
+    const ledger = new ExecutionCheckpointFold();
     for (const entry of events) {
       const payload: AgentEvent = entry.payload;
       if (payload.type === "paper_ledger_update" && payload.delta) {
         deltas.push(payload.delta);
-      } else if (payload.type === "execution_checkpoint") {
-        if (payload.checkpoint?.tasks?.length) planSeen = true;
+      } else if (
+        payload.type === "execution_checkpoint" ||
+        payload.type === "execution_checkpoint_delta"
+      ) {
+        if (ledger.apply(payload)?.tasks?.length) planSeen = true;
       } else if (PLAN_EVENT_TYPES.has(payload.type)) {
         planSeen = true;
       } else if (readCodexPlanChecklist(payload)) {
@@ -108,17 +114,19 @@ export function buildTaskProgressHistory(
   const latest = runs[runs.length - 1];
   let checklist: TaskProgressHistory["checklist"] = null;
   if (latest && latest.turn === question) {
+    // The run's ledger events fold to its ledger as it stood last.
+    const ledger = new ExecutionCheckpointFold();
     for (const entry of eventsByRun.get(latest.runId) || []) {
       const steps = readCodexPlanChecklist(entry.payload);
       if (steps) checklist = { source: "codex", runId: latest.runId, steps };
-      // The run's latest checkpoint is its ledger as it stood last.
+      const checkpoint = ledger.apply(entry.payload);
       if (
-        entry.payload.type === "execution_checkpoint" &&
-        entry.payload.checkpoint
+        checkpoint &&
+        (entry.payload.type === "execution_checkpoint" ||
+          entry.payload.type === "execution_checkpoint_delta")
       )
         checklist =
-          taskOutcomesChecklist(latest.runId, entry.payload.checkpoint) ??
-          checklist;
+          taskOutcomesChecklist(latest.runId, checkpoint) ?? checklist;
     }
   }
   return {

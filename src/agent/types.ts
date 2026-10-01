@@ -51,6 +51,7 @@ import type { SkillRoutingReceipt } from "./skills/routingTypes";
 import type { LoadedSkillRecord } from "./skills/loadingTypes";
 import type {
   ExecutionCheckpoint,
+  ExecutionCheckpointDelta,
   MaterialOutcomeEntry,
 } from "./execution/types";
 
@@ -70,6 +71,7 @@ export type {
 
 export type {
   ExecutionCheckpoint,
+  ExecutionCheckpointDelta,
   ExecutionCheckpointTask,
   ExecutionTaskStatus,
   MaterialOutcomeEntry,
@@ -437,6 +439,11 @@ export type AgentEvent =
   | {
       type: "execution_checkpoint";
       checkpoint: ExecutionCheckpoint;
+    }
+  | {
+      /** A change to the run's ledger since its previous ledger event. */
+      type: "execution_checkpoint_delta";
+      delta: ExecutionCheckpointDelta;
     }
   | {
       type: "provider_event";

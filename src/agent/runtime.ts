@@ -40,7 +40,10 @@ import {
   hydrateAgentEvidenceCache,
   type AgentPendingReadActivity,
 } from "./context/resourceContextPlan";
-import type { TaskPaperScopeSet } from "./context/taskPaperScopeListing";
+import {
+  statesTurnPaperScope,
+  type TaskPaperScopeSet,
+} from "./context/taskPaperScopeListing";
 import {
   buildAgentSemanticCheckpoint,
   buildPortableAgentTranscript,
@@ -117,6 +120,7 @@ import {
   createEmptyExecutionCheckpoint,
   latestExecutionCheckpoint,
 } from "./execution/checkpoint";
+import { executionCheckpointEvent } from "./execution/checkpointEvents";
 import type { ExecutionCheckpoint, RunEndState } from "./execution/types";
 import { createAgentExecutionContext } from "./execution/context";
 import { loadMaterialOutcomesForConversation } from "./execution/materialOutcomes";
@@ -325,11 +329,18 @@ export class AgentRuntime {
     return getAgentRunTrace(runId);
   }
 
-  /** The turn's scope, or none when it cannot be resolved: never fails a turn. */
+  /**
+   * The turn's scope, when it is worth stating (not a one-paper chat), or
+   * none when it cannot be resolved: never fails a turn.
+   */
   private async turnScopePapers(
     request: AgentRuntimeRequest,
   ): Promise<TaskPaperScopeSet | undefined> {
-    if (!this.resolveTurnScopePapers) return undefined;
+    if (
+      !this.resolveTurnScopePapers ||
+      !statesTurnPaperScope(request.turnPaperScope)
+    )
+      return undefined;
     try {
       return await this.resolveTurnScopePapers(request);
     } catch (error) {
@@ -429,6 +440,10 @@ export class AgentRuntime {
     // recorder both apply their change here, one change at a time, and each
     // change that moves the ledger is published once.
     let executionCheckpointWrites: Promise<unknown> = Promise.resolve();
+    // The ledger the run's events last published. A change is published as
+    // a delta from it; the first change, and the one after a publication
+    // that failed, is published whole.
+    let publishedCheckpoint: ExecutionCheckpoint | undefined;
     const updateExecutionCheckpoint = (
       apply: (checkpoint: ExecutionCheckpoint) => ExecutionCheckpoint,
     ): Promise<ExecutionCheckpoint> => {
@@ -439,10 +454,12 @@ export class AgentRuntime {
         const next = apply(current);
         if (next !== current) {
           request.executionCheckpoint = next;
-          await emitRunEvent?.({
-            type: "execution_checkpoint",
-            checkpoint: next,
-          });
+          if (emitRunEvent) {
+            const event = executionCheckpointEvent(publishedCheckpoint, next);
+            publishedCheckpoint = undefined;
+            await emitRunEvent(event);
+            publishedCheckpoint = next;
+          }
         }
         return next;
       });

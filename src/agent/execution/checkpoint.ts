@@ -1,5 +1,6 @@
 import type { MaterialRef } from "../documents/materialRef";
 import type { AgentExecutionContext, AgentRunEventRecord } from "../types";
+import { ExecutionCheckpointFold } from "./checkpointEvents";
 import type { ExecutionCheckpoint } from "./types";
 
 export type { ExecutionCheckpoint, ExecutionCheckpointTask } from "./types";
@@ -123,12 +124,14 @@ export function parseMaterialRef(value: unknown): MaterialRef | null {
   };
 }
 
+/**
+ * A run's ledger as its stored events last proved it: the whole ledgers and
+ * the deltas between them, folded in order (`checkpointEvents.ts`).
+ */
 export function latestExecutionCheckpoint(
   events: readonly AgentRunEventRecord[],
 ): ExecutionCheckpoint | undefined {
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const event = events[index].payload;
-    if (event.type === "execution_checkpoint") return event.checkpoint;
-  }
-  return undefined;
+  const fold = new ExecutionCheckpointFold();
+  for (const event of events) fold.apply(event.payload);
+  return fold.latest;
 }

@@ -12,6 +12,7 @@ import type {
   AgentRuntimeRequest,
 } from "../src/agent/types";
 import { buildQuoteCitation } from "../src/services/quotes/quoteCitations";
+import { executionCheckpointEvent } from "../src/agent/execution/checkpointEvents";
 import {
   clearAllTaskProgress,
   displayedTaskRunState,
@@ -2122,19 +2123,20 @@ describe("agent engine final UI release", function () {
       const deps = createDeps({
         runtime: runtimeWith(async (params) => {
           await params.onStart?.("run-outcomes");
-          await params.onEvent?.({
-            type: "execution_checkpoint",
-            checkpoint: outcomeCheckpoint([save]),
-          });
+          const first = outcomeCheckpoint([save]);
+          await params.onEvent?.(executionCheckpointEvent(undefined, first));
           snap();
-          await params.onEvent?.({
-            type: "execution_checkpoint",
-            checkpoint: outcomeCheckpoint(
+          // The runtime publishes each later change as a delta.
+          const delta = executionCheckpointEvent(
+            first,
+            outcomeCheckpoint(
               [{ ...save, status: "completed" }, tags],
               "completed_with_exceptions",
               3,
             ),
-          });
+          );
+          assert.equal(delta.type, "execution_checkpoint_delta");
+          await params.onEvent?.(delta);
           snap();
           await params.onEvent?.({ type: "final", text: "Saved." });
           return {

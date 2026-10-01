@@ -11,7 +11,12 @@ import {
   assertCheckpointOwner,
   ordinaryExecutionTaskId,
 } from "../../execution/checkpoint";
-import type { ExecutionCheckpoint, OutcomeEffect } from "../../execution/types";
+import type {
+  ExecutionCheckpoint,
+  ExecutionCheckpointTask,
+  ExecutionTaskStatus,
+  OutcomeEffect,
+} from "../../execution/types";
 import type { TaskPaperScopeSet } from "../../context/taskPaperScopeListing";
 import {
   declareOutcomes,
@@ -89,9 +94,61 @@ const HOST_MARKS_DONE =
   "Nothing changed: the host marks parts done from the tools' results, so progress needs no task_update call. Continue the work, or answer when it is done.";
 const SCOPE_OR_TARGETS = "Give a part targetIds or scope:true, not both.";
 const NO_SCOPE_PAPERS =
-  "This turn's paper scope lists no papers; name the part's papers in targetIds.";
+  "This turn states no paper scope to cover; name the part's papers in targetIds.";
 const NO_STATUS =
   "task_update takes no status: the host marks parts done from the tools' results. Declare parts in tasks, and list one that cannot be done under skipped, blocked or cancelled with the reason.";
+
+/**
+ * One part as the model reads it back: its id, status and counts. The ledger
+ * itself, with the papers a part froze, stays with the host.
+ */
+type TaskUpdatePart = {
+  taskId: string;
+  status: ExecutionTaskStatus;
+  /** Targets done, of the targets it names. */
+  done?: number;
+  total?: number;
+  /** Targets not done, with up to three of the host's reasons. */
+  exceptions?: number;
+  reasons?: string[];
+  /** Why it was skipped, blocked or cancelled, or why a write failed. */
+  reason?: string;
+  scope?: true;
+};
+
+const NAMED_EXCEPTION_REASONS = 3;
+
+function answerPart(
+  checkpoint: ExecutionCheckpoint,
+  task: ExecutionCheckpointTask,
+): TaskUpdatePart {
+  const prefix = `${checkpoint.executionId}:task:`;
+  const exceptions = task.exceptions || [];
+  const excepted = exceptions.reduce(
+    (count, entry) => count + entry.targets.length,
+    0,
+  );
+  return {
+    taskId: task.taskId.startsWith(prefix)
+      ? task.taskId.slice(prefix.length)
+      : task.taskId,
+    status: task.status,
+    ...(task.targets?.length
+      ? { done: task.doneTargets?.length || 0, total: task.targets.length }
+      : {}),
+    ...(excepted
+      ? {
+          exceptions: excepted,
+          reasons: [...new Set(exceptions.map((entry) => entry.reason))].slice(
+            0,
+            NAMED_EXCEPTION_REASONS,
+          ),
+        }
+      : {}),
+    ...(task.reason ? { reason: task.reason } : {}),
+    ...(task.scope ? { scope: true as const } : {}),
+  };
+}
 
 function optionalText(value: unknown): string | undefined {
   return typeof value === "string" ? value.trim() || undefined : undefined;
@@ -303,7 +360,7 @@ function applyOrdinaryTaskUpdates(
 
 export function createTaskUpdateTool(): AgentToolDefinition<
   TaskUpdateInput,
-  unknown
+  { parts: TaskUpdatePart[]; note?: string }
 > {
   return {
     spec: {
@@ -362,7 +419,10 @@ export function createTaskUpdateTool(): AgentToolDefinition<
         ignored = applied.ignored;
         return applied.checkpoint;
       });
-      return ignored ? { checkpoint, note: HOST_MARKS_DONE } : { checkpoint };
+      const parts = checkpoint.tasks.map((task) =>
+        answerPart(checkpoint, task),
+      );
+      return ignored ? { parts, note: HOST_MARKS_DONE } : { parts };
     },
   };
 }

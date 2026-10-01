@@ -5,6 +5,7 @@ import {
   listTaskPaperScope,
   resolveTaskPaperScopeItemIds,
   resolveTaskPaperScopeSet,
+  statesTurnPaperScope,
   taskPaperScopeContextsOf,
   type TaskPaperScopeContexts,
 } from "../src/agent/context/taskPaperScopeListing";
@@ -282,6 +283,50 @@ describe("taskPaperScopeListing", function () {
       assert.deepEqual(set.itemIds.slice(0, 5), [1, 2, 3, 6, 7]);
       assert.lengthOf(set.itemIds, 5 + extra);
       assert.equal(set.withText, 1);
+    });
+
+    it("is stated for a folder, a tag, the whole library or two papers, never for one paper", function () {
+      const paper = (itemId: number) => ({
+        itemId,
+        contextItemId: itemId + 100,
+        title: `Paper ${itemId}`,
+        libraryID: 1,
+      });
+      const scopeOf = (input: Parameters<typeof buildTurnPaperScope>[0]) => {
+        const built = buildTurnPaperScope({ libraryID: 1, ...input });
+        assert.isTrue(built.ok);
+        return (built as Extract<typeof built, { ok: true }>).scope;
+      };
+      const cases: Array<
+        [string, Parameters<typeof buildTurnPaperScope>[0], boolean]
+      > = [
+        ["the whole library", {}, true],
+        ["one paper", { selectedPaperContexts: [paper(1)] }, false],
+        [
+          "a paper chat's own paper",
+          { conversationKind: "paper", activePaperContext: paper(1) },
+          false,
+        ],
+        ["two papers", { selectedPaperContexts: [paper(1), paper(2)] }, true],
+        [
+          "one paper and a folder",
+          {
+            selectedPaperContexts: [paper(1)],
+            selectedCollectionContexts: [
+              { collectionId: 10, name: "Drift", libraryID: 1 },
+            ],
+          },
+          true,
+        ],
+        [
+          "a tag",
+          { selectedTagContexts: [{ name: "drift", libraryID: 1 }] },
+          true,
+        ],
+      ];
+      for (const [label, input, stated] of cases) {
+        assert.equal(statesTurnPaperScope(scopeOf(input)), stated, label);
+      }
     });
 
     it("reads a turn's papers, folders, tags and removals as Task progress does", function () {

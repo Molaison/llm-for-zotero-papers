@@ -6,6 +6,7 @@
  */
 import { assert } from "chai";
 import type { AgentRunEventRecord } from "../src/agent/types";
+import { executionCheckpointEvent } from "../src/agent/execution/checkpointEvents";
 import { rememberConversationKeyRetired } from "../src/shared/conversationKeyLedger";
 import {
   bumpConversationWriteGeneration,
@@ -320,6 +321,36 @@ describe("task progress history rebuild of outcome ledgers", function () {
     assert.equal(record.checklist?.source, "outcomes");
     assert.isTrue(record.planSeen);
     assert.equal(displayedTaskRunState(record), "completed_with_exceptions");
+  });
+
+  it("folds a run's whole ledger and the deltas after it", function () {
+    const folded = [
+      record("run-outcomes", 1, executionCheckpointEvent(undefined, live)),
+      record("run-outcomes", 2, executionCheckpointEvent(live, settledLedger)),
+    ];
+    assert.equal(folded[1].payload.type, "execution_checkpoint_delta");
+    assert.include(
+      TASK_PROGRESS_HISTORY_EVENT_TYPES as readonly string[],
+      "execution_checkpoint_delta",
+    );
+    const history = buildTaskProgressHistory(
+      stored(),
+      new Map([["run-outcomes", folded]]),
+      1,
+    );
+    assert.equal(history.checklist?.end, "completed_with_exceptions");
+    assert.deepEqual(
+      history.checklist?.steps.map((step) => [
+        step.label,
+        step.status,
+        step.outcome?.doneTargets,
+      ]),
+      [
+        ["Save the summary as a note", "completed", 0],
+        ["Added tags", "completed", 1],
+      ],
+    );
+    assert.isTrue(history.planSeen);
   });
 
   it("keeps an ending with no outcome off the steps, and an earlier run's outcomes to the row", async function () {

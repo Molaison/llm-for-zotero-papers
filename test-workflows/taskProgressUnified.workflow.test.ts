@@ -6,6 +6,8 @@
  */
 import { assert } from "chai";
 import { buildQuoteCitation } from "../src/services/quotes/quoteCitations";
+import { executionCheckpointEvent } from "../src/agent/execution/checkpointEvents";
+import type { ExecutionCheckpoint } from "../src/agent/types";
 import type {
   WorkflowTestApi,
   WorkflowTestFixture,
@@ -727,36 +729,34 @@ describe("workflow: task progress unified", function () {
         .slice(0, TITLES.length)
         .map((fixture) => `item:${fixture.parentItemId}`);
       const readAll = `Read each paper in ${collection.name}`;
-      await handle.emit({
-        type: "execution_checkpoint",
-        checkpoint: {
-          version: 1,
-          executionId: handle.runId,
-          conversationKey: handle.conversationKey,
-          conversationGeneration: 0,
-          tasks: [
-            {
-              taskId: `${handle.runId}:task:read-all`,
-              description: readAll,
-              dependencies: [],
-              status: "pending",
-              journalActionIds: [],
-              verifiedReceiptIds: [],
-              readEvidenceIds: [],
-              materialRefs: [],
-              createdAt: 1,
-              updatedAt: 2,
-              effect: "read",
-              origin: "model",
-              scope: true,
-              targets,
-              doneTargets: targets.slice(0, 2),
-            },
-          ],
-          createdAt: 1,
-          updatedAt: 2,
-        },
-      } as never);
+      const ledger = (done: number): ExecutionCheckpoint => ({
+        version: 1,
+        executionId: handle.runId,
+        conversationKey: handle.conversationKey,
+        conversationGeneration: 0,
+        tasks: [
+          {
+            taskId: `${handle.runId}:task:read-all`,
+            description: readAll,
+            dependencies: [],
+            status: "pending",
+            journalActionIds: [],
+            verifiedReceiptIds: [],
+            readEvidenceIds: [],
+            materialRefs: [],
+            createdAt: 1,
+            updatedAt: 2 + done,
+            effect: "read",
+            origin: "model",
+            scope: true,
+            targets,
+            doneTargets: targets.slice(0, done),
+          },
+        ],
+        createdAt: 1,
+        updatedAt: 2 + done,
+      });
+      await handle.emit(executionCheckpointEvent(undefined, ledger(2)));
       await until(
         () => {
           api.flushTaskProgress();
@@ -775,6 +775,22 @@ describe("workflow: task progress unified", function () {
       assert.isTrue(
         (line.querySelector(".llm-plan-task-pill") as HTMLElement).hidden,
         "a part still in progress shows no pill",
+      );
+      // The runtime publishes each later change as a delta.
+      const delta = executionCheckpointEvent(ledger(2), ledger(3));
+      assert.equal(delta.type, "execution_checkpoint_delta");
+      await handle.emit(delta);
+      await until(
+        () => {
+          api.flushTaskProgress();
+          return (
+            tp()
+              .steps.querySelector(".llm-plan-task-label")
+              ?.textContent?.endsWith("· 3 of 4") || false
+          );
+        },
+        () =>
+          `the delta moves the count: ${tp().steps.querySelector(".llm-plan-task-label")?.textContent}`,
       );
       await until(
         () => tp().drawer.dataset.state === "open",

@@ -18,6 +18,7 @@ import {
  * mode can be read and edited without opening chat.ts.
  */
 import type { AgentRuntime } from "../../../agent/runtime";
+import { ExecutionCheckpointFold } from "../../../agent/execution/checkpointEvents";
 import type {
   AgentEvent,
   AgentPendingAction,
@@ -298,6 +299,8 @@ export function createAgentTurnEventHandler(
   // Task progress follows the run: working from its start, the paper ledger
   // as reads land, answering at the first answer text, ✓ at final.
   let taskRunBegun = false;
+  // The run's outcome ledger, folded from its whole and delta events.
+  const outcomeLedger = new ExecutionCheckpointFold();
   const ensureTaskRun = () => {
     if (taskRunBegun || !assistantMessage.agentRunId) return;
     taskRunBegun = true;
@@ -521,15 +524,18 @@ export function createAgentTurnEventHandler(
         );
         return;
       case "execution_checkpoint":
+      case "execution_checkpoint_delta": {
         // The run's outcomes, as its ledger stands, are its Task progress steps.
-        if (assistantMessage.agentRunId) {
+        const checkpoint = outcomeLedger.apply(event);
+        if (assistantMessage.agentRunId && checkpoint) {
           setTaskOutcomes(
             conversationKey,
             assistantMessage.agentRunId,
-            event.checkpoint,
+            checkpoint,
           );
         }
         break;
+      }
       case "message_rollback":
         if (typeof event.length === "number" && event.length > 0) {
           assistantMessage.pendingFinalText = (
