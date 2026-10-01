@@ -169,7 +169,6 @@ describe("a finalized document hands the turn back while requested work remains"
           {
             taskId: "save-note",
             description: SAVE_TASK,
-            status: "pending",
             expectedEffect: "mutation",
             expectedCapability: "zotero.notes",
           },
@@ -224,7 +223,6 @@ describe("a finalized document hands the turn back while requested work remains"
           {
             taskId: "explain",
             description: "Explain how the drift was measured",
-            status: "pending",
             expectedEffect: "reasoning",
           },
         ],
@@ -263,29 +261,21 @@ describe("a finalized document hands the turn back while requested work remains"
           {
             taskId: "ask",
             description: "Ask which collection to use",
-            status: "pending",
             expectedEffect: "reasoning",
           },
           {
             taskId: "check",
             description: "Check the citation style",
-            status: "pending",
             expectedEffect: "reasoning",
           },
         ],
       }),
       toolCallStep("task-2", "task_update", {
-        tasks: [
-          {
-            taskId: "ask",
-            status: "blocked",
-            reason: "Needs the user's choice of collection",
-          },
-          {
-            taskId: "check",
-            status: "skipped",
-            reason: "The summary cites no other work",
-          },
+        blocked: [
+          { taskId: "ask", reason: "Needs the user's choice of collection" },
+        ],
+        skipped: [
+          { taskId: "check", reason: "The summary cites no other work" },
         ],
       }),
       stepOf(submitDocumentCall("submit-1")),

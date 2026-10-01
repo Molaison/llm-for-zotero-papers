@@ -177,39 +177,43 @@ describe("task_update ordinary declarations", function () {
   const declareSave = {
     taskId: "save",
     description: "Save it as a note on the paper",
-    status: "pending",
     expectedEffect: "mutation",
     expectedCapability: "zotero.notes",
     targetIds: ["12"],
   };
 
-  it("accepts the legacy task shorthand and the new tasks batch, but not both", function () {
+  it("takes declarations in tasks and exceptions in skipped, blocked or cancelled", function () {
     const tool = createTaskUpdateTool();
-    assert.isTrue(
-      tool.validate({ task: { taskId: "one", status: "pending" } }).ok,
-    );
+    assert.isTrue(tool.validate({ tasks: [declareSave] }).ok);
+    for (const exception of ["skipped", "blocked", "cancelled"])
+      assert.isTrue(
+        tool.validate({
+          [exception]: [{ taskId: "save", reason: "Not possible" }],
+        }).ok,
+        exception,
+      );
     assert.isTrue(
       tool.validate({
-        tasks: [
-          {
-            taskId: "one",
-            description: "First task",
-            status: "pending",
-          },
-          {
-            taskId: "two",
-            description: "Second task",
-            dependencies: ["one"],
-            status: "pending",
-          },
-        ],
+        tasks: [declareSave],
+        skipped: [{ taskId: "read", reason: "The PDF is missing" }],
       }).ok,
     );
-    const invalid = tool.validate({
-      task: { taskId: "one", status: "pending" },
-      tasks: [{ taskId: "two", status: "pending" }],
-    });
-    assert.isFalse(invalid.ok);
+    for (const args of [{ task: declareSave }, {}, { tasks: [] }])
+      assert.isFalse(tool.validate(args).ok, JSON.stringify(args));
+  });
+
+  it("has no status for the model to report progress with", function () {
+    const tool = createTaskUpdateTool();
+    const schema = tool.spec.inputSchema as {
+      properties: Record<string, { items?: { properties: object } }>;
+    };
+    assert.notProperty(schema.properties, "task");
+    assert.notProperty(schema.properties.tasks.items!.properties, "status");
+    for (const status of ["completed", "in_progress", "pending", "skipped"]) {
+      const parsed = tool.validate({ tasks: [{ ...declareSave, status }] });
+      assert.isFalse(parsed.ok, status);
+      if (!parsed.ok) assert.include(parsed.error, "host marks parts done");
+    }
   });
 
   it("declares a new part as a pending model outcome with its effect, capability and targets", async function () {
@@ -220,7 +224,6 @@ describe("task_update ordinary declarations", function () {
         {
           taskId: "explain",
           description: "Explain the method",
-          status: "pending",
           expectedEffect: "reasoning",
         },
       ],
@@ -255,7 +258,7 @@ describe("task_update ordinary declarations", function () {
 
   it("ignores an expectedCapability that is not an action capability", async function () {
     const result = await call(context(), {
-      task: { ...declareSave, expectedCapability: "zotero.everything" },
+      tasks: [{ ...declareSave, expectedCapability: "zotero.everything" }],
     });
     assert.notProperty(result.checkpoint.tasks[0], "capability");
     assert.equal(result.checkpoint.tasks[0].effect, "mutation");
@@ -265,13 +268,7 @@ describe("task_update ordinary declarations", function () {
     const ctx = context();
     const error = await rejectionOf(
       call(ctx, {
-        tasks: [
-          {
-            taskId: "save",
-            description: "Save it as a note",
-            status: "pending",
-          },
-        ],
+        tasks: [{ taskId: "save", description: "Save it as a note" }],
       }),
     );
     assert.instanceOf(error, ToolInputRejection);
@@ -283,20 +280,14 @@ describe("task_update ordinary declarations", function () {
     assert.isUndefined(ctx.request.executionCheckpoint);
   });
 
-  it("answers a request to complete, start or reopen a part with the note and changes nothing", async function () {
+  it("answers a repeated declaration with the note and changes nothing", async function () {
     const ctx = context();
-    await call(ctx, { task: declareSave });
+    await call(ctx, { tasks: [declareSave] });
     const declared = ctx.request.executionCheckpoint;
 
-    for (const status of ["completed", "in_progress", "pending"]) {
-      const result = await call(ctx, {
-        task: {
-          taskId: "save",
-          status,
-          verifiedReceiptIds: ["receipt-1"],
-        },
-      });
-      assert.equal(result.note, NOTHING_CHANGED, status);
+    for (const repeat of [declareSave, { taskId: "save" }]) {
+      const result = await call(ctx, { tasks: [repeat] });
+      assert.equal(result.note, NOTHING_CHANGED, JSON.stringify(repeat));
       assert.strictEqual(result.checkpoint, declared);
     }
     assert.lengthOf(published, 1, "only the declaration was published");
@@ -306,9 +297,9 @@ describe("task_update ordinary declarations", function () {
 
   it("refuses a skipped part without the reason", async function () {
     const ctx = context();
-    await call(ctx, { task: declareSave });
+    await call(ctx, { tasks: [declareSave] });
     const error = await rejectionOf(
-      call(ctx, { task: { taskId: "save", status: "skipped" } }),
+      call(ctx, { skipped: [{ taskId: "save" }] }),
     );
     assert.instanceOf(error, ToolInputRejection);
     assert.equal(
@@ -321,13 +312,9 @@ describe("task_update ordinary declarations", function () {
 
   it("marks a part skipped with its reason", async function () {
     const ctx = context();
-    await call(ctx, { task: declareSave });
+    await call(ctx, { tasks: [declareSave] });
     const result = await call(ctx, {
-      task: {
-        taskId: "save",
-        status: "skipped",
-        reason: "The library is read-only",
-      },
+      skipped: [{ taskId: "save", reason: "The library is read-only" }],
     });
     assert.notProperty(result, "note");
     assert.lengthOf(published, 2);
@@ -340,19 +327,21 @@ describe("task_update ordinary declarations", function () {
 
   it("never takes evidence identities from an ordinary task", async function () {
     const result = await call(context(), {
-      task: {
-        ...declareSave,
-        journalActionIds: ["action-1"],
-        verifiedReceiptIds: ["receipt-1"],
-        readEvidenceIds: ["read-1"],
-        materialRefs: [
-          {
-            documentId: "document-1",
-            documentVersion: 2,
-            contentHash: "sha256:material",
-          },
-        ],
-      },
+      tasks: [
+        {
+          ...declareSave,
+          journalActionIds: ["action-1"],
+          verifiedReceiptIds: ["receipt-1"],
+          readEvidenceIds: ["read-1"],
+          materialRefs: [
+            {
+              documentId: "document-1",
+              documentVersion: 2,
+              contentHash: "sha256:material",
+            },
+          ],
+        },
+      ],
     });
     const [task] = result.checkpoint.tasks;
     assert.equal(task.status, "pending");
@@ -365,25 +354,25 @@ describe("task_update ordinary declarations", function () {
   it("applies the declarations of a call before its marks, and publishes one checkpoint", async function () {
     const ctx = context();
     await call(ctx, {
-      task: {
-        taskId: "read",
-        description: "Read the paper",
-        status: "pending",
-        expectedEffect: "read",
-      },
+      tasks: [
+        {
+          taskId: "read",
+          description: "Read the paper",
+          expectedEffect: "read",
+        },
+      ],
     });
     const result = await call(ctx, {
       tasks: [
         declareSave,
-        { taskId: "read", status: "skipped", reason: "The PDF is missing" },
         {
           taskId: "cite",
           description: "Cite it in APA",
-          status: "blocked",
-          reason: "Needs the citation style",
           expectedEffect: "reasoning",
         },
       ],
+      skipped: [{ taskId: "read", reason: "The PDF is missing" }],
+      blocked: [{ taskId: "cite", reason: "Needs the citation style" }],
     });
 
     assert.lengthOf(published, 2, "one checkpoint per call");
@@ -398,38 +387,28 @@ describe("task_update ordinary declarations", function () {
     );
   });
 
-  it("declares a new part pending, with the note, when asked to start or complete it", async function () {
-    const result = await call(context(), {
-      task: { ...declareSave, status: "completed" },
-    });
-    assert.equal(result.checkpoint.tasks[0].status, "pending");
-    assert.equal(result.note, NOTHING_CHANGED);
-    assert.lengthOf(published, 1);
-  });
-
   it("refuses a malformed call as an input rejection: a new description, a repeated id, or an invalid id", async function () {
     const ctx = context();
-    await call(ctx, { task: declareSave });
+    await call(ctx, { tasks: [declareSave] });
+    const draft = {
+      taskId: "draft",
+      description: "Draft the summary",
+      expectedEffect: "artifact",
+    };
     for (const [args, message] of [
       [
-        { task: { ...declareSave, description: "Save somewhere else" } },
+        { tasks: [{ ...declareSave, description: "Save somewhere else" }] },
         /immutable/,
       ],
+      [{ tasks: [draft, draft] }, /only once/],
       [
         {
-          tasks: [
-            {
-              taskId: "draft",
-              description: "Draft the summary",
-              status: "pending",
-              expectedEffect: "artifact",
-            },
-            { taskId: "draft", status: "skipped", reason: "No time" },
-          ],
+          skipped: [{ taskId: "save", reason: "No time" }],
+          blocked: [{ taskId: "save", reason: "Needs a choice" }],
         },
         /only once/,
       ],
-      [{ task: { ...declareSave, taskId: "save the note" } }, /Task IDs/],
+      [{ tasks: [{ ...declareSave, taskId: "save the note" }] }, /Task IDs/],
     ] as const) {
       const error = await rejectionOf(call(ctx, args));
       assert.instanceOf(error, ToolInputRejection);
@@ -444,7 +423,7 @@ describe("task_update ordinary declarations", function () {
       10,
     );
     const error = await rejectionOf(
-      call(context(foreign), { task: declareSave }),
+      call(context(foreign), { tasks: [declareSave] }),
     );
     assert.include(error.message, "belongs to another execution");
     assert.lengthOf(published, 0);

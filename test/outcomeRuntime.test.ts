@@ -86,7 +86,6 @@ function declare(id: string, tasks: Record<string, unknown>[]): AgentToolCall {
 const saveDeclaration = {
   taskId: "save",
   description: SAVE,
-  status: "pending",
   expectedEffect: "mutation",
   expectedCapability: "zotero.notes",
   targetIds: [String(PARENT_ITEM_ID)],
@@ -414,7 +413,6 @@ describe("outcome ledger in runtime turns", function () {
             {
               taskId: "explain",
               description: "Explain how drift was measured",
-              status: "pending",
               expectedEffect: "reasoning",
             },
           ]),
@@ -564,7 +562,6 @@ describe("outcome ledger in runtime turns", function () {
             {
               taskId: "read",
               description: "Read the paper",
-              status: "pending",
               expectedEffect: "read",
               targetIds: [String(PARENT_ITEM_ID)],
             },
@@ -616,7 +613,6 @@ describe("outcome ledger in runtime turns", function () {
             {
               taskId: "read",
               description: "Read the paper",
-              status: "pending",
               expectedEffect: "read",
               targetIds: [String(PARENT_ITEM_ID)],
             },

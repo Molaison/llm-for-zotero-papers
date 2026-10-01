@@ -218,6 +218,6 @@ export class AgentFinalAnswerController {
     if (signature === this.outcomeCorrectionSignature) return undefined;
     this.outcomeCorrectionSignature = signature;
     const parts = open.map((task) => `“${task.description}”`).join("; ");
-    return `Before answering, finish the parts of this request you declared that are still open: ${parts}. Do them now with the tools. If one cannot be done, call task_update with status skipped or blocked and the reason, then answer.`;
+    return `Before answering, finish the parts of this request you declared that are still open: ${parts}. Do them now with the tools. If one cannot be done, list it under task_update's skipped or blocked with the reason, then answer.`;
   }
 }

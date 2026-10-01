@@ -229,7 +229,7 @@ describe("AgentFinalAnswerController declared outcomes", function () {
     if (decision.kind !== "correct") return;
     assert.equal(
       decision.correction,
-      `Before answering, finish the parts of this request you declared that are still open: “${SAVE}”; “Tag it”. Do them now with the tools. If one cannot be done, call task_update with status skipped or blocked and the reason, then answer.`,
+      `Before answering, finish the parts of this request you declared that are still open: “${SAVE}”; “Tag it”. Do them now with the tools. If one cannot be done, list it under task_update's skipped or blocked with the reason, then answer.`,
     );
   });
 
