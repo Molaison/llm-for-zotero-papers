@@ -7,7 +7,17 @@ import {
 import { buildRetrievalQueryPlan } from "../src/services/retrieval/retrievalQueryPlan";
 import type { PaperContextCandidate } from "../src/services/paperContent/types";
 import type { PaperContextRef } from "../src/shared/types";
-import { normalizeLibraryRetrieveArgs } from "../src/agent/tools/read/libraryRetrieve";
+import {
+  createLibraryRetrieveTool,
+  normalizeLibraryRetrieveArgs,
+} from "../src/agent/tools/read/libraryRetrieve";
+import {
+  EVIDENCE_SECTION_KINDS,
+  type EvidenceSectionKind,
+} from "../src/shared/libraryChatEvidencePolicy";
+import { AgentToolRegistry } from "../src/agent/tools/registry";
+import { resolveAgentRuntimeRequest } from "../src/agent/context/resolvedAgentRequest";
+import { renderAgentPromptEnvelope } from "../src/agent/model/messageBuilder";
 import { resolvedAgentRequest } from "./helpers/resolvedAgentRequest";
 import {
   makeGateway,
@@ -2641,6 +2651,146 @@ describe("LibraryRetrieveService body-evidence defaults", function () {
 
     assert.lengthOf(result.snippets, 1);
     assert.equal(result.snippets[0].chunkKind, "abstract");
+  });
+
+  describe("section steering in any language", function () {
+    const QUESTION = "这些论文用了什么方法？";
+    const INTRODUCTION = {
+      chunkIndex: 1,
+      chunkKind: "introduction",
+      sectionLabel: "Introduction",
+    };
+    const METHODS = {
+      chunkIndex: 2,
+      chunkKind: "methods",
+      sectionLabel: "Methods",
+    };
+
+    /** The section labels of the one-slot evidence a paper of `chunks`
+     * (equally relevant, in paper order) yields for the Chinese question. */
+    async function steeredSections(
+      args: { queryVariants?: string[]; sections?: EvidenceSectionKind[] },
+      chunks: Array<typeof INTRODUCTION> = [INTRODUCTION, METHODS],
+    ): Promise<Array<string | undefined>> {
+      const entries = [makeItem(1, "Drift paper", "Representational drift.")];
+      const service = new LibraryRetrieveService(
+        makeGateway(entries) as any,
+        {
+          ensurePaperContext: async () =>
+            makePdfContext(["chunk a", "chunk b", "chunk c"]),
+        } as any,
+        (async (
+          paperContext: PaperContextRef,
+        ): Promise<PaperContextCandidate[]> =>
+          chunks.map((chunk) =>
+            makeCandidate(paperContext, { ...chunk, evidenceScore: 0.5 }),
+          )) as any,
+      );
+      const result = await service.retrieve({
+        query: QUESTION,
+        ...args,
+        scope: { itemIds: [1] },
+        depth: "evidence",
+        perPaperTopK: 1,
+        maxTotalSnippets: 1,
+        request: REQUEST,
+      });
+      return result.snippets.map((snippet) => snippet.sectionLabel);
+    }
+
+    it("prefers the sections the model names for a question in any language", async function () {
+      assert.deepEqual(await steeredSections({ sections: ["methods"] }), [
+        "Methods",
+      ]);
+    });
+
+    it("reads the section cue from English query variants", async function () {
+      assert.deepEqual(
+        await steeredSections({ queryVariants: ["methods used"] }),
+        ["Methods"],
+      );
+    });
+
+    it("keeps the base order when nothing names a section", async function () {
+      assert.deepEqual(await steeredSections({}), ["Introduction"]);
+    });
+
+    it("admits a named abstract instead of demoting it as front matter", async function () {
+      const ABSTRACT = {
+        chunkIndex: 0,
+        chunkKind: "abstract",
+        sectionLabel: "Abstract",
+      };
+      assert.deepEqual(await steeredSections({}, [ABSTRACT, METHODS]), [
+        "Methods",
+      ]);
+      assert.deepEqual(
+        await steeredSections({ sections: ["abstract"] }, [ABSTRACT, METHODS]),
+        ["Abstract"],
+      );
+    });
+  });
+});
+
+describe("library_retrieve sections argument", function () {
+  it("normalizes named sections and rejects an unknown section kind with the accepted ones", function () {
+    const tool = createLibraryRetrieveTool({} as never);
+    const accepted = tool.validate({
+      query: "这些论文用了什么方法？",
+      sections: ["Methods", "limitations", "methods"],
+    });
+    assert.isTrue(accepted.ok);
+    assert.deepEqual(accepted.ok && accepted.value.sections, [
+      "methods",
+      "limitations",
+    ]);
+
+    for (const sections of [["method"], "methods", [3]]) {
+      const refused = tool.validate({ query: "q", sections });
+      assert.isFalse(refused.ok, JSON.stringify(sections));
+      const error = refused.ok ? "" : refused.error;
+      assert.include(error, "sections");
+      assert.include(error, EVIDENCE_SECTION_KINDS.join(", "));
+    }
+    const named = tool.validate({ query: "q", sections: ["method"] });
+    assert.include(named.ok ? "" : named.error, '"method"');
+  });
+
+  it("tells the model about sections in the schema and turn guidance it sees", async function () {
+    const registry = new AgentToolRegistry();
+    registry.register(createLibraryRetrieveTool({} as never));
+    const spec = registry
+      .listTools()
+      .find((entry) => entry.name === "library_retrieve")!;
+    const schema = spec.inputSchema as {
+      properties: Record<string, unknown>;
+    };
+    assert.deepEqual(schema.properties.sections, {
+      type: "array",
+      items: { type: "string" },
+    });
+
+    // Parameter descriptions never reach the model; a library-level turn's
+    // guidance does, and it names every section kind.
+    const rendered = await renderAgentPromptEnvelope(
+      resolveAgentRuntimeRequest({
+        conversationKey: 1,
+        mode: "agent",
+        userText: "这些论文用了什么方法？",
+        libraryID: 1,
+      }),
+      registry.listToolDefinitions(),
+      [],
+    );
+    const sectionsLine = rendered.inventory.toolGuidanceInstructions
+      .join("\n")
+      .split("\n")
+      .find((line) => /\bsections\b/.test(line));
+    assert.isString(sectionsLine);
+    assert.include(sectionsLine, "any language");
+    for (const kind of EVIDENCE_SECTION_KINDS) {
+      assert.include(sectionsLine, kind);
+    }
   });
 });
 

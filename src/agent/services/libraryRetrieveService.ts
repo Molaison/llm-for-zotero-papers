@@ -37,9 +37,12 @@ import {
   type LibraryChatReadStrategyDiagnostics,
 } from "../../shared/libraryChatReadStrategy";
 import {
-  compareEvidenceCandidatesForQuestion,
+  compareEvidenceCandidatesForSections,
   isBodyEvidenceSection,
+  isInSectionKinds,
   queryHasExplicitSectionPreference,
+  wantedSectionKinds,
+  type EvidenceSectionKind,
 } from "../../shared/libraryChatEvidencePolicy";
 import { buildLibraryRetrieveEvidencePack } from "./libraryRetrieveEvidencePack";
 import { triageCandidatesWithModel } from "./libraryRetrieveTriage";
@@ -104,6 +107,8 @@ export type LibraryRetrieveInput = {
   scope?: LibraryRetrieveScopeInput;
   query: string;
   queryVariants?: string[];
+  /** Paper sections the user asked about; snippet ranking prefers them. */
+  sections?: EvidenceSectionKind[];
   /** "discover" is accepted only for legacy callers and normalizes to "enumerate". */
   intent?: LibraryRetrieveIntent | "discover";
   depth?: LibraryRetrieveDepth;
@@ -389,6 +394,7 @@ type NormalizedLibraryRetrieveInput = Required<
   scope?: LibraryRetrieveScopeInput;
   queryVariants: string[];
   queryPlan: RetrievalQueryPlan;
+  sections?: EvidenceSectionKind[];
   intent: LibraryRetrieveIntent;
   requireExact: boolean;
 };
@@ -693,6 +699,7 @@ function normalizeInput(
     query: input.query.trim(),
     queryVariants: effectiveQueryPlan.variants,
     queryPlan: effectiveQueryPlan,
+    sections: input.sections,
     intent,
     depth,
     methods,
@@ -2966,6 +2973,13 @@ export class LibraryRetrieveService {
             readIntent: params.input.queryPlan.readIntent,
           })
         : params.input.queryPlan;
+      // Sections the model named (from a request in any language), else
+      // the English cue of the question or of its variants.
+      const wantedSections = wantedSectionKinds({
+        question: retrievalQuestion,
+        queryVariants: params.input.queryVariants,
+        sections: params.input.sections,
+      });
       // The builder embeds `semanticQuery || question`; embed that same text.
       const semanticText = paperQueryPlan.semanticQuery || retrievalQuestion;
       const precomputedQueryEmbedding =
@@ -2996,8 +3010,8 @@ export class LibraryRetrieveService {
       ).then((rows) =>
         params.preferBodyEvidence
           ? rows.sort(
-              compareEvidenceCandidatesForQuestion(
-                retrievalQuestion,
+              compareEvidenceCandidatesForSections(
+                wantedSections,
                 (candidate) =>
                   candidate.evidenceScore || candidate.hybridScore || 0,
               ),
@@ -3050,9 +3064,17 @@ export class LibraryRetrieveService {
       if (params.preferBodyEvidence) {
         // Body evidence fills the slots first; front matter (abstract/intro)
         // is capped at one snippet and only when slots remain. Exact-match
-        // snippets above are exempt — verify mode keeps literal hits.
+        // snippets above are exempt — verify mode keeps literal hits — and
+        // so is a section the request names, such as the abstract (never a
+        // reference list).
         const isFrontMatterCandidate = (candidate: PaperContextCandidate) =>
-          !isBodyEvidenceSection(candidate.sectionLabel, candidate.chunkKind);
+          !isBodyEvidenceSection(candidate.sectionLabel, candidate.chunkKind) &&
+          (candidate.chunkKind === "references" ||
+            !isInSectionKinds(
+              wantedSections,
+              candidate.sectionLabel,
+              candidate.chunkKind,
+            ));
         for (const candidate of candidates) {
           if (isFrontMatterCandidate(candidate)) continue;
           if (snippets.length >= params.maxSnippets) break;

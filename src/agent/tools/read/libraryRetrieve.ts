@@ -18,6 +18,12 @@ import {
   validateObject,
 } from "../shared";
 import { readOnlyInvocationPlan } from "../../authorization/invocationPlan";
+import {
+  EVIDENCE_SECTION_KINDS,
+  type EvidenceSectionKind,
+} from "../../../shared/libraryChatEvidencePolicy";
+
+const VALID_SECTION = new Set<string>(EVIDENCE_SECTION_KINDS);
 
 const VALID_DEPTH = new Set<LibraryRetrieveDepth>([
   "pool",
@@ -63,6 +69,32 @@ function normalizeStringArray(value: unknown): string[] | undefined {
     .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
     .filter(Boolean);
   return entries.length ? Array.from(new Set(entries)) : undefined;
+}
+
+function sectionKind(entry: unknown): EvidenceSectionKind | undefined {
+  const kind = typeof entry === "string" ? entry.trim().toLowerCase() : "";
+  return VALID_SECTION.has(kind) ? (kind as EvidenceSectionKind) : undefined;
+}
+
+/** Absent sections are none; anything else must be a list of section kinds. */
+function parseSections(
+  value: unknown,
+): { sections?: EvidenceSectionKind[] } | { error: string } {
+  if (value === undefined || value === null) return {};
+  const kinds = EVIDENCE_SECTION_KINDS.join(", ");
+  if (!Array.isArray(value)) {
+    return {
+      error: `library_retrieve sections must be an array of section kinds: ${kinds}.`,
+    };
+  }
+  const unknown = value.filter((entry) => !sectionKind(entry));
+  if (unknown.length) {
+    return {
+      error: `library_retrieve sections: unknown section kind ${unknown.map((entry) => JSON.stringify(entry)).join(", ")}; the section kinds are ${kinds}.`,
+    };
+  }
+  const sections = [...new Set(value.map((entry) => sectionKind(entry)!))];
+  return sections.length ? { sections } : {};
 }
 
 function normalizeTagScopes(
@@ -123,9 +155,11 @@ export function normalizeLibraryRetrieveArgs(
   if (!validateObject<Record<string, unknown>>(args)) return null;
   const query = typeof args.query === "string" ? args.query.trim() : "";
   if (!query) return null;
+  const sections = parseSections(args.sections);
   const input: LibraryRetrieveInput = {
     query,
     queryVariants: normalizeStringArray(args.queryVariants),
+    sections: "sections" in sections ? sections.sections : undefined,
     scope: normalizeScope(args.scope),
     intent: normalizeIntent(args.intent),
     depth: normalizeDepth(args.depth),
@@ -167,6 +201,7 @@ export const LIBRARY_RETRIEVE_GUIDANCE: NonNullable<
   instruction: [
     "Use library_search for catalog discovery, library_read for structured item state, library_retrieve for evidence search and synthesis across a collection or library, and paper_read for close reading known papers.",
     "For library_retrieve, preserve the returned coverage boundary and use paperMatches plus the synthesis digest as the paper ledger. Query variants improve recall but are not evidence. Do not turn sampled, metadata-only, abstract-only, partial, or unreadable coverage into exhaustive claims.",
+    `When the user asks about particular parts of papers, in any language, pass library_retrieve sections from: ${EVIDENCE_SECTION_KINDS.join(", ")}.`,
     "For bounded collection or tag synthesis, require body evidence when readable papers are available (coverage papersBodyRead > 0), or answer by naming what is missing. Do not silently substitute titles or abstracts for requested paper-level synthesis.",
     "If a references or bibliography section follows library_retrieve, either include all planned papers, or label the list as body-evidence references and separately identify metadata or abstract-only papers from the coverage frontier.",
   ].join("\n"),
@@ -247,6 +282,13 @@ export function createLibraryRetrieveTool(
             items: { type: "string" },
             description:
               "Optional bounded search probes such as translations, acronyms, notation variants, or technical equivalents. Variants improve recall but are not evidence by themselves.",
+          },
+          // The section kinds are listed in the turn guidance, not as an enum:
+          // the ordinary tool payload has no room for one.
+          sections: {
+            type: "array",
+            items: { type: "string" },
+            description: `Optional paper sections the user asked about, in any language: ${EVIDENCE_SECTION_KINDS.join(", ")}. Snippet ranking prefers evidence from them.`,
           },
           intent: {
             type: "string",
@@ -373,6 +415,12 @@ export function createLibraryRetrieveTool(
       },
     },
     validate(args) {
+      const sections = parseSections(
+        validateObject<Record<string, unknown>>(args)
+          ? args.sections
+          : undefined,
+      );
+      if ("error" in sections) return fail(sections.error);
       const input = normalizeLibraryRetrieveArgs(args);
       if (!input) {
         return fail("query is required for library_retrieve");
