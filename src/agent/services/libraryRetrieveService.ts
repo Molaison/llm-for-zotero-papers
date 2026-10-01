@@ -2534,6 +2534,7 @@ export class LibraryRetrieveService {
           .map((hit) => ({
             hit,
             sectionLabel: hit.meta.sectionLabel,
+            enclosingSection: hit.meta.enclosingSection,
             chunkKind: hit.meta.chunkKind,
             chunkIndex: hit.chunkIndex,
           }))
@@ -2550,6 +2551,7 @@ export class LibraryRetrieveService {
         params.wantedSections,
         hit.meta.sectionLabel,
         hit.meta.chunkKind,
+        hit.meta.enclosingSection,
       );
     // Body evidence fills the slots first; front matter is capped at one.
     const ordered = params.preferBodyEvidence
@@ -3128,6 +3130,7 @@ export class LibraryRetrieveService {
             wantedSections,
             candidate.sectionLabel,
             candidate.chunkKind,
+            candidate.enclosingSection,
           );
         for (const candidate of candidates) {
           if (isFrontMatterCandidate(candidate)) continue;

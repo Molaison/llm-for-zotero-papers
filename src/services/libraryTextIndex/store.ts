@@ -9,6 +9,7 @@ export type StoredChunkMeta = Pick<
   | "sectionIndex"
   | "sectionPath"
   | "sectionLevel"
+  | "enclosingSection"
   | "chunkKind"
   | "kindSource"
   | "pageStart"

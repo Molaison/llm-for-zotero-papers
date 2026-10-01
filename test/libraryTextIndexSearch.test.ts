@@ -2,6 +2,8 @@ import { assert } from "chai";
 import { installLibraryTextIndexSqlite } from "./helpers/libraryTextIndexDb";
 import {
   buildFixturePdfContext,
+  buildMarkdownPdfContext,
+  headingSequenceMarkdown,
   restoreTestGlobals,
   setupMemoryIO,
   setupZoteroGlobals,
@@ -89,6 +91,54 @@ describe("library text index search", function () {
     );
     result.chunks.forEach((c, i) =>
       assert.closeTo(c.bm25Score, expected[i].score, 1e-9),
+    );
+  });
+
+  it("returns each hit's enclosing standard section from an index built by the current chunker", async function () {
+    const ctx = await buildMarkdownPdfContext(
+      headingSequenceMarkdown(
+        [
+          "Introduction",
+          "Results",
+          "Drift readout",
+          "Materials and methods",
+          "Data analysis",
+          "References",
+        ],
+        {
+          "Drift readout": "The quorvex readout drifted across sessions.",
+          "Data analysis": "Quorvex traces were deconvolved first.",
+          References: "Smith J (2020) Quorvex. Journal 1:1.",
+        },
+      ),
+      9101,
+    );
+    await store.upsertDocument(
+      buildIndexDocumentFromPdfContext({
+        attachmentId: 9101,
+        attachmentKey: "K9101",
+        libraryID: 1,
+        parentItemId: 100,
+        fileState: null,
+        ctx,
+      }),
+    );
+    const result = await searchLibraryTextIndex({
+      store,
+      scopeAttachmentIds: [9101],
+      queries: ["quorvex"],
+      maxPapers: 1,
+      perPaperTopK: 10,
+    });
+    assert.deepEqual(
+      result.chunks
+        .map((hit) => [hit.meta.sectionLabel, hit.meta.enclosingSection])
+        .sort(),
+      [
+        ["Data analysis", "Materials and methods"],
+        ["Drift readout", "Results"],
+        ["References", undefined],
+      ],
     );
   });
 

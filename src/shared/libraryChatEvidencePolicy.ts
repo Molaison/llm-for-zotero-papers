@@ -119,13 +119,20 @@ export function wantedSectionKinds(params: {
   return [...new Set((params.queryVariants || []).flatMap(sectionCueKinds))];
 }
 
-/** Whether a chunk lies in one of `kinds`. */
+/**
+ * Whether a chunk lies in one of `kinds`: by the standard section enclosing
+ * it when it has one ("Materials and methods" for a "Data analysis"
+ * subsection), else by its own section label.
+ */
 export function isInSectionKinds(
   kinds: readonly EvidenceSectionKind[],
   sectionLabel?: string,
   chunkKind?: string,
+  enclosingSection?: string,
 ): boolean {
-  const section = normalizeEvidenceSectionLabel(sectionLabel);
+  const section = normalizeEvidenceSectionLabel(
+    enclosingSection || sectionLabel,
+  );
   return kinds.some((kind) =>
     kind === "figure-caption" || kind === "table-caption"
       ? chunkKind === kind
@@ -141,11 +148,12 @@ export function admitsAsBodyEvidence(
   kinds: readonly EvidenceSectionKind[],
   sectionLabel?: string,
   chunkKind?: EvidenceChunkKind,
+  enclosingSection?: string,
 ): boolean {
   return (
     isBodyEvidenceSection(sectionLabel, chunkKind) ||
     (chunkKind !== "references" &&
-      isInSectionKinds(kinds, sectionLabel, chunkKind))
+      isInSectionKinds(kinds, sectionLabel, chunkKind, enclosingSection))
   );
 }
 
@@ -153,9 +161,13 @@ function scoreSectionMatch(
   kinds: readonly EvidenceSectionKind[],
   sectionLabel?: string,
   chunkKind?: string,
+  enclosingSection?: string,
 ): number {
-  if (isInSectionKinds(kinds, sectionLabel, chunkKind)) return 2;
-  const section = normalizeEvidenceSectionLabel(sectionLabel);
+  if (isInSectionKinds(kinds, sectionLabel, chunkKind, enclosingSection))
+    return 2;
+  const section = normalizeEvidenceSectionLabel(
+    enclosingSection || sectionLabel,
+  );
   if (!section) return 0;
   return isFrontMatterSection(section) ? 0 : 0.25;
 }
@@ -197,6 +209,7 @@ export function chunkKindFromSectionLabel(
 
 type RankedEvidenceCandidate = {
   sectionLabel?: string;
+  enclosingSection?: string;
   chunkKind?: string;
   chunkIndex?: number;
 };
@@ -210,8 +223,18 @@ export function compareEvidenceCandidatesForSections<
 ) {
   return (left: T, right: T): number => {
     const preferenceDelta =
-      scoreSectionMatch(kinds, right.sectionLabel, right.chunkKind) -
-      scoreSectionMatch(kinds, left.sectionLabel, left.chunkKind);
+      scoreSectionMatch(
+        kinds,
+        right.sectionLabel,
+        right.chunkKind,
+        right.enclosingSection,
+      ) -
+      scoreSectionMatch(
+        kinds,
+        left.sectionLabel,
+        left.chunkKind,
+        left.enclosingSection,
+      );
     if (preferenceDelta !== 0) return preferenceDelta;
     const scoreDelta =
       (getBaseScore?.(right) || 0) - (getBaseScore?.(left) || 0);

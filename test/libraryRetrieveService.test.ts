@@ -2715,6 +2715,48 @@ describe("LibraryRetrieveService body-evidence defaults", function () {
       assert.deepEqual(await steeredSections({}), ["Introduction"]);
     });
 
+    it("ranks a directly read chunk by its enclosing section before its subsection title, like the index path", async function () {
+      const firstLabel = async (sections: EvidenceSectionKind[]) => {
+        const entries = [makeItem(1, "Drift paper", "Representational drift.")];
+        const service = new LibraryRetrieveService(
+          makeGateway(entries) as any,
+          {
+            ensurePaperContext: async () =>
+              makePdfContext(["chunk a", "chunk b", "chunk c"]),
+          } as any,
+          (async (
+            paperContext: PaperContextRef,
+          ): Promise<PaperContextCandidate[]> => [
+            makeCandidate(paperContext, {
+              ...INTRODUCTION,
+              evidenceScore: 0.5,
+            }),
+            {
+              ...makeCandidate(paperContext, {
+                chunkIndex: 6,
+                chunkKind: "body",
+                sectionLabel: "Data analysis",
+                evidenceScore: 0.5,
+              }),
+              enclosingSection: "Materials and methods",
+            },
+          ]) as any,
+        );
+        const result = await service.retrieve({
+          query: QUESTION,
+          sections,
+          scope: { itemIds: [1] },
+          depth: "evidence",
+          perPaperTopK: 1,
+          maxTotalSnippets: 1,
+          request: REQUEST,
+        });
+        return result.snippets[0]?.sectionLabel;
+      };
+      assert.equal(await firstLabel(["methods"]), "Data analysis");
+      assert.equal(await firstLabel(["results"]), "Introduction");
+    });
+
     it("admits a named abstract instead of demoting it as front matter", async function () {
       const ABSTRACT = {
         chunkIndex: 0,

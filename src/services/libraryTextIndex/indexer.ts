@@ -36,6 +36,7 @@ const META_KEYS: Array<keyof StoredChunkMeta> = [
   "sectionIndex",
   "sectionPath",
   "sectionLevel",
+  "enclosingSection",
   "chunkKind",
   "kindSource",
   "pageStart",
@@ -131,7 +132,7 @@ export function computeChunkerFingerprint(ctx: PdfContext): string {
     ctx.chunks
       .map(
         (c, i) =>
-          `${c.length}:${ctx.chunkMeta[i]?.sectionLabel || ""}:${ctx.chunkMeta[i]?.chunkKind || ""}`,
+          `${c.length}:${ctx.chunkMeta[i]?.sectionLabel || ""}:${ctx.chunkMeta[i]?.chunkKind || ""}:${ctx.chunkMeta[i]?.enclosingSection || ""}`,
       )
       .join("|"),
   );

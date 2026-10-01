@@ -259,6 +259,41 @@ export async function buildFixturePdfContext(
   return context;
 }
 
+/**
+ * MinerU markdown with one short paragraph under each heading, as MinerU
+ * writes it: every heading at `#`, whatever its depth in the paper. Each
+ * heading's text fits one chunk, so chunk i is heading i. `extra` adds words
+ * under the headings it names.
+ */
+export function headingSequenceMarkdown(
+  headings: string[],
+  extra: Record<string, string> = {},
+): string {
+  return `${headings
+    .map(
+      (heading, index) =>
+        `# ${heading}\n\nPassage ${index} under this heading reports its part of the work in plain words.${extra[heading] ? ` ${extra[heading]}` : ""}`,
+    )
+    .join("\n\n")}\n`;
+}
+
+/** The PdfContext the plugin builds from a MinerU cache holding `markdown`. */
+export async function buildMarkdownPdfContext(
+  markdown: string,
+  attachmentId: number,
+): Promise<PdfContext> {
+  setupMemoryIO();
+  setupZoteroGlobals();
+  pdfTextCache.clear();
+  await writeMineruCacheFiles(attachmentId, markdown, [
+    { relativePath: "full.md", data: encoder.encode(markdown) },
+  ]);
+  await ensurePDFTextCached(mockPdfAttachment(attachmentId));
+  const context = pdfTextCache.get(attachmentId);
+  if (!context) throw new Error("markdown context not built");
+  return context;
+}
+
 // ── Structure and ranking metrics ────────────────────────────────────────────
 
 export type CorpusMetrics = {

@@ -2,6 +2,8 @@ import { assert } from "chai";
 import { installLibraryTextIndexSqlite } from "./helpers/libraryTextIndexDb";
 import {
   buildFixturePdfContext,
+  buildMarkdownPdfContext,
+  headingSequenceMarkdown,
   mockPdfAttachment,
   restoreTestGlobals,
   setupMemoryIO,
@@ -27,6 +29,7 @@ import {
   pdfTextCache,
 } from "../src/services/paperContent/contextCache";
 import { buildChunkIndex } from "../src/services/paperContent/pdfContext";
+import { searchLibraryTextIndex } from "../src/services/libraryTextIndex/search";
 
 describe("library text indexer", function () {
   let globals: TestGlobalSnapshot;
@@ -299,6 +302,104 @@ describe("library text indexer", function () {
     }
   });
 
+  it("rebuilds a document an older chunker indexed: reconcile queues it for idle time and the reindex carries the enclosing section", async function () {
+    const markdown = headingSequenceMarkdown(
+      ["Introduction", "Materials and methods", "Data analysis", "References"],
+      { "Data analysis": "Quorvex traces were deconvolved first." },
+    );
+    const ctx = await buildMarkdownPdfContext(markdown, 9005);
+    const fileState = {
+      path: "/storage/K9005/paper.pdf",
+      size: 4096,
+      mtime: 1234,
+    };
+    const current = buildIndexDocumentFromPdfContext({
+      attachmentId: 9005,
+      attachmentKey: "K9005",
+      libraryID: 1,
+      parentItemId: 100,
+      fileState,
+      ctx,
+    });
+    // As the previous chunker stored it: its version, no enclosing section.
+    await store.upsertDocument({
+      ...current,
+      chunkerVersion: LIBRARY_TEXT_INDEX_CHUNKER_VERSION - 1,
+      chunks: current.chunks.map((chunk) => {
+        const { enclosingSection: _dropped, ...meta } = chunk.meta;
+        return { ...chunk, meta };
+      }),
+    });
+    pdfTextCache.clear();
+    const item = Object.assign(mockPdfAttachment(9005), {
+      key: "K9005",
+      libraryID: 1,
+      getFilePathAsync: async () => fileState.path,
+    }) as unknown as Zotero.Item;
+    (globalThis as any).IOUtils.stat = async () => ({
+      size: fileState.size,
+      lastModified: fileState.mtime,
+    });
+    const timers: Array<() => void> = [];
+    const scheduler = new LibraryTextIndexScheduler({
+      setTimer: (cb) => {
+        timers.push(cb);
+        return cb;
+      },
+      clearTimer: () => undefined,
+      getStore: async () => store,
+      getItem: (id) => (id === 9005 ? item : null),
+      getSnapshot: async () =>
+        ({
+          pdfAttachmentIdsByItemId: new Map([[100, [9005]]]),
+          attachmentById: new Map([
+            [9005, { attachmentId: 9005, isContextEligiblePdf: true }],
+          ]),
+          itemById: new Map([[100, { itemId: 100, addedAt: 1 }]]),
+        }) as any,
+      readFileState: async () => fileState,
+      listLibraryIds: () => [1],
+      isEnabled: () => true,
+      isUserIdle: () => true,
+      isIndexable: () => true,
+      hasMineruCache: async () => true,
+      currentVectorNamespace: () => null,
+    });
+    try {
+      const result = await scheduler.reconcile(1);
+      assert.equal(result.stale, 1, "only the chunker version made it stale");
+      const queued = await store.dequeueNext({ now: Date.now() });
+      assert.equal(queued?.reason, "chunkerVersion");
+      assert.equal(queued?.priority, INDEX_PRIORITY.chunkerVersion);
+
+      scheduler.start();
+      for (let i = 0; i < 6 && timers.length; i += 1) {
+        timers.shift()!();
+        await new Promise((r) => setTimeout(r, 5));
+      }
+      assert.equal(
+        (await store.getDocument(9005))?.chunkerVersion,
+        LIBRARY_TEXT_INDEX_CHUNKER_VERSION,
+      );
+      const hits = await searchLibraryTextIndex({
+        store,
+        scopeAttachmentIds: [9005],
+        queries: ["quorvex"],
+        maxPapers: 1,
+        perPaperTopK: 5,
+      });
+      assert.deepEqual(
+        hits.chunks.map((hit) => [
+          hit.meta.sectionLabel,
+          hit.meta.enclosingSection,
+        ]),
+        [["Data analysis", "Materials and methods"]],
+      );
+    } finally {
+      await scheduler.stop();
+    }
+  });
+
   it("reports no_text and writes a zero-chunk row for a readable file with no extractable text", async function () {
     const item = Object.assign(mockPdfAttachment(9999), {
       getFilePathAsync: async () => "/storage/K9999/scan.pdf",
@@ -350,9 +451,9 @@ describe("library text indexer", function () {
     // the fingerprint here and LIBRARY_TEXT_INDEX_CHUNKER_VERSION in constants.ts.
     assert.equal(
       `${computeChunkerFingerprint(bio)}:${computeChunkerFingerprint(math)}`,
-      "2644aa73:bb6e3130",
+      "3cb58673:2c4c17d6",
     );
-    assert.equal(LIBRARY_TEXT_INDEX_CHUNKER_VERSION, 1);
+    assert.equal(LIBRARY_TEXT_INDEX_CHUNKER_VERSION, 2);
   });
   it("never triggers a write-through listener, in either lane", async function () {
     await buildFixturePdfContext("bioSingleHash", 9001);

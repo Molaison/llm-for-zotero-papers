@@ -8,6 +8,7 @@ import {
 } from "../src/services/libraryTextIndex/scheduler";
 import {
   INDEX_DRAIN_GAP_BUSY_MS,
+  LIBRARY_TEXT_INDEX_CHUNKER_VERSION,
   INDEX_DRAIN_GAP_MS,
   INDEX_PRIORITY,
   INDEX_RETRY_BACKOFF_MS,
@@ -70,7 +71,7 @@ const docRow = (id: number, extra: Record<string, unknown> = {}) => ({
   sourceFingerprint: `fp${id}`,
   sourceMtime: 1000,
   sourceSize: 500,
-  chunkerVersion: 1,
+  chunkerVersion: LIBRARY_TEXT_INDEX_CHUNKER_VERSION,
   byteEstimate: 100,
   chunks: [],
   ...extra,

@@ -688,6 +688,40 @@ describe("library retrieve, section steering on the index path", function () {
     );
   });
 
+  it("ranks a hit by its enclosing section before its subsection title", async function () {
+    const firstLabel = async (sections: EvidenceSectionKind[]) => {
+      const index = fakeIndex(() => ({
+        chunks: [
+          sectionHit(1, 1, "Introduction", "introduction"),
+          {
+            ...hit(11, 10, 6, 2, "Traces were deconvolved."),
+            meta: {
+              sectionLabel: "Data analysis",
+              chunkKind: "body" as const,
+              enclosingSection: "Materials and methods",
+            },
+          },
+        ],
+        papers: [paper(11, 10, 9, 1)],
+      }));
+      const rig = createRetrieveServiceRig({ papers: 1, textIndex: index });
+      const result = await rig.service.retrieve({
+        query: QUESTION,
+        sections,
+        depth: "evidence",
+        perPaperTopK: 1,
+        maxTotalSnippets: 1,
+      });
+      return result.snippets[0]?.sectionLabel;
+    };
+    assert.equal(await firstLabel(["methods"]), "Data analysis");
+    assert.equal(
+      await firstLabel(["results"]),
+      "Introduction",
+      "its title alone reads as results; its section is methods",
+    );
+  });
+
   it("keeps the index's order when nothing names a section", async function () {
     assert.deepEqual((await steered({})).labels, ["Introduction"]);
   });

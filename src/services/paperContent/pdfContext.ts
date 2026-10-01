@@ -1054,8 +1054,16 @@ function buildChunkMetadataFromManifest(
 ): PdfChunkMeta[] {
   const sourceFingerprint = buildPdfSourceFingerprint(fullText, "mineru");
   // Build a lookup: for any char position in fullText, which section is it?
+  // Chunks come in document order, so each is searched for after the one
+  // before it: text that repeats (a running header) is found where it
+  // occurs, not at its first occurrence.
+  let searchFrom = 0;
   function findChunkPosition(chunkText: string): number {
-    return fullText.indexOf(chunkText.slice(0, 100));
+    const probe = chunkText.slice(0, 100);
+    const position = fullText.indexOf(probe, searchFrom);
+    if (position < 0) return fullText.indexOf(probe);
+    searchFrom = position + 1;
+    return position;
   }
 
   function findSectionIndexForPosition(pos: number): number {
@@ -1067,6 +1075,7 @@ function buildChunkMetadataFromManifest(
     return -1;
   }
 
+  const enclosing = enclosingStandardSections(sections);
   const meta: PdfChunkMeta[] = [];
   for (const [chunkIndex, chunkText] of chunks.entries()) {
     const sourceStart = findChunkPosition(chunkText);
@@ -1077,6 +1086,8 @@ function buildChunkMetadataFromManifest(
     const sectionIndex = findSectionIndexForPosition(sourceStart);
     const section = sectionIndex >= 0 ? sections[sectionIndex] : undefined;
     const sectionLabel = section?.heading;
+    const enclosingSection =
+      sectionIndex >= 0 ? enclosing[sectionIndex] : undefined;
     // The manifest heading decides the kind when it names a standard section;
     // otherwise ("2.2 Kinematic condition") the chunk text decides.
     const headingKind = section
@@ -1146,6 +1157,7 @@ function buildChunkMetadataFromManifest(
             sectionLevel: section.level,
           }
         : {}),
+      ...(enclosingSection ? { enclosingSection } : {}),
       chunkKind,
       kindSource: headingKind ? "manifest" : "heuristic",
       anchorText: buildEvidenceAnchorFromText(cleaned.text) || undefined,
@@ -1256,6 +1268,101 @@ export function classifyHeadingKind(
     }
   }
   return undefined;
+}
+
+// ── Enclosing standard section ───────────────────────────────────────────────
+
+/** The standard sections a chunk can lie in. */
+const STANDARD_SECTION_KINDS = new Set<PdfChunkKind>([
+  "abstract",
+  "introduction",
+  "methods",
+  "results",
+  "discussion",
+  "conclusion",
+]);
+
+/**
+ * Standard sections whose subsections inherit them. An abstract or an
+ * introduction does not: a paper without a Results heading follows its
+ * introduction with result subsections, which must not read as introduction.
+ */
+const INHERITED_SECTION_KINDS = new Set<PdfChunkKind>([
+  "methods",
+  "results",
+  "discussion",
+  "conclusion",
+]);
+
+/** Back matter ends the standard section before it: nothing after inherits. */
+const BACK_MATTER_HEADING_PATTERN =
+  /^(?:references?|bibliography|literature cited|works cited|acknowledg(?:e)?ments?|funding|financial (?:support|disclosures?)|authors?['’]?s? contributions?|competing (?:financial )?interests?|conflicts? of interests?|declarations?(?: of (?:competing )?interests?)?|(?:(?:data|code|materials?|software)(?:,|\s+(?:and|&))?\s+)+availability|availability of (?:data|code|materials?)|supplementary|supporting information|additional (?:information|files)|appendix|appendices)\b/i;
+
+function stripHeadingEnumerator(heading: string): string {
+  return normalizeEvidenceText(heading)
+    .replace(/^#{1,6}\s+/, "")
+    .replace(HEADING_ENUMERATOR_PATTERN, "")
+    .trim();
+}
+
+function isBackMatterHeading(heading: string): boolean {
+  return BACK_MATTER_HEADING_PATTERN.test(stripHeadingEnumerator(heading));
+}
+
+/**
+ * A back-matter heading opening a chunk of unsectioned text: a short heading
+ * line, or a heading run into the first sentence ("Funding: This work").
+ */
+function matchBackMatterHeading(
+  chunkText: string,
+): SectionHeadingMatch | undefined {
+  const firstLine = sanitizePdfText(chunkText).split(/\n+/, 1)[0] || "";
+  const candidate = stripHeadingEnumerator(firstLine);
+  const match = BACK_MATTER_HEADING_PATTERN.exec(candidate);
+  if (!match) return undefined;
+  const rest = candidate.slice(match[0].length);
+  const headingLine = candidate.length <= 80 && !/[.!?]\s+\S/.test(rest);
+  const runOn = /^[:.]?\s+[A-Z]/.test(rest);
+  if (!headingLine && !runOn) return undefined;
+  return {
+    label: headingLine ? candidate.replace(/[:.\s-]+$/, "") : match[0],
+    kind: "body",
+  };
+}
+
+/**
+ * The enclosing standard section of each manifest section, in document
+ * order: a standard heading encloses itself, its subsections inherit it
+ * (methods, results, discussion and conclusion only), and back matter ends
+ * it. MinerU writes every heading at one level, so order is the only
+ * structure; when the markdown does nest its headings, a heading no deeper
+ * than the standard one is a sibling, not a subsection, and ends it too.
+ */
+function enclosingStandardSections(
+  sections: ManifestSection[],
+): Array<string | undefined> {
+  const nested = new Set(sections.map((section) => section.level)).size > 1;
+  let inherited: { heading: string; level: number } | undefined;
+  return sections.map((section) => {
+    const kind = classifyHeadingKind(section.heading)?.kind;
+    if (
+      kind === "references" ||
+      kind === "appendix" ||
+      isBackMatterHeading(section.heading)
+    ) {
+      inherited = undefined;
+      return undefined;
+    }
+    if (kind && STANDARD_SECTION_KINDS.has(kind)) {
+      inherited = INHERITED_SECTION_KINDS.has(kind)
+        ? { heading: section.heading, level: section.level }
+        : undefined;
+      return section.heading;
+    }
+    if (inherited && nested && section.level <= inherited.level)
+      inherited = undefined;
+    return inherited?.heading;
+  });
 }
 
 const FIGURE_CAPTION_PATTERN =
@@ -1567,6 +1674,9 @@ export function buildChunkMetadata(
     sourceType,
   );
   let activeSection: SectionHeadingMatch | undefined;
+  // Unsectioned text shows only standard and back-matter headings, so the
+  // active standard section encloses every chunk until the next heading.
+  let enclosingSection: string | undefined;
   let sourceCursor = 0;
   let sourceSearchCursor = 0;
   const pageBoundaries = (() => {
@@ -1600,12 +1710,15 @@ export function buildChunkMetadata(
   };
   for (const [chunkIndex, chunkText] of chunks.entries()) {
     const explicitSection =
-      sourceType === "mineru"
+      (sourceType === "mineru"
         ? matchMarkdownSectionHeading(chunkText) ||
           matchSectionHeading(chunkText)
-        : matchSectionHeading(chunkText);
+        : matchSectionHeading(chunkText)) || matchBackMatterHeading(chunkText);
     if (explicitSection) {
       activeSection = explicitSection;
+      enclosingSection = STANDARD_SECTION_KINDS.has(explicitSection.kind)
+        ? explicitSection.label
+        : undefined;
     }
     const normalizedText = normalizeEvidenceText(chunkText);
     const sectionHeading = explicitSection || activeSection;
@@ -1655,6 +1768,7 @@ export function buildChunkMetadata(
       text: chunkText,
       normalizedText,
       sectionLabel: sectionHeading?.label,
+      ...(enclosingSection ? { enclosingSection } : {}),
       chunkKind,
       anchorText: buildEvidenceAnchorFromText(cleaned.text) || undefined,
       leadingNoiseRemoved: cleaned.removedLeadingNoise || undefined,
@@ -2759,6 +2873,7 @@ export async function buildPaperRetrievalCandidates(
       sectionLabel: meta?.sectionLabel,
       sectionIndex: meta?.sectionIndex,
       sectionPath: meta?.sectionPath,
+      enclosingSection: meta?.enclosingSection,
       chunkKind: meta?.chunkKind,
       anchorText: meta?.anchorText,
       leadingNoiseRemoved: meta?.leadingNoiseRemoved,

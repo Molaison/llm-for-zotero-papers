@@ -1,6 +1,7 @@
 export const LIBRARY_TEXT_INDEX_DB_NAME = "llm-for-zotero-index";
 export const LIBRARY_TEXT_INDEX_SCHEMA_VERSION = 1;
-export const LIBRARY_TEXT_INDEX_CHUNKER_VERSION = 1;
+/** 2: chunks carry their enclosing standard section (`enclosingSection`). */
+export const LIBRARY_TEXT_INDEX_CHUNKER_VERSION = 2;
 export const INDEX_DRAIN_GAP_MS = 250;
 export const INDEX_DRAIN_GAP_BUSY_MS = 2000;
 export const INDEX_MAX_ATTEMPTS = 3;
