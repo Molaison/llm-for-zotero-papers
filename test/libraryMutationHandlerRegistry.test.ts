@@ -183,6 +183,50 @@ describe("library mutation handler registry", function () {
     );
   });
 
+  it("checks a move that files one item into two folders against both at once", function () {
+    // mode:'move' with from:'all' leaves the item in exactly the folders the
+    // move names; an item given two of them must be judged by both together.
+    const operation = {
+      type: "move_to_collection" as const,
+      mode: "move" as const,
+      from: "all" as const,
+      assignments: [
+        { itemId: 1, targetCollectionId: 10 },
+        { itemId: 1, targetCollectionId: 11 },
+        { itemId: 2, targetCollectionId: 10 },
+      ],
+    };
+    const captured = (filed: Record<number, number[]>) => ({
+      version: 1 as const,
+      operation: "move_to_collection" as const,
+      items: Object.entries(filed).map(([itemId, collectionIds]) => ({
+        itemId: Number(itemId),
+        exists: true,
+        collectionIds,
+      })),
+    });
+    assert.isTrue(
+      mutationPostconditionIsSatisfied(
+        operation,
+        captured({ 1: [10, 11], 2: [10] }),
+      ),
+    );
+    assert.isFalse(
+      mutationPostconditionIsSatisfied(
+        operation,
+        captured({ 1: [10], 2: [10] }),
+      ),
+      "an item missing one of its folders fails",
+    );
+    assert.isFalse(
+      mutationPostconditionIsSatisfied(
+        operation,
+        captured({ 1: [10, 11, 12], 2: [10] }),
+      ),
+      "an item still in a folder the move left fails",
+    );
+  });
+
   it("checks a metadata update that names no item against the one item the write resolved", function () {
     // The live run's patch, as the state reader captures it: getField reads
     // the entered date back, whatever multipart form Zotero stores.

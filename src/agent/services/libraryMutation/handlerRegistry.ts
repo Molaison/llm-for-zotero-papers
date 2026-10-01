@@ -46,6 +46,22 @@ function filingDestinations(
 }
 
 /**
+ * Each item a filing names, with every collection it should land in: one
+ * item may be given several in one write.
+ */
+function destinationsByItem(
+  operation: MoveToCollection,
+): Map<number, Array<number | undefined>> {
+  const byItem = new Map<number, Array<number | undefined>>();
+  for (const entry of filingDestinations(operation))
+    byItem.set(entry.itemId, [
+      ...(byItem.get(entry.itemId) || []),
+      entry.targetCollectionId,
+    ]);
+  return byItem;
+}
+
+/**
  * Whether `state` shows the item filed as the operation asked: in every one
  * of `destinations`, and for a move, out of its source as well.
  */
@@ -266,33 +282,25 @@ export const libraryMutationHandlers = {
     stateSections: ["items"],
     replay: "state-aware",
     planInverse: (_operation, state) => restoreCollectionState(state),
-    postconditionSatisfied: (operation, state) =>
-      filingDestinations(operation).every((entry) =>
-        filedAsAsked(operation, state, entry.itemId, [
-          entry.targetCollectionId,
-        ]),
-      ),
     // Each item is judged against all of its destinations at once, so an item
     // given two folders in one move is judged by the set it should end with.
+    postconditionSatisfied: (operation, state) =>
+      [...destinationsByItem(operation)].every(([itemId, destinations]) =>
+        filedAsAsked(operation, state, itemId, destinations),
+      ),
     judgeTargets: (operation, before, after) => {
-      const entries = filingDestinations(operation);
-      const itemIds = [...new Set(entries.map((entry) => entry.itemId))];
-      const refused = unfileableItems(itemIds, before);
+      const byItem = destinationsByItem(operation);
+      const refused = unfileableItems([...byItem.keys()], before);
       const refusedIds = new Set(refused.flatMap((group) => group.itemIds));
       return {
         refused,
-        judged: itemIds
-          .filter((itemId) => !refusedIds.has(itemId))
-          .map((itemId) => {
-            const destinations = entries
-              .filter((entry) => entry.itemId === itemId)
-              .map((entry) => entry.targetCollectionId);
-            return {
-              itemId,
-              before: filedAsAsked(operation, before, itemId, destinations),
-              after: filedAsAsked(operation, after, itemId, destinations),
-            };
-          }),
+        judged: [...byItem]
+          .filter(([itemId]) => !refusedIds.has(itemId))
+          .map(([itemId, destinations]) => ({
+            itemId,
+            before: filedAsAsked(operation, before, itemId, destinations),
+            after: filedAsAsked(operation, after, itemId, destinations),
+          })),
       };
     },
     targetCount: (operation) =>
