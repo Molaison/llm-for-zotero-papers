@@ -70,9 +70,9 @@ const SECTION_LABEL_PATTERNS: Record<
   RegExp
 > = {
   methods:
-    /\b(?:method|methods|methodology|approach|protocol|design|implementation|experiment|ablation)\b/,
+    /\b(?:method|methods|methodology|approach|protocol|design|implementation|experiments?|ablation)\b/,
   results:
-    /\b(?:result|results|finding|findings|evaluation|experiment|analysis|discussion)\b/,
+    /\b(?:result|results|finding|findings|evaluation|experiments?|analysis|discussion)\b/,
   limitations: /\b(?:limitations?|discussion|future|caveat|threat)\b/,
   discussion: /\bdiscussion\b/,
   introduction:
@@ -133,6 +133,22 @@ export function isInSectionKinds(
   );
 }
 
+/**
+ * Whether a chunk competes for body-evidence slots: body text, or a section
+ * the request names, such as the abstract. A reference list never does.
+ */
+export function admitsAsBodyEvidence(
+  kinds: readonly EvidenceSectionKind[],
+  sectionLabel?: string,
+  chunkKind?: EvidenceChunkKind,
+): boolean {
+  return (
+    isBodyEvidenceSection(sectionLabel, chunkKind) ||
+    (chunkKind !== "references" &&
+      isInSectionKinds(kinds, sectionLabel, chunkKind))
+  );
+}
+
 function scoreSectionMatch(
   kinds: readonly EvidenceSectionKind[],
   sectionLabel?: string,
@@ -144,32 +160,39 @@ function scoreSectionMatch(
   return isFrontMatterSection(section) ? 0 : 0.25;
 }
 
-export function scoreSectionPreference(
-  query: string,
-  sectionLabel?: string,
-): number {
-  return scoreSectionMatch(sectionCueKinds(query), sectionLabel);
-}
-
-export function queryHasExplicitSectionPreference(query: string): boolean {
-  return sectionCueKinds(query).length > 0;
-}
+/**
+ * The one chunk kind a section label names, first match wins. Words count
+ * whole; introduction comes last, so a label any other kind claims keeps it.
+ */
+const SECTION_LABEL_KINDS: ReadonlyArray<readonly [EvidenceChunkKind, RegExp]> =
+  [
+    ["abstract", /^abstract$/],
+    [
+      "methods",
+      /\b(?:methods?|methodolog(?:y|ies|ical)|approach(?:es)?|protocols?|design)\b/,
+    ],
+    [
+      "results",
+      /\b(?:results?|findings?|evaluations?|experiments?|analysis)\b/,
+    ],
+    ["discussion", /\bdiscussion\b/],
+    ["conclusion", /\b(?:conclusions?|concluding remarks)\b/],
+    ["references", /\b(?:references?|bibliography)\b/],
+    [
+      "introduction",
+      /\b(?:introduction|background|related work|literature review)\b/,
+    ],
+  ];
 
 export function chunkKindFromSectionLabel(
   sectionLabel?: string,
 ): EvidenceChunkKind {
   const section = normalizeEvidenceSectionLabel(sectionLabel);
-  if (/^abstract$/.test(section)) return "abstract";
-  if (/\bmethod|methods|methodology|approach|protocol|design\b/.test(section)) {
-    return "methods";
-  }
-  if (/\bresult|finding|evaluation|experiment|analysis\b/.test(section)) {
-    return "results";
-  }
-  if (/\bdiscussion\b/.test(section)) return "discussion";
-  if (/\bconclusion\b/.test(section)) return "conclusion";
-  if (/\breference|bibliography\b/.test(section)) return "references";
-  return section ? "body" : "unknown";
+  if (!section) return "unknown";
+  return (
+    SECTION_LABEL_KINDS.find(([, pattern]) => pattern.test(section))?.[0] ||
+    "body"
+  );
 }
 
 type RankedEvidenceCandidate = {

@@ -37,10 +37,9 @@ import {
   type LibraryChatReadStrategyDiagnostics,
 } from "../../shared/libraryChatReadStrategy";
 import {
+  admitsAsBodyEvidence,
   compareEvidenceCandidatesForSections,
   isBodyEvidenceSection,
-  isInSectionKinds,
-  queryHasExplicitSectionPreference,
   wantedSectionKinds,
   type EvidenceSectionKind,
 } from "../../shared/libraryChatEvidencePolicy";
@@ -608,6 +607,33 @@ export function buildQuicksearchProbes(
 }
 
 const DEFAULT_INTENT: LibraryRetrieveIntent = "enumerate";
+
+/**
+ * Index hits fetched per paper, as a multiple of its snippet slots, while
+ * ranking prefers sections: room to find them among the paper's matching
+ * chunks. On the live suite's three real papers a section-labelled chunk
+ * ranked 7th to 19th of 20 to 39 matches; 12 hits (the default 3 slots)
+ * reached one in 6 of 12 measured cases, against 3 with the usual 5, at
+ * under twice the pass search's time on 250 real-length papers.
+ */
+const SECTION_STEERING_FETCH_FACTOR = 4;
+
+/**
+ * The sections a paper's evidence should come from, the same whether the
+ * paper is read from the index or directly: those the model named (from a
+ * request in any language), else the English cue of the question (triage's
+ * per-paper question when it gave one) or of its variants.
+ */
+function wantedSectionsFor(
+  input: NormalizedLibraryRetrieveInput,
+  queryOverride?: string,
+): EvidenceSectionKind[] {
+  return wantedSectionKinds({
+    question: queryOverride || input.query,
+    queryVariants: input.queryVariants,
+    sections: input.sections,
+  });
+}
 
 function clampBudget(
   value: unknown,
@@ -1739,7 +1765,12 @@ export class LibraryRetrieveService {
         maxPapers: indexScansScope
           ? Math.max(scopeAttachmentIds.length, 1)
           : input.maxCandidatePapers,
-        perPaperTopK: Math.max(input.perPaperTopK, 5),
+        perPaperTopK: Math.max(
+          wantedSectionsFor(input).length
+            ? SECTION_STEERING_FETCH_FACTOR * input.perPaperTopK
+            : input.perPaperTopK,
+          5,
+        ),
         chunkPapers: input.maxCandidatePapers,
       });
       if (result) {
@@ -2123,8 +2154,7 @@ export class LibraryRetrieveService {
       input.depth === "evidence" ||
       readStrategyBase.resolvedStrategy === "deep_synthesis" ||
       (readStrategyBase.resolvedStrategy === "evidence_overview" &&
-        input.intent === "summarize") ||
-      queryHasExplicitSectionPreference(input.query);
+        input.intent === "summarize");
 
     if (input.depth === "evidence" || input.depth === "verify") {
       const fullTextRecords = candidateRecords
@@ -2142,15 +2172,20 @@ export class LibraryRetrieveService {
         const maxSnippets = Math.min(input.perPaperTopK, remaining);
         let paperSnippets: LibraryRetrieveSnippet[];
         if (useIndexSnippets && record.indexed && record.paperContext) {
+          const queryOverride =
+            triagePerPaperQueries?.[String(record.target.itemId)];
+          const wantedSections = wantedSectionsFor(input, queryOverride);
           const hits = await timer.span("index_search", () =>
             this.indexHitsForPaper({
               attachmentId: record.paperContext!.contextItemId,
               passHits: indexHitsByAttachment.get(
                 record.paperContext!.contextItemId,
               ),
-              queryOverride:
-                triagePerPaperQueries?.[String(record.target.itemId)],
+              queryOverride,
               maxSnippets,
+              fetch: wantedSections.length
+                ? SECTION_STEERING_FETCH_FACTOR * maxSnippets
+                : maxSnippets,
             }),
           );
           paperSnippets = this.snippetsFromIndexHits({
@@ -2158,6 +2193,7 @@ export class LibraryRetrieveService {
             hits,
             maxSnippets,
             preferBodyEvidence,
+            wantedSections,
             fallbackTerms: input.queryPlan.lexicalTerms,
           });
           // Loaded only when the index actually served text for the paper.
@@ -2444,6 +2480,9 @@ export class LibraryRetrieveService {
     passHits?: IndexedChunkHit[];
     queryOverride?: string;
     maxSnippets: number;
+    /** Hits this paper's own reads fetch: more than its slots while
+     * ranking prefers sections. */
+    fetch: number;
   }): Promise<IndexedChunkHit[]> {
     if (params.maxSnippets <= 0) return [];
     if (params.queryOverride) {
@@ -2451,7 +2490,7 @@ export class LibraryRetrieveService {
         scopeAttachmentIds: [params.attachmentId],
         queries: [params.queryOverride],
         maxPapers: 1,
-        perPaperTopK: params.maxSnippets,
+        perPaperTopK: params.fetch,
       });
       if (own?.chunks.length) return own.chunks;
     }
@@ -2467,22 +2506,22 @@ export class LibraryRetrieveService {
             a.chunkIndex - b.chunkIndex,
         );
     return (
-      (await this.textIndex.leadingChunks(
-        params.attachmentId,
-        params.maxSnippets,
-      )) || []
+      (await this.textIndex.leadingChunks(params.attachmentId, params.fetch)) ||
+      []
     );
   }
 
   /**
    * Snippets for an indexed paper straight from its index hits, with the
-   * same body-first admission as `retrievePaperSnippets`.
+   * same section ranking and body-first admission as `retrievePaperSnippets`.
    */
   private snippetsFromIndexHits(params: {
     record: ResourceRecord;
     hits: IndexedChunkHit[];
     maxSnippets: number;
     preferBodyEvidence: boolean;
+    /** Sections the evidence should come from; their hits rank first. */
+    wantedSections: readonly EvidenceSectionKind[];
     /** Query tokens to window on when a hit carries no matched terms. */
     fallbackTerms: string[];
   }): LibraryRetrieveSnippet[] {
@@ -2490,15 +2529,35 @@ export class LibraryRetrieveService {
     if (!paperContext || params.maxSnippets <= 0) return [];
     const citationLabel = formatPaperCitationLabel(paperContext);
     const sourceLabel = formatPaperSourceLabel(paperContext);
+    const ranked = params.wantedSections.length
+      ? params.hits
+          .map((hit) => ({
+            hit,
+            sectionLabel: hit.meta.sectionLabel,
+            chunkKind: hit.meta.chunkKind,
+            chunkIndex: hit.chunkIndex,
+          }))
+          .sort(
+            compareEvidenceCandidatesForSections(
+              params.wantedSections,
+              (entry) => entry.hit.hybridScore,
+            ),
+          )
+          .map((entry) => entry.hit)
+      : params.hits;
     const isBody = (hit: IndexedChunkHit) =>
-      isBodyEvidenceSection(hit.meta.sectionLabel, hit.meta.chunkKind);
+      admitsAsBodyEvidence(
+        params.wantedSections,
+        hit.meta.sectionLabel,
+        hit.meta.chunkKind,
+      );
     // Body evidence fills the slots first; front matter is capped at one.
     const ordered = params.preferBodyEvidence
       ? [
-          ...params.hits.filter(isBody),
-          ...params.hits.filter((hit) => !isBody(hit)).slice(0, 1),
+          ...ranked.filter(isBody),
+          ...ranked.filter((hit) => !isBody(hit)).slice(0, 1),
         ]
-      : params.hits;
+      : ranked;
     const snippets: LibraryRetrieveSnippet[] = [];
     for (const hit of ordered) {
       if (snippets.length >= params.maxSnippets) break;
@@ -2973,13 +3032,10 @@ export class LibraryRetrieveService {
             readIntent: params.input.queryPlan.readIntent,
           })
         : params.input.queryPlan;
-      // Sections the model named (from a request in any language), else
-      // the English cue of the question or of its variants.
-      const wantedSections = wantedSectionKinds({
-        question: retrievalQuestion,
-        queryVariants: params.input.queryVariants,
-        sections: params.input.sections,
-      });
+      const wantedSections = wantedSectionsFor(
+        params.input,
+        params.queryOverride,
+      );
       // The builder embeds `semanticQuery || question`; embed that same text.
       const semanticText = paperQueryPlan.semanticQuery || retrievalQuestion;
       const precomputedQueryEmbedding =
@@ -3068,13 +3124,11 @@ export class LibraryRetrieveService {
         // so is a section the request names, such as the abstract (never a
         // reference list).
         const isFrontMatterCandidate = (candidate: PaperContextCandidate) =>
-          !isBodyEvidenceSection(candidate.sectionLabel, candidate.chunkKind) &&
-          (candidate.chunkKind === "references" ||
-            !isInSectionKinds(
-              wantedSections,
-              candidate.sectionLabel,
-              candidate.chunkKind,
-            ));
+          !admitsAsBodyEvidence(
+            wantedSections,
+            candidate.sectionLabel,
+            candidate.chunkKind,
+          );
         for (const candidate of candidates) {
           if (isFrontMatterCandidate(candidate)) continue;
           if (snippets.length >= params.maxSnippets) break;

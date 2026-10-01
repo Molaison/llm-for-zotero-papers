@@ -4,8 +4,6 @@ import {
   compareEvidenceCandidatesForSections,
   isBodyEvidenceSection,
   isFrontMatterSection,
-  queryHasExplicitSectionPreference,
-  scoreSectionPreference,
   wantedSectionKinds,
 } from "../src/shared/libraryChatEvidencePolicy";
 import type {
@@ -48,26 +46,6 @@ describe("libraryChatEvidencePolicy", function () {
     assert.isTrue(isBodyEvidenceSection("Results", "unknown"));
   });
 
-  it("scores section preferences from the user question", function () {
-    assert.equal(scoreSectionPreference("Compare the methods", "Methods"), 2);
-    assert.equal(
-      scoreSectionPreference("Compare the methods", "Results"),
-      0.25,
-    );
-    assert.equal(
-      scoreSectionPreference("What are the findings?", "Results"),
-      2,
-    );
-    assert.equal(
-      scoreSectionPreference("What are the limitations?", "Discussion"),
-      2,
-    );
-    assert.isTrue(queryHasExplicitSectionPreference("Compare the methods"));
-    assert.isFalse(
-      queryHasExplicitSectionPreference("Give me a broad synthesis"),
-    );
-  });
-
   it("orders candidates by section preference before base relevance", function () {
     const rows = [
       candidate({ chunkIndex: 1, sectionLabel: "Results", evidenceScore: 0.9 }),
@@ -84,55 +62,107 @@ describe("libraryChatEvidencePolicy", function () {
     assert.equal(rows[0].sectionLabel, "Methods");
   });
 
-  it("keeps English cue scoring as it was, except that a Limitations heading now counts as limitations", function () {
+  it("ranks sections by a question's English cue words: wanted sections, then labelled body, then front matter", function () {
+    // Equally relevant chunks in paper order, so only section preference
+    // moves them.
     const labels = [
+      "Abstract",
+      "Introduction",
       "Methods",
       "2.1 Experimental design",
+      "4 Experiments",
       "Results",
       "Results and Discussion",
       "Discussion",
       "Limitations",
-      "Introduction",
-      "Abstract",
       "Conclusions",
       "",
     ];
-    const grid: Array<[question: string, scores: number[], cued: boolean]> = [
+    const ranked = (question: string) =>
+      labels
+        .map((sectionLabel, chunkIndex) =>
+          candidate({ chunkIndex, sectionLabel, evidenceScore: 0.5 }),
+        )
+        .sort(
+          compareEvidenceCandidatesForSections(
+            wantedSectionKinds({ question }),
+            (row) => row.evidenceScore,
+          ),
+        )
+        .map((row) => row.sectionLabel);
+    const unwanted = (...wanted: string[]) =>
+      labels.filter(
+        (label) => label && label !== "Abstract" && !wanted.includes(label),
+      );
+    const grid: Array<[question: string, kinds: string[], wanted: string[]]> = [
+      // "4 Experiments" joins methods and results: the plural missed
+      // /\bexperiment\b/ before.
       [
         "Compare the methods",
-        [2, 2, 0.25, 0.25, 0.25, 0.25, 0.25, 0, 0.25, 0],
-        true,
+        ["methods"],
+        ["Methods", "2.1 Experimental design", "4 Experiments"],
       ],
       [
         "What are the findings?",
-        [0.25, 0.25, 2, 2, 2, 0.25, 0.25, 0, 0.25, 0],
-        true,
+        ["results"],
+        ["4 Experiments", "Results", "Results and Discussion", "Discussion"],
       ],
-      // Before, the plural heading missed /\blimitation\b/ and scored 0.25.
       [
         "What are the limitations?",
-        [0.25, 0.25, 0.25, 2, 2, 2, 0.25, 0, 0.25, 0],
-        true,
+        ["limitations"],
+        ["Results and Discussion", "Discussion", "Limitations"],
       ],
       [
         "How was the experimental setup chosen, and what were the results?",
-        [2, 2, 2, 2, 2, 0.25, 0.25, 0, 0.25, 0],
-        true,
+        ["methods", "results"],
+        [
+          "Methods",
+          "2.1 Experimental design",
+          "4 Experiments",
+          "Results",
+          "Results and Discussion",
+          "Discussion",
+        ],
       ],
-      [
-        "Give me a broad synthesis",
-        [0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0, 0.25, 0],
-        false,
-      ],
+      ["Give me a broad synthesis", [], []],
     ];
-    for (const [question, scores, cued] of grid) {
+    for (const [question, kinds, wanted] of grid) {
+      assert.deepEqual(wantedSectionKinds({ question }), kinds, question);
       assert.deepEqual(
-        labels.map((label) => scoreSectionPreference(question, label)),
-        scores,
+        ranked(question),
+        [...wanted, ...unwanted(...wanted), "Abstract", ""],
         question,
       );
-      assert.equal(queryHasExplicitSectionPreference(question), cued, question);
     }
+  });
+
+  it("maps a section label to one chunk kind, whole words only", function () {
+    const table: Array<[label: string, kind: string]> = [
+      ["Abstract", "abstract"],
+      ["Introduction", "introduction"],
+      ["1 Background", "introduction"],
+      ["Related Work", "introduction"],
+      ["Literature review", "introduction"],
+      ["Materials and methods", "methods"],
+      ["Methodological considerations", "methods"],
+      ["Experimental design", "methods"],
+      ["Results", "results"],
+      ["4 Experiments", "results"],
+      ["Statistical analysis", "results"],
+      ["Results and Discussion", "results"],
+      ["General Discussion", "discussion"],
+      ["Conclusions", "conclusion"],
+      ["Concluding remarks", "conclusion"],
+      ["References", "references"],
+      ["Acknowledgements", "body"],
+      // Not results any more: "experiment" counts only as a whole word.
+      ["Experimental data", "body"],
+      ["", "unknown"],
+    ];
+    assert.deepEqual(
+      table.map(([label]) => [label, chunkKindFromSectionLabel(label)]),
+      table,
+    );
   });
 
   describe("sections named in any language", function () {
@@ -234,7 +264,7 @@ describe("libraryChatEvidencePolicy", function () {
         [
           "Limitations/body",
           "General Discussion/discussion",
-          "Introduction/body",
+          "Introduction/introduction",
         ],
       );
       assert.deepEqual(

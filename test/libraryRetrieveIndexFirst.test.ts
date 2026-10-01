@@ -1,5 +1,6 @@
 import { assert } from "chai";
 import { createRetrieveServiceRig } from "./helpers/libraryRetrieveRig";
+import type { EvidenceSectionKind } from "../src/shared/libraryChatEvidencePolicy";
 import type {
   LibraryTextIndexFacade,
   LibraryTextIndexSearchResult,
@@ -64,14 +65,17 @@ function fakeIndex(
 ): LibraryTextIndexFacade & {
   calls: string[][];
   scopes: number[][];
+  topKs: number[];
   leadingCalls: Array<[number, number]>;
 } {
   const calls: string[][] = [];
   const scopes: number[][] = [];
+  const topKs: number[] = [];
   const leadingCalls: Array<[number, number]> = [];
   return {
     calls,
     scopes,
+    topKs,
     leadingCalls,
     isEnabled: () => true,
     async leadingChunks(attachmentId, k) {
@@ -81,6 +85,7 @@ function fakeIndex(
     async search(params) {
       calls.push(params.queries);
       scopes.push(params.scopeAttachmentIds);
+      topKs.push(params.perPaperTopK);
       return {
         chunks: [],
         papers: [],
@@ -623,5 +628,119 @@ describe("library retrieve, index first (v2 rules)", function () {
       [5],
       "the better round-2 hit wins the paper's single slot",
     );
+  });
+});
+
+describe("library retrieve, section steering on the index path", function () {
+  const QUESTION = "这些论文用了什么方法？";
+  /** A chunk of paper 10 (attachment 11) in the named section. */
+  const sectionHit = (
+    chunkIndex: number,
+    rank: number,
+    sectionLabel: string,
+    chunkKind: "introduction" | "methods" | "results",
+  ) => ({
+    ...hit(11, 10, chunkIndex, rank, `${sectionLabel} passage ${chunkIndex}.`),
+    meta: { sectionLabel, chunkKind },
+  });
+
+  /** The section labels of the evidence one paper yields when the index
+   * ranks its introduction above its methods (the base order). */
+  async function steered(args: {
+    query?: string;
+    queryVariants?: string[];
+    sections?: EvidenceSectionKind[];
+    perPaperTopK?: number;
+  }) {
+    const index = fakeIndex(() => ({
+      chunks: [
+        sectionHit(1, 1, "Introduction", "introduction"),
+        sectionHit(4, 2, "Methods", "methods"),
+      ],
+      papers: [paper(11, 10, 9, 1)],
+    }));
+    const rig = createRetrieveServiceRig({ papers: 1, textIndex: index });
+    const slots = args.perPaperTopK ?? 1;
+    const result = await rig.service.retrieve({
+      query: args.query ?? QUESTION,
+      queryVariants: args.queryVariants,
+      sections: args.sections,
+      depth: "evidence",
+      perPaperTopK: slots,
+      maxTotalSnippets: slots,
+    });
+    return {
+      index,
+      labels: result.snippets.map((snippet) => snippet.sectionLabel),
+    };
+  }
+
+  it("admits the hit of a section the model names first, for a question in any language", async function () {
+    assert.deepEqual((await steered({ sections: ["methods"] })).labels, [
+      "Methods",
+    ]);
+  });
+
+  it("reads the section cue from English query variants", async function () {
+    assert.deepEqual(
+      (await steered({ queryVariants: ["methods used"] })).labels,
+      ["Methods"],
+    );
+  });
+
+  it("keeps the index's order when nothing names a section", async function () {
+    assert.deepEqual((await steered({})).labels, ["Introduction"]);
+  });
+
+  it("steers an English cue question on the index path too, as the direct path always did", async function () {
+    assert.deepEqual(
+      (await steered({ query: "Compare the methods these papers use" })).labels,
+      ["Methods"],
+    );
+  });
+
+  it("fetches four times a paper's snippet slots from the index only when ranking prefers sections", async function () {
+    const named = await steered({ sections: ["methods"], perPaperTopK: 3 });
+    assert.deepEqual(named.index.topKs, [12]);
+    const plain = await steered({ perPaperTopK: 3 });
+    assert.deepEqual(plain.index.topKs, [5], "the existing floor of 5");
+  });
+
+  it("reaches a named section among the leading chunks of a paper the index did not rank", async function () {
+    const leading = [
+      sectionHit(1, 1, "Introduction", "introduction"),
+      sectionHit(2, 2, "Introduction", "introduction"),
+      sectionHit(3, 3, "Results", "results"),
+      sectionHit(4, 4, "Methods", "methods"),
+    ].map((entry) => ({
+      ...entry,
+      bm25Score: 0,
+      hybridScore: 0,
+      evidenceScore: 0,
+      matchedTerms: [],
+    }));
+    const run = async (sections?: EvidenceSectionKind[]) => {
+      const index = fakeIndex(
+        () => ({ chunks: [], papers: [] }),
+        (_attachmentId, k) => leading.slice(0, k),
+      );
+      const rig = createRetrieveServiceRig({ papers: 1, textIndex: index });
+      const result = await rig.service.retrieve({
+        query: QUESTION,
+        sections,
+        intent: "summarize",
+        depth: "evidence",
+        perPaperTopK: 1,
+      });
+      return {
+        k: index.leadingCalls.map(([, k]) => k),
+        first: result.snippets[0]?.sectionLabel,
+      };
+    };
+    const named = await run(["methods"]);
+    const plain = await run();
+    assert.equal(named.first, "Methods");
+    assert.equal(plain.first, "Introduction");
+    assert.equal(named.k[0], 4 * plain.k[0]);
   });
 });
