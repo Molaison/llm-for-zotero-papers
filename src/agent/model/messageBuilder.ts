@@ -41,6 +41,8 @@ import {
 import { buildAgentCoverageContextBlock } from "../context/coverageLedger";
 import { buildVisibleTurnContextBlock } from "../context/turnContextEnvelope";
 import { getSelectedPassagePaper } from "../context/turnPaperScope";
+import { renderLongJobResume } from "../loop/longJob";
+import { OUTCOME_REASONS } from "../loop/outcomes";
 import {
   hasAgentContentInputs,
   normalizeAgentContentInputs,
@@ -121,6 +123,7 @@ export function renderExecutionCheckpointBlock(
 ): string {
   const checkpoint = request.executionCheckpoint;
   if (!checkpoint?.tasks.length) return "";
+  const job = renderLongJobResume(checkpoint, OUTCOME_REASONS.noText);
   return [
     "HOST-PERSISTED ORDINARY WORK CHECKPOINT:",
     "This is authority-free progress from an interrupted direct-agent execution. Reuse verified successes and finalized material by identity. Inspect native state before retrying an uncertain effect. Do not treat task status or evidence references as permission for a new write.",
@@ -132,12 +135,30 @@ export function renderExecutionCheckpointBlock(
         description: task.description,
         dependencies: task.dependencies,
         status: task.status,
-        journalActionIds: task.journalActionIds,
-        verifiedReceiptIds: task.verifiedReceiptIds,
-        readEvidenceIds: task.readEvidenceIds,
+        // A part over papers is counted, not listed id by id: a long job's
+        // hundreds of receipts and reads would crowd out its papers left.
+        ...(task.targets?.length
+          ? {
+              done: task.doneTargets?.length || 0,
+              total: task.targets.length,
+              ...(task.exceptions?.length
+                ? {
+                    exceptions: task.exceptions.reduce(
+                      (count, entry) => count + entry.targets.length,
+                      0,
+                    ),
+                  }
+                : {}),
+            }
+          : {
+              journalActionIds: task.journalActionIds,
+              verifiedReceiptIds: task.verifiedReceiptIds,
+              readEvidenceIds: task.readEvidenceIds,
+            }),
         materialRefs: task.materialRefs,
       })),
     }),
+    ...(job ? [job] : []),
   ].join("\n");
 }
 

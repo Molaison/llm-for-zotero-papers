@@ -27,6 +27,7 @@ import { PassageCitationCollector } from "./context/passageCitationCollector";
 import {
   buildPaperDigest,
   collectPaperEvidence,
+  readStoredPaperDigests,
   renderPaperDigests,
   type PaperDigest,
 } from "./context/paperDigests";
@@ -77,6 +78,7 @@ import {
   declaresReadPart,
   decideRunEnd,
   OUTCOME_REASONS,
+  resumesOnContinue,
   settleOutcomes,
   type OutcomeEvidence,
 } from "./loop/outcomes";
@@ -116,6 +118,7 @@ import { listJournalActions } from "./store/changeJournal";
 import { recordAgentTurn } from "./store/conversationMemory";
 import {
   createAgentToolResultHandleRecord,
+  getAgentToolResultHandle,
   hasAgentToolResultHandles,
   hydrateAgentToolResultHandles,
   upsertAgentToolResultHandles,
@@ -460,6 +463,9 @@ export class AgentRuntime {
     // The run's event stream, once it is open. An ending before then has no
     // stream to record its stop rule in.
     let emitRunEvent: ((event: AgentEvent) => Promise<void>) | undefined;
+    // Records the results of a long job's unfinished page, once the turn has
+    // a job to record; a Stop or an error calls it before the run ends.
+    let recordUnfinishedPage: (() => Promise<void>) | undefined;
     // The turn's outcome ledger has one writer. task_update and the evidence
     // recorder both apply their change here, one change at a time, and each
     // change that moves the ledger is published once.
@@ -855,8 +861,9 @@ export class AgentRuntime {
           ? [...transcriptMessagesForPrompt, recoveryMessage]
           : [recoveryMessage];
       }
-      // An interrupted ledger resumes only when the whole message asks to
-      // continue; any other message starts with no ledger.
+      // An interrupted ledger, or one the user stopped with a part still open,
+      // resumes only when the whole message asks to continue; any other
+      // message starts with no ledger.
       if (
         !request.executionCheckpoint &&
         latestPriorRun &&
@@ -868,7 +875,8 @@ export class AgentRuntime {
           (await getAgentRunTrace(latestPriorRun.runId)).events;
         const interruptedLedger = latestExecutionCheckpoint(priorEvents);
         if (
-          interruptedLedger?.end?.state === "interrupted" &&
+          interruptedLedger &&
+          resumesOnContinue(interruptedLedger) &&
           interruptedLedger.conversationKey === request.conversationKey &&
           interruptedLedger.conversationGeneration ===
             request.executionContext?.conversationGeneration
@@ -1210,6 +1218,34 @@ export class AgentRuntime {
         priorPaperTokens(scopePaper(target)?.text),
       );
       const longJobDigests = new Map<string, PaperDigest>();
+      // A job "continue" picked back up: the per-paper results its earlier
+      // turns recorded carry forward, so its last step still sees every
+      // paper. Such a digest is re-cut to this turn's share at its first
+      // page, and recorded again only with new evidence.
+      const carriedDigests = new Set<string>();
+      if (recordsOutcomes() && readLongJob(request.executionCheckpoint)) {
+        for (const message of transcriptSegment.messages) {
+          if (
+            message.role !== "user" ||
+            message.retainedTool?.name !== "long_job_results" ||
+            !message.retainedTool.handle
+          )
+            continue;
+          const record = await getAgentToolResultHandle({
+            conversationKey: request.conversationKey,
+            handle: message.retainedTool.handle,
+          });
+          const content = record?.content as
+            | { executionId?: unknown; digests?: unknown }
+            | undefined;
+          if (content?.executionId !== request.executionCheckpoint?.executionId)
+            continue;
+          for (const digest of readStoredPaperDigests(content?.digests)) {
+            longJobDigests.set(`item:${digest.itemId}`, digest);
+            carriedDigests.add(`item:${digest.itemId}`);
+          }
+        }
+      }
       // The message that carries every digest and the next page. Every
       // restart sends it again, so no restart loses the job's results.
       let longJobMessage: AgentUserMessage | null = null;
@@ -1446,6 +1482,12 @@ export class AgentRuntime {
         statusText: string,
       ): Promise<{ step: AgentModelStep; stepStreamedText: string }> => {
         if (params.signal?.aborted) {
+          await recordUnfinishedPage?.().catch((error) =>
+            logRuntimeWarning(
+              "LLM Agent: recording a stopped page's results failed",
+              error,
+            ),
+          );
           // The run is finished here, so the catch below no longer does it.
           await terminateRun(
             "cancelled",
@@ -1870,6 +1912,138 @@ export class AgentRuntime {
           text,
         });
       };
+      /** Handles to the tool results in `source`, by call, and their records. */
+      const toolResultHandlesOf = (source: readonly AgentModelMessage[]) => {
+        const handles = new Map<string, string>();
+        const records: AgentToolResultHandleRecord[] = [];
+        for (const message of source) {
+          if (message.role !== "tool") continue;
+          let content: unknown = message.content;
+          try {
+            content = JSON.parse(message.content);
+          } catch {
+            // A result that is not JSON is stored as written.
+          }
+          const record = createAgentToolResultHandleRecord({
+            conversationKey: request.conversationKey,
+            toolName: message.name,
+            toolCallId: message.tool_call_id,
+            resourceSignature: resourceContextPlan.resourceSignature,
+            content,
+            createdAt: this.now(),
+          });
+          if (!record) continue;
+          handles.set(message.tool_call_id, record.handle);
+          records.push(record);
+        }
+        return { handles, records };
+      };
+      // The papers this turn's records hold, and the share the last page's
+      // digests were cut to.
+      const recordedPapers = new Set<string>();
+      let lastDigestShare = 0;
+      /**
+       * One batch of per-paper results as the transcript keeps it, under a
+       * handle that holds the digests themselves and the job they belong to,
+       * so a job "continue" picks back up carries them forward.
+       */
+      const recordLongJobResults = async (
+        digests: readonly PaperDigest[],
+      ): Promise<AgentUserMessage> => {
+        longJobRecords += 1;
+        const recordText = renderLongJobRecord(
+          longJobRecords,
+          renderPaperDigests(digests),
+        );
+        const record = createAgentToolResultHandleRecord({
+          conversationKey: request.conversationKey,
+          toolName: "long_job_results",
+          toolCallId: `${runId}:results-${longJobRecords}`,
+          resourceSignature: resourceContextPlan.resourceSignature,
+          content: {
+            itemIds: digests.map((digest) => digest.itemId),
+            results: recordText,
+            executionId: request.executionCheckpoint?.executionId,
+            digests,
+          },
+          createdAt: this.now(),
+        });
+        if (record) await persistToolResultHandles([record]);
+        for (const digest of digests)
+          recordedPapers.add(`item:${digest.itemId}`);
+        return {
+          role: "user",
+          retainedTool: {
+            name: "long_job_results",
+            callId: `${runId}:results-${longJobRecords}`,
+            ...(record ? { handle: record.handle } : {}),
+            category: "retrieval",
+          },
+          content: recordText,
+        };
+      };
+      /**
+       * Stop, or an error, ends a long job wherever it stands, often inside a
+       * page. The papers that page had read keep their results: recorded as
+       * a page's are, straight into the stored transcript (the turn's own
+       * unfinished messages are not kept), so "continue" finds them.
+       */
+      recordUnfinishedPage = async (): Promise<void> => {
+        if (!recordsOutcomes()) return;
+        const papers = new Set(
+          (request.executionCheckpoint?.tasks || []).flatMap((task) =>
+            task.origin === "model"
+              ? (task.targets || []).filter((target) =>
+                  target.startsWith("item:"),
+                )
+              : [],
+          ),
+        );
+        if (!papers.size) return;
+        const evidence = collectPaperEvidence(messages);
+        const itemOf = (target: string) => Number(target.replace(/^item:/, ""));
+        const unrecorded = [...papers].filter(
+          (target) =>
+            evidence.has(itemOf(target)) &&
+            !recordedPapers.has(target) &&
+            !carriedDigests.has(target),
+        );
+        if (!unrecorded.length) return;
+        const share = Math.max(
+          1,
+          lastDigestShare ||
+            Math.floor(providerReplaySoftLimit / (2 * papers.size)),
+        );
+        const { handles, records } = toolResultHandlesOf(messages);
+        await persistToolResultHandles(records);
+        const digests = unrecorded.map((target) => {
+          const found = evidence.get(itemOf(target))!;
+          return buildPaperDigest(
+            itemOf(target),
+            { ...found, title: found.title || scopePaper(target)?.title },
+            found.calls.flatMap((call) => {
+              const handle = handles.get(call.callId);
+              return handle ? [handle] : [];
+            }),
+            share,
+          );
+        });
+        const portable = buildPortableAgentTranscript({
+          messages: [
+            ...transcriptSegment.messages,
+            await recordLongJobResults(digests),
+          ],
+          conversationKey: request.conversationKey,
+          resourceSignature: resourceContextPlan.resourceSignature,
+        });
+        await persistToolResultHandles(portable.handleRecords);
+        const next = { ...transcriptSegment, messages: portable.messages };
+        const written = await persistIfLive(() =>
+          replaceAgentTranscriptSegment(next),
+        );
+        if (written === "persisted" || written === "memory_only")
+          transcriptSegment = next;
+      };
       /**
        * After a tool round: page the turn's long job. When a page ends, the
        * reads of the job's papers become per-paper digests (each within its
@@ -1918,28 +2092,8 @@ export class AgentRuntime {
         if (toDigest.length) {
           // Handles to the results the restart drops, for the checkpoint and
           // for each digest.
-          const handles = new Map<string, string>();
-          const handleRecords: AgentToolResultHandleRecord[] = [];
-          for (const message of messages) {
-            if (message.role !== "tool") continue;
-            let content: unknown = message.content;
-            try {
-              content = JSON.parse(message.content);
-            } catch {
-              // A result that is not JSON is stored as written.
-            }
-            const record = createAgentToolResultHandleRecord({
-              conversationKey: request.conversationKey,
-              toolName: message.name,
-              toolCallId: message.tool_call_id,
-              resourceSignature: resourceContextPlan.resourceSignature,
-              content,
-              createdAt: this.now(),
-            });
-            if (!record) continue;
-            handles.set(message.tool_call_id, record.handle);
-            handleRecords.push(record);
-          }
+          const { handles, records: handleRecords } =
+            toolResultHandlesOf(messages);
           // Restart first, without the job's message, so the digests share
           // and the next page is planned from the prompt the page will
           // start from, not from the checkpoint's budget.
@@ -1961,6 +2115,7 @@ export class AgentRuntime {
               ),
             ),
           );
+          lastDigestShare = digestShare;
           for (const target of toDigest) {
             const found = evidence.get(itemOf(target));
             const earlier = longJobDigests.get(target);
@@ -1997,7 +2152,9 @@ export class AgentRuntime {
               digestShare,
             );
             longJobDigests.set(target, digest);
-            digested.push(digest);
+            // A carried paper is in the transcript already: recorded again
+            // only when this turn read it.
+            if (found || !carriedDigests.has(target)) digested.push(digest);
           }
         }
         const results = renderPaperDigests(
@@ -2068,33 +2225,7 @@ export class AgentRuntime {
         // The page's per-paper results outlive the turn: Stop, a restart of
         // Zotero and "continue" find them in the transcript, and a handle
         // keeps them readable once older history is compacted.
-        longJobRecords += 1;
-        const recordText = renderLongJobRecord(
-          longJobRecords,
-          renderPaperDigests(digested),
-        );
-        const record = createAgentToolResultHandleRecord({
-          conversationKey: request.conversationKey,
-          toolName: "long_job_results",
-          toolCallId: `${runId}:results-${longJobRecords}`,
-          resourceSignature: resourceContextPlan.resourceSignature,
-          content: {
-            itemIds: digested.map((digest) => digest.itemId),
-            results: recordText,
-          },
-          createdAt: this.now(),
-        });
-        if (record) await persistToolResultHandles([record]);
-        newTranscriptMessages.push({
-          role: "user",
-          retainedTool: {
-            name: "long_job_results",
-            callId: `${runId}:results-${longJobRecords}`,
-            ...(record ? { handle: record.handle } : {}),
-            category: "retrieval",
-          },
-          content: recordText,
-        });
+        newTranscriptMessages.push(await recordLongJobResults(digested));
         await persistTranscriptCheckpoint();
       };
       let round = 0;
@@ -2618,6 +2749,12 @@ export class AgentRuntime {
       if (webSourceRunId && !runTerminalized) {
         const message = redactRunTerminalText(
           error instanceof Error ? error.message : String(error),
+        );
+        await recordUnfinishedPage?.().catch((failure) =>
+          logRuntimeWarning(
+            "LLM Agent: recording a stopped page's results failed",
+            failure,
+          ),
         );
         await terminateRun(
           params.signal?.aborted ? "cancelled" : "failed",

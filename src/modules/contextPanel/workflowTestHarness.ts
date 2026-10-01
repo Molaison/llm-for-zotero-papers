@@ -40,7 +40,10 @@ import {
   exerciseChatModeStreamingTurn,
 } from "./chatMemoryReplay";
 import { exerciseAgentDeliveryReplay } from "./agentDeliveryReplay";
-import { exerciseLongJobReplay } from "./longJobReplay";
+import {
+  exerciseLongJobNoteResume,
+  exerciseLongJobReplay,
+} from "./longJobReplay";
 import { buildUI } from "./buildUI";
 import { getAgentRuntime } from "../../agent";
 import { normalizeExecutionOutput } from "../../agent/tools/execution/results";
@@ -5744,6 +5747,13 @@ export function installWorkflowTestHarness(targetAddon: {
         collection: input.collection,
         papers: input.papers,
         inputTokenCap: input.inputTokenCap,
+      }),
+    exerciseLongJobNoteResume: (input) =>
+      exerciseLongJobNoteResume(getPanel(input.panelId), {
+        collection: input.collection,
+        papers: input.papers,
+        inputTokenCap: input.inputTokenCap,
+        stopAfterNotes: input.stopAfterNotes,
       }),
     renderStartupPanelForItem,
     startNewPanelConversation,

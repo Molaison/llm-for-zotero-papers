@@ -603,6 +603,17 @@ export type WorkflowTestApi = {
     papers: Array<{ itemId: number; title: string }>;
     inputTokenCap: number;
   }) => ReturnType<typeof import("./longJobReplay").exerciseLongJobReplay>;
+  /**
+   * A note job over a folder's papers, stopped midway, the agent's state
+   * reloaded as at startup, then "continue"; only the model is scripted.
+   */
+  exerciseLongJobNoteResume: (input: {
+    panelId: string;
+    collection: import("../../shared/types").CollectionContextRef;
+    papers: Array<{ itemId: number; title: string }>;
+    inputTokenCap: number;
+    stopAfterNotes: number;
+  }) => ReturnType<typeof import("./longJobReplay").exerciseLongJobNoteResume>;
   exerciseStreamingReplay: (input: {
     panelId: string;
     historyTurns: number;

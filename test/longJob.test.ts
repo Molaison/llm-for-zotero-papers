@@ -10,6 +10,7 @@ import {
   readLongJob,
   settledTargetCount,
   renderLongJobMessage,
+  renderLongJobResume,
   type LongJobPage,
 } from "../src/agent/loop/longJob";
 import {
@@ -991,6 +992,71 @@ describe("long job", function () {
       });
       assert.include(text, "paper_read mode:'overview'");
       assert.include(text, `make the change “${FILE_ALL}” for each of them`);
+    });
+  });
+
+  describe("a job resumed on continue", function () {
+    /** Read each paper and save a note on each, over `targets`. */
+    function readAndNote(targets: string[]): ExecutionCheckpoint {
+      return declareOutcomes(
+        jobLedger(targets),
+        [
+          {
+            taskId: "note-all",
+            description: "Save a note on each paper",
+            effect: "mutation",
+            capability: "zotero.notes",
+            targets,
+            scope: true,
+          },
+        ],
+        3,
+      );
+    }
+
+    function noted(
+      ledger: ExecutionCheckpoint,
+      target: string,
+    ): ExecutionCheckpoint {
+      return applyOutcomeEvidence(
+        ledger,
+        {
+          kind: "receipt",
+          receipt: {
+            version: 2,
+            id: `note:${target}`,
+            proposalId: `note_create:${target}`,
+            proofDomain: "zotero_state",
+            capability: "zotero.notes",
+            operation: "note_create",
+            verification: "verified",
+            status: "applied",
+            requestedTargets: [target],
+            appliedTargets: [target],
+            alreadySatisfiedTargets: [],
+            rejectedTargets: [],
+            reasons: [],
+            verifiedFacts: [],
+          },
+        },
+        4,
+      ).checkpoint;
+    }
+
+    it("states the job's progress and the papers it has left, in order, from the first not settled", function () {
+      // Papers 1 and 2 are read and noted; 3 is read; 4 has no text.
+      let ledger = read(readAndNote(items(6)), items(3), ["item:4"]);
+      ledger = noted(noted(ledger, "item:1"), "item:2");
+      assert.equal(
+        renderLongJobResume(ledger, OUTCOME_REASONS.noText),
+        "Long job to resume: “Read each paper in Drift” 3 of 6 done (1 without readable text); “Save a note on each paper” 2 of 6 done. The 4 papers left, in order: 3, 4, 5, 6. Go on from the first of them; a paper already done stays done, so do not redo it.",
+      );
+    });
+
+    it("says nothing when the ledger holds no open job", function () {
+      assert.equal(renderLongJobResume(undefined, OUTCOME_REASONS.noText), "");
+      const done = read(jobLedger(items(2)), items(2));
+      assert.equal(renderLongJobResume(done, OUTCOME_REASONS.noText), "");
     });
   });
 });

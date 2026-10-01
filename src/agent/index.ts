@@ -226,9 +226,15 @@ export function getAgentApi() {
       return undoNoteChange(_toolRegistry, _zoteroGateway, card);
     },
     // ── Core turn API ──────────────────────────────────────────────────────
+    /**
+     * Runs one agent turn. `options.signal` is the caller's Stop: aborting it
+     * ends the run as the panel's Stop button does (cancelled, resumable on
+     * "continue"). Without it the turn runs to its own end, as before.
+     */
     runTurn: (
       request: AgentRuntimeRequestInput,
       onEvent?: (event: AgentEvent) => void | Promise<void>,
+      options?: { signal?: AbortSignal },
     ) =>
       getAgentRuntime().runTurn({
         request:
@@ -241,6 +247,7 @@ export function getAgentApi() {
               }
             : request,
         onEvent,
+        ...(options?.signal ? { signal: options.signal } : {}),
       }),
     listTools: () => getAgentRuntime().listTools(),
     getToolDefinition: (name: string) =>

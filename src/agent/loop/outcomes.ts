@@ -1062,6 +1062,100 @@ export function applyOutcomeEvidence(
   }
 }
 
+/** Writes that create a note on a paper: repeating one writes it twice. */
+const NOTE_CREATING_OPERATIONS: ReadonlySet<string> = new Set([
+  "note_create",
+  "save_note",
+  "save_notes_batch",
+]);
+
+/**
+ * The papers a note-creating write names that the job has already written a
+ * note on: a declared part for notes holds each as done, by its receipt, and
+ * no open part still asks for a note on it. Such a write would write the
+ * paper twice, so the host does not run it (`toolExecution.ts`); the
+ * receipts that ticked the papers stay the proof. `left` are the papers the
+ * same write names that are still owed; null when none is written already.
+ *
+ * Only note creation is held to this: setting a folder, a tag or a field
+ * again changes nothing ("already satisfied"), and a second, different one
+ * on the same paper is a change of its own.
+ */
+export function papersAlreadyWritten(
+  checkpoint: ExecutionCheckpoint | undefined,
+  proposals: readonly Pick<
+    AgentActionProposal,
+    "capability" | "operation" | "requestedTargets"
+  >[],
+): { written: string[]; left: string[]; parts: string[] } | null {
+  const targets = unique(
+    proposals
+      .filter(
+        (proposal) =>
+          proposal.capability === "zotero.notes" &&
+          NOTE_CREATING_OPERATIONS.has(proposal.operation),
+      )
+      .flatMap((proposal) =>
+        proposal.requestedTargets.filter((target) =>
+          target.startsWith("item:"),
+        ),
+      ),
+  );
+  const noteParts = (checkpoint?.tasks || []).filter(
+    (task) =>
+      task.origin === "model" &&
+      task.effect === "mutation" &&
+      (!task.capability || task.capability === "zotero.notes") &&
+      Boolean(task.targets?.length),
+  );
+  if (!targets.length || !noteParts.length) return null;
+  const names = (values: readonly string[] | undefined, target: string) =>
+    (values || []).some(
+      (value) => resolveTarget(value, [target]) !== undefined,
+    );
+  const written: string[] = [];
+  const parts = new Set<string>();
+  for (const target of targets) {
+    const naming = noteParts.filter((task) => names(task.targets, target));
+    const holders = naming.filter(
+      (task) =>
+        task.capability === "zotero.notes" && names(task.doneTargets, target),
+    );
+    const owed = naming.some(
+      (task) =>
+        task.status === "pending" &&
+        !names(task.doneTargets, target) &&
+        !names(
+          (task.exceptions || []).flatMap((entry) => entry.targets),
+          target,
+        ),
+    );
+    if (!holders.length || owed) continue;
+    written.push(target);
+    for (const task of holders) parts.add(task.description);
+  }
+  if (!written.length) return null;
+  return {
+    written,
+    left: targets.filter((target) => !written.includes(target)),
+    parts: [...parts],
+  };
+}
+
+/**
+ * Whether "continue" picks a settled ledger back up: one its run left
+ * interrupted, or one the user stopped while a declared part was still
+ * open. Stop is the outer bound of a long job, not its end, so the job goes
+ * on from its first paper not yet settled.
+ */
+export function resumesOnContinue(checkpoint: ExecutionCheckpoint): boolean {
+  const state = checkpoint.end?.state;
+  return (
+    state === "interrupted" ||
+    (state === "cancelled" && openDeclaredOutcomes(checkpoint).length > 0)
+  );
+}
+
 /** The model's declared outcomes that still need work beyond the answer. */
 export function openDeclaredOutcomes(
   checkpoint: ExecutionCheckpoint | undefined,

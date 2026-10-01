@@ -2,6 +2,7 @@ import { assert } from "chai";
 import {
   buildPaperDigest,
   collectPaperEvidence,
+  readStoredPaperDigests,
   renderPaperDigests,
 } from "../src/agent/context/paperDigests";
 import type { AgentModelMessage } from "../src/agent/types";
@@ -193,5 +194,26 @@ describe("paper digests", function () {
     assert.include(text, "trh_a");
     assert.include(text, "itemId=14");
     assert.include(text, "no readable text");
+  });
+
+  it("reads back the digests a job recorded, and nothing that is not one", function () {
+    const evidence = collectPaperEvidence([targetedRead, overviewRead]);
+    const digests = [
+      buildPaperDigest(11, evidence.get(11)!, ["trh_a"], 2_000),
+      buildPaperDigest(14, evidence.get(14)!, ["trh_b"], 2_000),
+    ];
+    const stored = JSON.parse(JSON.stringify({ digests }));
+    assert.deepEqual(readStoredPaperDigests(stored.digests), digests);
+    assert.deepEqual(readStoredPaperDigests(undefined), []);
+    assert.deepEqual(
+      readStoredPaperDigests([
+        { itemId: "x", excerpts: [], handles: [] },
+        { itemId: 5, excerpts: "no", handles: [] },
+        { itemId: 6, excerpts: [{ text: 7 }], handles: [] },
+        null,
+      ]),
+      [{ itemId: 6, excerpts: [], handles: [] }],
+      "a malformed entry is left out, a malformed excerpt dropped",
+    );
   });
 });

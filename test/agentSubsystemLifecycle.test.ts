@@ -1,5 +1,6 @@
 import { assert } from "chai";
 import {
+  getAgentApi,
   getCoreAgentRuntime,
   initAgentSubsystem,
   shutdownAgentSubsystem,
@@ -149,5 +150,27 @@ describe("agent subsystem lifecycle", function () {
     ]);
     assert.strictEqual(currentRuntime, sameCurrentRuntime);
     assert.strictEqual(getCoreAgentRuntime(), currentRuntime);
+  });
+
+  it("passes the caller's Stop signal from the public runTurn to the runtime, and none by default", async function () {
+    const fixture = installAgentLifecycleTestZotero();
+    restoreZotero = fixture.restore;
+    const runtime = await initAgentSubsystem();
+    const received: Array<{ signal?: AbortSignal }> = [];
+    runtime.runTurn = (async (params: { signal?: AbortSignal }) => {
+      received.push(params);
+      return { kind: "completed", runId: "run-1", text: "" };
+    }) as never;
+    const request = {
+      conversationKey: 7,
+      conversationGeneration: 0,
+      mode: "agent" as const,
+      userText: "continue",
+    };
+    const stop = new AbortController();
+    await getAgentApi().runTurn(request, undefined, { signal: stop.signal });
+    await getAgentApi().runTurn(request);
+    assert.strictEqual(received[0].signal, stop.signal);
+    assert.notProperty(received[1], "signal");
   });
 });

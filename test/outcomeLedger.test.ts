@@ -11,6 +11,8 @@ import {
   openDeclaredOutcomes,
   OUTCOME_REASONS,
   outcomeProgressSignature,
+  papersAlreadyWritten,
+  resumesOnContinue,
   settleOutcomes,
   type OutcomeDeclaration,
   type OutcomeEvidence,
@@ -25,6 +27,7 @@ import type {
   ExecutionCheckpoint,
   ExecutionCheckpointTask,
 } from "../src/agent/types";
+import type { RunEndState } from "../src/agent/execution/types";
 import {
   DISCOVER_IMPORT,
   RENAME_DELETE_FOLDER,
@@ -2667,5 +2670,139 @@ describe("outcome ledger: papers the host gave up on", function () {
       decideRunEnd(ledger, { status: "failed", stopRule: "page_failed" }),
       "interrupted",
     );
+  });
+});
+
+describe("outcome ledger: resuming a job, and the notes it already wrote", function () {
+  const SCOPE = ["item:1", "item:2", "item:3"];
+  const readAll: OutcomeDeclaration = {
+    taskId: "read-all",
+    description: "Read each paper in Drift",
+    effect: "read",
+    targets: SCOPE,
+    scope: true,
+  };
+  const noteAll: OutcomeDeclaration = {
+    taskId: "note-all",
+    description: "Save a note on each paper",
+    effect: "mutation",
+    capability: "zotero.notes",
+    targets: SCOPE,
+    scope: true,
+  };
+  /** A note created on each of `targets`, one proposal per paper. */
+  const notesOn = (...targets: string[]) =>
+    targets.map((target) => ({
+      capability: "zotero.notes" as const,
+      operation: "note_create" as const,
+      requestedTargets: [target],
+    }));
+  /** The verified receipt of a note created on `target`. */
+  const noted = (checkpoint: ExecutionCheckpoint, target: string) =>
+    apply(checkpoint, {
+      kind: "receipt",
+      receipt: receipt({
+        id: `note:${target}`,
+        requestedTargets: [target],
+        appliedTargets: [target],
+      }),
+    }).checkpoint;
+
+  it("names the papers a note write would write a second time, and those it still owes", function () {
+    let ledger = noted(ledgerWith(readAll, noteAll), "item:1");
+    assert.deepEqual(papersAlreadyWritten(ledger, notesOn("item:1")), {
+      written: ["item:1"],
+      left: [],
+      parts: ["Save a note on each paper"],
+    });
+    // A batch over a written paper and one still owed.
+    assert.deepEqual(
+      papersAlreadyWritten(ledger, [
+        {
+          capability: "zotero.notes",
+          operation: "save_notes_batch",
+          requestedTargets: ["item:1", "item:2"],
+        },
+      ]),
+      {
+        written: ["item:1"],
+        left: ["item:2"],
+        parts: ["Save a note on each paper"],
+      },
+    );
+    assert.isNull(papersAlreadyWritten(ledger, notesOn("item:2")));
+    // Once the part is done, a note on any of its papers is a second one.
+    for (const target of ["item:2", "item:3"]) ledger = noted(ledger, target);
+    assert.equal(find(ledger, "note-all").status, "completed");
+    assert.deepEqual(papersAlreadyWritten(ledger, notesOn("item:3"))?.written, [
+      "item:3",
+    ]);
+  });
+
+  it("leaves a write alone that another open part still needs, or that writes no note on a paper", function () {
+    const second: OutcomeDeclaration = {
+      ...noteAll,
+      taskId: "methods",
+      description: "Save a methods note on each paper",
+    };
+    // One note receipt ticks every part that names its paper, so a part
+    // that still owes paper 1 a note is one declared after it was written.
+    const one = noted(ledgerWith(noteAll), "item:1");
+    const ledger = frozen(declareOutcomes(one, [second], 40));
+    assert.isNull(
+      papersAlreadyWritten(ledger, notesOn("item:1")),
+      "the methods part still owes paper 1 a note",
+    );
+    // Editing or appending to a note, and tagging a paper, write no new
+    // note on it; a job that never declared notes holds none.
+    for (const proposal of [
+      {
+        capability: "zotero.notes" as const,
+        operation: "note_append" as const,
+        requestedTargets: ["item:1"],
+      },
+      {
+        capability: "zotero.tags" as const,
+        operation: "apply_tags" as const,
+        requestedTargets: ["item:1"],
+      },
+    ])
+      assert.isNull(papersAlreadyWritten(one, [proposal]));
+    assert.isNull(papersAlreadyWritten(undefined, notesOn("item:1")));
+    const undeclared = apply(emptyLedger(), {
+      kind: "receipt",
+      receipt: receipt({ id: "note:host" }),
+    }).checkpoint;
+    assert.isNull(
+      papersAlreadyWritten(undeclared, notesOn("item:1")),
+      "a host part is no job",
+    );
+  });
+
+  it("picks a stopped job back up on continue, as an interrupted one", function () {
+    const ledger = noted(ledgerWith(readAll, noteAll), "item:1");
+    const ended = (state: RunEndState, checkpoint = ledger) =>
+      frozen({ ...checkpoint, end: { state } });
+    assert.isTrue(resumesOnContinue(ended("interrupted")));
+    assert.isTrue(resumesOnContinue(ended("cancelled")), "Stop is no end");
+    const done = ["item:1", "item:2", "item:3"].reduce(
+      (checkpoint, target) => noted(checkpoint, target),
+      apply(ledgerWith(noteAll), {
+        kind: "read",
+        targets: SCOPE,
+        observationIds: ["obs-1"],
+      }).checkpoint,
+    );
+    assert.isFalse(
+      resumesOnContinue(ended("cancelled", done)),
+      "a stopped run with nothing left has nothing to resume",
+    );
+    for (const state of [
+      "completed",
+      "completed_with_exceptions",
+      "blocked",
+      "failed",
+    ] as const)
+      assert.isFalse(resumesOnContinue(ended(state)), state);
   });
 });

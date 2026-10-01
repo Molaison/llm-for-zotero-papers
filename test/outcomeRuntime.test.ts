@@ -22,10 +22,15 @@ import {
   RENAME_DELETE_FOLDER,
 } from "./helpers/liveLedgerRuns";
 import {
+  PAPER_IDS,
   PARENT_ITEM_ID,
+  createBatchJourneyRegistry,
   finalStep,
+  installBatchJourneyEnvironment,
   installDirectJourneyEnvironment,
+  runJourneyTurn,
   toolCallStep,
+  type BatchJourneyEnvironment,
   type DirectJourneyEnvironment,
 } from "./helpers/materialJourneys";
 import type { AgentStepParams } from "../src/agent/model/adapter";
@@ -1656,6 +1661,509 @@ describe("long jobs in runtime turns", function () {
       assert.include(page, `Then make the change “${TAG}” for each of them.`);
       assert.notInclude(page, "library_search");
     });
+  });
+});
+
+describe("resuming a long job in runtime turns", function () {
+  let environment: DirectJourneyEnvironment;
+  let conversationKey = 999_000;
+  const PAPERS = Array.from({ length: 30 }, (_, index) => 5001 + index);
+  const READ_ALL = "Read each paper in Drift";
+  const scope: TaskPaperScopeSet = {
+    wholeLibrary: false,
+    itemIds: PAPERS,
+    withText: PAPERS.length,
+    papers: Object.fromEntries(
+      PAPERS.map((itemId) => [
+        itemId,
+        { title: `Paper ${itemId}`, text: "pdf" as const },
+      ]),
+    ),
+  };
+  const attached = {
+    selectedCollectionContexts: [
+      { collectionId: 9, name: "Drift", libraryID: 1 },
+    ],
+    advanced: { inputTokenCap: 30_000 },
+  } as Partial<AgentRuntimeRequestInput>;
+
+  beforeEach(async function () {
+    environment = await installDirectJourneyEnvironment();
+    libraryUpdateReceipt = undefined;
+    conversationKey += 10;
+    scriptedPaperRead = (input) => {
+      const itemId = Number((input.target as { itemId?: number })?.itemId);
+      return {
+        mode: "targeted",
+        results: [],
+        papers: [
+          {
+            paperContext: {
+              itemId,
+              contextItemId: itemId + 1000,
+              libraryID: 1,
+            },
+            passages: [
+              {
+                text: `Finding ${itemId}: drift was measured in this paper. ${"Representational drift details. ".repeat(120)}`,
+                sectionLabel: "Results",
+                pageLabel: "3",
+              },
+            ],
+          },
+        ],
+      };
+    };
+  });
+
+  afterEach(function () {
+    environment.restore();
+    scriptedPaperRead = undefined;
+  });
+
+  /** The latest message the host sent about the job, if any. */
+  const hostText = (messages: AgentModelMessage[]) =>
+    [...messages]
+      .reverse()
+      .map((message) => promptText([message]))
+      .find((text) => text.startsWith("Long job"));
+
+  const pageOf = (host: string) =>
+    [...host.matchAll(/^- itemId=(\d+)/gm)].map((match) => Number(match[1]));
+
+  let calls = 0;
+  const readCall = (itemId: number): AgentToolCall => ({
+    id: `read-${itemId}-${(calls += 1)}`,
+    name: "paper_read",
+    arguments: {
+      target: { itemId, contextItemId: itemId + 1000, libraryID: 1 },
+    },
+  });
+
+  it("goes on after Stop from the first paper not settled, and its last step sees every paper's results", async function () {
+    // The first turn reads each page the host names, and the user stops it
+    // after a dozen papers.
+    const controller = new AbortController();
+    const asked = new Set<number>();
+    let declared = false;
+    const reader = (messages: AgentModelMessage[]) => {
+      if (!declared) {
+        declared = true;
+        return stepOf(
+          declare("declare-1", [
+            {
+              taskId: "read-all",
+              description: READ_ALL,
+              expectedEffect: "read",
+              scope: true,
+            },
+          ]),
+        );
+      }
+      if (asked.size >= 12) {
+        controller.abort();
+        throw new Error("The request was aborted.");
+      }
+      const host = hostText(messages);
+      const page = (host ? pageOf(host) : [])
+        .filter((itemId) => !asked.has(itemId))
+        .slice(0, 8);
+      for (const itemId of page) asked.add(itemId);
+      return stepOf(...page.map(readCall));
+    };
+    const stopped = await runTurn({
+      conversationKey,
+      userText: "Read every paper in Drift and summarize each",
+      scope,
+      attached,
+      signal: controller.signal,
+      steps: Array.from({ length: 20 }, () => reader),
+    });
+    assert.equal(stopStatus(stopped), "cancelled");
+    const before = settled(stopped);
+    assert.deepEqual(before.end, { state: "cancelled" });
+    const doneBefore = outcome(before, "read-all").doneTargets || [];
+    assert.isAtLeast(doneBefore.length, 12);
+    assert.isBelow(doneBefore.length, 30);
+    const left = PAPERS.filter(
+      (itemId) => !doneBefore.includes(`item:${itemId}`),
+    );
+
+    // "continue": the stopped ledger is picked back up, with the papers
+    // left; the model works from the resume note, then from the pages.
+    const resumedAsked: number[] = [];
+    const resumer = (messages: AgentModelMessage[]) => {
+      const host = hostText(messages);
+      if (host?.startsWith("Long job complete"))
+        return finalStep("Every paper is summarized from its results.");
+      const named = host
+        ? pageOf(host)
+        : (/papers? left, in order: ([\d, ]+)\./
+            .exec(promptText(messages))?.[1]
+            ?.split(", ")
+            .map(Number) ?? []);
+      const page = named
+        .filter((itemId) => !resumedAsked.includes(itemId))
+        .slice(0, 3);
+      if (!page.length) return finalStep("Every paper is summarized.");
+      resumedAsked.push(...page);
+      return stepOf(...page.map(readCall));
+    };
+    const resumed = await runTurn({
+      conversationKey,
+      userText: "continue",
+      scope,
+      attached,
+      steps: Array.from({ length: 30 }, () => resumer),
+    });
+    assert.equal(resumed.outcome?.kind, "completed", String(resumed.error));
+    const adopted = resumed.initialCheckpoint;
+    assert.exists(adopted, "the stopped ledger was picked back up");
+    assert.equal(adopted!.executionId, before.executionId);
+    assert.notProperty(adopted!, "end");
+    assert.include(
+      promptText(resumed.prompts[0]),
+      `Long job to resume: “${READ_ALL}” ${doneBefore.length} of 30 done. The ${left.length} papers left, in order: ${left.join(", ")}.`,
+    );
+    assert.deepEqual(
+      [...resumedAsked].sort(),
+      [...left].sort(),
+      "only the papers left are read, each once",
+    );
+    assert.equal(resumedAsked[0], left[0], "from the first paper not settled");
+    const after = settled(resumed);
+    assert.deepEqual(after.end, { state: "completed" });
+    assert.lengthOf(outcome(after, "read-all").doneTargets!, 30);
+    // The earlier turn's per-paper results carry forward to the last step.
+    const last = promptText(resumed.prompts[resumed.prompts.length - 1]);
+    assert.include(last, "Long job complete");
+    for (const itemId of PAPERS) assert.include(last, `Finding ${itemId}`);
+    // Each paper's results are recorded once: a carried paper is not
+    // recorded again by the turn that resumed the job.
+    const stored = await loadAgentTranscriptSegment({
+      conversationKey,
+      compatibilityKey: PORTABLE_TRANSCRIPT_KEY,
+    });
+    const recorded = stored.messages
+      .filter(
+        (message) =>
+          message.role === "user" &&
+          message.retainedTool?.name === "long_job_results",
+      )
+      .flatMap((message) =>
+        [...promptText([message]).matchAll(/^itemId=(\d+)/gm)].map((match) =>
+          Number(match[1]),
+        ),
+      );
+    assert.deepEqual([...recorded].sort(), [...PAPERS].sort());
+  });
+
+  it("records the results of the papers a stopped page had read, so continue need not read them again", async function () {
+    const TAG = "Tag each paper by its method";
+    const tag = (id: string, papers: number[]) => {
+      const targets = papers.map((itemId) => `item:${itemId}`);
+      liveReceipts.push({
+        version: 2,
+        id: `apply_tags:${id}`,
+        proposalId: "apply_tags:0",
+        proofDomain: "zotero_state",
+        capability: "zotero.tags",
+        operation: "apply_tags",
+        verification: "verified",
+        status: "applied",
+        requestedTargets: targets,
+        appliedTargets: targets,
+        alreadySatisfiedTargets: [],
+        rejectedTargets: [],
+        reasons: [],
+        verifiedFacts: [],
+      });
+      return stepOf({
+        id,
+        name: "library_update",
+        arguments: { assignments: papers.map((itemId) => ({ itemId })) },
+      });
+    };
+    // Each page is read in one step and tagged in the next; the user stops
+    // the job right after a page was read, before its papers are tagged.
+    const controller = new AbortController();
+    const read = new Set<number>();
+    const tagged = new Set<number>();
+    let declared = false;
+    const worker = (messages: AgentModelMessage[]) => {
+      if (!declared) {
+        declared = true;
+        return stepOf(
+          declare("declare-1", [
+            {
+              taskId: "read-all",
+              description: READ_ALL,
+              expectedEffect: "read",
+              scope: true,
+            },
+            {
+              taskId: "tag-all",
+              description: TAG,
+              expectedEffect: "mutation",
+              expectedCapability: "zotero.tags",
+              scope: true,
+            },
+          ]),
+        );
+      }
+      if (tagged.size >= 5 && read.size > tagged.size) {
+        controller.abort();
+        throw new Error("The request was aborted.");
+      }
+      const host = hostText(messages);
+      const page = host ? pageOf(host) : [];
+      const toRead = page.filter((itemId) => !read.has(itemId));
+      if (toRead.length) {
+        for (const itemId of toRead) read.add(itemId);
+        return stepOf(...toRead.map(readCall));
+      }
+      const toTag = page.filter((itemId) => !tagged.has(itemId));
+      for (const itemId of toTag) tagged.add(itemId);
+      return toTag.length
+        ? tag(`tag-${tagged.size}`, toTag)
+        : finalStep("Every paper is tagged.");
+    };
+    liveReceipts = [];
+    try {
+      const stopped = await runTurn({
+        conversationKey,
+        userText: "Read each paper in Drift and tag it by its method",
+        scope,
+        attached,
+        signal: controller.signal,
+        steps: Array.from({ length: 40 }, () => worker),
+      });
+      assert.equal(stopStatus(stopped), "cancelled");
+      const unfinished = [...read].filter((itemId) => !tagged.has(itemId));
+      assert.isNotEmpty(unfinished, "stopped inside a page");
+      // The stopped page's reads were recorded, though the page never ended.
+      const stored = await loadAgentTranscriptSegment({
+        conversationKey,
+        compatibilityKey: PORTABLE_TRANSCRIPT_KEY,
+      });
+      const records = stored.messages
+        .filter(
+          (message) =>
+            message.role === "user" &&
+            message.retainedTool?.name === "long_job_results",
+        )
+        .map((message) => promptText([message]))
+        .join("\n");
+      for (const itemId of read)
+        assert.include(records, `Finding ${itemId}`, `paper ${itemId}`);
+
+      // "continue": a paper whose results the conversation holds is tagged
+      // without being read again.
+      const reread: number[] = [];
+      const resumedTagged = new Set<number>();
+      const resumer = (messages: AgentModelMessage[]) => {
+        const host = hostText(messages);
+        if (host?.startsWith("Long job complete"))
+          return finalStep("Every paper is tagged.");
+        const named = host
+          ? pageOf(host)
+          : (/papers? left, in order: ([\d, ]+)\./
+              .exec(promptText(messages))?.[1]
+              ?.split(", ")
+              .map(Number) ?? []);
+        const known = promptText(messages);
+        const page = named.filter((itemId) => !resumedTagged.has(itemId));
+        const toRead = page
+          .filter(
+            (itemId) =>
+              !known.includes(`Finding ${itemId}`) && !reread.includes(itemId),
+          )
+          .slice(0, 3);
+        if (toRead.length) {
+          reread.push(...toRead);
+          return stepOf(...toRead.map(readCall));
+        }
+        const toTag = page.slice(0, 3);
+        for (const itemId of toTag) resumedTagged.add(itemId);
+        return toTag.length
+          ? tag(`resumed-tag-${resumedTagged.size}`, toTag)
+          : finalStep("Every paper is tagged.");
+      };
+      const resumed = await runTurn({
+        conversationKey,
+        userText: "continue",
+        scope,
+        attached,
+        steps: Array.from({ length: 60 }, () => resumer),
+      });
+      assert.equal(resumed.outcome?.kind, "completed", String(resumed.error));
+      for (const itemId of unfinished)
+        assert.notInclude(reread, itemId, `paper ${itemId} was read before`);
+      const after = settled(resumed);
+      assert.deepEqual(after.end, { state: "completed" });
+      assert.lengthOf(outcome(after, "tag-all").doneTargets!, 30);
+      const last = promptText(resumed.prompts[resumed.prompts.length - 1]);
+      for (const itemId of PAPERS) assert.include(last, `Finding ${itemId}`);
+    } finally {
+      liveReceipts = [];
+    }
+  });
+
+  it("runs any other message after Stop as an ordinary turn, with no ledger", async function () {
+    const controller = new AbortController();
+    const stopped = await runTurn({
+      conversationKey,
+      userText: "Read every paper in Drift and summarize each",
+      scope,
+      attached,
+      signal: controller.signal,
+      steps: [
+        stepOf(
+          declare("declare-1", [
+            {
+              taskId: "read-all",
+              description: READ_ALL,
+              expectedEffect: "read",
+              scope: true,
+            },
+          ]),
+          readCall(PAPERS[0]),
+        ),
+        () => {
+          controller.abort();
+          throw new Error("The request was aborted.");
+        },
+      ],
+    });
+    assert.deepEqual(settled(stopped).end, { state: "cancelled" });
+    const question = await runTurn({
+      conversationKey,
+      userText: "What is representational drift?",
+      scope,
+      attached,
+      steps: [finalStep("A gradual change in a neural representation.")],
+    });
+    assert.isUndefined(question.initialCheckpoint);
+    assert.notInclude(promptText(question.prompts[0]), "Long job to resume");
+    assert.isEmpty(checkpoints(question));
+    assert.equal(question.requests, 1);
+  });
+
+  it("skips a note on a paper the job already wrote, with a note to the model, and writes none twice", async function () {
+    const turn = await runTurn({
+      conversationKey,
+      userText: "Summarize this paper and save it as a note",
+      steps: [
+        stepOf(declare("declare-1", [saveDeclaration]), noteWrite("note-1")),
+        // A model that starts its page over writes the paper's note again,
+        // in other words: a second note, were it run.
+        stepOf({
+          id: "note-2",
+          name: "note_write",
+          arguments: {
+            mode: "create",
+            content: "# Summary\n\nThe paper, summarized once more.",
+            targetItemId: PARENT_ITEM_ID,
+          },
+        }),
+        finalStep("Saved the summary as a note."),
+      ],
+    });
+    assert.equal(turn.outcome?.kind, "completed", String(turn.error || ""));
+    assert.equal(environment.library.nativeSaves(), 1, "one note was written");
+    assert.lengthOf(receiptIdsOf(turn, "note_write"), 1);
+    const second = turn.events.find(
+      (event) => event.type === "tool_result" && event.callId === "note-2",
+    );
+    assert.exists(second);
+    if (second?.type === "tool_result") {
+      assert.isTrue(second.ok);
+      assert.equal(second.effect, "none");
+      assert.include(
+        JSON.stringify(second.content),
+        `Skipped by the host: item ${PARENT_ITEM_ID} already has the note`,
+      );
+    }
+    assert.lengthOf(
+      turn.events.filter((event) => event.type === "confirmation_required"),
+      1,
+      "the skipped write asked for no review",
+    );
+    const ledger = settled(turn);
+    assert.equal(outcome(ledger, "save").status, "completed");
+    assert.deepEqual(ledger.end, { state: "completed" });
+  });
+});
+
+describe("a note batch over papers a job already wrote", function () {
+  let environment: BatchJourneyEnvironment;
+  let conversationKey = 999_500;
+
+  beforeEach(async function () {
+    environment = await installBatchJourneyEnvironment();
+    conversationKey += 10;
+  });
+
+  afterEach(function () {
+    environment.restore();
+  });
+
+  const batchOf = (id: string, ...papers: number[]): AgentModelStep =>
+    toolCallStep(id, "note_write_batch", {
+      notes: papers.map((paper) => ({
+        targetItemId: paper,
+        content: `# Paper ${paper}\n\nSummary of paper ${paper}.`,
+      })),
+    });
+
+  it("is refused while it names one, and the batch sent again without it writes the rest, each paper once", async function () {
+    const registry = createBatchJourneyRegistry(environment.library);
+    registry.register(createTaskUpdateTool());
+    const turn = await runJourneyTurn({
+      registry,
+      conversationKey,
+      userText: "Save a summary note on each of these three papers",
+      sourceMessageTimestamp: conversationKey,
+      steps: [
+        stepOf(
+          declare("declare-1", [
+            {
+              taskId: "note-all",
+              description: "Save a note on each paper",
+              expectedEffect: "mutation",
+              expectedCapability: "zotero.notes",
+              targetIds: PAPER_IDS.map(String),
+            },
+          ]),
+        ),
+        batchOf("batch-1", 1, 2),
+        // Paper 2 again, beside paper 3.
+        batchOf("batch-2", 2, 3),
+        batchOf("batch-3", 3),
+        finalStep("A note is saved on each paper."),
+      ],
+    });
+    assert.equal(turn.outcome?.kind, "completed");
+    assert.equal(environment.library.nativeSaves(), 3, "one note a paper");
+    const refused = turn.events.find(
+      (event) => event.type === "tool_result" && event.callId === "batch-2",
+    );
+    assert.exists(refused);
+    if (refused?.type === "tool_result") {
+      assert.isFalse(refused.ok);
+      assert.include(
+        JSON.stringify(refused.content),
+        "Not run: item 2 already has the note this job writes (“Save a note on each paper”)",
+      );
+      assert.include(
+        JSON.stringify(refused.content),
+        "only the papers left: 3.",
+      );
+    }
+    const checkpoint = checkpoints({ events: turn.events } as Turn);
+    const part = outcome(checkpoint[checkpoint.length - 1], "note-all");
+    assert.equal(part.status, "completed");
+    assert.deepEqual(part.doneTargets, ["item:1", "item:2", "item:3"]);
   });
 });
 

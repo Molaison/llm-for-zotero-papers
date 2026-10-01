@@ -588,7 +588,7 @@ function batchJourneyGateway(library: BatchJourneyLibrary): ZoteroGateway {
   } as unknown as ZoteroGateway;
 }
 
-function createBatchJourneyRegistry(
+export function createBatchJourneyRegistry(
   library: BatchJourneyLibrary,
 ): AgentToolRegistry {
   const gateway = batchJourneyGateway(library);

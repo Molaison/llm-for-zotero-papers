@@ -27,7 +27,11 @@ import {
   taskPaperReadDepths,
   type TaskPaperLedgerDelta,
 } from "../context/taskPaperLedger";
-import { openDeclaredOutcomes, type OutcomeEvidence } from "../loop/outcomes";
+import {
+  openDeclaredOutcomes,
+  papersAlreadyWritten,
+  type OutcomeEvidence,
+} from "../loop/outcomes";
 import { canonicalJson } from "../services/libraryMutation/canonicalJson";
 import { sha256Text } from "../store/journalRecoveryBlobStore";
 import {
@@ -428,6 +432,84 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
     };
   };
 
+  /**
+   * A note the turn's job has already written on its paper is not written
+   * again: the host answers the call itself and runs nothing, so no paper
+   * gets a second note, and the model reads why. A call that mixes such
+   * papers with papers still owed a note is refused, to be sent again
+   * without them. The receipts that ticked the papers stay the proof
+   * (`papersAlreadyWritten`). Null for every other call, which runs as ever.
+   */
+  const answerNoteWrittenInJob = async (
+    call: AgentToolCall,
+    toolDefinition: AgentToolDefinition<any, any> | undefined,
+  ): Promise<AgentToolResult | null> => {
+    const checkpoint = deps.request.executionCheckpoint;
+    if (
+      !deps.recordOutcomeEvidence ||
+      !checkpoint?.tasks.length ||
+      toolDefinition?.spec.executionClass !== "external_effect" ||
+      !toolDefinition.describeAction
+    )
+      return null;
+    const args =
+      call.arguments &&
+      typeof call.arguments === "object" &&
+      !Array.isArray(call.arguments)
+        ? Object.fromEntries(
+            Object.entries(call.arguments as Record<string, unknown>).filter(
+              ([key]) => key !== "review",
+            ),
+          )
+        : call.arguments;
+    const validation = toolDefinition.validate(args);
+    if (!validation.ok) return null;
+    let proposals: AgentActionProposal[] = [];
+    try {
+      proposals =
+        (await toolDefinition.describeAction(
+          validation.value as never,
+          deps.context,
+        )) || [];
+    } catch {
+      return null;
+    }
+    const found = papersAlreadyWritten(checkpoint, proposals);
+    if (!found) return null;
+    const ids = (targets: readonly string[]) =>
+      targets.map((target) => target.replace(/^item:/, "")).join(", ");
+    const one = found.written.length === 1;
+    const which = `item${one ? "" : "s"} ${ids(found.written)} already ${
+      one ? "has" : "have"
+    } the note this job writes (${found.parts
+      .map((part) => `“${part}”`)
+      .join(", ")})`;
+    if (!found.left.length)
+      return {
+        callId: call.id,
+        name: call.name,
+        ok: true,
+        effect: "none",
+        actionReceipts: [],
+        content: {
+          skipped: true,
+          note: `Skipped by the host: ${which}, so nothing was written. Go on with the papers left.`,
+        },
+      };
+    return {
+      callId: call.id,
+      name: call.name,
+      ok: false,
+      inputRejected: true,
+      actionReceipts: [],
+      content: {
+        error: `Not run: ${which}, and a second would write ${
+          one ? "it" : "them"
+        } twice. Send the call again with only the papers left: ${ids(found.left)}.`,
+      },
+    };
+  };
+
   const executePreparedToolCall = async (
     call: AgentToolCall,
     round: number,
@@ -512,6 +594,9 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
     };
     /** The arguments a review card showed the user before the call ran. */
     let reviewedArguments: unknown;
+    const writtenInJob = cachedPaperEvidence
+      ? null
+      : await answerNoteWrittenInJob(call, toolDefinition);
     if (cachedPaperEvidence) {
       executedCall = {
         toolResult: {
@@ -522,6 +607,12 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
           content: cachedPaperEvidence.content,
         },
         toolDefinition: deps.registry.getTool(call.name),
+        input: call.arguments,
+      };
+    } else if (writtenInJob) {
+      executedCall = {
+        toolResult: writtenInJob,
+        toolDefinition,
         input: call.arguments,
       };
     } else {

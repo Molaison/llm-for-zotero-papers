@@ -111,6 +111,67 @@ describe("ordinary ExecutionCheckpoint", function () {
     assert.notInclude(rendered, "verifiedFacts");
     assert.notInclude(rendered, "executionAuthority");
   });
+
+  it("states a job's progress and the papers it has left, with counts for a part over papers", function () {
+    const declared = declareOutcomes(
+      createEmptyExecutionCheckpoint(executionContext, 10),
+      [
+        {
+          taskId: "note-all",
+          description: "Save a note on each paper",
+          effect: "mutation",
+          capability: "zotero.notes",
+          targets: ["item:7", "item:8", "item:9"],
+          scope: true,
+        },
+      ],
+      20,
+    );
+    const checkpoint = applyOutcomeEvidence(
+      declared,
+      {
+        kind: "receipt",
+        receipt: {
+          version: 2,
+          id: "receipt-7",
+          proposalId: "proposal-7",
+          proofDomain: "zotero_state",
+          capability: "zotero.notes",
+          operation: "note_create",
+          verification: "verified",
+          status: "applied",
+          requestedTargets: ["item:7"],
+          appliedTargets: ["item:7"],
+          alreadySatisfiedTargets: [],
+          rejectedTargets: [],
+          reasons: [],
+          verifiedFacts: [],
+        },
+      },
+      30,
+    ).checkpoint;
+    const rendered = renderExecutionCheckpointBlock(
+      resolvedAgentRequest({
+        conversationKey: 41,
+        mode: "agent",
+        userText: "continue",
+        libraryID: 1,
+        executionContext,
+        executionCheckpoint: checkpoint,
+      }),
+    );
+    assert.include(rendered, "execution-direct-1:task:note-all");
+    assert.include(rendered, '"done":1,"total":3');
+    assert.notInclude(
+      rendered,
+      "receipt-7",
+      "a part over papers is counted, not listed id by id",
+    );
+    assert.include(
+      rendered,
+      "\nLong job to resume: “Save a note on each paper” 1 of 3 done. The 2 papers left, in order: 8, 9.",
+    );
+  });
 });
 
 describe("task_update ordinary declarations", function () {

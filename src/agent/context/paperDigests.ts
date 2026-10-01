@@ -265,6 +265,50 @@ export function buildPaperDigest(
   return digest;
 }
 
+/**
+ * The digests a job recorded, read back from where it stored them (a
+ * `long_job_results` handle), so a resumed job carries them forward. An
+ * entry that is not a digest is left out, and an excerpt without text
+ * dropped; nothing is invented.
+ */
+export function readStoredPaperDigests(value: unknown): PaperDigest[] {
+  return rows(value).flatMap((row): PaperDigest[] => {
+    const itemId = positive(row.itemId);
+    if (!itemId || !Array.isArray(row.excerpts)) return [];
+    const excerpts = rows(row.excerpts).flatMap((entry): PaperExcerpt[] =>
+      typeof entry.text === "string" && entry.text
+        ? [
+            {
+              text: entry.text,
+              ...(typeof entry.section === "string"
+                ? { section: entry.section }
+                : {}),
+              ...(typeof entry.page === "string" ? { page: entry.page } : {}),
+              ...(typeof entry.quoteId === "string"
+                ? { quoteId: entry.quoteId }
+                : {}),
+            },
+          ]
+        : [],
+    );
+    const omitted = positive(row.omitted);
+    return [
+      {
+        itemId,
+        ...(typeof row.title === "string" ? { title: row.title } : {}),
+        excerpts,
+        ...(omitted ? { omitted } : {}),
+        ...(row.noText === true ? { noText: true as const } : {}),
+        handles: Array.isArray(row.handles)
+          ? row.handles.filter(
+              (handle): handle is string => typeof handle === "string",
+            )
+          : [],
+      },
+    ];
+  });
+}
+
 function excerptLine(excerpt: PaperExcerpt): string {
   const anchor = [excerpt.section, excerpt.page ? `p. ${excerpt.page}` : ""]
     .filter(Boolean)
