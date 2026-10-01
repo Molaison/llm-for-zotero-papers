@@ -7,9 +7,25 @@ import {
 import {
   callLLM,
   getReasoningReserveTokens,
+  parseStatusFromErrorMessage,
   requireCompleteModelText,
   type ChatParams,
 } from "../utils/llmClient";
+import { resolveUtilityReasoningPlan } from "../utils/utilityLLM";
+
+/**
+ * Batch digests in flight at once. Three cut a full read to about a third of
+ * its sequential time while at most three batch prompts (each half the input
+ * cap) are in flight, the bound the library index uses for its embedding
+ * requests. A rate-limit answer drops the read to one call at a time.
+ */
+export const FULL_READ_BATCH_CONCURRENCY = 3;
+
+/**
+ * The pause before retrying a batch the provider rate-limited: long enough
+ * for a per-minute token budget to refill by about one batch.
+ */
+export const FULL_READ_RATE_LIMIT_BACKOFF_MS = 10_000;
 
 export type ExhaustiveReadStatus = "complete" | "partial" | "unreadable";
 
@@ -115,6 +131,10 @@ export type ExhaustiveDocumentReaderParams = {
   batchTokenBudget: number;
   finalTokenBudget: number;
   retryCount?: number;
+  /** Batch digests in flight at once (default FULL_READ_BATCH_CONCURRENCY). */
+  concurrency?: number;
+  /** Pause before retrying a rate-limited batch (default 10 s). */
+  rateLimitBackoffMs?: number;
   analyzeBatch?: ExhaustiveBatchAnalyzer;
   llm?: LlmBatchConfig;
   signal?: AbortSignal;
@@ -257,14 +277,30 @@ export function createLlmBatchAnalyzer(
   config: LlmBatchConfig,
   call: typeof callLLM = callLLM,
 ): ExhaustiveBatchAnalyzer {
-  // A reasoning model thinks inside the output limit. Without the reasoning
-  // reserve every digest is cut off, and each retry repeats the truncation.
-  const reasoningReserve = getReasoningReserveTokens(config.reasoning);
+  // A batch digest is bounded extraction for a later synthesis, not the
+  // user's question, so it runs at the utility layer's provider-safe level
+  // (thinking off where the provider allows it, else its lowest level), not
+  // the chat's. At "high", DeepSeek thought through the whole 4,096-token
+  // reserve of every digest and each came back truncated.
+  const plan = resolveUtilityReasoningPlan({
+    model: config.model || "",
+    apiBase: config.apiBase,
+    authMode: config.authMode,
+    providerProtocol: config.providerProtocol,
+    profileOverride: config.profileOverride,
+  });
+  const reasoning = plan ? plan.reasoning : config.reasoning;
+  // A reasoning level thinks inside the output limit. Without its reserve
+  // every digest is cut off, and each retry repeats the truncation.
+  const reasoningReserve = plan
+    ? plan.reserveTokens
+    : getReasoningReserveTokens(config.reasoning);
   return createExhaustiveBatchAnalyzer(async ({ maxTokens, ...input }) =>
     requireCompleteModelText(
       await call({
         ...config,
         ...input,
+        reasoning,
         outputTokenLimit: {
           mode: "custom",
           tokens: maxTokens + reasoningReserve,
@@ -506,10 +542,20 @@ function compactContextText(
     : sliceTextToTokenBudget(rendered, tokenBudget);
 }
 
+function isRateLimited(error: unknown): boolean {
+  return (
+    parseStatusFromErrorMessage(
+      error instanceof Error ? error.message : String(error),
+    ) === 429
+  );
+}
+
 async function analyzeWithRetries(params: {
   analyzer: ExhaustiveBatchAnalyzer;
   input: ExhaustiveBatchInput;
   retryCount: number;
+  /** Awaited before retrying a batch the provider rate-limited. */
+  onRateLimited: () => Promise<void>;
 }): Promise<ExhaustiveBatchOutput> {
   let lastError: unknown;
   for (let attempt = 0; attempt <= params.retryCount; attempt += 1) {
@@ -518,6 +564,10 @@ async function analyzeWithRetries(params: {
     } catch (error) {
       lastError = error;
       if (params.input.signal?.aborted) throw error;
+      if (attempt < params.retryCount && isRateLimited(error)) {
+        await params.onRateLimited();
+        if (params.input.signal?.aborted) throw error;
+      }
     }
   }
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
@@ -540,14 +590,29 @@ export async function readDocumentsExhaustively(
   const paperResults: FullReadPaperResult[] = [];
   const warnings: string[] = [];
 
+  type BatchTask = {
+    paperIndex: number;
+    input: ExhaustiveBatchInput;
+    output?: ExhaustiveBatchOutput;
+    error?: unknown;
+  };
+  type PaperPlan = {
+    paper: PaperInput;
+    paperKey: string;
+    sourceChunks: ExhaustiveSourceChunk[];
+    documentFingerprint: string;
+    tasks: BatchTask[];
+  };
+  // Every batch of every paper, in reading order, before any is read.
+  const plans: Array<PaperPlan | FullReadPaperResult> = [];
+  const tasks: BatchTask[] = [];
   for (const [paperIndex, paper] of params.papers.entries()) {
     if (params.signal?.aborted) throw new Error("Aborted");
     const paperKey = `${paper.paperContext.itemId}:${paper.paperContext.contextItemId}`;
     const pdfContext = paper.pdfContext;
     if (!pdfContext?.chunks.length) {
       const warning = `${paper.paperContext.title}: no extractable full text was available.`;
-      warnings.push(warning);
-      paperResults.push({
+      plans.push({
         paperContext: paper.paperContext,
         paperKey,
         documentFingerprint: "unreadable",
@@ -567,20 +632,9 @@ export async function readDocumentsExhaustively(
       paper.paperContext,
       pdfContext,
     );
-    const processed = new Set<number>();
-    const digests: FullReadPaperResult["digests"] = [];
-    const exactEvidence: ExhaustiveSourceChunk[] = [];
-    const paperWarnings: string[] = [];
-
-    for (const [batchIndex, chunks] of batches.entries()) {
-      if (params.signal?.aborted) throw new Error("Aborted");
-      params.onProgress?.({
-        paperIndex,
-        paperCount: params.papers.length,
-        batchIndex,
-        batchCount: batches.length,
-      });
-      const input: ExhaustiveBatchInput = {
+    const paperTasks = batches.map((chunks, batchIndex) => ({
+      paperIndex,
+      input: {
         paperContext: paper.paperContext,
         paperKey,
         paperTitle: paper.paperContext.title,
@@ -590,40 +644,116 @@ export async function readDocumentsExhaustively(
         question: params.question,
         chunks,
         signal: params.signal,
-      };
+      },
+    }));
+    tasks.push(...paperTasks);
+    plans.push({
+      paper,
+      paperKey,
+      sourceChunks,
+      documentFingerprint,
+      tasks: paperTasks,
+    });
+  }
+
+  // Batches are independent, so a few are read at once, started in reading
+  // order. A rate-limit answer drops the read to one call at a time: the
+  // worker it reached pauses, retries, and alone reads the rest, while the
+  // others finish the batch in hand and stop.
+  let limit = Math.max(
+    1,
+    Math.floor(params.concurrency ?? FULL_READ_BATCH_CONCURRENCY),
+  );
+  let survivor = 0;
+  const backoffMs = Math.max(
+    0,
+    params.rateLimitBackoffMs ?? FULL_READ_RATE_LIMIT_BACKOFF_MS,
+  );
+  const onRateLimited = async (slot: number) => {
+    limit = 1;
+    survivor = slot;
+    await new Promise((resolve) => setTimeout(resolve, backoffMs));
+  };
+  const mayRead = (slot: number) =>
+    limit > 1 ? slot < limit : slot === survivor;
+  let next = 0;
+  let cancelled: { error: unknown } | null = null;
+  const worker = async (slot: number) => {
+    while (!cancelled && mayRead(slot) && next < tasks.length) {
+      if (params.signal?.aborted) return;
+      const task = tasks[next++];
+      params.onProgress?.({
+        paperIndex: task.paperIndex,
+        paperCount: params.papers.length,
+        batchIndex: task.input.batchIndex,
+        batchCount: task.input.batchCount,
+      });
       try {
-        const output = await analyzeWithRetries({
+        task.output = await analyzeWithRetries({
           analyzer,
-          input,
+          input: task.input,
           retryCount,
-        });
-        if (!normalizeText(output.digest)) {
-          throw new Error("The exhaustive reader returned no digest");
-        }
-        const allowed = new Set(chunks.map((chunk) => chunk.chunkIndex));
-        const relevant = Array.from(
-          new Set(
-            output.relevantChunkIds.filter((chunkIndex) =>
-              allowed.has(chunkIndex),
-            ),
-          ),
-        );
-        for (const chunk of chunks) processed.add(chunk.chunkIndex);
-        for (const chunkIndex of relevant) {
-          const chunk = chunks.find((entry) => entry.chunkIndex === chunkIndex);
-          if (chunk) exactEvidence.push(chunk);
-        }
-        digests.push({
-          batchIndex,
-          chunkIndexes: chunks.map((chunk) => chunk.chunkIndex),
-          digest: normalizeText(output.digest),
+          onRateLimited: () => onRateLimited(slot),
         });
       } catch (error) {
-        if (params.signal?.aborted) throw error;
-        const warning = `${paper.paperContext.title}: batch ${batchIndex + 1}/${batches.length} failed: ${error instanceof Error ? error.message : String(error)}`;
+        if (params.signal?.aborted) {
+          cancelled ??= { error };
+          return;
+        }
+        task.error = error;
+      }
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(limit, tasks.length) }, (_, slot) =>
+      worker(slot),
+    ),
+  );
+  if (cancelled) throw (cancelled as { error: unknown }).error;
+  if (params.signal?.aborted) throw new Error("Aborted");
+
+  for (const plan of plans) {
+    if (!("tasks" in plan)) {
+      warnings.push(...plan.warnings);
+      paperResults.push(plan);
+      continue;
+    }
+    const { paper, paperKey, sourceChunks, documentFingerprint } = plan;
+    const processed = new Set<number>();
+    const digests: FullReadPaperResult["digests"] = [];
+    const exactEvidence: ExhaustiveSourceChunk[] = [];
+    const paperWarnings: string[] = [];
+    for (const task of plan.tasks) {
+      const { batchIndex, batchCount, chunks } = task.input;
+      const error =
+        task.error ??
+        (normalizeText(task.output?.digest)
+          ? undefined
+          : new Error("The exhaustive reader returned no digest"));
+      if (error !== undefined || !task.output) {
+        const warning = `${paper.paperContext.title}: batch ${batchIndex + 1}/${batchCount} failed: ${error instanceof Error ? error.message : String(error)}`;
         paperWarnings.push(warning);
         warnings.push(warning);
+        continue;
       }
+      const allowed = new Set(chunks.map((chunk) => chunk.chunkIndex));
+      const relevant = Array.from(
+        new Set(
+          task.output.relevantChunkIds.filter((chunkIndex) =>
+            allowed.has(chunkIndex),
+          ),
+        ),
+      );
+      for (const chunk of chunks) processed.add(chunk.chunkIndex);
+      for (const chunkIndex of relevant) {
+        const chunk = chunks.find((entry) => entry.chunkIndex === chunkIndex);
+        if (chunk) exactEvidence.push(chunk);
+      }
+      digests.push({
+        batchIndex,
+        chunkIndexes: chunks.map((chunk) => chunk.chunkIndex),
+        digest: normalizeText(task.output.digest),
+      });
     }
 
     const missingChunkRanges = missingRanges(sourceChunks.length, processed);

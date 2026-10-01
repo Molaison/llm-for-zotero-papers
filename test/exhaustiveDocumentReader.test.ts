@@ -36,26 +36,150 @@ function buildPaper(): {
 }
 
 describe("exhaustiveDocumentReader", function () {
-  it("leaves a reasoning model room to think inside each digest's output limit", async function () {
-    // DeepSeek at reasoning "high" spent the old fixed 700 tokens thinking,
-    // so every batch came back truncated and every retry repeated it.
-    const limits: unknown[] = [];
-    const analyze = createLlmBatchAnalyzer(
-      { model: "reasoner", reasoning: { level: "high" } } as never,
-      (async (params: { outputTokenLimit?: unknown }) => {
-        limits.push(params.outputTokenLimit);
-        return {
-          text: '{"digest":"Covered 0","relevantChunkIds":[0]}',
-          completion: { status: "complete" },
-        };
-      }) as never,
+  it("runs each digest at the provider's utility reasoning level, not the chat's, and leaves a level that still thinks its room", async function () {
+    // At the chat's "high", DeepSeek thought through the whole 700 + 4,096
+    // token budget of every digest in the live run: each came back
+    // truncated, and each retry repeated it, twenty seconds a call.
+    const digestCall = async (model: string, apiBase: string) => {
+      const calls: Array<{ reasoning?: unknown; outputTokenLimit?: unknown }> =
+        [];
+      const analyze = createLlmBatchAnalyzer(
+        {
+          model,
+          apiBase,
+          reasoning: { provider: model.split("-")[0], level: "high" },
+        } as never,
+        (async (params: {
+          reasoning?: unknown;
+          outputTokenLimit?: unknown;
+        }) => {
+          calls.push({
+            reasoning: params.reasoning,
+            outputTokenLimit: params.outputTokenLimit,
+          });
+          return {
+            text: '{"digest":"Covered 0","relevantChunkIds":[0]}',
+            completion: { status: "complete" },
+          };
+        }) as never,
+      );
+      const output = await analyze({
+        question: "Summarize",
+        chunks: [{ chunkIndex: 0, text: "Body" }],
+      } as never);
+      assert.equal(output.digest, "Covered 0");
+      return calls[0];
+    };
+    assert.deepEqual(
+      await digestCall("deepseek-flash", "https://api.deepseek.com/v1"),
+      {
+        reasoning: { provider: "deepseek", level: "none" },
+        outputTokenLimit: { mode: "custom", tokens: 700 },
+      },
+      "thinking off where the provider allows it",
     );
-    const output = await analyze({
-      question: "Summarize",
-      chunks: [{ chunkIndex: 0, text: "Body" }],
-    } as never);
-    assert.equal(output.digest, "Covered 0");
-    assert.deepEqual(limits, [{ mode: "custom", tokens: 700 + 4096 }]);
+    assert.deepEqual(
+      await digestCall("gpt-5", "https://api.openai.com/v1"),
+      {
+        reasoning: { provider: "openai", level: "low" },
+        outputTokenLimit: { mode: "custom", tokens: 700 + 1024 },
+      },
+      "else the lowest level, with that level's room to think",
+    );
+  });
+
+  it("reads at most three batches at a time across papers and keeps each paper's digests in order", async function () {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const started: string[] = [];
+    const papers = [
+      buildPaper(),
+      {
+        ...buildPaper(),
+        paperContext: { itemId: 20, contextItemId: 21, title: "Second Paper" },
+      },
+    ];
+    const result = await readDocumentsExhaustively({
+      papers,
+      question: "Read everything.",
+      batchTokenBudget: 24,
+      finalTokenBudget: 4000,
+      analyzeBatch: async (batch) => {
+        started.push(`${batch.paperKey}#${batch.batchIndex}`);
+        inFlight += 1;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        // Later batches answer first, so order must come from the batch.
+        await new Promise((resolve) =>
+          setTimeout(resolve, 2 + (batch.batchCount - batch.batchIndex) * 2),
+        );
+        inFlight -= 1;
+        return { digest: `Covered ${batch.batchIndex}`, relevantChunkIds: [] };
+      },
+    });
+    assert.equal(maxInFlight, 3);
+    assert.equal(result.status, "complete");
+    for (const paper of result.papers) {
+      assert.deepEqual(
+        paper.digests.map((digest) => digest.batchIndex),
+        paper.digests.map((_, index) => index),
+      );
+    }
+    assert.deepEqual(
+      started.slice(0, 2),
+      ["10:11#0", "10:11#1"],
+      "batches start in reading order",
+    );
+  });
+
+  it("drops to one call at a time after a rate-limit answer and retries that batch after a pause", async function () {
+    let limited = false;
+    let inFlightSinceLimit = 0;
+    let maxInFlightSinceLimit = 0;
+    const attempts = new Map<number, number>();
+    const retriedAt: number[] = [];
+    let limitedAt = 0;
+    const result = await readDocumentsExhaustively({
+      papers: [buildPaper()],
+      question: "Read everything.",
+      // One chunk a batch: nine batches, so the read goes on past the limit.
+      batchTokenBudget: 8,
+      finalTokenBudget: 4000,
+      rateLimitBackoffMs: 30,
+      analyzeBatch: async (batch) => {
+        const attempt = (attempts.get(batch.batchIndex) || 0) + 1;
+        attempts.set(batch.batchIndex, attempt);
+        const sinceLimit = limited;
+        if (batch.batchIndex === 1 && attempt === 2) {
+          retriedAt.push(Date.now() - limitedAt);
+        }
+        if (sinceLimit) {
+          inFlightSinceLimit += 1;
+          maxInFlightSinceLimit = Math.max(
+            maxInFlightSinceLimit,
+            inFlightSinceLimit,
+          );
+        }
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        if (sinceLimit) inFlightSinceLimit -= 1;
+        if (batch.batchIndex === 1 && attempt === 1) {
+          limited = true;
+          limitedAt = Date.now();
+          throw new Error(
+            "429 Too Many Requests (https://api.example.invalid/v1/chat) - rate limit reached",
+          );
+        }
+        return { digest: `Covered ${batch.batchIndex}`, relevantChunkIds: [] };
+      },
+    });
+    assert.equal(result.status, "complete", "the limited batch was retried");
+    assert.equal(result.receipt.totalChunks, 9);
+    assert.equal(attempts.get(1), 2);
+    assert.isAtLeast(retriedAt[0], 25, "after the pause");
+    assert.equal(
+      maxInFlightSinceLimit,
+      1,
+      "no two calls started after the limit overlap",
+    );
   });
 
   it("processes every source chunk and returns a complete coverage receipt", async function () {
