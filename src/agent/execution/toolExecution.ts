@@ -18,6 +18,10 @@ import {
   attestAndRecordRead,
   buildPaperLedgerUpdateEvent,
 } from "../context/taskPaperLedgerRecorder";
+import {
+  readObservationSourceKey,
+  readObservationSourceKeys,
+} from "../context/readObservation";
 import type { TaskPaperLedgerDelta } from "../context/taskPaperLedger";
 import { openDeclaredOutcomes, type OutcomeEvidence } from "../loop/outcomes";
 import { canonicalJson } from "../services/libraryMutation/canonicalJson";
@@ -50,9 +54,14 @@ import type {
   AgentRuntimeRequest,
   AgentToolCall,
   AgentToolContext,
+  AgentToolDefinition,
   AgentToolEffect,
   AgentToolResult,
 } from "../types";
+
+/** How the model reaches what a sized view left out. */
+const MODEL_VIEW_HANDLE_NOTICE =
+  "This result is sized to the request; omitted counts what it left out. context_read source:'tool_result' with this handle pages the exact stored result, which lists the rows shown here first: read a row path from offset = the number of rows shown.";
 
 /** One tool call the turn executed, as the runtime's loop consumes it. */
 export type ExecutedToolCall = {
@@ -261,6 +270,94 @@ async function outcomeEvidenceOf(params: {
  * three closures inside `runTurn`; the state they shared is now `deps`.
  */
 export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
+  /**
+   * Stores a result the model reads only part of under a trh_ handle that
+   * context_read pages for the rest of the conversation. Undefined when no
+   * handle can be made, so nothing may be left out.
+   */
+  const persistResultHandle = async (params: {
+    call: AgentToolCall;
+    input: unknown;
+    content: unknown;
+  }): Promise<string | undefined> => {
+    const inputDigest = `sha256:${await sha256Text(
+      canonicalJson(params.input),
+    )}`;
+    const record = createAgentToolResultHandleRecord({
+      conversationKey: deps.request.conversationKey,
+      toolName: params.call.name,
+      toolCallId: params.call.id,
+      inputDigest,
+      resourceSignature: deps.resourceContextPlan.resourceSignature,
+      content: params.content,
+      createdAt: deps.now(),
+    });
+    if (!record) return undefined;
+    await deps.persistToolResultHandles([record]);
+    deps.preservedTurnHandleRecords.push(record);
+    deps.setToolResultReadAvailable(true);
+    setToolResultReadAvailability(deps.request, true);
+    return record.handle;
+  };
+
+  /**
+   * The model's view of a result whose tool sizes it: the view, the evidence
+   * refs of the rows it keeps, and the handle holding everything else.
+   */
+  const buildModelViewContent = async (params: {
+    call: AgentToolCall;
+    toolDefinition: AgentToolDefinition<any, any>;
+    input: unknown;
+    toolResult: AgentToolResult;
+    documentEvidenceRefs?: unknown[];
+  }): Promise<Record<string, unknown> | undefined> => {
+    const view = params.toolDefinition.buildModelView?.(
+      params.input as never,
+      params.toolResult.content as never,
+      deps.context,
+    );
+    if (!view) return undefined;
+    const refs = (params.documentEvidenceRefs || []) as Array<
+      Record<string, unknown>
+    >;
+    const shown = refs.length
+      ? readObservationSourceKeys({
+          toolName: params.toolResult.name,
+          input: params.input,
+          result: view.content,
+        })
+      : new Set<string>();
+    const keptRefs = refs.filter((ref) =>
+      shown.has(readObservationSourceKey(ref)),
+    );
+    const omittedRefs = refs.filter(
+      (ref) => !shown.has(readObservationSourceKey(ref)),
+    );
+    const stored = view.stored ?? params.toolResult.content;
+    const handle = await persistResultHandle({
+      call: params.call,
+      input: params.input,
+      content:
+        refs.length && stored && typeof stored === "object"
+          ? { ...stored, documentEvidenceRefs: [...keptRefs, ...omittedRefs] }
+          : stored,
+    });
+    if (!handle) return undefined;
+    const omitted = {
+      ...((view.content.omitted as Record<string, number> | undefined) || {}),
+      ...(omittedRefs.length
+        ? { documentEvidenceRefs: omittedRefs.length }
+        : {}),
+    };
+    return {
+      ...view.content,
+      ...(keptRefs.length ? { documentEvidenceRefs: keptRefs } : {}),
+      ...(Object.keys(omitted).length ? { omitted } : {}),
+      toolResultHandle: handle,
+      toolResultHandleNotice: MODEL_VIEW_HANDLE_NOTICE,
+    };
+  };
+
   const executePreparedToolCall = async (
     call: AgentToolCall,
     round: number,
@@ -485,26 +582,8 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
         content: originalContent,
         toolCallId: call.id,
         resourceSignature: deps.resourceContextPlan.resourceSignature,
-        persistOriginal: async (content) => {
-          const inputDigest = `sha256:${await sha256Text(
-            canonicalJson(executedCall.input),
-          )}`;
-          const record = createAgentToolResultHandleRecord({
-            conversationKey: deps.request.conversationKey,
-            toolName: call.name,
-            toolCallId: call.id,
-            inputDigest,
-            resourceSignature: deps.resourceContextPlan.resourceSignature,
-            content,
-            createdAt: deps.now(),
-          });
-          if (!record) return undefined;
-          await deps.persistToolResultHandles([record]);
-          deps.preservedTurnHandleRecords.push(record);
-          deps.setToolResultReadAvailable(true);
-          setToolResultReadAvailability(deps.request, true);
-          return record.handle;
-        },
+        persistOriginal: (content) =>
+          persistResultHandle({ call, input: executedCall.input, content }),
       });
       toolResult.content = processed.content;
       readActivityContent = processed.originalContent ?? originalContent;
@@ -739,16 +818,28 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
     const { toolResult, toolDefinition, input, documentEvidenceRefs } =
       executedCall;
     const deliveryCallId = options.modelCallId || call.id;
-    const contentForModel = documentEvidenceRefs?.length
-      ? toolResult.content &&
-        typeof toolResult.content === "object" &&
-        !Array.isArray(toolResult.content)
-        ? {
-            ...(toolResult.content as Record<string, unknown>),
+    const modelView =
+      toolResult.ok && toolDefinition?.buildModelView
+        ? await buildModelViewContent({
+            call,
+            toolDefinition,
+            input,
+            toolResult,
             documentEvidenceRefs,
-          }
-        : { content: toolResult.content, documentEvidenceRefs }
-      : undefined;
+          })
+        : undefined;
+    const contentForModel =
+      modelView ||
+      (documentEvidenceRefs?.length
+        ? toolResult.content &&
+          typeof toolResult.content === "object" &&
+          !Array.isArray(toolResult.content)
+          ? {
+              ...(toolResult.content as Record<string, unknown>),
+              documentEvidenceRefs,
+            }
+          : { content: toolResult.content, documentEvidenceRefs }
+        : undefined);
 
     if (toolResult.ok && toolDefinition?.resolveTerminalResult) {
       const terminal = await toolDefinition.resolveTerminalResult(

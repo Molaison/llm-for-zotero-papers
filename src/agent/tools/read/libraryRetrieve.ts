@@ -1,4 +1,6 @@
-import type { AgentToolDefinition } from "../../types";
+import type { AgentRuntimeRequest, AgentToolDefinition } from "../../types";
+import { resolveAgentPromptBudgetLimits } from "../../context/promptBudget";
+import { buildLibraryRetrieveModelView } from "../../services/libraryRetrieveModelView";
 import { matchesLibraryLevelTurn } from "./librarySearch";
 import {
   LIBRARY_RETRIEVE_DEFAULT_BUDGETS,
@@ -200,7 +202,7 @@ export const LIBRARY_RETRIEVE_GUIDANCE: NonNullable<
   matches: matchesLibraryLevelTurn,
   instruction: [
     "Use library_search for catalog discovery, library_read for structured item state, library_retrieve for evidence search and synthesis across a collection or library, and paper_read for close reading known papers.",
-    "For library_retrieve, preserve the returned coverage boundary and use paperMatches plus the synthesis digest as the paper ledger. Query variants improve recall but are not evidence. Do not turn sampled, metadata-only, abstract-only, partial, or unreadable coverage into exhaustive claims.",
+    "For library_retrieve, preserve the returned coverage boundary and use paperMatches as the paper ledger. Query variants improve recall but are not evidence. Do not turn sampled, metadata-only, abstract-only, partial, or unreadable coverage into exhaustive claims.",
     `When the user asks about particular parts of papers, in any language, pass library_retrieve sections from: ${EVIDENCE_SECTION_KINDS.join(", ")}.`,
     "For bounded collection or tag synthesis, require body evidence when readable papers are available (coverage papersBodyRead > 0), or answer by naming what is missing. Do not silently substitute titles or abstracts for requested paper-level synthesis.",
     "If a references or bibliography section follows library_retrieve, either include all planned papers, or label the list as body-evidence references and separately identify metadata or abstract-only papers from the coverage frontier.",
@@ -213,6 +215,26 @@ export const LIBRARY_RETRIEVE_GUIDANCE: NonNullable<
  */
 export const LIBRARY_RETRIEVE_COVERAGE_GUIDANCE =
   "This coverage is not complete: do not present sampled, metadata-only, abstract-only, or partial coverage as exhaustive; name what was not read.";
+
+/**
+ * The share of the model's input budget one library_retrieve view may take:
+ * a turn also carries its prompt, its history and further reads, and a
+ * library question often makes two or three retrieve calls.
+ */
+export const LIBRARY_RETRIEVE_VIEW_ROOM_SHARE = 0.25;
+
+function libraryRetrieveViewRoomTokens(request: AgentRuntimeRequest): number {
+  const limits = resolveAgentPromptBudgetLimits({
+    ...request,
+    inputTokenCap: request.advanced?.inputTokenCap,
+    profileOverride: request.advanced?.profileOverride,
+    outputTokenLimit: request.advanced?.outputTokenLimit,
+  });
+  return Math.max(
+    1,
+    Math.floor(limits.softLimitTokens * LIBRARY_RETRIEVE_VIEW_ROOM_SHARE),
+  );
+}
 
 function hasIncompleteCoverage(result: LibraryRetrieveResult): boolean {
   const contract = result.answerContract;
@@ -345,6 +367,12 @@ export function createLibraryRetrieveTool(
       exposure: "model",
     },
     guidance: LIBRARY_RETRIEVE_GUIDANCE,
+    buildModelView: (input, result, context) =>
+      buildLibraryRetrieveModelView({
+        input,
+        result,
+        roomTokens: libraryRetrieveViewRoomTokens(context.request),
+      }),
     presentation: {
       label: "Retrieve Library",
       summaries: {

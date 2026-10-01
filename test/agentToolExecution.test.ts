@@ -39,6 +39,16 @@ import {
   installMockDb,
 } from "./helpers/agentRuntimeMockDb";
 import { createTestActionContractService } from "./helpers/actionContractService";
+import { createLibraryRetrieveTool } from "../src/agent/tools/read/libraryRetrieve";
+import { createContextReadTool } from "../src/agent/tools/read/contextRead";
+import {
+  clearAgentToolResultHandleStore,
+  upsertAgentToolResultHandles,
+} from "../src/agent/store/toolResultHandles";
+import type {
+  LibraryRetrieveResult,
+  LibraryRetrieveSnippet,
+} from "../src/agent/services/libraryRetrieveService";
 
 const CAPABILITIES: AgentModelCapabilities = {
   streaming: false,
@@ -991,6 +1001,235 @@ describe("agent tool execution collaborator", function () {
       );
     } finally {
       turn.restore();
+    }
+  });
+});
+
+/**
+ * A library_retrieve result over 40 papers, as the service ranks it: 20
+ * matched with three passages each, 10 matched in the index but never read,
+ * and 10 fallback leads that matched nothing.
+ */
+function rankedRetrieveResult(): LibraryRetrieveResult {
+  const papers = [
+    ...Array.from({ length: 20 }, () => ({ status: "strong", passages: 3 })),
+    ...Array.from({ length: 10 }, () => ({
+      status: "mentions_only",
+      passages: 0,
+    })),
+    ...Array.from({ length: 10 }, () => ({
+      status: "not_enough_evidence",
+      passages: 1,
+      lead: true,
+    })),
+  ] as Array<{ status: string; passages: number; lead?: boolean }>;
+  const snippets: LibraryRetrieveSnippet[] = papers.flatMap((paper, i) =>
+    Array.from({ length: paper.passages }, (_, k) => ({
+      snippetId: `lr_${i + 1}_${101 + i}_${k}_bm25`,
+      itemId: String(i + 1),
+      contextItemId: String(101 + i),
+      chunkIndex: k,
+      title: `Paper ${i + 1}`,
+      citationLabel: `Author${i + 1}, 2020`,
+      sourceKind: "mineru" as const,
+      matchMethod: "bm25" as const,
+      sectionLabel: "Results",
+      snippet: `Passage ${k} of paper ${i + 1}. ${"drift ".repeat(40)}`,
+      surroundingText: `Chunk ${k}. ${"context ".repeat(120)}`,
+      score: 100 - i - k / 10,
+      whyMatched: "Library index BM25 ranked this passage highly",
+      ...(paper.lead ? { leadingPassage: true as const } : {}),
+    })),
+  );
+  return {
+    queryPlan: { originalQuery: "drift" } as never,
+    resourcePool: {
+      type: "collection",
+      scope: { libraryID: 1, collectionIds: [6] },
+      totalItems: papers.length,
+      states: {} as never,
+      queryCoverage: {} as never,
+    },
+    intent: "enumerate",
+    depth: "evidence",
+    methodsUsed: ["metadata", "fts"],
+    candidates: papers.map((_, i) => ({
+      itemId: String(i + 1),
+      title: `Paper ${i + 1}`,
+      resourceState: ["available"],
+      queryState: ["shortlisted"],
+      score: 50 - i,
+      whyMatched: "library index: 3 matching passage(s)",
+    })),
+    paperMatches: papers.map((paper, i) => ({
+      itemId: String(i + 1),
+      title: `Paper ${i + 1}`,
+      matchStatus: paper.status as never,
+      basis: paper.lead ? [] : ["indexed_text"],
+      returnedSnippetCount: paper.passages,
+      confidence: "high",
+      whyMatched: "library index: 3 matching passage(s)",
+    })),
+    frontier: {
+      needsSnippetExpansion: [],
+      needsCloseRead: [],
+      suggestedNextQueries: [],
+      stopReason: "budget_limit",
+    },
+    answerContract: {
+      resolvedStrategy: "evidence_overview",
+      metadataCoverage: "complete",
+      indexedTextCoverage: "complete",
+      snippetCoverage: "sampled",
+      safeClaims: [],
+      unsafeClaims: [],
+    } as never,
+    coverageReceipt: { text: "receipt" } as never,
+    synthesisDigest: "Paper synthesis digest:",
+    snippets,
+    warnings: [],
+  };
+}
+
+/** Zotero items behind the result, so its reads issue evidence refs. */
+function installRetrievedItems(count: number): () => void {
+  const zotero = (globalThis as unknown as { Zotero: Record<string, unknown> })
+    .Zotero;
+  const original = zotero.Items;
+  const items = new Map<number, Record<string, unknown>>();
+  for (let i = 1; i <= count; i += 1) {
+    items.set(i, { id: i, key: `ITEM${i}`, libraryID: 1 });
+    items.set(100 + i, {
+      id: 100 + i,
+      key: `PDF${i}`,
+      libraryID: 1,
+      parentID: i,
+      isAttachment: () => true,
+    });
+  }
+  zotero.Items = { get: (id: number) => items.get(id) || null };
+  return () => {
+    zotero.Items = original;
+  };
+}
+
+describe("library_retrieve model view delivery", function () {
+  it("sends the model a view sized to the intent and keeps the whole result behind a handle that context_read pages", async function () {
+    const restoreDb = installMockDb();
+    const restoreItems = installRetrievedItems(40);
+    clearAgentToolResultHandleStore();
+    try {
+      const full = rankedRetrieveResult();
+      const registry = new AgentToolRegistry(createTestActionContractService());
+      registry.register(
+        createLibraryRetrieveTool({ retrieve: async () => full } as never),
+      );
+      const harness = await createHarness(registry);
+      const stored: AgentToolResultHandleRecord[] = [];
+      harness.deps.persistToolResultHandles = async (records) => {
+        stored.push(...records);
+        await upsertAgentToolResultHandles(records);
+      };
+      const toolExecution = createToolExecution(harness.deps);
+      const outcome = await toolExecution.executeToolWorkflow(
+        {
+          id: "call-retrieve",
+          name: "library_retrieve",
+          arguments: { query: "drift", intent: "enumerate" },
+        },
+        1,
+        { modelCallId: "call-retrieve" },
+      );
+
+      const view = outcome.delivery!.content as Record<string, any>;
+      assert.lengthOf(
+        view.paperMatches,
+        30,
+        "every matching paper, no fallback lead",
+      );
+      assert.lengthOf(view.snippets, 20, "one passage per matched paper");
+      assert.match(view.toolResultHandle, /^trh_/);
+      assert.include(view.omitted, { paperMatches: 10, snippets: 50 });
+      assert.isAbove(view.omitted.documentEvidenceRefs, 0);
+      const refKeys = (view.documentEvidenceRefs as Array<any>).map(
+        (ref) => `${ref.itemKey}:${ref.attachmentItemKey || ""}`,
+      );
+      assert.include(refKeys, "ITEM1:PDF1", "a shown passage keeps its ref");
+      assert.notInclude(
+        refKeys,
+        "ITEM31:PDF31",
+        "a lead the view leaves out takes its ref with it",
+      );
+
+      const event = harness.events.find(
+        (entry) => entry.type === "tool_result",
+      ) as Extract<AgentEvent, { type: "tool_result" }>;
+      assert.lengthOf(
+        (event.content as LibraryRetrieveResult).snippets,
+        70,
+        "the UI, ledger and citations still read the whole result",
+      );
+      assert.lengthOf(stored, 1);
+      assert.equal(stored[0].handle, view.toolResultHandle);
+      assert.lengthOf((stored[0].content as any).snippets, 70);
+      assert.isTrue(harness.toolResultReadAvailable.value);
+
+      const contextRead = createContextReadTool();
+      const input = contextRead.validate({
+        source: "tool_result",
+        handle: view.toolResultHandle,
+        path: "snippets",
+        offset: view.snippets.length,
+        limit: 200,
+        maxTokens: 24_000,
+      });
+      assert.isTrue(input.ok);
+      const page = (await contextRead.execute(
+        (input as { value: never }).value,
+        harness.deps.context,
+      )) as Record<string, any>;
+      assert.equal(page.totalCount, 70);
+      const shown = new Set(view.snippets.map((row: any) => row.snippetId));
+      assert.isNotEmpty(page.items);
+      assert.isTrue(
+        page.items.every((row: any) => !shown.has(row.snippetId)),
+        "paging from the number shown reads only what the view left out",
+      );
+      assert.property(page.items[0], "surroundingText", "whole rows");
+    } finally {
+      clearAgentToolResultHandleStore();
+      restoreItems();
+      restoreDb();
+    }
+  });
+
+  it("sends the whole result when no handle can hold it", async function () {
+    const restoreDb = installMockDb();
+    try {
+      const full = rankedRetrieveResult();
+      const registry = new AgentToolRegistry(createTestActionContractService());
+      registry.register(
+        createLibraryRetrieveTool({ retrieve: async () => full } as never),
+      );
+      const harness = await createHarness(registry);
+      // A conversation key the handle store refuses.
+      harness.request.conversationKey = 0 as never;
+      const outcome = await createToolExecution(
+        harness.deps,
+      ).executeToolWorkflow(
+        {
+          id: "call-retrieve",
+          name: "library_retrieve",
+          arguments: { query: "drift", intent: "enumerate" },
+        },
+        1,
+        { modelCallId: "call-retrieve" },
+      );
+      const delivered = outcome.delivery!.content as Record<string, any>;
+      assert.lengthOf(delivered.snippets, 70);
+      assert.notProperty(delivered, "toolResultHandle");
+    } finally {
+      restoreDb();
     }
   });
 });

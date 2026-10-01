@@ -238,6 +238,8 @@ export type LibraryRetrieveSnippet = {
   score: number;
   whyMatched: string;
   matchedQueryVariant?: string;
+  /** The paper's leading passage, served because nothing in it matched. */
+  leadingPassage?: true;
 };
 
 export type LibraryRetrieveResult = {
@@ -1142,8 +1144,15 @@ function recordHasAbstractMatch(record: ResourceRecord): boolean {
   return record.why.some((reason) => reason.startsWith("abstract "));
 }
 
+/** The reason applyIndexPapers records: indexed text, not metadata. */
+const INDEX_MATCH_REASON_PREFIX = "library index:";
+
 function recordHasMetadataOnlyMatch(record: ResourceRecord): boolean {
-  return record.why.some((reason) => !reason.startsWith("abstract "));
+  return record.why.some(
+    (reason) =>
+      !reason.startsWith("abstract ") &&
+      !reason.startsWith(INDEX_MATCH_REASON_PREFIX),
+  );
 }
 
 function snippetBasisForRecord(
@@ -1151,6 +1160,8 @@ function snippetBasisForRecord(
 ): Set<LibraryRetrieveMatchBasis> {
   const basis = new Set<LibraryRetrieveMatchBasis>();
   for (const snippet of snippets) {
+    // A leading passage was served because nothing in the paper matched.
+    if (snippet.leadingPassage) continue;
     if (snippet.matchMethod === "semantic") {
       basis.add("semantic");
     } else {
@@ -1215,7 +1226,9 @@ function buildPaperMatches(params: {
     const basis = snippetBasisForRecord(snippets);
     if (recordHasMetadataOnlyMatch(record)) basis.add("metadata");
     if (recordHasAbstractMatch(record)) basis.add("abstract");
-    if (record.quicksearchMatched) basis.add("indexed_text");
+    if (record.quicksearchMatched || record.indexMatched) {
+      basis.add("indexed_text");
+    }
     const status = paperMatchStatus({
       record,
       basis,
@@ -1274,14 +1287,17 @@ function buildFrontier(params: {
   indexedScan: IndexedTextScanResult;
   metadataComplete: boolean;
 }): LibraryRetrieveFrontier {
-  const unresolved = params.paperMatches.filter((match) =>
-    [
-      "possible",
-      "weak",
-      "mentions_only",
-      "semantic_only",
-      "not_enough_evidence",
-    ].includes(match.matchStatus),
+  // A paper nothing matched (a fallback lead) is not an unresolved match.
+  const unresolved = params.paperMatches.filter(
+    (match) =>
+      match.basis.length > 0 &&
+      [
+        "possible",
+        "weak",
+        "mentions_only",
+        "semantic_only",
+        "not_enough_evidence",
+      ].includes(match.matchStatus),
   );
   const needsSnippetExpansion = unresolved
     .filter((match) => match.returnedSnippetCount === 0)
@@ -2461,9 +2477,11 @@ export class LibraryRetrieveService {
       record.indexMatched = true;
       record.queryState.add("matched_bm25");
       record.resourceState.add("text_indexed");
-      if (!record.why.some((why) => why.startsWith("library index:"))) {
+      if (
+        !record.why.some((why) => why.startsWith(INDEX_MATCH_REASON_PREFIX))
+      ) {
         record.why.push(
-          `library index: ${paper.matchingChunks} matching passage(s)`,
+          `${INDEX_MATCH_REASON_PREFIX} ${paper.matchingChunks} matching passage(s)`,
         );
       }
     }
@@ -2594,10 +2612,13 @@ export class LibraryRetrieveService {
           (params.record.score + hit.evidenceScore * 10).toFixed(3),
         ),
         // A leading chunk served for an unranked paper matched nothing.
-        whyMatched:
-          hit.hybridScore > 0 || hit.bm25Score > 0
-            ? "Library index BM25 ranked this passage highly"
-            : "Leading passage of an indexed paper (no direct match)",
+        ...(hit.hybridScore > 0 || hit.bm25Score > 0
+          ? { whyMatched: "Library index BM25 ranked this passage highly" }
+          : {
+              whyMatched:
+                "Leading passage of an indexed paper (no direct match)",
+              leadingPassage: true as const,
+            }),
       });
     }
     return snippets;
@@ -3123,10 +3144,18 @@ export class LibraryRetrieveService {
             (params.record.score + candidate.evidenceScore * 10).toFixed(3),
           ),
           matchedQueryVariant: candidate.matchedQueryVariant,
-          whyMatched:
-            matchMethod === "semantic"
-              ? "Semantic retrieval ranked this passage highly"
-              : "Full-text BM25 retrieval ranked this passage highly",
+          // A chunk no query signal ranked is the paper's leading passage.
+          ...(candidate.why?.querySignal === "none"
+            ? {
+                whyMatched: "Leading passage of a paper (no direct match)",
+                leadingPassage: true as const,
+              }
+            : {
+                whyMatched:
+                  matchMethod === "semantic"
+                    ? "Semantic retrieval ranked this passage highly"
+                    : "Full-text BM25 retrieval ranked this passage highly",
+              }),
         });
         return true;
       };

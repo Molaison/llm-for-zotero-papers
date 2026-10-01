@@ -1576,6 +1576,17 @@ export type AgentInvocationPlan = {
   reason: string;
 };
 
+/**
+ * What the model reads of a successful result when the whole is more than
+ * the question needs. `stored` (the whole result when absent) must list the
+ * rows `content` shows first in each row array it shares with it, so paging
+ * a row path from offset = rows shown reads exactly what was left out.
+ */
+export type AgentToolModelView = {
+  content: Record<string, unknown>;
+  stored?: Record<string, unknown>;
+};
+
 export type AgentToolDefinition<TInput = unknown, TResult = unknown> = {
   spec: ToolSpec;
   isAvailable?: (request: AgentRuntimeRequest) => boolean;
@@ -1632,6 +1643,20 @@ export type AgentToolDefinition<TInput = unknown, TResult = unknown> = {
     result: AgentToolResult,
     context: AgentToolContext,
   ) => Promise<AgentModelMessage | null>;
+  /**
+   * The view of a successful result the model reads. The UI, the paper
+   * ledger and citations keep the whole result. The host stores the view's
+   * `stored` result, with every evidence ref, under a trh_ handle that
+   * context_read pages, and sends `content` with the handle and the evidence
+   * refs of the rows it keeps; `omitted.documentEvidenceRefs` counts the
+   * rest. With no handle to hold the rest, the whole result is sent. Null
+   * sends the whole result.
+   */
+  buildModelView?: (
+    input: TInput,
+    result: TResult,
+    context: AgentToolContext,
+  ) => AgentToolModelView | null;
   /**
    * Allows a host-owned terminal artifact to become the application-visible
    * answer without fabricating a provider assistant message. The exact

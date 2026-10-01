@@ -279,6 +279,45 @@ function zoteroIdentity(source: Candidate): {
   };
 }
 
+/** The source one read observation covers: its identity and page. */
+export function readObservationSourceKey(source: {
+  libraryID?: unknown;
+  itemKey?: unknown;
+  attachmentItemKey?: unknown;
+  pageIndex?: unknown;
+}): string {
+  return `${source.libraryID}:${source.itemKey}:${source.attachmentItemKey || ""}:${source.pageIndex ?? ""}`;
+}
+
+/**
+ * The sources the rows of `result` would issue observations for, keyed as
+ * readObservationSourceKey keys them: what a reduced view of a result still
+ * shows, so the evidence refs it carries can follow its rows.
+ */
+export function readObservationSourceKeys(params: {
+  toolName: string;
+  input: unknown;
+  result: unknown;
+}): Set<string> {
+  const keys = new Set<string>();
+  for (const seed of observationSeeds(
+    params.toolName,
+    params.input,
+    params.result,
+  )) {
+    const identity = zoteroIdentity(seed.source);
+    if (identity) {
+      keys.add(
+        readObservationSourceKey({
+          ...identity,
+          pageIndex: seed.source.pageIndex,
+        }),
+      );
+    }
+  }
+  return keys;
+}
+
 /** Host-owned, tool-specific read attestation. Unknown tools intentionally
  * return no trusted source/depth observations. */
 export async function createTrustedReadObservations(params: {
@@ -314,7 +353,10 @@ export async function createTrustedReadObservations(params: {
   for (const seed of seeds) {
     const identity = zoteroIdentity(seed.source);
     if (!identity) continue;
-    const key = `${identity.libraryID}:${identity.itemKey}:${identity.attachmentItemKey || ""}:${seed.source.pageIndex ?? ""}`;
+    const key = readObservationSourceKey({
+      ...identity,
+      pageIndex: seed.source.pageIndex,
+    });
     const existing = grouped.get(key);
     if (existing) {
       for (const capability of seed.capabilities) {

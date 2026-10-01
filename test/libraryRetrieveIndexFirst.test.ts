@@ -629,6 +629,91 @@ describe("library retrieve, index first (v2 rules)", function () {
       "the better round-2 hit wins the paper's single slot",
     );
   });
+
+  it("never counts a fallback paper's leading passage as a match: the paper the index matched heads the ledger", async function () {
+    // The live needle: one paper matches; the pool fallback shortlists the
+    // rest, and each gets its leading passages, which match nothing.
+    const index = fakeIndex(
+      () => ({
+        chunks: [hit(31, 30, 4, 1, "The tobetex coefficient was 0.92.")],
+        papers: [paper(31, 30, 9, 1)],
+        totalMatchingPapers: 1,
+      }),
+      (attachmentId, k) =>
+        Array.from({ length: k }, (_, i) => ({
+          ...hit(attachmentId, attachmentId - 1, i, i + 1, `Opening ${i}.`),
+          bm25Score: 0,
+          hybridScore: 0,
+          evidenceScore: 0,
+          matchedTerms: [],
+        })),
+    );
+    const rig = createRetrieveServiceRig({
+      papers: 6,
+      textIndex: index,
+      unmatchedMetadata: true,
+    });
+    const result = await rig.service.retrieve({
+      query: "tobetex coefficient",
+      intent: "enumerate",
+      depth: "evidence",
+    });
+    assert.deepEqual(
+      [result.paperMatches[0].itemId, result.paperMatches[0].matchStatus],
+      ["30", "strong"],
+    );
+    const others = result.paperMatches.filter((match) => match.itemId !== "30");
+    assert.isNotEmpty(others);
+    assert.isTrue(
+      others.every((match) => match.matchStatus === "not_enough_evidence"),
+      JSON.stringify(others.map((match) => match.matchStatus)),
+    );
+    assert.isTrue(
+      result.snippets
+        .filter((s) => s.itemId !== "30")
+        .every((s) => s.leadingPassage === true),
+    );
+    assert.isUndefined(
+      result.snippets.find((s) => s.itemId === "30")?.leadingPassage,
+    );
+    assert.deepEqual(
+      result.frontier.needsCloseRead,
+      [],
+      "a paper nothing matched is no close-reading lead",
+    );
+  });
+
+  it("calls an index match the snippet budget never reached mentions_only, not not_enough_evidence", async function () {
+    const index = fakeIndex(() => ({
+      chunks: [
+        hit(11, 10, 2, 1, "The tobetex coefficient was 0.92."),
+        hit(21, 20, 3, 2, "A tobetex reading is mentioned."),
+      ],
+      papers: [paper(11, 10, 9, 1), paper(21, 20, 8, 2)],
+      totalMatchingPapers: 2,
+    }));
+    const rig = createRetrieveServiceRig({
+      papers: 3,
+      textIndex: index,
+      unmatchedMetadata: true,
+    });
+    const result = await rig.service.retrieve({
+      query: "tobetex",
+      intent: "enumerate",
+      depth: "evidence",
+      maxSnippetPapers: 1,
+    });
+    const status = (itemId: string) =>
+      result.paperMatches.find((match) => match.itemId === itemId);
+    assert.equal(status("10")?.matchStatus, "strong");
+    assert.equal(status("20")?.matchStatus, "mentions_only");
+    assert.include(status("20")?.basis || [], "indexed_text");
+    assert.notInclude(
+      status("20")?.basis || [],
+      "metadata",
+      "an index match is indexed text, not metadata",
+    );
+  });
 });
 
 describe("library retrieve, section steering on the index path", function () {
