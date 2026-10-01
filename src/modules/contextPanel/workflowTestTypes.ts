@@ -614,6 +614,18 @@ export type WorkflowTestApi = {
     inputTokenCap: number;
     stopAfterNotes: number;
   }) => ReturnType<typeof import("./longJobReplay").exerciseLongJobNoteResume>;
+  /**
+   * A note job whose one note_write_batch is stopped while it writes, the
+   * agent's state reloaded as at startup, then "continue"; only the model is
+   * scripted.
+   */
+  exerciseLongJobBatchStop: (input: {
+    panelId: string;
+    collection: import("../../shared/types").CollectionContextRef;
+    papers: Array<{ itemId: number; title: string }>;
+    inputTokenCap: number;
+    stopAfterNotes: number;
+  }) => ReturnType<typeof import("./longJobReplay").exerciseLongJobBatchStop>;
   exerciseStreamingReplay: (input: {
     panelId: string;
     historyTurns: number;

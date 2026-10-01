@@ -179,6 +179,20 @@ export function judgeLibraryMutationTargets(
   );
 }
 
+/**
+ * The part of `operation` a call the user stopped between its items reached,
+ * from the call's result payload; undefined when the call was not stopped.
+ */
+export function mutationReachedFromHandler(
+  operation: LibraryMutationOperation,
+  result: unknown,
+): LibraryMutationOperation | undefined {
+  return libraryMutationHandlers[operation.type].reached(
+    operation as never,
+    result,
+  ) as LibraryMutationOperation | undefined;
+}
+
 export function executeMutationFromHandler(
   operation: LibraryMutationOperation,
   context: AgentToolContext,

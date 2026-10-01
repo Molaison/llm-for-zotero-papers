@@ -128,6 +128,10 @@ export async function callTool(
   if (ctx.resolvePreparedAction)
     return deliver((await ctx.resolvePreparedAction(prepared)).result);
 
+  // The inherited fence is the conversation's lifecycle only; a card
+  // resolved after Stop is denied, as the turn's own cards are.
+  const conversationAllowed =
+    toolContext.nestedExecutionOptions?.isExecutionAllowed;
   return deliver(
     (
       await resolvePreparedActionReview(
@@ -136,7 +140,9 @@ export async function callTool(
           ctx.onProgress({ type: "confirmation_required", requestId, action });
           return ctx.requestConfirmation(requestId, action);
         },
-        toolContext.nestedExecutionOptions?.isExecutionAllowed,
+        conversationAllowed
+          ? () => !toolContext.signal?.aborted && conversationAllowed()
+          : undefined,
       )
     ).result,
   );

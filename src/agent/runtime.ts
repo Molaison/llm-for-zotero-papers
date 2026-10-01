@@ -78,6 +78,7 @@ import {
   declaresReadPart,
   decideRunEnd,
   OUTCOME_REASONS,
+  reconcileJournaledReceipts,
   resumesOnContinue,
   settleOutcomes,
   type OutcomeEvidence,
@@ -151,6 +152,7 @@ import { executionCheckpointEvent } from "./execution/checkpointEvents";
 import type { ExecutionCheckpoint, RunEndState } from "./execution/types";
 import { createAgentExecutionContext } from "./execution/context";
 import { loadMaterialOutcomesForConversation } from "./execution/materialOutcomes";
+import { journaledNoteReceipts } from "./execution/journalReceipts";
 import {
   createToolExecution,
   type ToolExecutionRecord,
@@ -814,6 +816,8 @@ export class AgentRuntime {
       );
       let recoveryMessage: AgentModelMessage | null = null;
       let interruptedTraceEvents: readonly AgentRunEventRecord[] | undefined;
+      // The run whose ledger this turn resumes, if it resumes one.
+      let resumedFromRunId: string | undefined;
       if (interruptedPriorRun) {
         const [actions, latestTranscriptSegment, interruptedTrace] =
           await Promise.all([
@@ -844,6 +848,7 @@ export class AgentRuntime {
             ...request.executionContext,
             executionId: ordinaryCheckpoint.executionId,
           };
+          resumedFromRunId = interruptedPriorRun.runId;
         }
         const compatibilityMatches =
           latestTranscriptSegment?.compatibilityKey ===
@@ -887,6 +892,31 @@ export class AgentRuntime {
             ...request.executionContext!,
             executionId: ledger.executionId,
           };
+          resumedFromRunId = latestPriorRun.runId;
+        }
+      }
+      // The run a resumed ledger comes from may have written notes whose
+      // receipts never reached it: Stop or an error ended the run while a
+      // write was running, or Zotero quit mid-batch. The change journal holds
+      // every one, so the ledger takes those it lacks before the turn goes
+      // on, each once.
+      if (resumedFromRunId && request.executionCheckpoint) {
+        try {
+          const journaled = await journaledNoteReceipts({
+            runId: resumedFromRunId,
+            conversationKey: request.conversationKey,
+          });
+          if (journaled.length)
+            await updateExecutionCheckpoint(
+              (checkpoint) =>
+                reconcileJournaledReceipts(checkpoint, journaled, this.now())
+                  .checkpoint,
+            );
+        } catch (error) {
+          logRuntimeWarning(
+            "LLM Agent: reconciling the resumed ledger with the change journal failed",
+            error,
+          );
         }
       }
       // An interrupted run already carries the material and batch block inside

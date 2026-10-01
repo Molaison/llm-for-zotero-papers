@@ -444,6 +444,22 @@ export const libraryMutationHandlers = {
     },
     targetCount: (operation) => operation.notes.length,
     affectedCount: (_operation, result) => resultCount(result, "createdCount"),
+    // A stopped batch reports how many of its notes it reached; they are the
+    // first ones, in order, because it stops only between two notes.
+    reached: (operation, result) => {
+      const stopped =
+        result && typeof result === "object"
+          ? (result as { stopped?: { after?: unknown; of?: unknown } }).stopped
+          : undefined;
+      const after = Number(stopped?.after);
+      return stopped &&
+        Number(stopped.of) === operation.notes.length &&
+        Number.isInteger(after) &&
+        after >= 0 &&
+        after < operation.notes.length
+        ? { ...operation, notes: operation.notes.slice(0, after) }
+        : undefined;
+    },
     atomize: (operation) =>
       onePer(operation, operation.notes, (note) => ({
         ...operation,

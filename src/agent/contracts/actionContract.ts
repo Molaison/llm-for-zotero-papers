@@ -25,8 +25,11 @@ import { canonicalJsonEqual } from "../services/libraryMutation/canonicalJson";
 import type { LibraryMutationOperation } from "../services/libraryMutation/contracts";
 import type { MutationTargetJudgment } from "../services/libraryMutation/handlerDefinition";
 import {
+  actionDetailsForLibraryMutation,
   judgeLibraryMutationTargets,
   mutationPostconditionIsSatisfied,
+  mutationReachedFromHandler,
+  mutationTargetCountFromHandler,
 } from "../services/libraryMutation/handlerOperations";
 import { describeItemIds } from "../services/libraryMutation/handlerUtilities";
 import {
@@ -635,21 +638,35 @@ export class ActionContractService {
       return this.externalMutationReceipt(base, proposal, params);
     }
     const evidence = matchingNativeEvidence(proposal, params.actionEvidence);
+    // A call the user stopped between its items answers for the items it
+    // reached. The rest never started: it neither applied nor refused them,
+    // so the receipt names them in neither list and they stay owed.
+    const reached = mutationReachedFromHandler(
+      operation,
+      innermostToolResult(params.content),
+    );
+    const judged = reached || operation;
     const verified = Boolean(
-      evidence &&
-      mutationPostconditionIsSatisfied(operation, evidence.postState),
+      evidence && mutationPostconditionIsSatisfied(judged, evidence.postState),
     );
     const targets = proposal.requestedTargets.length
       ? proposal.requestedTargets
       : evidence
         ? evidenceTargets(evidence)
         : [];
+    const judgedTargets = reached
+      ? actionDetailsForLibraryMutation(reached).requestedTargets
+      : targets;
     const wasAlreadySatisfied = Boolean(
-      evidence &&
-      mutationPostconditionIsSatisfied(operation, evidence.preState),
+      evidence && mutationPostconditionIsSatisfied(judged, evidence.preState),
     );
     const alreadySatisfied =
       verified && (wasAlreadySatisfied || params.effect === "none");
+    const stopReason = reached
+      ? `Stopped by the user after ${mutationTargetCountFromHandler(
+          reached,
+        )} of ${mutationTargetCountFromHandler(operation)}; the rest were not started.`
+      : undefined;
     // The captured post-state proves the operation's postcondition, which is a
     // claim about the whole set. A write that created notes carries, beside
     // it, the read-back each note's creation forced; those are re-checked here
@@ -671,6 +688,8 @@ export class ActionContractService {
     // does for the same failed re-read. A receipt must never say "verified"
     // beside a reason that names a note it could not confirm.
     const readBackGap = noteReadBacks.reasons.length > 0;
+    // Stopped before its first item, the call did nothing there is to prove.
+    const stoppedBeforeAny = Boolean(reached && !judgedTargets.length);
     // The whole-set postcondition fails as soon as one target is not as asked,
     // which says nothing about the others. A handler that judges its targets
     // one by one says which landed and which it refused before running, and
@@ -680,13 +699,13 @@ export class ActionContractService {
     const judgment =
       evidence && !verified
         ? judgeLibraryMutationTargets(
-            operation,
+            judged,
             evidence.preState,
             evidence.postState,
           )
         : undefined;
     const split = judgment
-      ? splitByTarget(operation, judgment, targets, params.effect)
+      ? splitByTarget(judged, judgment, judgedTargets, params.effect)
       : null;
     if (evidence && split) {
       const landed = split.applied.length + split.alreadySatisfied.length > 0;
@@ -713,19 +732,28 @@ export class ActionContractService {
       ...base,
       verifiedFacts: [...base.verifiedFacts, ...noteReadBacks.facts],
       evidenceRef: evidence?.journalStepId || base.evidenceRef,
-      verification: verified && !readBackGap ? "verified" : "unverified",
-      status: verified
-        ? alreadySatisfied
-          ? "already_satisfied"
-          : "applied"
-        : "unverified",
+      verification: stoppedBeforeAny
+        ? "not_applicable"
+        : verified && !readBackGap
+          ? "verified"
+          : "unverified",
+      status: stoppedBeforeAny
+        ? "cancelled"
+        : !verified
+          ? "unverified"
+          : reached
+            ? "partial"
+            : alreadySatisfied
+              ? "already_satisfied"
+              : "applied",
       requestedTargets: targets,
-      appliedTargets: verified && !alreadySatisfied ? targets : [],
-      alreadySatisfiedTargets: alreadySatisfied ? targets : [],
-      rejectedTargets: verified ? [] : targets,
+      appliedTargets: verified && !alreadySatisfied ? judgedTargets : [],
+      alreadySatisfiedTargets: alreadySatisfied ? judgedTargets : [],
+      rejectedTargets: verified ? [] : judgedTargets,
       reasons: [
         ...base.reasons,
-        ...(verified
+        ...(stopReason ? [stopReason] : []),
+        ...(verified || stoppedBeforeAny
           ? []
           : [
               evidence

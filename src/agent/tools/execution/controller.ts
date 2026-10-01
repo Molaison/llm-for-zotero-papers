@@ -329,13 +329,18 @@ export class InvocationController {
     }
   }
 
-  private lifecycleValid(): boolean {
+  /** Whether the conversation this call was prepared in may still be changed. */
+  private conversationCurrent(): boolean {
     return (
-      !this.context.signal?.aborted &&
       (!this.options.isExecutionAllowed || this.options.isExecutionAllowed()) &&
       canonicalJson(this.context.request.executionContext || null) ===
         this.frozenExecutionContext
     );
+  }
+
+  /** Whether the tool may start: not stopped, and the conversation current. */
+  private lifecycleValid(): boolean {
+    return !this.context.signal?.aborted && this.conversationCurrent();
   }
 
   /**
@@ -529,7 +534,11 @@ export class InvocationController {
           }),
         );
         if (grant) grant.status = "executed";
-        if (!this.lifecycleValid())
+        // A Stop pressed while the tool ran ends the run after this call, not
+        // the call's record: what it did is real, and its receipts are the
+        // only proof of it. A tool that loops stops between its items itself.
+        // Only a conversation changed under the call discards its result.
+        if (!this.conversationCurrent())
           throw new Error("Conversation lifecycle changed during execution.");
         if (
           this.tool.spec.executionClass === "external_effect" &&

@@ -77,6 +77,16 @@ export type LibraryMutationHandler<Type extends LibraryMutationOperationType> =
       before: MutationStateView,
       after: MutationStateView,
     ) => MutationTargetJudgment;
+    /**
+     * The part of the operation a call the user stopped between its items
+     * had reached, read from the call's result payload; undefined for a call
+     * that ran to its end. Only an operation that stops between items has
+     * one, and its receipt is judged on that part alone.
+     */
+    reached: (
+      operation: LibraryMutationOperationOf<Type>,
+      result: unknown,
+    ) => LibraryMutationOperationOf<Type> | undefined;
     execute: (
       operation: LibraryMutationOperationOf<Type>,
       context: AgentToolContext,
@@ -129,6 +139,7 @@ type HandlerOptions<Type extends LibraryMutationOperationType> = Pick<
       | "deferredInverse"
       | "planInverse"
       | "judgeTargets"
+      | "reached"
       | "execute"
       | "replay"
       | "executionDomain"
@@ -162,6 +173,7 @@ export function defineHandler<Type extends LibraryMutationOperationType>(
     planInverse: options.planInverse || (() => ({})),
     postconditionSatisfied: options.postconditionSatisfied,
     ...(options.judgeTargets ? { judgeTargets: options.judgeTargets } : {}),
+    reached: options.reached || (() => undefined),
     execute:
       options.execute ||
       ((operation, context, gateway) =>

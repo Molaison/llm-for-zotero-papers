@@ -41,6 +41,7 @@ import {
 } from "./chatMemoryReplay";
 import { exerciseAgentDeliveryReplay } from "./agentDeliveryReplay";
 import {
+  exerciseLongJobBatchStop,
   exerciseLongJobNoteResume,
   exerciseLongJobReplay,
 } from "./longJobReplay";
@@ -5750,6 +5751,13 @@ export function installWorkflowTestHarness(targetAddon: {
       }),
     exerciseLongJobNoteResume: (input) =>
       exerciseLongJobNoteResume(getPanel(input.panelId), {
+        collection: input.collection,
+        papers: input.papers,
+        inputTokenCap: input.inputTokenCap,
+        stopAfterNotes: input.stopAfterNotes,
+      }),
+    exerciseLongJobBatchStop: (input) =>
+      exerciseLongJobBatchStop(getPanel(input.panelId), {
         collection: input.collection,
         papers: input.papers,
         inputTokenCap: input.inputTokenCap,

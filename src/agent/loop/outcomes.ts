@@ -1062,6 +1062,50 @@ export function applyOutcomeEvidence(
   }
 }
 
+/**
+ * Receipts read back from the change journal of the run a resumed ledger
+ * comes from (`execution/journalReceipts.ts`), applied where the ledger lacks
+ * them. A run that ended while a write was running, or a Zotero that quit
+ * mid-batch, can leave a write in the journal that no receipt in the ledger
+ * speaks for. A receipt is applied only when an open part names one of the
+ * papers it proves and no part that takes it holds that paper done already:
+ * a write the ledger knows, by whichever receipt, is never applied twice, and
+ * a paper no open part asks for gets no part of its own.
+ */
+export function reconcileJournaledReceipts(
+  checkpoint: ExecutionCheckpoint,
+  receipts: readonly AgentActionReceipt[],
+  now: number,
+): EvidenceResult {
+  let current = checkpoint;
+  for (const receipt of receipts) {
+    if (!isWrite(receipt) || isBound(current, receipt.id)) continue;
+    const proven = unique([
+      ...receipt.appliedTargets,
+      ...receipt.alreadySatisfiedTargets,
+    ]);
+    const takes = (task: Task) => acceptsWrite(task, receipt);
+    const held = current.tasks.some(
+      (task) =>
+        takes(task) &&
+        (task.doneTargets || []).some(
+          (target) => resolveTarget(target, proven) !== undefined,
+        ),
+    );
+    const owed = current.tasks.some(
+      (task) =>
+        RECEIPT_CANDIDATE_STATUSES.has(task.status) &&
+        Boolean(task.targets?.length) &&
+        takes(task),
+    );
+    if (held || !owed) continue;
+    current = applyReceipt(current, receipt, now).checkpoint;
+  }
+  return current === checkpoint
+    ? unchanged(checkpoint)
+    : { checkpoint: current, changed: true };
+}
+
 /** Writes that create a note on a paper: repeating one writes it twice. */
 const NOTE_CREATING_OPERATIONS: ReadonlySet<string> = new Set([
   "note_create",

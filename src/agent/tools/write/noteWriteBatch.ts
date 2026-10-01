@@ -81,6 +81,13 @@ type ResumeRowCorrection = {
  */
 type ResumeResolution = {
   batchId: string;
+  /**
+   * This resume's own identity. It continues the journal action the batch
+   * opened, so a receipt named after that action would take the identity of
+   * the call that opened it, and a ledger that already holds that receipt
+   * would take this call's as a repeat; the resume's proposal names this.
+   */
+  attempt: string;
   /** The journal action the batch's rows already name, if any. */
   actionId?: string;
   /** Items already written; this call does not touch them. */
@@ -275,6 +282,9 @@ export function createNoteWriteBatchTool(
 
     const resume: ResumeResolution = {
       batchId,
+      attempt: `${Date.now().toString(36)}-${Math.random()
+        .toString(36)
+        .slice(2, 10)}`,
       actionId: latestActionId(rows),
       skippedItemKeys: [],
       rewrittenItemKeys: [],
@@ -689,6 +699,9 @@ export function createNoteWriteBatchTool(
       notesOf(input).length
         ? describeLibraryMutationActions(input).map((descriptor) => ({
             ...descriptor,
+            ...(input._resume
+              ? { id: `${descriptor.id}:resume:${input._resume.attempt}` }
+              : {}),
             parameters: {
               ...descriptor.parameters,
               // The proposal names the exact material each item will write, so
@@ -741,34 +754,46 @@ export function createNoteWriteBatchTool(
         batchBinding.batchId,
         writtenItemKeys(result),
       );
+      const stopped = stoppedReach(result);
       // The rows are the authority on what still needs writing, so the job is
       // closed only once every item of it has landed. A throw above leaves it
       // open on purpose: the startup sweep will mark it interrupted and its
-      // pending rows stay resumable.
+      // pending rows stay resumable. A batch the user stopped is cancelled,
+      // and its unstarted rows stay pending just the same.
       await finishBatchJob({
         jobId: batchBinding.batchId,
         status: batchItems.every((item) => item.status === "saved")
           ? "completed"
-          : "failed",
+          : stopped
+            ? "cancelled"
+            : "failed",
         now: Date.now(),
       });
-      return {
-        ...result,
-        batchItems,
+      const content = {
+        ...(result.content as Record<string, unknown>),
+        ...(stopped
+          ? {
+              stopped: `The user stopped this batch after ${stopped.after} of ${stopped.of} notes. The ${
+                stopped.of - stopped.after
+              } not started stay pending in batch ${batchBinding.batchId}; continue it with resumeBatchId.`,
+            }
+          : {}),
         ...(resume
           ? {
-              content: {
-                ...(result.content as Record<string, unknown>),
-                resume: {
-                  batchId: resume.batchId,
-                  continuedActionId: resume.actionId,
-                  skippedItemKeys: resume.skippedItemKeys,
-                  rewrittenItemKeys: resume.rewrittenItemKeys,
-                  blocked: resume.blocked,
-                },
+              resume: {
+                batchId: resume.batchId,
+                continuedActionId: resume.actionId,
+                skippedItemKeys: resume.skippedItemKeys,
+                rewrittenItemKeys: resume.rewrittenItemKeys,
+                blocked: resume.blocked,
               },
             }
           : {}),
+      };
+      return {
+        ...result,
+        batchItems,
+        ...(stopped || resume ? { content } : {}),
       };
     },
   };
@@ -853,6 +878,36 @@ function writtenItemKeys(result: { content: unknown }): Set<string> {
         : [],
     ),
   );
+}
+
+/**
+ * How far a batch the user stopped got: the notes it reached, of all it was
+ * given. Undefined for a batch that ran to its end.
+ */
+function stoppedReach(result: {
+  content: unknown;
+}): { after: number; of: number } | undefined {
+  const outer =
+    result.content && typeof result.content === "object"
+      ? (result.content as Record<string, unknown>)
+      : {};
+  const inner =
+    outer.result && typeof outer.result === "object"
+      ? (outer.result as Record<string, unknown>)
+      : {};
+  const payload =
+    inner.result && typeof inner.result === "object"
+      ? (inner.result as Record<string, unknown>)
+      : {};
+  const stopped =
+    payload.stopped && typeof payload.stopped === "object"
+      ? (payload.stopped as Record<string, unknown>)
+      : undefined;
+  const after = Number(stopped?.after);
+  const of = Number(stopped?.of);
+  return stopped && Number.isInteger(after) && Number.isInteger(of)
+    ? { after, of }
+    : undefined;
 }
 
 /** What the host announces for each item, read back from the durable rows. */

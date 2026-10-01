@@ -567,6 +567,17 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
       },
     });
     const executionAllowed = () => !deps.signal?.aborted && deps.writeAllowed();
+    /**
+     * Whether a call that came back must still be dropped. A conversation
+     * changed under it (Clear, deletion) keeps nothing of it. Stop does not
+     * undo a call that ran to its result: that result and its receipts are
+     * the only record of what it wrote, so they are kept. A call that did not
+     * (Stop kept it from starting, or it failed) is dropped as before; a
+     * write it made before failing is still in the change journal, which a
+     * resumed ledger reads (`journalReceipts.ts`).
+     */
+    const droppedAfterReturn = (result: AgentToolResult) =>
+      !deps.writeAllowed() || (Boolean(deps.signal?.aborted) && !result.ok);
     if (!executionAllowed()) return lifecycleError();
     await emitCallStage("started");
     await deps.emit({
@@ -634,7 +645,9 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
         {
           callerKind: options.inheritedApproval ? "action" : "model",
           inheritedApproval: options.inheritedApproval,
-          isExecutionAllowed: executionAllowed,
+          // The conversation's lifecycle only: the controller reads Stop
+          // from the context's signal itself, before the tool runs.
+          isExecutionAllowed: deps.writeAllowed,
           executeWithLock: (task) =>
             withConversationWriteLock(deps.request.conversationKey, task),
         },
@@ -657,6 +670,8 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
             next.resolution,
           );
         }
+        if (droppedAfterReturn(confirmedExecution.execution.result))
+          return lifecycleError();
         executedCall = {
           toolResult: confirmedExecution.execution.result,
           toolDefinition: confirmedExecution.execution.tool,
@@ -664,7 +679,8 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
         };
         reviewedArguments = call.arguments;
       } else {
-        if (!executionAllowed()) return lifecycleError();
+        if (droppedAfterReturn(execution.execution.result))
+          return lifecycleError();
         executedCall = {
           toolResult: execution.execution.result,
           toolDefinition: execution.execution.tool,
@@ -1015,8 +1031,12 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
             }
           : { content: toolResult.content, documentEvidenceRefs }
         : undefined);
+    // A call that ran while the user pressed Stop is recorded and delivered,
+    // and nothing more: no terminal answer and no review card, so the run
+    // ends as the user stopped it.
+    const stopped = Boolean(deps.signal?.aborted);
 
-    if (toolResult.ok && toolDefinition?.resolveTerminalResult) {
+    if (!stopped && toolResult.ok && toolDefinition?.resolveTerminalResult) {
       const terminal = await toolDefinition.resolveTerminalResult(
         input as never,
         toolResult,
@@ -1082,6 +1102,7 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
     }
 
     if (
+      !stopped &&
       toolResult.ok &&
       toolDefinition?.createResultReviewAction &&
       toolDefinition.resolveResultReview

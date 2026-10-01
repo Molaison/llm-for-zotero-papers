@@ -27,7 +27,9 @@ import { AgentToolRegistry } from "../../agent/tools/registry";
 import { ActionContractService } from "../../agent/contracts/actionContract";
 import { ZoteroGateway } from "../../agent/services/zoteroGateway";
 import type { CollectionContextRef } from "../../shared/types";
+import type { TaskPaperScopeSet } from "../../agent/context/taskPaperScopeListing";
 import type {
+  AgentActionReceipt,
   AgentModelMessage,
   AgentModelStep,
   AgentToolCall,
@@ -41,7 +43,10 @@ const PAPER_TEXT_CHARACTERS = 16_000;
  * paper_read as the fixtures script it: each paper's text, its finding
  * first, no longer than the page share the host set for an overview read.
  */
-function stubPaperReadTool(libraryID: number) {
+function stubPaperReadTool(
+  libraryID: number,
+  paperCharacters = PAPER_TEXT_CHARACTERS,
+) {
   return {
     spec: {
       name: "paper_read",
@@ -57,8 +62,8 @@ function stubPaperReadTool(libraryID: number) {
       // An overview read takes no more than the page share the host set.
       const share = context.request.runtimeContextBudget?.maxTokensPerPaper;
       const characters = Math.min(
-        PAPER_TEXT_CHARACTERS,
-        share ? share * 4 : PAPER_TEXT_CHARACTERS,
+        paperCharacters,
+        share ? share * 4 : paperCharacters,
       );
       const text =
         `Finding ${itemId}: drift was measured in this paper. ${"Representational drift details. ".repeat(
@@ -273,6 +278,108 @@ async function reloadAgentStateAsAtStartup(panel: {
 }
 
 /**
+ * One turn of a scripted note job through the panel's send flow, with a
+ * fresh runtime: the real task_update and the named real write tool, and
+ * the paper_read stub. `step` scripts each model request; its `stop` presses
+ * the panel's Stop button while that request is in flight, and the request
+ * then ends as an aborted request does, on the signal the button aborted.
+ */
+async function scriptedJobTurn(
+  panel: { body: HTMLElement; item: Zotero.Item },
+  input: {
+    collection: CollectionContextRef;
+    scope: TaskPaperScopeSet;
+    inputTokenCap: number;
+    writeTool: "note_write" | "note_write_batch";
+    /** Characters of text a paper read returns, before the page share. */
+    paperCharacters?: number;
+    question: string;
+    step: (
+      messages: AgentModelMessage[],
+      stop: () => Promise<AgentModelStep>,
+    ) => AgentModelStep | Promise<AgentModelStep>;
+  },
+) {
+  const { body, item } = panel;
+  const key = getConversationKey(item);
+  const deps = buildAgentEngineDepsForTests(
+    item,
+    "upstream",
+    getConversationWriteGeneration(key),
+  );
+  const registry = new AgentToolRegistry(
+    new ActionContractService(new ZoteroGateway()),
+  );
+  registry.register(deps.getAgentRuntime().getToolDefinition("task_update")!);
+  registry.register(deps.getAgentRuntime().getToolDefinition(input.writeTool)!);
+  registry.register(stubPaperReadTool(item.libraryID, input.paperCharacters));
+  const stopDuring = (signal: AbortSignal | undefined) =>
+    new Promise<AgentModelStep>((_resolve, reject) => {
+      const aborted = () => {
+        const error = new Error("The user stopped the request.");
+        error.name = "AbortError";
+        reject(error);
+      };
+      if (!signal) {
+        reject(new Error("The model request carries no Stop signal."));
+        return;
+      }
+      signal.addEventListener("abort", aborted, { once: true });
+      const button = body.querySelector(
+        "#llm-cancel",
+      ) as HTMLButtonElement | null;
+      if (!button) {
+        reject(new Error("The panel shows no Stop button."));
+        return;
+      }
+      button.click();
+    });
+  let firstPrompt = "";
+  const runtime = new AgentRuntime({
+    registry,
+    resolveTurnScopePapers: async () => input.scope,
+    adapterFactory: () => ({
+      supportsTools: () => true,
+      getCapabilities: () => ({
+        streaming: false,
+        toolCalls: true,
+        multimodal: false,
+        fileInputs: false,
+        reasoning: false,
+      }),
+      runStep: async ({ messages, signal }): Promise<AgentModelStep> => {
+        if (!firstPrompt) firstPrompt = messages.map(contentText).join("\n");
+        return input.step(messages, () => stopDuring(signal));
+      },
+    }),
+  });
+  deps.getAgentRuntime = () => runtime;
+  await sendAgentTurn(
+    {
+      body,
+      item,
+      question: input.question,
+      selectedCollectionContexts: [input.collection],
+      advanced: {
+        temperature: 0,
+        outputTokenLimit: { mode: "auto" },
+        inputTokenCap: input.inputTokenCap,
+      },
+    },
+    deps,
+  );
+  const runId = deps.chatHistory.get(key)?.at(-1)?.agentRunId || "";
+  const trace = await getAgentRunTrace(runId);
+  return {
+    runStatus: trace.run?.status,
+    end: latestExecutionCheckpoint(trace.events)?.end?.state,
+    ledger: latestExecutionCheckpoint(trace.events),
+    firstPrompt,
+    events: trace.events.map((event) => event.payload),
+  };
+}
+
+/**
  * The resume gate (stage 6.4): a note job over a folder's papers, one note a
  * paper, stopped midway with the panel's Stop button while a model request
  * is in flight; the agent's state reloaded as a Zotero restart reloads it;
@@ -296,7 +403,6 @@ export async function exerciseLongJobNoteResume(
   body.style.left = "0";
   body.style.width = "420px";
   body.style.zIndex = "99999";
-  const key = getConversationKey(item);
   const NOTE_ALL = "Save a note on each paper";
   const scope = {
     wholeLibrary: false,
@@ -363,93 +469,21 @@ export async function exerciseLongJobNoteResume(
   };
 
   /** One turn through the panel's send flow, with a fresh runtime. */
-  const turn = async (
+  const turn = (
     question: string,
     step: (
       messages: AgentModelMessage[],
       stop: () => Promise<AgentModelStep>,
     ) => AgentModelStep | Promise<AgentModelStep>,
-  ) => {
-    const deps = buildAgentEngineDepsForTests(
-      item,
-      "upstream",
-      getConversationWriteGeneration(key),
-    );
-    const registry = new AgentToolRegistry(
-      new ActionContractService(new ZoteroGateway()),
-    );
-    registry.register(deps.getAgentRuntime().getToolDefinition("task_update")!);
-    registry.register(deps.getAgentRuntime().getToolDefinition("note_write")!);
-    registry.register(stubPaperReadTool(item.libraryID));
-    /**
-     * The user presses the panel's Stop button while this model request is
-     * in flight; the request then ends as an aborted request does, on the
-     * signal the button aborted.
-     */
-    const stopDuring = (signal: AbortSignal | undefined) =>
-      new Promise<AgentModelStep>((_resolve, reject) => {
-        const aborted = () => {
-          const error = new Error("The user stopped the request.");
-          error.name = "AbortError";
-          reject(error);
-        };
-        if (!signal) {
-          reject(new Error("The model request carries no Stop signal."));
-          return;
-        }
-        signal.addEventListener("abort", aborted, { once: true });
-        const button = body.querySelector(
-          "#llm-cancel",
-        ) as HTMLButtonElement | null;
-        if (!button) {
-          reject(new Error("The panel shows no Stop button."));
-          return;
-        }
-        button.click();
-      });
-    let firstPrompt = "";
-    const runtime = new AgentRuntime({
-      registry,
-      resolveTurnScopePapers: async () => scope,
-      adapterFactory: () => ({
-        supportsTools: () => true,
-        getCapabilities: () => ({
-          streaming: false,
-          toolCalls: true,
-          multimodal: false,
-          fileInputs: false,
-          reasoning: false,
-        }),
-        runStep: async ({ messages, signal }): Promise<AgentModelStep> => {
-          if (!firstPrompt) firstPrompt = messages.map(contentText).join("\n");
-          return step(messages, () => stopDuring(signal));
-        },
-      }),
+  ) =>
+    scriptedJobTurn(panel, {
+      collection: input.collection,
+      scope,
+      inputTokenCap: input.inputTokenCap,
+      writeTool: "note_write",
+      question,
+      step,
     });
-    deps.getAgentRuntime = () => runtime;
-    await sendAgentTurn(
-      {
-        body,
-        item,
-        question,
-        selectedCollectionContexts: [input.collection],
-        advanced: {
-          temperature: 0,
-          outputTokenLimit: { mode: "auto" },
-          inputTokenCap: input.inputTokenCap,
-        },
-      },
-      deps,
-    );
-    const runId = deps.chatHistory.get(key)?.at(-1)?.agentRunId || "";
-    const trace = await getAgentRunTrace(runId);
-    return {
-      runStatus: trace.run?.status,
-      end: latestExecutionCheckpoint(trace.events)?.end?.state,
-      firstPrompt,
-      events: trace.events.map((event) => event.payload),
-    };
-  };
 
   const previousMode = getOriginalAgentPermissionMode();
   setOriginalAgentPermissionMode("auto");
@@ -583,6 +617,284 @@ export async function exerciseLongJobNoteResume(
       receiptsPerPaper,
     };
   } finally {
+    setOriginalAgentPermissionMode(previousMode);
+  }
+}
+
+/**
+ * The Stop gate of a batch write: a note job over a folder's papers whose
+ * model reads every paper first and then writes all the notes in one
+ * note_write_batch, as models do; the user presses the panel's Stop button
+ * while that batch is writing, once `stopAfterNotes` notes exist. The batch
+ * stops between two notes, and what it wrote reaches the ledger before the
+ * run ends. After the agent's state is reloaded as at startup, "continue":
+ * the resumed model first sends the whole batch again, as a model that
+ * starts over would, and is refused for the papers already written; then it
+ * continues the stopped batch by its id. Only the model is scripted; the
+ * batch, its notes and their receipts are the real ones.
+ */
+export async function exerciseLongJobBatchStop(
+  panel: { body: HTMLElement; item: Zotero.Item },
+  input: {
+    collection: CollectionContextRef;
+    papers: Array<{ itemId: number; title: string }>;
+    inputTokenCap: number;
+    /** The user presses Stop once the batch has written this many notes. */
+    stopAfterNotes: number;
+  },
+) {
+  const { body, item } = panel;
+  body.style.left = "0";
+  body.style.width = "420px";
+  body.style.zIndex = "99999";
+  const NOTE_ALL = "Write a short reading note on each paper";
+  const ids = input.papers.map((paper) => paper.itemId);
+  const scope: TaskPaperScopeSet = {
+    wholeLibrary: false,
+    itemIds: ids,
+    withText: ids.length,
+    papers: Object.fromEntries(
+      input.papers.map((paper) => [
+        paper.itemId,
+        { title: paper.title, text: "pdf" as const },
+      ]),
+    ),
+  };
+  const toolStep = (calls: AgentToolCall[]): AgentModelStep => ({
+    kind: "tool_calls",
+    calls,
+    assistantMessage: { role: "assistant", content: "", tool_calls: calls },
+  });
+  const final = (text: string): AgentModelStep => ({
+    kind: "final",
+    text,
+    assistantMessage: { role: "assistant", content: text },
+  });
+  let calls = 0;
+  const readCall = (itemId: number): AgentToolCall => ({
+    id: `read-${itemId}-${(calls += 1)}`,
+    name: "paper_read",
+    arguments: {
+      target: { itemId, contextItemId: itemId, libraryID: item.libraryID },
+    },
+  });
+  const batchCall = (papers: number[]): AgentToolCall => ({
+    id: `batch-${(calls += 1)}`,
+    name: "note_write_batch",
+    arguments: {
+      target: "item",
+      notes: papers.map((itemId) => ({
+        targetItemId: itemId,
+        content: `# Paper ${itemId}\n\nReading note on the finding of paper ${itemId}.`,
+      })),
+    },
+  });
+  const notesPerPaper = async (): Promise<Record<number, number>> => {
+    const counts: Record<number, number> = {};
+    for (const itemId of ids) {
+      const parent = Zotero.Items.get(itemId);
+      await parent.reload(["childItems"], true);
+      counts[itemId] = parent.getNotes().length;
+    }
+    return counts;
+  };
+  const withNote = (counts: Record<number, number>) =>
+    ids.filter((itemId) => (counts[itemId] || 0) > 0);
+  const turn = (
+    question: string,
+    step: (messages: AgentModelMessage[]) => AgentModelStep,
+  ) =>
+    scriptedJobTurn(panel, {
+      collection: input.collection,
+      scope,
+      inputTokenCap: input.inputTokenCap,
+      writeTool: "note_write_batch",
+      // Short texts, so the whole folder is read in one pass and the model
+      // can write every note at once, as in the live run this gate repeats.
+      paperCharacters: 1_200,
+      question,
+      step,
+    });
+
+  const previousMode = getOriginalAgentPermissionMode();
+  setOriginalAgentPermissionMode("auto");
+  // The user presses Stop the moment the batch's `stopAfterNotes`th note
+  // lands, read from Zotero's own notifications of the notes it adds.
+  const paperIds = new Set(ids);
+  let notesSeen = 0;
+  let notesAtStop: number | undefined;
+  const observer = Zotero.Notifier.registerObserver(
+    {
+      notify(event: string, type: string, addedIds: Array<number | string>) {
+        if (event !== "add" || type !== "item" || notesAtStop !== undefined)
+          return;
+        for (const id of addedIds) {
+          const added = Zotero.Items.get(Number(id));
+          if (added?.isNote() && paperIds.has(Number(added.parentID)))
+            notesSeen += 1;
+        }
+        if (notesSeen < input.stopAfterNotes) return;
+        notesAtStop = notesSeen;
+        (
+          body.querySelector("#llm-cancel") as HTMLButtonElement | null
+        )?.click();
+      },
+    },
+    ["item"],
+    "llm-long-job-batch-stop",
+  );
+  try {
+    // Turn 1: declare the parts, read every paper ten at a time, then write
+    // all the notes in one batch; the user stops it while it writes.
+    let declared = false;
+    let readUpTo = 0;
+    let batched = false;
+    const first = await turn(
+      `Write a short reading note for each paper in ${input.collection.name}`,
+      () => {
+        if (!declared) {
+          declared = true;
+          return toolStep([
+            {
+              id: "declare-1",
+              name: "task_update",
+              arguments: {
+                tasks: [
+                  {
+                    taskId: "read-all",
+                    description: `Read each paper in ${input.collection.name}`,
+                    expectedEffect: "read",
+                    scope: true,
+                  },
+                  {
+                    taskId: "note-all",
+                    description: NOTE_ALL,
+                    expectedEffect: "mutation",
+                    expectedCapability: "zotero.notes",
+                    scope: true,
+                  },
+                ],
+              },
+            },
+          ]);
+        }
+        if (readUpTo < ids.length) {
+          const papers = ids.slice(readUpTo, readUpTo + 10);
+          readUpTo += papers.length;
+          return toolStep(papers.map(readCall));
+        }
+        if (!batched) {
+          batched = true;
+          return toolStep([batchCall(ids)]);
+        }
+        return final("Every paper has its note.");
+      },
+    );
+    Zotero.Notifier.unregisterObserver(observer);
+    const afterFirst = await notesPerPaper();
+    const noted = withNote(afterFirst);
+    const firstBatch = first.events.find(
+      (event) =>
+        event.type === "tool_result" && event.name === "note_write_batch",
+    );
+    const firstNotePart = first.ledger?.tasks.find((task) =>
+      task.taskId.endsWith(":task:note-all"),
+    );
+
+    await reloadAgentStateAsAtStartup(panel);
+
+    // Turn 2: "continue". The model first sends every note again, then
+    // continues the stopped batch by the id the host names.
+    let restarted = false;
+    let resumed = false;
+    const second = await turn("continue", (messages) => {
+      if (!restarted) {
+        restarted = true;
+        return toolStep([batchCall(ids)]);
+      }
+      if (!resumed) {
+        resumed = true;
+        const batchId = /resumeBatchId=([^;\s]+)/.exec(
+          messages.map(contentText).join("\n"),
+        )?.[1];
+        if (batchId)
+          return toolStep([
+            {
+              id: `batch-${(calls += 1)}`,
+              name: "note_write_batch",
+              arguments: { resumeBatchId: batchId },
+            },
+          ]);
+      }
+      return final("Every paper has its note.");
+    });
+    const results = second.events.filter(
+      (event) =>
+        event.type === "tool_result" && event.name === "note_write_batch",
+    );
+    const [refused, resumedBatch] = results;
+
+    // Every paper's receipts across both turns, as the batch receipts name
+    // the papers they wrote.
+    const receiptsPerPaper: Record<number, number> = {};
+    const appliedBy = (receipts: readonly AgentActionReceipt[] | undefined) =>
+      (receipts || []).flatMap((receipt) =>
+        receipt.verification === "verified" &&
+        (receipt.status === "applied" || receipt.status === "partial")
+          ? receipt.appliedTargets.map((target) =>
+              Number(target.replace(/^item:/, "")),
+            )
+          : [],
+      );
+    for (const event of [...first.events, ...second.events]) {
+      if (event.type !== "tool_result" || event.name !== "note_write_batch")
+        continue;
+      for (const itemId of appliedBy(event.actionReceipts))
+        receiptsPerPaper[itemId] = (receiptsPerPaper[itemId] || 0) + 1;
+    }
+    return {
+      first: {
+        runStatus: first.runStatus,
+        end: first.end,
+        notesAtStop,
+        noted,
+        receiptStatus:
+          firstBatch?.type === "tool_result"
+            ? firstBatch.actionReceipts?.[0]?.status
+            : undefined,
+        receiptApplied:
+          firstBatch?.type === "tool_result"
+            ? appliedBy(firstBatch.actionReceipts)
+            : [],
+        ledgerDone: (firstNotePart?.doneTargets || []).map((target) =>
+          Number(target.replace(/^item:/, "")),
+        ),
+        ledgerStatus: firstNotePart?.status,
+      },
+      second: {
+        runStatus: second.runStatus,
+        end: second.end,
+        resumeNote:
+          /Long job to resume:[^\n]*/.exec(second.firstPrompt)?.[0] || "",
+        refused:
+          refused?.type === "tool_result"
+            ? {
+                ok: refused.ok,
+                error: String(
+                  (refused.content as { error?: unknown })?.error || "",
+                ),
+              }
+            : undefined,
+        resumedApplied:
+          resumedBatch?.type === "tool_result"
+            ? appliedBy(resumedBatch.actionReceipts)
+            : [],
+      },
+      notesPerPaper: await notesPerPaper(),
+      receiptsPerPaper,
+    };
+  } finally {
+    Zotero.Notifier.unregisterObserver(observer);
     setOriginalAgentPermissionMode(previousMode);
   }
 }
