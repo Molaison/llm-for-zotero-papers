@@ -152,11 +152,6 @@ const MODEL_TOOL_DESCRIPTIONS: Readonly<Record<string, string>> = {
     "Ask up to three questions when required input cannot be found.",
   submit_document:
     "Persist validated Markdown and evidence as a versioned material reference.",
-  research_update:
-    "Persist verified research claims, relationships, work, and evidence.",
-  approve_research_expansion: "Review a bounded research-scope expansion.",
-  approve_research_mutation:
-    "Review exact effects derived during approved research.",
 };
 
 function modelToolSpec(spec: ToolSpec): ToolSpec {

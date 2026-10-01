@@ -48,7 +48,6 @@ import type {
   AgentToolActionDescriptor,
 } from "./contracts/types";
 import type { AgentActionVerification } from "./contracts/actionVerificationLabels";
-import type { PlanEvent, PlanRuntimeContext } from "./plans/types";
 import type { TrustedReadObservation } from "./context/readObservationTypes";
 import type { SkillRoutingReceipt } from "./skills/routingTypes";
 import type { LoadedSkillRecord } from "./skills/loadingTypes";
@@ -963,11 +962,6 @@ export type AgentRuntimeRequestInput = AgentRequest & {
 
   /** Host-loaded prior workflow evidence; never inferred from conversation prose. */
   workflowCheckpoint?: import("./contracts/workflowCheckpoint").ActionContractCheckpoint;
-  /**
-   * The plan context the research tools read. Plan mode is retired, so no
-   * caller sets it.
-   */
-  planContext?: PlanRuntimeContext;
   /** Validated per-turn skill routing identity; never provider-authored authority. */
   skillRoutingReceipt?: SkillRoutingReceipt;
   /** Host-resolved visible outcome contract for this Agent turn. */
@@ -1165,8 +1159,6 @@ export type AgentToolResult = {
    * into a single turn-level `materialRef`.
    */
   batchItems?: AgentBatchItemOutcome[];
-  /** The research job this call advanced, as the tool's result declared it. */
-  researchJobId?: string;
 };
 
 /**
@@ -1246,14 +1238,6 @@ export type AgentToolExecutionOutput<TResult = unknown> =
       materialKind?: string;
       materialTitle?: string;
       batchItems?: AgentBatchItemOutcome[];
-      /**
-       * The research job this call advanced.
-       *
-       * A research tool's own answer to "which investigation moved", so a
-       * bridge that wants to show the reader its progress reads a fact the
-       * result stated instead of recognising the tool by name.
-       */
-      researchJobId?: string;
     };
 
 /** Explicit execution contract for tools whose validated operation can write. */
@@ -1375,11 +1359,6 @@ export type AgentToolContext = {
   ) => Promise<AgentToolResult>;
   /** Persist the current contract ledger at a durable composite checkpoint. */
   checkpointActionProgress?: () => Promise<void>;
-  /**
-   * Where the research tools publish their plan events. Plan mode is retired,
-   * so no runtime provides it.
-   */
-  publishPlanEvent?: (event: PlanEvent) => Promise<void>;
   /**
    * Apply one change to the turn's ordinary-work checkpoint through the
    * runtime, its only writer, which publishes it when it changed. Resolves to

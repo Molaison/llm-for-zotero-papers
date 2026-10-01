@@ -99,14 +99,9 @@ export const ZOTERO_MCP_SAFE_READ_TOOL_NAMES = [
 export const ZOTERO_MCP_PLAN_TOOL_NAMES = [
   "request_user_input",
   "task_update",
-  "research_update",
-  "approve_research_expansion",
-  "approve_research_mutation",
   "submit_document",
 ] as const;
 export const ZOTERO_MCP_WRITE_TOOL_NAMES = [
-  "approve_research_expansion",
-  "approve_research_mutation",
   "library_update",
   "note_write",
   "library_import",
@@ -1387,8 +1382,7 @@ function isMcpToolVisibleInScope(
   if (tool.name === "request_user_input")
     return Boolean(scope?.requestInteraction);
   // Of the control tools only submit_document serves an external turn:
-  // task_update tracks the in-plugin Agent's own parts, and the research
-  // tools run only inside an approved plan.
+  // task_update tracks the in-plugin Agent's own parts.
   if (CURATED_PLAN_TOOL_NAMES.has(tool.name))
     return tool.name === "submit_document";
   if (!hasRawPdfScope(scope)) return true;
@@ -1737,7 +1731,6 @@ function buildMcpToolActivityEvent(params: {
   readObservations?: readonly TrustedReadObservation[];
   paperLedgerDelta?: TaskPaperLedgerDelta;
   mutability?: "read" | "write";
-  researchJobId?: string;
   scope: ZoteroMcpActiveScope | null;
   libraryID: number;
 }): ZoteroMcpToolActivityEvent {
@@ -1756,7 +1749,6 @@ function buildMcpToolActivityEvent(params: {
     actionReceipts: params.actionReceipts,
     workCategory: params.workCategory,
     mutability: params.mutability,
-    researchJobId: params.researchJobId,
     quoteCitations: params.quoteCitations,
     verifiedReadSources: params.verifiedReadSources,
     readObservations: params.readObservations,
@@ -2214,7 +2206,6 @@ async function handleToolsCall(
     verifiedReadSources?: VerifiedReadSource[];
     readObservations?: readonly TrustedReadObservation[];
     paperLedgerDelta?: TaskPaperLedgerDelta | null;
-    researchJobId?: string;
   }) => {
     emitZoteroMcpToolActivity(
       buildMcpToolActivityEvent({
@@ -2231,7 +2222,6 @@ async function handleToolsCall(
         verifiedReadSources: result.verifiedReadSources,
         readObservations: result.readObservations,
         paperLedgerDelta: result.paperLedgerDelta || undefined,
-        researchJobId: result.researchJobId,
         mutability:
           tool?.spec.executionClass === "external_effect" ? "write" : "read",
         quoteCitations: result.quoteCitations,
@@ -2471,7 +2461,6 @@ async function handleToolsCall(
       ),
       artifacts: prepared.execution.result.artifacts,
       actionReceipts: prepared.execution.result.actionReceipts,
-      researchJobId: prepared.execution.result.researchJobId,
       verifiedReadSources: readObservations.map(
         ({
           libraryID,

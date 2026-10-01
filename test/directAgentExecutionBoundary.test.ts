@@ -8,7 +8,6 @@ import { ActionContractService } from "../src/agent/contracts/actionContract";
 import { initAgentChangeJournal } from "../src/agent/store/changeJournal";
 import { AgentToolRegistry } from "../src/agent/tools/registry";
 import type { AgentToolContext } from "../src/agent/types";
-import type { PlanEffectSpecification } from "../src/agent/plans/types";
 import { ChangeJournalTestDb } from "./helpers/changeJournalTestDb";
 
 function directContext(): AgentToolContext {
@@ -414,7 +413,7 @@ describe("direct-agent execution boundary", function () {
     await initAgentChangeJournal();
     // Everything the retired plan authority used to accept: an approved
     // plan's execution context and its frozen effect for this exact write.
-    const specification: PlanEffectSpecification = {
+    const specification = {
       version: 1,
       constraints: [],
       effects: [

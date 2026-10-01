@@ -1,4 +1,3 @@
-import { planStepObligationIds } from "../src/agent/plans/workflowBindings";
 import { assert } from "chai";
 import { createBuiltInToolRegistry } from "../src/agent/tools";
 import {
@@ -220,35 +219,5 @@ describe("shared workflow step selection", function () {
     assert.equal(next.kind, "action");
     if (next.kind !== "action") return;
     assert.deepEqual((next.prepared.call.arguments as any).itemIds, [44]);
-  });
-});
-
-describe("Plan workflow step ownership", function () {
-  it("keeps an unbound reading step from executing the later move or note save", async function () {
-    const { request, registry, ready } = workflow();
-    await ready();
-    const read = { expectedEffect: "read" } as never;
-    const summary = {
-      expectedEffect: "artifact",
-      materialOutputId: "summary",
-    } as never;
-    const move = { expectedEffect: "mutation", actionIndexes: [0] } as never;
-    const save = { expectedEffect: "mutation", actionIndexes: [1] } as never;
-    const readIds = planStepObligationIds(read, request.actionContract);
-    assert.deepEqual(readIds, []);
-    assert.deepEqual(
-      planStepObligationIds(summary, request.actionContract),
-      [],
-    );
-    assert.equal(
-      (await registry.getNextWorkflowStep(request, readIds)).kind,
-      "model",
-    );
-    assert.deepEqual(planStepObligationIds(move, request.actionContract), [
-      request.actionContract!.obligations[0].id,
-    ]);
-    assert.deepEqual(planStepObligationIds(save, request.actionContract), [
-      request.actionContract!.obligations[1].id,
-    ]);
   });
 });

@@ -1,7 +1,5 @@
 import { assert } from "chai";
 import { DatabaseSync } from "node:sqlite";
-import { createDocumentPlan } from "./helpers/documentPlan";
-import { PlanExecutionCoordinator } from "../src/agent/plans/coordinator";
 import { DirectDocumentFinalizer } from "../src/agent/documents/directFinalization";
 import { deliverPendingPlanDocumentMessage } from "../src/agent/documents/publication";
 import {
@@ -9,13 +7,12 @@ import {
   loadPlanDocument,
   loadPlanDocumentOutbox,
 } from "../src/agent/documents/store";
-import { listTaskEvidence } from "../src/agent/plans/store";
-import { initResearchStore } from "../src/agent/research/store";
 import type { ZoteroGateway } from "../src/agent/services/zoteroGateway";
 import type { AgentRuntimeRequest } from "../src/agent/types";
 import { canonicalJson } from "../src/agent/services/libraryMutation/canonicalJson";
 import { sha256Text } from "../src/agent/store/journalRecoveryBlobStore";
 import { initDormantPlanTables } from "../src/agent/store/dormantPlanTables";
+import { initDormantResearchTables } from "../src/agent/store/dormantResearchTables";
 
 describe("document finalization persistence", function () {
   const globals = globalThis as typeof globalThis & { Zotero?: unknown };
@@ -51,125 +48,11 @@ describe("document finalization persistence", function () {
     };
     await initDormantPlanTables();
     await initPlanDocumentStore();
-    await initResearchStore();
+    await initDormantResearchTables();
   });
   afterEach(function () {
     globals.Zotero = original;
     db.close();
-  });
-
-  it("ignores a read receipt no approved effect names, and still rejects an unmatched write", async function () {
-    // A real paper_read full inside an approved plan emits a read_full
-    // receipt; treating it as an unauthorized effect crashed the whole run.
-    const plan = await createDocumentPlan();
-    const taskId = plan.tasks[0].taskId;
-    const read = {
-      version: 2,
-      id: "read_full:fallback",
-      proposalId: "read_full:fallback",
-      proofDomain: "zotero_state",
-      capability: "zotero.read",
-      operation: "read_full",
-      verification: "verified",
-      status: "observed",
-      requestedTargets: [],
-      appliedTargets: [],
-      alreadySatisfiedTargets: [],
-      rejectedTargets: [],
-      reasons: [],
-      verifiedFacts: ["read_mode:full"],
-    };
-    const coordinator = new PlanExecutionCoordinator();
-    const after = await coordinator.attachReceiptEvidence({
-      executionId: plan.executionId,
-      taskId,
-      receipts: [read as never],
-    });
-    assert.deepEqual(after.tasks, plan.tasks);
-    assert.isEmpty(await listTaskEvidence(plan.executionId, taskId));
-    let failure = "";
-    try {
-      await coordinator.attachReceiptEvidence({
-        executionId: plan.executionId,
-        taskId,
-        receipts: [
-          {
-            ...read,
-            id: "note:1",
-            proposalId: "note:1",
-            capability: "zotero.notes",
-            operation: "note_create",
-            status: "applied",
-          } as never,
-        ],
-      });
-    } catch (error) {
-      failure = String(error);
-    }
-    assert.match(failure, /does not match an active approved effect/);
-  });
-
-  it("rejects a draft step whose material no later save consumes, before approval", async function () {
-    // A live literature-review plan added such a step; its material_integrity
-    // could never be satisfied, so publication waited on it forever.
-    const spec = {
-      kind: "literature_review" as const,
-      title: "Review",
-      requiredSections: ["Review"],
-      requiresReferences: false,
-      requiresCoverageSection: false,
-      allowFigures: false,
-      citationStyle: {
-        styleId: "http://www.zotero.org/styles/apa",
-        styleTitle: "APA",
-        locale: "en-US",
-      },
-    };
-    let failure = "";
-    try {
-      await new PlanExecutionCoordinator().updateDraft({
-        planId: "draft-material-plan",
-        conversationKey: 41,
-        provider: "original",
-        revision: 1,
-        ready: true,
-        now: 1,
-        contract: { deliverable: { kind: "document", spec } },
-        steps: [
-          {
-            content: "Draft the review",
-            expectedEffect: "artifact",
-            materialOutputId: "review-draft",
-            acceptanceCriteria: [
-              {
-                criterionId: "draft",
-                description: "The draft is stored",
-                verifier: "material_integrity",
-              },
-            ],
-          },
-          {
-            content: "Publish the review",
-            expectedEffect: "artifact",
-            acceptanceCriteria: [
-              {
-                criterionId: "integrity",
-                description: "The review is complete",
-                verifier: "document_integrity",
-              },
-              {
-                criterionId: "published",
-                description: "The review is published",
-                verifier: "document_published",
-              },
-            ],
-          },
-        ],
-      });
-    } catch (error) {
-      failure = String(error);
-    }
-    assert.match(failure, /material_integrity is only for an artifact step/);
   });
   it("preserves direct document identity, hash, retry and publication", async function () {
     const input = {

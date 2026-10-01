@@ -47,7 +47,6 @@ export {
   prependNativeSkillMention,
 } from "./routing";
 export type {
-  PlanSkillRoutingReceipt,
   SkillRequestedScope,
   SkillRoutingReceipt,
   ValidatedSkillActivation,

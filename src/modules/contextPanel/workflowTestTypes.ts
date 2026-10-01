@@ -730,11 +730,6 @@ export type WorkflowTestApi = {
   exerciseDuplicatePanelSetup: (
     panelId: string,
   ) => Promise<WorkflowTestDuplicatePanelSetupDiagnostics>;
-  /** Flight 0: the research quality report and run timings for one execution. */
-  researchFlightReport: (input: { executionId: string }) => Promise<{
-    report: import("../../agent/research/flightReport").ResearchFlightReport;
-    rendered: string;
-  }>;
   exercisePanelDraftStateRefresh: (
     panelId: string,
     text: string,

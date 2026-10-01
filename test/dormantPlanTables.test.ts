@@ -1,14 +1,22 @@
 /**
- * The tables plan mode wrote stay in every profile, dormant: a fresh profile
- * still creates them exactly as plan mode did, nothing ever drops them, and
- * deleting a conversation still removes its rows from each of them.
+ * The tables plan mode and its research engine wrote stay in every profile,
+ * dormant: a fresh profile still creates them exactly as they were created,
+ * nothing ever drops them, and deleting a conversation still removes its rows
+ * from each of them.
  */
 import { assert } from "chai";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
   clearDormantPlanRowsInTransaction,
   initDormantPlanTables,
 } from "../src/agent/store/dormantPlanTables";
+import {
+  clearDormantResearchRowsInTransaction,
+  initDormantResearchTables,
+} from "../src/agent/store/dormantResearchTables";
+import { clearPersistedAgentConversationRowsInTransaction } from "../src/modules/contextPanel/agentConversationCleanup";
 
 type Row = Record<string, unknown>;
 
@@ -278,5 +286,161 @@ describe("dormant plan tables", function () {
       tasks.map((row) => row.execution_id),
       ["execution-8"],
     );
+  });
+});
+
+/**
+ * The research store's schema as it stood when the research engine was
+ * removed, read from `sqlite_master` after its last `initResearchStore` with
+ * whitespace collapsed. It cannot be regenerated: the store that produced it
+ * is gone, and this record is what the dormant copy is held to.
+ */
+const RESEARCH_SCHEMA = JSON.parse(
+  readFileSync(
+    path.join(__dirname, "fixtures", "dormantResearchSchema.json"),
+    "utf8",
+  ),
+) as Array<{ type: string; name: string; table: string; sql: string | null }>;
+
+const RESEARCH_TABLE_PATTERN =
+  "(tbl_name LIKE 'llm_for_zotero_research_%' OR tbl_name LIKE 'llm_for_zotero_plan_scope_snapshot%')";
+
+function researchSchema(db: DatabaseSync) {
+  return (
+    db
+      .prepare(
+        `SELECT type, name, tbl_name, sql FROM sqlite_master WHERE ${RESEARCH_TABLE_PATTERN} ORDER BY type, name`,
+      )
+      .all() as Row[]
+  ).map((row) => ({
+    type: String(row.type),
+    name: String(row.name),
+    table: String(row.tbl_name),
+    sql:
+      typeof row.sql === "string" ? row.sql.replace(/\s+/g, " ").trim() : null,
+  }));
+}
+
+function researchTables(): string[] {
+  return RESEARCH_SCHEMA.filter((row) => row.type === "table").map(
+    (row) => row.name,
+  );
+}
+
+/**
+ * One row in every research table for conversation `key`, joined the way
+ * the research store joined them: jobs and approvals by conversation, the
+ * job's records by its id, and the snapshot's items by the snapshot id.
+ */
+function insertResearchRows(db: DatabaseSync, key: number): void {
+  for (const table of researchTables()) {
+    const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Row[];
+    const values = columns.map((column) => {
+      const name = String(column.name);
+      if (name === "conversation_key") return key;
+      if (name === "research_job_id") return `job-${key}`;
+      if (name === "snapshot_id") return `snapshot-${key}`;
+      return column.type === "INTEGER" ? 1 : `${name}-${key}`;
+    });
+    db.prepare(
+      `INSERT INTO ${table} (${columns.map((column) => column.name).join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`,
+    ).run(...(values as never[]));
+  }
+}
+
+function researchRowCounts(db: DatabaseSync): Record<string, number> {
+  return Object.fromEntries(
+    researchTables().map((table) => [
+      table,
+      Number((db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as Row).n),
+    ]),
+  );
+}
+
+describe("dormant research tables", function () {
+  let db: DatabaseSync;
+  let restore: () => void;
+
+  beforeEach(function () {
+    ({ db, restore } = installSqliteZotero());
+  });
+
+  afterEach(function () {
+    restore();
+  });
+
+  it("creates the twelve research tables and their indexes with the research store's own statements", async function () {
+    await initDormantResearchTables();
+    assert.lengthOf(researchTables(), 12);
+    assert.deepEqual(researchSchema(db), RESEARCH_SCHEMA);
+  });
+
+  it("keeps existing rows when a later start creates the tables again", async function () {
+    await initDormantResearchTables();
+    insertResearchRows(db, 7);
+    await initDormantResearchTables();
+    assert.deepEqual(
+      Object.values(researchRowCounts(db)),
+      researchTables().map(() => 1),
+    );
+  });
+
+  it("removes one conversation's rows from every research table and keeps the others", async function () {
+    await initDormantResearchTables();
+    insertResearchRows(db, 7);
+    insertResearchRows(db, 8);
+    await (
+      globalThis as unknown as typeof globalThis & { Zotero: typeof Zotero }
+    ).Zotero.DB.executeTransaction(() =>
+      clearDormantResearchRowsInTransaction(7),
+    );
+    assert.deepEqual(
+      Object.values(researchRowCounts(db)),
+      researchTables().map(() => 1),
+    );
+    for (const table of researchTables()) {
+      const left = JSON.stringify(
+        db.prepare(`SELECT * FROM ${table}`).all() as Row[],
+      );
+      assert.notInclude(left, "-7", `${table} keeps no row of conversation 7`);
+    }
+  });
+});
+
+describe("deleting a conversation with dormant plan and research rows", function () {
+  let db: DatabaseSync;
+  let restore: () => void;
+
+  beforeEach(function () {
+    ({ db, restore } = installSqliteZotero());
+  });
+
+  afterEach(function () {
+    restore();
+  });
+
+  it("removes that conversation's rows from every dormant table and keeps the others", async function () {
+    await initDormantPlanTables();
+    await initDormantResearchTables();
+    insertConversationRows(db, 7);
+    insertConversationRows(db, 8);
+    insertResearchRows(db, 7);
+    insertResearchRows(db, 8);
+    await (
+      globalThis as unknown as typeof globalThis & { Zotero: typeof Zotero }
+    ).Zotero.DB.executeTransaction(() =>
+      clearPersistedAgentConversationRowsInTransaction(7),
+    );
+    assert.deepEqual(Object.values(rowCounts(db)), [1, 1, 1, 1, 1, 1, 1]);
+    assert.deepEqual(
+      Object.values(researchRowCounts(db)),
+      researchTables().map(() => 1),
+    );
+    for (const table of [...Object.keys(COLUMNS), ...researchTables()]) {
+      const left = JSON.stringify(
+        db.prepare(`SELECT * FROM ${table}`).all() as Row[],
+      );
+      assert.notInclude(left, "-7", `${table} keeps no row of conversation 7`);
+    }
   });
 });

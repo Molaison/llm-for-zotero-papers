@@ -1,6 +1,6 @@
 /**
- * A real SQLite Plan store behind a fake `Zotero`, for tests that read stored
- * Plan executions the way a send does.
+ * A real SQLite store of the dormant plan tables behind a fake `Zotero`, for
+ * tests that hold a stored plan execution the way an old profile does.
  *
  * The rows are proxied because Zotero's rows THROW when code reads a column
  * the SELECT did not name, where a plain node:sqlite row would quietly answer
@@ -8,11 +8,36 @@
  */
 
 import { DatabaseSync } from "node:sqlite";
-import type {
-  ExecutionTask,
-  PlanExecutionLedger,
-} from "../../src/agent/plans/types";
-import { initDormantPlanTables } from "../../src/agent/store/dormantPlanTables";
+import {
+  PLAN_EXECUTION_TASKS_TABLE,
+  PLAN_EXECUTIONS_TABLE,
+  initDormantPlanTables,
+} from "../../src/agent/store/dormantPlanTables";
+
+/** A stored plan execution task, as plan mode wrote it. */
+type StoredPlanTask = Record<string, unknown> & {
+  taskId: string;
+  executionId: string;
+  planStepId: string;
+  parentTaskId?: string;
+  status: string;
+  createdAt: number;
+  updatedAt: number;
+};
+
+/** A stored plan execution ledger, as plan mode wrote it. */
+export type StoredPlanExecutionLedger = Record<string, unknown> & {
+  executionId: string;
+  planId: string;
+  revision: number;
+  conversationKey: number;
+  status: string;
+  activeTaskId?: string;
+  tasks: StoredPlanTask[];
+  createdAt: number;
+  updatedAt: number;
+  completedAt?: number;
+};
 
 const STEPS = [
   "Read the selected paper",
@@ -27,9 +52,9 @@ const STEPS = [
 export function storedPlanExecution(
   status: "interrupted" | "waiting_for_user",
   conversationKey: number,
-): PlanExecutionLedger {
+): StoredPlanExecutionLedger {
   const executionId = `execution-${status}-${conversationKey}`;
-  const task = (index: number): ExecutionTask => {
+  const task = (index: number): StoredPlanTask => {
     const taskStatus =
       index === 0 ? "completed" : index === 1 ? status : "pending";
     return {
@@ -83,6 +108,55 @@ export function storedPlanExecution(
     createdAt: 1,
     updatedAt: 2,
   };
+}
+
+/**
+ * Write `ledger` into the dormant plan tables the way plan mode saved an
+ * execution: its row, then one row per task in order.
+ */
+export async function saveStoredPlanExecution(
+  ledger: StoredPlanExecutionLedger,
+): Promise<void> {
+  await Zotero.DB.executeTransaction(async () => {
+    await Zotero.DB.queryAsync(
+      `INSERT OR REPLACE INTO ${PLAN_EXECUTIONS_TABLE}
+        (execution_id, plan_id, revision, conversation_key, status,
+         active_task_id, payload_json, created_at, updated_at, completed_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        ledger.executionId,
+        ledger.planId,
+        ledger.revision,
+        ledger.conversationKey,
+        ledger.status,
+        ledger.activeTaskId || null,
+        JSON.stringify(ledger),
+        ledger.createdAt,
+        ledger.updatedAt,
+        ledger.completedAt || null,
+      ],
+    );
+    for (let index = 0; index < ledger.tasks.length; index += 1) {
+      const task = ledger.tasks[index];
+      await Zotero.DB.queryAsync(
+        `INSERT OR REPLACE INTO ${PLAN_EXECUTION_TASKS_TABLE}
+          (task_id, execution_id, plan_step_id, parent_task_id, task_order,
+           status, payload_json, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          task.taskId,
+          task.executionId,
+          task.planStepId,
+          task.parentTaskId || null,
+          index,
+          task.status,
+          JSON.stringify(task),
+          task.createdAt,
+          task.updatedAt,
+        ],
+      );
+    }
+  });
 }
 
 function toZoteroRow(row: Record<string, unknown>) {

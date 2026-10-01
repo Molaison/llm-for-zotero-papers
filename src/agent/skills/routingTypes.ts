@@ -21,14 +21,3 @@ export type SkillRoutingReceipt = Readonly<{
   skillManifestHash: string;
   skills: readonly ValidatedSkillActivation[];
 }>;
-
-export type PlanSkillRoutingReceipt = Readonly<{
-  routerSchemaVersion: number;
-  skillManifestHash: string;
-  skills: readonly Readonly<{
-    id: string;
-    version: number;
-    instructionHash: string;
-    source: "automatic" | "explicit";
-  }>[];
-}>;

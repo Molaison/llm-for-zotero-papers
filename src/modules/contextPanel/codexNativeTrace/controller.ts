@@ -80,8 +80,6 @@ type CodexNativeMcpToolActivityEvent = {
   artifacts?: AgentToolArtifact[];
   actionReceipts?: import("../../../agent/contracts/types").AgentActionReceipt[];
   workCategory?: AgentWorkCategory;
-  /** The research job this call advanced, as its own result declared it. */
-  researchJobId?: string;
   /**
    * The native item this MCP request belongs to, as the Codex client paired
    * them inside the turn. Two identity spaces describe one call; this is the

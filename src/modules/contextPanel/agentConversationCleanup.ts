@@ -22,7 +22,7 @@ import {
 import { clearAgentRuntimeTraceState } from "./agentState";
 import { clearTaskProgress } from "./taskProgress/store";
 import { clearDormantPlanRowsInTransaction } from "../../agent/store/dormantPlanTables";
-import { clearResearchConversationRowsInTransaction } from "../../agent/research/store";
+import { clearDormantResearchRowsInTransaction } from "../../agent/store/dormantResearchTables";
 import { clearPlanDocumentConversationRowsInTransaction } from "../../agent/documents/store";
 
 export type AgentConversationCleanupDeps = {
@@ -166,7 +166,7 @@ export async function clearPersistedAgentConversationRowsInTransaction(
     if (/no such table|no table/i.test(String(error))) return;
     throw error;
   });
-  await clearResearchConversationRowsInTransaction(key).catch((error) => {
+  await clearDormantResearchRowsInTransaction(key).catch((error) => {
     if (/no such table|no table/i.test(String(error))) return;
     throw error;
   });

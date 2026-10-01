@@ -195,31 +195,7 @@ import {
   getConversationWriteGeneration,
   bumpConversationWriteGeneration,
 } from "../../shared/conversationWriteFence";
-import {
-  loadLatestPlanDocumentForExecution,
-  loadPlanDocumentOutbox,
-} from "../../agent/documents/store";
-import {
-  loadPlanArtifact,
-  loadPlanExecutionLedger,
-} from "../../agent/plans/store";
-import {
-  buildResearchFlightReport,
-  renderResearchFlightReport,
-  type FlightRun,
-} from "../../agent/research/flightReport";
-import {
-  listPaperFindings,
-  listResearchCorpusItems,
-  listResearchEdges,
-  listResearchOpenQuestions,
-  listThemeFindings,
-  loadResearchJobForExecution,
-} from "../../agent/research/store";
-import {
-  getAgentRunTrace,
-  listAgentRunsForConversation,
-} from "../../agent/store/traceStore";
+import { loadPlanDocumentOutbox } from "../../agent/documents/store";
 import {
   activeClaudeConversationModeByLibrary,
   activeClaudeGlobalConversationByLibrary,
@@ -1751,76 +1727,6 @@ async function exerciseDuplicatePanelSetup(
     turnNavigatorCountAfter: panel.body.querySelectorAll(".llm-turn-navigator")
       .length,
   };
-}
-
-async function researchFlightReport(input: { executionId: string }) {
-  assertWorkflowTestEnabled();
-  const job = await loadResearchJobForExecution(input.executionId);
-  if (!job) throw new Error("No research job for this execution");
-  const ledger = await loadPlanExecutionLedger(input.executionId);
-  const artifact = ledger
-    ? await loadPlanArtifact(ledger.planId, ledger.revision)
-    : null;
-  const [corpus, findings, edges, questions, themes, document] =
-    await Promise.all([
-      listResearchCorpusItems({ researchJobId: job.researchJobId }),
-      listPaperFindings(job.researchJobId),
-      listResearchEdges(job.researchJobId),
-      listResearchOpenQuestions(job.researchJobId),
-      listThemeFindings(job.researchJobId, job.scopeLineageDigest),
-      loadLatestPlanDocumentForExecution(input.executionId),
-    ]);
-  const runs: FlightRun[] = [];
-  if (ledger) {
-    for (const run of await listAgentRunsForConversation(
-      ledger.conversationKey,
-    )) {
-      if (run.createdAt < job.createdAt - 5 * 60_000) continue;
-      const trace = await getAgentRunTrace(run.runId);
-      const events = trace.events.map((event) => ({
-        type: event.eventType,
-        createdAt: event.createdAt,
-        payload: event.payload as unknown as Record<string, unknown>,
-      }));
-      if (
-        !events.some(
-          (event) =>
-            event.type === "tool_call" &&
-            String(event.payload.executionId || "") === input.executionId,
-        )
-      )
-        continue;
-      runs.push({
-        runId: run.runId,
-        status: run.status,
-        createdAt: run.createdAt,
-        completedAt: run.completedAt ?? undefined,
-        events,
-      });
-    }
-  }
-  const report = buildResearchFlightReport({
-    job,
-    corpus,
-    findings,
-    edges,
-    questions,
-    themes,
-    subquestions: artifact?.contract?.investigation?.subquestions || [],
-    ...(document
-      ? {
-          document: {
-            visibleMarkdown: document.visibleMarkdown,
-            clusters: document.citationBundle.clusters.map((cluster) => ({
-              citationId: cluster.citationId,
-              sources: cluster.sources,
-            })),
-          },
-        }
-      : {}),
-    ...(runs.length ? { runs } : {}),
-  });
-  return { report, rendered: renderResearchFlightReport(report) };
 }
 
 async function exercisePanelDraftStateRefresh(
@@ -5842,7 +5748,6 @@ export function installWorkflowTestHarness(targetAddon: {
     startNewPanelConversation,
     togglePanelConversationMode,
     exerciseDuplicatePanelSetup,
-    researchFlightReport,
     exercisePanelDraftStateRefresh,
     selectPanelModelEntry,
     exerciseWebChatPdfToggleWorkflow,

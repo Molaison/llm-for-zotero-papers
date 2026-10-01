@@ -1,8 +1,6 @@
 {
   "visible": [
     "annotate_pdf",
-    "approve_research_expansion",
-    "approve_research_mutation",
     "context_read",
     "file_io",
     "library_cite",
@@ -21,7 +19,6 @@
     "paper_read",
     "read_attachment",
     "request_user_input",
-    "research_update",
     "run_command",
     "submit_document",
     "task_update",
@@ -29,5 +26,5 @@
     "zotero_script"
   ],
   "internal": [],
-  "specBytes": 35141
+  "specBytes": 26556
 }

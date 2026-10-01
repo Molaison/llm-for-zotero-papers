@@ -19,8 +19,10 @@ import { stripNoteHtml } from "../src/utils/noteText";
 import { renderMarkdownForNote } from "../src/utils/markdown";
 import { DatabaseSync } from "node:sqlite";
 import { initPlanDocumentStore } from "../src/agent/documents/store";
-import { savePlanExecutionLedger } from "../src/agent/plans/store";
-import { storedPlanExecution } from "./helpers/planStoreDb";
+import {
+  saveStoredPlanExecution,
+  storedPlanExecution,
+} from "./helpers/planStoreDb";
 import type { MaterialRef } from "../src/agent/documents/materialRef";
 import { createSubmitDocumentTool } from "../src/agent/tools/control/submitDocument";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -50,7 +52,6 @@ import {
 } from "../src/agent/store/toolResultHandles";
 import { AgentToolRegistry } from "../src/agent/tools/registry";
 import { createBuiltInToolRegistry } from "../src/agent/tools";
-import { PlanAmendmentService } from "../src/agent/plans/amendments";
 import {
   ActionContractService,
   describeLibraryMutationActions,
@@ -7429,7 +7430,6 @@ describe("AgentRuntime", function () {
         );
         const registry = new AgentToolRegistry(
           createTestActionContractService(),
-          new PlanAmendmentService(),
         );
         let writes = 0;
         registry.register({
@@ -7548,7 +7548,6 @@ describe("AgentRuntime", function () {
               } as unknown as Zotero.Item)
             : null,
         ),
-        new PlanAmendmentService(),
       );
       let requestedWrites = 0;
       let judgmentWrites = 0;
@@ -9644,7 +9643,7 @@ describe("finalized material announcement", function () {
     try {
       await initDormantPlanTables();
       const conversationKey = 774414;
-      await savePlanExecutionLedger(
+      await saveStoredPlanExecution(
         storedPlanExecution("interrupted", conversationKey),
       );
 

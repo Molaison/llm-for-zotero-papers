@@ -91,7 +91,6 @@ describe("direct Agent ownership boundary", function () {
   });
   it("does not infer executable Plan effects from native provider step prose", function () {
     for (const path of [
-      "src/agent/plans/coordinator.ts",
       "src/agent/externalBackendBridge.ts",
       "src/modules/contextPanel/chat.ts",
     ]) {

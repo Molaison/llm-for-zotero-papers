@@ -764,7 +764,6 @@ describe("taskPaperLedger", function () {
         }
       };
       walk(path.join(__dirname, "../src/agent/tools"));
-      walk(path.join(__dirname, "../src/agent/plans"));
       return [...names];
     }
 

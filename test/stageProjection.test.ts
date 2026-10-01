@@ -20,10 +20,6 @@ import type {
   AgentToolContext,
 } from "../src/agent/types";
 import type {
-  PlanArtifact,
-  PlanArtifactStatus,
-} from "../src/agent/plans/types";
-import type {
   AgentModelAdapter,
   AgentStepParams,
 } from "../src/agent/model/adapter";
@@ -82,7 +78,8 @@ const BATCH_ITEM_REF = {
   contentHash: "sha256:batch",
 };
 
-function planArtifact(status: PlanArtifactStatus): PlanArtifact {
+/** An old plan artifact, as plan mode stored it in its events. */
+function planArtifact(status: "drafting" | "awaiting_approval") {
   return {
     version: 1,
     planId: "plan-1",

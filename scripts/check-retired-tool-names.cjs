@@ -50,11 +50,14 @@ const RETIRED_TOOL_NAMES = [
   "revert_changes",
   "tool_result_read",
   "conversation_read",
-  // plan mode (retired with it)
+  // plan mode and its research engine (retired with it)
   "update_plan",
   "amend_plan",
   "prepare_plan_execution",
   "submit_plan_document",
+  "research_update",
+  "approve_research_expansion",
+  "approve_research_mutation",
   ...IDENTIFIER_NAMES,
 ];
 // Repo-relative, forward-slash prefixes matched with startsWith.
@@ -63,11 +66,9 @@ const ALLOWLIST = [
   "src/agent/tools/preparedLibraryActions.ts", // registerActionBinding(operation)
   "src/agent/services/libraryMutation/", // operation handlers
   "src/agent/contracts/actionScope.ts",
-  "src/agent/plans/",
   "src/modules/contextPanel/agentTrace/actionCardModel.ts",
   "src/agent/context/toolNames.ts", // RETIRED_TOOL_HINTS: retired name -> facade
   "src/agent/finalization/finalAnswerController.ts", // accepts search_literature_online from stored tool history
-  "src/agent/research/flightReport.ts", // reads update_plan calls from stored plan runs
   "src/modules/contextPanel/taskProgress/codexPlan.ts", // Codex's own update_plan checklist, not ours
   "src/modules/contextPanel/agentTrace/noteReviewCard.ts", // accepts edit_current_note from stored review cards
 ];

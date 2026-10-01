@@ -30,9 +30,9 @@ import type { LocalDocumentResource } from "../src/shared/types";
 import { resolvePromptText as resolveProductionPromptText } from "../src/modules/contextPanel/textUtils";
 import { createPaperPortalItem } from "../src/modules/contextPanel/portalScope";
 import { buildTurnPaperScope } from "../src/agent/context/turnPaperScope";
-import { savePlanExecutionLedger } from "../src/agent/plans/store";
 import {
   installPlanStoreZotero,
+  saveStoredPlanExecution,
   storedPlanExecution,
 } from "./helpers/planStoreDb";
 
@@ -3161,7 +3161,7 @@ describe("sendFlowController", function () {
       Items: { get: () => null },
     });
     try {
-      await savePlanExecutionLedger(stored);
+      await saveStoredPlanExecution(stored);
       const sends: Array<{ planContext: unknown; displayQuestion: unknown }> =
         [];
       const { controller, inputBox } = createBaseDeps({

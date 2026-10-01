@@ -19,7 +19,6 @@ import { resolvedAgentRequest } from "./helpers/resolvedAgentRequest";
 import { parseActionIntents } from "../src/agent/model/actionIntent";
 import { createRunCommandTool } from "../src/agent/tools/write/runCommand";
 import { sha256Text } from "../src/agent/store/journalRecoveryBlobStore";
-import { decodeActionReceipt } from "../src/agent/plans/contracts";
 
 type FakeItemState = {
   tags: string[];
@@ -2255,35 +2254,6 @@ describe("Action Contract V2", function () {
     assert.include(receipt.verifiedFacts, "native_note:700:text_match");
     assert.notInclude(receipt.verifiedFacts.join(" "), "html_sha256");
   });
-
-  it("round-trips a material-backed note receipt through persistence", async function () {
-    const html = "<p>Grounded summary.</p>";
-    const receipt = await noteWriteReceipt({
-      noteHtml: html,
-      parameters: {
-        noteMode: "create",
-        targetItemId: 41,
-        documentId: "doc-material-3",
-        documentVersion: 4,
-        contentHash: "sha256:round-trip-hash",
-      },
-      content: {
-        noteId: 700,
-        noteVerification: {
-          schemaVersion: 1,
-          noteId: 700,
-          matches: true,
-          html,
-          expectedHtml: html,
-        },
-      },
-    });
-    const decoded = decodeActionReceipt(JSON.parse(JSON.stringify(receipt)));
-    assert.deepEqual(decoded.materialRef, receipt.materialRef);
-    assert.deepEqual(decoded.verifiedFacts, receipt.verifiedFacts);
-    assert.equal(decoded.normalizedParameters?.documentVersion, 4);
-  });
-
   it("says which note of a batch could not be re-read at receipt time", async function () {
     // The whole-set postcondition is a claim about the set, so it can still
     // hold while one note the call physically wrote is gone by the time the
@@ -3214,26 +3184,6 @@ describe("Bespoke finalize-branch receipts", function () {
         });
         assert.equal(receipt.verification, "unverified", field);
       }
-    });
-
-    it("round-trips annotation proof parameters including an empty comment", async function () {
-      const receipt = await receiptFor({
-        harness: annotationHarness({}),
-        proposal: annotationProposal,
-        content: { annotationId: 901, expectedAnnotation },
-      });
-      assert.equal(
-        decodeActionReceipt(JSON.parse(JSON.stringify(receipt)))
-          .normalizedParameters?.annotationComment,
-        expectedAnnotation.comment,
-      );
-      const emptyCommentReceipt = JSON.parse(JSON.stringify(receipt));
-      emptyCommentReceipt.normalizedParameters.annotationComment = "";
-      assert.equal(
-        decodeActionReceipt(emptyCommentReceipt).normalizedParameters
-          ?.annotationComment,
-        "",
-      );
     });
     it("credits an existing matching annotation as already satisfied", async function () {
       const receipt = await receiptFor({

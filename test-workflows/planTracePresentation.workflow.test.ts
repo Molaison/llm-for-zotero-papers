@@ -124,7 +124,7 @@ describe("workflow: Plan trace presentation", function () {
               type: "codex_tool_activity",
               itemId: "research",
               phase: "completed",
-              toolName: "research_update",
+              toolName: "inspect_records",
               args: { operation: "next_work", view: "full" },
             },
           },

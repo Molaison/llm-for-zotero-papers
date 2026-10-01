@@ -9,7 +9,6 @@ import {
 import { buildActionCallDigest } from "../src/agent/authorization/proposal";
 import { ActionContractService } from "../src/agent/contracts/actionContract";
 import { evaluateActionContract } from "../src/agent/contracts/actionEvaluation";
-import { PlanAmendmentService } from "../src/agent/plans/amendments";
 import { initAgentChangeJournal } from "../src/agent/store/changeJournal";
 import { createMalformedToolArgumentsDiagnostic } from "../src/agent/toolArgumentDiagnostics";
 import { describeLibraryMutationInput } from "../src/agent/contracts/actionContract";
@@ -368,78 +367,6 @@ describe("AgentToolRegistry", function () {
       assert.isTrue(result.execution.result.ok);
       assert.isEmpty(result.execution.result.actionReceipts || []);
     }
-  });
-
-  it("keeps protected integrity checks active after plan approval", async function () {
-    globalThis.Zotero = { DB: new ChangeJournalTestDb() } as never;
-    await initAgentChangeJournal();
-    let writes = 0;
-    const contracts = new ActionContractService({} as never);
-    const registry = new AgentToolRegistry(contracts);
-    registry.register({
-      effectOperations: ["settings_update"],
-      spec: {
-        name: "library_settings",
-        description: "Protected fixture",
-        inputSchema: { type: "object" },
-        executionClass: "external_effect",
-        requiresConfirmation: true,
-      },
-      validate: () => ({ ok: true, value: {} }),
-      describeAction: describeTestMutation,
-      planInvocation: () =>
-        prohibitedInvocationPlan({
-          reason: "Protected target",
-          riskSignals: ["protected_target"],
-        }),
-      execute: async () => {
-        writes++;
-        return { content: {}, effect: "applied" };
-      },
-    });
-    const contract = semanticContractFixture(
-      semanticContractFixture({
-        version: 3,
-        id: "approved-protected-test",
-        hardConstraints: [],
-        writeDisposition: "required",
-        interpretationSource: "classifier",
-        obligations: [
-          {
-            id: "settings",
-            operation: "settings_update",
-            proofDomain: "zotero_state",
-            capability: "zotero.settings",
-            coverage: "one",
-            targetKind: "items",
-          },
-        ],
-      }),
-    ) as const;
-    const result = await registry.prepareExecution(
-      { id: "protected", name: "library_settings", arguments: {} },
-      {
-        ...baseContext,
-        request: {
-          ...baseContext.request,
-          actionContract: contract as never,
-          actionProgress: contracts.createProgress(contract as never),
-          planContext: {
-            phase: "executing",
-            planId: "p",
-            revision: 1,
-          } as never,
-        },
-      },
-    );
-    assert.equal(writes, 0, "approval cannot execute a prohibited target");
-    assert.equal(result.kind, "result");
-    if (result.kind !== "result") return;
-    assert.isFalse(result.execution.result.ok);
-    assert.include(
-      JSON.stringify(result.execution.result.content),
-      "protected integrity boundary",
-    );
   });
   for (const mode of ["safe", "auto", "yolo"]) {
     it(`requires the discovery selection path before importing in ${mode}`, async function () {
@@ -1741,7 +1668,6 @@ describe("AgentToolRegistry", function () {
     await initAgentChangeJournal();
     const registry = new AgentToolRegistry(
       new ActionContractService({} as never),
-      new PlanAmendmentService(),
     );
     let writes = 0;
     let checkpoints = 0;
@@ -1804,7 +1730,6 @@ describe("AgentToolRegistry", function () {
     await initAgentChangeJournal();
     const registry = new AgentToolRegistry(
       new ActionContractService({} as never),
-      new PlanAmendmentService(),
     );
     let targets = ["item:41"],
       writes = 0;
@@ -1880,7 +1805,6 @@ describe("AgentToolRegistry", function () {
     await initAgentChangeJournal();
     const registry = new AgentToolRegistry(
       new ActionContractService({} as never),
-      new PlanAmendmentService(),
     );
     let writes = 0;
     registerUnrequestedTagTool(registry, () => writes++);
@@ -1917,7 +1841,6 @@ describe("AgentToolRegistry", function () {
     await initAgentChangeJournal();
     const registry = new AgentToolRegistry(
       new ActionContractService({} as never),
-      new PlanAmendmentService(),
     );
     let writes = 0;
     registerUnrequestedTagTool(registry, () => writes++, {
@@ -1957,61 +1880,6 @@ describe("AgentToolRegistry", function () {
     );
     assert.equal(executed.execution.result.authority, "yolo_judgment");
   });
-
-  it("yolo ledgers an off-plan judgment write as yolo_judgment inside an executing plan", async function () {
-    globalThis.Zotero = {
-      DB: new ChangeJournalTestDb(),
-      Prefs: { get: () => "yolo" },
-      debug: () => undefined,
-    } as never;
-    await initAgentChangeJournal();
-    const registry = new AgentToolRegistry(
-      new ActionContractService({} as never),
-      new PlanAmendmentService(),
-    );
-    let writes = 0;
-    registerUnrequestedTagTool(registry, () => writes++);
-    const request = JSON.parse(JSON.stringify(baseContext.request));
-    request.actionProgress = registry.createActionProgress(
-      request.actionContract,
-    );
-    request.planContext = {
-      phase: "executing",
-      provider: "original",
-      planId: "plan-1",
-      revision: 1,
-      executionId: "exec-1",
-      approvedDigest: "sha256:test",
-    };
-    const prepared = await registry.prepareExecution(
-      { id: "off-plan-judgment", name: "judgment_tags", arguments: {} },
-      {
-        ...baseContext,
-        request,
-        runId: "yolo-plan-turn",
-        checkpointActionProgress: async () => undefined,
-      },
-    );
-    assert.equal(prepared.kind, "result");
-    if (prepared.kind !== "result") return;
-    assert.isTrue(
-      prepared.execution.result.ok,
-      JSON.stringify(prepared.execution.result.content),
-    );
-    assert.equal(writes, 1);
-    assert.deepEqual(
-      request.actionProgress.authorizationGrants.map(
-        (grant: { authority: string; status: string }) => [
-          grant.authority,
-          grant.status,
-        ],
-      ),
-      [["yolo_judgment", "executed"]],
-      "the judgment marker, not the plan-approval policy, decides the authority",
-    );
-    assert.equal(prepared.execution.result.authority, "yolo_judgment");
-  });
-
   describe("external_effect registration", function () {
     const effectDefinition = () => ({
       spec: {
@@ -2197,11 +2065,7 @@ describe("AgentToolRegistry", function () {
         .filter((spec) => spec.interaction === "user_input")
         .map((spec) => spec.name)
         .sort();
-      assert.deepEqual(userInput, [
-        "approve_research_expansion",
-        "approve_research_mutation",
-        "request_user_input",
-      ]);
+      assert.deepEqual(userInput, ["request_user_input"]);
       for (const spec of specs) {
         if (spec.interaction === "user_input") {
           assert.isBoolean(
@@ -2327,7 +2191,7 @@ describe("AgentToolRegistry", function () {
       );
       assert.equal(
         inspected,
-        3,
+        1,
         "the source scan lost or gained requiresConfirmation sites; update the count deliberately",
       );
     });

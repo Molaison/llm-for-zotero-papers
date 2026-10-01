@@ -274,9 +274,15 @@ const PREVIOUSLY_HIDDEN_PLAN_TOOL_NAMES = [
   "update_plan",
 ] as const;
 
-/** The plan tools retired with plan mode: no longer registered at all. */
+/**
+ * The plan and research tools retired with plan mode: no longer registered
+ * at all.
+ */
 const RETIRED_PLAN_TOOL_NAMES: readonly string[] = [
   "amend_plan",
+  "approve_research_expansion",
+  "approve_research_mutation",
+  "research_update",
   "submit_plan_document",
   "update_plan",
 ];
@@ -300,7 +306,7 @@ describe("the trace's hidden tools are declared by the registry", function () {
     .sort();
 
   it("builds the registry the running plugin builds", function () {
-    // 30 once plan mode's own tools were retired.
+    // 27 once plan mode's own tools and its research tools were retired.
     assert.isAbove(
       definitions.length,
       25,

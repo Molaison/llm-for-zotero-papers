@@ -21,7 +21,7 @@ const root = process.cwd();
  * Spec literals the source guard must see. A drop means the scan stopped
  * inspecting sites, not that the sites became correct.
  */
-const EXPECTED_SPEC_LITERAL_SITES = 50;
+const EXPECTED_SPEC_LITERAL_SITES = 47;
 
 const ALLOWED_WORK_CATEGORIES: readonly AgentWorkCategory[] = [
   "retrieval",
@@ -49,11 +49,8 @@ const EXPECTED_TOOL_CATEGORIES: Readonly<Record<string, AgentWorkCategory>> = {
   web_read: "retrieval",
   context_read: "retrieval",
   load_skill: "retrieval",
-  // Task and research bookkeeping.
+  // Task bookkeeping.
   task_update: "planning",
-  research_update: "planning",
-  approve_research_expansion: "planning",
-  approve_research_mutation: "planning",
   request_user_input: "planning",
   // Authored deliverables.
   submit_document: "generation",

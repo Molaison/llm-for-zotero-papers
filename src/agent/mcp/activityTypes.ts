@@ -21,12 +21,6 @@ export type ZoteroMcpToolActivityEvent = {
   artifacts?: AgentToolArtifact[];
   actionReceipts?: AgentActionReceipt[];
   workCategory?: AgentWorkCategory;
-  /**
-   * The research job this call advanced, as the tool's own result declared
-   * it. A bridge shows the reader that progress from this field instead of
-   * recognising the research tool by its name.
-   */
-  researchJobId?: string;
   mutability?: "read" | "write";
   profileSignature?: string;
   conversationKey?: number;

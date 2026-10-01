@@ -111,7 +111,7 @@ describe("prompt rules have a single owner", function () {
   it("collects the persona, every tool, every shipped skill, and the message builder", function () {
     assert.isAtLeast(
       Array.from(owners.keys()).filter((key) => key.startsWith("tool:")).length,
-      30,
+      27,
     );
     assert.isAtLeast(
       Array.from(owners.keys()).filter((key) => key.startsWith("skill:"))

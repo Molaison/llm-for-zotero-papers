@@ -725,7 +725,6 @@ export class InvocationController {
             materialKind: output.materialKind,
             materialTitle: output.materialTitle,
             batchItems: output.batchItems,
-            researchJobId: output.researchJobId,
           },
         });
       } catch (error) {

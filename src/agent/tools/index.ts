@@ -22,14 +22,10 @@ import { createWebSearchTool } from "./read/webSearch";
 import { AgentToolRegistry } from "./registry";
 
 import { ActionContractService } from "../contracts/actionContract";
-import { PlanAmendmentService } from "../plans/amendments";
 import { PdfFigureExtractionService } from "../services/pdfFigureExtractionService";
 import { PdfPageService } from "../services/pdfPageService";
 import type { AgentToolDefinition } from "../types";
-import { createApproveResearchExpansionTool } from "./plan/approveResearchExpansion";
-import { createApproveResearchMutationTool } from "./plan/approveResearchMutation";
 import { createRequestUserInputTool } from "./control/requestUserInput";
-import { createResearchUpdateTool } from "./plan/researchUpdate";
 import { createSubmitDocumentTool } from "./control/submitDocument";
 import { createTaskUpdateTool } from "./control/taskUpdate";
 import { SEARCH_CONDITION_SCHEMA } from "./searchConditions";
@@ -686,13 +682,6 @@ export function createBuiltInToolRegistry(
   registry.register(createRequestUserInputTool());
   registry.register(createTaskUpdateTool());
   registry.register(createSubmitDocumentTool(deps.zoteroGateway));
-  registry.register(createResearchUpdateTool(deps.zoteroGateway));
-  registry.register(
-    createApproveResearchExpansionTool(
-      new PlanAmendmentService(deps.zoteroGateway),
-    ),
-  );
-  registry.register(createApproveResearchMutationTool());
 
   registerPreparedLibraryActions(registry, deps.zoteroGateway);
   return registry;

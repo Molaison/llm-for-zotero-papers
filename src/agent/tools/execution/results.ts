@@ -175,7 +175,6 @@ export function normalizeExecutionOutput(
   materialKind?: string;
   materialTitle?: string;
   batchItems?: AgentBatchItemOutcome[];
-  researchJobId?: string;
 } {
   if (value && typeof value === "object" && !Array.isArray(value)) {
     const record = value as {
@@ -188,7 +187,6 @@ export function normalizeExecutionOutput(
       materialKind?: unknown;
       materialTitle?: unknown;
       batchItems?: unknown;
-      researchJobId?: unknown;
     };
     if (Object.prototype.hasOwnProperty.call(record, "content")) {
       return {
@@ -227,10 +225,6 @@ export function normalizeExecutionOutput(
         batchItems: Array.isArray(record.batchItems)
           ? (record.batchItems as AgentBatchItemOutcome[])
           : undefined,
-        researchJobId:
-          typeof record.researchJobId === "string"
-            ? record.researchJobId
-            : undefined,
       };
     }
   }

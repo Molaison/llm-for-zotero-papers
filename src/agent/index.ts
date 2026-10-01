@@ -18,7 +18,7 @@ import { initPlanDocumentStore } from "./documents/store";
 import { registerMcpServer, unregisterMcpServer } from "./mcp/server";
 import { createAgentModelAdapter } from "./model/factory";
 import { initDormantPlanTables } from "./store/dormantPlanTables";
-import { initResearchStore } from "./research/store";
+import { initDormantResearchTables } from "./store/dormantResearchTables";
 import { AgentRuntime } from "./runtime";
 import { PdfPageService } from "./services/pdfPageService";
 import { PdfService } from "./services/pdfService";
@@ -94,7 +94,7 @@ async function createAgentSubsystemRuntime(
   assertAgentInitCurrent(generation);
   await initDormantPlanTables();
   assertAgentInitCurrent(generation);
-  await initResearchStore();
+  await initDormantResearchTables();
   assertAgentInitCurrent(generation);
   await initPlanDocumentStore();
   assertAgentInitCurrent(generation);
