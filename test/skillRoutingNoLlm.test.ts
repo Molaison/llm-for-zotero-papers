@@ -37,6 +37,7 @@ const SHIPPED_SKILL_IDS = [
   "import-to-library",
   "library-analysis",
   "literature-review",
+  "reorganize-library",
   "write-note",
 ];
 

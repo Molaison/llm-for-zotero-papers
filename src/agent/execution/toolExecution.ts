@@ -216,6 +216,8 @@ async function outcomeEvidenceOf(params: {
   context: AgentToolContext;
   paperLedgerDelta: TaskPaperLedgerDelta | null;
   observationIds: readonly string[];
+  /** The call's arguments, when a review card showed them to the user. */
+  reviewedArguments?: unknown;
 }): Promise<OutcomeEvidence[]> {
   const { toolResult } = params;
   const evidence: OutcomeEvidence[] = [];
@@ -270,8 +272,60 @@ async function outcomeEvidenceOf(params: {
         ),
       });
     }
+  } else if (params.reviewedArguments !== undefined && params.toolDefinition) {
+    const untouched = await leftUntouchedInReview({
+      callId: toolResult.callId,
+      toolDefinition: params.toolDefinition,
+      shownArguments: params.reviewedArguments,
+      input: params.input,
+      context: params.context,
+    });
+    if (untouched) evidence.push(untouched);
   }
   return evidence;
+}
+
+/**
+ * The rows the user left untouched in a card it approved: the targets the
+ * write named as the card showed it that the call no longer names once the
+ * user's edits were applied. Only a write that named several targets has
+ * rows to leave out.
+ */
+async function leftUntouchedInReview(params: {
+  callId: string;
+  toolDefinition: AgentToolDefinition<any, any>;
+  shownArguments: unknown;
+  input: unknown;
+  context: AgentToolContext;
+}): Promise<OutcomeEvidence | undefined> {
+  const describe = params.toolDefinition.describeAction;
+  if (!describe) return undefined;
+  try {
+    const shownInput = params.toolDefinition.validate(params.shownArguments);
+    if (!shownInput.ok) return undefined;
+    const shown = (await describe(shownInput.value, params.context)) || [];
+    if (new Set(shown.flatMap((write) => write.requestedTargets)).size < 2) {
+      return undefined;
+    }
+    const kept = new Set(
+      ((await describe(params.input, params.context)) || []).flatMap(
+        (write) => write.requestedTargets,
+      ),
+    );
+    const proposals = shown.flatMap(
+      ({ capability, operation, requestedTargets }) => {
+        const left = requestedTargets.filter((target) => !kept.has(target));
+        return left.length
+          ? [{ capability, operation, requestedTargets: left }]
+          : [];
+      },
+    );
+    return proposals.length
+      ? { kind: "declined", callId: params.callId, proposals, narrowed: true }
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -456,6 +510,8 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
       input?: unknown;
       documentEvidenceRefs?: unknown[];
     };
+    /** The arguments a review card showed the user before the call ran. */
+    let reviewedArguments: unknown;
     if (cachedPaperEvidence) {
       executedCall = {
         toolResult: {
@@ -515,6 +571,7 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
           toolDefinition: confirmedExecution.execution.tool,
           input: confirmedExecution.execution.input,
         };
+        reviewedArguments = call.arguments;
       } else {
         if (!executionAllowed()) return lifecycleError();
         executedCall = {
@@ -738,6 +795,7 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
         context: deps.context,
         paperLedgerDelta,
         observationIds: attestedObservationIds,
+        reviewedArguments,
       });
       const source = cachedPaperEvidence?.sourceToolCallId
         ? readEvidenceByCall.get(cachedPaperEvidence.sourceToolCallId)

@@ -2261,3 +2261,319 @@ describe("outcome ledger: how models declare folder writes and imports (live run
     assert.equal(ended(unproven), "completed_with_exceptions");
   });
 });
+
+describe("outcome ledger: batches over a part's papers (reorganization)", function () {
+  const PAPERS = ["item:1", "item:2", "item:3", "item:4", "item:5", "item:6"];
+  const [BATCH_A, BATCH_B, BATCH_C] = [
+    PAPERS.slice(0, 2),
+    PAPERS.slice(2, 4),
+    PAPERS.slice(4),
+  ];
+  const REFUSED =
+    "Zotero refused the move (The current operation may have applied; inspect journal state before retrying.)";
+  const moveAll: OutcomeDeclaration = {
+    taskId: "move",
+    description: "Move papers into the collections",
+    effect: "mutation",
+    capability: "zotero.collections",
+    targets: PAPERS,
+    scope: true,
+  };
+
+  function moved(id: string, targets: string[]): OutcomeEvidence {
+    return {
+      kind: "receipt",
+      receipt: receipt({
+        id,
+        capability: "zotero.collections",
+        operation: "move_to_collection",
+        requestedTargets: targets,
+        appliedTargets: targets,
+      }),
+    };
+  }
+
+  /** A batch that ran and threw, as `finalizeProposal` stamps it. */
+  function failedMove(id: string, targets: string[]): OutcomeEvidence {
+    return {
+      kind: "receipt",
+      receipt: receipt({
+        id,
+        capability: "zotero.collections",
+        operation: "move_to_collection",
+        verification: "unverified",
+        status: "failed",
+        requestedTargets: targets,
+        appliedTargets: [],
+        reasons: [REFUSED],
+      }),
+    };
+  }
+
+  /** A denied call: its cancelled receipt, then the decline, as the runtime records them. */
+  function deniedMove(callId: string, targets: string[]): OutcomeEvidence[] {
+    return [
+      {
+        kind: "receipt",
+        receipt: receipt({
+          id: `${callId}:receipt`,
+          capability: "zotero.collections",
+          operation: "move_to_collection",
+          verification: "not_applicable",
+          status: "cancelled",
+          requestedTargets: targets,
+          appliedTargets: [],
+          reasons: ["User denied action"],
+        }),
+      },
+      declined(callId, {
+        capability: "zotero.collections",
+        operation: "move_to_collection",
+        requestedTargets: targets,
+      }),
+    ];
+  }
+
+  /** Rows the user left untouched in a card it approved. */
+  function leftUntouched(callId: string, targets: string[]): OutcomeEvidence {
+    return {
+      kind: "declined",
+      callId,
+      proposals: [
+        {
+          capability: "zotero.collections",
+          operation: "move_to_collection",
+          requestedTargets: targets,
+        },
+      ],
+      narrowed: true,
+    };
+  }
+
+  function applyAll(
+    checkpoint: ExecutionCheckpoint,
+    ...evidence: OutcomeEvidence[]
+  ): ExecutionCheckpoint {
+    return evidence.reduce(
+      (ledger, entry) => apply(ledger, entry).checkpoint,
+      checkpoint,
+    );
+  }
+
+  function endOf(checkpoint: ExecutionCheckpoint) {
+    return decideRunEnd(checkpoint, {
+      status: "completed",
+      stopRule: "final_answer",
+    });
+  }
+
+  it("each batch's receipt closes its own papers, and the last batch completes the part", function () {
+    let ledger = applyAll(ledgerWith(moveAll), moved("batch-a", BATCH_A));
+    let task = find(ledger, "move");
+    assert.equal(task.status, "pending");
+    assert.deepEqual(task.doneTargets, BATCH_A);
+
+    ledger = applyAll(
+      ledger,
+      moved("batch-b", BATCH_B),
+      moved("batch-c", BATCH_C),
+    );
+    task = find(ledger, "move");
+    assert.equal(task.status, "completed");
+    assert.deepEqual(task.doneTargets, PAPERS);
+    assert.deepEqual(task.verifiedReceiptIds, [
+      "batch-a",
+      "batch-b",
+      "batch-c",
+    ]);
+    assert.lengthOf(ledger.tasks, 1);
+    assert.equal(endOf(ledger), "completed");
+  });
+
+  it("a declined batch excepts its papers and leaves the part open for the next batch", function () {
+    let ledger = applyAll(
+      ledgerWith(moveAll),
+      moved("batch-a", BATCH_A),
+      ...deniedMove("call-b", BATCH_B),
+    );
+    let task = find(ledger, "move");
+    assert.equal(task.status, "pending", "one declined batch blocks nothing");
+    assert.notProperty(task, "reason", "each paper's exception says why");
+    assert.deepEqual(task.doneTargets, BATCH_A);
+    assert.deepEqual(task.exceptions, [{ targets: BATCH_B, reason: DECLINED }]);
+    assert.include(task.receiptIds, "declined:call-b");
+    assert.deepEqual(openDeclaredOutcomes(ledger), [task]);
+
+    ledger = applyAll(ledger, moved("batch-c", BATCH_C));
+    task = find(ledger, "move");
+    assert.equal(task.status, "completed");
+    assert.notProperty(task, "reason");
+    assert.deepEqual(task.doneTargets, [...BATCH_A, ...BATCH_C]);
+    assert.deepEqual(task.exceptions, [{ targets: BATCH_B, reason: DECLINED }]);
+    assert.lengthOf(ledger.tasks, 1, "no host outcome for the decline");
+    assert.equal(endOf(ledger), "completed_with_exceptions");
+  });
+
+  it("a failed batch excepts its papers with the failure's reason, and the part completes with the rest", function () {
+    let ledger = applyAll(
+      ledgerWith(moveAll),
+      moved("batch-a", BATCH_A),
+      failedMove("batch-b", BATCH_B),
+    );
+    let task = find(ledger, "move");
+    assert.equal(task.status, "pending");
+    assert.notProperty(task, "reason", "each paper's exception says why");
+    assert.deepEqual(task.exceptions, [{ targets: BATCH_B, reason: REFUSED }]);
+
+    ledger = applyAll(ledger, moved("batch-c", BATCH_C));
+    task = find(ledger, "move");
+    assert.equal(task.status, "completed");
+    assert.deepEqual(task.exceptions, [{ targets: BATCH_B, reason: REFUSED }]);
+    assert.equal(endOf(ledger), "completed_with_exceptions");
+  });
+
+  it("a later success clears a paper's exception, even after the part settled", function () {
+    const settledWithFailure = applyAll(
+      ledgerWith(moveAll),
+      moved("batch-a", BATCH_A),
+      failedMove("batch-b", BATCH_B),
+      moved("batch-c", BATCH_C),
+    );
+    assert.equal(find(settledWithFailure, "move").status, "completed");
+
+    const retried = apply(settledWithFailure, moved("batch-b-retry", BATCH_B));
+    assert.isTrue(retried.changed);
+    assert.lengthOf(
+      retried.checkpoint.tasks,
+      1,
+      "no host outcome for the retry",
+    );
+    const task = find(retried.checkpoint, "move");
+    assert.equal(task.status, "completed");
+    assert.notProperty(task, "exceptions");
+    assert.deepEqual(task.doneTargets, [...BATCH_A, ...BATCH_C, ...BATCH_B]);
+    assert.equal(endOf(retried.checkpoint), "completed");
+
+    // A part every paper of which was excepted is skipped; a success revives it.
+    const allFailed = applyAll(
+      ledgerWith({ ...moveAll, targets: BATCH_A }),
+      failedMove("batch-a", BATCH_A),
+    );
+    assert.equal(find(allFailed, "move").status, "skipped");
+    assert.equal(find(allFailed, "move").reason, REFUSED);
+    const revived = find(
+      apply(allFailed, moved("batch-a-retry", BATCH_A)).checkpoint,
+      "move",
+    );
+    assert.equal(revived.status, "completed");
+    assert.notProperty(revived, "reason");
+    assert.notProperty(revived, "exceptions");
+  });
+
+  it("rows the user left untouched in an approved card are excepted on the part that names them", function () {
+    let ledger = applyAll(
+      ledgerWith(moveAll),
+      moved("batch-a", ["item:1"]),
+      leftUntouched("call-a", ["item:2"]),
+    );
+    let task = find(ledger, "move");
+    assert.equal(task.status, "pending");
+    assert.deepEqual(task.doneTargets, ["item:1"]);
+    assert.deepEqual(task.exceptions, [
+      { targets: ["item:2"], reason: DECLINED },
+    ]);
+
+    ledger = applyAll(
+      ledger,
+      moved("batch-b", BATCH_B),
+      moved("batch-c", BATCH_C),
+    );
+    task = find(ledger, "move");
+    assert.equal(task.status, "completed");
+    assert.equal(endOf(ledger), "completed_with_exceptions");
+
+    // With no part that names them, an edit in review records nothing.
+    for (const ledgerWithout of [
+      emptyLedger(),
+      ledgerWith({ ...moveAll, targets: undefined, scope: undefined }),
+    ]) {
+      const result = apply(ledgerWithout, leftUntouched("call-x", ["item:2"]));
+      assert.isFalse(result.changed);
+      assert.strictEqual(result.checkpoint, ledgerWithout);
+    }
+  });
+
+  it("a part whose every batch was declined is blocked, as a declined write is", function () {
+    const ledger = applyAll(
+      ledgerWith(moveAll),
+      ...deniedMove("call-a", BATCH_A),
+      ...deniedMove("call-b", BATCH_B),
+      ...deniedMove("call-c", BATCH_C),
+    );
+    const task = find(ledger, "move");
+    assert.equal(task.status, "blocked");
+    assert.equal(task.reason, DECLINED);
+    assert.deepEqual(task.exceptions, [{ targets: PAPERS, reason: DECLINED }]);
+    assert.equal(endOf(ledger), "blocked");
+  });
+
+  it("each paper is excepted once, under the first reason given for it", function () {
+    const ledger = applyAll(
+      ledgerWith(moveAll),
+      ...deniedMove("call-b", BATCH_B),
+      failedMove("batch-b-again", BATCH_B),
+    );
+    assert.deepEqual(find(ledger, "move").exceptions, [
+      { targets: BATCH_B, reason: DECLINED },
+    ]);
+  });
+
+  it("a part that names its papers by bare id, as models write targetIds, takes batches the same way", function () {
+    const bare: OutcomeDeclaration = {
+      ...moveAll,
+      targets: ["1", "2", "3", "4", "5", "6"],
+      scope: undefined,
+    };
+    let ledger = applyAll(
+      ledgerWith(bare),
+      moved("batch-a", BATCH_A),
+      ...deniedMove("call-b", BATCH_B),
+      failedMove("batch-c", BATCH_C),
+    );
+    let task = find(ledger, "move");
+    assert.deepEqual(task.targets, ["1", "2", "3", "4", "5", "6"]);
+    assert.equal(task.status, "completed");
+    assert.deepEqual(task.doneTargets, ["1", "2"]);
+    assert.deepEqual(task.exceptions, [
+      { targets: ["3", "4"], reason: DECLINED },
+      { targets: ["5", "6"], reason: REFUSED },
+    ]);
+
+    ledger = applyAll(ledger, moved("batch-c-retry", BATCH_C));
+    task = find(ledger, "move");
+    assert.equal(task.status, "completed");
+    assert.deepEqual(task.doneTargets, ["1", "2", "5", "6"]);
+    assert.deepEqual(task.exceptions, [
+      { targets: ["3", "4"], reason: DECLINED },
+    ]);
+    assert.lengthOf(ledger.tasks, 1);
+  });
+
+  it("a one-paper write keeps the single-write rules: a failure leaves the part open, a decline blocks it", function () {
+    const failed = find(
+      applyAll(ledgerWith(moveAll), failedMove("one-failed", ["item:1"])),
+      "move",
+    );
+    assert.equal(failed.status, "pending");
+    assert.equal(failed.reason, REFUSED);
+    assert.notProperty(failed, "exceptions");
+
+    const refused = find(
+      applyAll(ledgerWith(moveAll), ...deniedMove("call-one", ["item:1"])),
+      "move",
+    );
+    assert.equal(refused.status, "blocked");
+    assert.equal(refused.reason, DECLINED);
+    assert.notProperty(refused, "exceptions");
+  });
+});

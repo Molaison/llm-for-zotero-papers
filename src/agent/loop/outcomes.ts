@@ -73,6 +73,11 @@ export type OutcomeEvidence =
         AgentActionProposal,
         "capability" | "operation" | "requestedTargets"
       >[];
+      /**
+       * The user approved the call without these targets: rows it left
+       * untouched in the review card. Only a part that names them records it.
+       */
+      narrowed?: true;
     }
   | { kind: "answer" };
 
@@ -348,6 +353,148 @@ function completed(task: Task): Task {
   return { ...rest, status: "completed" };
 }
 
+/*
+ * Batches. A write that names several papers is accounted paper by paper:
+ * the papers a failed batch did not change, the papers of a declined batch,
+ * and the rows the user left untouched in a card it approved become
+ * exceptions with the reason, and the part stays open for the next batch. A
+ * write that names one paper keeps the single-write rules: a failure leaves
+ * its part open with the reason, and a decline blocks it. A later success
+ * clears a paper's exception, even after its part settled.
+ */
+
+/** A write that names several papers. */
+function isBatch(targets: readonly string[]): boolean {
+  return unique(targets).length > 1;
+}
+
+/** Except `targets` with `reason`; a paper already excepted keeps its first reason. */
+function exceptTargets(
+  exceptions: readonly OutcomeException[],
+  targets: readonly string[],
+  reason: string,
+): readonly OutcomeException[] {
+  const excepted = new Set(exceptions.flatMap((entry) => entry.targets));
+  return withException(
+    exceptions,
+    targets.filter((target) => !excepted.has(target)),
+    reason,
+  );
+}
+
+/** The exceptions without the papers since done. */
+function withoutDone(
+  exceptions: readonly OutcomeException[],
+  done: readonly string[],
+): readonly OutcomeException[] {
+  return exceptions.flatMap((entry) => {
+    const left = entry.targets.filter((target) => !done.includes(target));
+    return left.length ? [{ ...entry, targets: left }] : [];
+  });
+}
+
+/** The papers a failed batch named and did not change. */
+function failedBatchTargets(receipt: AgentActionReceipt): string[] {
+  if (receipt.status !== "failed" || !isBatch(receipt.requestedTargets)) {
+    return [];
+  }
+  const settled = new Set([
+    ...receipt.appliedTargets,
+    ...receipt.alreadySatisfiedTargets,
+    ...receipt.rejectedTargets,
+  ]);
+  return unique(receipt.requestedTargets).filter(
+    (target) => !settled.has(target),
+  );
+}
+
+/**
+ * A part that names papers, once each is done or excepted: completed when
+ * any is done; with none done, blocked when the user declined one, as a
+ * declined write is, and otherwise skipped with the first reason.
+ */
+function settleTargets(task: Task): Task {
+  const targets = task.targets || [];
+  const done = new Set(task.doneTargets || []);
+  const exceptions = task.exceptions || [];
+  const accounted = new Set([
+    ...done,
+    ...exceptions.flatMap((entry) => entry.targets),
+  ]);
+  if (!targets.length || !targets.every((target) => accounted.has(target))) {
+    return task;
+  }
+  if (targets.some((target) => done.has(target))) return completed(task);
+  return exceptions.some((entry) => entry.reason === OUTCOME_REASONS.declined)
+    ? { ...task, status: "blocked", reason: OUTCOME_REASONS.declined }
+    : { ...task, status: "skipped", reason: exceptions[0].reason };
+}
+
+/** A settled part takes a receipt that proves one of its excepted papers done. */
+function clearsException(task: Task, receipt: AgentActionReceipt): boolean {
+  if (task.status !== "completed" && task.status !== "skipped") return false;
+  if (
+    !PROOF_VERIFICATIONS.has(receipt.verification) ||
+    !DONE_RECEIPT_STATUSES.has(receipt.status)
+  ) {
+    return false;
+  }
+  const proven = [
+    ...receipt.appliedTargets,
+    ...receipt.alreadySatisfiedTargets,
+  ];
+  return (task.exceptions || []).some((entry) =>
+    entry.targets.some((target) => resolveTarget(target, proven) !== undefined),
+  );
+}
+
+/**
+ * A declined batch, or rows left untouched in an approved card: each open
+ * part that names those papers excepts them. Undefined for a declined
+ * one-paper write, or a declined batch no part names, which the single-write
+ * rule handles; rows no part names record nothing.
+ */
+function declineBatch(
+  checkpoint: ExecutionCheckpoint,
+  evidence: Extract<OutcomeEvidence, { kind: "declined" }>,
+  writes: readonly Write[],
+  identity: string,
+  now: number,
+): EvidenceResult | undefined {
+  const declined = unique(writes.flatMap((write) => write.requestedTargets));
+  if (!evidence.narrowed && !isBatch(declined)) return undefined;
+  const chosen = new Set(
+    checkpoint.tasks.flatMap((task, index) =>
+      task.targets?.length &&
+      DECLINE_CANDIDATE_STATUSES.has(task.status) &&
+      writes.some((write) => acceptsWrite(task, write))
+        ? [index]
+        : [],
+    ),
+  );
+  if (!chosen.size)
+    return evidence.narrowed ? unchanged(checkpoint) : undefined;
+  return mapTasks(checkpoint, now, (task, index) => {
+    if (!chosen.has(index)) return undefined;
+    const done = new Set(task.doneTargets || []);
+    // The part's own papers the call named, in the part's own form.
+    const exceptions = exceptTargets(
+      task.exceptions || [],
+      task.targets!.filter(
+        (target) =>
+          resolveTarget(target, declined) !== undefined && !done.has(target),
+      ),
+      OUTCOME_REASONS.declined,
+    );
+    return settleTargets({
+      ...task,
+      receiptIds: union(task.receiptIds, [identity]),
+      ...(exceptions.length ? { exceptions } : {}),
+      updatedAt: now,
+    });
+  });
+}
+
 function bindReceipt(
   task: Task,
   receipt: AgentActionReceipt,
@@ -372,13 +519,18 @@ function bindReceipt(
       ? own([...receipt.appliedTargets, ...receipt.alreadySatisfiedTargets])
       : [],
   );
-  const exceptions = withException(
-    task.exceptions || [],
-    own(receipt.rejectedTargets),
-    receipt.reasons[0]?.trim() || OUTCOME_REASONS.notApplied,
+  const exceptions = exceptTargets(
+    exceptTargets(
+      withoutDone(task.exceptions || [], doneTargets),
+      own(receipt.rejectedTargets),
+      receipt.reasons[0]?.trim() || OUTCOME_REASONS.notApplied,
+    ),
+    own(failedBatchTargets(receipt)),
+    receipt.reasons[0]?.trim() || OUTCOME_REASONS.writeFailed,
   );
+  const { exceptions: _previous, ...rest } = task;
   const bound: Task = {
-    ...task,
+    ...rest,
     verifiedReceiptIds:
       proves && receipt.verification === "verified"
         ? union(task.verifiedReceiptIds, [receipt.id])
@@ -391,17 +543,13 @@ function bindReceipt(
   if (receipt.status === "unverified") {
     return { ...bound, status: "blocked", reason: OUTCOME_REASONS.unverified };
   }
-  const accounted = new Set([
-    ...doneTargets,
-    ...exceptions.flatMap((entry) => entry.targets),
-  ]);
-  if (targets.length && targets.every((target) => accounted.has(target))) {
-    return targets.some((target) => doneTargets.includes(target))
-      ? completed(bound)
-      : { ...bound, status: "skipped", reason: exceptions[0].reason };
-  }
+  const settled = settleTargets(bound);
+  if (settled !== bound) return settled;
   if (!targets.length && proves) return completed(bound);
-  if (receipt.status === "failed" || receipt.status === "cancelled") {
+  if (
+    (receipt.status === "failed" || receipt.status === "cancelled") &&
+    !isBatch(receipt.requestedTargets)
+  ) {
     return {
       ...bound,
       reason: receipt.reasons[0]?.trim() || OUTCOME_REASONS.writeFailed,
@@ -563,7 +711,8 @@ function applyReceipt(
     const membership = write !== receipt;
     const candidates = checkpoint.tasks.flatMap((task, index) =>
       !chosen.has(index) &&
-      RECEIPT_CANDIDATE_STATUSES.has(task.status) &&
+      (RECEIPT_CANDIDATE_STATUSES.has(task.status) ||
+        clearsException(task, write)) &&
       acceptsWrite(task, write) &&
       (!membership ||
         task.capability === "zotero.collections" ||
@@ -649,6 +798,8 @@ function applyDeclined(
   if (!writes.length || isBound(checkpoint, identity)) {
     return unchanged(checkpoint);
   }
+  const batch = declineBatch(checkpoint, evidence, writes, identity, now);
+  if (batch) return batch;
   const chosen = checkpoint.tasks.findIndex(
     (task) =>
       DECLINE_CANDIDATE_STATUSES.has(task.status) &&
