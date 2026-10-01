@@ -1,4 +1,5 @@
 import type { TrustedReadObservation } from "../context/readObservationTypes";
+import { expandEvidenceRefs } from "../context/evidenceRefTokens";
 import type { ZoteroGateway } from "../services/zoteroGateway";
 import type { AgentRuntimeRequest, AgentToolArtifact } from "../types";
 import type { DocumentCitationEvidence } from "./citationService";
@@ -186,6 +187,44 @@ function validateDirectAssetProvenance(params: {
   }
 }
 
+/**
+ * The submission with every evidence ref it names as a full observation id:
+ * tool results show refs in short form, and every check, and the stored
+ * document, reads full ids.
+ */
+function withFullEvidenceRefs(
+  input: SubmitPlanDocumentInput,
+  observationIds: readonly string[],
+): SubmitPlanDocumentInput {
+  const expand = (refs: readonly string[]) =>
+    expandEvidenceRefs(refs, observationIds);
+  return {
+    ...input,
+    citations: input.citations.map((cluster) => ({
+      ...cluster,
+      sources: cluster.sources.map((source) => ({
+        ...source,
+        evidenceRefs: expand(source.evidenceRefs),
+      })),
+    })),
+    quotes: input.quotes.map((quote) => ({
+      ...quote,
+      evidenceRefs: expand(quote.evidenceRefs),
+    })),
+    assets: input.assets.map((asset) =>
+      asset.provenance.origin === "generated"
+        ? {
+            ...asset,
+            provenance: {
+              ...asset.provenance,
+              evidenceRefs: expand(asset.provenance.evidenceRefs),
+            },
+          }
+        : asset,
+    ),
+  };
+}
+
 export class DirectDocumentFinalizer {
   constructor(private readonly gateway: ZoteroGateway) {}
 
@@ -202,7 +241,12 @@ export class DirectDocumentFinalizer {
     return this.publish({
       request: params.request,
       runId: params.runId,
-      input: params.input,
+      input: withFullEvidenceRefs(
+        params.input,
+        (params.request.documentReadObservations || []).map(
+          (observation) => observation.observationId,
+        ),
+      ),
       policy,
       now: params.now,
     });

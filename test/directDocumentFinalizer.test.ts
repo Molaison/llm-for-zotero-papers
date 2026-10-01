@@ -516,6 +516,72 @@ describe("DirectDocumentFinalizer", function () {
     );
   });
 
+  describe("evidence refs a tool result showed in short form", function () {
+    const digest =
+      "a88d71e2c5d1bfcf196ccd05f2066c88ba9b55538bdf9b2879106e7f514a45b5";
+    const read: TrustedReadObservation = {
+      ...observation,
+      observationId: `sha256:${digest}:2`,
+      callDigest: `sha256:${digest}`,
+    };
+    const policy: DocumentOutcomePolicy = {
+      documentKind: "literature_review",
+      integrityPolicy: "research_grounded",
+    };
+    const cited = (evidenceRef: string, observations = [read]) =>
+      finalizer.finalize({
+        request: request(observations),
+        runId: `run-${evidenceRef}`,
+        input: {
+          ...input({
+            markdown:
+              "# Review\n\nEvidence [[cite:C1]].\n\n## Scope and limitations\n\nOne verified paper was reviewed.",
+            citations: [
+              {
+                citationId: "C1",
+                sources: [
+                  {
+                    libraryID: 1,
+                    itemKey: "AAAA1111",
+                    evidenceRefs: [evidenceRef],
+                  },
+                ],
+              },
+            ],
+          }),
+          ...policy,
+        },
+        now: 300,
+      });
+
+    it("validates a citation that names its evidence by the short ref, and stores the full ref", async function () {
+      const result = await cited("a88d71e2c5d1:2");
+      assert.deepEqual(
+        result.document.version === 2
+          ? result.document.citationBundle.clusters[0].sources[0].evidenceRefs
+          : [],
+        [read.observationId],
+      );
+    });
+
+    it("still validates the full ref older conversations and stored documents carry", async function () {
+      const result = await cited(read.observationId);
+      assert.deepEqual(
+        result.document.version === 2
+          ? result.document.citationBundle.clusters[0].sources[0].evidenceRefs
+          : [],
+        [read.observationId],
+      );
+    });
+
+    it("rejects a short ref that names no observation of this conversation", async function () {
+      await expectRejected(
+        cited("a88d71e2c5d1:9"),
+        /invalid evidence reference/,
+      );
+    });
+  });
+
   it("rejects document assets that were not emitted by a host tool", async function () {
     const policy: DocumentOutcomePolicy = {
       documentKind: "guide",

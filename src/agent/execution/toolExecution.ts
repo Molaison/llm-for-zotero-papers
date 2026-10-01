@@ -22,6 +22,7 @@ import {
   readObservationSourceKey,
   readObservationSourceKeys,
 } from "../context/readObservation";
+import { shortEvidenceRef } from "../context/evidenceRefTokens";
 import {
   taskPaperReadDepths,
   type TaskPaperLedgerDelta,
@@ -570,8 +571,9 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
           merged.set(observation.observationId, observation);
         }
         deps.request.documentReadObservations = [...merged.values()];
+        // The model cites the short ref; the document finalizer expands it.
         executedCall.documentEvidenceRefs = observations.map((observation) => ({
-          evidenceRef: observation.observationId,
+          evidenceRef: shortEvidenceRef(observation.observationId),
           libraryID: observation.libraryID,
           itemKey: observation.itemKey,
           capabilities: observation.capabilities,

@@ -1156,6 +1156,11 @@ describe("library_retrieve model view delivery", function () {
         (ref) => `${ref.itemKey}:${ref.attachmentItemKey || ""}`,
       );
       assert.include(refKeys, "ITEM1:PDF1", "a shown passage keeps its ref");
+      assert.match(
+        view.documentEvidenceRefs[0].evidenceRef,
+        /^[0-9a-f]{12}:\d+$/,
+        "the model sees the short ref",
+      );
       assert.notInclude(
         refKeys,
         "ITEM31:PDF31",
