@@ -1819,7 +1819,10 @@ export function scoreChunkBM25(
   return score;
 }
 
-function cosineSimilarity(a: number[], b: number[]): number {
+export function cosineSimilarity(
+  a: readonly number[],
+  b: readonly number[],
+): number {
   if (!a.length || !b.length || a.length !== b.length) return 0;
   let dot = 0;
   let normA = 0;

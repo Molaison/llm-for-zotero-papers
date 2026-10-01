@@ -1,7 +1,6 @@
 import { assert } from "chai";
 import {
   chunkKindFromSectionLabel,
-  compareEvidenceCandidatesForQuestion,
   compareEvidenceCandidatesForSections,
   isBodyEvidenceSection,
   isFrontMatterSection,
@@ -76,8 +75,8 @@ describe("libraryChatEvidencePolicy", function () {
     ];
 
     rows.sort(
-      compareEvidenceCandidatesForQuestion(
-        "Compare the methods",
+      compareEvidenceCandidatesForSections(
+        wantedSectionKinds({ question: "Compare the methods" }),
         (row) => row.evidenceScore,
       ),
     );

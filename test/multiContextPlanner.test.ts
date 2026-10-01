@@ -18,6 +18,7 @@ import {
 } from "../src/services/paperContent/pdfContext";
 import { tokenizeRetrievalText } from "../src/services/retrieval/retrievalTokenizer";
 import { buildRetrievalQueryPlan } from "../src/services/retrieval/retrievalQueryPlan";
+import { SECTION_INTENT_EXAMPLES } from "../src/services/retrieval/sectionIntent";
 import { pdfTextCache } from "../src/services/paperContent/contextCache";
 import type { PaperContextRef } from "../src/modules/contextPanel/types";
 import type { ChunkStat, PdfContext } from "../src/services/paperContent/types";
@@ -838,6 +839,117 @@ describe("multiContextPlanner", function () {
       result.contextText,
       "A second paragraph that still belongs to the abstract section.",
     );
+  });
+
+  it("steers retrieval to the section a question's embedding asks about, in any language", async function () {
+    // A semantic-search configuration whose endpoint is a fake model. Axes:
+    // the three section intents, "a question about papers", off-topic,
+    // Chinese, and the axis both chunks embed on (so relevance ties).
+    const settings: Record<string, unknown> = {
+      enableSemanticSearch: true,
+      embeddingProvider: "custom",
+      embeddingApiBase: "http://embeddings.test",
+      embeddingModel: "fake-section-intent",
+    };
+    const prefs = Zotero.Prefs as unknown as {
+      set: (key: string, value: unknown) => void;
+    };
+    const applySettings = (on: boolean) => {
+      for (const [key, setting] of Object.entries(settings)) {
+        prefs.set(
+          `extensions.zotero.llmforzotero.${key}`,
+          on ? setting : undefined,
+        );
+      }
+    };
+    const METHODS_ZH = "这些论文用了什么方法？";
+    const UNRELATED_ZH = "把这段话翻译成英文";
+    const vectors = new Map<string, number[]>([
+      [METHODS_ZH, [0.7, 0, 0, 0.35, 0, 1, 0]],
+      [UNRELATED_ZH, [0, 0, 0, 0.1, 1, 1, 0]],
+    ]);
+    for (const [group, axes] of [
+      ["methods", [1, 0, 0, 0.4, 0, 0, 0]],
+      ["results", [0, 1, 0, 0.4, 0, 0, 0]],
+      ["limitations", [0, 0, 1, 0.4, 0, 0, 0]],
+      ["general", [0, 0, 0, 1, 0, 0, 0]],
+    ] as const) {
+      for (const text of SECTION_INTENT_EXAMPLES[group]) {
+        vectors.set(text, [...axes]);
+      }
+    }
+    const embeddedTexts: string[] = [];
+    const fakeFetch = async (_url: string, init: { body: string }) => {
+      const { input } = JSON.parse(init.body) as { input: string[] };
+      embeddedTexts.push(...input);
+      return {
+        ok: true,
+        json: async () => ({
+          data: input.map((text, index) => ({
+            index,
+            embedding: vectors.get(text) || [0, 0, 0, 0, 0, 0, 1],
+          })),
+        }),
+      };
+    };
+    const toolkit = (globalThis as unknown as { ztoolkit: any }).ztoolkit;
+    toolkit.getGlobal = (name: string) =>
+      name === "fetch" ? fakeFetch : undefined;
+    applySettings(true);
+    try {
+      const paper: PaperContextRef = {
+        itemId: 70,
+        contextItemId: 71,
+        title: "Section Intent Paper",
+      };
+      const introduction =
+        "Introduction\nPlace cells in the hippocampus encode position and gradually remap as the same environment is revisited over many days.";
+      const methods =
+        "Methods\nWe imaged calcium activity with two-photon microscopy while head-fixed mice ran along a virtual linear track for many days.";
+      const pdfContext = buildPdfContext("Section Intent Paper", [
+        introduction,
+        methods,
+      ]);
+      const firstChunk = async (question: string) => {
+        const result = await assembleRetrievedMultiPaperContext({
+          papers: [
+            {
+              paperContext: paper,
+              contextItem: null,
+              pdfContext,
+              paperKey: buildPaperKey(paper),
+              isActive: false,
+              pinKind: "none",
+              order: 1,
+            },
+          ] as any,
+          question,
+          contextBudgetTokens: 10_000,
+          minChunksByPaper: new Map([[buildPaperKey(paper), 1]]),
+          options: { maxChunks: 1 },
+        });
+        assert.equal(result.selectedChunkCount, 1, question);
+        return result.contextText.includes("calcium activity")
+          ? "Methods"
+          : result.contextText.includes("Place cells")
+            ? "Introduction"
+            : "neither";
+      };
+
+      assert.equal(await firstChunk(METHODS_ZH), "Methods");
+      assert.equal(await firstChunk(UNRELATED_ZH), "Introduction");
+      assert.includeMembers(
+        embeddedTexts,
+        [
+          ...SECTION_INTENT_EXAMPLES.methods,
+          ...SECTION_INTENT_EXAMPLES.general,
+        ],
+        "the section examples went through the configured embedding model",
+      );
+    } finally {
+      applySettings(false);
+      delete toolkit.getGlobal;
+    }
   });
 
   it("falls back to hybrid chunks when no abstract chunk exists in paper-mode follow-up retrieval", async function () {

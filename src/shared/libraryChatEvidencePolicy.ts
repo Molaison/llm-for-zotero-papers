@@ -196,12 +196,3 @@ export function compareEvidenceCandidatesForSections<
     return (left.chunkIndex || 0) - (right.chunkIndex || 0);
   };
 }
-
-export function compareEvidenceCandidatesForQuestion<
-  T extends RankedEvidenceCandidate,
->(query: string, getBaseScore?: (candidate: T) => number) {
-  return compareEvidenceCandidatesForSections<T>(
-    sectionCueKinds(query),
-    getBaseScore,
-  );
-}
