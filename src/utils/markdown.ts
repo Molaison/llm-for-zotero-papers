@@ -2367,13 +2367,37 @@ function createMarkedRenderer(
   return renderer;
 }
 
+/**
+ * A tilde in model text usually means "about". GFM in marked also reads a
+ * pair of single tildes as strikethrough, so "~2 days ... (~1 month)" struck
+ * through everything between them in a saved note. A single tilde is read
+ * here as plain text before strikethrough sees it; only a doubled tilde
+ * ("~~text~~") strikes text through.
+ */
+const literalTildeExtension = {
+  name: "llmLiteralTilde",
+  level: "inline" as const,
+  start(src: string) {
+    const index = src.indexOf("~");
+    return index >= 0 ? index : undefined;
+  },
+  tokenizer(src: string) {
+    return /^~(?!~)/.test(src)
+      ? { type: "llmLiteralTilde", raw: "~" }
+      : undefined;
+  },
+  renderer() {
+    return "~";
+  },
+};
+
 function createMarkedMarkdownRenderer(target: MarkdownRenderTarget): Marked {
   return new Marked({
     async: false,
     breaks: false,
     gfm: true,
     renderer: createMarkedRenderer(target),
-    extensions: createMathExtensions(),
+    extensions: [...createMathExtensions(), literalTildeExtension],
   });
 }
 

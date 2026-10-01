@@ -170,6 +170,11 @@ function resolveEditSnapshot(
  * preserving images, list structure, and other formatting in blocks that
  * are not being edited.
  *
+ * A patch matches the note's visible text exactly. A text find that is not
+ * there is read once more the way the model sees the note (library_read's
+ * note text, Markdown such as **bold** included) and matched exactly again;
+ * nothing looser.
+ *
  * Returns the patched HTML, or `null` if any patch cannot be located.
  * A missing match must stop the write, never rewrite the whole note.
  */
@@ -181,11 +186,14 @@ function applyPatchesToNoteHtml(
 
   let result = html;
   for (const patch of patches) {
-    const find =
+    const asShown = stripNoteHtml(renderRawNoteHtml(patch.find));
+    const applied =
       patch.findFormat === "markdown"
-        ? stripNoteHtml(renderRawNoteHtml(patch.find))
-        : patch.find;
-    const applied = replaceTextContentInHtml(result, find, patch.replace);
+        ? replaceTextContentInHtml(result, asShown, patch.replace)
+        : (replaceTextContentInHtml(result, patch.find, patch.replace) ??
+          (asShown !== patch.find
+            ? replaceTextContentInHtml(result, asShown, patch.replace)
+            : null));
     if (applied === null) return null;
     result = applied;
   }
