@@ -48,7 +48,14 @@ export const libraryMutationHandlers = {
         : {};
     },
     postconditionSatisfied: (operation, state) => {
-      const current = state.item(Number(operation.itemId));
+      // An operation that names no item updates the one the write resolved
+      // (its paper context or the open item), which is the one item the
+      // state reader captured, exactly as planInverse reads it.
+      const current = operation.itemId
+        ? state.item(Number(operation.itemId))
+        : state.items?.length === 1
+          ? state.items[0]
+          : undefined;
       if (!current?.exists || !current.fields) return false;
       return Object.entries(operation.metadata).every(([field, value]) =>
         field === "creators"

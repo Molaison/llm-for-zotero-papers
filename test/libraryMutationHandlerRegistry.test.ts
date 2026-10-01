@@ -183,6 +183,43 @@ describe("library mutation handler registry", function () {
     );
   });
 
+  it("checks a metadata update that names no item against the one item the write resolved", function () {
+    // The live run's patch, as the state reader captures it: getField reads
+    // the entered date back, whatever multipart form Zotero stores.
+    const operation = {
+      type: "update_metadata" as const,
+      metadata: { date: "2024", DOI: "10.1234/abcd.loopmupo0g23" },
+    };
+    const captured = (fields: Record<string, string>, itemIds = [520]) => ({
+      version: 1 as const,
+      operation: "update_metadata" as const,
+      items: itemIds.map((itemId) => ({ itemId, exists: true, fields })),
+    });
+    assert.isTrue(
+      mutationPostconditionIsSatisfied(
+        operation,
+        captured({ date: "2024", DOI: "10.1234/abcd.loopmupo0g23" }),
+      ),
+    );
+    assert.isFalse(
+      mutationPostconditionIsSatisfied(
+        operation,
+        captured({ date: "2024", DOI: "" }),
+      ),
+      "a field Zotero did not keep fails",
+    );
+    assert.isFalse(
+      mutationPostconditionIsSatisfied(
+        operation,
+        captured(
+          { date: "2024", DOI: "10.1234/abcd.loopmupo0g23" },
+          [520, 521],
+        ),
+      ),
+      "with no named item, two captured items prove nothing",
+    );
+  });
+
   it("indexes captured item, collection, and saved-search state once", function () {
     const view = new MutationStateView({
       version: 1,

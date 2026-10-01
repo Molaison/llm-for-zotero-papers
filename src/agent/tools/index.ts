@@ -28,7 +28,13 @@ import { createRequestUserInputTool } from "./control/requestUserInput";
 import { createSubmitDocumentTool } from "./control/submitDocument";
 import { createTaskUpdateTool } from "./control/taskUpdate";
 import { SEARCH_CONDITION_SCHEMA } from "./searchConditions";
-import { fail, ok, PAPER_CONTEXT_REF_SCHEMA, validateObject } from "./shared";
+import {
+  fail,
+  normalizePositiveInt,
+  ok,
+  PAPER_CONTEXT_REF_SCHEMA,
+  validateObject,
+} from "./shared";
 import { createAnnotatePdfTool } from "./write/annotatePdf";
 import { createApplyTagsTool } from "./write/applyTags";
 import { createAttachmentUpdateTool } from "./write/attachmentUpdate";
@@ -383,7 +389,36 @@ function createLibraryUpdateTool(tools: {
         return ok({ tool: tools.moveToCollection, args: delegateArgs });
       }
       if (args.kind === "metadata") {
-        return ok({ tool: tools.updateMetadata, args: delegateArgs });
+        // The metadata delegate names one item per operation. itemIds is the
+        // facade's uniform-change list, so each named item gets its own
+        // operation; dropping it would write the open paper instead.
+        const itemIds = [
+          ...new Set(
+            [args.itemId, ...(Array.isArray(args.itemIds) ? args.itemIds : [])]
+              .map((value) => normalizePositiveInt(value))
+              .filter((value): value is number => Boolean(value)),
+          ),
+        ];
+        if (Array.isArray(args.operations)) {
+          return args.itemIds === undefined
+            ? ok({ tool: tools.updateMetadata, args: delegateArgs })
+            : fail(
+                "Use either itemIds with one metadata patch, or per-item operations, not both.",
+              );
+        }
+        const metadataArgs = { ...delegateArgs };
+        delete metadataArgs.itemIds;
+        if (itemIds.length > 1) {
+          delete metadataArgs.itemId;
+          delete metadataArgs.metadata;
+          metadataArgs.operations = itemIds.map((itemId) => ({
+            itemId,
+            metadata: args.metadata,
+          }));
+        } else if (itemIds.length === 1) {
+          metadataArgs.itemId = itemIds[0];
+        }
+        return ok({ tool: tools.updateMetadata, args: metadataArgs });
       }
       if (args.kind === "parent") {
         return ok({ tool: tools.reparentItems, args: delegateArgs });
