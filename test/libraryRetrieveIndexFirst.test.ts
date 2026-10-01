@@ -714,11 +714,77 @@ describe("library retrieve, section steering on the index path", function () {
       });
       return result.snippets[0]?.sectionLabel;
     };
-    assert.equal(await firstLabel(["methods"]), "Data analysis");
+    assert.equal(
+      await firstLabel(["methods"]),
+      "Materials and methods › Data analysis",
+    );
     assert.equal(
       await firstLabel(["results"]),
       "Introduction",
       "its title alone reads as results; its section is methods",
+    );
+  });
+
+  it("names each snippet's section with the section enclosing it", async function () {
+    const index = fakeIndex(() => ({
+      chunks: [
+        {
+          ...hit(11, 10, 6, 1, "Traces were deconvolved."),
+          meta: {
+            sectionLabel: "Data analysis",
+            chunkKind: "body" as const,
+            enclosingSection: "Materials and methods",
+          },
+        },
+        {
+          ...hit(11, 10, 3, 2, "The task design."),
+          meta: {
+            sectionLabel: "Methods",
+            chunkKind: "methods" as const,
+            enclosingSection: "Methods",
+          },
+        },
+        sectionHit(9, 3, "Introduction", "introduction"),
+      ],
+      papers: [paper(11, 10, 9, 1)],
+    }));
+    const rig = createRetrieveServiceRig({ papers: 1, textIndex: index });
+    const result = await rig.service.retrieve({
+      query: "method",
+      depth: "evidence",
+      perPaperTopK: 3,
+      maxTotalSnippets: 3,
+    });
+    assert.deepEqual(
+      result.snippets.map((snippet) => snippet.sectionLabel),
+      ["Materials and methods › Data analysis", "Methods", "Introduction"],
+    );
+  });
+
+  it("never steers to the chunk whose section label is the paper's own title", async function () {
+    const title = "Drift results in a recurrent model";
+    const index = fakeIndex(() => ({
+      chunks: [
+        {
+          ...hit(11, 10, 0, 1, "Title, authors and abstract."),
+          title,
+          meta: { sectionLabel: title, chunkKind: "body" as const },
+        },
+        { ...sectionHit(8, 2, "Results", "results"), title },
+      ],
+      papers: [paper(11, 10, 9, 1)],
+    }));
+    const rig = createRetrieveServiceRig({ papers: 1, textIndex: index });
+    const result = await rig.service.retrieve({
+      query: QUESTION,
+      sections: ["results"],
+      depth: "evidence",
+      perPaperTopK: 1,
+      maxTotalSnippets: 1,
+    });
+    assert.deepEqual(
+      result.snippets.map((snippet) => snippet.sectionLabel),
+      ["Results"],
     );
   });
 

@@ -119,19 +119,73 @@ export function wantedSectionKinds(params: {
   return [...new Set((params.queryVariants || []).flatMap(sectionCueKinds))];
 }
 
+/** Letters only, so a heading and the paper's title compare alike through
+ * line numbers, punctuation and spacing. */
+function titleKey(value?: string): string {
+  return normalizeText(value)
+    .replace(/[^\p{L}]+/gu, " ")
+    .trim();
+}
+
+/** A section label that is the paper's own title names no section. */
+function sectionLabelUnlessTitle(
+  sectionLabel?: string,
+  paperTitle?: string,
+): string | undefined {
+  const key = titleKey(sectionLabel);
+  return key && key === titleKey(paperTitle) ? undefined : sectionLabel;
+}
+
+/** How a chunk's enclosing section and its own title are joined in one label. */
+const SECTION_LABEL_SEPARATOR = " › ";
+
+/**
+ * A chunk's section as one label: "Methods › Data analysis" for a subsection
+ * its standard section encloses, the one name when the two are the same, and
+ * nothing for the paper's own title.
+ */
+export function renderSectionLabel(
+  sectionLabel?: string,
+  enclosingSection?: string,
+  paperTitle?: string,
+): string | undefined {
+  const own = sectionLabelUnlessTitle(sectionLabel?.trim(), paperTitle);
+  const enclosing = enclosingSection?.trim();
+  if (!enclosing) return own || undefined;
+  if (!own || titleKey(own) === titleKey(enclosing)) return enclosing;
+  return `${enclosing}${SECTION_LABEL_SEPARATOR}${own}`;
+}
+
+/** The enclosing section and own title a rendered label joins. */
+export function sectionLabelParts(label?: string): {
+  sectionLabel?: string;
+  enclosingSection?: string;
+} {
+  if (!label) return {};
+  const at = label.indexOf(SECTION_LABEL_SEPARATOR);
+  return at < 0
+    ? { sectionLabel: label }
+    : {
+        enclosingSection: label.slice(0, at),
+        sectionLabel: label.slice(at + SECTION_LABEL_SEPARATOR.length),
+      };
+}
+
 /**
  * Whether a chunk lies in one of `kinds`: by the standard section enclosing
  * it when it has one ("Materials and methods" for a "Data analysis"
- * subsection), else by its own section label.
+ * subsection), else by its own section label, unless that label is the
+ * paper's title.
  */
 export function isInSectionKinds(
   kinds: readonly EvidenceSectionKind[],
   sectionLabel?: string,
   chunkKind?: string,
   enclosingSection?: string,
+  paperTitle?: string,
 ): boolean {
   const section = normalizeEvidenceSectionLabel(
-    enclosingSection || sectionLabel,
+    enclosingSection || sectionLabelUnlessTitle(sectionLabel, paperTitle),
   );
   return kinds.some((kind) =>
     kind === "figure-caption" || kind === "table-caption"
@@ -149,11 +203,18 @@ export function admitsAsBodyEvidence(
   sectionLabel?: string,
   chunkKind?: EvidenceChunkKind,
   enclosingSection?: string,
+  paperTitle?: string,
 ): boolean {
   return (
     isBodyEvidenceSection(sectionLabel, chunkKind) ||
     (chunkKind !== "references" &&
-      isInSectionKinds(kinds, sectionLabel, chunkKind, enclosingSection))
+      isInSectionKinds(
+        kinds,
+        sectionLabel,
+        chunkKind,
+        enclosingSection,
+        paperTitle,
+      ))
   );
 }
 
@@ -162,8 +223,17 @@ function scoreSectionMatch(
   sectionLabel?: string,
   chunkKind?: string,
   enclosingSection?: string,
+  paperTitle?: string,
 ): number {
-  if (isInSectionKinds(kinds, sectionLabel, chunkKind, enclosingSection))
+  if (
+    isInSectionKinds(
+      kinds,
+      sectionLabel,
+      chunkKind,
+      enclosingSection,
+      paperTitle,
+    )
+  )
     return 2;
   const section = normalizeEvidenceSectionLabel(
     enclosingSection || sectionLabel,
@@ -212,6 +282,8 @@ type RankedEvidenceCandidate = {
   enclosingSection?: string;
   chunkKind?: string;
   chunkIndex?: number;
+  /** The paper's title: a section label equal to it names no section. */
+  title?: string;
 };
 
 /** Candidates in `kinds` first, then by base score, then in paper order. */
@@ -228,12 +300,14 @@ export function compareEvidenceCandidatesForSections<
         right.sectionLabel,
         right.chunkKind,
         right.enclosingSection,
+        right.title,
       ) -
       scoreSectionMatch(
         kinds,
         left.sectionLabel,
         left.chunkKind,
         left.enclosingSection,
+        left.title,
       );
     if (preferenceDelta !== 0) return preferenceDelta;
     const scoreDelta =

@@ -4,6 +4,9 @@ import {
   compareEvidenceCandidatesForSections,
   isBodyEvidenceSection,
   isFrontMatterSection,
+  isInSectionKinds,
+  renderSectionLabel,
+  sectionLabelParts,
   wantedSectionKinds,
 } from "../src/shared/libraryChatEvidencePolicy";
 import type {
@@ -134,6 +137,86 @@ describe("libraryChatEvidencePolicy", function () {
         question,
       );
     }
+  });
+
+  it("renders a chunk's section as one label: the enclosing section, then its own title when that differs", function () {
+    assert.equal(
+      renderSectionLabel("Data analysis", "Materials and methods"),
+      "Materials and methods › Data analysis",
+    );
+    assert.equal(renderSectionLabel("Methods", "Methods"), "Methods");
+    assert.equal(renderSectionLabel("2. Methods:", "Methods"), "Methods");
+    assert.equal(renderSectionLabel(undefined, "Results"), "Results");
+    assert.equal(renderSectionLabel("Data analysis"), "Data analysis");
+    assert.isUndefined(renderSectionLabel(undefined, undefined));
+    // A paper's own title is no section: a running header inside Results
+    // reads as Results, and the title chunk as nothing.
+    const title = "Network mechanisms underlying drift in area CA1";
+    assert.equal(
+      renderSectionLabel(
+        "1 Network mechanisms underlying drift in area CA1",
+        "61 Results",
+        title,
+      ),
+      "61 Results",
+    );
+    assert.isUndefined(renderSectionLabel(title, undefined, title));
+    assert.deepEqual(
+      sectionLabelParts("Materials and methods › Data analysis"),
+      {
+        enclosingSection: "Materials and methods",
+        sectionLabel: "Data analysis",
+      },
+    );
+    assert.deepEqual(sectionLabelParts("Methods"), { sectionLabel: "Methods" });
+    assert.deepEqual(sectionLabelParts(undefined), {});
+  });
+
+  it("never reads a paper's title chunk as a section", function () {
+    const title =
+      "Representational drift as a result of implicit regularization";
+    assert.isTrue(
+      isInSectionKinds(["results"], title, "body"),
+      "the title alone reads as results",
+    );
+    assert.isFalse(
+      isInSectionKinds(["results"], title, "body", undefined, title),
+    );
+    assert.isFalse(
+      isInSectionKinds(
+        ["results"],
+        "1 Representational drift as a result of implicit regularization",
+        "body",
+        undefined,
+        title,
+      ),
+      "line numbers and punctuation do not hide the title",
+    );
+    const rows = [
+      {
+        ...candidate({
+          chunkIndex: 0,
+          sectionLabel: title,
+          evidenceScore: 0.9,
+        }),
+        title,
+      },
+      {
+        ...candidate({
+          chunkIndex: 5,
+          sectionLabel: "Results",
+          evidenceScore: 0.1,
+        }),
+        title,
+      },
+    ];
+    rows.sort(
+      compareEvidenceCandidatesForSections(
+        ["results"],
+        (row) => row.evidenceScore,
+      ),
+    );
+    assert.equal(rows[0].sectionLabel, "Results");
   });
 
   it("maps a section label to one chunk kind, whole words only", function () {

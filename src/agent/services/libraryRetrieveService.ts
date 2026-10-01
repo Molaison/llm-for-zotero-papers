@@ -40,6 +40,7 @@ import {
   admitsAsBodyEvidence,
   compareEvidenceCandidatesForSections,
   isBodyEvidenceSection,
+  renderSectionLabel,
   wantedSectionKinds,
   type EvidenceSectionKind,
 } from "../../shared/libraryChatEvidencePolicy";
@@ -2537,6 +2538,7 @@ export class LibraryRetrieveService {
             enclosingSection: hit.meta.enclosingSection,
             chunkKind: hit.meta.chunkKind,
             chunkIndex: hit.chunkIndex,
+            title: hit.title || paperContext.title,
           }))
           .sort(
             compareEvidenceCandidatesForSections(
@@ -2552,6 +2554,7 @@ export class LibraryRetrieveService {
         hit.meta.sectionLabel,
         hit.meta.chunkKind,
         hit.meta.enclosingSection,
+        hit.title || paperContext.title,
       );
     // Body evidence fills the slots first; front matter is capped at one.
     const ordered = params.preferBodyEvidence
@@ -2573,7 +2576,11 @@ export class LibraryRetrieveService {
         sourceLabel,
         sourceKind: sourceKindFromSourceType(hit.sourceType, paperContext),
         matchMethod: "bm25",
-        sectionLabel: hit.meta.sectionLabel,
+        sectionLabel: renderSectionLabel(
+          hit.meta.sectionLabel,
+          hit.meta.enclosingSection,
+          hit.title || paperContext.title,
+        ),
         chunkKind: hit.meta.chunkKind,
         // Same convention as the direct path's BM25 snippets: no
         // charStart/charEnd/pageLabel (exact snippets carry chunk-relative
@@ -3104,7 +3111,11 @@ export class LibraryRetrieveService {
           sourceLabel,
           sourceKind,
           matchMethod,
-          sectionLabel: candidate.sectionLabel,
+          sectionLabel: renderSectionLabel(
+            candidate.sectionLabel,
+            candidate.enclosingSection,
+            candidate.title,
+          ),
           chunkKind: candidate.chunkKind,
           snippet: truncateText(candidate.chunkText, 900),
           surroundingText: truncateText(candidate.chunkText, 1200),
@@ -3131,6 +3142,7 @@ export class LibraryRetrieveService {
             candidate.sectionLabel,
             candidate.chunkKind,
             candidate.enclosingSection,
+            candidate.title,
           );
         for (const candidate of candidates) {
           if (isFrontMatterCandidate(candidate)) continue;
@@ -3181,7 +3193,11 @@ export class LibraryRetrieveService {
         sourceLabel: formatPaperSourceLabel(params.paperContext),
         sourceKind: params.sourceKind,
         matchMethod: "exact",
-        sectionLabel: meta?.sectionLabel,
+        sectionLabel: renderSectionLabel(
+          meta?.sectionLabel,
+          meta?.enclosingSection,
+          params.paperContext.title,
+        ),
         chunkKind: meta?.chunkKind,
         charStart: match.start,
         charEnd: match.end,

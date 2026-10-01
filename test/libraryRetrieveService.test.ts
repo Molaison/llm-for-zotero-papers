@@ -2753,7 +2753,11 @@ describe("LibraryRetrieveService body-evidence defaults", function () {
         });
         return result.snippets[0]?.sectionLabel;
       };
-      assert.equal(await firstLabel(["methods"]), "Data analysis");
+      assert.equal(
+        await firstLabel(["methods"]),
+        "Materials and methods › Data analysis",
+        "the snippet names its enclosing section too",
+      );
       assert.equal(await firstLabel(["results"]), "Introduction");
     });
 

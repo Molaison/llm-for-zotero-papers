@@ -17,6 +17,7 @@ import {
   formatPaperSourceLabel,
 } from "../../services/paperContent/paperAttribution";
 import type { PaperContextRef } from "../../shared/types";
+import { renderSectionLabel } from "../../shared/libraryChatEvidencePolicy";
 import { PdfService } from "./pdfService";
 import type { ModelProfileOverride } from "../../modelCapabilities";
 
@@ -252,7 +253,11 @@ export class RetrievalService {
       const paperResults: RetrievalResult[] = candidates.map((candidate) => ({
         paperContext,
         chunkIndex: candidate.chunkIndex,
-        sectionLabel: candidate.sectionLabel,
+        sectionLabel: renderSectionLabel(
+          candidate.sectionLabel,
+          candidate.enclosingSection,
+          candidate.title,
+        ),
         sectionPath: candidate.sectionPath,
         chunkKind: candidate.chunkKind,
         citationLabel: formatPaperCitationLabel(paperContext),
