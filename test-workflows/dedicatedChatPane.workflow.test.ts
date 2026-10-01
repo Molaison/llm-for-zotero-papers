@@ -79,8 +79,9 @@ describe("workflow: dedicated native chat pane", function () {
   }
 
   /**
-   * Both layouts share one header: the toggle row, then the actions row with
-   * the divider that closes the header. Neither has a docked title row.
+   * Independent: the toggle row, then the actions row. Stacked: one row, with
+   * the mode chip in the actions row and no toggle row. Neither has a docked
+   * title row or a divider under the header.
    */
   function assertHeaderRows(
     details: Element,
@@ -93,24 +94,72 @@ describe("workflow: dedicated native chat pane", function () {
     );
     const toggleRow = section.querySelector(".llm-header-toggle-row")!;
     const navRow = section.querySelector(".llm-header-nav-row")!;
-    assert.isAbove(toggleRow.getBoundingClientRect().height, 0);
-    assert.isAtMost(
-      toggleRow.getBoundingClientRect().bottom,
-      navRow.getBoundingClientRect().top + 0.5,
-      `the toggle row sits above the actions row (${layout})`,
-    );
+    const chip = section.querySelector("#llm-mode-capsule")!;
+    const firstRow = layout === "independent" ? toggleRow : navRow;
+    if (layout === "independent") {
+      assert.isAbove(toggleRow.getBoundingClientRect().height, 0);
+      assert.isAtMost(
+        toggleRow.getBoundingClientRect().bottom,
+        navRow.getBoundingClientRect().top + 0.5,
+        `the toggle row sits above the actions row (${layout})`,
+      );
+      assert.equal(
+        chip.getBoundingClientRect().width,
+        0,
+        `no mode chip (${layout})`,
+      );
+    } else {
+      assert.equal(
+        toggleRow.getBoundingClientRect().height,
+        0,
+        `no toggle row (${layout})`,
+      );
+      assert.isAbove(
+        chip.getBoundingClientRect().width,
+        0,
+        `the mode chip shows (${layout})`,
+      );
+      assert.isTrue(navRow.contains(chip), `the chip is in the one row`);
+    }
     assert.equal(
       win.getComputedStyle(navRow).borderBottomStyle,
       "none",
       `no divider under the actions row (${layout})`,
     );
-    // The toggle opens the header, a few pixels under the panel's top.
+    // The first row opens the header, a few pixels under the panel's top.
     const panelTop = section
       .querySelector(".llm-panel")!
       .getBoundingClientRect().top;
-    const gap = toggleRow.getBoundingClientRect().top - panelTop;
-    assert.isAtLeast(gap, 0, `toggle row starts inside the panel (${layout})`);
-    assert.isAtMost(gap, 12, `toggle row leads the header (${layout})`);
+    const gap = firstRow.getBoundingClientRect().top - panelTop;
+    assert.isAtLeast(gap, 0, `first row starts inside the panel (${layout})`);
+    assert.isAtMost(gap, 12, `first row leads the header (${layout})`);
+  }
+
+  /**
+   * Pick a mode with the control the layout shows: the tab (Independent) or
+   * the chip (Stacked), which toggles on a click without hover.
+   */
+  function pickMode(panel: Element, mode: "paper" | "library") {
+    const layout = win.document.documentElement.getAttribute(
+      "data-llm-sidebar-layout",
+    );
+    if (layout === "stacked") {
+      const chip = panel.querySelector("#llm-mode-capsule") as HTMLElement;
+      assert.isAbove(chip.getBoundingClientRect().width, 0, "chip shows");
+      if (chip.dataset.mode === mode) return;
+      const shown = panel.querySelector(
+        `#llm-mode-option-${chip.dataset.mode}`,
+      ) as HTMLElement;
+      shown.dispatchEvent(
+        new win.MouseEvent("click", { bubbles: true, cancelable: true }),
+      );
+      return;
+    }
+    (
+      panel.querySelector(
+        mode === "paper" ? "#llm-paper-chat-tab" : "#llm-library-chat-tab",
+      ) as HTMLElement
+    ).click();
   }
 
   function assertSidebarGaps(details: Element) {
@@ -222,9 +271,9 @@ describe("workflow: dedicated native chat pane", function () {
       () =>
         ((
           details.querySelector(
-            ".llm-dedicated-chat-pane .llm-header-toggle-row",
+            ".llm-dedicated-chat-pane #llm-mode-capsule",
           ) as HTMLElement | null
-        )?.getBoundingClientRect().height ?? 0) > 0,
+        )?.getBoundingClientRect().width ?? 0) > 0,
       "stacked chat header is laid out",
     );
     assertHeaderRows(details, "stacked");
@@ -338,12 +387,13 @@ describe("workflow: dedicated native chat pane", function () {
           panel().querySelectorAll("[data-paper-context-item-id]").length === 2,
         "drop prepares a library chat and renders both context chips",
       );
-      // Both header rows show the moment the library chat lands, before any
-      // history refresh: the toggle row and the history bar never diverge.
+      // The header shows the moment the library chat lands, before any
+      // history refresh: the mode control and the history bar never diverge.
       for (const selector of [
-        ".llm-header-toggle-row",
+        ...(layout === "independent"
+          ? [".llm-header-toggle-row", "#llm-library-chat-tab"]
+          : ["#llm-mode-capsule", "#llm-mode-option-library"]),
         "#llm-history-bar",
-        "#llm-library-chat-tab",
         "#llm-history-new",
       ]) {
         const rect = panel().querySelector(selector).getBoundingClientRect();
@@ -354,6 +404,13 @@ describe("workflow: dedicated native chat pane", function () {
           .querySelector("#llm-library-chat-tab")
           .classList.contains("active"),
         "Library chat is the active tab",
+      );
+      assert.equal(
+        panel()
+          .querySelector("#llm-mode-option-library")
+          .getAttribute("aria-pressed"),
+        "true",
+        "the chip shows Library chat",
       );
       assertHeaderRows(details, layout);
       await until(
@@ -408,7 +465,7 @@ describe("workflow: dedicated native chat pane", function () {
         panel().querySelectorAll("[data-paper-context-item-id]"),
         2,
       );
-      panel().querySelector("#llm-paper-chat-tab").click();
+      pickMode(panel(), "paper");
       await until(
         () => panel().dataset.conversationKind === "paper",
         "paper mode remains available",
@@ -826,7 +883,7 @@ describe("workflow: dedicated native chat pane", function () {
           ".llm-dedicated-chat-pane > collapsible-section",
         ).collapsible,
       );
-      (panel().querySelector("#llm-library-chat-tab") as HTMLElement).click();
+      pickMode(panel(), "library");
       await until(
         () => panel().dataset.conversationKind === "global",
         "Library chat opens in stacked reader",
@@ -838,7 +895,7 @@ describe("workflow: dedicated native chat pane", function () {
         "stacked reader tabs preserve Library lock",
       );
       await Zotero.Promise.delay(300);
-      (panel().querySelector("#llm-paper-chat-tab") as HTMLElement).click();
+      pickMode(panel(), "paper");
       await until(
         () =>
           panel().dataset.contextOwnerItemId ===

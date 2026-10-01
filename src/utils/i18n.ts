@@ -46,6 +46,7 @@ const zhCN: Record<string, string> = {
   "Library chat": "文献库对话",
   "Paper chat": "论文对话",
   "Note chat": "笔记对话",
+  "Chat mode": "对话模式",
   "New chat": "新对话",
   "Search history": "搜索历史记录",
   Skills: "技能",

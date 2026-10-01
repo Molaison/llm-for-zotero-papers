@@ -1,7 +1,12 @@
 import { assert } from "chai";
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   resolveSidebarChatModeTabAction,
   resolveSidebarChatModeToggleState,
+  resolveSidebarModeChipArrow,
+  resolveSidebarModeChipPick,
 } from "../src/modules/contextPanel/sidebarChatModeToggle";
 import { resolveStandalonePaperTabLabel } from "../src/modules/contextPanel/standaloneTabLabel";
 
@@ -164,6 +169,156 @@ describe("sidebar chat mode toggle", function () {
           );
         }
       }
+    });
+  });
+
+  it("routes the Stacked mode chip through the tabs' switch path", function () {
+    const controller = readFileSync(
+      resolve(
+        dirname(fileURLToPath(import.meta.url)),
+        "..",
+        "src/modules/contextPanel/setupHandlers/controllers/historyLifecycleController.ts",
+      ),
+      "utf8",
+    );
+    // One switch path: the tab clicks and the chip's picks both call it, so
+    // the chip adds no mode logic of its own.
+    assert.equal(
+      controller.match(/const switchSidebarChatMode = async/g)?.length,
+      1,
+    );
+    assert.match(
+      controller,
+      /installSidebarModeSwitch\(modeSwitch, \(requested\) => \{\s*void switchSidebarChatMode\(requested\)/,
+    );
+    assert.match(
+      controller,
+      /tabButton\.addEventListener\("click"[\s\S]*?void switchSidebarChatMode\(requested\)/,
+    );
+  });
+
+  // The Stacked layout's mode chip picks a mode for the same switch path the
+  // tabs use; these decide only which mode a gesture asks for.
+  describe("resolveSidebarModeChipPick", function () {
+    it("picks the clicked option while the switch is open", function () {
+      assert.equal(
+        resolveSidebarModeChipPick({
+          expanded: true,
+          clicked: "library",
+          active: "paper",
+        }),
+        "library",
+      );
+      assert.equal(
+        resolveSidebarModeChipPick({
+          expanded: true,
+          clicked: "paper",
+          active: "library",
+        }),
+        "paper",
+      );
+    });
+
+    it("makes no pick when the open switch's current mode is clicked", function () {
+      for (const active of ["paper", "library"] as const) {
+        assert.isNull(
+          resolveSidebarModeChipPick({
+            expanded: true,
+            clicked: active,
+            active,
+          }),
+        );
+      }
+    });
+
+    it("toggles on a click with no hover, as on touch", function () {
+      assert.equal(
+        resolveSidebarModeChipPick({
+          expanded: false,
+          clicked: "paper",
+          active: "paper",
+        }),
+        "library",
+      );
+      assert.equal(
+        resolveSidebarModeChipPick({
+          expanded: false,
+          clicked: "library",
+          active: "library",
+        }),
+        "paper",
+      );
+    });
+  });
+
+  describe("resolveSidebarModeChipArrow", function () {
+    it("opens a closed switch with either arrow and picks nothing", function () {
+      for (const key of ["ArrowDown", "ArrowUp"] as const) {
+        assert.deepEqual(
+          resolveSidebarModeChipArrow({
+            key,
+            expanded: false,
+            rows: ["paper", "library"],
+            active: "paper",
+          }),
+          { open: true, pick: null, focus: null },
+        );
+      }
+    });
+
+    it("picks the lower row with Down and the upper row with Up", function () {
+      assert.deepEqual(
+        resolveSidebarModeChipArrow({
+          key: "ArrowDown",
+          expanded: true,
+          rows: ["paper", "library"],
+          active: "paper",
+        }),
+        { open: false, pick: "library", focus: "library" },
+      );
+      assert.deepEqual(
+        resolveSidebarModeChipArrow({
+          key: "ArrowUp",
+          expanded: true,
+          rows: ["paper", "library"],
+          active: "library",
+        }),
+        { open: false, pick: "paper", focus: "paper" },
+      );
+    });
+
+    it("follows the rows as they opened, not the current mode", function () {
+      // Opened in Library chat: Library is the upper row until it closes.
+      assert.deepEqual(
+        resolveSidebarModeChipArrow({
+          key: "ArrowDown",
+          expanded: true,
+          rows: ["library", "paper"],
+          active: "library",
+        }),
+        { open: false, pick: "paper", focus: "paper" },
+      );
+      assert.deepEqual(
+        resolveSidebarModeChipArrow({
+          key: "ArrowUp",
+          expanded: true,
+          rows: ["library", "paper"],
+          active: "paper",
+        }),
+        { open: false, pick: "library", focus: "library" },
+      );
+    });
+
+    it("only moves focus when the arrow points at the current mode", function () {
+      assert.deepEqual(
+        resolveSidebarModeChipArrow({
+          key: "ArrowDown",
+          expanded: true,
+          rows: ["paper", "library"],
+          active: "library",
+        }),
+        { open: false, pick: null, focus: "library" },
+      );
     });
   });
 });

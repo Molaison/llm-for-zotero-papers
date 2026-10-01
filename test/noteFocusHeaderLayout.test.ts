@@ -19,17 +19,27 @@ describe("note focus header layout", function () {
       "historyBar.append(historyNewBtn, historyToggle, headerRuntimeControls)",
       "note focus must keep the same +, history, runtime order as normal chat",
     );
-    assert.include(
+    // Independent: the divider, then the runtime icons (the toggle is its own
+    // row above). Stacked: the mode chip in the divider's place, one row.
+    // Both are always built; CSS picks one from the root layout attribute.
+    assert.match(
       buildUi,
-      "headerRuntimeControls.append(runtimeDivider, runtimeSystemControls.group)",
-      "runtime icons must follow the divider after the history button",
+      /headerRuntimeControls\.append\(\s*runtimeDivider,\s*modeSwitch,\s*runtimeSystemControls\.group,?\s*\)/,
+      "runtime icons must follow the divider (Independent) or the chip (Stacked)",
     );
+    assert.include(buildUi, "headerTop.append(toggleRow, headerNavRow)");
     assert.include(buildUi, "resolveSidebarChatModeToggleState");
     assert.include(setupHandlers, "resolveSidebarChatModeToggleState");
     // Both render paths label the paper slot through the shared resolver,
-    // which yields "Note" for note sessions.
+    // which yields "Note chat" for note sessions, in the tabs and the chip.
     assert.include(buildUi, "t(chatModeToggle.paperTabLabel)");
     assert.include(setupHandlers, "t(state.paperTabLabel)");
+    assert.match(
+      buildUi,
+      /createSidebarModeSwitch\(\s*doc,\s*\{[^}]*paperLabel: t\(chatModeToggle\.paperTabLabel\)/,
+      "the chip takes the paper slot's label from the same resolver",
+    );
+    assert.include(setupHandlers, "syncSidebarModeSwitch(modeSwitch, {");
     assert.notInclude(
       setupHandlers,
       'historyNewBtn.style.display = noteSession ? "none" : ""',

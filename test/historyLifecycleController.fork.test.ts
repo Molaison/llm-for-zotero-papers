@@ -293,6 +293,7 @@ function createControllerHarness(
     topToast,
     paperChatTabBtn: null,
     libraryChatTabBtn: null,
+    modeSwitch: null,
     getItem: () => currentItem,
     setItem: (item) => {
       currentItem = item;

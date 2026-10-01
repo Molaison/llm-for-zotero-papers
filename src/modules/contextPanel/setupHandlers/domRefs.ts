@@ -29,6 +29,8 @@ export type PanelDomRefs = {
   chatModeTabs: HTMLDivElement | null;
   paperChatTabBtn: HTMLButtonElement | null;
   libraryChatTabBtn: HTMLButtonElement | null;
+  /** The Stacked layout's mode chip and its hover switch. */
+  modeSwitch: HTMLDivElement | null;
   historyRowMenu: HTMLDivElement | null;
   historyRowRenameBtn: HTMLButtonElement | null;
   historyUndo: HTMLDivElement | null;
@@ -164,6 +166,9 @@ export function getPanelDomRefs(body: Element): PanelDomRefs {
     libraryChatTabBtn: body.querySelector(
       "#llm-library-chat-tab",
     ) as HTMLButtonElement | null,
+    modeSwitch: body.querySelector(
+      "#llm-mode-capsule",
+    ) as HTMLDivElement | null,
     historyMenu: body.querySelector(
       "#llm-history-menu",
     ) as HTMLDivElement | null,

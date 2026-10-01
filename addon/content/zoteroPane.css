@@ -362,10 +362,11 @@
 }
 
 /*
- * Row 1: the Paper chat | Library chat toggle, centered, at the standalone
- * window's own segmented-tab size. It flows with the header: no fixed height,
- * no divider. No code writes its display, so it is laid out whenever the
- * history bar below is (that bar's display is !important).
+ * Row 1 (Independent): the Paper chat | Library chat toggle, centered, at the
+ * standalone window's own segmented-tab size. It flows with the header: no
+ * fixed height, no divider. No code writes its display, so it is laid out
+ * whenever the history bar below is (that bar's display is !important); only
+ * the Stacked layout drops it, for the mode chip in row 2.
  */
 .llm-header-toggle-row {
   --llm-standalone-ui-font-size: var(--llm-fs-12);
@@ -666,6 +667,271 @@
 
 .llm-header-mode-tab:disabled:not(.active):hover {
   color: var(--fill-secondary);
+}
+
+/* ---- Stacked: one header row, with the mode chip ----
+ * Every header builds both controls and the root layout attribute picks one,
+ * so a live layout change swaps them without rebuilding the panel.
+ * Independent keeps the toggle row above the actions row; Stacked drops it
+ * and shows the chip in the divider's place. The standalone window hides
+ * this header altogether. */
+:root[data-llm-sidebar-layout="stacked"] .llm-header-toggle-row,
+:root[data-llm-sidebar-layout="stacked"] .llm-header-runtime-divider {
+  display: none;
+}
+
+:root[data-llm-sidebar-layout="stacked"] .llm-mode-switch {
+  display: grid;
+}
+
+/* An empty Stacked library opens the full-pane chat: its single row takes
+ * the top space the toggle row gives the Independent pane. */
+:root[data-llm-sidebar-layout="stacked"]:not([data-llm-pane-view="stacked"])
+  .llm-dedicated-chat-pane
+  .llm-header-nav-row {
+  padding-top: 6px;
+}
+
+/* At rest the chip is the selected pill. On hover or keyboard focus a dark
+ * track drops down from it, the current mode in the chip's place and the
+ * other beneath. The open switch stays in the chip's column and paints over
+ * the top of the chat: above the Task progress card (8), below the header
+ * menus (13, 14). sidebarModeSwitch.ts writes the data attributes. */
+.llm-mode-switch {
+  --llm-mode-switch-duration: 300ms;
+  --llm-mode-switch-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --llm-mode-switch-track: color-mix(
+    in srgb,
+    var(--material-sidepane) 66%,
+    black 34%
+  );
+  --llm-mode-switch-thumb: color-mix(
+    in srgb,
+    var(--fill-primary) 11%,
+    var(--material-sidepane)
+  );
+  --llm-mode-switch-thumb-edge: rgba(255, 255, 255, 0.05);
+  /* --stroke-secondary is unset in Zotero 10: fall back to its dark value. */
+  --llm-mode-switch-edge: var(--stroke-secondary, rgba(255, 255, 255, 0.1));
+  position: relative;
+  z-index: 12;
+  display: none;
+  flex: 0 0 auto;
+  height: 22px;
+  margin: 0;
+}
+
+@media (prefers-color-scheme: light) {
+  .llm-mode-switch {
+    --llm-mode-switch-track: color-mix(
+      in srgb,
+      var(--material-sidepane) 88%,
+      black 12%
+    );
+    --llm-mode-switch-thumb: var(--material-background);
+    --llm-mode-switch-thumb-edge: rgba(0, 0, 0, 0.06);
+    --llm-mode-switch-edge: var(--stroke-secondary, rgba(0, 0, 0, 0.09));
+  }
+}
+
+/* Laid out but never painted: the chip is as wide as the longest label it
+ * can show (Note chat and the WebChat sites included), so it keeps one width
+ * in every state and the icons beside it never shift. */
+.llm-mode-switch-sizer {
+  display: grid;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+/* Both labels are semibold in every state, so widths never jump. */
+.llm-mode-switch-sizer > span,
+.llm-mode-switch-option {
+  font: inherit;
+  font-size: var(--llm-fs-12);
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.llm-mode-switch-sizer > span {
+  grid-area: 1 / 1;
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 9px;
+}
+
+.llm-mode-switch-track {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 22px;
+  box-sizing: border-box;
+  border-radius: 11px;
+  background: var(--llm-mode-switch-track);
+  box-shadow: inset 0 0 0 1px var(--llm-mode-switch-edge);
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    height var(--llm-mode-switch-duration) var(--llm-mode-switch-ease),
+    opacity 200ms ease,
+    box-shadow var(--llm-mode-switch-duration) ease;
+}
+
+/* Open: two 22px rows, 2px apart, inside 3px of padding. The track keeps the
+ * pointer inside the switch between the rows. */
+.llm-mode-switch[data-expanded="true"] .llm-mode-switch-track {
+  height: 52px;
+  opacity: 1;
+  pointer-events: auto;
+  box-shadow:
+    inset 0 0 0 1px var(--llm-mode-switch-edge),
+    0 6px 16px rgba(0, 0, 0, 0.28);
+}
+
+/* The selected pill: at rest it is the chip; open, it slides to its row. */
+.llm-mode-switch-thumb {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 22px;
+  box-sizing: border-box;
+  border-radius: 11px;
+  background: var(--llm-mode-switch-thumb);
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.28),
+    inset 0 0 0 1px var(--llm-mode-switch-thumb-edge);
+  pointer-events: none;
+  transition:
+    transform var(--llm-mode-switch-duration) var(--llm-mode-switch-ease),
+    width var(--llm-mode-switch-duration) var(--llm-mode-switch-ease),
+    border-radius var(--llm-mode-switch-duration) var(--llm-mode-switch-ease);
+}
+
+.llm-mode-switch[data-expanded="true"] .llm-mode-switch-thumb {
+  width: calc(100% - 6px);
+  border-radius: 8px;
+  transform: translate(3px, 27px);
+}
+
+.llm-mode-switch[data-expanded="true"][data-top="paper"][data-mode="paper"]
+  .llm-mode-switch-thumb,
+.llm-mode-switch[data-expanded="true"][data-top="library"][data-mode="library"]
+  .llm-mode-switch-thumb {
+  transform: translate(3px, 3px);
+}
+
+.llm-mode-switch-option {
+  appearance: none;
+  -moz-appearance: none;
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 22px;
+  min-width: 0;
+  min-height: 0;
+  margin: 0;
+  padding: 0 9px;
+  box-sizing: border-box;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  color: var(--fill-secondary);
+  cursor: pointer;
+  /* Closed, the other mode waits a row down, out of sight. */
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(0, 24px);
+  transition:
+    transform var(--llm-mode-switch-duration) var(--llm-mode-switch-ease),
+    width var(--llm-mode-switch-duration) var(--llm-mode-switch-ease),
+    opacity 180ms ease,
+    color 200ms ease;
+}
+
+.llm-mode-switch-option[aria-pressed="true"] {
+  z-index: 2;
+  color: var(--fill-primary);
+  opacity: 1;
+  pointer-events: auto;
+  transform: none;
+}
+
+/* Closing after a pick from the upper row: the old mode slides under the
+ * chip as it fades. */
+.llm-mode-switch[data-top="paper"]:not([data-expanded="true"])
+  .llm-mode-switch-option[data-tab="paper"],
+.llm-mode-switch[data-top="library"]:not([data-expanded="true"])
+  .llm-mode-switch-option[data-tab="library"] {
+  transform: none;
+}
+
+/* Open, the rows keep the order they opened with: a click moves the pill,
+ * never the word under the pointer. */
+.llm-mode-switch[data-expanded="true"] .llm-mode-switch-option {
+  width: calc(100% - 6px);
+  padding-inline: 3px;
+  opacity: 1;
+  pointer-events: auto;
+  transform: translate(3px, 27px);
+}
+
+.llm-mode-switch[data-expanded="true"][data-top="paper"]
+  .llm-mode-switch-option[data-tab="paper"],
+.llm-mode-switch[data-expanded="true"][data-top="library"]
+  .llm-mode-switch-option[data-tab="library"] {
+  transform: translate(3px, 3px);
+}
+
+.llm-mode-switch[data-expanded="true"]
+  .llm-mode-switch-option:not([aria-pressed="true"]):hover {
+  color: var(--fill-primary);
+}
+
+.llm-mode-switch-option:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
+/* Note sessions and WebChat: a static pill. */
+.llm-mode-switch[data-static="true"] .llm-mode-switch-option {
+  cursor: default;
+}
+
+/* The chat settles in when the mode changes, in the Stacked sidebar. */
+:root[data-llm-sidebar-layout="stacked"]
+  .llm-dedicated-chat-pane
+  .llm-messages.llm-mode-switch-fade {
+  animation: llm-mode-switch-fade 260ms ease both;
+}
+
+@keyframes llm-mode-switch-fade {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .llm-mode-switch,
+  .llm-mode-switch * {
+    transition-duration: 0ms !important;
+  }
+
+  .llm-messages.llm-mode-switch-fade {
+    animation: none !important;
+  }
 }
 
 .llm-runtime-system-controls {
@@ -1082,6 +1348,12 @@
     min-width: 24px;
     height: 24px;
     min-height: 24px;
+  }
+
+  /* With the history bar's gap gone, the Stacked chip keeps 4px from
+   * history, as on its Codex side. */
+  .llm-mode-switch {
+    margin-inline-start: 4px;
   }
 }
 

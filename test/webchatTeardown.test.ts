@@ -197,12 +197,18 @@ describe("WebChat connection check ownership", function () {
     );
   });
 
-  it("starts the poll only where the connection dot is shown", function () {
+  it("starts the poll only where the connection dots are shown", function () {
     const setupHandlers = source(SETUP_HANDLERS_PATH);
+    // One poll paints both dots: the Independent tab's and the Stacked chip's.
     assert.strictEqual(
-      occurrences(setupHandlers, /ConnectionCheck\(dot\)/g),
+      occurrences(setupHandlers, /startConnectionCheck\(/g),
       1,
       "the connection check must be started from exactly one place",
+    );
+    assert.strictEqual(
+      occurrences(setupHandlers, /ConnectionCheck\(dot, modeSwitchDot\)/g),
+      1,
+      "the one poll covers the tab's and the chip's dots",
     );
 
     const applyStart = setupHandlers.indexOf(
@@ -217,21 +223,39 @@ describe("WebChat connection check ownership", function () {
     const applyBody = setupHandlers.slice(applyStart, applyEnd);
 
     const dotAttached = applyBody.indexOf("paperChatTabBtn.prepend(dot);");
-    const startCall = applyBody.search(/ConnectionCheck\(dot\)/);
+    const chipDotAttached = applyBody.indexOf(
+      "const modeSwitchDot = showSidebarModeSwitchDot(modeSwitch);",
+    );
+    const startCall = applyBody.search(/ConnectionCheck\(dot, modeSwitchDot\)/);
     assert.isAbove(dotAttached, -1, "mode tab dot attachment not found");
+    assert.isAbove(chipDotAttached, -1, "mode chip dot attachment not found");
     assert.isAbove(
       startCall,
       dotAttached,
       "the poll must start after the dot is attached to the mode tab",
     );
+    assert.isAbove(
+      startCall,
+      chipDotAttached,
+      "the poll must start after the dot is attached to the mode chip",
+    );
 
     const dotRemoved = applyBody.indexOf("oldDot.remove();");
+    const chipDotRemoved = applyBody.indexOf(
+      "removeSidebarModeSwitchDot(modeSwitch);",
+    );
     const stopCall = applyBody.search(/stop\w*ConnectionCheck\(\);/);
     assert.isAbove(dotRemoved, -1, "mode tab dot removal not found");
+    assert.isAbove(chipDotRemoved, -1, "mode chip dot removal not found");
     assert.isAbove(
       stopCall,
       dotRemoved,
       "the poll must stop where the dot is removed",
+    );
+    assert.isAbove(
+      stopCall,
+      chipDotRemoved,
+      "the poll must stop where the chip's dot is removed",
     );
   });
 });

@@ -55,3 +55,49 @@ export function resolveSidebarChatModeTabAction(input: {
   if (input.requested === "library") return "switch-library";
   return input.hasPaper ? "switch-paper" : "no-paper";
 }
+
+const otherSidebarChatModeTab = (
+  tab: SidebarChatModeTab,
+): SidebarChatModeTab => (tab === "paper" ? "library" : "paper");
+
+/**
+ * A click on the Stacked layout's mode chip. While its switch is open the
+ * clicked option is the pick; closed (a click with no hover, as on touch) the
+ * chip toggles. The mode already shown is no pick. Picks go through the same
+ * switch path as the tabs.
+ */
+export function resolveSidebarModeChipPick(input: {
+  expanded: boolean;
+  clicked: SidebarChatModeTab;
+  active: SidebarChatModeTab;
+}): SidebarChatModeTab | null {
+  const pick = input.expanded
+    ? input.clicked
+    : otherSidebarChatModeTab(input.active);
+  return pick === input.active ? null : pick;
+}
+
+/**
+ * ↑/↓ on the mode chip. A closed switch opens. An open one picks the row the
+ * key points to, in the order the rows had when the switch opened, and moves
+ * focus there.
+ */
+export function resolveSidebarModeChipArrow(input: {
+  key: "ArrowUp" | "ArrowDown";
+  expanded: boolean;
+  /** The rows top to bottom, as the switch opened. */
+  rows: readonly [SidebarChatModeTab, SidebarChatModeTab];
+  active: SidebarChatModeTab;
+}): {
+  open: boolean;
+  pick: SidebarChatModeTab | null;
+  focus: SidebarChatModeTab | null;
+} {
+  if (!input.expanded) return { open: true, pick: null, focus: null };
+  const target = input.key === "ArrowUp" ? input.rows[0] : input.rows[1];
+  return {
+    open: false,
+    pick: target === input.active ? null : target,
+    focus: target,
+  };
+}

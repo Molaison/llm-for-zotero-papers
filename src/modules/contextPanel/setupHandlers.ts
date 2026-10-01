@@ -381,7 +381,16 @@ import {
   type RuntimeConversationSystem,
   type RuntimeSystemControls,
 } from "./runtimeSystemControls";
-import { resolveSidebarChatModeToggleState } from "./sidebarChatModeToggle";
+import {
+  resolveSidebarChatModeToggleState,
+  type SidebarChatModeTab,
+} from "./sidebarChatModeToggle";
+import {
+  playSidebarModeChangeFade,
+  removeSidebarModeSwitchDot,
+  showSidebarModeSwitchDot,
+  syncSidebarModeSwitch,
+} from "./sidebarModeSwitch";
 import { getPanelDomRefs } from "./setupHandlers/domRefs";
 import {
   chooseAutoLoadedContextPanelItem,
@@ -742,6 +751,7 @@ export function setupHandlers(
     chatModeTabs,
     paperChatTabBtn,
     libraryChatTabBtn,
+    modeSwitch,
     historyRowMenu,
     historyRowRenameBtn,
     historyUndo,
@@ -1356,8 +1366,8 @@ export function setupHandlers(
     },
   };
   let runtimeSystemSwitchInFlight = false;
-  const headerRuntimeControls = body.querySelector(
-    "#llm-header-runtime-controls",
+  const runtimeDivider = body.querySelector(
+    "#llm-header-runtime-controls .llm-header-runtime-divider",
   ) as HTMLElement | null;
   const updateRuntimeSystemToggles = () => {
     const state = syncRuntimeSystemControls(panelRuntimeSystemControls, {
@@ -1366,9 +1376,10 @@ export function setupHandlers(
       claudeEnabled: isClaudeModeAvailable(),
       busy: runtimeSystemSwitchInFlight,
     });
-    // The divider before the runtime systems goes when they do.
-    if (headerRuntimeControls) {
-      headerRuntimeControls.style.display = state.groupVisible ? "" : "none";
+    // The divider before the runtime systems goes when they do. Their
+    // wrapper stays: in the Stacked layout it also holds the mode chip.
+    if (runtimeDivider) {
+      runtimeDivider.style.display = state.groupVisible ? "" : "none";
     }
   };
   let claudeWarmupInFlight: Promise<void> | null = null;
@@ -1708,33 +1719,54 @@ export function setupHandlers(
   );
   const getTextContextConversationKey = (): number | null =>
     item ? getConversationKey(item) : null;
-  // WebChat owns the paper slot's tooltip while it is active.
+  // WebChat owns the paper slot's tooltip while it is active, and the Stacked
+  // chip shows its site there.
   let webChatModeTabTitle = "";
+  let webChatModeChipLabel = "";
+  let lastSyncedModeTab: SidebarChatModeTab | null = null;
+  // One sync for both mode controls, the Independent tabs and the Stacked
+  // chip, so whichever the layout shows always matches the panel's mode.
   const syncChatModeTabs = () => {
-    if (!chatModeTabs || !paperChatTabBtn || !libraryChatTabBtn) return;
     const state = resolveSidebarChatModeToggleState({
       isGlobalMode: Boolean(item) && isGlobalMode(),
       isNoteSession: isNoteSession(),
       isWebChat: panelRoot.dataset.webchatMode === "true",
     });
-    chatModeTabs.dataset.mode = state.activeTab;
-    const paperLabelEl = paperChatTabBtn.querySelector(
-      ".llm-header-mode-tab-label",
-    );
     const paperLabel = t(state.paperTabLabel);
-    if (paperLabelEl) paperLabelEl.textContent = paperLabel;
-    paperChatTabBtn.title =
-      state.showWebChatDot && webChatModeTabTitle
-        ? webChatModeTabTitle
-        : paperLabel;
-    for (const tab of [paperChatTabBtn, libraryChatTabBtn]) {
-      const active = tab.dataset.tab === state.activeTab;
-      tab.classList.toggle("active", active);
-      tab.setAttribute("aria-pressed", active ? "true" : "false");
-      tab.disabled = state.disabled;
-      if (state.disabled) tab.setAttribute("aria-disabled", "true");
-      else tab.removeAttribute("aria-disabled");
+    if (chatModeTabs && paperChatTabBtn && libraryChatTabBtn) {
+      chatModeTabs.dataset.mode = state.activeTab;
+      const paperLabelEl = paperChatTabBtn.querySelector(
+        ".llm-header-mode-tab-label",
+      );
+      if (paperLabelEl) paperLabelEl.textContent = paperLabel;
+      paperChatTabBtn.title =
+        state.showWebChatDot && webChatModeTabTitle
+          ? webChatModeTabTitle
+          : paperLabel;
+      for (const tab of [paperChatTabBtn, libraryChatTabBtn]) {
+        const active = tab.dataset.tab === state.activeTab;
+        tab.classList.toggle("active", active);
+        tab.setAttribute("aria-pressed", active ? "true" : "false");
+        tab.disabled = state.disabled;
+        if (state.disabled) tab.setAttribute("aria-disabled", "true");
+        else tab.removeAttribute("aria-disabled");
+      }
     }
+    if (modeSwitch) {
+      const webChatSite = state.showWebChatDot ? webChatModeChipLabel : "";
+      syncSidebarModeSwitch(modeSwitch, {
+        activeTab: state.activeTab,
+        paperLabel: webChatSite || paperLabel,
+        libraryLabel: t(state.libraryTabLabel),
+        disabled: state.disabled,
+        paperTitle: webChatSite ? webChatModeTabTitle : "",
+      });
+    }
+    // The chat settles in on a mode change (CSS plays it in Stacked only).
+    if (chatBox && lastSyncedModeTab && lastSyncedModeTab !== state.activeTab) {
+      playSidebarModeChangeFade(chatBox);
+    }
+    lastSyncedModeTab = state.activeTab;
     // The Task progress row follows the conversation and mode shown.
     syncTaskProgressPanel(body);
   };
@@ -4833,6 +4865,7 @@ export function setupHandlers(
     topToast,
     paperChatTabBtn,
     libraryChatTabBtn,
+    modeSwitch,
     getItem: () => item,
     setItem: (nextItem) => {
       if (
@@ -6446,11 +6479,13 @@ export function setupHandlers(
     panelRoot.dataset.webchatMode = isWebChat ? "true" : "false";
     syncQueuedFollowUpRegistration();
 
-    // Mode toggle: WebChat takes the paper slot, with its connection dot on
-    // that active tab, and the toggle stays static until WebChat exits.
+    // Mode controls: WebChat takes the paper slot, with its connection dot,
+    // in the Independent tab and the Stacked chip (which names the site), and
+    // both stay static until WebChat exits.
     if (paperChatTabBtn) {
       if (isWebChat) {
         let webchatTabTitle = "WebChat Sync";
+        let webchatChipLabel = "chatgpt";
         try {
           const { currentModel } = getSelectedModelInfo();
           const { getWebChatTargetByModelName } =
@@ -6458,11 +6493,13 @@ export function setupHandlers(
           const entry = getWebChatTargetByModelName(currentModel || "");
           if (entry) {
             webchatTabTitle = `${entry.label} Web Sync (${entry.modelName})`;
+            webchatChipLabel = entry.displayName;
           }
         } catch {
           /* fallback to defaults */
         }
         webChatModeTabTitle = webchatTabTitle;
+        webChatModeChipLabel = webchatChipLabel;
 
         let dot = paperChatTabBtn.querySelector(
           ".llm-webchat-dot",
@@ -6474,14 +6511,17 @@ export function setupHandlers(
           dot.className = "llm-webchat-dot llm-webchat-dot-disconnected";
         }
         paperChatTabBtn.prepend(dot);
+        const modeSwitchDot = showSidebarModeSwitchDot(modeSwitch);
         syncChatModeTabs();
-        webChatFeature.startConnectionCheck(dot);
+        webChatFeature.startConnectionCheck(dot, modeSwitchDot);
       } else {
         webChatModeTabTitle = "";
+        webChatModeChipLabel = "";
         const oldDot = paperChatTabBtn.querySelector(".llm-webchat-dot");
         if (oldDot) {
           oldDot.remove();
         }
+        removeSidebarModeSwitchDot(modeSwitch);
         webChatFeature.stopConnectionCheck();
         syncChatModeTabs();
       }

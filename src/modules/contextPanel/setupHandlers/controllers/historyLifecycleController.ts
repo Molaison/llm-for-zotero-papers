@@ -191,6 +191,7 @@ import {
   resolveSidebarChatModeToggleState,
   type SidebarChatModeTab,
 } from "../../sidebarChatModeToggle";
+import { installSidebarModeSwitch } from "../../sidebarModeSwitch";
 import {
   canCommitPanelConversation,
   capturePanelOperationLease,
@@ -281,6 +282,8 @@ export type HistoryLifecycleControllerDeps = {
   topToast: HTMLElement | null;
   paperChatTabBtn: HTMLButtonElement | null;
   libraryChatTabBtn: HTMLButtonElement | null;
+  /** The Stacked layout's mode chip; it picks through the tabs' path. */
+  modeSwitch: HTMLElement | null;
   getItem: () => Zotero.Item | null;
   setItem: (item: Zotero.Item | null) => boolean | void;
   getBasePaperItem: () => Zotero.Item | null;
@@ -460,6 +463,7 @@ export function createHistoryLifecycleController(
     topToast,
     paperChatTabBtn,
     libraryChatTabBtn,
+    modeSwitch,
   } = deps;
   const getConversationSystem = deps.getConversationSystem;
   const isClaudeConversationSystem = deps.isClaudeConversationSystem;
@@ -4372,6 +4376,16 @@ export function createHistoryLifecycleController(
     tabButton.addEventListener("click", (e: Event) => {
       e.preventDefault();
       e.stopPropagation();
+      void switchSidebarChatMode(requested).catch((err) => {
+        appLogger.warn("LLM: sidebar chat mode switch failed", err);
+      });
+    });
+  }
+
+  // The Stacked layout's mode chip: its hover switch picks a mode, and the
+  // pick takes exactly the tabs' path.
+  if (modeSwitch) {
+    installSidebarModeSwitch(modeSwitch, (requested) => {
       void switchSidebarChatMode(requested).catch((err) => {
         appLogger.warn("LLM: sidebar chat mode switch failed", err);
       });

@@ -28,6 +28,7 @@ import {
   resolveSidebarChatModeToggleState,
   type SidebarChatModeTab,
 } from "./sidebarChatModeToggle";
+import { createSidebarModeSwitch } from "./sidebarModeSwitch";
 import { buildContextUsagePresentation } from "./textUtils";
 import { createChatLatestButton } from "./chatLatestButton";
 import { createTaskProgressCard } from "./taskProgress/view";
@@ -162,7 +163,16 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
   historyToggle.style.display = "";
 
   const isStandaloneBody = (body as HTMLElement).dataset?.standalone === "true";
-  // Runtime systems follow the history button, after a thin divider.
+  // Paper chat or Library chat: the Independent toggle row and the Stacked
+  // chip show the same state.
+  const chatModeToggle = resolveSidebarChatModeToggleState({
+    isGlobalMode: hasItem && isGlobalMode,
+    isNoteSession: Boolean(activeNoteSession),
+    isWebChat: false,
+  });
+  // Runtime systems follow the history button, after a thin divider
+  // (Independent) or the mode chip in its place (Stacked). Both are built;
+  // CSS picks one from the root layout attribute.
   const headerRuntimeControls = createElement(
     doc,
     "div",
@@ -177,6 +187,19 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
     "llm-header-runtime-divider",
   );
   runtimeDivider.setAttribute("aria-hidden", "true");
+  const modeSwitch = createSidebarModeSwitch(
+    doc,
+    {
+      activeTab: chatModeToggle.activeTab,
+      paperLabel: t(chatModeToggle.paperTabLabel),
+      libraryLabel: t(chatModeToggle.libraryTabLabel),
+      disabled: chatModeToggle.disabled,
+    },
+    {
+      ariaLabel: t("Chat mode"),
+      fitLabels: [t("Paper chat"), t("Library chat"), t("Note chat")],
+    },
+  );
 
   const runtimeSystemControls = createRuntimeSystemControls(doc, {
     groupId: "llm-runtime-system-controls",
@@ -187,14 +210,13 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
       claude_code: "llm-claude-system-toggle",
     },
   });
-  headerRuntimeControls.append(runtimeDivider, runtimeSystemControls.group);
+  headerRuntimeControls.append(
+    runtimeDivider,
+    modeSwitch,
+    runtimeSystemControls.group,
+  );
 
   // Paper chat | Library chat, sharing the standalone window's segmented tabs.
-  const chatModeToggle = resolveSidebarChatModeToggleState({
-    isGlobalMode: hasItem && isGlobalMode,
-    isNoteSession: Boolean(activeNoteSession),
-    isWebChat: false,
-  });
   const chatModeTabs = createElement(
     doc,
     "div",
@@ -238,8 +260,9 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
     ),
   );
 
-  // Row 1: the mode toggle, centered. It is laid out whenever the history
-  // bar is, which CSS keeps always: no code path writes its display.
+  // Row 1 (Independent): the mode toggle, centered. It is laid out whenever
+  // the history bar is, which CSS keeps always: no code path writes its
+  // display. The Stacked layout drops it for the chip in row 2.
   const toggleRow = createElement(doc, "div", "llm-header-toggle-row", {
     id: "llm-header-toggle-row",
   });
