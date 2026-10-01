@@ -436,12 +436,19 @@ describe("agent prompt envelope", function () {
         "The host does not run an approval model or ask for permission",
       );
       // The guidance must not read as unlimited authority: the rails that
-      // still block in yolo belong in the same sentence.
-      assert.include(yolo, "chat-only memory");
+      // still block in yolo belong in the same sentence, and only those.
       assert.include(
         yolo,
-        "importing discovered papers without the user's selection",
+        "Requested review workflows and database integrity remain binding",
       );
+      for (const unenforced of [
+        "Explicit user restrictions",
+        "protected targets",
+        "Plan integrity",
+        "chat-only memory",
+        "importing discovered papers",
+      ])
+        assert.notInclude(yolo, unenforced);
       assert.notInclude(yolo, "Interpretation assumptions");
       const auto = await promptText("auto");
       assert.include(auto, "Permission mode: auto");

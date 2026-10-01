@@ -620,20 +620,34 @@ describe("provider permission modes", function () {
     assert.include(byKey["original:yolo"], "without permission prompts");
     assert.include(byKey["original:yolo"], "ambiguous or dangerous actions");
     assert.include(byKey["original:yolo"], "Claude Code, Codex");
-    assert.include(byKey["original:yolo"], "requested review workflows");
-    assert.include(byKey["original:yolo"], "required paper selection");
+    assert.include(
+      byKey["original:yolo"],
+      "Requested review workflows and execution integrity remain enforced",
+    );
+    // Nothing enforces these any more, so the copy must not promise them.
+    for (const unenforced of [
+      "Explicit restrictions",
+      "required paper selection",
+    ])
+      assert.notInclude(byKey["original:yolo"], unenforced);
     assert.notInclude(byKey["original:yolo"], "require review");
     assert.notInclude(byKey["original:yolo"], "Only explicit prohibitions");
   });
 
   it("names the same yolo rails in the long mode description", function () {
     const description = getOriginalAgentPermissionModeDescription();
-    assert.include(description, "chat-only memory");
     assert.include(
       description,
-      "the paper selection card before importing discovered papers",
+      "Requested review workflows, database integrity and the change journal remain enforced",
     );
-    assert.include(description, "the change journal remain enforced");
+    for (const unenforced of [
+      "Explicit user restrictions",
+      "protected targets",
+      "Plan integrity",
+      "chat-only memory",
+      "paper selection card",
+    ])
+      assert.notInclude(description, unenforced);
   });
 
   it("falls back to auto when the preference store is unreadable", function () {
