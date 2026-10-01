@@ -1,9 +1,11 @@
 /**
- * The reorganize-library skill: a large reorganization shows its proposed
- * grouping in the chat before the first change, then moves the papers batch
- * by batch with library_update assignments, and declares the moves as one
- * part over the papers so Task progress counts them. Every tool and
- * parameter it names exists in the model-facing schemas.
+ * The reorganize-library skill: a large reorganization places papers from
+ * their metadata, reading a paper only when its metadata cannot place it,
+ * shows its proposed grouping in the chat before the first change, then
+ * moves or tags the papers batch by batch with library_update assignments,
+ * and declares the changes as one part over the papers so Task progress
+ * counts them. Every tool and parameter it names exists in the model-facing
+ * schemas.
  */
 import { assert } from "chai";
 import { BUILTIN_SKILL_FILES } from "../src/agent/skills";
@@ -44,16 +46,23 @@ describe("reorganize-library skill", function () {
     assert.deepEqual(getSkillRoutingDiagnostics(skill), []);
   });
 
-  it("shows the proposed grouping in the chat before creating or moving anything", function () {
+  it("shows the proposed grouping in the chat before creating, moving or tagging anything", function () {
     assert.include(
       skill.instruction,
-      "Before creating or moving anything, show the proposed grouping in the chat",
+      "Before creating, moving or tagging anything, show the proposed grouping in the chat",
     );
     assert.include(skill.instruction, "`request_user_input`");
   });
 
-  it("surveys titles, metadata and abstracts in pages, not full texts", function () {
-    assert.include(skill.instruction, "not their full texts");
+  it("places papers from their metadata, reading a paper only when its metadata cannot place it", function () {
+    for (const phrase of [
+      "Place each paper from its metadata first",
+      "Read further only for a paper its metadata cannot place",
+      "targeted `paper_read`, not its full text",
+      "never read every paper by default",
+    ])
+      assert.include(skill.instruction, phrase);
+    assert.include(schemaOf("paper_read").properties!.mode.enum!, "targeted");
     const search = schemaOf("library_search").properties!;
     assert.include(search.include.items!.enum!, "abstract");
     assert.containsAllKeys(search.filters.properties!, [
@@ -106,8 +115,23 @@ describe("reorganize-library skill", function () {
     ]);
   });
 
-  it("reports what moved and what did not, from the receipts", function () {
+  it("tags papers in the same batches, with per-paper tag assignments", function () {
+    for (const phrase of [
+      "`'zotero.tags'`",
+      "`kind:'tags'`",
+      "one `assignments` entry (`itemId`, `tags`) per paper",
+    ])
+      assert.include(skill.instruction, phrase);
+    const update = schemaOf("library_update").properties!;
+    assert.include(update.kind.enum!, "tags");
+    assert.containsAllKeys(update.assignments.items!.properties!, [
+      "itemId",
+      "tags",
+    ]);
+  });
+
+  it("reports what changed and what did not, from the receipts", function () {
     assert.include(skill.instruction, "Report from the receipts");
-    assert.include(skill.instruction, "did not move and why");
+    assert.include(skill.instruction, "did not change and why");
   });
 });
