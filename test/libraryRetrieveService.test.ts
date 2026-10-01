@@ -1,4 +1,3 @@
-import { semanticFixture } from "./helpers/semanticIntent";
 import { assert } from "chai";
 import {
   LibraryRetrieveService as ResolvedLibraryRetrieveService,
@@ -2497,10 +2496,9 @@ describe("LibraryRetrieveService evidence triage", function () {
   });
 });
 
-describe("LibraryRetrieveService classified intent defaults", function () {
+describe("LibraryRetrieveService intent defaults", function () {
   const run = async (params: {
     intent?: "enumerate" | "verify" | "summarize";
-    classifiedIntent?: unknown;
   }) => {
     const entries = [makeItem(1, "Drift paper", "Representational drift.")];
     const service = new LibraryRetrieveService(
@@ -2517,39 +2515,16 @@ describe("LibraryRetrieveService classified intent defaults", function () {
         mode: "agent",
         userText: "x",
         libraryID: 1,
-        ...(params.classifiedIntent
-          ? { classifiedIntent: params.classifiedIntent }
-          : {}),
       } as any,
     });
   };
-
-  it("uses the classified retrieval intent as the default", async function () {
-    const result = await run({
-      classifiedIntent: {
-        semantic: semanticFixture(),
-        retrievalIntent: "summarize",
-        wantedSections: [],
-      },
-    });
-
-    assert.equal(result.intent, "summarize");
-  });
-
-  it("lets explicit tool-arg intent beat the classified intent", async function () {
-    const result = await run({
-      intent: "verify",
-      classifiedIntent: {
-        semantic: semanticFixture(),
-        retrievalIntent: "summarize",
-        wantedSections: [],
-      },
-    });
+  it("uses the explicit tool-arg intent", async function () {
+    const result = await run({ intent: "verify" });
 
     assert.equal(result.intent, "verify");
   });
 
-  it("keeps regex defaulting when no classified intent is present", async function () {
+  it("defaults the intent from the query when the tool gives none", async function () {
     const result = await run({});
 
     assert.equal(result.intent, "enumerate");
@@ -2666,48 +2641,6 @@ describe("LibraryRetrieveService body-evidence defaults", function () {
 
     assert.lengthOf(result.snippets, 1);
     assert.equal(result.snippets[0].chunkKind, "abstract");
-  });
-
-  it("steers section ranking from classifier wantedSections for a CJK query", async function () {
-    const entries = [makeItem(1, "Drift paper", "Representational drift.")];
-    const service = new LibraryRetrieveService(
-      makeGateway(entries) as any,
-      {
-        ensurePaperContext: async () => makePdfContext(["chunk a", "chunk b"]),
-      } as any,
-      (async (
-        paperContext: PaperContextRef,
-      ): Promise<PaperContextCandidate[]> => [
-        makeCandidate(paperContext, {
-          chunkIndex: 2,
-          chunkKind: "results",
-          sectionLabel: "Results",
-          evidenceScore: 1,
-        }),
-        makeCandidate(paperContext, {
-          chunkIndex: 5,
-          chunkKind: "methods",
-          sectionLabel: "Methods",
-          evidenceScore: 0.5,
-        }),
-      ]) as any,
-    );
-
-    const result = await service.retrieve({
-      query: "这些论文用了什么实验手段",
-      depth: "evidence",
-      perPaperTopK: 1,
-      request: {
-        ...REQUEST,
-        classifiedIntent: {
-          semantic: semanticFixture(),
-          retrievalIntent: "enumerate",
-          wantedSections: ["methods"],
-        },
-      } as any,
-    });
-
-    assert.equal(result.snippets[0]?.sectionLabel, "Methods");
   });
 });
 

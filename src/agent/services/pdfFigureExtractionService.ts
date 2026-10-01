@@ -22,8 +22,7 @@ import { joinLocalPath } from "../../utils/localPath";
 import type { PaperReadFigureExtractionResult } from "../tools/read/paperRead";
 import type { PdfTarget } from "../tools/read/pdfToolUtils";
 import type { AgentToolArtifact, AgentToolContext } from "../types";
-import type { PdfPageService } from "./pdfPageService";
-import type { SemanticDecisions } from "../model/semanticDecisions";
+import type { PdfFigureSelection, PdfPageService } from "./pdfPageService";
 import { sha256Bytes } from "../store/journalRecoveryBlobStore";
 import type { PlanDocumentAsset } from "../documents/types";
 
@@ -40,7 +39,7 @@ type FigureExtractionInput = {
 type FigureExtractionParams = {
   input: FigureExtractionInput;
   /** Host-owned selectors; free-text tool queries cannot change them. */
-  selection?: SemanticDecisions["figures"];
+  selection?: PdfFigureSelection;
   context: AgentToolContext;
   paperContexts: NonNullable<PdfTarget["paperContext"]>[];
 };
@@ -52,7 +51,7 @@ type FigureCropPageService = PdfPageService & {
     figureCacheDir: string;
     mineruCacheDir?: string;
     query: string;
-    selection: NonNullable<SemanticDecisions["figures"]>;
+    selection: PdfFigureSelection;
     pages?: number[];
     dpi?: number;
   }) => Promise<
@@ -67,15 +66,15 @@ type FigureCropPageService = PdfPageService & {
 };
 
 /**
- * Ordinary Agent and MCP calls use the same concrete read selectors.
- * Frozen Plan selections are resolved by the caller before this fallback.
- * Queries remain supported for existing clients; no preliminary classifier
- * is required to read a figure.
+ * Ordinary Agent and MCP calls use the same concrete read selectors. A
+ * host-owned selection (normal chat's figure references) is used instead
+ * when the caller supplies one. Queries remain supported for existing
+ * clients; no preliminary classifier is required to read a figure.
  */
 function resolveDirectFigureSelection(
   input: FigureExtractionInput,
   context: AgentToolContext,
-): SemanticDecisions["figures"] | undefined {
+): PdfFigureSelection | undefined {
   if (input.figureLabels) {
     return {
       labels: input.figureLabels,
@@ -295,7 +294,7 @@ function labelAllowedForAllQuery(
 }
 
 function buildCachedFigureRequest(
-  selection: NonNullable<SemanticDecisions["figures"]>,
+  selection: PdfFigureSelection,
   pages: number[] | undefined,
 ): CachedFigureRequest {
   const requestedLabels = new Set<string>();
@@ -398,7 +397,7 @@ function selectCachedFiguresForRequest(params: {
   expectedFigures: ExpectedPdfFigure[];
   missingFigures: ExpectedPdfFigure[];
   manifest: MineruManifest | null;
-  selection: NonNullable<SemanticDecisions["figures"]>;
+  selection: PdfFigureSelection;
   includeSupplementary?: boolean;
   pages?: number[];
 }): {
@@ -453,7 +452,7 @@ async function readVerifiedCachedFigures(params: {
   manifestHash: string;
   pdfFingerprint: string;
   paperContext: NonNullable<PdfTarget["paperContext"]>;
-  selection: NonNullable<SemanticDecisions["figures"]>;
+  selection: PdfFigureSelection;
   includeSupplementary?: boolean;
   pages?: number[];
 }): Promise<{
@@ -544,7 +543,6 @@ export class PdfFigureExtractionService {
   ): Promise<PaperReadFigureExtractionResult> {
     const selection =
       params.selection ||
-      params.context.request.classifiedIntent?.semantic?.figures ||
       resolveDirectFigureSelection(params.input, params.context);
     const query = params.input.query || selection?.labels.join(", ") || "";
     if (!selection)

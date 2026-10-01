@@ -13,10 +13,8 @@ import type {
 import {
   ActionContractService,
   type PreparedActionExecution,
-  type ScopeValidationFailure,
 } from "../../contracts/actionContract";
 import { prepareActionExecution } from "../../contracts/actionOperationEvidence";
-import { preparationEffectBlock } from "../../contracts/actionPreparation";
 import { getOriginalAgentPermissionMode } from "../../originalAgentPermissionMode";
 import { isAgentChangeJournalAvailable } from "../../store/changeJournal";
 import { evaluateHostAccess } from "../../authorization/hostAccess";
@@ -32,7 +30,6 @@ export type AssessedInvocation = {
   plan: AgentInvocationPlan;
   preparedAction?: PreparedActionExecution;
   proposal: ActionProposal;
-  scopeFailure: ScopeValidationFailure | null;
   interaction: ActionInteraction;
   authorization: AuthorizationDecision;
   review?: ActionReviewRecord;
@@ -121,10 +118,7 @@ export class InvocationAssessor {
     );
   }
 
-  async assess(
-    input: unknown,
-    concreteWrite = true,
-  ): Promise<AssessedInvocation> {
+  async assess(input: unknown): Promise<AssessedInvocation> {
     const { tool, context, options, contracts } = this;
     const request = context.request;
     const delegated = context.authorization?.kind === "external_runtime";
@@ -168,7 +162,6 @@ export class InvocationAssessor {
       intentBinding: {
         conversationKey: request.conversationKey,
         conversationGeneration: request.conversationGeneration,
-        actionContractId: request.actionContract?.id,
         userText: request.userText,
       },
     });
@@ -196,15 +189,17 @@ export class InvocationAssessor {
             (delegated && context.authorization?.standalone)
           ? { kind: "block", reason: hostAccess.reason }
           : { kind: "confirm", reason: hostAccess.reason };
-    const enforceContract =
+    // Only the in-plugin agent, a connected agent, or a host action may cause
+    // an effect; anything else is refused before it reaches the policy.
+    if (
+      !hostAction &&
       !delegated &&
       !directAgent &&
-      (!hostAction || Boolean(context.journalActionScope));
-    const preparationBlock =
-      hostAction || delegated || directAgent
-        ? null
-        : preparationEffectBlock(request, plan);
-    if (preparationBlock) throw new Error(preparationBlock);
+      plan.impact !== "read_only"
+    )
+      throw new Error(
+        "No current semantic action contract authorizes this effect. Legacy contracts are history-only.",
+      );
     if (
       effect &&
       (!preparedAction?.hasExplicitAdapter || !preparedAction.proposals.length)
@@ -212,58 +207,12 @@ export class InvocationAssessor {
       throw new Error(
         `External effect blocked for ${tool.spec.name}: no typed action adapter describes its exact operation, capability, proof domain, and targets.`,
       );
-    if (
-      effect &&
-      !delegated &&
-      !directAgent &&
-      !hostAction &&
-      contracts &&
-      !request.actionContract
-    )
-      throw new Error(
-        `Mutation blocked for ${tool.spec.name}: no validated action contract exists for this request.`,
-      );
-    if (
-      enforceContract &&
-      request.actionContract &&
-      plan.impact !== "read_only" &&
-      !contracts
-    )
-      throw new Error(
-        `Write blocked: ${tool.spec.name} has no configured Action Contract verifier.`,
-      );
-    const scopeValidated = Boolean(
-      enforceContract &&
-      plan.impact !== "read_only" &&
-      preparedAction &&
-      request.actionContract &&
-      contracts,
-    );
-    const scopeFailure = scopeValidated
-      ? await contracts!.validateScope(
-          request.actionContract!,
-          preparedAction!,
-          {
-            allowPartialCoverage: Boolean(
-              options.checkpointedWorkflow ||
-              (options.callerKind === "action" && context.journalActionScope),
-            ),
-            concreteWrite: concreteWrite && plan.impact !== "read_only",
-            progress: request.actionProgress,
-          },
-        )
-      : null;
-    if (
-      !scopeFailure &&
-      plan.impact !== "read_only" &&
-      !isAgentChangeJournalAvailable()
-    )
+    if (plan.impact !== "read_only" && !isAgentChangeJournalAvailable())
       throw new Error(
         `${tool.spec.name} was refused because the durable change journal is unavailable. Effects cannot run without restart-safe authorization and recovery.`,
       );
     const interaction = resolveActionInteraction(
       request,
-      preparedAction?.proposals || [],
       // Native action pages are explicitly requested editing/review workflows.
       // A model's generic review hint cannot override Auto or YOLO permissions.
       Boolean(options.forceConfirmation && options.callerKind === "action"),
@@ -282,20 +231,6 @@ export class InvocationAssessor {
             mode: getOriginalAgentPermissionMode(),
             interaction,
             executionContext: request.executionContext,
-            constraints:
-              request.actionContract?.intent?.semantic?.constraints || [],
-            semantic: request.executionContext
-              ? undefined
-              : request.classifiedIntent?.semantic ||
-                request.actionContract?.intent?.semantic,
-            hasMatchingActionIntent:
-              hostAction ||
-              Boolean(
-                scopeValidated &&
-                !scopeFailure &&
-                preparedAction?.proposals.length &&
-                request.actionContract?.obligations.length,
-              ),
           },
           {
             input,
@@ -315,8 +250,7 @@ export class InvocationAssessor {
               })),
             userInstructions: request.customInstructions,
             workspace: request.executionContext?.workspaceSnapshot || null,
-            constraints:
-              request.actionContract?.intent?.semantic?.constraints || [],
+            constraints: [],
           },
           context.signal,
         );
@@ -325,7 +259,6 @@ export class InvocationAssessor {
       plan,
       preparedAction,
       proposal,
-      scopeFailure,
       interaction,
       ...decision,
     };

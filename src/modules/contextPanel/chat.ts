@@ -3692,9 +3692,7 @@ function buildCodexNativeTurnCallbacks(ctx: {
   handleUsage: (usage: UsageStats) => void;
   conversationKey: number;
   conversationGeneration: number;
-  classifiedIntent?: import("../../agent/types").ClassifiedTurnIntent;
   skillRoutingReceipt?: import("../../agent/types").AgentRuntimeRequest["skillRoutingReceipt"];
-  actionPreparation?: import("../../agent/contracts/actionPreparation").ActionPreparation;
 }): CodexNativeTurnCallbacks {
   const {
     body,
@@ -9719,9 +9717,7 @@ export async function sendQuestion(
               handleUsage,
               conversationKey,
               conversationGeneration,
-              classifiedIntent: codexExecutionRequest?.classifiedIntent,
               skillRoutingReceipt: codexExecutionRequest?.skillRoutingReceipt,
-              actionPreparation: codexExecutionRequest?.actionPreparation,
             }),
           });
           assistantMessage.agentRunId = result.agentRunId;

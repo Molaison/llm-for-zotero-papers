@@ -1,5 +1,4 @@
 import { ActionContractService } from "../src/agent/contracts/actionContract";
-import { actionContractFixture } from "./helpers/semanticIntent";
 import { assert } from "chai";
 import { DatabaseSync } from "node:sqlite";
 import { createSubmitDocumentTool } from "../src/agent/tools/control/submitDocument";
@@ -1330,46 +1329,6 @@ describe("Zotero MCP server", function () {
     } finally {
       ordinary.clear();
       required.clear();
-    }
-  });
-
-  it("preserves workflow continuation instructions across MCP", async function () {
-    const registry = new AgentToolRegistry();
-    const tool = createReadTool("library_read");
-    const checkpoint = {
-      reason: "research_batch_durable" as const,
-      instruction: "Record the remaining manifest, then verify coverage.",
-    };
-    tool.execute = async () => {
-      return {
-        content: { durablePapers: 1 },
-        continuationCheckpoint: checkpoint,
-      };
-    };
-    registerMcpServer({ toolRegistry: registry, zoteroGateway: {} as never });
-    registry.register(tool);
-    const scope = registerScopedZoteroMcpScope({
-      conversationKey: 7003,
-      libraryID: 1,
-      kind: "global",
-    });
-    try {
-      const response = await invokeMcpEndpoint({
-        token: getOrCreateZoteroMcpBearerToken(),
-        headers: { [ZOTERO_MCP_SCOPE_HEADER]: scope.token },
-        body: {
-          jsonrpc: "2.0",
-          id: 1,
-          method: "tools/call",
-          params: { name: "library_read", arguments: {} },
-        },
-      });
-      const payload = JSON.parse(
-        JSON.parse(response[2]).result.content[0].text,
-      );
-      assert.deepEqual(payload.continuationCheckpoint, checkpoint);
-    } finally {
-      scope.clear();
     }
   });
   it("carries single-owner reading guidance on the paper_read and library_retrieve descriptions", async function () {
@@ -3510,7 +3469,6 @@ describe("Zotero MCP server", function () {
         libraryID: 1,
         kind: "global",
         userText: "move and verify",
-        actionContract: actionContractFixture("settings_update"),
         runtimeAuthority: "codex",
       },
       { token: "dedupe-write-scope-token" },
@@ -3907,7 +3865,6 @@ describe("Zotero MCP server", function () {
         conversationKey: 456,
         libraryID: 1,
         kind: "global",
-        actionContract: actionContractFixture("settings_update"),
         runtimeAuthority: "codex",
       },
       { token: "deny-scope-token" },
@@ -3933,10 +3890,6 @@ describe("Zotero MCP server", function () {
       assert.deepEqual(content.result, { applied: true });
       assert.equal(executeCount, 1);
       assert.isNotEmpty(content.actionReceipts);
-      assert.isString(
-        content.actionReceipts[0].obligationId,
-        "Integrated receipts must still update the host workflow progress",
-      );
     } finally {
       scoped.clear();
     }
@@ -4075,7 +4028,6 @@ describe("Zotero MCP server", function () {
         conversationKey: 789,
         libraryID: 1,
         kind: "global",
-        actionContract: actionContractFixture("settings_update"),
         requestInteraction: async (action) => {
           assert.equal(action.title, "Review new note");
           return { approved: true };
@@ -4191,7 +4143,6 @@ describe("Zotero MCP server", function () {
         activeNoteId: 501,
         activeNoteKind: "standalone",
         activeNoteTitle: "Active Note",
-        actionContract: actionContractFixture("settings_update"),
         requestInteraction: async (action) => {
           assert.equal(action.fields[0].type, "diff_preview");
           return { approved: true };
@@ -4474,7 +4425,6 @@ describe("Zotero MCP server", function () {
     const scoped = registerScopedZoteroMcpScope(
       {
         profileSignature: "profile-script",
-        actionContract: actionContractFixture("zotero_script_execute"),
         conversationKey: 5020,
         libraryID: 1,
         kind: "global",

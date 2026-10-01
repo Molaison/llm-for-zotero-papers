@@ -84,7 +84,6 @@ describe("request_user_input planning card contract", function () {
 describe("semantic integration", function () {
   it("keeps native MCP clarification pending until a real answer arrives", async function () {
     const { AgentToolRegistry } = await import("../src/agent/tools/registry");
-    const { classifiedFixture } = await import("./helpers/semanticIntent");
     const { resolvedAgentRequest } =
       await import("./helpers/resolvedAgentRequest");
     const registry = new AgentToolRegistry();
@@ -112,7 +111,6 @@ describe("semantic integration", function () {
           mode: "agent",
           libraryID: 1,
           userText: "File the paper",
-          classifiedIntent: classifiedFixture(),
         }),
         item: null,
         currentAnswerText: "",
@@ -175,7 +173,6 @@ describe("prepared action clarification", function () {
         conversationKey: 2317,
         mode: "agent",
         userText: "move this paper to learning folder",
-        actionPreparation: { state: "needs_input", issues: ["Which source?"] },
       }),
     };
     const input = tool.validate({

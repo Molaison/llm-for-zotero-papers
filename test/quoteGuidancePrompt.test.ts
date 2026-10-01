@@ -1,8 +1,3 @@
-import {
-  actionFixture,
-  classifiedFixture,
-  semanticFixture,
-} from "./helpers/semanticIntent";
 import { readFileSync } from "node:fs";
 import { assert } from "chai";
 import { buildZoteroEnvironmentManifest } from "../src/codexAppServer/nativeClient";
@@ -105,9 +100,6 @@ describe("quote guidance prompts", function () {
     const messages = await buildAgentInitialMessages(
       request({
         userText: "File this paper in Bayesian",
-        classifiedIntent: actionFixture("move_to_collection", undefined, {
-          reading: { source: "metadata", coverage: "overview" },
-        }),
         fullTextPaperContexts: [
           {
             itemId: 10,
@@ -299,9 +291,6 @@ describe("quote guidance prompts", function () {
     const intentMatched = await buildAgentInitialMessages(
       request({
         userText: "Explain Figure 1.",
-        classifiedIntent: classifiedFixture({
-          semantic: semanticFixture({ visualMode: "figure" }),
-        }),
         selectedPaperContexts: [paperContext],
         fullTextPaperContexts: [],
       }),

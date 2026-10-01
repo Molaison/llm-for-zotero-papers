@@ -109,7 +109,6 @@ describe("direct Agent ownership boundary", function () {
       "src/agent/authorization/policy.ts",
       "src/agent/contracts/actionContract.ts",
       "src/agent/documents/outcomePolicy.ts",
-      "src/agent/skills/noteIntent.ts",
     ]) {
       const offenders: string[] = [];
       const visit = (node: ts.Node) => {

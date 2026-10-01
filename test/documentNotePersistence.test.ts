@@ -284,28 +284,6 @@ describe("durable document note association", function () {
       request: {
         conversationKey: 42,
         libraryID: 1,
-        actionContract: {
-          id: "workflow",
-          obligations: [
-            {
-              id: "save",
-              operation: "note_create",
-              contentFrom: "summary",
-              targetBoundary: { frozenTargetIds: [42] },
-            },
-          ],
-        },
-        actionProgress: {
-          contractId: "workflow",
-          materialOutputs: [
-            {
-              outputId: "summary",
-              documentId: document.documentId,
-              documentVersion: 1,
-              contentHash: document.contentHash,
-            },
-          ],
-        },
       },
     } as any;
     await tool.planInvocation(input.value, context);
@@ -568,27 +546,6 @@ describe("durable document note association", function () {
       request: {
         conversationKey: 42,
         libraryID: 1,
-        actionContract: {
-          id: "workflow",
-          obligations: [
-            {
-              operation: "note_edit",
-              contentFrom: "summary",
-              targetBoundary: { frozenTargetIds: [note.id] },
-            },
-          ],
-        },
-        actionProgress: {
-          contractId: "workflow",
-          materialOutputs: [
-            {
-              outputId: "summary",
-              documentId: document.documentId,
-              documentVersion: 1,
-              contentHash: document.contentHash,
-            },
-          ],
-        },
       },
     } as any;
     await tool.planInvocation(input.value, context);

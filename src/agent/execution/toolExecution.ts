@@ -29,7 +29,6 @@ import {
 import { buildAgentStageEvent } from "../stageEvents";
 import { resolvePreparedActionReview } from "../tools/execution/review";
 import type { AgentToolRegistry } from "../tools/registry";
-import type { PreparedActionCall } from "../tools/workflowSteps";
 import { resolveAgentToolPresentationLabel } from "../toolPresentation";
 import { resolveAgentToolCallWorkCategory } from "../workCategory";
 import { withConversationWriteLock } from "../../shared/conversationWriteFence";
@@ -130,7 +129,6 @@ export type ToolExecutionDeps = {
   /** The names of the tools this turn called. */
   toolsUsedThisTurn: string[];
   /** The summaries of the prepared actions this turn verified. */
-  workflowSummaries: string[];
   /**
    * The answer text streamed so far.
    *
@@ -172,7 +170,6 @@ export type ToolExecution = {
     round: number,
     options?: {
       inheritedApproval?: AgentInheritedApproval;
-      checkpointedWorkflow?: boolean;
     },
   ) => Promise<ExecutedToolCall>;
   buildToolDelivery: (
@@ -187,10 +184,8 @@ export type ToolExecution = {
     round: number,
     options?: {
       modelCallId?: string;
-      preparedAction?: PreparedActionCall;
       suppressModelDelivery?: boolean;
       inheritedApproval?: AgentInheritedApproval;
-      checkpointedWorkflow?: boolean;
       /** Calls after this one in the same model step, still to run. */
       followingCallCount?: number;
     },
@@ -271,7 +266,6 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
     round: number,
     options: {
       inheritedApproval?: AgentInheritedApproval;
-      checkpointedWorkflow?: boolean;
     } = {},
   ): Promise<ExecutedToolCall> => {
     const toolDefinition = deps.registry.getTool(call.name);
@@ -380,7 +374,6 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
         {
           callerKind: options.inheritedApproval ? "action" : "model",
           inheritedApproval: options.inheritedApproval,
-          checkpointedWorkflow: options.checkpointedWorkflow,
           isExecutionAllowed: executionAllowed,
           executeWithLock: (task) =>
             withConversationWriteLock(deps.request.conversationKey, task),
@@ -654,9 +647,7 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
       });
       for (const entry of evidence) await deps.recordOutcomeEvidence(entry);
     }
-    await deps.actionContractSession.recordToolReceipts(
-      toolResult.actionReceipts,
-    );
+    deps.actionContractSession.recordToolReceipts(toolResult.actionReceipts);
     return executedCall;
   };
   const buildToolDelivery = async (
@@ -717,10 +708,8 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
     round: number,
     options: {
       modelCallId?: string;
-      preparedAction?: PreparedActionCall;
       suppressModelDelivery?: boolean;
       inheritedApproval?: AgentInheritedApproval;
-      checkpointedWorkflow?: boolean;
       followingCallCount?: number;
     } = {},
   ): Promise<ToolWorkflowOutcome> => {
@@ -746,20 +735,8 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
         },
       };
     }
-    // A provider may batch a prerequisite read and a bound action. Recheck
-    // readiness at this tool boundary, using the host's canonical arguments
-    // while preserving the provider call ID solely for result delivery.
-    let preparedAction = options.preparedAction;
-    if (!preparedAction && options.modelCallId && !options.inheritedApproval) {
-      const next = await deps.registry.getNextWorkflowStep(deps.request);
-      if (next.kind === "action" && next.prepared.call.name === call.name)
-        preparedAction = next.prepared;
-    }
-    if (preparedAction) call = preparedAction.call;
     const executedCall = await executePreparedToolCall(call, round, {
       inheritedApproval: options.inheritedApproval,
-      checkpointedWorkflow:
-        Boolean(preparedAction) || options.checkpointedWorkflow,
     });
     const { toolResult, toolDefinition, input, documentEvidenceRefs } =
       executedCall;
@@ -775,37 +752,6 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
         : { content: toolResult.content, documentEvidenceRefs }
       : undefined;
 
-    if (preparedAction) {
-      const verified =
-        toolResult.ok &&
-        toolResult.actionReceipts.some(
-          (receipt) =>
-            receipt.obligationId === preparedAction.obligationId &&
-            receipt.verification === "verified" &&
-            ["applied", "already_satisfied"].includes(receipt.status),
-        );
-      if (!verified) {
-        const failure =
-          readToolError(toolResult) ||
-          "The requested state change could not be verified. Remaining actions have not been executed; recorded progress has been retained.";
-        return {
-          toolResult,
-          failed: true,
-          stopRun: true,
-          finalText: failure,
-          delivery: options.suppressModelDelivery
-            ? undefined
-            : await buildToolDelivery(
-                toolResult,
-                deliveryCallId,
-                toolDefinition,
-                { error: failure, result: toolResult.content },
-              ),
-        };
-      }
-      deps.workflowSummaries.push(preparedAction.summary);
-    }
-
     if (toolResult.ok && toolDefinition?.resolveTerminalResult) {
       const terminal = await toolDefinition.resolveTerminalResult(
         input as never,
@@ -818,11 +764,7 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
             documentId: terminal.documentId,
             finalText: terminal.finalText,
           });
-          const actionDecision = await deps.actionContractSession.evaluateFinal(
-            {
-              canCorrect: true,
-            },
-          );
+          const actionDecision = deps.actionContractSession.evaluateFinal();
           const accepted = actionDecision.kind === "accept";
           // An accepted document ends the turn only when nothing else was
           // requested: a later call of this step, or a part the model
@@ -833,11 +775,9 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
           );
           if (!accepted || options.followingCallCount || openTasks.length) {
             const remainingWork =
-              actionDecision.kind === "correct"
-                ? actionDecision.correction
-                : actionDecision.kind === "fail"
-                  ? actionDecision.failure
-                  : openTasks.map((task) => task.description).join("; ");
+              actionDecision.kind === "fail"
+                ? actionDecision.failure
+                : openTasks.map((task) => task.description).join("; ");
             return {
               toolResult,
               delivery: options.suppressModelDelivery

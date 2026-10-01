@@ -706,13 +706,7 @@ export function decideRunEnd(
 ): RunEndState {
   const tasks = checkpoint?.tasks || [];
   if (run.status === "cancelled") return "cancelled";
-  if (
-    run.stopRule === "awaiting_clarification" ||
-    run.stopRule === "references_unresolved" ||
-    tasks.some((task) => task.status === "blocked")
-  ) {
-    return "blocked";
-  }
+  if (tasks.some((task) => task.status === "blocked")) return "blocked";
   if (run.status === "failed") {
     return INTERRUPTING_STOP_RULES.has(run.stopRule) && tasks.some(hasEvidence)
       ? "interrupted"

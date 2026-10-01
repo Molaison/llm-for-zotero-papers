@@ -160,9 +160,6 @@ describe("direct-agent execution boundary", function () {
     const preparedGrant = JSON.parse(String(observations[0].extra_json));
     assert.equal(preparedGrant.grant.authority, "auto_policy");
     assert.equal(preparedGrant.proposal.targetLibraryIDs[0], 1);
-    assert.isUndefined((directContext().request as any).actionProgress);
-    assert.isUndefined((directContext().request as any).actionContract);
-    assert.isUndefined((directContext().request as any).classifiedIntent);
   });
 
   it("audits an external write by summary, never by copying its post-image", async function () {

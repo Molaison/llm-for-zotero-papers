@@ -1,4 +1,3 @@
-import { classifiedFixture, semanticFixture } from "./helpers/semanticIntent";
 import { assert } from "chai";
 import { createLiteratureSearchTool } from "../src/agent/tools/read/literatureSearch";
 import { createLiteratureReviewTool } from "../src/agent/tools/read/reviewLiterature";
@@ -233,11 +232,7 @@ describe("ranked literature discovery workflow", function () {
   it("does not accept prose as completed discovery while a shortlist review is still required", async function () {
     const context = makeContext();
     const content = await search(context);
-    const controller = new AgentFinalAnswerController(
-      context.request,
-      { evaluateFinal: async () => ({ kind: "accept" }) },
-      [],
-    );
+    const controller = new AgentFinalAnswerController(context.request);
     const first = await controller.evaluate({
       candidateText: "Here are some papers.",
       canCorrect: true,
@@ -259,11 +254,7 @@ describe("ranked literature discovery workflow", function () {
     // instead of demanding the selection card after the papers were imported.
     const context = makeContext();
     const content = await search(context);
-    const controller = new AgentFinalAnswerController(
-      context.request,
-      { evaluateFinal: async () => ({ kind: "accept" }) },
-      [],
-    );
+    const controller = new AgentFinalAnswerController(context.request);
     const verdict = await controller.evaluate({
       candidateText: "Imported three papers into the new collection.",
       canCorrect: true,
@@ -309,11 +300,7 @@ describe("ranked literature discovery workflow", function () {
     it(`still requires the card after ${label}`, async function () {
       const context = makeContext();
       const content = await search(context);
-      const controller = new AgentFinalAnswerController(
-        context.request,
-        { evaluateFinal: async () => ({ kind: "accept" }) },
-        [],
-      );
+      const controller = new AgentFinalAnswerController(context.request);
       const verdict = await controller.evaluate({
         candidateText: "Imported the papers.",
         canCorrect: true,
@@ -338,11 +325,7 @@ describe("ranked literature discovery workflow", function () {
       identifiers: string[],
     ) {
       const context = makeContext();
-      const controller = new AgentFinalAnswerController(
-        context.request,
-        { evaluateFinal: async () => ({ kind: "accept" }) },
-        [],
-      );
+      const controller = new AgentFinalAnswerController(context.request);
       const verdict = await controller.evaluate({
         candidateText: "Imported the paper.",
         canCorrect: true,
@@ -417,132 +400,93 @@ describe("ranked literature discovery workflow", function () {
       );
     });
   });
-
-  it("still requires the card when a classified discovery turn imports", async function () {
+  it("expands 5 ranked choices from saved candidates and preserves selections", async function () {
+    // A discovery batch is five papers; no turn carries a requested count.
+    const count = 5;
     const context = makeContext();
-    context.request.classifiedIntent = classifiedFixture({
-      externalSearchIntent: "literature",
-      semantic: semanticFixture({ literature: "discover" }),
-    });
-    const content = await search(context);
-    const controller = new AgentFinalAnswerController(
-      context.request,
-      { evaluateFinal: async () => ({ kind: "accept" }) },
-      [],
-    );
-    const verdict = await controller.evaluate({
-      candidateText: "Imported the papers.",
-      canCorrect: true,
-      toolExecutionRecords: [
-        { name: "literature_search", ok: true, content },
-        {
-          name: "library_import",
-          ok: true,
-          input: { kind: "identifiers", identifiers: ["10.1000/candidate-2"] },
-        },
-      ],
-    });
-    assert.equal(verdict.kind, "correct");
-  });
-
-  for (const [text, count] of [
-    ["Find relevant papers for me", 5],
-    ["Find three relevant papers for me", 3],
-  ] as const) {
-    it(`expands ${count} ranked choices from saved candidates and preserves selections`, async function () {
-      const context = makeContext();
-      context.request.userText = text;
-      context.request.classifiedIntent = classifiedFixture({
-        semantic: semanticFixture({
-          literature: "discover",
-          requestedCount: count,
-        }),
+    context.request.userText = "Find relevant papers for me";
+    const candidates = await search(context);
+    const tool = createLiteratureReviewTool(gateway as never);
+    const review = async (indices: number[], extra = {}) => {
+      const parsed = tool.validate({
+        selections: indices.map((candidateIndex) => ({
+          candidateSetId: candidates.candidateSetId,
+          candidateIndex,
+          reason: "Relevant retrieved evidence",
+        })),
+        ...extra,
       });
-      const candidates = await search(context);
-      const tool = createLiteratureReviewTool(gateway as never);
-      const review = async (indices: number[], extra = {}) => {
-        const parsed = tool.validate({
-          selections: indices.map((candidateIndex) => ({
-            candidateSetId: candidates.candidateSetId,
-            candidateIndex,
-            reason: "Relevant retrieved evidence",
-          })),
-          ...extra,
-        });
-        if (!parsed.ok) throw new Error(parsed.error);
-        const content = (await tool.execute(parsed.value, context)) as any;
-        const result = resultOf("literature_review", content);
-        const card = await tool.createResultReviewAction!(
-          parsed.value,
-          result,
-          context,
-        );
-        return { input: parsed.value, content, result, card: card! };
-      };
-      const first = await review(
-        Array.from({ length: count }, (_, i) => i + 1),
-      );
-      const list = first.card.fields[0];
-      if (list.type !== "paper_result_list")
-        throw new Error("Missing paper list");
-      assert.equal(list.loadMoreActionId, "find_more");
-      const selected = [list.rows[0].id];
-      const more = await tool.resolveResultReview!(
-        first.input,
-        first.result,
-        {
-          approved: true,
-          actionId: "find_more",
-          data: { selectedPaperIds: selected },
-        },
+      if (!parsed.ok) throw new Error(parsed.error);
+      const content = (await tool.execute(parsed.value, context)) as any;
+      const result = resultOf("literature_review", content);
+      const card = await tool.createResultReviewAction!(
+        parsed.value,
+        result,
         context,
       );
-      assert.equal(
-        more.kind,
-        "deliver",
-        "expansion must resume research, never import",
-      );
-      if (more.kind !== "deliver") return;
-      const continuation = more.toolMessageContent as any;
-      assert.equal(continuation.batchSize, count);
-      assert.equal(continuation.reviewRequired, true);
-      const second = await review(
-        Array.from({ length: count }, (_, i) => count + i + 1),
-        {
-          sessionId: continuation.sessionId,
-          revision: continuation.revision,
-        },
-      );
-      const expanded = second.card.fields[0];
-      if (expanded.type !== "paper_result_list")
-        throw new Error("Missing paper list");
-      assert.lengthOf(expanded.rows, count * 2);
-      assert.deepEqual(
-        expanded.rows.slice(0, count).map((r) => r.id),
-        list.rows.map((r) => r.id),
-      );
-      assert.isTrue(expanded.rows[0].checked);
-      assert.isFalse(expanded.rows[1].checked);
-      assert.isTrue(expanded.rows[count].checked);
-      const imported = await tool.resolveResultReview!(
-        second.input,
-        second.result,
-        {
-          approved: true,
-          actionId: "import",
-          data: { selectedPaperIds: [expanded.rows[count].id] },
-        },
-        context,
-      );
-      assert.equal(imported.kind, "invoke_tool");
-      if (imported.kind === "invoke_tool") {
-        assert.equal(imported.call.name, "library_import");
-        assert.deepInclude(imported.call.arguments, {
-          identifiers: [`10.1000/candidate-${count + 1}`],
-        });
-      }
-    });
-  }
+      return { input: parsed.value, content, result, card: card! };
+    };
+    const first = await review(Array.from({ length: count }, (_, i) => i + 1));
+    const list = first.card.fields[0];
+    if (list.type !== "paper_result_list")
+      throw new Error("Missing paper list");
+    assert.equal(list.loadMoreActionId, "find_more");
+    const selected = [list.rows[0].id];
+    const more = await tool.resolveResultReview!(
+      first.input,
+      first.result,
+      {
+        approved: true,
+        actionId: "find_more",
+        data: { selectedPaperIds: selected },
+      },
+      context,
+    );
+    assert.equal(
+      more.kind,
+      "deliver",
+      "expansion must resume research, never import",
+    );
+    if (more.kind !== "deliver") return;
+    const continuation = more.toolMessageContent as any;
+    assert.equal(continuation.batchSize, count);
+    assert.equal(continuation.reviewRequired, true);
+    const second = await review(
+      Array.from({ length: count }, (_, i) => count + i + 1),
+      {
+        sessionId: continuation.sessionId,
+        revision: continuation.revision,
+      },
+    );
+    const expanded = second.card.fields[0];
+    if (expanded.type !== "paper_result_list")
+      throw new Error("Missing paper list");
+    assert.lengthOf(expanded.rows, count * 2);
+    assert.deepEqual(
+      expanded.rows.slice(0, count).map((r) => r.id),
+      list.rows.map((r) => r.id),
+    );
+    assert.isTrue(expanded.rows[0].checked);
+    assert.isFalse(expanded.rows[1].checked);
+    assert.isTrue(expanded.rows[count].checked);
+    const imported = await tool.resolveResultReview!(
+      second.input,
+      second.result,
+      {
+        approved: true,
+        actionId: "import",
+        data: { selectedPaperIds: [expanded.rows[count].id] },
+      },
+      context,
+    );
+    assert.equal(imported.kind, "invoke_tool");
+    if (imported.kind === "invoke_tool") {
+      assert.equal(imported.call.name, "library_import");
+      assert.deepInclude(imported.call.arguments, {
+        identifiers: [`10.1000/candidate-${count + 1}`],
+      });
+    }
+  });
 
   it("keeps scholarly evidence search separate from discovery", async function () {
     const context = makeContext();
@@ -613,37 +557,6 @@ describe("ranked literature discovery workflow", function () {
     assert.isAtLeast(nextStep.indexOf("library_import"), 0, nextStep);
     assert.match(nextStep, /Otherwise answer from these results/);
   });
-
-  it("adds no routing to a classified scholarly-evidence search", async function () {
-    const context = makeContext();
-    context.request.classifiedIntent = classifiedFixture({
-      externalSearchIntent: "literature",
-      semantic: semanticFixture({ literature: "none" }),
-    });
-    const tool = createLiteratureSearchTool(gateway as never);
-    const parsed = tool.validate({
-      mode: "search",
-      workflow: "answer",
-      query: "representational drift",
-    });
-    if (!parsed.ok) throw new Error(parsed.error);
-    const content = (await tool.execute(parsed.value, context)) as any;
-    assert.isUndefined(content.nextStep);
-  });
-
-  it("keeps a classified discovery turn on the base selection-card text", async function () {
-    const context = makeContext();
-    context.request.classifiedIntent = classifiedFixture({
-      externalSearchIntent: "literature",
-      semantic: semanticFixture({ literature: "discover" }),
-    });
-    const content = await search(context);
-    assert.equal(
-      content.nextStep,
-      `Assess titles and abstracts and select 5 genuinely relevant papers in ranked order. Respect the user's topic and these constraints: {"batchSize":5}. Assess unused saved candidates first; search further if needed. To expand a provider list, increase its retrieval limit rather than repeating the same bounded request. Call literature_review with sessionId '${content.sessionId}', revision 0, NEW candidateSetId/candidateIndex selections and evidence-based relevance reasons. Do not repeat displayed papers or dump the raw pool. If fewer qualify, explain shortfallReason; use outcome 'no_more' when no further relevant matches were found, or 'search_failed' for a retrieval failure. Empty selections with an explanation are allowed. Never import during discovery or finish with prose instead of the card.`,
-    );
-  });
-
   it("offers no card route to a caller that cannot see literature_review", async function () {
     // MCP clients never see literature_review; the routing must not send
     // them there (the answer path returns no nextStep, as before).
@@ -662,11 +575,7 @@ describe("ranked literature discovery workflow", function () {
   });
 
   it("requires the current expansion even when an earlier card was presented", async function () {
-    const controller = new AgentFinalAnswerController(
-      makeContext().request,
-      { evaluateFinal: async () => ({ kind: "accept" }) },
-      [],
-    );
+    const controller = new AgentFinalAnswerController(makeContext().request);
     const decision = await controller.evaluate({
       candidateText: "Done",
       canCorrect: true,
@@ -689,14 +598,6 @@ describe("ranked literature discovery workflow", function () {
   it("never substitutes keyword matches for an unavailable reference list", async function () {
     const context = makeContext();
     context.request.userText = "Find five papers cited by this paper";
-    context.request.classifiedIntent = classifiedFixture({
-      externalSearchIntent: "literature",
-      semantic: semanticFixture({
-        literature: "discover",
-        literatureMode: "references",
-        requestedCount: 5,
-      }),
-    });
     let networkCalls = 0;
     globalThis.fetch = (async () => {
       networkCalls++;
@@ -706,7 +607,7 @@ describe("ranked literature discovery workflow", function () {
     const parsed = tool.validate({
       mode: "references",
       query: "A seed without a DOI",
-      workflow: "answer",
+      workflow: "review",
     });
     if (!parsed.ok) throw new Error(parsed.error);
     const result = (await tool.execute(parsed.value, context)) as any;

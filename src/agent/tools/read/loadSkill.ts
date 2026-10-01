@@ -42,9 +42,9 @@ export type LoadSkillToolOptions = {
  * (`deliveredToolGuidance`: the rendered guidance plus earlier load_skill
  * returns), every instruction that matches with the loaded skill active is
  * returned minus that set; this also covers guidance that became applicable
- * after the render, such as a note obligation approved mid-turn. Without a
- * record (an MCP call) only guidance tied to the skill is returned: it
- * matches with the skill and not with the skills active before the load.
+ * after the render. Without a record (an MCP call) only guidance tied to the
+ * skill is returned: it matches with the skill and not with the skills
+ * active before the load.
  */
 function collectSkillToolGuidance(
   skillId: string,

@@ -16,28 +16,6 @@ type PlanQuestion = {
 
 type RequestUserInput = { questions: PlanQuestion[] };
 
-function pendingQuestions(
-  input: RequestUserInput,
-  context: import("../../types").AgentToolContext,
-): PlanQuestion[] {
-  const selection = context.request?.actionPreparation?.sourceSelection;
-  if (!selection) return input.questions;
-  return [
-    {
-      id: "reference",
-      question: selection.question,
-      options: selection.candidates.map((candidate) => ({
-        id: `source:${candidate.id}`,
-        label: candidate.path,
-        description:
-          "Remove this membership and preserve every other membership.",
-      })),
-      answer: input.questions.find((question) => question.id === "reference")
-        ?.answer,
-    },
-  ];
-}
-
 function readQuestionAnswer(value: unknown): string | undefined {
   if (typeof value === "string") return value.trim() || undefined;
   if (!validateObject<Record<string, unknown>>(value)) return undefined;
@@ -166,24 +144,23 @@ export function createRequestUserInputTool(
       mode: "review",
       confirmLabel: "Continue",
       cancelLabel: "Cancel",
-      fields: pendingQuestions(input, context).map<AgentPendingField>(
-        (question) =>
-          question.options.length
-            ? {
-                type: "choice",
-                id: question.id,
-                label: question.question,
-                requiredForActionIds: ["continue"],
-                options: question.options.map((option) => ({ ...option })),
-                allowCustom: true,
-                customPlaceholder: "Something else…",
-              }
-            : {
-                type: "text",
-                id: question.id,
-                label: question.question,
-                requiredForActionIds: ["continue"],
-              },
+      fields: input.questions.map<AgentPendingField>((question) =>
+        question.options.length
+          ? {
+              type: "choice",
+              id: question.id,
+              label: question.question,
+              requiredForActionIds: ["continue"],
+              options: question.options.map((option) => ({ ...option })),
+              allowCustom: true,
+              customPlaceholder: "Something else…",
+            }
+          : {
+              type: "text",
+              id: question.id,
+              label: question.question,
+              requiredForActionIds: ["continue"],
+            },
       ),
       actions: [
         { id: "continue", label: "Continue", approved: true },
@@ -195,7 +172,7 @@ export function createRequestUserInputTool(
     applyConfirmation: (input, data, context) => {
       const record = validateObject<Record<string, unknown>>(data) ? data : {};
       return ok({
-        questions: pendingQuestions(input, context).map((question) => ({
+        questions: input.questions.map((question) => ({
           ...question,
           answer: readQuestionAnswer(
             record[question.id] as AgentPendingChoiceValue | undefined,
@@ -204,7 +181,6 @@ export function createRequestUserInputTool(
       });
     },
     execute: async (input, context) => {
-      input = { questions: pendingQuestions(input, context) };
       const publicAnswers = input.questions.map((question) => ({
         id: question.id,
         answer: question.answer,

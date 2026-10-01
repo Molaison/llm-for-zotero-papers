@@ -28,12 +28,6 @@ export function capabilityForLibraryMutation(
   return libraryMutationHandlers[type].actionCapability;
 }
 
-export function libraryMutationTargetsItems(
-  type: LibraryMutationOperationType,
-): boolean {
-  return libraryMutationHandlers[type].targetScope === "items";
-}
-
 export function targetItemIdsForLibraryMutation(
   operation: LibraryMutationOperation,
 ): number[] {

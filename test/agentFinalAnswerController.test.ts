@@ -1,7 +1,5 @@
-import { semanticFixture } from "./helpers/semanticIntent";
 import { assert } from "chai";
 import { AgentFinalAnswerController } from "../src/agent/finalization/finalAnswerController";
-import type { AgentFinalActionSession } from "../src/agent/finalization/finalAnswerController";
 import {
   applyOutcomeEvidence,
   declareOutcomes,
@@ -32,27 +30,11 @@ function makeRequest(
   } as AgentRuntimeRequest;
 }
 
-function acceptingActionSession(): AgentFinalActionSession {
-  return {
-    evaluateFinal: async () => ({ kind: "accept" as const }),
-  };
-}
-
 describe("AgentFinalAnswerController", function () {
   for (const canCorrect of [true, false]) {
     it(`accepts the first grounded paper answer with canCorrect=${canCorrect}`, async function () {
       const controller = new AgentFinalAnswerController(
-        makeRequest({
-          conversationKind: "paper",
-          classifiedIntent: {
-            semantic: semanticFixture(),
-            retrievalIntent: "none",
-            wantedSections: ["results"],
-            actionIntents: [],
-          },
-        }),
-        acceptingActionSession(),
-        [],
+        makeRequest({ conversationKind: "paper" }),
       );
       const decision = await controller.evaluate({
         candidateText:
@@ -66,13 +48,11 @@ describe("AgentFinalAnswerController", function () {
 
   it("accepts completed paper actions and finalized documents", async function () {
     for (const overrides of [
-      { actionContract: { obligations: [{ operation: "note_create" }] } },
+      {},
       { documentOutcomePolicy: { required: true } },
     ]) {
       const controller = new AgentFinalAnswerController(
         makeRequest({ conversationKind: "paper", ...overrides } as never),
-        acceptingActionSession(),
-        [],
       );
       const result = await controller.evaluate({
         candidateText: "Saved.",
@@ -95,8 +75,6 @@ describe("AgentFinalAnswerController", function () {
           trigger: "document_intent",
         },
       }),
-      acceptingActionSession(),
-      [],
     );
 
     const first = await controller.evaluate({
@@ -131,8 +109,6 @@ describe("AgentFinalAnswerController", function () {
           trigger: "document_intent",
         },
       }),
-      acceptingActionSession(),
-      [],
     );
     const decision = await controller.evaluate({
       candidateText: "# Complete guide",
@@ -143,68 +119,7 @@ describe("AgentFinalAnswerController", function () {
     });
     assert.equal(decision.kind, "accept");
   });
-  it("returns an uncommitted action-contract correction before other quality gates", async function () {
-    const controller = new AgentFinalAnswerController(
-      makeRequest({
-        actionContract: { obligations: [{ operation: "note_create" }] },
-      } as never),
-      {
-        evaluateFinal: async () => ({
-          kind: "correct" as const,
-          correction: "Complete the required action.",
-        }),
-      },
-      [],
-    );
-
-    const decision = await controller.evaluate({
-      candidateText: "Draft",
-      canCorrect: true,
-      toolExecutionRecords: [],
-    });
-
-    assert.deepEqual(decision, {
-      kind: "correct",
-      correction: "Complete the required action.",
-      actionContractRejection: {
-        kind: "correct",
-        correction: "Complete the required action.",
-      },
-    });
-  });
-
-  it("returns a kind-matched uncommitted action-contract failure", async function () {
-    const controller = new AgentFinalAnswerController(
-      makeRequest({
-        actionContract: { obligations: [{ operation: "note_create" }] },
-      } as never),
-      {
-        evaluateFinal: async () => ({
-          kind: "fail" as const,
-          failure: "The action could not be verified.",
-        }),
-      },
-      [],
-    );
-
-    const decision = await controller.evaluate({
-      candidateText: "Draft",
-      canCorrect: false,
-      toolExecutionRecords: [],
-    });
-
-    assert.deepEqual(decision, {
-      kind: "fail",
-      userMessage: "The action could not be verified.",
-      actionContractRejection: {
-        kind: "fail",
-        failure: "The action could not be verified.",
-      },
-    });
-  });
-
   it("does not invent action obligations for a fresh direct turn", async function () {
-    let legacyEvaluationCalls = 0;
     const controller = new AgentFinalAnswerController(
       makeRequest({
         executionContext: {
@@ -221,16 +136,6 @@ describe("AgentFinalAnswerController", function () {
           configuredAccess: { libraryIDs: [1], outputDirectories: [] },
         },
       }),
-      {
-        evaluateFinal: async () => {
-          legacyEvaluationCalls += 1;
-          return {
-            kind: "fail" as const,
-            failure: "A semantic action contract is unavailable.",
-          };
-        },
-      },
-      [],
     );
 
     const decision = await controller.evaluate({
@@ -240,15 +145,10 @@ describe("AgentFinalAnswerController", function () {
     });
 
     assert.equal(decision.kind, "accept");
-    assert.equal(legacyEvaluationCalls, 0);
   });
 
   it("fails a direct applied write whose concrete effect is unverified", async function () {
-    const controller = new AgentFinalAnswerController(
-      makeRequest(),
-      acceptingActionSession(),
-      [],
-    );
+    const controller = new AgentFinalAnswerController(makeRequest());
 
     const decision = await controller.evaluate({
       candidateText: "Saved.",
@@ -293,11 +193,7 @@ describe("AgentFinalAnswerController", function () {
     },
   ]) {
     it(`${scenario.expected}s an applied write whose receipt is ${scenario.verification} because ${scenario.why}`, async function () {
-      const controller = new AgentFinalAnswerController(
-        makeRequest(),
-        acceptingActionSession(),
-        [],
-      );
+      const controller = new AgentFinalAnswerController(makeRequest());
 
       const decision = await controller.evaluate({
         candidateText: "Ran it.",
@@ -321,55 +217,8 @@ describe("AgentFinalAnswerController", function () {
       assert.equal(decision.kind, scenario.expected);
     });
   }
-
-  it("allows one collection evidence correction then accepts the next final", async function () {
-    const request = makeRequest({
-      userText: "What methods do these papers share?",
-      classifiedIntent: {
-        semantic: semanticFixture(),
-        retrievalIntent: "summarize",
-        wantedSections: ["methods"],
-        actionIntents: [],
-      },
-      turnPaperScope: {
-        active: [],
-        added: [],
-        pinned: [],
-        selected: [],
-        collections: [{ collectionId: 3, name: "C", libraryID: 1 }],
-        tags: [],
-      },
-    });
-    const controller = new AgentFinalAnswerController(
-      request,
-      acceptingActionSession(),
-      [],
-    );
-
-    const first = await controller.evaluate({
-      candidateText: "Shallow answer.",
-      canCorrect: true,
-      toolExecutionRecords: [],
-    });
-    assert.equal(first.kind, "correct");
-    if (first.kind === "correct") {
-      assert.notProperty(first, "actionContractRejection");
-    }
-
-    const second = await controller.evaluate({
-      candidateText: "Disclosed partial answer.",
-      canCorrect: true,
-      toolExecutionRecords: [],
-    });
-    assert.equal(second.kind, "accept");
-  });
-
   it("returns a clean assistant copy for a web-attribution correction", async function () {
-    const controller = new AgentFinalAnswerController(
-      makeRequest(),
-      acceptingActionSession(),
-      [],
-    );
+    const controller = new AgentFinalAnswerController(makeRequest());
 
     const decision = await controller.evaluate({
       candidateText: "An unsupported current claim.",
@@ -381,7 +230,6 @@ describe("AgentFinalAnswerController", function () {
 
     assert.equal(decision.kind, "correct");
     if (decision.kind !== "correct") return;
-    assert.notProperty(decision, "actionContractRejection");
     assert.equal(decision.assistantContent, "An unsupported current claim.");
     assert.include(decision.correction, "Correct the web attribution");
   });
@@ -433,8 +281,6 @@ describe("AgentFinalAnswerController declared outcomes", function () {
         executionContext: execution,
         executionCheckpoint: declared(),
       }),
-      acceptingActionSession(),
-      [],
     );
     const decision = await decide(controller);
     assert.equal(decision.kind, "correct");
@@ -450,11 +296,7 @@ describe("AgentFinalAnswerController declared outcomes", function () {
       executionContext: execution,
       executionCheckpoint: declared(),
     });
-    const controller = new AgentFinalAnswerController(
-      request,
-      acceptingActionSession(),
-      [],
-    );
+    const controller = new AgentFinalAnswerController(request);
     assert.equal((await decide(controller)).kind, "correct");
     assert.equal(
       (await decide(controller)).kind,
@@ -513,11 +355,7 @@ describe("AgentFinalAnswerController declared outcomes", function () {
         false,
       ],
     ] as const) {
-      const controller = new AgentFinalAnswerController(
-        request,
-        acceptingActionSession(),
-        [],
-      );
+      const controller = new AgentFinalAnswerController(request);
       assert.equal((await decide(controller, canCorrect)).kind, "accept");
     }
   });

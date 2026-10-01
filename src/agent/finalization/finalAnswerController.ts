@@ -1,18 +1,8 @@
 import type {
   AgentActionReceipt,
-  AgentModelMessage,
   AgentRuntimeRequest,
   AgentToolEffect,
 } from "../types";
-import type {
-  ActionContractRunSession,
-  RejectedActionContractFinalDecision,
-} from "../contracts/actionContractRunSession";
-import {
-  findLibraryRetrieveShallowSignal,
-  isEvidenceSeekingTurn,
-  transcriptShowsEvidenceReads,
-} from "../model/libraryAnswerGuard";
 import {
   assessWebAttribution,
   type WebAttributionAssessment,
@@ -89,11 +79,6 @@ function importsSavedCandidate(
   );
 }
 
-export type AgentFinalActionSession = Pick<
-  ActionContractRunSession,
-  "evaluateFinal"
->;
-
 export type AgentFinalAnswerDecision =
   | {
       kind: "accept";
@@ -103,22 +88,11 @@ export type AgentFinalAnswerDecision =
       kind: "correct";
       correction: string;
       assistantContent?: string;
-      actionContractRejection?: Extract<
-        RejectedActionContractFinalDecision,
-        { kind: "correct" }
-      >;
     }
   | {
       kind: "fail";
       userMessage: string;
-      actionContractRejection?: Extract<
-        RejectedActionContractFinalDecision,
-        { kind: "fail" }
-      >;
     };
-
-const LIBRARY_EVIDENCE_CORRECTION =
-  "Correction for this turn: the question targets the selected collection/tag scope and needs library evidence. Call `library_retrieve` scoped to the selected collections/tags now (intent:'summarize' for synthesis or theme questions, 'enumerate' for which-papers questions; depth:'evidence'), then answer from the returned evidence. Include the coverage line (papers planned / body evidence read / metadata-only) in the final answer; if coverage is partial, name what is missing instead of generalizing.";
 
 /**
  * Applies every runtime-owned final-answer gate through one typed decision.
@@ -127,47 +101,19 @@ const LIBRARY_EVIDENCE_CORRECTION =
  * final response.
  */
 export class AgentFinalAnswerController {
-  private shallowLibraryCorrectionUsed = false;
   private webAttributionCorrectionUsed = false;
   private documentCorrectionUsed = false;
   private readonly literatureReviewCorrections = new Set<string>();
   /** The ledger's progress when the last outcome correction was given. */
   private outcomeCorrectionSignature?: string;
 
-  constructor(
-    private readonly request: AgentRuntimeRequest,
-    private readonly actionContractSession: AgentFinalActionSession,
-    private readonly transcriptMessages: readonly AgentModelMessage[],
-  ) {}
+  constructor(private readonly request: AgentRuntimeRequest) {}
 
   async evaluate(params: {
     candidateText: string;
     canCorrect: boolean;
     toolExecutionRecords: readonly AgentFinalAnswerToolRecord[];
   }): Promise<AgentFinalAnswerDecision> {
-    // Action contracts remain a compatibility boundary for approved legacy
-    // Plans. Fresh direct turns are checked at each concrete invocation and
-    // have no predicted obligations to evaluate here.
-    if (this.request.actionContract) {
-      const actionDecision = await this.actionContractSession.evaluateFinal({
-        canCorrect: params.canCorrect,
-      });
-      if (actionDecision.kind !== "accept") {
-        if (actionDecision.kind === "correct") {
-          return {
-            kind: "correct",
-            correction: actionDecision.correction,
-            actionContractRejection: actionDecision,
-          };
-        }
-        return {
-          kind: "fail",
-          userMessage: actionDecision.failure,
-          actionContractRejection: actionDecision,
-        };
-      }
-    }
-
     const unverifiableWrite = params.toolExecutionRecords.find(
       (record) =>
         record.ok &&
@@ -210,14 +156,6 @@ export class AgentFinalAnswerController {
       return { kind: "fail", userMessage: failure };
     }
 
-    if (this.shouldCorrectShallowLibraryAnswer(params)) {
-      this.shallowLibraryCorrectionUsed = true;
-      return {
-        kind: "correct",
-        correction: LIBRARY_EVIDENCE_CORRECTION,
-      };
-    }
-
     const lastDiscovery = params.toolExecutionRecords.findLastIndex(
       (record) =>
         record.ok &&
@@ -232,9 +170,8 @@ export class AgentFinalAnswerController {
             ?.reviewRequired,
         ),
     );
-    // Without a classified literature intent the search result offers an
-    // import branch, so importing its saved candidates also closes discovery.
-    const importCloses = !this.request.classifiedIntent?.semantic?.literature;
+    // The search result offers an import branch, so importing its saved
+    // candidates also closes discovery.
     if (
       lastDiscovery >= 0 &&
       !params.toolExecutionRecords
@@ -242,8 +179,7 @@ export class AgentFinalAnswerController {
         .some(
           (record) =>
             (record.ok && record.name === "literature_review") ||
-            (importCloses &&
-              importsSavedCandidate(params.toolExecutionRecords, record)),
+            importsSavedCandidate(params.toolExecutionRecords, record),
         )
     ) {
       const failure =
@@ -302,29 +238,5 @@ export class AgentFinalAnswerController {
     this.outcomeCorrectionSignature = signature;
     const parts = open.map((task) => `“${task.description}”`).join("; ");
     return `Before answering, finish the parts of this request you declared that are still open: ${parts}. Do them now with the tools. If one cannot be done, call task_update with status skipped or blocked and the reason, then answer.`;
-  }
-
-  private shouldCorrectShallowLibraryAnswer(params: {
-    canCorrect: boolean;
-    toolExecutionRecords: readonly AgentFinalAnswerToolRecord[];
-  }): boolean {
-    if (!params.canCorrect || this.shallowLibraryCorrectionUsed) return false;
-    const libraryScoped = Boolean(
-      this.request.turnPaperScope.collections.length ||
-      this.request.turnPaperScope.tags.length,
-    );
-    if (!libraryScoped || !isEvidenceSeekingTurn(this.request)) return false;
-    if (transcriptShowsEvidenceReads(this.transcriptMessages)) return false;
-
-    const shallowSignal = findLibraryRetrieveShallowSignal(
-      params.toolExecutionRecords,
-    );
-    const classifiedRetrieval = this.request.classifiedIntent?.retrievalIntent;
-    return (
-      !shallowSignal.ranRetrieveFamily ||
-      (shallowSignal.lastRetrieveShallow &&
-        (classifiedRetrieval === "summarize" ||
-          classifiedRetrieval === "verify"))
-    );
   }
 }

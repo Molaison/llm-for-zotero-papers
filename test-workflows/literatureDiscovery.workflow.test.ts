@@ -1,8 +1,4 @@
 import "./hostSurfaceBootstrap";
-import {
-  classifiedFixture,
-  semanticFixture,
-} from "../test/helpers/semanticIntent";
 import { assert } from "chai";
 import { createLiteratureSearchTool } from "../src/agent/tools/read/literatureSearch";
 import { createLiteratureReviewTool } from "../src/agent/tools/read/reviewLiterature";
@@ -29,15 +25,8 @@ describe("workflow: expandable ranked discovery", function () {
           activeItemId: fixture.parentItemId,
           libraryID: Zotero.Items.get(fixture.parentItemId).libraryID,
           mode: "agent",
-          userText:
-            "Find three relevant papers and let me review before importing",
-          classifiedIntent: classifiedFixture({
-            externalSearchIntent: "literature",
-            semantic: semanticFixture({
-              literature: "select_then_import",
-              requestedCount: 3,
-            }),
-          }),
+          // A discovery batch is five papers; no turn carries a requested count.
+          userText: "Find relevant papers and let me review before importing",
         }),
         runId: `discovery-workflow-${fixture.parentItemId}`,
         resourceSignature: `paper-${fixture.parentItemId}`,
@@ -52,7 +41,7 @@ describe("workflow: expandable ranked discovery", function () {
         ok: true,
         status: 200,
         json: async () => ({
-          results: Array.from({ length: 12 }, (_, i) => ({
+          results: Array.from({ length: 15 }, (_, i) => ({
             id: `https://openalex.org/W${i + 1}`,
             display_name: `Discovery candidate ${i + 1}`,
             doi: `https://doi.org/10.1000/discovery-${i + 1}`,
@@ -70,7 +59,7 @@ describe("workflow: expandable ranked discovery", function () {
         mode: "search",
         query: "discovery fixture",
         workflow: "answer",
-        limit: 12,
+        limit: 15,
       });
       if (!searchInput.ok) throw new Error(searchInput.error);
       const candidates = (await search.execute(
@@ -82,9 +71,9 @@ describe("workflow: expandable ranked discovery", function () {
       for (let batch = 0; batch < 3; batch++) {
         const parsed = review.validate({
           ...continuation,
-          selections: [1, 2, 3].map((i) => ({
+          selections: [1, 2, 3, 4, 5].map((i) => ({
             candidateSetId: candidates.candidateSetId,
-            candidateIndex: batch * 3 + i,
+            candidateIndex: batch * 5 + i,
             reason: "Shares the measured population coding method.",
           })),
         });
@@ -115,7 +104,7 @@ describe("workflow: expandable ranked discovery", function () {
             ".llm-search-results-list input[type=checkbox]",
           ),
         ) as HTMLInputElement[];
-        assert.lengthOf(rows, (batch + 1) * 3);
+        assert.lengthOf(rows, (batch + 1) * 5);
         if (batch === 0) rows[0].click();
         else
           assert.isFalse(
@@ -125,7 +114,7 @@ describe("workflow: expandable ranked discovery", function () {
         const more = card.querySelector<HTMLButtonElement>(
           ".llm-search-load-more-btn",
         )!;
-        assert.equal(more.textContent, "Find 3 more");
+        assert.equal(more.textContent, "Find 5 more");
         assert.isAbove(more.getBoundingClientRect().width, 0);
         if (batch < 2) more.click();
         else

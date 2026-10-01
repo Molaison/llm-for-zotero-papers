@@ -1236,16 +1236,7 @@ describe("outcome ledger: run end state", function () {
     assert.isUndefined(ledger.end);
   });
 
-  it("awaiting clarification, unresolved references, or any blocked outcome end blocked", function () {
-    for (const stopRule of [
-      "awaiting_clarification",
-      "references_unresolved",
-    ] as RunStopRule[]) {
-      assert.equal(
-        decideRunEnd(undefined, { status: "completed", stopRule }),
-        "blocked",
-      );
-    }
+  it("any blocked outcome ends the run blocked", function () {
     const blocked = apply(
       ledgerWith(saveNote),
       declineNote("call-note"),

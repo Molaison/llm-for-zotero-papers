@@ -4,7 +4,6 @@ import {
   getConversationWriteGeneration,
   unfreezeConversationWrites,
 } from "../src/shared/conversationWriteFence";
-import { classifiedFixture } from "./helpers/semanticIntent";
 import { assert } from "chai";
 import { afterEach, beforeEach, describe, it } from "mocha";
 import { initAgentChangeJournal } from "../src/agent/store/changeJournal";
@@ -33,13 +32,7 @@ describe("external bridge action approval handling", function () {
           request.conversationGeneration = getConversationWriteGeneration(
             request.conversationKey,
           );
-          if (request.planContext?.phase !== "executing") {
-            request.classifiedIntent = undefined;
-            request.skillRoutingReceipt = undefined;
-            request.actionContract = undefined;
-            request.actionProgress = undefined;
-            request.actionPreparation = undefined;
-          }
+          request.skillRoutingReceipt = undefined;
           request.executionContext = {
             version: 1,
             executionId: "external-test-execution",
@@ -213,7 +206,6 @@ describe("external bridge action approval handling", function () {
       const runtime = createRuntime();
       await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 99,
           metadata: { conversationInstanceID: "instance-99" },
           mode: "agent",
@@ -283,7 +275,6 @@ describe("external bridge action approval handling", function () {
       const runtime = createRuntime();
       await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 100,
           mode: "agent",
           userText: "hello",
@@ -560,7 +551,6 @@ describe("external bridge action approval handling", function () {
 
       await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 77,
           mode: "agent",
           userText: "write this to my Obsidian",
@@ -834,7 +824,6 @@ describe("external bridge action approval handling", function () {
 
       await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 88,
           mode: "agent",
           userText: "hello",
@@ -992,7 +981,6 @@ describe("external bridge action approval handling", function () {
       const runtime = createRuntime();
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 8901,
           mode: "agent",
           userText: "Read the selected PDF.",

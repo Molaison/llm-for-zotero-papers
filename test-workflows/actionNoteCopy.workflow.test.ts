@@ -1,10 +1,5 @@
 import "./hostSurfaceBootstrap";
 import { resolvedAgentRequest } from "../test/helpers/resolvedAgentRequest";
-import {
-  semanticContractFixture,
-  classifiedFixture,
-  semanticResponseFixture,
-} from "../test/helpers/semanticIntent";
 import { assert } from "chai";
 import { AgentToolRegistry } from "../src/agent/tools/registry";
 import { ActionContractService } from "../src/agent/contracts/actionContract";
@@ -14,7 +9,8 @@ import {
   getOriginalAgentPermissionMode,
   setOriginalAgentPermissionMode,
 } from "../src/agent/originalAgentPermissionMode";
-import type { AgentActionContract, AgentToolContext } from "../src/agent/types";
+import { createAgentExecutionContext } from "../src/agent/execution/context";
+import type { AgentToolContext } from "../src/agent/types";
 
 describe("workflow: native source-note copy", function () {
   this.timeout(60000);
@@ -55,33 +51,19 @@ describe("workflow: native source-note copy", function () {
       registry.register(
         (Zotero as any).LLMForZotero.api.agent.getToolDefinition("note_write"),
       );
-      const contract: AgentActionContract = semanticContractFixture({
-        version: 3,
-        id: "native-copy",
-        hardConstraints: [],
-        writeDisposition: "required",
-        interpretationSource: "semantic",
-        obligations: [
-          {
-            id: "copy",
-            operation: "note_create",
-            proofDomain: "zotero_state",
-            capability: "zotero.notes",
-            coverage: "one",
-            targetKind: "items",
-            parameters: { noteMode: "create" },
-          },
-        ],
+      const request = resolvedAgentRequest({
+        conversationKey: source.id,
+        mode: "agent",
+        userText: `Create one standalone copy of note ${source.id}`,
+        libraryID: source.libraryID,
       });
+      // An ordinary agent turn: the in-plugin agent owns permission.
+      request.executionContext = createAgentExecutionContext(
+        request,
+        "native-copy",
+      );
       const context: AgentToolContext = {
-        request: resolvedAgentRequest({
-          conversationKey: source.id,
-          mode: "agent",
-          userText: `Create one standalone copy of note ${source.id}`,
-          libraryID: source.libraryID,
-          actionContract: contract,
-          actionProgress: contracts.createProgress(contract),
-        }),
+        request,
         item: null,
         modelName: "workflow",
         currentAnswerText: "",
@@ -133,21 +115,6 @@ describe("workflow: native source-note copy", function () {
         1,
       );
       const copiedBefore = copied.getNote();
-      const editContract: AgentActionContract = {
-        ...contract,
-        id: "native-encoded-note-edit",
-        obligations: [
-          {
-            id: "edit",
-            operation: "note_edit",
-            proofDomain: "zotero_state",
-            capability: "zotero.notes",
-            coverage: "one",
-            targetKind: "items",
-            parameters: { noteMode: "edit", targetNoteId: copied.id },
-          },
-        ],
-      };
       const edit = await registry.prepareExecution(
         {
           id: "edit",
@@ -165,8 +132,6 @@ describe("workflow: native source-note copy", function () {
           request: {
             ...context.request,
             userText: `In note ${copied.id}, replace only "preserved paragraph" with "reviewed paragraph". Keep all other content.`,
-            actionContract: editContract,
-            actionProgress: contracts.createProgress(editContract),
           },
         },
       );

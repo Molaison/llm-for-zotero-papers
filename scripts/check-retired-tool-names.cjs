@@ -62,10 +62,7 @@ const RETIRED_TOOL_NAMES = [
 ];
 // Repo-relative, forward-slash prefixes matched with startsWith.
 const ALLOWLIST = [
-  "src/agent/model/actionIntent.ts", // OPERATION_CATALOG keys are operations, not tools
-  "src/agent/tools/preparedLibraryActions.ts", // registerActionBinding(operation)
   "src/agent/services/libraryMutation/", // operation handlers
-  "src/agent/contracts/actionScope.ts",
   "src/modules/contextPanel/agentTrace/actionCardModel.ts",
   "src/agent/context/toolNames.ts", // RETIRED_TOOL_HINTS: retired name -> facade
   "src/agent/finalization/finalAnswerController.ts", // accepts search_literature_online from stored tool history

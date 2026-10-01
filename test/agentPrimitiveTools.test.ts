@@ -2,13 +2,7 @@ import { noteHtmlMatches } from "../src/utils/noteHtml";
 import { renderRawNoteHtml } from "../src/services/notes/noteRendering";
 import { composeRetrievalCandidateInvalidation } from "./helpers/hostSurfaces";
 import { nativeNoteGateway } from "./helpers/nativeNoteGateway";
-import { actionContractFixture } from "./helpers/semanticIntent";
 import { ActionContractService } from "../src/agent/contracts/actionContract";
-import {
-  actionFixture,
-  classifiedFixture,
-  semanticFixture,
-} from "./helpers/semanticIntent";
 import { assert } from "chai";
 import { buildAgentInitialMessages as buildAgentInitialMessagesResolved } from "../src/agent/model/messageBuilder";
 import { EDITABLE_ARTICLE_METADATA_FIELDS } from "../src/agent/services/zoteroGateway";
@@ -20,7 +14,6 @@ import { createLibraryReadTool } from "../src/agent/tools/read/libraryRead";
 import { createPaperReadTool } from "../src/agent/tools/read/paperRead";
 import { getPagedOperationId } from "../src/agent/actions/pagedWorkflow";
 import { createFileIOTool } from "../src/agent/tools/write/fileIO";
-import { createBuiltInToolRegistry } from "../src/agent/tools";
 import { createNoteWriteTool } from "../src/agent/tools/write/noteWrite";
 import { createApplyTagsTool } from "../src/agent/tools/write/applyTags";
 import { createUpdateMetadataTool } from "../src/agent/tools/write/updateMetadata";
@@ -259,7 +252,7 @@ describe("primitive agent tools", function () {
     globalScope.Zotero = originalZotero;
   });
 
-  it("does not infer library scope or figure work from a forced skill when semantic intent requests chat", async function () {
+  it("does not infer library scope or figure work from a forced skill", async function () {
     const messages = await buildAgentInitialMessages(
       {
         conversationKey: 43_799,
@@ -269,7 +262,6 @@ describe("primitive agent tools", function () {
         model: "gpt-4o",
         libraryID: 1,
         forcedSkillIds: ["analyze-figures"],
-        classifiedIntent: classifiedFixture(),
       },
       [],
       ["analyze-figures"],
@@ -2249,32 +2241,6 @@ Figure 2 explains the attractor-network interpretation.`;
     assert.equal(first.citationLabel, "Rivera, 2024");
     assert.equal(first.sourceLabel, "(Rivera, 2024)");
   });
-
-  it("adds direct-card guidance for write tool requests", async function () {
-    const registry = createBuiltInToolRegistry({
-      zoteroGateway: {} as never,
-      pdfService: {} as never,
-      pdfPageService: {} as never,
-      retrievalService: {} as never,
-    });
-    const messages = await buildAgentInitialMessages(
-      {
-        conversationKey: 2,
-        mode: "agent",
-        userText: "can you help me tag these papers?",
-        classifiedIntent: actionFixture("apply_tags"),
-      },
-      registry.listToolDefinitions(),
-      [],
-    );
-    const turnText = messageText(messages[messages.length - 1]);
-    assert.include(turnText, "library_update");
-    assert.include(turnText, "collection membership");
-    // The write delegates are not registered, so their own guidance never
-    // reaches the model; library_update's guidance is the only write guidance.
-    assert.notInclude(turnText, "confirmation card is the deliverable");
-  });
-
   it("note_write confirms and updates the active note", async function () {
     const tool = createNoteWriteTool(
       nativeNoteGateway({
@@ -2563,7 +2529,17 @@ env.log('updated');
         ...baseContext,
         request: {
           ...baseContext.request,
-          actionContract: actionContractFixture("zotero_script_execute"),
+          // An ordinary agent turn: the in-plugin agent owns permission.
+          executionContext: {
+            version: 1,
+            executionId: "script-run",
+            conversationKey: 42,
+            conversationGeneration: 0,
+            chatLibraryID: 1,
+            permissionOwner: "original_agent",
+            workspaceSnapshot: { selectedPapers: [], selectedCollections: [] },
+            configuredAccess: { libraryIDs: [1], outputDirectories: [] },
+          },
         },
       },
     );

@@ -46,7 +46,7 @@ describe("undo multi-revert effect path", function () {
       tool,
       validated({ actionIds: ["action-1"] }),
     );
-    const receipts = await service.finalize(undefined, prepared, {
+    const receipts = await service.finalize(prepared, {
       ok: true,
       effect: "applied",
       content: {
@@ -74,7 +74,7 @@ describe("undo multi-revert effect path", function () {
       tool,
       validated({ actionIds: ["action-1"] }),
     );
-    const receipts = await service.finalize(undefined, prepared, {
+    const receipts = await service.finalize(prepared, {
       ok: true,
       effect: "applied",
       content: {
@@ -105,7 +105,7 @@ describe("undo multi-revert effect path", function () {
       tool,
       validated({ actionIds: ["action-1", "action-2"] }),
     );
-    const receipts = await service.finalize(undefined, prepared, {
+    const receipts = await service.finalize(prepared, {
       ok: true,
       effect: "partial",
       content: {
@@ -136,7 +136,7 @@ describe("undo multi-revert effect path", function () {
       tool,
       validated({ actionIds: ["action-1"] }),
     );
-    const receipts = await service.finalize(undefined, prepared, {
+    const receipts = await service.finalize(prepared, {
       ok: true,
       // Every step conflicted, so nothing was replayed and nothing changed.
       // "No effect" here means the library was left as it was, not that the
@@ -161,7 +161,7 @@ describe("undo multi-revert effect path", function () {
 
   it("still treats an empty history as already satisfied", async function () {
     const prepared = await service.prepare(tool, validated({ count: 1 }));
-    const receipts = await service.finalize(undefined, prepared, {
+    const receipts = await service.finalize(prepared, {
       ok: true,
       effect: "none",
       content: {
@@ -180,7 +180,7 @@ describe("undo multi-revert effect path", function () {
       tool,
       validated({ actionIds: ["action-1"] }),
     );
-    const receipts = await service.finalize(undefined, prepared, {
+    const receipts = await service.finalize(prepared, {
       ok: true,
       effect: "partial",
       content: {
@@ -199,7 +199,7 @@ describe("undo multi-revert effect path", function () {
 
   it("reports a cancelled revert as not_applicable", async function () {
     const prepared = await service.prepare(tool, validated({ count: 1 }));
-    const receipts = await service.finalize(undefined, prepared, {
+    const receipts = await service.finalize(prepared, {
       ok: false,
       cancelled: true,
       reason: "The user declined the revert.",

@@ -1,9 +1,6 @@
 import type {
   AgentActionCapability,
-  AgentActionContract,
-  AgentActionObligation,
   AgentActionOperation,
-  AgentActionProgressLedger,
   AgentActionReceipt,
   AgentToolEffect,
 } from "../types";
@@ -26,15 +23,13 @@ export type ContractEvaluation = {
   failure?: string;
 };
 
-/** Shared completion boundary for original and native provider turns. */
+/**
+ * Shared completion boundary for original and native provider turns: what the
+ * turn's own receipts prove. A turn carries no contract of obligations, so an
+ * effect counts as done when its receipt says so, and an applied effect the
+ * host could not re-read is reported instead of claimed.
+ */
 export function evaluatePreparedActionContract(
-  request: Pick<
-    import("../types").AgentRuntimeRequest,
-    | "actionContract"
-    | "actionProgress"
-    | "actionPreparation"
-    | "classifiedIntent"
-  >,
   receipts: AgentActionReceipt[],
 ): ContractEvaluation {
   const delegated = receipts.filter(
@@ -61,103 +56,17 @@ export function evaluatePreparedActionContract(
       failure: `Delegated action results:\n${formatReceiptStatus(delegated)}`,
     };
   }
-  if (!request.actionContract && !request.classifiedIntent?.semantic) {
-    const unverifiableApplied = receipts.filter(
-      (receipt) =>
-        (receipt.status === "applied" || receipt.status === "partial") &&
-        receipt.verification === "unverified",
-    );
-    return unverifiableApplied.length
-      ? {
-          state: "unverified",
-          failure: `Concrete action results could not be verified:\n${formatReceiptStatus(unverifiableApplied)}`,
-        }
-      : { state: "satisfied" };
-  }
-  if (
-    request.actionPreparation &&
-    request.actionPreparation.state !== "ready"
-  ) {
-    return {
-      state: "failed",
-      failure:
-        request.actionPreparation.issues.join(" ") ||
-        "Semantic action preparation is incomplete; completion cannot be verified.",
-    };
-  }
-  const contract = request.actionContract;
-  if (
-    !contract &&
-    request.actionPreparation?.state === "ready" &&
-    request.classifiedIntent?.semantic &&
-    request.classifiedIntent.writeDisposition === "none" &&
-    !request.classifiedIntent.actionIntents.length &&
-    !request.classifiedIntent.semantic.questions.length
-  )
-    return { state: "satisfied" };
-  if (contract?.version !== 4 || !contract.intent?.semantic) {
-    return {
-      state: "failed",
-      failure:
-        "A current semantic action contract is unavailable; no completed action can be claimed.",
-    };
-  }
-  const actions = evaluateActionContract(
-    contract,
-    receipts,
-    request.actionProgress,
+  const unverifiableApplied = receipts.filter(
+    (receipt) =>
+      (receipt.status === "applied" || receipt.status === "partial") &&
+      receipt.verification === "unverified",
   );
-  const missingOutputs = (
-    contract.intent.semantic.materialOutputs || []
-  ).filter(
-    (output) =>
-      !request.actionProgress?.materialOutputs?.some(
-        (material) => material.outputId === output.id,
-      ),
-  );
-  if (missingOutputs.length && actions.state === "satisfied")
-    return {
-      state: "pending",
-      correction: `Finalize the remaining requested material with submit_document: ${missingOutputs.map((output) => output.id).join(", ")}. The earlier actions are already verified; do not repeat them.`,
-    };
-  return actions;
-}
-
-const ACTION_CORRECTION_GUIDANCE: Partial<
-  Record<AgentActionCapability, string>
-> = {
-  "zotero.tags":
-    "Use library_search to resolve IDs, then library_update with the exact tag verb and values.",
-  "zotero.metadata":
-    "Use library_search to resolve IDs, then library_update with the exact metadata operation.",
-  "zotero.collections":
-    "Use library_update with the exact collection operation (kind:'collections' for membership, kind:'collection' for the collection itself).",
-  "zotero.notes":
-    "Use note_write or note_write_batch with the requested edit mode.",
-  "zotero.import": "Use library_import with the requested import mode.",
-  "zotero.trash":
-    "Use library_delete with the exact trash, restore, or merge operation.",
-  "zotero.attachments":
-    "Use library_update kind:'attachment' with the exact attachment operation.",
-  "zotero.read": "Use paper_read with mode:'full'.",
-  "zotero.settings": "Use library_settings with the exact key and value.",
-  "zotero.undo": "Use the requested undo or revert operation.",
-  "file.write": "Use file_io with the exact path and content.",
-  "command.execute": "Use run_command for the explicitly requested command.",
-  "zotero.script":
-    "Use zotero_script only for the explicitly requested execution.",
-};
-
-export function actionToolGuidanceForCapabilities(
-  capabilities: Iterable<AgentActionCapability>,
-): string {
-  return [
-    ...new Set(
-      [...capabilities]
-        .map((capability) => ACTION_CORRECTION_GUIDANCE[capability])
-        .filter((entry): entry is string => Boolean(entry)),
-    ),
-  ].join(" ");
+  return unverifiableApplied.length
+    ? {
+        state: "unverified",
+        failure: `Concrete action results could not be verified:\n${formatReceiptStatus(unverifiableApplied)}`,
+      }
+    : { state: "satisfied" };
 }
 
 export function createUnverifiedReceipt(params: {
@@ -197,7 +106,6 @@ export function createFallbackToolReceipts(params: {
   cancelled?: boolean;
   reason?: string;
   content?: unknown;
-  actionContract?: AgentActionContract;
 }): AgentActionReceipt[] {
   if (
     params.executionClass === "read" &&
@@ -206,13 +114,6 @@ export function createFallbackToolReceipts(params: {
     typeof params.input === "object" &&
     (params.input as { mode?: unknown }).mode === "full"
   ) {
-    const matchingObligations = (
-      params.actionContract?.obligations || []
-    ).filter(
-      (obligation) =>
-        obligation.operation === "read_full" &&
-        obligation.proofDomain === "zotero_state",
-    );
     return [
       {
         version: 2,
@@ -221,10 +122,6 @@ export function createFallbackToolReceipts(params: {
         proofDomain: "zotero_state",
         capability: "zotero.read",
         operation: "read_full",
-        obligationId:
-          matchingObligations.length === 1
-            ? matchingObligations[0].id
-            : undefined,
         verification: "verified",
         status: "observed",
         requestedTargets: [],
@@ -326,17 +223,6 @@ export function createFallbackToolReceipts(params: {
   ];
 }
 
-function itemTarget(itemId: number): string {
-  return `item:${itemId}`;
-}
-
-function receiptMatches(
-  receipt: AgentActionReceipt,
-  obligation: AgentActionObligation,
-): boolean {
-  return receipt.obligationId === obligation.id;
-}
-
 /**
  * An effect the connected client ran inside its own runtime.
  *
@@ -368,10 +254,6 @@ function receiptTookEffect(receipt: AgentActionReceipt): boolean {
   );
 }
 
-function receiptVerified(receipt: AgentActionReceipt): boolean {
-  return receipt.verification === "verified" && receiptTookEffect(receipt);
-}
-
 /**
  * The receipt carries the strongest proof its proof domain admits.
  *
@@ -391,174 +273,6 @@ function receiptProved(receipt: AgentActionReceipt): boolean {
       receipt.verification === "execution_only") &&
     receiptTookEffect(receipt)
   );
-}
-
-/**
- * A requested action the host dropped during contract building has no
- * obligation to satisfy, so nothing else in this evaluation would notice it.
- * It counts as done only when some receipt shows the same operation actually
- * took effect; an unmatched judgment receipt qualifies, because in yolo the
- * agent is expected to perform the dropped action with a target of its own
- * choosing.
- */
-function uncoveredSkippedActions(
-  contract: AgentActionContract,
-  receipts: AgentActionReceipt[],
-): string {
-  const effective = new Set(
-    receipts
-      .filter(
-        (receipt) =>
-          receipt.status === "applied" ||
-          receipt.status === "already_satisfied" ||
-          receipt.status === "partial" ||
-          receipt.status === "observed",
-      )
-      .map((receipt) => receipt.operation),
-  );
-  const uncovered = [
-    ...new Set(
-      (contract.skippedActions || [])
-        .filter((skipped) => !effective.has(skipped.operation))
-        .map((skipped) => skipped.operation),
-    ),
-  ];
-  return uncovered
-    .map(
-      (operation) =>
-        `The requested ${operation.replace(/_/g, " ")} could not be resolved and was not performed.`,
-    )
-    .join(" ");
-}
-
-export function evaluateActionContract(
-  contract: AgentActionContract,
-  receipts: AgentActionReceipt[],
-  progress?: AgentActionProgressLedger,
-): ContractEvaluation {
-  const skippedFailure = uncoveredSkippedActions(contract, receipts);
-  // The action contract is a completion contract, not a retrospective tool
-  // allowlist. Authorization already enforced hard constraints before a tool
-  // could run. With no requested obligations there is therefore nothing for
-  // finalization to prove, and unrelated rejected, cancelled, or unverified
-  // exploratory calls must not invalidate an informational answer.
-  if (!contract.obligations.length) {
-    return skippedFailure
-      ? { state: "failed", failure: skippedFailure }
-      : { state: "satisfied" };
-  }
-  const missing: AgentActionObligation[] = [];
-  const failed: AgentActionObligation[] = [];
-  let sawPartial = false;
-  let sawUnverified = false;
-  for (const obligation of contract.obligations) {
-    const obligationProgress = progress?.obligations.find(
-      (entry) => entry.obligationId === obligation.id,
-    );
-    if (obligationProgress?.status === "cancelled") {
-      return {
-        state: "cancelled",
-        failure: `The requested ${obligation.operation} action was cancelled; no corrective retry was attempted.`,
-      };
-    }
-    if (
-      obligationProgress?.status === "fulfilled" ||
-      obligationProgress?.status === "already_satisfied"
-    ) {
-      continue;
-    }
-    const matching = receipts.filter((receipt) =>
-      receiptMatches(receipt, obligation),
-    );
-    // What credits an obligation is the strongest proof its own proof domain
-    // admits. `execution` has no state to read back, so `execution_only` —
-    // which both completion gates accept — is what an execution obligation
-    // can be shown. Every other domain still requires a re-read that matched,
-    // and a receipt only ever matches an obligation of its own operation, so
-    // this never lets a command stand in for a library write.
-    const credited = matching.filter(
-      obligation.proofDomain === "execution" ? receiptProved : receiptVerified,
-    );
-    if (
-      matching.some((receipt) => receipt.status === "cancelled") &&
-      !credited.length
-    ) {
-      return {
-        state: "cancelled",
-        failure: `The requested ${obligation.operation} action was cancelled; no corrective retry was attempted.`,
-      };
-    }
-    if (matching.some((receipt) => receipt.status === "failed")) {
-      failed.push(obligation);
-    }
-    if (
-      obligation.targetBoundary &&
-      (obligation.scopeRole !== "destination" || obligation.destinationCreation)
-    ) {
-      const covered = new Set(
-        credited.flatMap((receipt) => [
-          ...receipt.appliedTargets,
-          ...receipt.alreadySatisfiedTargets,
-        ]),
-      );
-      if (
-        !obligation.targetBoundary.frozenTargetIds.every((itemId) =>
-          covered.has(itemTarget(itemId)),
-        )
-      ) {
-        missing.push(obligation);
-      }
-    } else if (!credited.length) {
-      missing.push(obligation);
-    }
-    sawPartial ||= matching.some((receipt) => receipt.status === "partial");
-    sawUnverified ||= matching.some(
-      (receipt) => receipt.verification === "unverified",
-    );
-  }
-  if (!missing.length)
-    return skippedFailure
-      ? { state: "failed", failure: skippedFailure }
-      : { state: "satisfied" };
-
-  const labels = missing.map((obligation) => {
-    const scope = obligation.scope
-      ? ` in exact collection "${obligation.scope.collectionPath}" (${obligation.targetBoundary?.frozenTargetIds.length || 0} frozen targets)`
-      : obligation.targetBoundary?.kind === "library"
-        ? ` in frozen library scope (${obligation.targetBoundary.frozenTargetIds.length} targets)`
-        : "";
-    return `${obligation.operation} coverage:${obligation.coverage}${scope}`;
-  });
-  const failureReasons = [
-    ...new Set(
-      missing.flatMap((obligation) =>
-        receipts
-          .filter((receipt) => receiptMatches(receipt, obligation))
-          .flatMap((receipt) => receipt.reasons),
-      ),
-    ),
-  ];
-  const state =
-    failed.length || skippedFailure
-      ? "failed"
-      : sawPartial
-        ? "partial"
-        : sawUnverified
-          ? "unverified"
-          : "pending";
-  const guidance = actionToolGuidanceForCapabilities(
-    missing.map((obligation) => obligation.capability),
-  );
-  return {
-    state,
-    correction:
-      `Correction for this turn: open typed obligation(s): ${labels.join("; ")}. ` +
-      `${guidance} Retry only unresolved targets. Completion requires independently verified post-state; a successful call, command exit, script output, or model prose is not semantic proof.`,
-    failure:
-      `I could not verify completion of: ${labels.join("; ")}.` +
-      (failureReasons.length ? ` ${failureReasons.join("; ")}` : "") +
-      (skippedFailure ? ` ${skippedFailure}` : ""),
-  };
 }
 
 /**

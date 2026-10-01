@@ -14,7 +14,6 @@ import {
   clearAgentMemory,
   recordAgentTurn,
 } from "../src/agent/store/conversationMemory";
-import { classifiedFixture, semanticFixture } from "./helpers/semanticIntent";
 
 function messageText(message: AgentModelMessage): string {
   if (typeof message.content === "string") return message.content;
@@ -419,16 +418,6 @@ describe("agent prompt envelope", function () {
         conversationKey: 9,
         mode: "agent",
         userText: "tidy this folder",
-        classifiedIntent: classifiedFixture(),
-        actionContract: {
-          version: 4,
-          id: "contract:mode",
-          writeDisposition: "none",
-          interpretationSource: "semantic",
-          intent: classifiedFixture(),
-          obligations: [],
-          ...(assumptions ? { assumptions } : {}),
-        },
       });
       const rendered = await renderAgentPromptEnvelope(request, [], []);
       return [
@@ -514,11 +503,6 @@ describe("agent prompt envelope evidence sufficiency", function () {
             ],
           }
         : {}),
-      classifiedIntent: classifiedFixture({
-        semantic: semanticFixture({
-          reading: { source: "document_text", coverage: "targeted" },
-        }),
-      }),
     });
   }
 

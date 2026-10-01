@@ -206,7 +206,6 @@ type ZoteroMcpScopeMetadata = {
   requestInteraction?: (
     action: import("../types").AgentPendingAction,
   ) => Promise<import("../types").AgentConfirmationResolution>;
-  actionProgress?: AgentRuntimeRequest["actionProgress"];
   clarificationHistory?: AgentRuntimeRequest["clarificationHistory"];
   runtimeAuthority?: "claude" | "codex";
   /** Host lifecycle signal; never supplied by MCP tool arguments. */
@@ -235,8 +234,6 @@ type ZoteroMcpScopeMetadata = {
   reasoning?: ReasoningConfig;
   /** Host-created execution facts; never accepted from MCP tool arguments. */
   executionContext?: AgentRuntimeRequest["executionContext"];
-  actionContract?: AgentRuntimeRequest["actionContract"];
-  actionPreparation?: AgentRuntimeRequest["actionPreparation"];
   documentOutcomePolicy?: AgentRuntimeRequest["documentOutcomePolicy"];
   documentReadObservations?: AgentRuntimeRequest["documentReadObservations"];
   documentArtifactObservations?: AgentRuntimeRequest["documentArtifactObservations"];
@@ -803,10 +800,7 @@ function normalizeActiveScope(
       : undefined,
     requestInteraction: scope.requestInteraction,
     publishHostEvent: scope.publishHostEvent,
-    actionProgress: scope.actionProgress,
     clarificationHistory: scope.clarificationHistory,
-    actionContract: scope.actionContract,
-    actionPreparation: scope.actionPreparation,
     documentOutcomePolicy: scope.documentOutcomePolicy,
     documentReadObservations: scope.documentReadObservations
       ? cloneTrustedReadObservations(scope.documentReadObservations)
@@ -1822,13 +1816,7 @@ function createToolContext(
         : undefined,
     reasoning: scope?.reasoning,
     executionContext: scope?.executionContext,
-    actionProgress: scope?.actionProgress,
     clarificationHistory: scope?.clarificationHistory,
-    actionContract: scope?.actionContract,
-    // Legacy approved plans can still expose their frozen intent through the
-    // contract reader. Fresh ordinary MCP turns have no classified intent.
-    classifiedIntent: scope?.actionContract?.intent,
-    actionPreparation: scope?.actionPreparation,
     documentOutcomePolicy: scope?.documentOutcomePolicy,
     documentReadObservations: scope?.documentReadObservations,
     documentArtifactObservations: scope?.documentArtifactObservations,
@@ -2025,9 +2013,6 @@ function formatToolResult(
           {
             ok: result.ok,
             result: result.content,
-            ...(result.continuationCheckpoint
-              ? { continuationCheckpoint: result.continuationCheckpoint }
-              : {}),
             effect: result.effect,
             ...(result.actionReceipts.length
               ? { actionReceipts: result.actionReceipts }
@@ -2347,41 +2332,6 @@ async function handleToolsCall(
       callScope,
       deps.zoteroGateway,
     );
-    toolContext.checkpointActionProgress = async () => {
-      const request = toolContext.request;
-      if (!scope?.publishHostEvent)
-        throw new Error(
-          "The provider turn cannot persist its execution authority.",
-        );
-      if (
-        request.actionContract &&
-        request.actionProgress?.contractId !== request.actionContract.id
-      )
-        request.actionProgress = deps.toolRegistry.createActionProgress(
-          request.actionContract,
-        );
-      if (scope) {
-        scope.actionContract = request.actionContract;
-        scope.actionPreparation = request.actionPreparation;
-        scope.actionProgress = request.actionProgress;
-        scope.clarificationHistory = request.clarificationHistory;
-        if (request.actionPreparation)
-          await scope.publishHostEvent?.({
-            type: "provider_event",
-            providerType: "agent_action_preparation",
-            payload: request.actionPreparation,
-          });
-        if (request.actionContract && request.actionProgress)
-          await scope.publishHostEvent?.({
-            type: "provider_event",
-            providerType: "agent_action_contract",
-            payload: {
-              contract: request.actionContract,
-              progress: request.actionProgress,
-            },
-          });
-      }
-    };
     let prepared = await deps.toolRegistry.prepareExecution(
       {
         id: `mcp-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
@@ -2425,12 +2375,8 @@ async function handleToolsCall(
             execution: await prepared.deny(resolution.data),
           };
     }
-    if (scope) {
-      scope.actionContract = toolContext.request.actionContract;
-      scope.actionPreparation = toolContext.request.actionPreparation;
-      scope.actionProgress = toolContext.request.actionProgress;
+    if (scope)
       scope.clarificationHistory = toolContext.request.clarificationHistory;
-    }
     let result = formatToolResult(prepared.execution);
     // One attestation site, one recorder: the read's trusted observations and
     // its Task progress delta come from the same call. Without a

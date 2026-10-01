@@ -6,7 +6,6 @@ import {
   clearRememberedLocalDocumentPaths,
   rememberLocalDocumentPaths,
 } from "../src/agent/privacy/localDocumentPathRedaction";
-import { classifiedFixture } from "./helpers/semanticIntent";
 import { createTestActionContractService } from "./helpers/actionContractService";
 import { installMockDb } from "./helpers/agentRuntimeMockDb";
 import type {
@@ -150,7 +149,6 @@ async function runTurn(options: { conversationKey?: number }): Promise<{
     });
     const outcome = await runtime.runTurn({
       request: {
-        classifiedIntent: classifiedFixture(),
         conversationKey: options.conversationKey ?? CONVERSATION_KEY,
         mode: "agent",
         libraryID: 1,

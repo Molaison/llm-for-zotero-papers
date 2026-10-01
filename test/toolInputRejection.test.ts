@@ -2,13 +2,11 @@ import { assert } from "chai";
 import { ToolInputRejection } from "../src/agent/tools/execution/failure";
 import { AgentToolRegistry } from "../src/agent/tools/registry";
 import type { AgentToolContext } from "../src/agent/types";
-import { classifiedFixture } from "./helpers/semanticIntent";
 import { resolvedAgentRequest } from "./helpers/resolvedAgentRequest";
 
 describe("tool input rejections raised during execution", function () {
   const context: AgentToolContext = {
     request: resolvedAgentRequest({
-      classifiedIntent: classifiedFixture(),
       conversationKey: 91,
       mode: "agent",
       userText: "record",

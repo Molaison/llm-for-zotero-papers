@@ -391,14 +391,11 @@ describe("skill routing without a model call", function () {
       request.deliveredToolGuidance,
       NOTE_WRITE_GUIDANCE.instruction,
     );
-    // A note obligation approved mid-turn, as approve_research_mutation does.
-    request.actionContract = {
-      obligations: [{ capability: "zotero.notes" }],
-    } as never;
+    // Loading the note skill mid-turn makes the note guidance applicable.
     const loadSkill = registry.getTool("load_skill")!;
     const context = { request } as unknown as AgentToolContext;
     const first = (await loadSkill.execute(
-      { id: "compare-papers" },
+      { id: "write-note" },
       context,
     )) as Record<string, unknown>;
     assert.include(

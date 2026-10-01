@@ -1,8 +1,4 @@
-import {
-  materialRefFromDocument,
-  resolveMaterialOutput,
-  recordMaterialOutput,
-} from "../../documents/workflowMaterial";
+import { materialRefFromDocument } from "../../documents/workflowMaterial";
 import type {
   AgentToolDefinition,
   AgentToolInputValidation,
@@ -495,10 +491,6 @@ export function createSubmitDocumentTool(
           "This host-owned control submits an already prepared workflow document.",
       }),
     execute: async (input, context) => {
-      const material = resolveMaterialOutput(
-        context.request,
-        input.materialOutputId,
-      );
       const { document } = await directFinalizer.finalize({
         request: context.request,
         runId:
@@ -508,7 +500,6 @@ export function createSubmitDocumentTool(
           })(),
         input,
       });
-      if (material) recordMaterialOutput(context.request, material, document);
       const materialRef = materialRefFromDocument(document);
       return {
         // The model reads the reference from the payload; the host reads it

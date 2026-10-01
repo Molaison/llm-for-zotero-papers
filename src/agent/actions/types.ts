@@ -10,8 +10,6 @@ import type { UtilityLLMParams } from "../../utils/utilityLLM";
 import type { ZoteroGateway } from "../services/zoteroGateway";
 import type { AgentToolRegistry } from "../tools/registry";
 import type {
-  AgentActionContract,
-  AgentActionProgressLedger,
   AgentConfirmationResolution,
   AgentJournalActionScope,
   AgentPendingAction,
@@ -67,15 +65,12 @@ export type ActionCheckpoint = {
 
 export type ActionRequestContext = {
   actionEntryPoint?: "action_ui" | "conversation";
-  classifiedIntent?: import("../types").ClassifiedTurnIntent;
   mode?: "paper" | "library";
   activeItemId?: number;
   selectedPaperContexts?: PaperContextRef[];
   fullTextPaperContexts?: PaperContextRef[];
   selectedCollectionContexts?: CollectionContextRef[];
   selectedTagContexts?: TagContextRef[];
-  actionContract?: AgentActionContract;
-  actionProgress?: AgentActionProgressLedger;
 };
 
 export type ActionExecutionContext = {

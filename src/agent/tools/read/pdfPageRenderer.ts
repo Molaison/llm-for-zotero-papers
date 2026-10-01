@@ -9,7 +9,6 @@ import { parsePageSelectionValue } from "../../services/pdfPageService";
 import { fail, normalizePositiveInt, ok, validateObject } from "../shared";
 import {
   normalizeTarget,
-  semanticPdfMode,
   setPreparedCache,
   setCapturedCache,
 } from "./pdfToolUtils";
@@ -134,7 +133,7 @@ export function createPdfPageRenderer(
           attachmentId: input.target?.attachmentId,
           name: input.target?.name,
           question: input.question,
-          mode: semanticPdfMode(context.request),
+          mode: "general",
           topK: 3,
         });
         pages = searchResult.pages.map((p) => p.pageIndex);
@@ -255,7 +254,7 @@ export function createPdfPageRenderer(
           attachmentId: input.target?.attachmentId,
           name: input.target?.name,
           question: input.question,
-          mode: semanticPdfMode(context.request),
+          mode: "general",
           topK: 3,
         });
         pages = searchResult.pages.map((p) => p.pageIndex);

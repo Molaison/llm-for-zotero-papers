@@ -1,35 +1,8 @@
 import { assert } from "chai";
-import {
-  resolveAdaptiveReadingBudget,
-  resolvePlannedReadingPapers,
-} from "../src/agent/context/readingBudget";
-import { resolveResearchPolicy } from "../src/agent/context/researchPolicy";
+import { resolveAdaptiveReadingBudget } from "../src/agent/context/readingBudget";
 import { bindCitationEvidenceRefs } from "../src/agent/documents/citationService";
 
-const policy = resolveResearchPolicy("plan_research");
-
 describe("narrative literature-review strategy", function () {
-  it("derives adaptive full-scope reading from the frozen corpus instead of a count in the prompt", function () {
-    const adaptive = {
-      reviewMode: "narrative" as const,
-      readingStrategy: "adaptive" as const,
-      requiredEvidenceDepth: "body" as const,
-      estimatedDeepReadPapers: 0,
-    };
-    assert.equal(resolvePlannedReadingPapers(adaptive, 7), 7);
-    assert.equal(resolvePlannedReadingPapers(adaptive, 55), 55);
-    assert.equal(
-      resolvePlannedReadingPapers(
-        {
-          ...adaptive,
-          readingStrategy: "selected",
-          estimatedDeepReadPapers: 6,
-        },
-        55,
-      ),
-      6,
-    );
-  });
   it("sizes reading depth from remaining model capacity and never from small, medium, or large corpus labels", function () {
     const smallWindow = resolveAdaptiveReadingBudget({
       contextWindowTokens: 128_000,

@@ -20,28 +20,6 @@ export type ResearchScopeSnapshotItem = Readonly<{
   ordinal: number;
 }>;
 
-export type ResearchQualityReport = Readonly<{
-  version: 1;
-  computedAt: number;
-  papers: number;
-  nodes: number;
-  claims: number;
-  claimsWithLocators: number;
-  nodesWithEdges: number;
-  edges: number;
-  edgesVerified: number;
-  edgesTentative: number;
-  edgesRefuted: number;
-  contradictions: number;
-  subquestionClaims: Readonly<Record<string, number>>;
-  themes: number;
-  themesWithEdges: number;
-  openQuestions: number;
-  answeredQuestions: number;
-  crossPaperParagraphs?: number;
-  crossPaperParagraphsSupported?: number;
-}>;
-
 export type ResearchEvidenceRecord = Readonly<{
   version: 1 | 2;
   evidenceRef: string;

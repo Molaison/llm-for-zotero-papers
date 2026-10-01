@@ -1,8 +1,3 @@
-import {
-  actionFixture,
-  classifiedFixture,
-  semanticFixture,
-} from "./helpers/semanticIntent";
 import { assert } from "chai";
 import { readdirSync, readFileSync, statSync } from "fs";
 import { join, relative } from "path";
@@ -343,7 +338,7 @@ describe("tool guidance contracts", function () {
     assert.deepEqual(failures, []);
   });
 
-  it("injects note-write tool guidance only for note intent or the matched note skill", function () {
+  it("injects note-write tool guidance only for the matched note skill", function () {
     const registry = stubRegistry();
     const noteWrite = registry
       .listToolDefinitions()
@@ -359,13 +354,6 @@ describe("tool guidance contracts", function () {
     assert.isTrue(
       noteWrite!.guidance!.matches(baseRequest, {
         matchedSkillIds: ["write-note"],
-      }),
-    );
-    assert.isTrue(
-      noteWrite!.guidance!.matches({
-        ...baseRequest,
-        userText: "Create a Zotero note about this paper.",
-        classifiedIntent: actionFixture("note_create"),
       }),
     );
   });
@@ -520,28 +508,6 @@ describe("tool guidance contracts", function () {
       mentionsTrash: true,
     });
   });
-
-  it("keeps plan-intent matching for library write guidance", function () {
-    const registry = stubRegistry();
-    const guidanceFor = (name: string) => registry.getTool(name)!.guidance!;
-    const planned = (operation: string) =>
-      ({
-        conversationKey: 1,
-        mode: "agent",
-        classifiedIntent: actionFixture(operation as never),
-      }) as any;
-    assert.isTrue(
-      guidanceFor("library_delete").matches(planned("merge_items")),
-    );
-    assert.isTrue(
-      guidanceFor("library_import").matches(planned("import_local_files")),
-    );
-    assert.isTrue(
-      guidanceFor("library_update").matches(planned("rename_attachment")),
-    );
-    assert.isTrue(guidanceFor("library_update").matches(planned("apply_tags")));
-  });
-
   it("keeps library_search examples explicit about entity and mode", function () {
     const failures: string[] = [];
     const callPattern = /library_search\(([^)]*)\)/g;

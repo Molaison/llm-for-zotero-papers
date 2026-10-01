@@ -2,6 +2,7 @@ import { canonicalNoteHtml } from "../src/utils/noteHtml";
 import { assert } from "chai";
 import { readFileSync } from "node:fs";
 import { ActionContractService } from "../src/agent/contracts/actionContract";
+import { createAgentExecutionContext } from "../src/agent/execution/context";
 import { setOriginalAgentPermissionMode } from "../src/agent/originalAgentPermissionMode";
 import { revertActions } from "../src/agent/services/changeReverter";
 import { ZoteroGateway } from "../src/agent/services/zoteroGateway";
@@ -30,11 +31,6 @@ import {
 import { ChangeJournalTestDb } from "./helpers/changeJournalTestDb";
 import { resolvedAgentRequest } from "./helpers/resolvedAgentRequest";
 import { composeRetrievalCandidateInvalidation } from "./helpers/hostSurfaces";
-import {
-  actionFixture,
-  classifiedFixture,
-  semanticFixture,
-} from "./helpers/semanticIntent";
 
 describe("noteWrite create tracking", function () {
   it("only defers notes that contain supported visual figure fences", function () {
@@ -52,7 +48,6 @@ describe("noteWrite create tracking", function () {
 
   const baseContext: AgentToolContext = {
     request: {
-      classifiedIntent: classifiedFixture(),
       conversationKey: 91,
       mode: "agent",
       userText: "save this note",
@@ -490,6 +485,17 @@ describe("noteWrite create tracking", function () {
     });
   }
 
+  /** An ordinary agent turn: the in-plugin agent owns permission. */
+  function agentTurnRequest(userText: string) {
+    const request = resolvedAgentRequest({ ...baseContext.request, userText });
+    request.executionContext = createAgentExecutionContext(
+      request,
+      "note-edit-run",
+      { notesDirectory: null },
+    );
+    return request;
+  }
+
   for (const mode of ["auto", "yolo", "safe"] as const) {
     it(`replaces exact HTML in ${mode} when the user prohibits creating a new note`, async function () {
       (globalScope.Zotero as unknown as { DB: ChangeJournalTestDb }).DB =
@@ -504,28 +510,9 @@ describe("noteWrite create tracking", function () {
       const contracts = new ActionContractService(gateway);
       const registry = new AgentToolRegistry(contracts);
       registry.register(createNoteWriteTool(gateway));
-      const request = resolvedAgentRequest({
-        classifiedIntent: classifiedFixture(),
-        ...baseContext.request,
-        userText: `Replace the content of existing note 60 with this exact HTML: ${html}. Do not create a new note.`,
-      });
-      request.classifiedIntent = actionFixture(
-        "note_edit",
-        { targetNoteId: 60 },
-        {
-          constraints: [
-            {
-              kind: "deny_effects",
-              effects: ["create"],
-              domains: ["zotero_library"],
-              operations: ["note_create", "save_note", "save_notes_batch"],
-              description: "No new notes",
-            },
-          ],
-        },
+      const request = agentTurnRequest(
+        `Replace the content of existing note 60 with this exact HTML: ${html}. Do not create a new note.`,
       );
-      request.actionContract = await contracts.createContract(request);
-      request.actionProgress = contracts.createProgress(request.actionContract);
       let execution = await registry.prepareExecution(
         {
           id: `html-${mode}`,
@@ -578,27 +565,9 @@ describe("noteWrite create tracking", function () {
       const contracts = new ActionContractService(gateway);
       const registry = new AgentToolRegistry(contracts);
       registry.register(createNoteWriteTool(gateway));
-      const request = resolvedAgentRequest({
-        ...baseContext.request,
-        userText:
-          'In note 60, replace only the first occurrence of "copper-limitation" with "copper-limitation (reviewed)". Preserve every other character and section.',
-        classifiedIntent: {
-          semantic: semanticFixture(),
-          type: "note",
-          actionIntents: [
-            {
-              operation: "note_edit",
-              capability: "zotero.notes",
-              proofDomain: "zotero_state",
-              coverage: "one",
-              targetKind: "items",
-              parameters: { targetNoteId: 60 },
-            },
-          ],
-        },
-      });
-      request.actionContract = await contracts.createContract(request);
-      request.actionProgress = contracts.createProgress(request.actionContract);
+      const request = agentTurnRequest(
+        'In note 60, replace only the first occurrence of "copper-limitation" with "copper-limitation (reviewed)". Preserve every other character and section.',
+      );
       let result = await registry.prepareExecution(
         {
           id: `patch-${mode}`,

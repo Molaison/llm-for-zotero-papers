@@ -1,7 +1,7 @@
 import { assert } from "chai";
 import { createLibrarySearchTool } from "../src/agent/tools/read/librarySearch";
 import { createLibraryReadTool } from "../src/agent/tools/read/libraryRead";
-import { resolveMaterialOutput } from "../src/agent/documents/workflowMaterial";
+import { rejectMaterialOutputId } from "../src/agent/documents/workflowMaterial";
 import { createFileIOTool } from "../src/agent/tools/write/fileIO";
 import type { AgentToolContext } from "../src/agent/types";
 import { createMalformedToolArgumentsDiagnostic } from "../src/agent/toolArgumentDiagnostics";
@@ -167,9 +167,10 @@ describe("tool validation compatibility", function () {
     assert.isFalse(other.ok);
     if (!other.ok) assert.notInclude(other.error, "include:['tags']");
     assert.throws(
-      () => resolveMaterialOutput({} as never, "review-draft"),
+      () => rejectMaterialOutputId("review-draft"),
       /omit materialOutputId to submit the final document/,
     );
+    assert.doesNotThrow(() => rejectMaterialOutputId(undefined));
   });
 
   it("normalizes file_io canonical and deprecated alias shapes", async function () {

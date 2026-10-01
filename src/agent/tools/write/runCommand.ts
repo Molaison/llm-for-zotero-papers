@@ -17,6 +17,7 @@ import {
   isLocalPathInsideOrEqual,
   parseNotesDirectoryWritePolicy,
 } from "../../../utils/notesDirectoryConfig";
+import { neverSelected } from "../guidance";
 import { ok, fail, validateObject } from "../shared";
 import { executeExternalMutation } from "../../services/externalMutationCoordinator";
 import { sha256Bytes } from "../../store/journalRecoveryBlobStore";
@@ -336,12 +337,7 @@ export function createRunCommandTool(): AgentWriteToolDefinition<
     },
 
     guidance: {
-      matches: (request) =>
-        Boolean(
-          request.classifiedIntent?.actionIntents.some(
-            (action) => action.capability === "command.execute",
-          ),
-        ),
+      matches: neverSelected,
       instruction:
         "Use run_command to execute shell commands for data analysis, running scripts, or invoking external tools. " +
         "Do not use run_command for ordinary Zotero paper/library reading when semantic Zotero tools can answer. " +

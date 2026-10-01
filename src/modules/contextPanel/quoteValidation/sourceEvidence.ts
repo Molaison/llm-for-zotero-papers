@@ -389,13 +389,7 @@ export function shouldRequireBodyEvidenceQuoteSearch(params: {
     params.runtimeRequest?.selectedTagContexts?.length ||
     countQuoteScopedPapers(params.pairedUserMessage, params.runtimeRequest) > 1,
   );
-  if (!hasScopedPool) return false;
-  if (
-    params.runtimeRequest?.classifiedIntent?.semantic?.reading.source ===
-    "metadata"
-  )
-    return false;
-  return true;
+  return hasScopedPool;
 }
 
 export type AssistantQuoteFinalizationOptions = {

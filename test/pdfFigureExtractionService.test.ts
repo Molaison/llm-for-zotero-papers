@@ -1,5 +1,4 @@
 import { assert } from "chai";
-import { classifiedFixture, semanticFixture } from "./helpers/semanticIntent";
 import { PdfFigureExtractionService } from "../src/agent/services/pdfFigureExtractionService";
 import {
   PDF_FIGURE_CROP_ALGORITHM_VERSION,
@@ -432,76 +431,6 @@ describe("PdfFigureExtractionService", function () {
       [cropPath],
     );
   });
-
-  it("selects cached figures from semantic intent even when tool prose names another figure", async function () {
-    const figure1CropPath =
-      "/tmp/mineru-paper/figure_crops/crops/figure-1-p2.png";
-    const figure2CropPath =
-      "/tmp/mineru-paper/figure_crops/crops/figure-2-p4.png";
-    files.set(figure1CropPath, encoder.encode("png"));
-    files.set(figure2CropPath, encoder.encode("png"));
-    writeCropCache({
-      version: PDF_FIGURE_CROP_CACHE_VERSION,
-      attachmentId: 22,
-      manifestHash: currentManifestHash(),
-      pdfFingerprint: currentPdfFingerprint(),
-      renderScale: 1.8,
-      algorithmVersion: PDF_FIGURE_CROP_ALGORITHM_VERSION,
-      generatedAt: 1,
-      expectedFigures: [
-        {
-          label: "Figure 1",
-          baseLabel: "Figure 1",
-          pageNumber: 2,
-          status: "ok",
-          cropPath: figure1CropPath,
-        },
-        {
-          label: "Figure 2",
-          baseLabel: "Figure 2",
-          pageNumber: 4,
-          status: "ok",
-          cropPath: figure2CropPath,
-        },
-      ],
-      missingFigures: [],
-      entries: [
-        cachedFigureWithLabel("Figure 1", figure1CropPath),
-        cachedFigureWithLabel("Figure 2", figure2CropPath),
-      ],
-    });
-
-    const result = await new PdfFigureExtractionService({
-      extractFiguresFromSourcePdf: async () => {
-        throw new Error("source extraction should not run for cached crops");
-      },
-    } as never).extractFigures({
-      input: { query: "Show Figure 2 instead" },
-      context: {
-        ...context,
-        request: {
-          ...context.request,
-          classifiedIntent: classifiedFixture({
-            semantic: semanticFixture({
-              figures: {
-                labels: ["Figure 1"],
-                kind: "figures",
-                includeSupplementary: false,
-              },
-            }),
-          }),
-        },
-      },
-      paperContexts: [paperContext],
-    });
-
-    assert.equal(result.status, "ok");
-    assert.deepEqual(
-      result.figures?.map((figure) => figure.label),
-      ["Figure 1"],
-    );
-  });
-
   it("does not reuse a cached crop for a different requested figure", async function () {
     const oldCropPath = "/tmp/mineru-paper/figure_crops/crops/figure-1-p2.png";
     const regeneratedCropPath =

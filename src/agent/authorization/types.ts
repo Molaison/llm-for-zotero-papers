@@ -133,11 +133,6 @@ export type OriginalAuthorizationContext = {
   /** Resolved by the host from the entry point and concrete proposal. */
   interaction?: ActionInteraction;
   mode: OriginalAgentPermissionMode;
-  constraints?: readonly ActionConstraint[];
-  /** Legacy capture accepted by stored research flows; direct policy ignores it. */
-  semantic?: import("../model/semanticDecisions").SemanticIntent;
   /** Host-created turn facts; never accepted from model tool arguments. */
   executionContext?: import("../types").AgentExecutionContext;
-  /** Legacy compatibility input. Direct-agent policy does not use this as authority. */
-  hasMatchingActionIntent?: boolean;
 };

@@ -39,11 +39,8 @@ import type {
   TurnPaperScopeWarning,
 } from "./context/turnPaperScope";
 import type {
-  AgentActionContract,
   AgentActionEvidence,
-  AgentActionIntent,
   AgentActionOperation,
-  AgentActionProgressLedger,
   AgentActionReceipt,
   AgentToolActionDescriptor,
 } from "./contracts/types";
@@ -58,16 +55,12 @@ import type {
 
 export type {
   AgentActionCapability,
-  AgentActionContract,
   AgentActionEvidence,
   AgentExternalMutationEvidence,
   AgentLibraryMutationEvidence,
   AgentPostImageState,
-  AgentActionIntent,
-  AgentActionObligation,
   AgentActionOperation,
   AgentActionParameters,
-  AgentActionProgressLedger,
   AgentActionProofDomain,
   AgentActionProposal,
   AgentActionReceipt,
@@ -469,8 +462,6 @@ export type AgentEvent =
       /** The tool's own presentation label, resolved when the call was made. */
       toolLabel?: string;
       workCategory?: AgentWorkCategory;
-      executionId?: string;
-      taskId?: string;
     }
   | {
       type: "tool_result";
@@ -485,8 +476,6 @@ export type AgentEvent =
       actionReceipts: AgentActionReceipt[];
       content: unknown;
       artifacts?: AgentToolArtifact[];
-      executionId?: string;
-      taskId?: string;
     }
   | {
       type: "tool_error";
@@ -849,27 +838,6 @@ export type ExhaustiveReadBackend =
   | "unavailable";
 
 /**
- * Legacy classifier-era intent retained for deterministic decoding of stored
- * Plans and checkpoints. Fresh ordinary turns leave this absent.
- */
-export type ClassifiedTurnIntent = {
-  retrievalIntent: "enumerate" | "verify" | "summarize" | "none";
-  deliverableIntent?: "chat" | "document" | "unspecified";
-  documentKind?: import("./documents/types").DocumentSpec["kind"];
-  paperTargetIntent?: "active" | "added" | "all_visible" | "unspecified";
-  externalSearchIntent?: "none" | "web" | "literature" | "both";
-  wantedSections: Array<"methods" | "results" | "limitations">;
-  queryLanguage?: string;
-  writeDisposition?: "none" | "required" | "uncertain";
-  actionInterpretationSource?:
-    | "semantic"
-    | "classifier"
-    | "deterministic_fallback";
-  semantic?: import("./model/semanticDecisions").SemanticIntent;
-  actionIntents: AgentActionIntent[];
-};
-
-/**
  * Host-created facts for one main-agent execution.
  *
  * This deliberately contains no predicted operations or model-authored
@@ -944,8 +912,6 @@ export type AgentRuntimeRequestInput = AgentRequest & {
   materialOutcomes?: readonly MaterialOutcomeEntry[];
   /** Exact skill instructions loaded or forced by the host for this workflow. */
   loadedSkillRecords?: LoadedSkillRecord[];
-  /** Legacy stored-artifact compatibility; absent on fresh ordinary turns. */
-  classifiedIntent?: ClassifiedTurnIntent;
   /** Cheap chat-path keyword signal for tool-guidance matching only; never grants authority. */
   userTextSignals?: {
     mentionsDuplicates: boolean;
@@ -953,15 +919,7 @@ export type AgentRuntimeRequestInput = AgentRequest & {
     mentionsAttachment: boolean;
     mentionsImport: boolean;
   };
-  /** Legacy or approved-Plan obligations; absent on fresh ordinary turns. */
-  actionContract?: AgentActionContract;
-  /** Mutable completion state kept separate from the immutable contract. */
-  actionProgress?: AgentActionProgressLedger;
-  actionPreparation?: import("./contracts/actionPreparation").ActionPreparation;
   clarificationHistory?: Array<{ question: string; answer: string }>;
-
-  /** Host-loaded prior workflow evidence; never inferred from conversation prose. */
-  workflowCheckpoint?: import("./contracts/workflowCheckpoint").ActionContractCheckpoint;
   /** Validated per-turn skill routing identity; never provider-authored authority. */
   skillRoutingReceipt?: SkillRoutingReceipt;
   /** Host-resolved visible outcome contract for this Agent turn. */
@@ -1122,17 +1080,6 @@ export type AgentToolArtifact =
  */
 export type AgentToolEffect = "applied" | "partial" | "none";
 
-/**
- * A tool can request a clean provider continuation after it has durably
- * reduced large transient inputs into compact application-owned state.
- * The instruction must contain everything needed to continue without replaying
- * the discarded raw payload.
- */
-export type AgentToolContinuationCheckpoint = Readonly<{
-  reason: string;
-  instruction: string;
-}>;
-
 export type AgentToolResult = {
   callId: string;
   name: string;
@@ -1145,7 +1092,6 @@ export type AgentToolResult = {
   actionReceipts: AgentActionReceipt[];
   content: unknown;
   artifacts?: AgentToolArtifact[];
-  continuationCheckpoint?: AgentToolContinuationCheckpoint;
   /**
    * Durable material this call finalized. The host announces it as a run
    * event, so later turns recover it without re-reading tool payloads.
@@ -1233,7 +1179,6 @@ export type AgentToolExecutionOutput<TResult = unknown> =
       artifacts?: AgentToolArtifact[];
       effect?: AgentToolEffect;
       actionEvidence?: AgentActionEvidence[];
-      continuationCheckpoint?: AgentToolContinuationCheckpoint;
       materialRef?: MaterialRef;
       materialKind?: string;
       materialTitle?: string;
@@ -1357,8 +1302,6 @@ export type AgentToolContext = {
     name: string,
     args: unknown,
   ) => Promise<AgentToolResult>;
-  /** Persist the current contract ledger at a durable composite checkpoint. */
-  checkpointActionProgress?: () => Promise<void>;
   /**
    * Apply one change to the turn's ordinary-work checkpoint through the
    * runtime, its only writer, which publishes it when it changed. Resolves to
@@ -1758,8 +1701,6 @@ export type PreparedToolExecutionResult = {
 };
 
 export type PreparedToolExecutionOptions = {
-  /** The host checkpoints each subset; the frozen contract still requires full final coverage. */
-  checkpointedWorkflow?: boolean;
   inheritedApproval?: AgentInheritedApproval;
   forceConfirmation?: boolean;
   /**

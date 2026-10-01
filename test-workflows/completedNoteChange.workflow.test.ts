@@ -13,7 +13,6 @@ import type {
   AgentToolResult,
 } from "../src/agent/types";
 import type { WorkflowTestApi } from "../src/modules/contextPanel/workflowTestTypes";
-import { semanticContractFixture } from "../test/helpers/semanticIntent";
 
 describe("workflow: completed native note change", function () {
   this.timeout(60000);
@@ -45,24 +44,6 @@ describe("workflow: completed native note change", function () {
         note: Zotero.Item,
         text: string,
       ): Promise<AgentToolResult> {
-        const contract = semanticContractFixture({
-          version: 3,
-          id: `native-edit-${note.id}-${text}`,
-          writeDisposition: "required",
-          interpretationSource: "semantic",
-          obligations: [
-            {
-              id: "edit",
-              operation: "note_edit",
-              capability: "zotero.notes",
-              proofDomain: "zotero_state",
-              coverage: "one",
-              targetKind: "items",
-              reviewPreference: "default",
-              parameters: { targetNoteId: note.id, noteMode: "edit" },
-            },
-          ],
-        });
         const execution = await registry.prepareExecution(
           {
             id: `edit-${note.id}`,
@@ -80,8 +61,23 @@ describe("workflow: completed native note change", function () {
               libraryID: note.libraryID,
               userText: `Edit this note: ${text}`,
               actionEntryPoint: "conversation",
-              actionContract: contract,
-              actionProgress: contracts.createProgress(contract),
+              // An ordinary agent turn: the in-plugin agent owns permission.
+              executionContext: {
+                version: 1,
+                executionId: `edit-${note.id}`,
+                conversationKey: notes[0].id,
+                conversationGeneration: 0,
+                chatLibraryID: note.libraryID,
+                permissionOwner: "original_agent",
+                workspaceSnapshot: {
+                  selectedPapers: [],
+                  selectedCollections: [],
+                },
+                configuredAccess: {
+                  libraryIDs: [note.libraryID],
+                  outputDirectories: [],
+                },
+              },
             },
             item: note,
             currentAnswerText: "",

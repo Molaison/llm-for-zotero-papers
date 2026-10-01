@@ -1,4 +1,3 @@
-import { semanticFixture } from "./helpers/semanticIntent";
 import { assert } from "chai";
 import { createLiteratureSearchTool } from "../src/agent/tools/read/literatureSearch";
 import type { AgentToolContext } from "../src/agent/types";
@@ -291,56 +290,5 @@ describe("literature_search tool", function () {
     );
     assert.isNull(reviewAction);
     assert.isString((result as { candidateSetId: string }).candidateSetId);
-  });
-
-  it("adds guidance for live paper discovery requests", function () {
-    const tool = createLiteratureSearchTool({
-      resolveMetadataItem: () => null,
-      getEditableArticleMetadata: () => null,
-    } as never);
-    assert.isTrue(
-      tool.guidance?.matches({
-        conversationKey: 11,
-        mode: "agent",
-        userText: "can you find related papers from internet to me",
-        classifiedIntent: {
-          semantic: semanticFixture(),
-          retrievalIntent: "none",
-          externalSearchIntent: "literature",
-          wantedSections: [],
-          actionIntents: [],
-        },
-      }) || false,
-    );
-    assert.include(tool.guidance?.instruction || "", "workflow:'answer'");
-    assert.include(tool.guidance?.instruction || "", "workflow:'review'");
-    assert.isFalse(
-      tool.guidance?.matches({
-        conversationKey: 12,
-        mode: "agent",
-        userText: "search the web for the latest Zotero release notes",
-        classifiedIntent: {
-          semantic: semanticFixture(),
-          retrievalIntent: "none",
-          externalSearchIntent: "web",
-          wantedSections: [],
-          actionIntents: [],
-        },
-      }) || false,
-    );
-    assert.isTrue(
-      tool.guidance?.matches({
-        conversationKey: 13,
-        mode: "agent",
-        userText: "查找论文并核对当前官方文档",
-        classifiedIntent: {
-          semantic: semanticFixture(),
-          retrievalIntent: "none",
-          externalSearchIntent: "both",
-          wantedSections: [],
-          actionIntents: [],
-        },
-      }) || false,
-    );
   });
 });

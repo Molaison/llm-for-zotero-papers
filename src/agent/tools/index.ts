@@ -4,8 +4,7 @@ import { RetrievalService } from "../services/retrievalService";
 import { ZoteroGateway } from "../services/zoteroGateway";
 import { createWorkflowScriptTool } from "./control/workflowScript";
 import { createDelegatingTool } from "./facade";
-import { intentOrSignal } from "./guidance";
-import { registerPreparedLibraryActions } from "./preparedLibraryActions";
+import { userTextSignal } from "./guidance";
 import { createCiteExportTool } from "./read/citeExport";
 import { createLibraryRetrieveTool } from "./read/libraryRetrieve";
 import { createLoadSkillTool } from "./read/loadSkill";
@@ -97,21 +96,9 @@ const LIBRARY_UPDATE_OPERATION_SCHEMA = {
 };
 
 const LIBRARY_UPDATE_GUIDANCE: ToolGuidance = {
-  // Plan-specific except for attachments: only the attachment signal reaches
-  // it from ordinary chat.
+  // Only the attachment signal selects it.
   matches: (request) =>
-    intentOrSignal(
-      request,
-      [
-        "zotero.tags",
-        "zotero.metadata",
-        "zotero.collections",
-        "delete_attachment",
-        "rename_attachment",
-        "relink_attachment",
-      ],
-      (signals) => signals.mentionsAttachment,
-    ),
+    userTextSignal(request, (signals) => signals.mentionsAttachment),
   instruction:
     "Execute resolved library write obligations with library_update and report verified receipts. Central policy decides whether a review card is required. Use kind:'tags' for tag changes, kind:'collections' for collection membership, and kind:'metadata' for item metadata fields. Batch one uniform change across all applicable item IDs in a single call. For different per-item changes, use assignments when the schema supports them. A zotero_script computation uses the same exact-effect authority; the mechanism alone adds no confirmation. Explicit script prohibitions remain binding. For metadata obligations with permitted external evidence discovery, use literature_search with workflow:'review' and mode:'metadata' to fetch canonical data, then continue through the exact review/update flow. Bind direct metadata updates to the field values in the resolved obligation or approved review." +
     "\n\nUse kind:'attachment' to delete, rename, or re-link a single attachment. To find attachments, use library_read with sections:['attachments'] first. Renaming renames the file on disk, not just the title. Re-linking repairs an attachment whose file has moved or gone missing, and works for stored attachments as well as linked files; only linked URLs cannot be re-linked. Batch renaming with computed filenames requires separately authorized computation and exact attachment targets.",
@@ -119,11 +106,7 @@ const LIBRARY_UPDATE_GUIDANCE: ToolGuidance = {
 
 const LIBRARY_IMPORT_GUIDANCE: ToolGuidance = {
   matches: (request) =>
-    intentOrSignal(
-      request,
-      ["import_local_files"],
-      (signals) => signals.mentionsImport,
-    ),
+    userTextSignal(request, (signals) => signals.mentionsImport),
   instruction:
     "Use library_import with kind:'files' to import local files from the user's filesystem into Zotero. Use only resolved paths within the contract's source boundary. Missing paths require preparation; this import obligation does not independently authorize command execution. A bibliography file (.ris, .bib, .enw, .nbib, RDF) has its references imported as real items; other files are attached, and PDFs go through Zotero's metadata lookup so they arrive with a title and authors. Optionally specify a targetCollectionId to file the results into a collection." +
     "\n\nkind:'identifiers' resolves DOIs, ISBNs, PMIDs, arXiv IDs and ADS bibcodes. It cannot import from a page URL — Zotero has no translator path for that — so take the DOI or arXiv ID off the page instead.",
@@ -131,9 +114,8 @@ const LIBRARY_IMPORT_GUIDANCE: ToolGuidance = {
 
 const LIBRARY_DELETE_GUIDANCE: ToolGuidance = {
   matches: (request) =>
-    intentOrSignal(
+    userTextSignal(
       request,
-      ["merge_items", "trash_items", "restore_from_trash"],
       (signals) => signals.mentionsDuplicates || signals.mentionsTrash,
     ),
   instruction:
@@ -682,8 +664,6 @@ export function createBuiltInToolRegistry(
   registry.register(createRequestUserInputTool());
   registry.register(createTaskUpdateTool());
   registry.register(createSubmitDocumentTool(deps.zoteroGateway));
-
-  registerPreparedLibraryActions(registry, deps.zoteroGateway);
   return registry;
 }
 

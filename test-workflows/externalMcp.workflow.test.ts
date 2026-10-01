@@ -160,15 +160,7 @@ describe("external MCP writes against native Zotero", function () {
           "external_runtime",
         );
         assert.equal(
-          evaluatePreparedActionContract(
-            {
-              actionPreparation: {
-                state: "needs_input",
-                issues: ["Unresolved Original Agent intent"],
-              },
-            },
-            tagged.actionReceipts,
-          ).state,
+          evaluatePreparedActionContract(tagged.actionReceipts).state,
           "satisfied",
         );
         const saved = await call("note_write", {

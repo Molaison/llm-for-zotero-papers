@@ -8,7 +8,6 @@ import { projectStageEvents } from "../src/modules/contextPanel/agentTrace/stage
 import { buildAgentStageEvent } from "../src/agent/stageEvents";
 import { mapCodexNativeItemToEvents } from "../src/codexAppServer/nativeActivityStages";
 import { createCodexNativeActivityTraceControllerForTests } from "../src/modules/contextPanel/codexNativeTrace/controller";
-import { classifiedFixture } from "./helpers/semanticIntent";
 import { createTestActionContractService } from "./helpers/actionContractService";
 import { installMockDb } from "./helpers/agentRuntimeMockDb";
 import type {
@@ -259,7 +258,6 @@ async function runLiveJourney(): Promise<AgentEvent[]> {
     });
     const outcome = await runtime.runTurn({
       request: {
-        classifiedIntent: classifiedFixture(),
         conversationKey: 991_201,
         mode: "agent",
         libraryID: 1,

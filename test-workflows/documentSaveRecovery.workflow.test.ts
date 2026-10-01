@@ -247,28 +247,6 @@ describe("workflow: document save recovery", function () {
           conversationKey: parent.id,
           mode: "agent",
           libraryID: parent.libraryID,
-          actionContract: {
-            id: "recovery-workflow",
-            obligations: [
-              {
-                id: "save",
-                operation: "note_create",
-                contentFrom: "summary",
-                targetBoundary: { frozenTargetIds: [parent.id] },
-              },
-            ],
-          },
-          actionProgress: {
-            contractId: "recovery-workflow",
-            materialOutputs: [
-              {
-                outputId: "summary",
-                documentId: document.documentId,
-                documentVersion: document.documentVersion,
-                contentHash: document.contentHash,
-              },
-            ],
-          },
         },
         item: parent,
         modelName: "workflow",

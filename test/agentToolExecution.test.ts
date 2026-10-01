@@ -1,5 +1,7 @@
 import { assert } from "chai";
 import { ActionContractRunSession } from "../src/agent/contracts/actionContractRunSession";
+import { formatReceiptStatus } from "../src/agent/contracts/actionEvaluation";
+import type { AgentActionReceipt } from "../src/agent/contracts/types";
 import { PaperEvidenceFrontier } from "../src/agent/context/paperEvidenceFrontier";
 import { buildAgentResourceContextPlan } from "../src/agent/context/resourceContextPlan";
 import { resolveAgentRuntimeRequest } from "../src/agent/context/resolvedAgentRequest";
@@ -24,7 +26,6 @@ import type {
   ExecutionCheckpoint,
   ExecutionTaskStatus,
 } from "../src/agent/types";
-import { classifiedFixture } from "./helpers/semanticIntent";
 import { installMockDb } from "./helpers/agentRuntimeMockDb";
 import { createTestActionContractService } from "./helpers/actionContractService";
 
@@ -145,7 +146,6 @@ type Harness = {
     value: { documentId: string; finalText: string } | null;
   };
   toolResultReadAvailable: { value: boolean };
-  workflowSummaries: string[];
 };
 
 async function createHarness(registry: AgentToolRegistry): Promise<Harness> {
@@ -155,7 +155,6 @@ async function createHarness(registry: AgentToolRegistry): Promise<Harness> {
   };
   const request = resolveAgentRuntimeRequest(
     {
-      classifiedIntent: classifiedFixture(),
       conversationKey: 970_001,
       mode: "agent",
       libraryID: 1,
@@ -167,7 +166,7 @@ async function createHarness(registry: AgentToolRegistry): Promise<Harness> {
     {},
   ) as AgentRuntimeRequest;
   // A turn stamps its execution context before anything runs; it is what
-  // tells the contract session this is an ordinary agent turn.
+  // authorizes the in-plugin agent's own effects.
   request.executionContext ||= createAgentExecutionContext(
     request,
     "run-collaborator",
@@ -177,7 +176,6 @@ async function createHarness(registry: AgentToolRegistry): Promise<Harness> {
   const toolResultReadAvailable = { value: false };
   const records: ToolExecutionRecord[] = [];
   const reads: AgentPendingReadActivity[] = [];
-  const workflowSummaries: string[] = [];
   const handles: AgentToolResultHandleRecord[] = [];
   const context = {
     request,
@@ -186,7 +184,6 @@ async function createHarness(registry: AgentToolRegistry): Promise<Harness> {
     currentAnswerText: "",
     modelName: "test",
     signal: undefined,
-    checkpointActionProgress: async () => undefined,
     publishPlanEvent: async () => undefined,
     updateExecutionCheckpoint: async (
       apply: (checkpoint: ExecutionCheckpoint) => ExecutionCheckpoint,
@@ -202,11 +199,7 @@ async function createHarness(registry: AgentToolRegistry): Promise<Harness> {
     context,
     writeAllowed: () => true,
     adapterCapabilities: CAPABILITIES,
-    actionContractSession: new ActionContractRunSession({
-      request,
-      contracts: registry,
-      emit,
-    }),
+    actionContractSession: new ActionContractRunSession(),
     paperEvidenceFrontier: new PaperEvidenceFrontier(),
     resourceContextPlan: buildAgentResourceContextPlan(request),
     persistToolResultHandles: async (written) => {
@@ -220,7 +213,6 @@ async function createHarness(registry: AgentToolRegistry): Promise<Harness> {
     preservedTurnHandleRecords: handles,
     toolExecutionRecords: records,
     toolsUsedThisTurn: [],
-    workflowSummaries,
     getCurrentAnswerText: () => answerText.value,
     setFinalizedMaterial: (material) => {
       finalizedMaterial.value = material;
@@ -229,9 +221,6 @@ async function createHarness(registry: AgentToolRegistry): Promise<Harness> {
       toolResultReadAvailable.value = available;
     },
   } as ToolExecutionDeps;
-  // The turn initializes its contract session before any tool runs; without
-  // it no effect is authorized and every write fails closed.
-  await deps.actionContractSession.initialize({ checkpoint: null });
   // Only what the collaborator itself publishes is under test here.
   events.length = 0;
   return {
@@ -243,7 +232,6 @@ async function createHarness(registry: AgentToolRegistry): Promise<Harness> {
     answerText,
     finalizedMaterial,
     toolResultReadAvailable,
-    workflowSummaries,
   };
 }
 
@@ -534,6 +522,28 @@ describe("agent tool execution collaborator", function () {
       const registry = new AgentToolRegistry(createTestActionContractService());
       registerDocumentTool(registry);
       const harness = await createHarness(registry);
+      // An earlier write this turn applied but could not be verified, so the
+      // final evaluation cannot accept: the material is kept and the model is
+      // told what is left rather than the run stopping here.
+      const unverified: AgentActionReceipt[] = [
+        {
+          version: 2,
+          id: "proposal:apply_tags:unmatched:result",
+          proposalId: "proposal:apply_tags",
+          proofDomain: "zotero_state",
+          capability: "zotero.tags",
+          operation: "apply_tags",
+          verification: "unverified",
+          status: "applied",
+          requestedTargets: ["item:41"],
+          appliedTargets: ["item:41"],
+          alreadySatisfiedTargets: [],
+          rejectedTargets: [],
+          reasons: [],
+          verifiedFacts: [],
+        },
+      ];
+      harness.deps.actionContractSession.recordToolReceipts(unverified);
       const toolExecution = createToolExecution(harness.deps);
 
       const outcome = await toolExecution.executeToolWorkflow(
@@ -547,16 +557,12 @@ describe("agent tool execution collaborator", function () {
         { documentId: "doc-1", finalText: "The document is ready." },
         "the turn is told which material this call finalized, through the setter",
       );
-      // An ordinary agent turn holds no semantic action contract, so the
-      // final evaluation cannot accept: the material is kept and the model
-      // is told what is left rather than the run stopping here.
       assert.isUndefined(outcome.stopRun);
       assert.isUndefined(outcome.finalText);
       assert.equal(outcome.delivery?.callId, "provider-submit");
       assert.deepEqual(outcome.delivery?.content, {
         content: { documentId: "doc-1" },
-        remainingWork:
-          "A current semantic action contract is unavailable; no completed action can be claimed.",
+        remainingWork: `Concrete action results could not be verified:\n${formatReceiptStatus(unverified)}`,
         finalizedDocumentId: "doc-1",
         instruction:
           "The material is finalized and preserved. Complete the remaining authorized actions using this finalized payload; do not regenerate the document.",
@@ -573,9 +579,6 @@ describe("agent tool execution collaborator", function () {
       const registry = new AgentToolRegistry(createTestActionContractService());
       registerDocumentTool(registry);
       const harness = await createHarness(registry);
-      // An ordinary turn carries no semantic intent, so both final
-      // evaluations accept the document.
-      harness.request.classifiedIntent = undefined;
       harness.request.executionCheckpoint = checkpointWith([
         ["Summarize the paper", "pending", "answer"],
         ["Save the summary as a note", "pending", "mutation"],

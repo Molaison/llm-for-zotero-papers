@@ -1,7 +1,6 @@
 import { appLogger } from "../core/logging";
 import { createAbortController } from "../utils/apiHelpers";
 import { readNativeQuestions } from "./nativeQuestions";
-import { renderResolvedActionContract } from "../agent/contracts/presentation";
 import type {
   ChatMessage,
   MessageContent,
@@ -1649,8 +1648,6 @@ function buildCodexNativeScopedMcpScope(params: {
   model?: string;
   codexPath?: string;
   reasoning?: ReasoningConfig;
-  actionContract?: import("../agent/contracts/types").AgentActionContract;
-  actionPreparation?: import("../agent/contracts/actionPreparation").ActionPreparation;
   sourceMessageTimestamp?: number;
   skillContext?: CodexNativeSkillContext;
 }): ZoteroMcpActiveScope {
@@ -1687,9 +1684,6 @@ function buildCodexNativeScopedMcpScope(params: {
     reasoning: params.reasoning,
     executionContext:
       params.preparedRequest?.executionContext || params.executionContext,
-    actionContract: params.actionContract,
-    actionProgress: params.preparedRequest?.actionProgress,
-    actionPreparation: params.actionPreparation,
     exhaustiveReadBackend: "codex_responses",
     turnPaperScope: resolvedRequest.turnPaperScope,
     turnPaperScopeWarnings: resolvedRequest.turnPaperScopeWarnings,
@@ -1704,8 +1698,6 @@ export function buildCodexNativeScopedMcpScopeForTests(params: {
   model?: string;
   codexPath?: string;
   reasoning?: ReasoningConfig;
-  actionContract?: import("../agent/contracts/types").AgentActionContract;
-  actionPreparation?: import("../agent/contracts/actionPreparation").ActionPreparation;
   sourceMessageTimestamp?: number;
   skillContext?: CodexNativeSkillContext;
 }): ZoteroMcpActiveScope {
@@ -1713,8 +1705,6 @@ export function buildCodexNativeScopedMcpScopeForTests(params: {
 }
 
 export function buildZoteroEnvironmentManifest(params: {
-  actionPreparation?: import("../agent/contracts/actionPreparation").ActionPreparation;
-  actionContract?: import("../agent/contracts/types").AgentActionContract;
   scope: CodexNativeConversationScope;
   mcpEnabled: boolean;
   mcpReady: boolean;
@@ -1740,12 +1730,7 @@ export function buildZoteroEnvironmentManifest(params: {
     : params.priorReadContextBlock || "";
   const lines = [
     "Zotero environment for this turn:",
-    params.actionContract
-      ? renderResolvedActionContract(params.actionContract)
-      : "The connected Codex runtime owns ordinary invocation approval. Zotero separately enforces the current library, filesystem, command, durable-journal, and conversation boundaries on every MCP call. Tool arguments cannot expand those host grants.",
-    params.actionPreparation
-      ? `Action preparation: ${JSON.stringify(params.actionPreparation)}. When needs_input, ask the material question through request_user_input; this is unresolved intent or references, not a read-only permission setting. Do not invent a request to enable writes.`
-      : "",
+    "The connected Codex runtime owns ordinary invocation approval. Zotero separately enforces the current library, filesystem, command, durable-journal, and conversation boundaries on every MCP call. Tool arguments cannot expand those host grants.",
     formatScopeLine(
       "Chat scope",
       scope.kind === "paper" ? "paper chat" : "library chat",
@@ -2984,12 +2969,6 @@ export async function runCodexAppServerNativeTurn(input: {
 }): Promise<CodexNativeTurnResult> {
   const params = {
     ...input,
-    get actionContract() {
-      return input.executionRequest.actionContract;
-    },
-    get actionPreparation() {
-      return input.executionRequest.actionPreparation;
-    },
     sourceMessageTimestamp:
       Number(input.executionRequest.metadata?.sourceMessageTimestamp) ||
       undefined,
@@ -3144,8 +3123,6 @@ export async function runCodexAppServerNativeTurn(input: {
         model: params.model,
         codexPath,
         reasoning: params.reasoning,
-        actionContract: params.actionContract,
-        actionPreparation: params.actionPreparation,
         sourceMessageTimestamp: params.sourceMessageTimestamp,
         skillContext,
       });
@@ -3168,27 +3145,11 @@ export async function runCodexAppServerNativeTurn(input: {
             persistentScopeToken ? { token: persistentScopeToken } : {},
           )
         : null;
-      const publishAuthority = async () => {
-        const authority = scopedMcp
-          ? scopedMcp.getState()
-          : params.executionRequest;
-        if (!authority)
+      // The prepared scope must still be current when the turn starts and
+      // whenever it records an MCP call.
+      const assertScopeCurrent = async () => {
+        if (scopedMcp && !scopedMcp.getState())
           throw new Error("The prepared native scope is no longer current.");
-        if (authority.actionPreparation)
-          await publishHost({
-            type: "provider_event",
-            providerType: "agent_action_preparation",
-            payload: authority.actionPreparation,
-          });
-        if (authority.actionContract && authority.actionProgress)
-          await publishHost({
-            type: "provider_event",
-            providerType: "agent_action_contract",
-            payload: {
-              contract: authority.actionContract,
-              progress: authority.actionProgress,
-            },
-          });
       };
       const mcpThreadConfig = scopedMcp
         ? buildCodexZoteroMcpThreadConfig({
@@ -3268,7 +3229,7 @@ export async function runCodexAppServerNativeTurn(input: {
           turnStarted = new Promise<void>((resolve) => {
             resolveTurnStarted = resolve;
           });
-          await publishAuthority();
+          await assertScopeCurrent();
           unregisterGuardianReviews = registerNativeGuardianReviewHandlers({
             proc,
             threadId: args.thread.threadId,
@@ -3340,7 +3301,7 @@ export async function runCodexAppServerNativeTurn(input: {
                 .append(
                   buildCodexMcpToolActivityEvent(redactedEvent, correlationId),
                 )
-                .then(() => publishAuthority());
+                .then(() => assertScopeCurrent());
               pendingMcpActivity.push(pending);
               // Observe rejection immediately, but retain the original promise until
               // the turn drains all evidence before reporting completion.
@@ -3550,14 +3511,11 @@ export async function runCodexAppServerNativeTurn(input: {
                 apiBase: params.codexPath,
                 skillContext,
               });
-        documentRequest.actionContract = params.actionContract;
         documentRequest.executionContext =
           params.executionRequest.executionContext;
         const turnSkillIds = resolvedSkills.matchedSkillIds;
         const turnSkillInstructionBlock = resolvedSkills.instructionBlock;
-        const documentOutcomePolicy = resolveDocumentOutcomePolicy({
-          request: documentRequest,
-        });
+        const documentOutcomePolicy = resolveDocumentOutcomePolicy();
         documentRequest.documentOutcomePolicy = documentOutcomePolicy;
         scopedMcpScope.documentOutcomePolicy = documentOutcomePolicy;
         if (scopedMcp) {
@@ -3614,8 +3572,6 @@ export async function runCodexAppServerNativeTurn(input: {
             )
           : params.messages;
         const developerEnvironmentText = buildZoteroEnvironmentManifest({
-          actionPreparation: params.actionPreparation,
-          actionContract: params.actionContract,
           scope: scopeWithProfile,
           mcpEnabled,
           mcpReady: optimisticMcpReady,
@@ -3770,8 +3726,6 @@ export async function runCodexAppServerNativeTurn(input: {
         const latestUserFallbackContextText = [
           visibleTurnContextBlock,
           buildZoteroEnvironmentManifest({
-            actionPreparation: params.actionPreparation,
-            actionContract: params.actionContract,
             scope: scopeWithProfile,
             mcpEnabled,
             mcpReady,
@@ -3788,8 +3742,6 @@ export async function runCodexAppServerNativeTurn(input: {
           messages: messagesForNativeTurn,
           includeVisibleHistory: true,
           zoteroEnvironmentText: buildZoteroEnvironmentManifest({
-            actionPreparation: params.actionPreparation,
-            actionContract: params.actionContract,
             scope: scopeWithProfile,
             mcpEnabled,
             mcpReady,
@@ -3893,46 +3845,7 @@ export async function runCodexAppServerNativeTurn(input: {
             "The requested document was not finalized, so ordinary answer text cannot be accepted as the completed outcome.",
           );
         }
-        const currentAuthority = () =>
-          scopedMcp
-            ? scopedMcp.getState() || {
-                actionPreparation: {
-                  state: "unavailable" as const,
-                  issues: [
-                    "The native scope expired or was superseded; execution authority is no longer current.",
-                  ],
-                },
-              }
-            : {
-                actionContract: params.actionContract,
-                actionPreparation: params.actionPreparation,
-              };
-        let actionEvaluation = evaluatePreparedActionContract(
-          currentAuthority(),
-          hostReceipts,
-        );
-        const progress = scopedMcp?.getState()?.actionProgress;
-        const corrections = [
-          actionEvaluation.correction && (progress?.correctionCount || 0) < 1
-            ? actionEvaluation.correction
-            : "",
-        ].filter(Boolean);
-        if (corrections.length) {
-          if (progress && actionEvaluation.correction)
-            progress.correctionCount++;
-          result = await executePreparedThread({
-            thread,
-            input: [{ type: "text", text: corrections.join("\n") }],
-            skillIds: activatedSkillIds,
-          });
-          if (documentOutcomePolicy.required || submittedDocument) {
-            document = (await loadRequiredDocument(result)) || document;
-          }
-          actionEvaluation = evaluatePreparedActionContract(
-            currentAuthority(),
-            hostReceipts,
-          );
-        }
+        const actionEvaluation = evaluatePreparedActionContract(hostReceipts);
         const verificationFailure = [
           actionEvaluation.state !== "satisfied" &&
           actionEvaluation.state !== "cancelled"
@@ -3941,18 +3854,6 @@ export async function runCodexAppServerNativeTurn(input: {
         ]
           .filter(Boolean)
           .join("\n");
-        const finalScope = scopedMcp?.getState();
-        if (finalScope?.actionContract && finalScope.actionProgress) {
-          finalScope.actionProgress.state = actionEvaluation.state;
-          await publishHost({
-            type: "provider_event",
-            providerType: "agent_action_contract",
-            payload: {
-              contract: finalScope.actionContract,
-              progress: finalScope.actionProgress,
-            },
-          });
-        }
         if (verificationFailure) {
           result = {
             ...result,

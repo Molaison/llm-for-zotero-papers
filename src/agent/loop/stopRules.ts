@@ -12,12 +12,6 @@ export type RunStopRule =
   | "tools_unsupported_fallback"
   // A /compact request ended the turn without a model step.
   | "manual_compaction"
-  // The action contract could not be set up or restored for this turn.
-  | "action_contract_initialization_failed"
-  // A prepared action asked the user for input and got no usable answer.
-  | "awaiting_clarification"
-  // The user answered, but the prepared action's references stay unresolved.
-  | "references_unresolved"
   // The protected prompt stays above the input budget after compaction.
   | "prompt_budget_exceeded"
   // A tool the provider ran through its callback ended the run.

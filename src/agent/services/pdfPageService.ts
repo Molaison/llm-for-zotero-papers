@@ -1,5 +1,4 @@
 import { appLogger } from "../../core/logging";
-import type { SemanticDecisions } from "../model/semanticDecisions";
 import {
   ensureAttachmentBlobFromPath,
   persistAttachmentBlob,
@@ -99,13 +98,20 @@ type PreparePdfFileParams = ResolvePdfTargetInput & {
   request: AgentRuntimeRequest;
 };
 
+/** Which figures or tables a figure read targets, resolved from the call. */
+export type PdfFigureSelection = {
+  labels: string[];
+  includeSupplementary: boolean;
+  kind: "figures" | "tables" | "both";
+};
+
 export type SourcePdfFigureExtractionParams = ResolvePdfTargetInput & {
   request: AgentRuntimeRequest;
   paperContext?: PaperContextRef;
   figureCacheDir: string;
   mineruCacheDir?: string;
   query: string;
-  selection: NonNullable<SemanticDecisions["figures"]>;
+  selection: PdfFigureSelection;
   pages?: number[];
   dpi?: number;
 };
@@ -1823,12 +1829,6 @@ export class PdfPageService {
       throw new Error("pdftohtml is not available for source-PDF geometry");
     }
     return { target, pages };
-  }
-
-  getUserExplicitPageSelection(
-    request: AgentRuntimeRequest,
-  ): ParsedPageSelection | null {
-    return parsePageSelectionValue(request.classifiedIntent?.semantic?.pages);
   }
 
   getActivePageIndex(): number | null {

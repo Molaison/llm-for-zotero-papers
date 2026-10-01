@@ -1,4 +1,3 @@
-import { loadWorkflowMaterial } from "../../documents/workflowMaterial";
 import { prepareDocumentMarkdownExport } from "../../documents/exportBundle";
 import {
   loadPlanDocument,
@@ -24,6 +23,7 @@ import {
   formatPaperCitationLabel,
   formatPaperSourceLabel,
 } from "../../../services/paperContent/paperAttribution";
+import { neverSelected } from "../guidance";
 import { ok, fail, validateObject } from "../shared";
 import { getLocalParentPath } from "../../../utils/localPath";
 import { executeExternalMutation } from "../../services/externalMutationCoordinator";
@@ -592,15 +592,9 @@ async function resolveFileWriteBundle(
     throw new Error(`Finalized document was not found: ${input.documentId}`);
   const document =
     explicitDocument ||
-    (context && (await loadWorkflowMaterial(context.request))) ||
     (context?.runId ? await loadLatestDocumentForRun(context.runId) : null);
-  const mustUseDocument =
-    context?.request.documentOutcomePolicy?.required &&
-    ["file", "both"].includes(
-      context.request.classifiedIntent?.semantic?.noteDestination || "none",
-    );
   if (
-    (mustUseDocument || input.documentId) &&
+    input.documentId &&
     (!document || document.visibleMarkdown !== input.content)
   )
     throw new Error(
@@ -723,10 +717,7 @@ export function createFileIOTool(): AgentWriteToolDefinition<
     },
 
     guidance: {
-      matches: (request) =>
-        Boolean(
-          request.classifiedIntent?.semantic?.supportTools?.includes("file_io"),
-        ),
+      matches: neverSelected,
       instruction:
         "Use file_io to read or write files on the user's filesystem. " +
         "For ordinary Zotero paper summaries, methods, key points, and targeted Q&A, use paper_read instead of direct MinerU cache reads. " +

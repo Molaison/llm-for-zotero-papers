@@ -17,11 +17,6 @@ import type {
 } from "../types";
 import { InvocationController } from "./execution/controller";
 import { createSyntheticErrorResult } from "./execution/results";
-import {
-  selectWorkflowStep,
-  type PreparedActionBinding,
-  type PreparedActionBindings,
-} from "./workflowSteps";
 function assertPortableModelToolSchema(spec: ToolSpec): void {
   if (spec.exposure === "internal") return;
 
@@ -170,85 +165,6 @@ export class AgentToolRegistry {
   private readonly tools = new Map<string, AgentToolDefinition<any, any>>();
 
   constructor(private readonly actionContracts?: ActionContractService) {}
-
-  async createActionContract(
-    request: AgentRuntimeRequest,
-  ): Promise<NonNullable<AgentRuntimeRequest["actionContract"]> | null> {
-    if (!request.classifiedIntent?.semantic) return null;
-    if (this.actionContracts) {
-      return this.actionContracts.createContract(request);
-    }
-    if (
-      request.classifiedIntent?.actionIntents.some(
-        (intent) => intent.operation !== "read_full",
-      )
-    ) {
-      throw new Error(
-        "Action execution requires the native action contract resolver.",
-      );
-    }
-    return null;
-  }
-
-  private readonly actionBindings: PreparedActionBindings = new Map();
-
-  registerActionBinding(
-    operation: import("../types").AgentActionOperation,
-    binding: PreparedActionBinding,
-  ): void {
-    if (this.actionBindings.has(operation))
-      throw new Error(`Duplicate prepared action binding: ${operation}`);
-    this.actionBindings.set(operation, binding);
-  }
-
-  async getNextWorkflowStep(
-    request: AgentRuntimeRequest,
-    allowedObligationIds?: readonly string[],
-  ) {
-    const resolved = this.actionContracts?.resolveWorkflowContract(
-      request.actionContract,
-      request.actionProgress,
-    );
-    const step = await selectWorkflowStep(
-      resolved ? { ...request, actionContract: resolved } : request,
-      this.actionBindings,
-      allowedObligationIds,
-    );
-    if (step.kind !== "action") return step;
-    const tool = this.tools.get(step.prepared.call.name);
-    const validation = tool?.validate(step.prepared.call.arguments);
-    if (!validation?.ok)
-      return {
-        kind: "blocked" as const,
-        code: "invalid_binding" as const,
-        reason: `The registered ${step.prepared.call.name} action binding is invalid. No action was executed.`,
-      };
-    return step;
-  }
-
-  createActionProgress(
-    contract: NonNullable<AgentRuntimeRequest["actionContract"]>,
-  ): NonNullable<AgentRuntimeRequest["actionProgress"]> {
-    if (this.actionContracts)
-      return this.actionContracts.createProgress(contract);
-    return {
-      version: 1,
-      contractId: contract.id,
-      state: "pending",
-      correctionCount: 0,
-      obligations: contract.obligations.map((obligation) => ({
-        obligationId: obligation.id,
-        status: "open",
-        verifiedTargetIds: [],
-        unresolvedTargetIds: [],
-        journalStepIds: [],
-        failureReasons: [],
-      })),
-      appliedReceiptKeys: [],
-      authorizationGrants: [],
-      updatedAt: Date.now(),
-    };
-  }
 
   private isModelVisibleTool(tool: AgentToolDefinition<any, any>): boolean {
     return tool.spec.exposure !== "internal";

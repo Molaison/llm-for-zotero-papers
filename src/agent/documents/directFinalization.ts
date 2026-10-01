@@ -7,7 +7,6 @@ import {
   directDocumentId,
   loadDocumentForRunByContentHash,
   loadLatestDocumentForRun,
-  loadPlanDocument,
   loadPlanDocumentOutbox,
   nextDirectDocumentSequence,
 } from "./store";
@@ -19,14 +18,9 @@ import type {
   PlanDocumentOutboxRecord,
   SubmitPlanDocumentInput,
 } from "./types";
-import {
-  assertMaterialReady,
-  materialDocumentId,
-  resolveMaterialOutput,
-} from "./workflowMaterial";
+import { rejectMaterialOutputId } from "./workflowMaterial";
 import { ToolInputRejection } from "../tools/execution/failure";
 import { normalizeNoteSourceText } from "../../services/notes/noteRendering";
-import type { MaterialOutputIntent } from "../contracts/workflowDependencies";
 
 /** The already stored document, with the outbox record that published it. */
 async function storedDocumentResult(document: PlanDocument): Promise<{
@@ -203,13 +197,7 @@ export class DirectDocumentFinalizer {
     now?: number;
   }): Promise<{ document: PlanDocument; outbox: PlanDocumentOutboxRecord }> {
     const configuredPolicy = params.request.documentOutcomePolicy;
-    const material = resolveMaterialOutput(
-      params.request,
-      params.input.materialOutputId,
-    );
-    const stableDocumentId = material
-      ? materialDocumentId(params.request, material.id)
-      : undefined;
+    rejectMaterialOutputId(params.input.materialOutputId);
     const policy: DocumentOutcomePolicy = configuredPolicy?.required
       ? configuredPolicy
       : {
@@ -223,8 +211,6 @@ export class DirectDocumentFinalizer {
       runId: params.runId,
       input: params.input,
       policy,
-      material,
-      stableDocumentId,
       now: params.now,
     });
   }
@@ -274,24 +260,17 @@ export class DirectDocumentFinalizer {
     runId: string;
     input: SubmitPlanDocumentInput;
     policy: DocumentOutcomePolicy;
-    material?: MaterialOutputIntent;
-    stableDocumentId?: string;
     now?: number;
   }): Promise<{ document: PlanDocument; outbox: PlanDocumentOutboxRecord }> {
-    const { material, stableDocumentId, policy } = params;
-    const prior = stableDocumentId
-      ? await loadPlanDocument(stableDocumentId)
-      : await loadLatestDocumentForRun(params.runId);
+    const { policy } = params;
+    const prior = await loadLatestDocumentForRun(params.runId);
     if (prior && prior.conversationKey !== params.request.conversationKey)
       throw new Error(
         "The finalized material belongs to another conversation.",
       );
-    // A workflow material output has one frozen identity, so its stored
-    // version is the answer. A direct run has no such identity: it may author
-    // several documents, and whether this submission is a retry of the stored
-    // one is only known once its content hash is computed below.
-    if (prior && stableDocumentId) return storedDocumentResult(prior);
-    if (material) assertMaterialReady(params.request, material, this.gateway);
+    // A direct run may author several documents, and whether this submission
+    // is a retry of the stored one is only known once its content hash is
+    // computed below.
     const now = params.now ?? Date.now();
     const title = params.input.title.trim();
     const observations = params.request.documentReadObservations || [];
@@ -326,12 +305,10 @@ export class DirectDocumentFinalizer {
     const coverageItems = researchGrounded
       ? coverageFromObservations(observations)
       : [];
-    const documentId =
-      stableDocumentId ||
-      directDocumentId(
-        params.runId,
-        await nextDirectDocumentSequence(params.runId),
-      );
+    const documentId = directDocumentId(
+      params.runId,
+      await nextDirectDocumentSequence(params.runId),
+    );
     const finalized = await finalizeDocument({
       gateway: this.gateway,
       input: params.input,
@@ -373,18 +350,16 @@ export class DirectDocumentFinalizer {
     // older content for the input the model just submitted. One run may
     // publish many documents — a note batch publishes one per item — so the
     // retry it is looking for is not always the newest one.
-    if (!stableDocumentId) {
-      const duplicate = await loadDocumentForRunByContentHash({
-        runId: params.runId,
-        contentHash: finalized.document.contentHash,
-        documentKind: spec.kind,
-      });
-      if (
-        duplicate &&
-        duplicate.conversationKey === params.request.conversationKey
-      )
-        return storedDocumentResult(duplicate);
-    }
+    const duplicate = await loadDocumentForRunByContentHash({
+      runId: params.runId,
+      contentHash: finalized.document.contentHash,
+      documentKind: spec.kind,
+    });
+    if (
+      duplicate &&
+      duplicate.conversationKey === params.request.conversationKey
+    )
+      return storedDocumentResult(duplicate);
     await persistFinalizedDocument(finalized);
     return finalized;
   }

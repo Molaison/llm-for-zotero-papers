@@ -106,7 +106,7 @@ describe("native PDF annotation workflow", function () {
       assert.isBelow(rect[3] - rect[1], 17);
     }
     assert.isBelow(position.rects[2][2], position.rects[0][2]);
-    const receipts = await contract.finalize(undefined, prepared, {
+    const receipts = await contract.finalize(prepared, {
       ok: true,
       effect: result.effect,
       content: result.content,

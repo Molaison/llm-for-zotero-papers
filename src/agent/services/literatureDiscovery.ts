@@ -54,15 +54,9 @@ export type LiteratureDiscoverySession = {
   outcome: "complete" | "no_more" | "search_failed";
 };
 
-export function resolveLiteratureDiscoveryRequest(
-  request: AgentToolContext["request"],
-): LiteratureDiscoveryRequest {
-  const semantic = request.classifiedIntent?.semantic;
-  return {
-    batchSize: semantic?.requestedCount || 5,
-    mode: semantic?.literatureMode,
-    source: semantic?.literatureSource,
-  };
+/** A discovery batch is five papers unless the tool call says otherwise. */
+export function resolveLiteratureDiscoveryRequest(): LiteratureDiscoveryRequest {
+  return { batchSize: 5, mode: undefined, source: undefined };
 }
 
 function assertActive(context: AgentToolContext): void {
@@ -91,7 +85,7 @@ function sessionSeed(context: AgentToolContext): AgentToolResultHandleRecord {
     kind: "literature_discovery",
     runId: context.runId,
     libraryID: context.request.libraryID,
-    request: resolveLiteratureDiscoveryRequest(context.request),
+    request: resolveLiteratureDiscoveryRequest(),
     revision: 0,
     phase: "gathering",
     candidateSetIds: [],

@@ -808,7 +808,6 @@ export type WorkflowTestApi = {
       priorResults?: import("../../agent/types").AgentToolResult[];
       documentId?: string;
       userText?: string;
-      actionContract?: import("../../agent/types").AgentActionContract;
     },
   ) => HTMLElement | null;
   renderPendingActionForPanel: (

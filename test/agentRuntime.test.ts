@@ -1,19 +1,11 @@
 import { PdfService } from "../src/agent/services/pdfService";
 import { AgentRunContinuationSession } from "../src/agent/continuation/runContinuationSession";
-import { loadWorkflowCheckpoint } from "../src/agent/contracts/workflowCheckpoint";
-import {
-  createAgentRun,
-  appendAgentRunEvent,
-} from "../src/agent/store/traceStore";
+import { appendAgentRunEvent } from "../src/agent/store/traceStore";
 import { createRequestUserInputTool } from "../src/agent/tools/control/requestUserInput";
 import {
   bumpConversationWriteGeneration,
   getConversationWriteGeneration,
 } from "../src/shared/conversationWriteFence";
-import { actionFixture } from "./helpers/semanticIntent";
-import { classifiedFixture } from "./helpers/semanticIntent";
-import { semanticContractFixture } from "./helpers/semanticIntent";
-import { semanticFixture } from "./helpers/semanticIntent";
 import { assert } from "chai";
 import { stripNoteHtml } from "../src/utils/noteText";
 import { renderMarkdownForNote } from "../src/utils/markdown";
@@ -143,30 +135,6 @@ function registerZeroEffectLibraryUpdate(registry: AgentToolRegistry): void {
       };
     },
   } as never);
-}
-
-function createRequiredMoveActionContractService(): ActionContractService {
-  const service = createTestActionContractService();
-  service.createContract = async () =>
-    semanticContractFixture(
-      semanticContractFixture({
-        version: 3,
-        id: "required-move-contract",
-        writeDisposition: "required",
-        interpretationSource: "classifier",
-        obligations: [
-          {
-            id: "required-move-contract:obligation:0",
-            capability: "zotero.collections",
-            operation: "move_to_collection",
-            proofDomain: "zotero_state",
-            coverage: "all",
-            targetKind: "items",
-          },
-        ],
-      }),
-    );
-  return service;
 }
 
 function commandActionDescriptor(id: string) {
@@ -474,7 +442,6 @@ describe("AgentRuntime", function () {
           }),
         });
         const request: AgentRuntimeRequest = {
-          classifiedIntent: classifiedFixture(),
           conversationKey,
           mode: "agent",
           userText: "Summarize the library result",
@@ -545,62 +512,6 @@ describe("AgentRuntime", function () {
       restore();
     }
   });
-
-  it("preserves prior durable workflow evidence when the main model fails", async function () {
-    const restore = installMockDb();
-    try {
-      const service = createRequiredMoveActionContractService();
-      const contract = await service.createContract({} as never);
-      const progress = service.createProgress(contract);
-      await createAgentRun({
-        runId: "prior-workflow",
-        conversationKey: 998811,
-        mode: "agent",
-        status: "failed",
-        createdAt: 1,
-      });
-      await appendAgentRunEvent("prior-workflow", 1, {
-        type: "provider_event",
-        providerType: "agent_action_contract",
-        payload: { contract, progress },
-      });
-      const runtime = new AgentRuntime({
-        registry: new AgentToolRegistry(service),
-        adapterFactory: () =>
-          new MockAdapter([], {
-            streaming: false,
-            toolCalls: true,
-            multimodal: false,
-          }),
-      });
-      let failed = false;
-      try {
-        await runtime.runTurn({
-          request: {
-            conversationKey: 998811,
-            mode: "agent",
-            userText: "Continue the unfinished workflow",
-            libraryID: 1,
-            model: "test",
-            apiKey: "test",
-            apiBase: "https://example.invalid",
-          },
-        });
-      } catch {
-        failed = true;
-      }
-      assert.isTrue(failed, "The injected interpretation failure must occur");
-      const retained = await loadWorkflowCheckpoint(998811);
-      assert.equal(
-        retained?.contract.id,
-        contract.id,
-        "A failed interpretation must not hide the last durable workflow from the next turn",
-      );
-    } finally {
-      restore();
-    }
-  });
-
   it("durably orders immutable native authority snapshots before finalization", async function () {
     const restore = installMockDb();
     try {
@@ -822,13 +733,6 @@ describe("AgentRuntime", function () {
             model: "test-model",
             apiKey: "test",
             apiBase: "",
-            classifiedIntent: {
-              ...classifiedFixture(),
-              semantic: semanticFixture(),
-              retrievalIntent: "none",
-              wantedSections: [],
-              actionIntents: [],
-            },
           },
           onEvent: (event) => events.push(event),
         });
@@ -874,7 +778,6 @@ describe("AgentRuntime", function () {
       const events: AgentEvent[] = [];
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 1,
           libraryID: 1,
           mode: "agent",
@@ -966,10 +869,6 @@ describe("AgentRuntime", function () {
       try {
         await runtime.runTurn({
           request: {
-            classifiedIntent: classifiedFixture({
-              deliverableIntent: "document",
-              documentKind: "report",
-            }),
             conversationKey: 421,
             libraryID: 1,
             mode: "agent",
@@ -1016,7 +915,6 @@ describe("AgentRuntime", function () {
       try {
         await runtime.runTurn({
           request: {
-            classifiedIntent: classifiedFixture(),
             conversationKey: 3,
             libraryID: 1,
             mode: "agent",
@@ -1134,7 +1032,6 @@ describe("AgentRuntime", function () {
       const events: AgentEvent[] = [];
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 393,
           libraryID: 1,
           conversationKind: "paper",
@@ -1182,8 +1079,6 @@ describe("AgentRuntime", function () {
           params.request.loadedSkillRecords!.map((skill) => skill.id),
           ["analyze-figures", "write-note"],
         );
-        assert.isUndefined(params.request.classifiedIntent);
-        assert.isUndefined(params.request.actionContract);
         const prompt = JSON.stringify(params);
         for (const filename of ["analyze-figures.md", "write-note.md"]) {
           assert.include(
@@ -1274,7 +1169,6 @@ describe("AgentRuntime", function () {
 
       await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 1,
           libraryID: 1,
           mode: "agent",
@@ -1349,7 +1243,6 @@ describe("AgentRuntime", function () {
 
       await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 2,
           mode: "agent",
           userText: "Hello",
@@ -1523,9 +1416,6 @@ describe("AgentRuntime", function () {
       const events: AgentEvent[] = [];
       const outcomePromise = runtime.runTurn({
         request: {
-          classifiedIntent: actionFixture("note_create", undefined, {
-            noteDestination: "zotero",
-          }),
           conversationKey: 1,
           mode: "agent",
           libraryID: 1,
@@ -1714,7 +1604,6 @@ describe("AgentRuntime", function () {
 
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 1,
           mode: "agent",
           userText: "Explain the figure",
@@ -1853,7 +1742,6 @@ describe("AgentRuntime", function () {
 
       await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 98,
           mode: "agent",
           userText: "inspect the figure",
@@ -1963,7 +1851,6 @@ describe("AgentRuntime", function () {
 
       await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 99,
           mode: "agent",
           userText: "inspect the figure",
@@ -2047,7 +1934,6 @@ describe("AgentRuntime", function () {
       const events: AgentEvent[] = [];
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 1,
           mode: "agent",
           userText: "summarize the paper",
@@ -2144,7 +2030,6 @@ describe("AgentRuntime", function () {
 
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 171,
           mode: "agent",
           userText: "read every distinct chunk and synthesize",
@@ -2264,7 +2149,6 @@ describe("AgentRuntime", function () {
         });
         const outcome = await runtime.runTurn({
           request: {
-            classifiedIntent: classifiedFixture(),
             conversationKey: 9010 + failingRounds,
             mode: "agent",
             userText: "Read these papers and answer from their evidence.",
@@ -2340,7 +2224,6 @@ describe("AgentRuntime", function () {
 
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 172,
           mode: "agent",
           userText: "keep reading until done",
@@ -2486,7 +2369,6 @@ describe("AgentRuntime", function () {
 
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 1,
           mode: "agent",
           userText: "summarize the paper",
@@ -2570,7 +2452,6 @@ describe("AgentRuntime", function () {
       try {
         await runtime.runTurn({
           request: {
-            classifiedIntent: classifiedFixture(),
             conversationKey: 2,
             mode: "agent",
             userText: "Read safely",
@@ -2622,7 +2503,6 @@ describe("AgentRuntime", function () {
       const events: AgentEvent[] = [];
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 1,
           mode: "agent",
           userText: "hello",
@@ -2696,7 +2576,6 @@ describe("AgentRuntime", function () {
 
         const outcome = await runtime.runTurn({
           request: {
-            classifiedIntent: classifiedFixture(),
             conversationKey: 1_909,
             mode: "agent",
             userText: "finish this task",
@@ -2776,7 +2655,6 @@ describe("AgentRuntime", function () {
 
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 1_912,
           mode: "agent",
           userText: "write the full review",
@@ -2846,7 +2724,6 @@ describe("AgentRuntime", function () {
 
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 1_913,
           mode: "agent",
           userText: "write the full review",
@@ -2928,7 +2805,6 @@ describe("AgentRuntime", function () {
 
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 1_914,
           mode: "agent",
           userText: "look it up",
@@ -2983,7 +2859,6 @@ describe("AgentRuntime", function () {
       });
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 19091,
           mode: "agent",
           userText: "finish this task",
@@ -3026,7 +2901,6 @@ describe("AgentRuntime", function () {
 
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 1_910,
           mode: "agent",
           userText: "finish this task",
@@ -3090,7 +2964,6 @@ describe("AgentRuntime", function () {
       const events: AgentEvent[] = [];
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 7_940_001,
           libraryID: 1,
           mode: "agent",
@@ -3189,7 +3062,6 @@ describe("AgentRuntime", function () {
 
       await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey,
           libraryID: 1,
           mode: "agent",
@@ -3287,7 +3159,6 @@ describe("AgentRuntime", function () {
       const events: AgentEvent[] = [];
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 1,
           mode: "agent",
           userText: "summarize",
@@ -3383,7 +3254,6 @@ describe("AgentRuntime", function () {
       const events: AgentEvent[] = [];
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 1,
           mode: "agent",
           userText: "what is this paper about?",
@@ -3441,69 +3311,6 @@ describe("AgentRuntime", function () {
       restoreDb();
     }
   });
-
-  it("keeps a successful preclassified empty intent authoritative", async function () {
-    const restoreDb = installMockDb();
-    try {
-      let stepIndex = 0;
-      let sawCorrection = false;
-      const runtime = new AgentRuntime({
-        registry: new AgentToolRegistry(),
-        adapterFactory: () => ({
-          getCapabilities: () => ({
-            streaming: true,
-            toolCalls: true,
-            multimodal: false,
-            fileInputs: false,
-            reasoning: true,
-          }),
-          supportsTools: () => true,
-          async runStep(params: AgentStepParams): Promise<AgentModelStep> {
-            stepIndex += 1;
-            sawCorrection ||= params.messages.some(
-              (message) =>
-                message.role === "user" &&
-                typeof message.content === "string" &&
-                message.content.includes("open typed obligation(s)"),
-            );
-            const text = stepIndex === 1 ? "I found it." : "Done.";
-            return {
-              kind: "final",
-              text,
-              assistantMessage: { role: "assistant", content: text },
-            };
-          },
-        }),
-      });
-
-      const outcome = await runtime.runTurn({
-        request: {
-          conversationKey: 1,
-          mode: "agent",
-          userText:
-            'Move the paper titled "A very long named paper that previously bypassed the action fallback" to the destination.',
-          model: "test-model",
-          apiBase: "",
-          apiKey: "test",
-          classifiedIntent: {
-            ...classifiedFixture(),
-            semantic: semanticFixture(),
-            retrievalIntent: "none",
-            wantedSections: [],
-            actionIntents: [],
-          },
-        },
-      });
-
-      assert.equal(outcome.kind, "completed");
-      if (outcome.kind !== "completed") return;
-      assert.isFalse(sawCorrection);
-      assert.equal(outcome.text, "I found it.");
-    } finally {
-      restoreDb();
-    }
-  });
-
   it("preserves an informational final after permitted exploratory reads", async function () {
     const restoreDb = installMockDb();
     try {
@@ -3669,14 +3476,6 @@ describe("AgentRuntime", function () {
           apiBase: "",
           apiKey: "test",
           libraryID: 1,
-          classifiedIntent: {
-            ...classifiedFixture(),
-            semantic: semanticFixture(),
-            retrievalIntent: "targeted",
-            wantedSections: [],
-            writeDisposition: "none",
-            actionIntents: [],
-          },
         },
         onEvent: (event) => {
           events.push(event);
@@ -3852,14 +3651,6 @@ describe("AgentRuntime", function () {
           apiBase: "",
           apiKey: "test",
           libraryID: 1,
-          classifiedIntent: {
-            ...classifiedFixture(),
-            semantic: semanticFixture(),
-            retrievalIntent: "targeted",
-            wantedSections: [],
-            writeDisposition: "none",
-            actionIntents: [],
-          },
         },
       });
 
@@ -3987,14 +3778,6 @@ describe("AgentRuntime", function () {
           apiBase: "",
           apiKey: "test",
           libraryID: 1,
-          classifiedIntent: {
-            ...classifiedFixture(),
-            semantic: semanticFixture(),
-            retrievalIntent: "targeted",
-            wantedSections: [],
-            writeDisposition: "none",
-            actionIntents: [],
-          },
         },
         onEvent: (event) => events.push(event),
       });
@@ -4114,14 +3897,6 @@ describe("AgentRuntime", function () {
           apiBase: "",
           apiKey: "test",
           libraryID: 1,
-          classifiedIntent: {
-            ...classifiedFixture(),
-            semantic: semanticFixture(),
-            retrievalIntent: "targeted",
-            wantedSections: [],
-            writeDisposition: "none",
-            actionIntents: [],
-          },
         },
         onEvent: (event) => events.push(event),
       });
@@ -4326,9 +4101,6 @@ describe("AgentRuntime", function () {
 
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: actionFixture("note_create", undefined, {
-            noteDestination: "zotero",
-          }),
           conversationKey: 1,
           mode: "agent",
           libraryID: 1,
@@ -4483,9 +4255,6 @@ describe("AgentRuntime", function () {
 
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: actionFixture("file_write", undefined, {
-            noteDestination: "file",
-          }),
           conversationKey: 1,
           mode: "agent",
           userText: "write this figure note to my Obsidian",
@@ -4584,7 +4353,6 @@ describe("AgentRuntime", function () {
       const events: AgentEvent[] = [];
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 1,
           mode: "agent",
           userText: "summarize the paper",
@@ -4663,7 +4431,6 @@ describe("AgentRuntime", function () {
       const events: AgentEvent[] = [];
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 1,
           mode: "agent",
           userText: "count tokens",
@@ -4756,7 +4523,6 @@ describe("AgentRuntime", function () {
 
       await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 1,
           mode: "agent",
           userText: "count tokens",
@@ -4785,7 +4551,6 @@ describe("AgentRuntime", function () {
     const restoreDb = installMockDb();
     try {
       const request: AgentRuntimeRequest = {
-        classifiedIntent: classifiedFixture(),
         conversationKey: 501,
         mode: "agent",
         userText: "summarize this paper",
@@ -4880,7 +4645,6 @@ describe("AgentRuntime", function () {
       const secondEvents: AgentEvent[] = [];
       await secondRuntime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           ...request,
           userText: "what about the methods?",
         },
@@ -4933,7 +4697,6 @@ describe("AgentRuntime", function () {
       const failedEvents: AgentEvent[] = [];
       await failingRuntime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           ...request,
           conversationKey: 777,
           userText: "this will fail",
@@ -4968,7 +4731,6 @@ describe("AgentRuntime", function () {
       const retryEvents: AgentEvent[] = [];
       await retryRuntime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           ...request,
           conversationKey: 777,
           userText: "retry",
@@ -5031,7 +4793,6 @@ describe("AgentRuntime", function () {
       });
 
       const request: AgentRuntimeRequest = {
-        classifiedIntent: classifiedFixture(),
         conversationKey: 601,
         mode: "agent",
         userText: "read the abstract",
@@ -5138,7 +4899,6 @@ describe("AgentRuntime", function () {
       });
       await secondRuntime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           ...request,
           userText: "use what you read",
         },
@@ -5242,7 +5002,6 @@ describe("AgentRuntime", function () {
       try {
         await runtime.runTurn({
           request: {
-            classifiedIntent: classifiedFixture(),
             conversationKey,
             mode: "agent",
             userText: "persist this before inference",
@@ -5351,7 +5110,6 @@ describe("AgentRuntime", function () {
       });
       const run = runtime.runTurn({
         request: {
-          classifiedIntent: actionFixture("command_execute"),
           conversationKey,
           mode: "agent",
           libraryID: 1,
@@ -5387,7 +5145,6 @@ describe("AgentRuntime", function () {
     const restoreDb = installMockDb();
     try {
       const request: AgentRuntimeRequest = {
-        classifiedIntent: classifiedFixture(),
         conversationKey: 7,
         mode: "agent",
         userText: "remember alpha",
@@ -5463,7 +5220,6 @@ describe("AgentRuntime", function () {
       });
       await secondRuntime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           ...request,
           userText: "what did I ask you to remember?",
         },
@@ -5590,9 +5346,6 @@ describe("AgentRuntime", function () {
       try {
         await firstRuntime.runTurn({
           request: {
-            classifiedIntent: actionFixture("command_execute", undefined, {
-              continuation: "resume",
-            }),
             conversationKey,
             mode: "agent",
             userText: "run the recovery command once",
@@ -5643,9 +5396,6 @@ describe("AgentRuntime", function () {
       });
       await continuedRuntime.runTurn({
         request: {
-          classifiedIntent: actionFixture("command_execute", undefined, {
-            continuation: "resume",
-          }),
           conversationKey,
           mode: "agent",
           userText: "continue",
@@ -5760,9 +5510,6 @@ describe("AgentRuntime", function () {
       try {
         await interruptedRuntime.runTurn({
           request: {
-            classifiedIntent: actionFixture("command_execute", undefined, {
-              continuation: "resume",
-            }),
             conversationKey,
             mode: "agent",
             userText: "run the recovery command to preserve this original goal",
@@ -5823,9 +5570,6 @@ describe("AgentRuntime", function () {
       });
       await continuedRuntime.runTurn({
         request: {
-          classifiedIntent: actionFixture("command_execute", undefined, {
-            continuation: "resume",
-          }),
           conversationKey,
           mode: "agent",
           userText: "continue after the model change",
@@ -5856,7 +5600,6 @@ describe("AgentRuntime", function () {
     const restoreDb = installMockDb();
     try {
       const request: AgentRuntimeRequest = {
-        classifiedIntent: classifiedFixture(),
         conversationKey: 8,
         mode: "agent",
         userText: "seed",
@@ -5935,7 +5678,6 @@ describe("AgentRuntime", function () {
       });
       await seedRuntime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           ...request,
           userText: "seed tool result",
         },
@@ -5966,7 +5708,6 @@ describe("AgentRuntime", function () {
         });
         await runtime.runTurn({
           request: {
-            classifiedIntent: classifiedFixture(),
             ...request,
             userText: `seed ${index}`,
           },
@@ -5987,7 +5728,6 @@ describe("AgentRuntime", function () {
       });
       const compactOutcome = await compactRuntime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           ...request,
           userText: "/compact",
         },
@@ -6031,7 +5771,6 @@ describe("AgentRuntime", function () {
       });
       await followupRuntime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           ...request,
           userText: "continue",
         },
@@ -6142,7 +5881,6 @@ describe("AgentRuntime", function () {
       const events: AgentEvent[] = [];
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 11,
           mode: "agent",
           userText: "list my library",
@@ -6285,7 +6023,6 @@ describe("AgentRuntime", function () {
       const events: AgentEvent[] = [];
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 13,
           mode: "agent",
           userText: "list my library",
@@ -6504,7 +6241,6 @@ describe("AgentRuntime", function () {
       });
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 15,
           mode: "agent",
           userText: "list my library, then inspect omitted rows",
@@ -6700,7 +6436,6 @@ describe("AgentRuntime", function () {
       });
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 14,
           mode: "agent",
           userText: "find evidence",
@@ -6808,7 +6543,6 @@ describe("AgentRuntime", function () {
       });
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 12,
           mode: "agent",
           userText: "current request",
@@ -6843,160 +6577,6 @@ describe("AgentRuntime", function () {
       restoreDb();
     }
   });
-
-  it("checkpoints raw paper text after a durable research batch", async function () {
-    const restoreDb = installMockDb();
-    try {
-      const registry = new AgentToolRegistry();
-      registry.register({
-        spec: {
-          name: "paper_read",
-          description: "read papers",
-          inputSchema: { type: "object" },
-          executionClass: "read",
-          requiresConfirmation: false,
-        },
-        validate: (args) => ({ ok: true, value: args }),
-        execute: async () => ({
-          results: [
-            {
-              identity: "1:AAAA1111",
-              text: `FULL_PAPER_TEXT_SENTINEL ${"P".repeat(20_000)}`,
-            },
-          ],
-        }),
-      });
-      registry.register({
-        spec: {
-          name: "research_update",
-          description: "persist paper understanding",
-          inputSchema: { type: "object" },
-          executionClass: "read",
-          requiresConfirmation: false,
-        },
-        validate: (args) => ({ ok: true, value: args }),
-        execute: async () => ({
-          content: {
-            progress: { totalItems: 30, deepReadCompleted: 1 },
-          },
-          continuationCheckpoint: {
-            reason: "research_batch_durable",
-            instruction:
-              "The completed paper understanding is durable. Continue with the remaining reading manifest.",
-          },
-        }),
-      });
-      registry.register(createContextReadTool());
-
-      let stepIndex = 0;
-      let resetCount = 0;
-      let messagesAfterBatch: AgentModelMessage[] = [];
-      const events: AgentEvent[] = [];
-      const runtime = new AgentRuntime({
-        registry,
-        adapterFactory: () => ({
-          getCapabilities: () => ({
-            streaming: false,
-            toolCalls: true,
-            multimodal: false,
-            fileInputs: false,
-            reasoning: true,
-          }),
-          supportsTools: () => true,
-          resetState: () => {
-            resetCount += 1;
-          },
-          async runStep(params: AgentStepParams): Promise<AgentModelStep> {
-            stepIndex += 1;
-            if (stepIndex === 1) {
-              const call = {
-                id: "read-paper-batch",
-                name: "paper_read",
-                arguments: {
-                  mode: "overview",
-                  targets: [{ itemId: 1, contextItemId: 2 }],
-                },
-              };
-              return {
-                kind: "tool_calls",
-                calls: [call],
-                assistantMessage: {
-                  role: "assistant",
-                  content: "",
-                  tool_calls: [call],
-                },
-              };
-            }
-            if (stepIndex === 2) {
-              const call = {
-                id: "record-paper-batch",
-                name: "research_update",
-                arguments: {
-                  operation: "record_papers",
-                  papers: [{ libraryID: 1, itemKey: "AAAA1111" }],
-                },
-              };
-              return {
-                kind: "tool_calls",
-                calls: [call],
-                assistantMessage: {
-                  role: "assistant",
-                  content: "",
-                  tool_calls: [call],
-                },
-              };
-            }
-            messagesAfterBatch = structuredClone(params.messages);
-            return {
-              kind: "final",
-              text: "Durable batch recorded.",
-              assistantMessage: {
-                role: "assistant",
-                content: "Durable batch recorded.",
-              },
-            };
-          },
-        }),
-      });
-
-      const outcome = await runtime.runTurn({
-        request: {
-          classifiedIntent: classifiedFixture(),
-          conversationKey: 1213,
-          mode: "agent",
-          userText: "Read every paper and persist each completed group.",
-          model: "deepseek-v4-pro",
-          apiBase: "https://api.deepseek.com/anthropic",
-          apiKey: "test",
-          advanced: { inputTokenCap: 1_000_000 },
-        },
-        onEvent: (event) => events.push(event),
-      });
-
-      assert.equal(outcome.kind, "completed");
-      assert.equal(resetCount, 1);
-      assert.notInclude(
-        JSON.stringify(messagesAfterBatch),
-        "FULL_PAPER_TEXT_SENTINEL",
-      );
-      assert.include(
-        JSON.stringify(messagesAfterBatch),
-        "Agent semantic continuation checkpoint",
-      );
-      assert.isTrue(
-        events.some(
-          (event) =>
-            event.type === "provider_event" &&
-            event.providerType === "agent_context_budget" &&
-            event.payload?.action === "checkpoint_durable_tool_state" &&
-            event.payload?.reason === "research_batch_durable",
-        ),
-      );
-    } finally {
-      restoreDb();
-    }
-  });
-
   it("does not abort after repeated input rejections", async function () {
     const restoreDb = installMockDb();
     try {
@@ -7077,7 +6657,6 @@ describe("AgentRuntime", function () {
 
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 1219,
           mode: "agent",
           userText: "record",
@@ -7151,7 +6730,6 @@ describe("AgentRuntime", function () {
 
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 1220,
           mode: "agent",
           userText: "record",
@@ -7243,7 +6821,6 @@ describe("AgentRuntime", function () {
 
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 1212,
           mode: "agent",
           userText: "Use the small result.",
@@ -7399,7 +6976,6 @@ describe("AgentRuntime", function () {
 
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 1213,
           mode: "agent",
           userText: "Use both small results.",
@@ -7494,7 +7070,6 @@ describe("AgentRuntime", function () {
         const events: AgentEvent[] = [];
         const outcome = await runtime.runTurn({
           request: {
-            classifiedIntent: classifiedFixture(),
             conversationKey: 1,
             mode: "agent",
             libraryID: 1,
@@ -7653,9 +7228,6 @@ describe("AgentRuntime", function () {
       const events: AgentEvent[] = [];
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: actionFixture("note_create", undefined, {
-            noteDestination: "zotero",
-          }),
           conversationKey: 1,
           mode: "agent",
           libraryID: 1,
@@ -7869,7 +7441,6 @@ describe("web attribution runtime guard", function () {
       const events: AgentEvent[] = [];
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 920,
           mode: "agent",
           userText: "What is current?",
@@ -7936,7 +7507,6 @@ describe("web attribution runtime guard", function () {
       const events: AgentEvent[] = [];
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 921,
           mode: "agent",
           userText: "What is current?",
@@ -8013,7 +7583,6 @@ describe("web attribution runtime guard", function () {
       });
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 922,
           mode: "agent",
           userText: "What is current?",
@@ -8148,7 +7717,6 @@ describe("shallow guard round-limit safety", function () {
       });
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 1,
           mode: "agent",
           userText: "What methods do these papers share?",
@@ -8181,7 +7749,7 @@ describe("shallow guard round-limit safety", function () {
    * legitimate ("they were already in that collection") — the goal is an
    * accurate report, not a failed run.
    */
-  it("does not retry a typed obligation after the user declines it", async function () {
+  it("does not retry a write after the user declines it", async function () {
     const restoreDb = installMockDb();
     try {
       await initAgentChangeJournal();
@@ -8259,7 +7827,6 @@ describe("shallow guard round-limit safety", function () {
       let denials = 0;
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: actionFixture("command_execute"),
           conversationKey: 992,
           mode: "agent",
           userText: "run command after confirmation",
@@ -8427,18 +7994,6 @@ describe("shallow guard round-limit safety", function () {
 
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: {
-            ...actionFixture("apply_tags", { tags: ["reviewed"] }),
-            paperTargetIntent: "all_visible",
-            actionIntents: [
-              {
-                ...actionFixture("apply_tags", { tags: ["reviewed"] })
-                  .actionIntents[0],
-                coverage: "some",
-                targetKind: "papers",
-              },
-            ],
-          },
           conversationKey: 993,
           mode: "agent",
           userText: 'Add the tag "reviewed" to these papers.',
@@ -8550,11 +8105,6 @@ describe("AgentRuntime evidence stop policy", function () {
           model: "test-model",
           apiKey: "test",
           apiBase: "",
-          classifiedIntent: classifiedFixture({
-            semantic: semanticFixture({
-              reading: { source: "document_text", coverage: "targeted" },
-            }),
-          }),
         },
         onEvent: () => {},
       });
@@ -8618,7 +8168,6 @@ describe("truncated answer continuation with a non-streaming final step", functi
 
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 1_915,
           mode: "agent",
           userText: "write it",
@@ -8706,13 +8255,6 @@ describe("delegating facade trace labels", function () {
             model: "test-model",
             apiKey: "test",
             apiBase: "",
-            classifiedIntent: {
-              ...classifiedFixture(),
-              semantic: semanticFixture(),
-              retrievalIntent: "none",
-              wantedSections: [],
-              actionIntents: [],
-            },
           },
           onEvent: (event) => events.push(event),
         });
@@ -9769,7 +9311,6 @@ describe("agent stage events", function () {
 
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 990_101,
           mode: "agent",
           libraryID: 1,
@@ -9904,7 +9445,6 @@ describe("agent stage events", function () {
       });
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 990_102,
           mode: "agent",
           userText: "Find it",
@@ -9979,7 +9519,6 @@ describe("agent stage events", function () {
       });
       await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 990_103,
           mode: "agent",
           userText: "Do something",
@@ -10085,7 +9624,6 @@ describe("agent stage events", function () {
       });
       await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 990_105,
           mode: "agent",
           libraryID: 1,
@@ -10204,7 +9742,6 @@ describe("tool result review delivery", function () {
 
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 991_201,
           mode: "agent",
           libraryID: 1,
@@ -10365,7 +9902,6 @@ describe("tool result review delivery", function () {
 
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 991_202,
           mode: "agent",
           libraryID: 1,

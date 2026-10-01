@@ -122,7 +122,6 @@ export class RetrievalService {
     question: string;
     queryVariants?: string[];
     queryPlan?: RetrievalQueryPlan;
-    intent?: import("../types").ClassifiedTurnIntent;
     model?: string;
     apiBase?: string;
     apiKey?: string;
@@ -173,9 +172,7 @@ export class RetrievalService {
           .join("\n");
       }),
     });
-    queryPlan.retrievalPurpose = params.intent?.semantic?.retrievalPurpose;
-    queryPlan.quoteAnchorPolicy =
-      params.intent?.retrievalIntent === "verify" ? "verified" : "none";
+    queryPlan.quoteAnchorPolicy = "none";
     // The planner's similarity key strips operators and truncates long input.
     // Evidence reuse must retain the complete query that selected these facts.
     const queryCacheKey = JSON.stringify([

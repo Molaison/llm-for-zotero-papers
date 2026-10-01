@@ -55,7 +55,7 @@ describe("undo single-action effect path", function () {
       tool,
       validated({ actionId: "action-42" }),
     );
-    const receipts = await service.finalize(undefined, prepared, {
+    const receipts = await service.finalize(prepared, {
       ok: true,
       effect: "applied",
       content: { status: "undone", actionId: "action-42", reverted: 1 },
@@ -76,7 +76,7 @@ describe("undo single-action effect path", function () {
       tool,
       validated({ actionId: "action-42" }),
     );
-    const receipts = await service.finalize(undefined, prepared, {
+    const receipts = await service.finalize(prepared, {
       ok: true,
       effect: "partial",
       content: {
@@ -93,7 +93,7 @@ describe("undo single-action effect path", function () {
 
   it("treats nothing-to-undo as already satisfied, not as a failed write", async function () {
     const prepared = await service.prepare(tool, validated({}));
-    const receipts = await service.finalize(undefined, prepared, {
+    const receipts = await service.finalize(prepared, {
       ok: true,
       effect: "none",
       content: { status: "nothing_reversible", reverted: 0 },
@@ -201,7 +201,7 @@ describe("undo single-action native re-read", function () {
     if (!input.ok) throw new Error(input.error);
     const prepared = await service.prepare(tool, input.value, context);
     const result = await tool.execute(input.value, context);
-    const receipts = await service.finalize(undefined, prepared, {
+    const receipts = await service.finalize(prepared, {
       ok: true,
       effect: result.effect,
       content: result.content,

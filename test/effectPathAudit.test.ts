@@ -15,7 +15,6 @@ import {
   prepareJournalStep,
 } from "../src/agent/store/changeJournal";
 import { ChangeJournalTestDb } from "./helpers/changeJournalTestDb";
-import { actionContractFixture } from "./helpers/semanticIntent";
 
 /**
  * The executable audit of the effect path.
@@ -962,21 +961,27 @@ describe("effect path audit", function () {
    * The production path for one audited fixture, start to finish.
    *
    * The call is the row's own representative input, so the observation and
-   * the table cannot drift apart, and the contract is built from the same
-   * operation the row declares. A confirmation is approved rather than
-   * bypassed: the receipt has to be the one a user's approval produces.
+   * the table cannot drift apart, and it runs as an ordinary agent turn. A
+   * confirmation is approved rather than bypassed: the receipt has to be the
+   * one a user's approval produces.
    */
   async function driveAuditedCall(toolName: string, gateway: unknown) {
     const registry = auditRegistry(gateway as never);
     const row = AUDIT[toolName];
-    const contract = actionContractFixture(row.operations[0]);
     const context = auditContext();
     const request = {
       ...context.request,
       libraryID: 1,
-      actionContract: contract,
-      classifiedIntent: contract.intent,
-      actionProgress: registry.createActionProgress(contract),
+      executionContext: {
+        version: 1,
+        executionId: `audit:${toolName}`,
+        conversationKey: context.request.conversationKey,
+        conversationGeneration: 0,
+        chatLibraryID: 1,
+        permissionOwner: "original_agent",
+        workspaceSnapshot: { selectedPapers: [], selectedCollections: [] },
+        configuredAccess: { libraryIDs: [1], outputDirectories: [] },
+      },
     };
     let prepared = await registry.prepareExecution(
       { id: `audit:${toolName}`, name: toolName, arguments: row.fixture },

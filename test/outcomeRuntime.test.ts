@@ -113,23 +113,11 @@ function registry(): AgentToolRegistry {
     (itemId) => (globalThis.Zotero as any).Items.get(itemId) || null,
   );
   const finalize = service.finalize.bind(service);
-  service.finalize = (async (
-    contract,
-    prepared,
-    params,
-    progress,
-    amendment,
-  ) =>
+  service.finalize = (async (prepared, params) =>
     libraryUpdateReceipt &&
     prepared.proposals.some((proposal) => proposal.id === "library-update")
       ? [libraryUpdateReceipt]
-      : finalize(
-          contract,
-          prepared,
-          params,
-          progress,
-          amendment,
-        )) as typeof service.finalize;
+      : finalize(prepared, params)) as typeof service.finalize;
   const tools = new AgentToolRegistry(service);
   tools.register(createSubmitDocumentTool(submitDocumentGateway));
   tools.register(

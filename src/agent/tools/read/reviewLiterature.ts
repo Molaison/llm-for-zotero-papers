@@ -1,5 +1,4 @@
 import { readOnlyInvocationPlan } from "../../authorization/invocationPlan";
-import { isExplicitLiteratureImport } from "../../model/literatureIntent";
 import {
   createSearchLiteratureReviewAction,
   resolveSearchLiteratureReview,
@@ -172,10 +171,6 @@ export function createLiteratureReviewTool(
           "Review saved scholarly candidates without changing the library.",
       }),
     execute: async (input, context) => {
-      if (isExplicitLiteratureImport(context.request))
-        throw new Error(
-          "This is an explicit import request. Use library_import for the requested count and destination; do not substitute a discovery card.",
-        );
       const active = await getLiteratureDiscovery(context, true);
       const targetCollectionId =
         active?.session.targetCollectionId ||

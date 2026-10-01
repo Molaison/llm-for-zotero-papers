@@ -10,48 +10,27 @@ import { ZoteroGateway } from "../src/agent/services/zoteroGateway";
 import { initAgentChangeJournal } from "../src/agent/store/changeJournal";
 import { createLibrarySearchTool } from "../src/agent/tools/read/librarySearch";
 import { AgentToolRegistry } from "../src/agent/tools/registry";
-import type { AgentActionContract, AgentToolContext } from "../src/agent/types";
-import { semanticContractFixture } from "../test/helpers/semanticIntent";
+import { createAgentExecutionContext } from "../src/agent/execution/context";
+import type { AgentToolContext } from "../src/agent/types";
 
 describe("workflow: behavior audit shared-owner regressions", function () {
   this.timeout(60000);
 
-  function writeContext(
-    operation: string,
-    parameters: Record<string, unknown>,
-    text: string,
-  ) {
+  function writeContext(operation: string, text: string) {
     const contracts = new ActionContractService(new ZoteroGateway());
-    const contract: AgentActionContract = semanticContractFixture({
-      version: 3,
-      id: `behavior-review-${Date.now()}`,
-      hardConstraints: [],
-      writeDisposition: "required",
-      interpretationSource: "semantic",
-      obligations: [
-        {
-          id: "write",
-          operation: operation as never,
-          proofDomain: "zotero_state",
-          capability:
-            operation === "create_collection"
-              ? "zotero.collections"
-              : "zotero.notes",
-          coverage: "one",
-          targetKind: "items",
-          parameters,
-        },
-      ],
+    const request = resolvedAgentRequest({
+      conversationKey: 2500900001,
+      mode: "agent",
+      libraryID: Zotero.Libraries.userLibraryID,
+      userText: text,
     });
+    // An ordinary agent turn: the in-plugin agent owns permission.
+    request.executionContext = createAgentExecutionContext(
+      request,
+      `behavior-review-${operation}`,
+    );
     const context: AgentToolContext = {
-      request: resolvedAgentRequest({
-        conversationKey: 2500900001,
-        mode: "agent",
-        libraryID: Zotero.Libraries.userLibraryID,
-        userText: text,
-        actionContract: contract,
-        actionProgress: contracts.createProgress(contract),
-      }),
+      request,
       item: null,
       modelName: "workflow",
       currentAnswerText: "",
@@ -68,7 +47,6 @@ describe("workflow: behavior audit shared-owner regressions", function () {
       setOriginalAgentPermissionMode("auto");
       const { registry, context } = writeContext(
         "create_collection",
-        { collectionName: name, parentCollectionId: null },
         `Create one collection named "${name}" in My Library. Do not merge them yet and do not create any papers or notes.`,
       );
       registry.register(
@@ -152,7 +130,7 @@ describe("workflow: behavior audit shared-owner regressions", function () {
     }
   });
 
-  it("allows a confined read script to inspect a native item while a note-write obligation is pending", async function () {
+  it("allows a confined read script to inspect a native item before a note edit", async function () {
     const originalMode = getOriginalAgentPermissionMode();
     const note = new Zotero.Item("note");
     note.libraryID = Zotero.Libraries.userLibraryID;
@@ -163,7 +141,6 @@ describe("workflow: behavior audit shared-owner regressions", function () {
       setOriginalAgentPermissionMode("auto");
       const { registry, context } = writeContext(
         "note_edit",
-        { targetNoteId: note.id },
         `Edit note ${note.id}.`,
       );
       registry.register(
@@ -238,7 +215,6 @@ describe("workflow: behavior audit shared-owner regressions", function () {
         setOriginalAgentPermissionMode("auto");
         const { registry, context } = writeContext(
           "note_edit",
-          { noteMode: "edit", targetNoteId: note.id },
           `In note ${note.id}, replace only "${example.find}" with "${example.replacement}".`,
         );
         registry.register(

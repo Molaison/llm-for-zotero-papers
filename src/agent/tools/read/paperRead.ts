@@ -47,7 +47,6 @@ import { fail, normalizePositiveInt, ok, validateObject } from "../shared";
 import {
   PAPER_TARGET_SELECTOR_SCHEMA,
   buildCaptureFollowupMessage,
-  semanticPdfMode,
   normalizeExplicitTargetSyntax,
   describeNoDefaultPaperTarget,
   resolveDefaultTargets,
@@ -174,18 +173,6 @@ function normalizePages(value: unknown): number[] | undefined {
   return parsePageSelectionValue(value)?.pageIndexes;
 }
 
-function dedupePaperContexts(
-  paperContexts: NonNullable<PdfTarget["paperContext"]>[],
-): NonNullable<PdfTarget["paperContext"]>[] {
-  const seen = new Set<string>();
-  return paperContexts.filter((paperContext) => {
-    const key = `${paperContext.libraryID || 0}:${paperContext.itemId}:${paperContext.contextItemId}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-}
-
 function resolveFullReadTargets(params: {
   input: PaperReadInput;
   context: AgentToolContext;
@@ -202,74 +189,16 @@ function resolveFullReadTargets(params: {
         )
       : [];
   const request = params.context.request;
-  const isLegacySemanticTurn = Boolean(request.classifiedIntent?.semantic);
-  if (
-    isLegacySemanticTurn &&
-    request.classifiedIntent?.semantic?.reading.coverage !== "exhaustive"
-  )
+  // The main agent chooses reading depth through the actual paper_read call.
+  // Explicit selectors are already host-resolved and therefore define the
+  // intended read set without a preliminary model gate.
+  if (explicitTargets.length) return explicitTargets;
+  const active = getTurnPapersWithRoles(request, ["active"]).slice(0, 1);
+  if (!active.length)
     throw new Error(
-      "Exhaustive reading requires compatible legacy turn intent.",
+      "The full-read target is unresolved. Pass explicit paper targets or open an active paper.",
     );
-
-  // In the direct workflow the main agent chooses reading depth through the
-  // actual paper_read call. Explicit selectors are already host-resolved and
-  // therefore define the intended read set without a preliminary model gate.
-  if (!isLegacySemanticTurn) {
-    if (explicitTargets.length) return explicitTargets;
-    const active = getTurnPapersWithRoles(request, ["active"]).slice(0, 1);
-    if (!active.length)
-      throw new Error(
-        "The full-read target is unresolved. Pass explicit paper targets or open an active paper.",
-      );
-    return active;
-  }
-  const available = dedupePaperContexts(
-    params.zoteroGateway.listPaperContexts(request),
-  );
-  const obligations =
-    request.actionContract?.obligations.filter(
-      (entry) => entry.operation === "read_full",
-    ) || [];
-  const ids = obligations.flatMap(
-    (entry) =>
-      entry.targetBoundary?.frozenTargetIds ||
-      entry.targetSelectors?.flatMap((selector) =>
-        selector.kind === "item_id" ? [selector.value] : [],
-      ) ||
-      [],
-  );
-  const intendedTargets = ids.length
-    ? available.filter((paper) => ids.includes(paper.itemId))
-    : request.classifiedIntent?.paperTargetIntent === "all_visible"
-      ? available
-      : request.classifiedIntent?.paperTargetIntent === "added"
-        ? getTurnPapersWithRoles(request, ["selected"])
-        : getTurnPapersWithRoles(request, ["active"]).slice(0, 1);
-  if (!intendedTargets.length)
-    throw new Error("The requested full-read targets are unresolved.");
-  if (explicitTargets.length) {
-    const intendedKeys = new Set(
-      intendedTargets.map(
-        (paperContext) =>
-          `${paperContext.libraryID || 0}:${paperContext.itemId}:${paperContext.contextItemId}`,
-      ),
-    );
-    const explicitKeys = new Set(
-      explicitTargets.map(
-        (paperContext) =>
-          `${paperContext.libraryID || 0}:${paperContext.itemId}:${paperContext.contextItemId}`,
-      ),
-    );
-    const targetsAgree =
-      intendedKeys.size === explicitKeys.size &&
-      [...intendedKeys].every((key) => explicitKeys.has(key));
-    if (!targetsAgree) {
-      throw new Error(
-        `The explicit paper_read full target conflicts with the user's requested paper scope. Requested: ${intendedTargets.map((paperContext) => paperContext.title).join("; ")}. Tool supplied: ${explicitTargets.map((paperContext) => paperContext.title).join("; ")}. Omit target/targets or retry with the requested papers.`,
-      );
-    }
-  }
-  return [...intendedTargets];
+  return active;
 }
 
 function readTextFile(filePath: string): Promise<string> {
@@ -376,13 +305,7 @@ async function buildMineruVisualRedirect(params: {
   context: AgentToolContext;
   zoteroGateway: ZoteroGateway;
 }): Promise<Record<string, unknown> | null> {
-  if (
-    params.input.pages?.length ||
-    params.context.request.classifiedIntent?.semantic?.reading.source ===
-      "rendered_pages"
-  ) {
-    return null;
-  }
+  if (params.input.pages?.length) return null;
   let targets: NonNullable<PdfTarget["paperContext"]>[] = [];
   try {
     targets = resolveDefaultTargets(
@@ -399,25 +322,6 @@ async function buildMineruVisualRedirect(params: {
   const mineruCacheDir = normalizeString(paperContext?.mineruCacheDir);
   if (!paperContext) return null;
   const query = params.input.query || params.context.request.userText || "";
-  if (
-    params.context.request.classifiedIntent?.semantic?.figures?.kind ===
-    "tables"
-  ) {
-    if (!mineruCacheDir) return null;
-    return {
-      mode: "visual",
-      status: "use_text_mode",
-      backend: "mineru",
-      query,
-      paperContext,
-      mineruCacheDir,
-      guidance:
-        "This is a table request for a MinerU-ready paper. Do not render PDF pages and do not use the figure-crop extractor. Call paper_read({ mode:'targeted', query:'<table label and surrounding discussion>' }) so the answer comes from MinerU table text, captions, and surrounding extracted text. Use direct file_io manifest/full.md inspection only for explicit filesystem/cache-inspection tasks.",
-      nextSteps: [
-        `paper_read({ mode:'targeted', query:'${query.replace(/'/g, "\\'")}' })`,
-      ],
-    };
-  }
   return {
     mode: "visual",
     status: "use_figures_mode",
@@ -1511,11 +1415,7 @@ export function createPaperReadTool(
               references.every((ref) => ref.kind === "table")
             );
           });
-        if (
-          context.request.classifiedIntent?.semantic?.figures?.kind ===
-            "tables" ||
-          explicitTablesOnly
-        ) {
+        if (explicitTablesOnly) {
           return {
             mode: "figures",
             status: "no_figures",
@@ -1837,7 +1737,6 @@ export function createPaperReadTool(
         .filter(Boolean)
         .join("\n");
       const results = await retrievalService.retrieveEvidence({
-        intent: context.request.classifiedIntent,
         papers: targets,
         question,
         queryVariants: input.queryVariants,

@@ -4,11 +4,6 @@ import { ToolExecutionFailure, ToolInputRejection } from "./failure";
 import { buildActionCallDigest } from "../../authorization/proposal";
 import type { ActionContractService } from "../../contracts/actionContract";
 import { createFallbackToolReceipts } from "../../contracts/actionEvaluation";
-import { getOriginalAgentPermissionMode } from "../../originalAgentPermissionMode";
-import {
-  decideScopeJudgment,
-  type ScopeJudgmentDecision,
-} from "../../authorization/scopeJudgment";
 import { canonicalJson } from "../../services/libraryMutation/canonicalJson";
 import type {
   AgentActionEvidence,
@@ -90,10 +85,7 @@ type GrantAuthority =
 /** Owns the lifetime of one invocation; authority is bound to exact assessed payloads. */
 export class InvocationController {
   private readonly assessor: InvocationAssessor;
-  private readonly frozenContract: string;
   private readonly frozenExecutionContext: string;
-  /** Exact proposal the host authorized on the agent's judgment (yolo only). */
-  private judgment?: { proposalDigest: string };
   private readonly childResults = new Map<
     string,
     import("../../types").AgentToolResult
@@ -107,7 +99,6 @@ export class InvocationController {
     private readonly contracts?: ActionContractService,
   ) {
     this.assessor = new InvocationAssessor(tool, context, options, contracts);
-    this.frozenContract = canonicalJson(context.request.actionContract || null);
     this.frozenExecutionContext = canonicalJson(
       context.request.executionContext || null,
     );
@@ -130,10 +121,9 @@ export class InvocationController {
             `Inherited approval for ${this.call.name} was refused because it was not bound to this exact invocation.`,
           );
       }
-      const assessed = await this.assessor.assess(input, false);
+      const assessed = await this.assessor.assess(input);
       if (
         this.options.inheritedApproval &&
-        !assessed.scopeFailure &&
         assessed.authorization.kind !== "block"
       )
         return this.execute(assessed, assessed.proposal.payloadDigest);
@@ -158,24 +148,13 @@ export class InvocationController {
     if (prepared?.hasExplicitAdapter && !prepared.proposals.length) return [];
     const receipts =
       prepared && this.contracts
-        ? await this.contracts.finalize(
-            this.context.request.actionContract,
-            prepared,
-            outcome,
-            this.context.request.actionProgress,
-          )
+        ? await this.contracts.finalize(prepared, outcome)
         : createFallbackToolReceipts({
             toolName: this.call.name,
             executionClass: this.tool.spec.executionClass,
             input: assessed?.input ?? input,
-            actionContract: this.context.request.actionContract,
             ...outcome,
           });
-    if (this.context.request.actionProgress && this.contracts)
-      this.contracts.applyReceipts(
-        this.context.request.actionProgress,
-        receipts,
-      );
     const allReceipts = [
       ...receipts,
       ...[...this.childResults.values()].flatMap(
@@ -228,73 +207,9 @@ export class InvocationController {
     };
   }
 
-  private scopeFailure(
-    assessed: AssessedInvocation,
-  ): PreparedToolExecutionResult {
-    const failure = assessed.scopeFailure!;
-    return {
-      tool: this.tool,
-      input: assessed.input,
-      result: {
-        callId: this.call.id,
-        name: this.call.name,
-        ok: false,
-        actionReceipts: this.contracts!.rejectionReceipts(
-          this.context.request.actionContract!,
-          assessed.preparedAction!,
-          failure,
-        ),
-        content: {
-          code: failure.code,
-          error: failure.message,
-          retryable: false,
-          expectedCount: failure.expectedCount,
-          proposedCount: failure.proposedCount,
-          rejectedTargets: failure.rejectedTargets,
-          missingTargets: failure.missingTargets,
-        },
-      },
-    };
-  }
-
-  private scopeDecision(assessed: AssessedInvocation): ScopeJudgmentDecision {
-    return decideScopeJudgment({
-      originalMode: getOriginalAgentPermissionMode(),
-      failure: assessed.scopeFailure!,
-      actionImpact: assessed.plan.impact,
-      riskSignals: assessed.plan.riskSignals,
-    });
-  }
-
-  /** The scope decision grants judgment for this exact scope failure. */
-  private grantsJudgment(assessed: AssessedInvocation): boolean {
-    if (!assessed.scopeFailure) return false;
-    const decision = this.scopeDecision(assessed);
-    return (
-      decision.kind === "execute" && decision.authority === "yolo_judgment"
-    );
-  }
-
-  /** True when this exact payload is the one the host granted on judgment. */
-  private judgmentGranted(assessed: AssessedInvocation): boolean {
-    return (
-      this.judgment !== undefined &&
-      this.judgment.proposalDigest === assessed.proposal.payloadDigest
-    );
-  }
-
-  private judgmentAccepts(assessed: AssessedInvocation): boolean {
-    return this.judgmentGranted(assessed) && this.grantsJudgment(assessed);
-  }
-
   private async dispatch(
     assessed: AssessedInvocation,
   ): Promise<PreparedToolExecution> {
-    const scopeDecision = assessed.scopeFailure
-      ? this.scopeDecision(assessed)
-      : undefined;
-    if (scopeDecision?.kind === "block")
-      return this.result(this.scopeFailure(assessed));
     if (assessed.authorization.kind === "block")
       return this.result(
         await this.failure(
@@ -312,18 +227,11 @@ export class InvocationController {
         this.tool.spec.requiresConfirmation);
     const needsReview = assessed.authorization.kind === "confirm" || toolReview;
     if (needsReview) {
-      const action = assessed.scopeFailure
-        ? createProposalConfirmationAction({
-            ...assessed.proposal,
-            summary: `${assessed.proposal.summary}\n\nNew targets now qualify inside the approved source: ${assessed.scopeFailure.message}`,
-          })
-        : this.tool.createPendingAction
-          ? await this.tool.createPendingAction(assessed.input, this.context)
-          : createProposalConfirmationAction(assessed.proposal);
+      const action = this.tool.createPendingAction
+        ? await this.tool.createPendingAction(assessed.input, this.context)
+        : createProposalConfirmationAction(assessed.proposal);
       return this.review(assessed, action);
     }
-    if (scopeDecision?.kind === "execute")
-      this.judgment = { proposalDigest: assessed.proposal.payloadDigest };
     return this.execute(assessed);
   }
 
@@ -403,18 +311,9 @@ export class InvocationController {
         input = resolved.value;
       }
       const assessed = await this.assessor.assess(input);
-      if (
-        assessed.scopeFailure &&
-        this.scopeDecision(assessed).kind === "block"
-      )
-        return this.result(this.scopeFailure(assessed));
       if (assessed.authorization.kind === "block")
         throw new Error(assessed.authorization.reason);
-      if (
-        invocationExpands(displayed.plan, assessed.plan) ||
-        (assessed.scopeFailure &&
-          assessed.proposal.payloadDigest !== displayed.proposal.payloadDigest)
-      )
+      if (invocationExpands(displayed.plan, assessed.plan))
         return this.review(
           assessed,
           createProposalConfirmationAction({
@@ -423,10 +322,6 @@ export class InvocationController {
           }),
           false,
         );
-      // The review only adds the user's approval on top of the host's
-      // judgment grant.
-      if (this.grantsJudgment(assessed))
-        this.judgment = { proposalDigest: assessed.proposal.payloadDigest };
       // This digest exists only after a validated, real review resolution.
       return this.execute(assessed, assessed.proposal.payloadDigest);
     } catch (error) {
@@ -434,22 +329,18 @@ export class InvocationController {
     }
   }
 
-  private lifecycleValid(checkContract = true): boolean {
+  private lifecycleValid(): boolean {
     return (
       !this.context.signal?.aborted &&
       (!this.options.isExecutionAllowed || this.options.isExecutionAllowed()) &&
       canonicalJson(this.context.request.executionContext || null) ===
-        this.frozenExecutionContext &&
-      (!checkContract ||
-        canonicalJson(this.context.request.actionContract || null) ===
-          this.frozenContract)
+        this.frozenExecutionContext
     );
   }
 
   /**
    * The one authority this invocation executes under, most specific first:
-   * a real user review, then the judgment marker (the single source of truth
-   * for judgment), and finally the policy's own verdict.
+   * a real user review, then the policy's own verdict.
    */
   private grantAuthority(
     assessed: AssessedInvocation,
@@ -458,7 +349,6 @@ export class InvocationController {
     if (this.context.authorization?.kind === "external_runtime")
       return "external_runtime";
     if (userApproval) return "safe_confirmation";
-    if (this.judgmentGranted(assessed)) return "yolo_judgment";
     const policy =
       assessed.authorization.kind === "execute"
         ? assessed.authorization.authority
@@ -523,36 +413,17 @@ export class InvocationController {
       status: "staged" as "staged" | "executed" | "failed",
       createdAt: Date.now(),
     };
-    const progress = this.context.request.actionProgress;
-    const legacyContractGrant = Boolean(
-      this.context.request.actionContract &&
-      progress &&
-      this.context.checkpointActionProgress,
-    );
-    if (!legacyContractGrant) {
-      await recordJournalObservation({
-        actionId: this.context.journalActionScope?.actionId,
-        event: "original_authorization_prepared",
-        objectType: "tool_invocation",
-        objectIds: [this.context.runId!, this.call.id],
-        extra: {
-          grant,
-          libraryID: this.context.request.executionContext?.chatLibraryID,
-          proposal: assessed.proposal,
-        },
-      });
-      return grant;
-    }
-    const grants = (progress!.authorizationGrants ||= []);
-    grants.push(grant);
-    try {
-      await this.context.checkpointActionProgress!();
-    } catch (error) {
-      grants.splice(grants.indexOf(grant), 1);
-      throw new Error(
-        `Action authorization persistence failed: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
+    await recordJournalObservation({
+      actionId: this.context.journalActionScope?.actionId,
+      event: "original_authorization_prepared",
+      objectType: "tool_invocation",
+      objectIds: [this.context.runId!, this.call.id],
+      extra: {
+        grant,
+        libraryID: this.context.request.executionContext?.chatLibraryID,
+        proposal: assessed.proposal,
+      },
+    });
     return grant;
   }
 
@@ -606,10 +477,6 @@ export class InvocationController {
             "Conversation lifecycle changed before this tool could execute.",
           );
         assessed = await this.assessor.assess(prepared.input);
-        if (assessed.scopeFailure && !this.judgmentAccepts(assessed)) {
-          if (grant) grant.status = "failed";
-          return this.result(this.scopeFailure(assessed));
-        }
         if (assessed.authorization.kind === "block")
           throw new Error(assessed.authorization.reason);
         if (
@@ -662,7 +529,7 @@ export class InvocationController {
           }),
         );
         if (grant) grant.status = "executed";
-        if (!this.lifecycleValid(false))
+        if (!this.lifecycleValid())
           throw new Error("Conversation lifecycle changed during execution.");
         if (
           this.tool.spec.executionClass === "external_effect" &&
@@ -720,7 +587,6 @@ export class InvocationController {
             actionReceipts,
             content: output.content,
             artifacts: output.artifacts,
-            continuationCheckpoint: output.continuationCheckpoint,
             materialRef: output.materialRef,
             materialKind: output.materialKind,
             materialTitle: output.materialTitle,

@@ -1,6 +1,5 @@
 import type { PaperContextRef } from "../../../shared/types";
 import type {
-  AgentRuntimeRequest,
   AgentToolContext,
   AgentToolDefinition,
   AgentTraceDetail,
@@ -8,12 +7,9 @@ import type {
 import { LiteratureSearchService } from "../../services/literatureSearchService";
 import { identifyLiteratureCandidates } from "../../services/literatureDiscovery";
 import { LITERATURE_REVIEW_SPEC } from "./reviewLiterature";
-import {
-  isExplicitLiteratureImport,
-  isLiteratureDiscovery,
-} from "../../model/literatureIntent";
 import type { ZoteroGateway } from "../../services/zoteroGateway";
 import { readOnlyInvocationPlan } from "../../authorization/invocationPlan";
+import { neverSelected } from "../guidance";
 import {
   createSearchLiteratureReviewAction,
   resolveSearchLiteratureReview,
@@ -54,20 +50,10 @@ type LiteratureSearchInput = {
   libraryID?: number;
 };
 
-export function matchesLiteratureSearchGuidance(
-  request: Pick<AgentRuntimeRequest, "classifiedIntent">,
-): boolean {
-  const intent = request.classifiedIntent?.externalSearchIntent;
-  if (intent !== undefined) {
-    return intent === "literature" || intent === "both";
-  }
-  return false;
-}
-
 export const LITERATURE_SEARCH_GUIDANCE: NonNullable<
   AgentToolDefinition["guidance"]
 > = {
-  matches: matchesLiteratureSearchGuidance,
+  matches: neverSelected,
   instruction:
     LITERATURE_WORKFLOW_GUIDANCE +
     "\n\nSource selection:" +
@@ -380,18 +366,14 @@ export function createLiteratureSearchTool(
           : { results }) as object),
       };
       if (input.mode === "metadata") return content;
-      // Route explicit imports only where the literature intent is unknown
-      // and the caller can open the card (MCP never offers literature_review).
+      // Route explicit imports only where the caller can open the card (MCP
+      // never offers literature_review).
       const routeImports =
-        !context.request.classifiedIntent?.semantic?.literature &&
-        (!context.isToolVisible ||
-          context.isToolVisible(LITERATURE_REVIEW_SPEC));
+        !context.isToolVisible || context.isToolVisible(LITERATURE_REVIEW_SPEC);
       return identifyLiteratureCandidates(
         content,
         context,
-        !isExplicitLiteratureImport(context.request) &&
-          (isLiteratureDiscovery(context.request) ||
-            input.workflow === "review"),
+        input.workflow === "review",
         routeImports,
       );
     },

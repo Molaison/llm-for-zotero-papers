@@ -3,10 +3,8 @@ import {
   createNativeLifecycleTestProcess,
   installDirectPathTestPrefs,
 } from "./helpers/codexNativeLifecycle";
-import { classifiedFixture } from "./helpers/semanticIntent";
 import { buildCodexNativeSkillRequest } from "../src/codexAppServer/nativeSkills";
 import type { AgentRuntimeRequest } from "../src/agent/types";
-import { semanticContractFixture } from "./helpers/semanticIntent";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -422,88 +420,6 @@ describe("Codex app-server native client", function () {
       }
     });
   }
-
-  it("rejects a provider's filing-completed narrative without host-verified effects", async function () {
-    const persisted: any[] = [];
-    let finished: unknown;
-    const requests: Array<{ method: string; params: Record<string, any> }> = [];
-    const proc = createNativeLifecycleTestProcess({
-      newThreadIds: ["unverified-native-thread"],
-      requests,
-      deltaForTurn: () => "Done, the paper was filed.",
-    });
-    const originalSpawn = CodexAppServerProcess.spawn;
-    const restorePrefs = installDirectPathTestPrefs();
-    const processKey = "direct-native-completion";
-    CodexAppServerProcess.spawn = async () => proc;
-    try {
-      const result = await runCodexAppServerNativeTurn({
-        eventJournal: {
-          runId: "host-native-run",
-          append: async (event) => {
-            persisted.push(event);
-          },
-          finish: async (status, text) => {
-            finished = { status, text };
-          },
-        },
-        scope: {
-          conversationKey: 6_000_000_190,
-          libraryID: 1,
-          kind: "global",
-          title: "File a paper",
-        },
-        model: "gpt-5.6",
-        messages: [{ role: "user", content: "File this paper in Bayesian" }],
-        processKey,
-        actionPreparation: { state: "ready", issues: [] },
-        actionContract: semanticContractFixture({
-          id: "native-filing-contract",
-          writeDisposition: "required",
-          obligations: [
-            {
-              id: "filing",
-              operation: "move_to_collection",
-              capability: "zotero.collections",
-              proofDomain: "zotero_state",
-              coverage: "one",
-              targetKind: "papers",
-              parameters: { destinationCollectionId: 5 },
-            },
-          ],
-        }),
-        hooks: {
-          loadProviderSessionId: async () => null,
-          persistProviderSession: async () => {},
-        },
-      });
-      assert.include(result.text, "could not verify");
-      assert.notInclude(result.text, "Done, the paper was filed");
-      assert.isString(result.verificationFailure);
-      assert.equal(result.agentRunId, "host-native-run");
-      assert.isFalse(
-        persisted.some(
-          (event) => event.providerType === "agent_semantic_intent",
-        ),
-      );
-      assert.isTrue(
-        persisted.some(
-          (event) => event.providerType === "provider_run_binding",
-        ),
-      );
-      assert.equal((finished as any)?.status, "failed");
-
-      assert.lengthOf(
-        requests.filter((request) => request.method === "turn/start"),
-        2,
-      );
-    } finally {
-      CodexAppServerProcess.spawn = originalSpawn;
-      destroyCachedCodexAppServerProcess(processKey, proc);
-      restorePrefs();
-    }
-  });
-
   it("renders exact original PDF paths and identities in selection order", function () {
     const first = createDirectPdfSelection({
       itemId: 10,

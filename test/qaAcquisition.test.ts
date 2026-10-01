@@ -17,7 +17,6 @@ import { pdfTextCache } from "../src/services/paperContent/contextCache";
 import { RetrievalService } from "../src/agent/services/retrievalService";
 import { createPaperReadTool } from "../src/agent/tools/read/paperRead";
 import { buildRetrievalQueryPlan } from "../src/services/retrieval/retrievalQueryPlan";
-import { classifiedFixture } from "./helpers/semanticIntent";
 import { papers as corpus } from "./fixtures/qaEvaluation/corpus";
 
 describe("QA acquisition contracts", function () {
@@ -81,7 +80,6 @@ describe("QA acquisition contracts", function () {
     if (!input.ok) throw Error(input.error);
     return (await tool.execute(input.value, {
       request: {
-        classifiedIntent: classifiedFixture(),
         conversationKey: 10,
         mode: "agent",
         conversationKind: "paper",

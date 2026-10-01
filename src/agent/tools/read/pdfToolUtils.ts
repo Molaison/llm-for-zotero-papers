@@ -10,7 +10,6 @@ import { readAttachmentBytes } from "../../../services/attachmentStorage";
 import type {
   AgentModelContentPart,
   AgentRuntimeRequest,
-  AgentToolContext,
   AgentToolDefinition,
 } from "../../types";
 import type { ZoteroGateway } from "../../services/zoteroGateway";
@@ -461,57 +460,15 @@ export function resolveDefaultTargets(
     }
     return [paperContext];
   }
-  const scope = getTurnPaperScopeFromRequest(context.request);
-  const activePaper = getActiveTurnPaper(scope);
-  const activeKey = activePaper
-    ? `${activePaper.libraryID}:${activePaper.itemId}:${activePaper.contextItemId}`
-    : "";
-  const addedPapers = scope.papers
-    .filter(
-      (entry) =>
-        `${entry.paper.libraryID}:${entry.paper.itemId}:${entry.paper.contextItemId}` !==
-        activeKey,
-    )
-    .map((entry) => entry.paper);
-  const allPapers = scope.papers.map((entry) => entry.paper);
-  const paperTargetIntent = context.request.classifiedIntent?.paperTargetIntent;
-  const classifiedTargets =
-    paperTargetIntent === "active"
-      ? activePaper
-        ? [activePaper]
-        : []
-      : paperTargetIntent === "added"
-        ? activePaper
-          ? addedPapers
-          : allPapers
-        : paperTargetIntent === "all_visible"
-          ? allPapers
-          : paperTargetIntent === "unspecified"
-            ? activePaper
-              ? [activePaper]
-              : allPapers
-            : undefined;
-  // Fresh direct-agent turns have no semantic paper-target prediction. An
-  // omitted selector still has one precise meaning in paper chat: the active
+  // An omitted selector has one precise meaning in paper chat: the active
   // paper supplied by the host. Broader scopes must be named explicitly.
-  const implicit =
-    classifiedTargets ||
-    (!context.request.classifiedIntent?.semantic && activePaper
-      ? [activePaper]
-      : []);
-  return dedupePaperContextRefs(implicit).slice(0, maxCount);
-}
-
-// ---------------------------------------------------------------------------
-// PDF visual mode inference
-// ---------------------------------------------------------------------------
-
-export type PdfVisualMode = "general" | "figure" | "equation";
-
-export function semanticPdfMode(
-  request: Pick<AgentToolContext["request"], "classifiedIntent">,
-): PdfVisualMode {
-  return request.classifiedIntent?.semantic?.visualMode || "general";
+  const activePaper = getActiveTurnPaper(
+    getTurnPaperScopeFromRequest(context.request),
+  );
+  return dedupePaperContextRefs(activePaper ? [activePaper] : []).slice(
+    0,
+    maxCount,
+  );
 }
 
 // ---------------------------------------------------------------------------

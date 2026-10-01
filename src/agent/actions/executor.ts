@@ -32,15 +32,6 @@ function buildToolContext(
         ...ctx.toolContext.request,
         actionEntryPoint:
           ctx.requestContext?.actionEntryPoint || "conversation",
-        actionContract:
-          ctx.requestContext?.actionContract ||
-          ctx.toolContext.request.actionContract,
-        actionProgress:
-          ctx.requestContext?.actionProgress ||
-          ctx.toolContext.request.actionProgress,
-        classifiedIntent:
-          ctx.requestContext?.classifiedIntent ||
-          ctx.toolContext.request.classifiedIntent,
       },
       signal: ctx.signal || ctx.toolContext.signal,
       journalActionScope:
@@ -57,7 +48,6 @@ function buildToolContext(
       conversationKey: ctx.conversationKey ?? 0,
       mode: "agent",
       actionEntryPoint: ctx.requestContext?.actionEntryPoint || "action_ui",
-      classifiedIntent: ctx.requestContext?.classifiedIntent,
       userText: stepDescription,
       libraryID: ctx.libraryID,
       activeItemId: ctx.requestContext?.activeItemId,
@@ -66,8 +56,6 @@ function buildToolContext(
       selectedCollectionContexts:
         ctx.requestContext?.selectedCollectionContexts,
       selectedTagContexts: ctx.requestContext?.selectedTagContexts,
-      actionContract: ctx.requestContext?.actionContract,
-      actionProgress: ctx.requestContext?.actionProgress,
     }),
     runId: ctx.runId,
     item: syntheticItem,
@@ -123,7 +111,6 @@ export async function callTool(
         toolContext.nestedExecutionOptions?.executeWithLock ||
         ((task) =>
           withConversationWriteLock(toolContext.request.conversationKey, task)),
-      checkpointedWorkflow: Boolean(ctx.journalActionScope),
       inheritedApproval,
       // Native action pages are an explicit review workflow. Preserve that
       // workflow even when the operation is fully reversible and the global

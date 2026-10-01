@@ -388,19 +388,6 @@ export async function loadPlanDocument(
   return { ...document, coverageItems: await loadCoverageItems(documentId) };
 }
 
-export async function loadLatestPlanDocumentForExecution(
-  executionId: string,
-): Promise<PlanDocument | null> {
-  const rows = (await Zotero.DB.queryAsync(
-    `SELECT document_id AS documentId FROM ${PLAN_DOCUMENTS_TABLE}
-     WHERE execution_id = ? ORDER BY created_at DESC LIMIT 1`,
-    [executionId],
-  )) as Array<{ documentId?: unknown }> | undefined;
-  const documentId =
-    typeof rows?.[0]?.documentId === "string" ? rows[0].documentId : "";
-  return documentId ? loadPlanDocument(documentId) : null;
-}
-
 /**
  * Per-item material of a batch: one note body, not a deliverable of its own.
  *

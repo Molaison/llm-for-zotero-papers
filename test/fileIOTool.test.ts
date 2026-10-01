@@ -54,7 +54,7 @@ describe("file_io effect path", function () {
   it("verifies the receipt only from a readback that matches the frozen hash", async function () {
     const prepared = await service.prepare(tool, writeInput());
     const expected = prepared.proposals[0].expectedFiles![0];
-    const receipts = await service.finalize(undefined, prepared, {
+    const receipts = await service.finalize(prepared, {
       ok: true,
       effect: "applied",
       content: {
@@ -84,7 +84,7 @@ describe("file_io effect path", function () {
   it("refuses to call a mismatched readback verified", async function () {
     const prepared = await service.prepare(tool, writeInput());
     const expected = prepared.proposals[0].expectedFiles![0];
-    const receipts = await service.finalize(undefined, prepared, {
+    const receipts = await service.finalize(prepared, {
       ok: true,
       effect: "applied",
       content: {
@@ -100,7 +100,7 @@ describe("file_io effect path", function () {
 
   it("refuses to verify when nothing was read back", async function () {
     const prepared = await service.prepare(tool, writeInput());
-    const receipts = await service.finalize(undefined, prepared, {
+    const receipts = await service.finalize(prepared, {
       ok: true,
       effect: "applied",
       content: { filePath: "/tmp/file-io-audit.md" },

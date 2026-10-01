@@ -98,8 +98,8 @@
  *
  * ```ts
  * guidance: {
- *   matches: (request) => request.classifiedIntent?.semantic?.supportTools?.includes("my_tool") === true,
- *   instruction: "Use my_tool for the supporting operation selected by semantic intent.",
+ *   matches: (request, context) => context?.matchedSkillIds.includes("my-skill") === true,
+ *   instruction: "Use my_tool for the supporting operation the my-skill workflow needs.",
  * },
  * ```
  *

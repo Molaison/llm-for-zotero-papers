@@ -1381,10 +1381,7 @@ function buildClaudeZoteroMcpScope(
     runtimeAuthority: "claude",
     sourceMessageTimestamp: Number(request.metadata?.sourceMessageTimestamp),
     executionContext: request.executionContext,
-    actionContract: request.actionContract,
-    actionProgress: request.actionProgress,
     clarificationHistory: request.clarificationHistory,
-    actionPreparation: request.actionPreparation,
     documentOutcomePolicy: request.documentOutcomePolicy,
     documentReadObservations: request.documentReadObservations,
     documentArtifactObservations: request.documentArtifactObservations,
@@ -3146,9 +3143,7 @@ export function createExternalBackendBridgeRuntime(options: {
           makeProfilingEvent("frontend.run_turn.enter"),
         );
         await notifyIfLive(makeProfilingEvent("frontend.run_turn.enter"));
-        params.request.documentOutcomePolicy = resolveDocumentOutcomePolicy({
-          request: params.request,
-        });
+        params.request.documentOutcomePolicy = resolveDocumentOutcomePolicy();
         const contextEnvelope = buildContextEnvelope(params.request);
         await appendPersistedEvent(
           makeProfilingEvent("frontend.context_envelope.ready"),
@@ -3204,7 +3199,6 @@ export function createExternalBackendBridgeRuntime(options: {
         let clearScopedMcpScope: () => void = () => undefined;
         let unregisterMcpToolActivity: () => void = () => undefined;
         let scopedMcpToken = "";
-        let currentMcpScope: (() => ZoteroMcpActiveScope | null) | undefined;
         const hostReceipts: import("./contracts/types").AgentActionReceipt[] =
           [];
         try {
@@ -3256,7 +3250,6 @@ export function createExternalBackendBridgeRuntime(options: {
               ),
             });
             scopedMcpToken = scopedMcp.token;
-            currentMcpScope = scopedMcp.getState;
             clearScopedMcpScope = scopedMcp.clear;
             unregisterMcpToolActivity = addZoteroMcpToolActivityObserver(
               (event) => {
@@ -3456,10 +3449,7 @@ export function createExternalBackendBridgeRuntime(options: {
               };
             }
           }
-          const actionEvaluation = evaluatePreparedActionContract(
-            currentMcpScope ? currentMcpScope() || {} : params.request,
-            hostReceipts,
-          );
+          const actionEvaluation = evaluatePreparedActionContract(hostReceipts);
           if (
             actionEvaluation.state !== "satisfied" &&
             actionEvaluation.state !== "cancelled"

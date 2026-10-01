@@ -3,7 +3,6 @@ import { readFileSync } from "node:fs";
 import ts from "typescript";
 import { AgentRuntime } from "../src/agent/runtime";
 import { AgentToolRegistry } from "../src/agent/tools/registry";
-import { ActionContractRunSession } from "../src/agent/contracts/actionContractRunSession";
 import { clearAgentReadLedger } from "../src/agent/context/resourceContextPlan";
 import { clearAgentCoverageLedger } from "../src/agent/context/coverageLedger";
 import { clearAgentTranscriptStore } from "../src/agent/store/transcriptStore";
@@ -34,7 +33,6 @@ import {
   type InstalledMockDb,
   type MockDbRow,
 } from "./helpers/agentRuntimeMockDb";
-import { classifiedFixture } from "./helpers/semanticIntent";
 
 /**
  * Golden endings of the Original Agent loop.
@@ -134,7 +132,6 @@ function baseRequest(
   overrides: Partial<AgentRuntimeRequest> = {},
 ): AgentRuntimeRequest {
   return {
-    classifiedIntent: classifiedFixture(),
     conversationKey,
     mode: "agent",
     userText,
@@ -683,33 +680,6 @@ describe("Original Agent run endings", function () {
     assert.equal(ending.run.finalText, "Nothing to compact yet");
     assertStoppedBy(ending, "manual_compaction", "completed");
   });
-  it("action_contract_initialization_failed: stops when the action contract cannot initialize", async function () {
-    const original = ActionContractRunSession.prototype.initialize;
-    ActionContractRunSession.prototype.initialize = async () => ({
-      kind: "failed",
-      userMessage: "The interrupted action contract could not be restored.",
-    });
-    try {
-      const adapter = scriptedAdapter(() => finalStep("Never reached."));
-      const ending = await runToEnding(installed, {
-        adapter,
-        request: baseRequest(97_319, "Apply the change"),
-      });
-
-      const text = "The interrupted action contract could not be restored.";
-      assert.equal(adapter.steps(), 0);
-      assert.deepInclude(ending.outcome, { kind: "completed", text });
-      assert.equal(ending.run.status, "failed");
-      assert.equal(ending.run.finalText, text);
-      assertStoppedBy(
-        ending,
-        "action_contract_initialization_failed",
-        "failed",
-      );
-    } finally {
-      ActionContractRunSession.prototype.initialize = original;
-    }
-  });
 });
 
 describe("run stop rule declarations", function () {
@@ -757,7 +727,7 @@ describe("run stop rule declarations", function () {
 
   it("names every declared rule at an ending of the loop", function () {
     const rules = declaredRules();
-    assert.isAbove(rules.length, 20, "the declared rules were read");
+    assert.isAbove(rules.length, 15, "the declared rules were read");
     assert.equal(
       new Set(rules).size,
       rules.length,

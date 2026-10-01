@@ -11,7 +11,6 @@ import type {
   AgentPendingAction,
   AgentToolArtifact,
   AgentToolCall,
-  AgentToolContinuationCheckpoint,
   AgentToolDefinition,
   AgentToolEffect,
   AgentToolExecutionOutput,
@@ -170,7 +169,6 @@ export function normalizeExecutionOutput(
   artifacts?: AgentToolArtifact[];
   effect?: AgentToolEffect;
   actionEvidence?: AgentActionEvidence[];
-  continuationCheckpoint?: AgentToolContinuationCheckpoint;
   materialRef?: MaterialRef;
   materialKind?: string;
   materialTitle?: string;
@@ -182,7 +180,6 @@ export function normalizeExecutionOutput(
       artifacts?: unknown;
       effect?: unknown;
       actionEvidence?: unknown;
-      continuationCheckpoint?: unknown;
       materialRef?: unknown;
       materialKind?: unknown;
       materialTitle?: unknown;
@@ -203,16 +200,6 @@ export function normalizeExecutionOutput(
         actionEvidence: Array.isArray(record.actionEvidence)
           ? (record.actionEvidence as AgentActionEvidence[])
           : undefined,
-        continuationCheckpoint:
-          record.continuationCheckpoint &&
-          typeof record.continuationCheckpoint === "object" &&
-          !Array.isArray(record.continuationCheckpoint) &&
-          typeof (record.continuationCheckpoint as Record<string, unknown>)
-            .reason === "string" &&
-          typeof (record.continuationCheckpoint as Record<string, unknown>)
-            .instruction === "string"
-            ? (record.continuationCheckpoint as AgentToolContinuationCheckpoint)
-            : undefined,
         materialRef: readMaterialRef(record.materialRef),
         materialKind:
           typeof record.materialKind === "string"

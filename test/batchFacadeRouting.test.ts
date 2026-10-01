@@ -9,7 +9,6 @@ import {
   runBatchActionFixture,
 } from "./helpers/batchFixtures";
 import { installNativeNoteStore } from "./helpers/nativeNoteStore";
-import { actionContractFixture } from "./helpers/semanticIntent";
 
 /**
  * Batch actions reach library reads and writes only through the
@@ -182,47 +181,6 @@ describe("batch actions call facade tools", function () {
       "library_import",
     ]);
     assert.equal(search.seen[0]?.itemId, 1);
-    assert.deepEqual(library.importedIdentifiers, ["10.1000/r1"]);
-    assert.lengthOf(run.journal, 1);
-    assert.equal(run.journal[0].toolName, "library_import");
-    assert.equal(run.journal[0].steps[0].operation, "import_identifiers");
-  });
-
-  it("discover_related imports an explicitly requested count through library_import kind:'identifiers'", async function () {
-    const library = createBatchLibrary([
-      { itemId: 1, title: "Seed Paper", fields: { DOI: "10.1000/seed" } },
-    ]);
-    const search = literatureSearchStub([
-      { title: "Related One", doi: "10.1000/r1", year: 2024 },
-      { title: "Related Two", doi: "10.1000/r2", year: 2023 },
-    ]);
-
-    const run = await runBatchActionFixture({
-      action: discoverRelatedAction,
-      input: { itemId: 1 },
-      library,
-      replaceTools: { literature_search: search.stub },
-      configure: (ctx) => {
-        const actionContract = actionContractFixture("import_identifiers");
-        const intent = actionContract.intent!;
-        return {
-          ...ctx,
-          confirmationMode: "automatic",
-          requestContext: {
-            actionEntryPoint: "conversation",
-            actionContract,
-            classifiedIntent: {
-              ...intent,
-              semantic: { ...intent.semantic!, requestedCount: 1 },
-            },
-          },
-        };
-      },
-    });
-
-    assert.isTrue(run.result.ok, JSON.stringify(run.result));
-    assertOnlyFacades(run.calls);
-    assert.include(run.calls, "library_import");
     assert.deepEqual(library.importedIdentifiers, ["10.1000/r1"]);
     assert.lengthOf(run.journal, 1);
     assert.equal(run.journal[0].toolName, "library_import");

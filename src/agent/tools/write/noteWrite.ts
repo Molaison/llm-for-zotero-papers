@@ -34,10 +34,7 @@ import {
   sha256Text,
   storeRecoveryText,
 } from "../../store/journalRecoveryBlobStore";
-import {
-  requestsNoteAction,
-  WRITE_NOTE_SKILL_ID,
-} from "../../skills/noteIntent";
+import { WRITE_NOTE_SKILL_ID } from "../../skills/noteIntent";
 import type {
   AgentToolContext,
   AgentToolDefinition,
@@ -68,11 +65,7 @@ export const NOTE_WRITE_GUIDANCE: NonNullable<AgentToolDefinition["guidance"]> =
     matches: (request, context) =>
       Boolean(
         context?.matchedSkillIds.includes(WRITE_NOTE_SKILL_ID) ||
-        request.forcedSkillIds?.includes(WRITE_NOTE_SKILL_ID) ||
-        requestsNoteAction(request) ||
-        request.actionContract?.obligations.some(
-          (obligation) => obligation.capability === "zotero.notes",
-        ),
+        request.forcedSkillIds?.includes(WRITE_NOTE_SKILL_ID),
       ),
     instruction:
       "Use note_write mode:'edit' against the exact note target. For a bound Selected text passage, pass selection:{index:<1-based Selected text number>,replacement:<final Markdown>}. The host binds its owning note, replaces the selected structure, preserves surrounding content and embedded assets, and saves and verifies in one action. Preserve headings and list structure unless the user requests changing them. For precise edits without a bound selection, use patches with plain replacement text; findFormat:'markdown' interprets Markdown copied from library_read. Use mode:'append' to append and mode:'create' for a new note. Resolve a named parent or collection before proposing the write. Pass finalized material by documentId so retries reuse exact content. Safe reviews every note write, including creation; Auto may apply routine same-library note changes directly. After verified success, do not claim that a diff is still awaiting review. " +
@@ -433,10 +426,6 @@ async function prepareWorkflowDocumentNote(
   const document = await resolveWorkflowNoteDocument(
     context,
     input.documentId,
-    input.mode === "create"
-      ? input.targetItemId
-      : input.targetNoteId || input.noteId,
-    input.mode,
     // Preparation freezes the reference; every later pass re-checks against it.
     input._documentMaterialRef,
   );
@@ -1186,8 +1175,6 @@ export function createNoteWriteTool(
                 const document = await resolveWorkflowNoteDocument(
                   context,
                   input.documentId!,
-                  targetNote.id,
-                  input.mode,
                   input._documentMaterialRef,
                 );
                 const finalized = await finalizeDocumentNoteHtml(document, {

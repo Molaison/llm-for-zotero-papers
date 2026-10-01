@@ -4,23 +4,19 @@ type GuidanceRequest = Parameters<AgentToolGuidance["matches"]>[0];
 
 type UserTextSignals = NonNullable<GuidanceRequest["userTextSignals"]>;
 
-/**
- * Plan turns match on classified operations or capabilities; ordinary chat
- * turns carry no classified intent, so they match on a cheap user-text signal.
- */
-export function intentOrSignal(
+/** A turn selects this guidance by a cheap signal in the user's own text. */
+export function userTextSignal(
   request: GuidanceRequest,
-  operations: readonly string[],
   signal: (signals: UserTextSignals) => boolean,
 ): boolean {
-  if (
-    request.classifiedIntent?.actionIntents.some(
-      (action) =>
-        operations.includes(action.operation) ||
-        operations.includes(action.capability),
-    )
-  ) {
-    return true;
-  }
   return Boolean(request.userTextSignals && signal(request.userTextSignals));
+}
+
+/**
+ * Selects nothing. Guidance the classifier's intent used to select keeps its
+ * text with this matcher: that intent is gone, so no turn selects it until it
+ * is given a trigger of its own or removed.
+ */
+export function neverSelected(): boolean {
+  return false;
 }

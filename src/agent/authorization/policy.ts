@@ -1,116 +1,14 @@
 import type {
-  ActionConstraint,
-  ActionDomain,
-  ActionEffect,
-  ActionMechanism,
   ActionProposal,
   AuthorizationDecision,
   AuthorizationAssessment,
   OriginalAuthorizationContext,
 } from "./types";
 
-function constraint(
-  effects: ActionEffect[],
-  domains: ActionDomain[],
-  description: string,
-): Extract<ActionConstraint, { kind: "deny_effects" }> {
-  return { kind: "deny_effects", effects, domains, description };
-}
-
-function mechanismConstraint(
-  mechanisms: Exclude<ActionMechanism, "none">[],
-  description: string,
-): ActionConstraint {
-  return { kind: "deny_mechanisms", mechanisms, description };
-}
-
-export function proposalViolatesConstraints(
-  proposal: Pick<
-    ActionProposal,
-    "operation" | "domains" | "effects" | "invocationPlan"
-  >,
-  constraints: readonly ActionConstraint[],
-): ActionConstraint | null {
-  return (
-    constraints.find((constraint) => {
-      if (constraint.kind === "deny_mechanisms") {
-        return (
-          proposal.invocationPlan.mechanism !== "none" &&
-          constraint.mechanisms.includes(proposal.invocationPlan.mechanism)
-        );
-      }
-      if (
-        constraint.operations?.length &&
-        proposal.invocationPlan.mechanism === "none" &&
-        proposal.invocationPlan.assurance === "runtime_enforced" &&
-        !proposal.operation
-          .split("+")
-          .some((operation) => constraint.operations!.includes(operation))
-      )
-        return false;
-      if (
-        constraint.exceptOperations?.includes(proposal.operation) &&
-        proposal.invocationPlan.mechanism === "none" &&
-        proposal.invocationPlan.assurance === "runtime_enforced"
-      )
-        return false;
-      return (
-        proposal.domains.some((domain) =>
-          constraint.domains.includes(domain),
-        ) &&
-        proposal.effects.some((effect) => constraint.effects.includes(effect))
-      );
-    }) || null
-  );
-}
-
-export function normalizeStoredActionConstraints(
-  constraints:
-    | readonly (ActionConstraint | { kind: "no_write"; description: string })[]
-    | undefined,
-): ActionConstraint[] {
-  return (constraints || []).flatMap((entry) => {
-    if (entry.kind === "deny_mechanisms") return [entry];
-    if (entry.kind === "deny_effects") {
-      const executeDenied = entry.effects.includes("execute");
-      const effects = entry.effects.filter((effect) => effect !== "execute");
-      return [
-        ...(effects.length ? [{ ...entry, effects }] : []),
-        ...(executeDenied
-          ? [mechanismConstraint(["shell", "zotero_script"], entry.description)]
-          : []),
-      ];
-    }
-    return [
-      constraint(
-        ["create", "modify", "delete"],
-        [
-          "zotero_library",
-          "filesystem",
-          "local_execution",
-          "privileged_zotero",
-        ],
-        entry.description,
-      ),
-      mechanismConstraint(["shell", "zotero_script"], entry.description),
-    ];
-  });
-}
-
 export function authorizeOriginalAction(
   proposal: ActionProposal,
   context: OriginalAuthorizationContext,
 ): AuthorizationAssessment {
-  const violation = proposalViolatesConstraints(
-    proposal,
-    context.constraints || [],
-  );
-  if (violation) {
-    return {
-      kind: "block",
-      reason: violation.description,
-    };
-  }
   const integrityFailure = actionIntegrityFailure(proposal);
   if (integrityFailure) return integrityFailure;
   const trustedRead =
@@ -118,31 +16,6 @@ export function authorizeOriginalAction(
     proposal.invocationPlan.assurance !== "unknown";
   if (trustedRead) {
     return { kind: "execute", authority: "safe_read" };
-  }
-  // Stored classifier-era workflows retain their selection gate while fresh
-  // direct-agent turns no longer create or consume semantic authority.
-  if (
-    context.semantic?.conversationOnly &&
-    (proposal.capabilities.includes("zotero.notes") ||
-      proposal.capabilities.includes("file.write"))
-  ) {
-    return {
-      kind: "block",
-      reason:
-        "Remember this within the conversation only. The stored workflow does not permit a saved note or file.",
-    };
-  }
-  if (
-    context.semantic &&
-    proposal.capabilities.includes("zotero.import") &&
-    (context.semantic.literature === "discover" ||
-      context.semantic.literature === "select_then_import")
-  ) {
-    return {
-      kind: "block",
-      reason:
-        "Paper discovery requires user selection. Call literature_review with the ranked candidates before importing the approved selection.",
-    };
   }
   const chatLibraryID = context.executionContext?.chatLibraryID;
   const isLibraryWrite =

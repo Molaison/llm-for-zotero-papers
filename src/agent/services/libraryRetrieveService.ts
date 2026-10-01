@@ -40,7 +40,6 @@ import {
   compareEvidenceCandidatesForQuestion,
   isBodyEvidenceSection,
   queryHasExplicitSectionPreference,
-  type WantedEvidenceSection,
 } from "../../shared/libraryChatEvidencePolicy";
 import { buildLibraryRetrieveEvidencePack } from "./libraryRetrieveEvidencePack";
 import { triageCandidatesWithModel } from "./libraryRetrieveTriage";
@@ -630,18 +629,13 @@ function normalizeIntent(
   value: unknown,
   depth: LibraryRetrieveDepth,
   query: string,
-  request?: AgentRuntimeRequest,
 ): LibraryRetrieveIntent {
   if (value === "enumerate" || value === "verify" || value === "summarize") {
     return value;
   }
   if (value === "discover") return "enumerate";
   if (depth === "verify") return "verify";
-  // Tool arguments and the shared semantic result are the only intent inputs.
-  const classified = request?.classifiedIntent;
-  if (classified && classified.retrievalIntent !== "none") {
-    return classified.retrievalIntent;
-  }
+  // The tool arguments are the only intent input.
   return DEFAULT_INTENT;
 }
 
@@ -684,7 +678,7 @@ function normalizeInput(
           ),
         )
       : DEFAULT_METHODS;
-  const intent = normalizeIntent(input.intent, depth, input.query, request);
+  const intent = normalizeIntent(input.intent, depth, input.query);
   const collectionLikeScope = hasCollectionLikeScope(input, request);
   const comprehensiveIntent =
     intent === "enumerate" || intent === "verify" || intent === "summarize";
@@ -1640,11 +1634,7 @@ export class LibraryRetrieveService {
         {
           query: params.query,
           queryVariants: params.queryVariants,
-          readIntent:
-            params.request?.classifiedIntent?.semantic?.reading.coverage ===
-            "exhaustive"
-              ? "full-once"
-              : "targeted",
+          readIntent: "targeted",
           hasRetrievalContext:
             requestedDepth !== "verify" && requestedIntent !== "verify",
           model: params.model || params.request?.model,
@@ -1664,22 +1654,13 @@ export class LibraryRetrieveService {
         warnings,
       ),
     );
-    queryPlan.retrievalPurpose =
-      params.request?.classifiedIntent?.semantic?.retrievalPurpose;
-    queryPlan.quoteAnchorPolicy =
-      params.request?.classifiedIntent?.retrievalIntent === "verify"
-        ? "verified"
-        : "none";
+    queryPlan.quoteAnchorPolicy = "none";
     let input = normalizeInput(params, params.request, queryPlan);
     for (const note of new Set(input.queryPlan.notes)) {
       warnings.push(`Query planner: ${note}`);
     }
     const methodsUsed = new Set<LibraryRetrieveMethod>();
     const readStrategyBase = resolveLibraryChatReadStrategy({
-      answerStyle:
-        params.request?.classifiedIntent?.documentKind === "comparison"
-          ? "comparison"
-          : undefined,
       intent: input.intent,
       depth: input.depth,
       paperCount: scope.totalItems,
@@ -2128,10 +2109,6 @@ export class LibraryRetrieveService {
     let evidencePapers = 0;
     let fallbackRead = 0;
     let fallbackSkipped = 0;
-    const wantedSections = params.request?.classifiedIntent?.wantedSections
-      ?.length
-      ? params.request.classifiedIntent.wantedSections
-      : undefined;
     // Evidence depth defaults to body-first ranking: BM25 loves term-dense
     // abstracts/intros, which is exactly the "answers from the introduction"
     // failure this counteracts.
@@ -2140,7 +2117,7 @@ export class LibraryRetrieveService {
       readStrategyBase.resolvedStrategy === "deep_synthesis" ||
       (readStrategyBase.resolvedStrategy === "evidence_overview" &&
         input.intent === "summarize") ||
-      queryHasExplicitSectionPreference(input.query, wantedSections);
+      queryHasExplicitSectionPreference(input.query);
 
     if (input.depth === "evidence" || input.depth === "verify") {
       const fullTextRecords = candidateRecords
@@ -2201,7 +2178,6 @@ export class LibraryRetrieveService {
                 input,
                 maxSnippets,
                 preferBodyEvidence,
-                wantedSections,
                 queryOverride:
                   triagePerPaperQueries?.[String(record.target.itemId)],
                 apiBase: params.apiBase,
@@ -2930,8 +2906,6 @@ export class LibraryRetrieveService {
     input: NormalizedLibraryRetrieveInput;
     maxSnippets: number;
     preferBodyEvidence?: boolean;
-    /** Classifier-provided sections to prefer, language-independent. */
-    wantedSections?: WantedEvidenceSection[];
     /** Triage-provided per-paper question; falls back to the main query. */
     queryOverride?: string;
     apiBase?: string;
@@ -3026,7 +3000,6 @@ export class LibraryRetrieveService {
                 retrievalQuestion,
                 (candidate) =>
                   candidate.evidenceScore || candidate.hybridScore || 0,
-                params.wantedSections,
               ),
             )
           : rows,

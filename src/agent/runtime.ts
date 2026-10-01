@@ -1,4 +1,3 @@
-import { resolveNoteEditModelRequest } from "./model/noteEditingPolicy";
 import { ensureModelCapabilities } from "../modelCapabilities";
 import { reanchorQuoteCitationsToClaims } from "../services/quotes/claimAnchoring";
 import type { QuoteCitation } from "../shared/types";
@@ -8,7 +7,6 @@ import {
   isConversationWriteGenerationCurrent,
   withConversationWriteLock,
 } from "../shared/conversationWriteFence";
-import { getNotesDirectoryConfig } from "../utils/notesDirectoryConfig";
 import { createTurnUsageRecorder } from "../utils/usageTurnRecorder";
 import type { UsageEventRuntime } from "../utils/usageStore";
 import { classifyConversationKey } from "../shared/conversationKeySpace";
@@ -51,18 +49,9 @@ import {
   compactAgentTranscript,
 } from "./context/transcriptCompactor";
 import { AgentRunContinuationSession } from "./continuation/runContinuationSession";
-import {
-  ActionContractRunSession,
-  readLatestActionContractCheckpoint,
-  type ActionContractCheckpoint,
-} from "./contracts/actionContractRunSession";
-import { loadWorkflowCheckpoint } from "./contracts/workflowCheckpoint";
+import { ActionContractRunSession } from "./contracts/actionContractRunSession";
 import { resolveDocumentOutcomePolicy } from "./documents/outcomePolicy";
 import type { MaterialRef } from "./documents/materialRef";
-import {
-  loadWorkflowMaterial,
-  materialRefFromDocument,
-} from "./documents/workflowMaterial";
 import { AgentFinalAnswerController } from "./finalization/finalAnswerController";
 import type { RunStopRule } from "./loop/stopRules";
 import {
@@ -146,10 +135,8 @@ import {
 import {
   buildToolProgressFingerprint,
   isUserDeniedToolResult,
-  readToolError,
   setToolResultReadAvailability,
 } from "./execution/toolResultLifecycle";
-import type { PreparedActionCall } from "./tools/workflowSteps";
 import type {
   AgentAssistantMessage,
   AgentConfirmationResolution,
@@ -164,7 +151,6 @@ import type {
   AgentRuntimeRequestInput,
   AgentToolContext,
   AgentToolMessage,
-  AgentToolResult,
   AgentUserMessage,
   ResolvedAgentRuntimeRequest,
 } from "./types";
@@ -200,17 +186,6 @@ function createRunId(): string {
 
 function createConfirmationRequestId(): string {
   return `confirm-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-}
-
-/**
- * A turn starts with no intent, action contract, progress or preparation of
- * its own; the tools it calls establish what it does.
- */
-function clearTurnIntent(request: AgentRuntimeRequest): void {
-  request.actionContract = undefined;
-  request.actionProgress = undefined;
-  request.actionPreparation = undefined;
-  request.classifiedIntent = undefined;
 }
 
 /**
@@ -273,16 +248,9 @@ export class AgentRuntime {
         : resolveAgentRuntimeRequest(requestInput, {
             resolvePaperContext: this.paperContextResolver,
           });
-    request.workflowCheckpoint = await loadWorkflowCheckpoint(
-      request.conversationKey,
-    );
     request.conversationGeneration ??= getConversationWriteGeneration(
       request.conversationKey,
     );
-    request.actionContract = undefined;
-    request.actionProgress = undefined;
-    request.actionPreparation = undefined;
-    request.classifiedIntent = undefined;
     request.skillRoutingReceipt = undefined;
     if (options.signal?.aborted)
       throw new Error("Agent preparation was cancelled.");
@@ -526,10 +494,6 @@ export class AgentRuntime {
       const latestPriorRun = await getLatestAgentRunForConversation(
         request.conversationKey,
       );
-      request.workflowCheckpoint = await loadWorkflowCheckpoint(
-        request.conversationKey,
-        latestPriorRun,
-      );
       const interruptedPriorRun =
         latestPriorRun?.status === "failed" &&
         latestPriorRun.finalText === INTERRUPTED_AGENT_RUN_MARKER
@@ -605,17 +569,7 @@ export class AgentRuntime {
         }
       };
       emitRunEvent = emit;
-      if (request.workflowCheckpoint)
-        await emit({
-          type: "provider_event",
-          providerType: "agent_workflow_predecessor",
-          payload: request.workflowCheckpoint,
-        });
-      const actionContractSession = new ActionContractRunSession({
-        request,
-        contracts: this.registry,
-        emit,
-      });
+      const actionContractSession = new ActionContractRunSession();
 
       const context: AgentToolContext = {
         request,
@@ -634,7 +588,6 @@ export class AgentRuntime {
               input,
               content,
             })),
-        checkpointActionProgress: () => actionContractSession.checkpoint(),
         publishSkillActivation: (id) =>
           emit({ type: "status", text: `Skill activated: ${id}` }),
         updateExecutionCheckpoint,
@@ -650,7 +603,6 @@ export class AgentRuntime {
       // A turn carries only explicitly forced skills; the model loads any
       // other guidance from the installed inventory with load_skill, so no
       // request precedes it.
-      clearTurnIntent(request);
       request.userTextSignals = computeUserTextSignals(request.userText);
       request.skillRoutingReceipt = undefined;
       const matchedSkills = getMatchedSkillIds(request, []);
@@ -669,9 +621,7 @@ export class AgentRuntime {
             })),
         )
       ).sort((left, right) => left.id.localeCompare(right.id));
-      request.documentOutcomePolicy = resolveDocumentOutcomePolicy({
-        request,
-      });
+      request.documentOutcomePolicy = resolveDocumentOutcomePolicy();
       if (!adapter.supportsTools(request)) {
         if (request.documentOutcomePolicy.required) {
           const failure =
@@ -788,7 +738,6 @@ export class AgentRuntime {
         request.conversationKey,
       );
       let recoveryMessage: AgentModelMessage | null = null;
-      let interruptedActionCheckpoint: ActionContractCheckpoint | null = null;
       let interruptedTraceEvents: readonly AgentRunEventRecord[] | undefined;
       if (interruptedPriorRun) {
         const [actions, latestTranscriptSegment, interruptedTrace] =
@@ -801,9 +750,6 @@ export class AgentRuntime {
             getAgentRunTrace(interruptedPriorRun.runId),
           ]);
         interruptedTraceEvents = interruptedTrace.events;
-        interruptedActionCheckpoint = readLatestActionContractCheckpoint(
-          interruptedTrace.events.map((event) => event.payload),
-        );
         const ordinaryCheckpoint = latestExecutionCheckpoint(
           interruptedTrace.events,
         );
@@ -979,39 +925,6 @@ export class AgentRuntime {
         }
       }
 
-      const requiresFileNoteWrite = Boolean(
-        request.classifiedIntent?.actionIntents?.some(
-          (intent) => intent.operation === "file_write",
-        ),
-      );
-      const actionContractInitialization =
-        await actionContractSession.initialize({
-          checkpoint: interruptedActionCheckpoint,
-        });
-      if (actionContractInitialization.kind === "failed") {
-        const text = actionContractInitialization.userMessage;
-        await emit({ type: "final", text });
-        await terminateRun(
-          "failed",
-          text,
-          "action_contract_initialization_failed",
-        );
-        return {
-          kind: "completed",
-          runId,
-          text,
-          usedFallback: false,
-        };
-      }
-      const noteWritePolicy = requiresFileNoteWrite
-        ? getNotesDirectoryConfig()
-        : null;
-      if (noteWritePolicy) {
-        request.metadata = {
-          ...(request.metadata || {}),
-          fileNoteWritePolicy: noteWritePolicy,
-        };
-      }
       await emit({
         type: "provider_event",
         providerType: "agent_context_envelope",
@@ -1029,7 +942,7 @@ export class AgentRuntime {
       });
       const captureInstructionInventory =
         request.metadata?.instructionHarnessInventory === true;
-      let renderedPrompt = await renderAgentPromptEnvelope(
+      const renderedPrompt = await renderAgentPromptEnvelope(
         request,
         toolDefinitions,
         matchedSkills,
@@ -1269,11 +1182,7 @@ export class AgentRuntime {
       const extendedRunLimits = request.metadata?.hostRecordedBatchJob === true;
       const { maxRounds, maxToolCallsPerRound } =
         resolveAgentLimits(extendedRunLimits);
-      const finalAnswerController = new AgentFinalAnswerController(
-        request,
-        actionContractSession,
-        transcriptMessagesForPrompt,
-      );
+      const finalAnswerController = new AgentFinalAnswerController(request);
       let toolCallOverflowCorrectionUsed = false;
       const shouldFlushStreamBuffer = (value: string): boolean => {
         if (!value) return false;
@@ -1559,7 +1468,7 @@ export class AgentRuntime {
         // usage row even if this round never finishes.
         usageRecorder.markDispatched();
         const step = await adapter.runStep({
-          request: resolveNoteEditModelRequest(request),
+          request,
           messages: modelInput.messages,
           continuationMessages: modelInput.continuationMessages,
           tools: stepToolSpecs,
@@ -1774,9 +1683,7 @@ export class AgentRuntime {
       };
       // Tool execution is its own collaborator, built once per turn with the
       // state its three functions used to reach through this method's
-      // closure. The prepared-action summaries it appends to are read by the
-      // finalization path below, so they stay declared here.
-      const workflowSummaries: string[] = [];
+      // closure.
       const toolExecution = createToolExecution({
         registry: this.registry,
         now: this.now,
@@ -1797,7 +1704,6 @@ export class AgentRuntime {
         preservedTurnHandleRecords,
         toolExecutionRecords,
         toolsUsedThisTurn,
-        workflowSummaries,
         getCurrentAnswerText: () => currentAnswerText,
         setFinalizedMaterial: (material) => {
           finalizedMaterial = material;
@@ -1809,71 +1715,6 @@ export class AgentRuntime {
           ? recordOutcomeEvidence
           : undefined,
       });
-      // A prepared effect already has its native identities and arguments. It
-      // uses the same permission, journal and receipt path as any model call.
-      let referencesClarified = false;
-      if (request.actionPreparation?.state === "needs_input") {
-        const clarification = await toolExecution.executeToolWorkflow(
-          {
-            id: `preparation:${runId}`,
-            name: "request_user_input",
-            arguments: {
-              questions: [
-                {
-                  id: "reference",
-                  question: request.actionPreparation.issues.join("\n"),
-                  options:
-                    request.actionPreparation.sourceSelection?.candidates.map(
-                      (candidate) => ({
-                        id: `source:${candidate.id}`,
-                        label: candidate.path,
-                        description:
-                          "Remove this membership and preserve every other membership.",
-                      }),
-                    ) || [],
-                },
-              ],
-            },
-          },
-          0,
-          { suppressModelDelivery: true },
-        );
-        if (!clarification.toolResult.ok)
-          return await completeRun(
-            readToolError(clarification.toolResult) ||
-              "The requested action is still awaiting your input.",
-            "failed",
-            "awaiting_clarification",
-          );
-        if (
-          (
-            request.actionPreparation as import("./contracts/actionPreparation").ActionPreparation
-          ).state !== "ready"
-        )
-          return await completeRun(
-            request.actionPreparation.issues.join("\n") ||
-              "The requested references remain unresolved.",
-            "failed",
-            "references_unresolved",
-          );
-        referencesClarified = true;
-      }
-      if (request.actionProgress?.materialOutputs?.length) {
-        const retained = await loadWorkflowMaterial(request);
-        if (retained) {
-          finalizedMaterial = {
-            documentId: retained.documentId,
-            finalText: retained.visibleMarkdown,
-          };
-          // Material re-adopted from an earlier run must reach the terminal
-          // event with the same identity it was finalized under, not as a
-          // bare document id.
-          finalizedMaterialRefs.set(
-            retained.documentId,
-            materialRefFromDocument(retained),
-          );
-        }
-      }
       let operationSequence = 0;
       context.invokeRegisteredOperation = async (name, args) => {
         const tool = this.registry.getTool(name);
@@ -1892,35 +1733,10 @@ export class AgentRuntime {
             arguments: args,
           },
           0,
-          { suppressModelDelivery: true, checkpointedWorkflow: true },
+          { suppressModelDelivery: true },
         );
-        await actionContractSession.checkpoint();
         return outcome.toolResult;
       };
-      if (referencesClarified) {
-        // The first model call must see the resolved authority, not the
-        // pre-clarification prompt that correctly prohibited effects.
-        renderedPrompt = await renderAgentPromptEnvelope(
-          request,
-          toolDefinitions,
-          matchedSkills,
-          resourceContextPlan,
-          {
-            contentInputs:
-              resolveCapabilitiesContentInputs(adapterCapabilities),
-          },
-        );
-        // The restart replaces the earlier prompt, so only this render's
-        // guidance has reached the model.
-        request.deliveredToolGuidance = [
-          ...renderedPrompt.inventory.toolGuidanceInstructions,
-        ];
-        continuationSession.restartWithMessages(
-          composeAgentModelInput(renderedPrompt.envelope, {
-            transcriptMessages: promptTranscriptMessages(),
-          }),
-        );
-      }
       const rollbackCommittedStreamedText = async (
         stepStreamedText: string,
       ): Promise<void> => {
@@ -2173,22 +1989,8 @@ export class AgentRuntime {
                   assistantMessage: assistantCorrectionMessage,
                   correctionMessage: userCorrectionMessage,
                 });
-                await persistTranscriptCheckpoint({
-                  requireAccepted: Boolean(
-                    finalDecision.actionContractRejection,
-                  ),
-                });
-                if (finalDecision.actionContractRejection) {
-                  actionContractSession.commitRejectedFinal(
-                    finalDecision.actionContractRejection,
-                  );
-                }
+                await persistTranscriptCheckpoint();
                 continue;
-              }
-              if (finalDecision.actionContractRejection) {
-                actionContractSession.commitRejectedFinal(
-                  finalDecision.actionContractRejection,
-                );
               }
               return await completeRun(
                 finalDecision.userMessage,
@@ -2250,9 +2052,6 @@ export class AgentRuntime {
           newTranscriptMessages.push(assistantToolMessage);
           const roundToolMessages: AgentToolMessage[] = [];
           const roundFollowupMessages: AgentModelMessage[] = [];
-          let continuationCheckpoint:
-            | NonNullable<AgentToolResult["continuationCheckpoint"]>
-            | undefined;
           const appendRoundContinuation = () => {
             const delta = continuationSession.completeToolStep({
               toolMessages: roundToolMessages,
@@ -2277,13 +2076,6 @@ export class AgentRuntime {
               roundHadInputRejection = true;
             else if (!isUserDeniedToolResult(outcome.toolResult))
               roundHadToolFailure = true;
-            if (
-              outcome.toolResult.ok &&
-              outcome.toolResult.continuationCheckpoint
-            ) {
-              continuationCheckpoint =
-                outcome.toolResult.continuationCheckpoint;
-            }
             if (outcome.delivery) {
               const toolMessage: AgentToolMessage = {
                 role: "tool",
@@ -2352,22 +2144,7 @@ export class AgentRuntime {
                 : "Agent stopped after repeated tool errors. Please adjust the request and try again.");
             return await completeRun(finalText, "failed", stopRule);
           }
-          if (continuationCheckpoint) {
-            await restartFromSemanticCheckpoint({
-              sourceMessages: messages,
-              retryInstruction: continuationCheckpoint.instruction,
-            });
-            await emit({
-              type: "provider_event",
-              providerType: "agent_context_budget",
-              payload: {
-                action: "checkpoint_durable_tool_state",
-                reason: continuationCheckpoint.reason,
-              },
-            });
-          } else {
-            await persistTranscriptCheckpoint();
-          }
+          await persistTranscriptCheckpoint();
         }
 
         const newFingerprints = toolExecutionRecords

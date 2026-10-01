@@ -44,9 +44,10 @@ export function isBodyEvidenceSection(
   return !isFrontMatterSection(section);
 }
 
-export type WantedEvidenceSection = "methods" | "results" | "limitations";
-
-const SECTION_LABEL_PATTERNS: Record<WantedEvidenceSection, RegExp> = {
+const SECTION_LABEL_PATTERNS: Record<
+  "methods" | "results" | "limitations",
+  RegExp
+> = {
   methods:
     /\b(?:method|methods|methodology|approach|protocol|design|implementation|experiment|ablation)\b/,
   results:
@@ -57,18 +58,10 @@ const SECTION_LABEL_PATTERNS: Record<WantedEvidenceSection, RegExp> = {
 export function scoreSectionPreference(
   query: string,
   sectionLabel?: string,
-  wantedSections?: WantedEvidenceSection[],
 ): number {
   const normalizedQuery = normalizeText(query);
   const section = normalizeEvidenceSectionLabel(sectionLabel);
   if (!section) return 0;
-  // Classifier-provided wanted sections are language-independent: they match
-  // on the paper's section label alone, regardless of the query language.
-  if (wantedSections?.length) {
-    for (const wanted of wantedSections) {
-      if (SECTION_LABEL_PATTERNS[wanted]?.test(section)) return 2;
-    }
-  }
   if (
     /\b(?:method|methods|methodology|approach|protocol|design|implementation|ablation|experiment(?:al)? setup)\b/.test(
       normalizedQuery,
@@ -94,11 +87,7 @@ export function scoreSectionPreference(
   return isFrontMatterSection(section) ? 0 : 0.25;
 }
 
-export function queryHasExplicitSectionPreference(
-  query: string,
-  wantedSections?: WantedEvidenceSection[],
-): boolean {
-  if (wantedSections?.length) return true;
+export function queryHasExplicitSectionPreference(query: string): boolean {
   return (
     scoreSectionPreference(query, "Methods") >= 2 ||
     scoreSectionPreference(query, "Results") >= 2 ||
@@ -125,15 +114,11 @@ export function chunkKindFromSectionLabel(
 
 export function compareEvidenceCandidatesForQuestion<
   T extends { sectionLabel?: string; chunkIndex?: number },
->(
-  query: string,
-  getBaseScore?: (candidate: T) => number,
-  wantedSections?: WantedEvidenceSection[],
-) {
+>(query: string, getBaseScore?: (candidate: T) => number) {
   return (left: T, right: T): number => {
     const preferenceDelta =
-      scoreSectionPreference(query, right.sectionLabel, wantedSections) -
-      scoreSectionPreference(query, left.sectionLabel, wantedSections);
+      scoreSectionPreference(query, right.sectionLabel) -
+      scoreSectionPreference(query, left.sectionLabel);
     if (preferenceDelta !== 0) return preferenceDelta;
     const scoreDelta =
       (getBaseScore?.(right) || 0) - (getBaseScore?.(left) || 0);

@@ -18,6 +18,7 @@ import {
   stateChangeInvocationPlan,
 } from "../../authorization/invocationPlan";
 import type { ActionRiskSignal } from "../../authorization/types";
+import { neverSelected } from "../guidance";
 import { ok, fail, validateObject } from "../shared";
 import { currentMutationActionId } from "../../services/mutationCoordinator";
 import { executeExternalMutation } from "../../services/externalMutationCoordinator";
@@ -1281,12 +1282,7 @@ export function createZoteroScriptTool(
     },
 
     guidance: {
-      matches: (request) =>
-        Boolean(
-          request.classifiedIntent?.semantic?.supportTools?.includes(
-            "zotero_script",
-          ),
-        ),
+      matches: neverSelected,
       instruction: ZOTERO_SCRIPT_GUIDANCE,
     },
 
