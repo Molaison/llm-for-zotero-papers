@@ -5,8 +5,10 @@ import { stripNoteHtml } from "../../../utils/noteText";
 import {
   defineHandler,
   type LibraryMutationHandlerRegistry,
+  type MutationTargetJudgment,
 } from "./handlerDefinition";
 import {
+  describeItemIds,
   noteContentMatches,
   onePer,
   restoreCollectionState,
@@ -18,6 +20,111 @@ import {
   resultStatus,
   sameMembers,
 } from "./handlerUtilities";
+import type { MutationStateView } from "./stateView";
+
+type MoveToCollection = Extract<
+  LibraryMutationOperation,
+  { type: "move_to_collection" }
+>;
+
+/** Each item a filing names, with the collection it should land in. */
+function filingDestinations(
+  operation: MoveToCollection,
+): Array<{ itemId: number; targetCollectionId?: number }> {
+  return (
+    operation.assignments?.length
+      ? operation.assignments
+      : (operation.itemIds || []).map((itemId) => ({
+          itemId,
+          targetCollectionId: operation.targetCollectionId,
+        }))
+  ).map((assignment) => ({
+    itemId: assignment.itemId,
+    targetCollectionId:
+      assignment.targetCollectionId || operation.targetCollectionId,
+  }));
+}
+
+/**
+ * Whether `state` shows the item filed as the operation asked: in every one
+ * of `destinations`, and for a move, out of its source as well.
+ */
+function filedAsAsked(
+  operation: MoveToCollection,
+  state: MutationStateView,
+  itemId: number,
+  destinations: ReadonlyArray<number | undefined>,
+): boolean {
+  const current = state.item(itemId);
+  const collectionIds = current?.exists ? current.collectionIds : undefined;
+  if (
+    !collectionIds ||
+    !destinations.length ||
+    destinations.some((id) => !id || !collectionIds.includes(id))
+  ) {
+    return false;
+  }
+  if (operation.mode !== "move") return true;
+  return operation.from === "all"
+    ? sameMembers(collectionIds, destinations as number[])
+    : !collectionIds.includes(Number(operation.from));
+}
+
+const TOP_LEVEL_ONLY = "only top-level items can be filed into collections.";
+
+function filingRefusal(itemIds: number[], predicate: string): string {
+  const subject = describeItemIds(itemIds);
+  return `${subject[0].toUpperCase()}${subject.slice(1)} ${predicate}; ${TOP_LEVEL_ONLY}`;
+}
+
+/**
+ * The items of a filing that no collection can hold, read from the state
+ * captured before the write: an annotation, which lives inside its
+ * attachment, and a child note or attachment, which belongs to its parent.
+ * Zotero holds top-level items only, and the gateway refuses these before it
+ * writes anything, so they are refused targets rather than failed ones.
+ */
+function unfileableItems(
+  itemIds: readonly number[],
+  before: MutationStateView,
+): MutationTargetJudgment["refused"] {
+  const annotations: number[] = [];
+  const childrenOf = new Map<number, number[]>();
+  for (const itemId of itemIds) {
+    const item = before.item(itemId);
+    if (!item?.exists) continue;
+    if (item.annotation) {
+      annotations.push(itemId);
+    } else if (item.parentItemId) {
+      childrenOf.set(item.parentItemId, [
+        ...(childrenOf.get(item.parentItemId) || []),
+        itemId,
+      ]);
+    }
+  }
+  return [
+    ...(annotations.length
+      ? [
+          {
+            itemIds: annotations,
+            reason: filingRefusal(
+              annotations,
+              annotations.length === 1
+                ? "is an annotation inside an attachment"
+                : "are annotations inside attachments",
+            ),
+          },
+        ]
+      : []),
+    ...[...childrenOf].map(([parentItemId, children]) => ({
+      itemIds: children,
+      reason: filingRefusal(
+        children,
+        `${children.length === 1 ? "is a child item" : "are child items"} of item ${parentItemId}`,
+      ),
+    })),
+  ];
+}
 
 export const libraryMutationHandlers = {
   update_metadata: defineHandler("update_metadata", {
@@ -159,30 +266,34 @@ export const libraryMutationHandlers = {
     stateSections: ["items"],
     replay: "state-aware",
     planInverse: (_operation, state) => restoreCollectionState(state),
-    postconditionSatisfied: (operation, state) => {
-      const assignments = operation.assignments?.length
-        ? operation.assignments
-        : (operation.itemIds || []).map((itemId) => ({
-            itemId,
-            targetCollectionId: operation.targetCollectionId,
-          }));
-      return assignments.every((assignment) => {
-        const targetCollectionId =
-          assignment.targetCollectionId || operation.targetCollectionId;
-        const current = state.item(assignment.itemId);
-        if (
-          !current?.exists ||
-          !current.collectionIds ||
-          !targetCollectionId ||
-          !current.collectionIds.includes(targetCollectionId)
-        ) {
-          return false;
-        }
-        if (operation.mode !== "move") return true;
-        return operation.from === "all"
-          ? sameMembers(current.collectionIds, [targetCollectionId])
-          : !current.collectionIds.includes(Number(operation.from));
-      });
+    postconditionSatisfied: (operation, state) =>
+      filingDestinations(operation).every((entry) =>
+        filedAsAsked(operation, state, entry.itemId, [
+          entry.targetCollectionId,
+        ]),
+      ),
+    // Each item is judged against all of its destinations at once, so an item
+    // given two folders in one move is judged by the set it should end with.
+    judgeTargets: (operation, before, after) => {
+      const entries = filingDestinations(operation);
+      const itemIds = [...new Set(entries.map((entry) => entry.itemId))];
+      const refused = unfileableItems(itemIds, before);
+      const refusedIds = new Set(refused.flatMap((group) => group.itemIds));
+      return {
+        refused,
+        judged: itemIds
+          .filter((itemId) => !refusedIds.has(itemId))
+          .map((itemId) => {
+            const destinations = entries
+              .filter((entry) => entry.itemId === itemId)
+              .map((entry) => entry.targetCollectionId);
+            return {
+              itemId,
+              before: filedAsAsked(operation, before, itemId, destinations),
+              after: filedAsAsked(operation, after, itemId, destinations),
+            };
+          }),
+      };
     },
     targetCount: (operation) =>
       new Set(

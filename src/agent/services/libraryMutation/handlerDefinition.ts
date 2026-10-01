@@ -13,6 +13,25 @@ export type LibraryMutationOperationOf<
   Type extends LibraryMutationOperationType,
 > = Extract<LibraryMutationOperation, { type: Type }>;
 
+/**
+ * An operation's targets judged one at a time against the states captured
+ * around the write.
+ *
+ * `refused` holds the targets the operation cannot apply to at all, decided
+ * from the state captured before it ran, grouped by reason; each reason names
+ * its own items, so it can be read on its own. `judged` holds every other
+ * target, with whether its own postcondition held before the write and holds
+ * after it.
+ */
+export type MutationTargetJudgment = Readonly<{
+  refused: ReadonlyArray<
+    Readonly<{ itemIds: readonly number[]; reason: string }>
+  >;
+  judged: ReadonlyArray<
+    Readonly<{ itemId: number; before: boolean; after: boolean }>
+  >;
+}>;
+
 export type LibraryMutationHandler<Type extends LibraryMutationOperationType> =
   Readonly<{
     type: Type;
@@ -47,6 +66,17 @@ export type LibraryMutationHandler<Type extends LibraryMutationOperationType> =
       operation: LibraryMutationOperationOf<Type>,
       state: MutationStateView,
     ) => boolean;
+    /**
+     * The targets judged one by one, for a handler whose operation names
+     * items it can judge independently. Without it, a receipt rests on
+     * `postconditionSatisfied` for the whole set, which cannot say which
+     * targets landed when some did not.
+     */
+    judgeTargets?: (
+      operation: LibraryMutationOperationOf<Type>,
+      before: MutationStateView,
+      after: MutationStateView,
+    ) => MutationTargetJudgment;
     execute: (
       operation: LibraryMutationOperationOf<Type>,
       context: AgentToolContext,
@@ -98,6 +128,7 @@ type HandlerOptions<Type extends LibraryMutationOperationType> = Pick<
       | "stateSections"
       | "deferredInverse"
       | "planInverse"
+      | "judgeTargets"
       | "execute"
       | "replay"
       | "executionDomain"
@@ -130,6 +161,7 @@ export function defineHandler<Type extends LibraryMutationOperationType>(
     deferredInverse: options.deferredInverse || (() => false),
     planInverse: options.planInverse || (() => ({})),
     postconditionSatisfied: options.postconditionSatisfied,
+    ...(options.judgeTargets ? { judgeTargets: options.judgeTargets } : {}),
     execute:
       options.execute ||
       ((operation, context, gateway) =>

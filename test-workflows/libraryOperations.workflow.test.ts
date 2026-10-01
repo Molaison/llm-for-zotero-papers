@@ -1,5 +1,6 @@
 import "./hostSurfaceBootstrap";
 import { assert } from "chai";
+import { PDFDocument, StandardFonts } from "pdf-lib";
 import { ZoteroGateway } from "../src/agent/services/zoteroGateway";
 import { LibraryMutationService } from "../src/agent/services/libraryMutationService";
 import {
@@ -7,10 +8,21 @@ import {
   ZOTERO_MCP_ENDPOINT_PATH,
 } from "../src/agent/mcp/server";
 import { replayLibraryInverse } from "../test/helpers/replayLibraryInverse";
+import { resolvedAgentRequest } from "../test/helpers/resolvedAgentRequest";
 import { createLibrarySearchTool } from "../src/agent/tools/read/librarySearch";
 import { createSavedSearchTool } from "../src/agent/tools/write/savedSearches";
+import { ActionContractService } from "../src/agent/contracts/actionContract";
+import { AgentToolRegistry } from "../src/agent/tools/registry";
+import { initAgentChangeJournal } from "../src/agent/store/changeJournal";
+import {
+  getOriginalAgentPermissionMode,
+  setOriginalAgentPermissionMode,
+} from "../src/agent/originalAgentPermissionMode";
+import type { AgentToolContext, AgentToolResult } from "../src/agent/types";
+import type { WorkflowTestApi } from "../src/modules/contextPanel/workflowTestTypes";
 
 declare const Zotero: any;
+declare const IOUtils: any;
 
 /**
  * Every capability added in Stages 0–6, exercised against a REAL Zotero
@@ -450,6 +462,193 @@ describe("library operations against real Zotero", function () {
       // The old inverse emitted remove_from_collection, which would have
       // unfiled the item entirely instead of restoring a and b.
       assert.sameMembers((rows || []).map(Number), [a.id, b.id]);
+    });
+
+    it("files an unfiled paper, refuses its annotation with the reason, and never reports the batch unverified", async function () {
+      // The live reorganization filed 253 papers, then sent a highlight its
+      // own script had counted as unfiled. Zotero holds only top-level items in
+      // collections; the refusal used to make the receipt "unverified", which
+      // blocked the run. Here the installed library_update runs against a real
+      // paper, a real PDF and a real highlight on it.
+      const api = Zotero.LLMForZotero.api;
+      const workflow = api.workflowTest as WorkflowTestApi;
+      const originalMode = getOriginalAgentPermissionMode();
+      const destination = await makeCollection("Annotated-Dest");
+      const paper = await makeItem("journalArticle", "Annotated unfiled paper");
+      const pdf = await PDFDocument.create();
+      const font = await pdf.embedFont(StandardFonts.Helvetica);
+      pdf.addPage([612, 792]).drawText("Representational drift.", {
+        x: 72,
+        y: 700,
+        size: 12,
+        font,
+      });
+      const pdfPath = PathUtils.join(
+        Zotero.getTempDirectory().path,
+        `annotated-${SUFFIX}.pdf`,
+      );
+      await IOUtils.write(pdfPath, await pdf.save());
+      const attachment = await Zotero.Attachments.importFromFile({
+        file: pdfPath,
+        parentItemID: paper.id,
+      });
+      const annotation = new Zotero.Item("annotation");
+      annotation.libraryID = libraryID();
+      annotation.parentID = attachment.id;
+      annotation.annotationType = "highlight";
+      annotation.annotationText = "Representational drift.";
+      annotation.annotationComment =
+        "the authors claim that representations drift";
+      annotation.annotationColor = "#ffd400";
+      annotation.annotationPageLabel = "1";
+      annotation.annotationSortIndex = "00000|000000|00080";
+      annotation.annotationPosition = JSON.stringify({
+        pageIndex: 0,
+        rects: [[72, 698, 230, 712]],
+      });
+      await annotation.saveTx();
+      const reason = `Item ${annotation.id} is an annotation inside an attachment; only top-level items can be filed into collections.`;
+      const membership = async (itemId: number) =>
+        (
+          (await Zotero.DB.columnQueryAsync(
+            "SELECT collectionID FROM collectionItems WHERE itemID=?",
+            [itemId],
+          )) || []
+        ).map(Number);
+      let root: HTMLElement | null = null;
+      try {
+        assert.isTrue(annotation.isAnnotation());
+        assert.deepEqual(
+          await membership(paper.id),
+          [],
+          "the paper is unfiled",
+        );
+        await initAgentChangeJournal();
+        setOriginalAgentPermissionMode("yolo");
+        const registry = new AgentToolRegistry(
+          new ActionContractService(gateway()),
+        );
+        registry.register(api.agent.getToolDefinition("library_update"));
+        const context: AgentToolContext = {
+          request: resolvedAgentRequest({
+            conversationKey: paper.id,
+            mode: "agent",
+            userText: "Sort my unfiled papers into topic folders",
+            libraryID: libraryID(),
+            executionContext: {
+              version: 1,
+              executionId: `unfileable:${SUFFIX}`,
+              conversationKey: paper.id,
+              conversationGeneration: 0,
+              chatLibraryID: libraryID(),
+              permissionOwner: "original_agent",
+              workspaceSnapshot: {
+                selectedPapers: [],
+                selectedCollections: [],
+              },
+              configuredAccess: {
+                libraryIDs: [libraryID()],
+                outputDirectories: [],
+              },
+            },
+          }),
+          item: paper,
+          modelName: "workflow",
+          currentAnswerText: "",
+          runId: `unfileable-run:${SUFFIX}`,
+        };
+        const file = async (
+          callId: string,
+          args: Record<string, unknown>,
+        ): Promise<AgentToolResult> => {
+          let execution = await registry.prepareExecution(
+            {
+              id: callId,
+              name: "library_update",
+              arguments: { kind: "collections", action: "add", ...args },
+            },
+            context,
+            { callerKind: "model" },
+          );
+          if (execution.kind === "confirmation")
+            execution = await execution.execute({ approved: true });
+          assert.equal(execution.kind, "result");
+          if (execution.kind !== "result") throw new Error("unreachable");
+          const result = execution.execution.result;
+          assert.isTrue(result.ok, JSON.stringify(result.content));
+          return result;
+        };
+
+        // The paper and its highlight in one batch, as the reorganization
+        // sent them.
+        const batch = await file("file-batch", {
+          assignments: [
+            { itemId: paper.id, targetCollectionId: destination.id },
+            { itemId: annotation.id, targetCollectionId: destination.id },
+          ],
+        });
+        assert.deepEqual(await membership(paper.id), [destination.id]);
+        assert.deepEqual(await membership(annotation.id), []);
+        const [batchReceipt] = batch.actionReceipts!;
+        assert.equal(batchReceipt.status, "partial");
+        assert.equal(batchReceipt.verification, "verified");
+        assert.deepEqual(batchReceipt.appliedTargets, [`item:${paper.id}`]);
+        assert.deepEqual(batchReceipt.rejectedTargets, [
+          `item:${annotation.id}`,
+        ]);
+        assert.equal(batchReceipt.reasons[0], reason);
+
+        // The highlight moved on its own, out of every folder.
+        const direct = await file("move-annotation", {
+          mode: "move",
+          from: "all",
+          itemIds: [annotation.id],
+          targetCollectionId: destination.id,
+        });
+        assert.deepEqual(await membership(annotation.id), []);
+        const [directReceipt] = direct.actionReceipts!;
+        assert.equal(directReceipt.status, "failed");
+        assert.equal(directReceipt.verification, "not_applicable");
+        assert.deepEqual(directReceipt.rejectedTargets, [
+          `item:${annotation.id}`,
+        ]);
+        assert.deepEqual(directReceipt.reasons, [reason]);
+
+        // What the reader sees: the paper's row, the refused highlight on a
+        // row of its own beneath it with the reason, and no "Unverified".
+        const panel = await workflow.renderPanelForItem(paper.id);
+        root = workflow.renderToolResultForPanel(panel.panelId, direct, {
+          priorResults: [batch],
+          userText: "Sort my unfiled papers into topic folders",
+        });
+        assert.exists(root);
+        const card = root!.querySelector<HTMLElement>(
+          ".llm-agent-action-summary-card",
+        );
+        assert.exists(card, "the filed paper is reported");
+        const skipped = [
+          ...card!.querySelectorAll<HTMLElement>(".llm-at-row-skip"),
+        ] as HTMLElement[];
+        assert.lengthOf(skipped, 1, card!.textContent || "");
+        assert.include(skipped[0].textContent || "", reason);
+        assert.notInclude(
+          root!.textContent || "",
+          "Unverified",
+          "a refused annotation is not an unverified change",
+        );
+      } finally {
+        root?.remove();
+        setOriginalAgentPermissionMode(originalMode);
+        await workflow.reset();
+        for (const item of [annotation, attachment]) {
+          try {
+            if (Zotero.Items.get(item.id)) await item.eraseTx();
+          } catch {
+            /* best effort; the paper's own cleanup takes its children */
+          }
+        }
+        await IOUtils.remove(pdfPath, { ignoreAbsent: true });
+      }
     });
   });
 

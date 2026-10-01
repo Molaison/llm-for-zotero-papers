@@ -22,7 +22,13 @@ import {
   type PreparedActionExecution,
 } from "./actionOperationEvidence";
 import { canonicalJsonEqual } from "../services/libraryMutation/canonicalJson";
-import { mutationPostconditionIsSatisfied } from "../services/libraryMutation/handlerOperations";
+import type { LibraryMutationOperation } from "../services/libraryMutation/contracts";
+import type { MutationTargetJudgment } from "../services/libraryMutation/handlerDefinition";
+import {
+  judgeLibraryMutationTargets,
+  mutationPostconditionIsSatisfied,
+} from "../services/libraryMutation/handlerOperations";
+import { describeItemIds } from "../services/libraryMutation/handlerUtilities";
 import {
   verifyRecordedPostImage,
   type PostImageReader,
@@ -73,6 +79,82 @@ function evidenceTargets(evidence: AgentLibraryMutationEvidence): string[] {
       (search) => `saved-search:${search.savedSearchId}`,
     ),
   ];
+}
+
+/**
+ * A write's requested targets one by one, from the handler's own judgment of
+ * the states captured around it: the targets it refused before running, the
+ * ones whose postcondition now holds (already before the write, or made true
+ * by it), and the ones whose postcondition does not hold.
+ *
+ * Null leaves the receipt to the whole-set postcondition, which happens when
+ * the split adds nothing to it or cannot be trusted: the handler did not
+ * judge every requested target; every target landed; or nothing was refused
+ * and nothing landed, where no reason says why and the outcome is genuinely
+ * unknown. `reason` covers every rejected target on its own, because the
+ * ledger and the action card read only a receipt's first reason.
+ */
+function splitByTarget(
+  operation: LibraryMutationOperation,
+  judgment: MutationTargetJudgment,
+  requestedTargets: readonly string[],
+  effect: AgentToolEffect | undefined,
+): {
+  applied: string[];
+  alreadySatisfied: string[];
+  rejected: string[];
+  reason: string;
+} | null {
+  const refused = new Set(
+    judgment.refused.flatMap((group) => group.itemIds.map(itemTarget)),
+  );
+  const landed = judgment.judged.filter((target) => target.after);
+  const missed = judgment.judged.filter((target) => !target.after);
+  const judged = new Set([
+    ...refused,
+    ...judgment.judged.map((target) => itemTarget(target.itemId)),
+  ]);
+  if (
+    !requestedTargets.length ||
+    requestedTargets.some((target) => !judged.has(target))
+  ) {
+    return null;
+  }
+  if (!refused.size && (!missed.length || !landed.length)) return null;
+  if (!landed.length && missed.length) return null;
+  // A write that changed nothing already held what it found in place.
+  const held = new Set(
+    landed
+      .filter((target) => target.before || effect === "none")
+      .map((target) => itemTarget(target.itemId)),
+  );
+  const made = new Set(
+    landed
+      .map((target) => itemTarget(target.itemId))
+      .filter((target) => !held.has(target)),
+  );
+  const rejected = new Set([
+    ...refused,
+    ...missed.map((target) => itemTarget(target.itemId)),
+  ]);
+  // In the order the write named them, as the requested targets are.
+  const inOrder = (targets: Set<string>) =>
+    requestedTargets.filter((target) => targets.has(target));
+  return {
+    applied: inOrder(made),
+    alreadySatisfied: inOrder(held),
+    rejected: inOrder(rejected),
+    reason: [
+      ...judgment.refused.map((group) => group.reason),
+      ...(missed.length
+        ? [
+            `The captured native post-state does not show ${operation.type} for ${describeItemIds(
+              missed.map((target) => target.itemId),
+            )}.`,
+          ]
+        : []),
+    ].join(" "),
+  };
 }
 
 function matchingNativeEvidence(
@@ -589,6 +671,44 @@ export class ActionContractService {
     // does for the same failed re-read. A receipt must never say "verified"
     // beside a reason that names a note it could not confirm.
     const readBackGap = noteReadBacks.reasons.length > 0;
+    // The whole-set postcondition fails as soon as one target is not as asked,
+    // which says nothing about the others. A handler that judges its targets
+    // one by one says which landed and which it refused before running, and
+    // the receipt then reports that split: verified for what landed, rejected
+    // with the reason for the rest. Only an outcome the split cannot explain
+    // keeps the whole-set verdict below.
+    const judgment =
+      evidence && !verified
+        ? judgeLibraryMutationTargets(
+            operation,
+            evidence.preState,
+            evidence.postState,
+          )
+        : undefined;
+    const split = judgment
+      ? splitByTarget(operation, judgment, targets, params.effect)
+      : null;
+    if (evidence && split) {
+      const landed = split.applied.length + split.alreadySatisfied.length > 0;
+      return {
+        ...base,
+        verifiedFacts: [...base.verifiedFacts, ...noteReadBacks.facts],
+        evidenceRef: evidence.journalStepId || base.evidenceRef,
+        // Every target refused means nothing was attempted, so nothing is
+        // left to verify.
+        verification: landed
+          ? readBackGap
+            ? "unverified"
+            : "verified"
+          : "not_applicable",
+        status: landed ? "partial" : "failed",
+        requestedTargets: targets,
+        appliedTargets: split.applied,
+        alreadySatisfiedTargets: split.alreadySatisfied,
+        rejectedTargets: split.rejected,
+        reasons: [...base.reasons, split.reason, ...noteReadBacks.reasons],
+      };
+    }
     return {
       ...base,
       verifiedFacts: [...base.verifiedFacts, ...noteReadBacks.facts],
@@ -612,6 +732,8 @@ export class ActionContractService {
                 ? `The mutation handler rejected the captured native post-state for ${operation.type}.`
                 : `No captured native post-state was attached for ${operation.type}.`,
             ]),
+        // Refusals stay named even when the rest of the write is unknown.
+        ...(judgment?.refused.map((group) => group.reason) || []),
         ...noteReadBacks.reasons,
       ],
     };

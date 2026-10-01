@@ -92,7 +92,6 @@ const EXPECTED_EFFECT_REQUIRED =
   "Give each new task an expectedEffect: read, artifact, mutation, or reasoning.";
 const HOST_MARKS_DONE =
   "Nothing changed: the host marks parts done from the tools' results, so progress needs no task_update call. Continue the work, or answer when it is done.";
-const SCOPE_OR_TARGETS = "Give a part targetIds or scope:true, not both.";
 const NO_SCOPE_PAPERS =
   "This turn states no paper scope to cover; name the part's papers in targetIds.";
 const NO_STATUS =
@@ -261,19 +260,24 @@ function actionCapability(
  * The targets a new part declares: its targetIds, or, with `scope`, every
  * paper of the turn's scope as the host resolved it, frozen now in scope
  * order. A later change to the scope never reaches a part declared before.
+ * A part that names targetIds and also sets `scope` tracks the papers it
+ * named: they say exactly what is meant, so `scope` is ignored rather than
+ * the call refused.
  */
 function declaredTargets(
   request: TaskDeclaration,
   scopePapers: TaskPaperScopeSet | undefined,
-): string[] | undefined {
-  if (!request.scope) return request.targetIds;
-  if (request.targetIds?.length) {
-    throw new ToolInputRejection(SCOPE_OR_TARGETS);
+): { targets?: string[]; scope?: true } {
+  if (!request.scope || request.targetIds?.length) {
+    return { targets: request.targetIds };
   }
   if (!scopePapers?.itemIds.length) {
     throw new ToolInputRejection(NO_SCOPE_PAPERS);
   }
-  return scopePapers.itemIds.map((itemId) => `item:${itemId}`);
+  return {
+    targets: scopePapers.itemIds.map((itemId) => `item:${itemId}`),
+    scope: true,
+  };
 }
 
 /**
@@ -322,13 +326,14 @@ function applyOrdinaryTaskUpdates(
             ? "answer"
             : request.expectedEffect;
         if (!effect) throw new ToolInputRejection(EXPECTED_EFFECT_REQUIRED);
+        const { targets, scope } = declaredTargets(request, scopePapers);
         declarations.push({
           taskId,
           description: request.description || "",
           effect,
           capability: actionCapability(request.expectedCapability),
-          targets: declaredTargets(request, scopePapers),
-          ...(request.scope ? { scope: true } : {}),
+          targets,
+          ...(scope ? { scope } : {}),
         });
         continue;
       }

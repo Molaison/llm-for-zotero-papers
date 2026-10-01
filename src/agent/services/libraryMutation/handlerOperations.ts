@@ -8,6 +8,7 @@ import type {
   LibraryMutationHandler,
   LibraryMutationOperationOf,
   LibraryMutationOperationType,
+  MutationTargetJudgment,
 } from "./handlerDefinition";
 import type { ZoteroGateway } from "../zoteroGateway";
 import type { ForwardExecution } from "./forwardExecutors";
@@ -151,6 +152,30 @@ export function mutationPostconditionIsSatisfied(
   return libraryMutationHandlers[operation.type].postconditionSatisfied(
     operation as never,
     asMutationStateView(state),
+  );
+}
+
+/**
+ * The handler's own target-by-target judgment of a write, from the states
+ * captured before and after it, or undefined when the handler does not judge
+ * its targets one by one.
+ */
+export function judgeLibraryMutationTargets(
+  operation: LibraryMutationOperation,
+  before: LibraryMutationState | MutationStateView,
+  after: LibraryMutationState | MutationStateView,
+): MutationTargetJudgment | undefined {
+  const judge = libraryMutationHandlers[operation.type].judgeTargets as
+    | ((
+        operation: never,
+        before: MutationStateView,
+        after: MutationStateView,
+      ) => MutationTargetJudgment)
+    | undefined;
+  return judge?.(
+    operation as never,
+    asMutationStateView(before),
+    asMutationStateView(after),
   );
 }
 

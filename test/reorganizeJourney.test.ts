@@ -65,7 +65,15 @@ type FolderLibrary = {
   folderName: (collectionId: number) => string | undefined;
 };
 
-function installFolderLibrary(): FolderLibrary {
+/** An annotation on a paper's PDF, which no collection can hold. */
+const ANNOTATION = 107;
+const ANNOTATION_PDF = 1071;
+const ANNOTATION_REASON =
+  "Item 107 is an annotation inside an attachment; only top-level items can be filed into collections.";
+
+function installFolderLibrary(
+  options: { annotation?: boolean } = {},
+): FolderLibrary {
   const membership = new Map<number, Set<number>>(
     PAPER_IDS.map((id) => [id, new Set([DRIFT])]),
   );
@@ -75,7 +83,7 @@ function installFolderLibrary(): FolderLibrary {
   let nextFolderId = PLACE;
   const title = (id: number) =>
     PAPERS.find((paper) => paper.id === id)?.title || `Item ${id}`;
-  const item = (id: number) =>
+  const paperItem = (id: number) =>
     membership.has(id)
       ? {
           id,
@@ -92,6 +100,29 @@ function installFolderLibrary(): FolderLibrary {
           getDisplayTitle: () => title(id),
         }
       : null;
+  // The annotation the live run's own script found: Zotero reports it with a
+  // parent (its PDF), and as neither a regular item, a note nor an attachment.
+  const annotation =
+    options.annotation === true
+      ? {
+          id: ANNOTATION,
+          key: `ANNOT${ANNOTATION}`,
+          libraryID: 1,
+          parentID: ANNOTATION_PDF,
+          deleted: false,
+          annotationType: "highlight",
+          annotationText: "the authors claim that representations drift",
+          isRegularItem: () => false,
+          isAttachment: () => false,
+          isNote: () => false,
+          isAnnotation: () => true,
+          getCollections: () => [],
+          getField: () => "",
+          getDisplayTitle: () => "",
+        }
+      : null;
+  const item = (id: number) =>
+    (id === ANNOTATION ? annotation : null) || paperItem(id);
   const summary = (collectionId: number) => {
     const folder = folders.get(collectionId);
     if (!folder) return null;
@@ -166,11 +197,16 @@ function installFolderLibrary(): FolderLibrary {
       mode?: "move";
       from?: number | "all";
     }) => {
-      const priorCollections = params.assignments.map((assignment) => ({
+      // As the real gateway does, an item no collection can hold is refused
+      // before anything is written, and the rest of the batch still runs.
+      const fileable = params.assignments.filter((assignment) =>
+        membership.has(assignment.itemId),
+      );
+      const priorCollections = fileable.map((assignment) => ({
         itemId: assignment.itemId,
         collectionIds: [...membership.get(assignment.itemId)!],
       }));
-      for (const assignment of params.assignments) {
+      for (const assignment of fileable) {
         const filed = membership.get(assignment.itemId)!;
         if (params.mode === "move" && typeof params.from === "number") {
           filed.delete(params.from);
@@ -179,15 +215,25 @@ function installFolderLibrary(): FolderLibrary {
       }
       return {
         selectedCount: params.assignments.length,
-        movedCount: params.assignments.length,
+        movedCount: fileable.length,
         addedCount: 0,
-        skippedCount: 0,
+        skippedCount: params.assignments.length - fileable.length,
         collections: [],
-        items: params.assignments.map((assignment) => ({
-          itemId: assignment.itemId,
-          status: "moved",
-          targetCollectionId: assignment.targetCollectionId,
-        })),
+        items: params.assignments.map((assignment) =>
+          membership.has(assignment.itemId)
+            ? {
+                itemId: assignment.itemId,
+                status: "moved",
+                targetCollectionId: assignment.targetCollectionId,
+              }
+            : {
+                itemId: assignment.itemId,
+                status: "missing",
+                targetCollectionId: assignment.targetCollectionId,
+                reason:
+                  "Annotations live inside an attachment and cannot be filed or reparented",
+              },
+        ),
         priorCollections,
       };
     },
@@ -237,6 +283,38 @@ function declareMoves(id: string): AgentToolCall {
         scope: true,
       },
     ],
+  });
+}
+
+/** The moves part over ids the model counted itself, as bare ids. */
+function declareMovesOf(id: string, itemIds: number[]): AgentToolCall {
+  return call(id, "task_update", {
+    tasks: [
+      {
+        taskId: "move",
+        description: MOVE_PART,
+        expectedEffect: "mutation",
+        expectedCapability: "zotero.collections",
+        targetIds: itemIds.map(String),
+      },
+    ],
+  });
+}
+
+/** Files items into one folder, adding only, as the live run's last call did. */
+function fileInto(
+  id: string,
+  collectionId: number,
+  itemIds: number[],
+): AgentToolCall {
+  return call(id, "library_update", {
+    kind: "collections",
+    action: "add",
+    mode: "add",
+    assignments: itemIds.map((itemId) => ({
+      itemId,
+      targetCollectionId: collectionId,
+    })),
   });
 }
 
@@ -575,5 +653,111 @@ describe("reorganization flow: sort a folder's papers into topic subfolders", fu
     );
     for (const id of PAPER_IDS)
       assert.deepEqual([...library.membership.get(id)!], [TOPIC_OF[id]]);
+  });
+
+  it("Auto: an annotation filed on its own after the papers is excepted with the reason, and the part completes", async function () {
+    // The live run: the model's own script counted an annotation among the
+    // unfiled items, declared it with the papers, and tried it last.
+    setOriginalAgentPermissionMode("auto");
+    const annotated = installFolderLibrary({ annotation: true });
+    const turn = await runReorganization({
+      conversationKey,
+      library: annotated,
+      steps: [
+        sayThen(
+          PROPOSAL,
+          declareMovesOf("declare-1", [...PAPER_IDS, ANNOTATION]),
+          createFolder("create-place", "Place cells"),
+          createFolder("create-grid", "Grid cells"),
+        ),
+        stepOf(moveBatch("batch-1", [101, 102, 104])),
+        stepOf(moveBatch("batch-2", [103, 105, 106])),
+        stepOf(fileInto("file-annotation", PLACE, [ANNOTATION])),
+        finalStep(
+          "Moved all 6 papers. The highlight on the first paper is an annotation, which Zotero cannot file into a folder.",
+        ),
+      ],
+    });
+
+    assert.equal(turn.outcome?.kind, "completed");
+    const ledger = settled(turn);
+    const part = movePart(ledger);
+    assert.equal(part.status, "completed");
+    assert.deepEqual(part.doneTargets, [
+      "101",
+      "102",
+      "104",
+      "103",
+      "105",
+      "106",
+    ]);
+    assert.deepEqual(part.exceptions, [
+      { targets: [String(ANNOTATION)], reason: ANNOTATION_REASON },
+    ]);
+    assert.deepEqual(
+      ledger.end,
+      { state: "completed_with_exceptions" },
+      "a refused annotation is an exception, not a decision for the user",
+    );
+    assert.notOk(
+      ledger.tasks.some((task) => task.status === "blocked"),
+      "nothing is left blocked",
+    );
+    for (const id of PAPER_IDS)
+      assert.deepEqual([...annotated.membership.get(id)!], [TOPIC_OF[id]]);
+  });
+
+  it("Auto: an annotation inside a batch is refused while the batch's papers move", async function () {
+    setOriginalAgentPermissionMode("auto");
+    const annotated = installFolderLibrary({ annotation: true });
+    const mixed = call("batch-2", "library_update", {
+      kind: "collections",
+      action: "add",
+      mode: "move",
+      from: DRIFT,
+      assignments: [
+        ...[103, 105, 106].map((itemId) => ({
+          itemId,
+          targetCollectionId: TOPIC_OF[itemId],
+        })),
+        { itemId: ANNOTATION, targetCollectionId: PLACE },
+      ],
+    });
+    const turn = await runReorganization({
+      conversationKey,
+      library: annotated,
+      steps: [
+        sayThen(
+          PROPOSAL,
+          declareMovesOf("declare-1", [...PAPER_IDS, ANNOTATION]),
+          createFolder("create-place", "Place cells"),
+          createFolder("create-grid", "Grid cells"),
+        ),
+        stepOf(moveBatch("batch-1", [101, 102, 104])),
+        stepOf(mixed),
+        finalStep("Moved all 6 papers; the annotation stays with its PDF."),
+      ],
+    });
+
+    const ledger = settled(turn);
+    const part = movePart(ledger);
+    assert.equal(part.status, "completed");
+    assert.deepEqual(part.doneTargets, [
+      "101",
+      "102",
+      "104",
+      "103",
+      "105",
+      "106",
+    ]);
+    assert.deepEqual(part.exceptions, [
+      { targets: [String(ANNOTATION)], reason: ANNOTATION_REASON },
+    ]);
+    assert.lengthOf(
+      part.verifiedReceiptIds,
+      2,
+      "the mixed batch's receipt still proves the papers it moved",
+    );
+    assert.deepEqual(ledger.end, { state: "completed_with_exceptions" });
   });
 });

@@ -563,13 +563,26 @@ describe("task_update ordinary declarations", function () {
       );
     });
 
-    it("refuses scope with targetIds, or without papers in the scope, and publishes nothing", async function () {
+    it("takes the named targetIds when a part also asks for scope:true", async function () {
+      // The live run declared one annotation this way and was refused, which
+      // cost a turn for nothing: the named papers say exactly what is meant.
+      for (const ctx of [scoped([10, 20]), context()]) {
+        published.length = 0;
+        const result = await call(ctx, {
+          tasks: [{ ...readAll, targetIds: ["30"] }],
+        });
+        const [task] = ledgerOf(ctx).tasks;
+        assert.deepEqual(task.targets, ["item:30"]);
+        assert.notProperty(task, "scope", "the part is not the turn's scope");
+        assert.deepEqual(result, {
+          parts: [{ taskId: "read-all", status: "pending", done: 0, total: 1 }],
+        });
+        assert.lengthOf(published, 1);
+      }
+    });
+
+    it("refuses scope without papers in the scope, and publishes nothing", async function () {
       for (const [ctx, args, message] of [
-        [
-          scoped([10]),
-          { tasks: [{ ...readAll, targetIds: ["10"] }] },
-          "Give a part targetIds or scope:true, not both.",
-        ],
         [
           context(),
           { tasks: [readAll] },
