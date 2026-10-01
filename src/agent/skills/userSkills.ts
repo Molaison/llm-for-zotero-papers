@@ -191,7 +191,20 @@ const loggedObsoleteSkillIds = new Set<string>();
 const BUILTIN_BOOTSTRAP_RAW_HASHES: Partial<
   Record<string, ReadonlyArray<string>>
 > = {
-  "library-analysis.md": ["ftq8b2", "qttubn", "i2f8xa"],
+  "library-analysis.md": [
+    "ftq8b2",
+    "qttubn",
+    "i2f8xa",
+    // Released texts the list missed, from each release tag's copy
+    // (v3.7.12, v3.8.5, v3.8.6, v3.8.11 and v3.8.24).
+    "1gboxxt",
+    "1dibsu3",
+    "1fmb4jm",
+    "19974y5",
+    "1c3awl3",
+    // v4, which named the synthesis digest the sized views omit (v5).
+    "1fqhql1",
+  ],
   "compare-papers.md": [
     "i0j6yq",
     "1yreksb",
