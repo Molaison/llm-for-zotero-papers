@@ -1413,6 +1413,250 @@ describe("long jobs in runtime turns", function () {
     assert.notInclude(promptText(turn.prompts[1]), "Long job");
     assert.deepEqual(settled(turn).end, { state: "completed" });
   });
+
+  describe("how deep a job reads, from each part's declared effect", function () {
+    const SORT = "File each paper into its topic folder";
+    const TAG = "Tag each paper by its method";
+    const NOTE = "Save a note on each paper";
+
+    /** A library chat over `count` papers, each with a PDF. */
+    function library(count: number): TaskPaperScopeSet {
+      const ids = Array.from({ length: count }, (_, index) => 3001 + index);
+      return {
+        wholeLibrary: true,
+        itemIds: ids,
+        withText: ids.length,
+        papers: Object.fromEntries(
+          ids.map((itemId) => [
+            itemId,
+            { title: `Paper ${itemId}`, text: "pdf" as const },
+          ]),
+        ),
+      };
+    }
+
+    /** The long job's host messages the turn sent, each once. */
+    const hostMessages = (turn: Turn) => [
+      ...new Set(
+        turn.prompts.flatMap((messages) =>
+          messages
+            .map((message) => promptText([message]))
+            .filter((text) => text.startsWith("Long job")),
+        ),
+      ),
+    ];
+
+    const firstPage = (turn: Turn) =>
+      pageEvents(turn).find((page) => typeof page.page === "number");
+
+    /**
+     * A model that changes papers: it declares one part over the scope, then
+     * makes each page's change in one library_update call, whose receipt
+     * names the page's papers.
+     */
+    function changeModel(part: {
+      taskId: string;
+      description: string;
+      capability: "zotero.collections" | "zotero.tags";
+      operation: "move_to_collection" | "apply_tags";
+    }): ScriptStep {
+      const changed = new Set<number>();
+      let declared = false;
+      return (messages: AgentModelMessage[]) => {
+        if (!declared) {
+          declared = true;
+          return stepOf(
+            declare("declare-1", [
+              {
+                taskId: part.taskId,
+                description: part.description,
+                expectedEffect: "mutation",
+                expectedCapability: part.capability,
+                scope: true,
+              },
+            ]),
+          );
+        }
+        const host = [...messages]
+          .reverse()
+          .map((message) => promptText([message]))
+          .find((text) => text.startsWith("Long job"));
+        if (!host || host.startsWith("Long job complete"))
+          return finalStep("Every paper is changed as asked.");
+        const page = [...host.matchAll(/^- itemId=(\d+)/gm)]
+          .map((match) => Number(match[1]))
+          .filter((itemId) => !changed.has(itemId));
+        for (const itemId of page) changed.add(itemId);
+        const targets = page.map((itemId) => `item:${itemId}`);
+        liveReceipts.push({
+          version: 2,
+          id: `${part.operation}:${changed.size}`,
+          proposalId: `${part.operation}:0`,
+          proofDomain: "zotero_state",
+          capability: part.capability,
+          operation: part.operation,
+          verification: "verified",
+          status: "applied",
+          requestedTargets: targets,
+          appliedTargets: targets,
+          alreadySatisfiedTargets: [],
+          rejectedTargets: [],
+          reasons: [],
+          verifiedFacts: [],
+        });
+        return stepOf({
+          id: `${part.taskId}-${changed.size}`,
+          name: "library_update",
+          arguments: { assignments: page.map((itemId) => ({ itemId })) },
+        });
+      };
+    }
+
+    /** The model declares parts over the scope, then answers at once. */
+    const declaredOnly = (parts: Record<string, unknown>[]): ScriptStep[] => [
+      stepOf(declare("declare-1", parts)),
+      ...Array.from({ length: 4 }, () =>
+        finalStep("I stopped before the papers."),
+      ),
+    ];
+
+    it("sorts sixty papers into folders, then tags the same sixty, from their metadata: priced at their records, never told to read", async function () {
+      liveReceipts = [];
+      try {
+        const scope = library(60);
+        const sorting = changeModel({
+          taskId: "sort",
+          description: SORT,
+          capability: "zotero.collections",
+          operation: "move_to_collection",
+        });
+        const sorted = await runTurn({
+          conversationKey,
+          userText: "Sort my library into topic folders",
+          scope,
+          attached: { advanced: { inputTokenCap: 30_000 } as never },
+          steps: Array.from({ length: 30 }, () => sorting),
+        });
+        const tagging = changeModel({
+          taskId: "tag",
+          description: TAG,
+          capability: "zotero.tags",
+          operation: "apply_tags",
+        });
+        const tagged = await runTurn({
+          conversationKey,
+          userText: "Now tag each of them by its method",
+          scope,
+          attached: { advanced: { inputTokenCap: 30_000 } as never },
+          steps: Array.from({ length: 30 }, () => tagging),
+        });
+        for (const [turn, taskId, description] of [
+          [sorted, "sort", SORT],
+          [tagged, "tag", TAG],
+        ] as const) {
+          assert.equal(
+            turn.outcome?.kind,
+            "completed",
+            String(turn.error || ""),
+          );
+          const part = outcome(settled(turn), taskId);
+          assert.equal(part.status, "completed");
+          assert.lengthOf(part.doneTargets!, 60);
+          assert.deepEqual(settled(turn).end, { state: "completed" });
+          // Paged at what a paper's record costs, not its text.
+          assert.include(firstPage(turn), {
+            page: 1,
+            left: 60,
+            measured: false,
+            costPerPaper: 600,
+          });
+          const pages = hostMessages(turn).filter((text) =>
+            text.includes("in this order:"),
+          );
+          assert.isAtLeast(pages.length, 2, JSON.stringify(pageEvents(turn)));
+          for (const text of pages) {
+            assert.include(
+              text,
+              `Make the change “${description}” for these papers now`,
+            );
+            assert.include(text, "library_search with include:['abstract']");
+          }
+          for (const text of hostMessages(turn)) {
+            assert.notInclude(text, "paper_read");
+            assert.notMatch(text, /\bread\b/i, text);
+          }
+        }
+        assert.include(
+          promptText(sorted.prompts[0]),
+          "\nPaper scope: whole library — 60 papers, 60 with full text\n",
+        );
+      } finally {
+        liveReceipts = [];
+      }
+    });
+
+    it("reads for a note on each of fifty papers: priced at their text and told to read", async function () {
+      const turn = await runTurn({
+        conversationKey,
+        userText: "Read each of these papers and save a note on each",
+        scope: library(50),
+        attached: { advanced: { inputTokenCap: 30_000 } as never },
+        steps: declaredOnly([
+          {
+            taskId: "note-all",
+            description: NOTE,
+            expectedEffect: "mutation",
+            expectedCapability: "zotero.notes",
+            scope: true,
+          },
+        ]),
+      });
+      assert.include(firstPage(turn), {
+        page: 1,
+        left: 50,
+        measured: false,
+        costPerPaper: 12_000,
+      });
+      const [page] = hostMessages(turn);
+      assert.include(page, "Read them with paper_read mode:'overview'");
+      assert.include(page, "use mode:'full' only if the user asked");
+      assert.include(page, `Then make the change “${NOTE}” for each of them.`);
+    });
+
+    it("prices a mixed job, reading each paper and tagging it by its method, as reading", async function () {
+      const turn = await runTurn({
+        conversationKey,
+        userText: "Read each paper and tag it by its method",
+        scope: library(60),
+        attached: { advanced: { inputTokenCap: 30_000 } as never },
+        steps: declaredOnly([
+          {
+            taskId: "read-all",
+            description: READ_ALL,
+            expectedEffect: "read",
+            scope: true,
+          },
+          {
+            taskId: "tag",
+            description: TAG,
+            expectedEffect: "mutation",
+            expectedCapability: "zotero.tags",
+            scope: true,
+          },
+        ]),
+      });
+      assert.include(firstPage(turn), {
+        page: 1,
+        left: 60,
+        measured: false,
+        costPerPaper: 12_000,
+      });
+      const [page] = hostMessages(turn);
+      assert.include(page, "Read them with paper_read mode:'overview'");
+      assert.include(page, `Then make the change “${TAG}” for each of them.`);
+      assert.notInclude(page, "library_search");
+    });
+  });
 });
 
 describe("derived limits in runtime turns", function () {
