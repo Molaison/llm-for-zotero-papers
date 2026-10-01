@@ -263,13 +263,19 @@ function zoteroIdentity(source: Candidate): {
   const itemKey = text(item?.key);
   const libraryID = positive(item?.libraryID);
   if (!itemKey || !libraryID) return null;
+  // The context item is the file that was read. A standalone PDF is also its
+  // own bibliographic item, and its figure assets name it as the attachment,
+  // so it is named here too; a regular item is never an attachment.
+  const attachment =
+    contextItem &&
+    item &&
+    (contextItem.id !== item.id || contextItem.isAttachment?.())
+      ? contextItem
+      : null;
   return {
     libraryID,
     itemKey,
-    attachmentItemKey:
-      contextItem && item && contextItem.id !== item.id
-        ? text(contextItem.key)
-        : undefined,
+    attachmentItemKey: text(attachment?.key),
   };
 }
 

@@ -244,6 +244,81 @@ describe("PdfFigureExtractionService", function () {
     assert.deepEqual(observations[0].capabilities, ["figure"]);
   });
 
+  it("observes a standalone PDF's figure under the same identity its document asset names", async function () {
+    // A standalone PDF is an attachment without a parent item: it is its own
+    // bibliographic item, so the paper context names it twice.
+    const standalone = {
+      itemId: 33,
+      contextItemId: 33,
+      title: "Standalone PDF",
+    };
+    const cropPath = "/tmp/zotero/standalone-crops/figure-1-p2.png";
+    files.set(
+      cropPath,
+      Uint8Array.from(
+        Buffer.from(
+          "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a/aYAAAAASUVORK5CYII=",
+          "base64",
+        ),
+      ),
+    );
+    files.set("/tmp/standalone.pdf", encoder.encode("standalone PDF bytes"));
+    const items = new Map([
+      [
+        33,
+        {
+          id: 33,
+          key: "PDF00033",
+          libraryID: 1,
+          isAttachment: () => true,
+          getFilePathAsync: async () => "/tmp/standalone.pdf",
+        },
+      ],
+    ]);
+    globalScope.Zotero = {
+      DataDirectory: { dir: "/tmp/zotero" },
+      Items: { get: (id: number) => items.get(id) },
+    };
+    const result = await new PdfFigureExtractionService({
+      extractFiguresFromSourcePdf: async () => [cachedFigure(cropPath)],
+    } as never).extractFigures({
+      input: { query: "Figure 1" },
+      selection: {
+        labels: ["Figure 1"],
+        kind: "figures",
+        includeSupplementary: false,
+      },
+      context,
+      paperContexts: [standalone],
+    });
+    const provenance = result.figures?.[0].documentAsset?.provenance as Record<
+      string,
+      unknown
+    >;
+    assert.include(provenance, {
+      origin: "extracted",
+      itemKey: "PDF00033",
+      attachmentItemKey: "PDF00033",
+    });
+
+    const observations = await createTrustedReadObservations({
+      toolName: "paper_read",
+      callId: "standalone-figure-read",
+      input: { mode: "figures" },
+      result,
+    });
+
+    assert.lengthOf(observations, 1);
+    assert.deepInclude(observations[0], {
+      libraryID: provenance.libraryID,
+      itemKey: provenance.itemKey,
+      attachmentItemKey: provenance.attachmentItemKey,
+      pageIndex: provenance.pageIndex,
+      sourceFingerprint: provenance.sourceFingerprint,
+    });
+    assert.deepEqual(observations[0].capabilities, ["figure"]);
+  });
+
   it("requests a concrete figure selector when neither the call nor the request supplies one", async function () {
     let calls = 0;
     const result = await new PdfFigureExtractionService({

@@ -9,6 +9,8 @@ describe("trusted read observations", function () {
       [10, { id: 10, key: "AAAA1111", libraryID: 1 }],
       [11, { id: 11, key: "BBBB2222", libraryID: 1 }],
       [20, { id: 20, key: "PDFP1111", libraryID: 1, parentID: 10 }],
+      // A standalone PDF: an attachment that is its own bibliographic item.
+      [30, { id: 30, key: "PDFS3030", libraryID: 1, isAttachment: () => true }],
     ]);
     (globalThis as { Zotero?: unknown }).Zotero = {
       Items: { get: (itemId: number) => items.get(itemId) || null },
@@ -17,6 +19,40 @@ describe("trusted read observations", function () {
 
   after(function () {
     (globalThis as { Zotero?: unknown }).Zotero = priorZotero;
+  });
+
+  it("names a standalone PDF as the attachment it read, and never a regular item", async function () {
+    const read = (paperContext: { itemId: number; contextItemId: number }) =>
+      createTrustedReadObservations({
+        toolName: "paper_read",
+        callId: `read-${paperContext.itemId}`,
+        input: { mode: "full" },
+        result: {
+          papers: [
+            {
+              paperContext,
+              pageIndex: 2,
+              sourceFingerprint: "pdfjs:standalone",
+              text: "A verified passage",
+            },
+          ],
+        },
+      });
+
+    const [standalone] = await read({ itemId: 30, contextItemId: 30 });
+    assert.deepInclude(standalone, {
+      libraryID: 1,
+      itemKey: "PDFS3030",
+      attachmentItemKey: "PDFS3030",
+      pageIndex: 2,
+    });
+
+    const [regular] = await read({ itemId: 10, contextItemId: 10 });
+    assert.equal(regular.itemKey, "AAAA1111");
+    assert.isUndefined(
+      regular.attachmentItemKey,
+      "a regular item is not an attachment, even as its own context",
+    );
   });
 
   it("does not treat unknown or empty result shapes as provenance", async function () {

@@ -127,8 +127,30 @@ const CROP_PATH = "/tmp/figure-crops/figure-1-p2.png";
 const FIGURE_CAPTION = "Figure 1. Assemblies drift across days.";
 
 /**
- * The paper and its PDF as Zotero knows them, and the files a figure document
- * reads (the crop) and writes (its durable asset copy).
+ * The PDF a figure turn reads, with the native identity its figure asset
+ * names: a paper's child PDF, or a standalone PDF (an attachment without a
+ * parent item, so it is its own bibliographic item).
+ */
+type FigureSource = {
+  paperContext: { itemId: number; contextItemId: number };
+  itemKey: string;
+  attachmentItemKey: string;
+};
+const PARENTED_PDF: FigureSource = {
+  paperContext: { itemId: 11, contextItemId: 22 },
+  itemKey: "PAPER001",
+  attachmentItemKey: "PDF00001",
+};
+const STANDALONE_PDF: FigureSource = {
+  paperContext: { itemId: 33, contextItemId: 33 },
+  itemKey: "PDF00033",
+  attachmentItemKey: "PDF00033",
+};
+
+/**
+ * The paper, its PDF, and a standalone PDF as Zotero knows them, and the
+ * files a figure document reads (the crop) and writes (its durable asset
+ * copy).
  */
 function installFigureLibrary(): {
   files: Map<string, Uint8Array>;
@@ -137,7 +159,17 @@ function installFigureLibrary(): {
     .Zotero;
   const items = new Map<number, Record<string, unknown>>([
     [11, { id: 11, key: "PAPER001", libraryID: 1 }],
-    [22, { id: 22, key: "PDF00001", libraryID: 1, parentID: 11 }],
+    [
+      22,
+      {
+        id: 22,
+        key: "PDF00001",
+        libraryID: 1,
+        parentID: 11,
+        isAttachment: () => true,
+      },
+    ],
+    [33, { id: 33, key: "PDF00033", libraryID: 1, isAttachment: () => true }],
   ]);
   zotero.Items = { get: (id: number) => items.get(id) || null };
   zotero.DataDirectory = { dir: "/tmp/zotero-data" };
@@ -163,12 +195,12 @@ function installFigureLibrary(): {
 }
 
 /**
- * An ordinary in-plugin turn that has read one figure, with the real
- * submit_document registered. paper_read answers in the shape the figure
+ * An ordinary in-plugin turn that has read one figure from `source`, with the
+ * real submit_document registered. paper_read answers in the shape the figure
  * extraction service returns: the crop row with the asset a document may
  * carry, and the artifact the host records for it.
  */
-async function startFigureTurn() {
+async function startFigureTurn(source: FigureSource = PARENTED_PDF) {
   const restoreDb = installMockDb();
   const restoreDocuments = installAgentStoreSqlite();
   const library = installFigureLibrary();
@@ -182,7 +214,7 @@ async function startFigureTurn() {
     const contentHash = `sha256:${await sha256Bytes(CROP_BYTES)}`;
     const sourceFingerprint = `sha256:${"b".repeat(64)}`;
     const asset: PlanDocumentAsset = {
-      assetId: "PDF00001-figure-1-p2",
+      assetId: `${source.attachmentItemKey}-figure-1-p2`,
       contentHash,
       mimeType: "image/png",
       byteLength: CROP_BYTES.byteLength,
@@ -193,8 +225,8 @@ async function startFigureTurn() {
       provenance: {
         origin: "extracted",
         libraryID: 1,
-        itemKey: "PAPER001",
-        attachmentItemKey: "PDF00001",
+        itemKey: source.itemKey,
+        attachmentItemKey: source.attachmentItemKey,
         sourceFingerprint,
         pageIndex: 1,
         extractionToolVersion: "pdf-figure-crop:test",
@@ -221,7 +253,7 @@ async function startFigureTurn() {
               captionText: FIGURE_CAPTION,
               pageIndex: 1,
               sourceFingerprint,
-              paperContext: { itemId: 11, contextItemId: 22 },
+              paperContext: source.paperContext,
               documentAsset: asset,
             },
           ],
@@ -259,7 +291,7 @@ async function startFigureTurn() {
         name: "paper_read",
         arguments: {
           mode: "figures",
-          target: { itemId: 11, contextItemId: 22 },
+          target: source.paperContext,
         },
       },
       1,
@@ -902,6 +934,56 @@ describe("agent tool execution collaborator", function () {
       assert.deepEqual(refused.toolResult.content, {
         error:
           "Document asset PDF00001-figure-2-p4 was not emitted by a successful host tool call",
+      });
+      assert.isNull(
+        turn.harness.finalizedMaterial.value,
+        "nothing is published",
+      );
+    } finally {
+      turn.restore();
+    }
+  });
+
+  it("lets a document include a figure read from a standalone PDF", async function () {
+    const turn = await startFigureTurn(STANDALONE_PDF);
+    try {
+      const submitted = await turn.submit([turn.asset]);
+
+      assert.isTrue(
+        submitted.toolResult.ok,
+        JSON.stringify(submitted.toolResult.content),
+      );
+      const { documentId } = submitted.toolResult.content as {
+        documentId: string;
+      };
+      const published = (await loadPlanDocument(documentId))?.assets || [];
+      assert.lengthOf(published, 1, "the published document has the figure");
+      assert.include(published[0], {
+        assetId: "PDF00033-figure-1-p2",
+        contentHash: turn.asset.contentHash,
+      });
+    } finally {
+      turn.restore();
+    }
+  });
+
+  it("still refuses a standalone PDF's figure asset that names another attachment", async function () {
+    const turn = await startFigureTurn(STANDALONE_PDF);
+    try {
+      const refused = await turn.submit([
+        {
+          ...turn.asset,
+          provenance: {
+            ...turn.asset.provenance,
+            attachmentItemKey: "PDF00001",
+          },
+        } as PlanDocumentAsset,
+      ]);
+
+      assert.isFalse(refused.toolResult.ok);
+      assert.deepEqual(refused.toolResult.content, {
+        error:
+          "Extracted asset PDF00033-figure-1-p2 is not backed by a host-verified figure observation",
       });
       assert.isNull(
         turn.harness.finalizedMaterial.value,
