@@ -60,6 +60,7 @@ describe("reorganize-library skill", function () {
       "Read further only for a paper its metadata cannot place",
       "targeted `paper_read`, not its full text",
       "never read every paper by default",
+      "Do not list them with a `zotero_script`",
     ])
       assert.include(skill.instruction, phrase);
     assert.include(schemaOf("paper_read").properties!.mode.enum!, "targeted");
