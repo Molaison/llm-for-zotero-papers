@@ -16,15 +16,11 @@ describe("workflow: Plan trace presentation", function () {
         conversationKey,
         mode: "agent",
         userText: "Write the guide",
-        documentOutcomePolicy: {
-          required: true,
-          documentKind: "guide",
-          integrityPolicy: "authored",
-          trigger: "document_intent",
-        },
       } as unknown as AgentRuntimeRequest,
       runId: `publication-trace-${conversationKey}`,
       input: {
+        documentKind: "guide",
+        integrityPolicy: "authored",
         title: "Guide",
         markdown:
           "# Guide\n\n" +

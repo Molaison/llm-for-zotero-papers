@@ -71,7 +71,6 @@ export function buildEvidenceCacheKey(params: {
   sectionIds: readonly string[];
   source: Awaited<ReturnType<PdfService["ensurePaperContext"]>>;
   embeddingKey: string;
-  purpose?: string;
   quotePolicy?: string;
 }): EvidenceCacheKey {
   const fingerprints = [
@@ -94,7 +93,6 @@ export function buildEvidenceCacheKey(params: {
     params.perPaperTopK,
     [...params.sectionIds].sort(),
     params.embeddingKey,
-    params.purpose,
     params.quotePolicy,
     fingerprints.length
       ? fingerprints
@@ -214,7 +212,6 @@ export class RetrievalService {
         sectionIds,
         source: pdfContext,
         embeddingKey,
-        purpose: queryPlan.retrievalPurpose,
         quotePolicy: queryPlan.quoteAnchorPolicy,
       });
       const cached = this.evidenceCache.get(cacheKey);

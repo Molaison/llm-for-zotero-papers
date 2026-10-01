@@ -2253,58 +2253,20 @@ function shouldTryEmbeddings(): boolean {
   return state.enabled;
 }
 
-// ── Intent-driven evidence heuristics ────────────────────────────────────────
-
-type QueryIntent =
-  | "factual"
-  | "conceptual"
-  | "methodological"
-  | "comparative"
-  | "citation"
-  | "visual"
-  | "general";
+// ── Evidence section heuristics ──────────────────────────────────────────────
 
 /**
- * Section priors keyed by query intent. Only the *sign* of a prior survives:
- * a boosted kind moves up a fixed two ranks, a demoted kind moves to the end.
- * `introduction`, `body` and `unknown` never move — a prior may break a tie,
- * it may not decide the order (reciprocal-rank fusion spans ~0.03 in total,
- * so the old additive constants of 0.8–1.5 overruled relevance outright).
+ * Section priors. Only the *sign* of a prior survives: a boosted kind moves
+ * up a fixed two ranks, a demoted kind moves to the end. `introduction`,
+ * `body` and `unknown` never move — a prior may break a tie, it may not
+ * decide the order (reciprocal-rank fusion spans ~0.03 in total, so the old
+ * additive constants of 0.8–1.5 overruled relevance outright).
  */
-const SECTION_BOOST_PROFILES: Record<
-  QueryIntent,
-  { boost: PdfChunkKind[]; demote: PdfChunkKind[] }
-> = {
-  general: {
+const SECTION_BOOST_PROFILE: { boost: PdfChunkKind[]; demote: PdfChunkKind[] } =
+  {
     boost: ["abstract", "results", "discussion", "conclusion"],
     demote: ["figure-caption", "table-caption", "appendix", "references"],
-  },
-  factual: {
-    boost: ["results", "methods", "abstract", "discussion"],
-    demote: ["figure-caption", "table-caption", "appendix", "references"],
-  },
-  conceptual: {
-    boost: ["discussion", "abstract", "results"],
-    demote: ["figure-caption", "table-caption", "appendix", "references"],
-  },
-  methodological: {
-    boost: ["methods", "abstract", "results"],
-    // The old profile gave `appendix` a positive weight for method questions.
-    demote: ["figure-caption", "table-caption", "references"],
-  },
-  comparative: {
-    boost: ["results", "discussion", "abstract"],
-    demote: ["figure-caption", "table-caption", "appendix", "references"],
-  },
-  citation: {
-    boost: ["references", "discussion", "abstract"],
-    demote: ["figure-caption", "table-caption", "appendix"],
-  },
-  visual: {
-    boost: ["figure-caption", "table-caption", "results"],
-    demote: ["appendix", "references"],
-  },
-};
+  };
 
 /** Ranks a boosted section kind can climb. */
 const SECTION_PRIOR_RANK_SHIFT = -2;
@@ -2327,14 +2289,13 @@ function priorShiftFor(params: {
   chunkText: string;
   chunkKind?: PdfChunkKind;
   kindSource?: "manifest" | "heuristic";
-  intent?: QueryIntent;
 }): SectionPrior {
   const chunkText = normalizeEvidenceText(params.chunkText);
   const wordCount = chunkText ? chunkText.split(/\s+/).length : 0;
   if (wordCount < MIN_EVIDENCE_WORD_COUNT) return DEMOTED_PRIOR;
   if (looksLikeReferenceList(params.chunkText)) return DEMOTED_PRIOR;
 
-  const profile = SECTION_BOOST_PROFILES[params.intent || "general"];
+  const profile = SECTION_BOOST_PROFILE;
   const kind = params.chunkKind as PdfChunkKind | undefined;
   if (!kind) return NEUTRAL_PRIOR;
   if (profile.demote.includes(kind)) return DEMOTED_PRIOR;
@@ -2769,8 +2730,6 @@ export async function buildPaperRetrievalCandidates(
   // normalization sensitivity and fixed weight tuning.
   const retrievalMode = options?.mode || "general";
 
-  const intent = queryPlan?.retrievalPurpose;
-
   const candidates = chunkStats.map((chunk, idx) => {
     const bm25Score = bm25Scores[idx] || 0;
     const embeddingScore = rawEmbeddingScores
@@ -2827,7 +2786,6 @@ export async function buildPaperRetrievalCandidates(
               chunkText: chunks[chunk.index],
               chunkKind: meta?.chunkKind,
               kindSource: meta?.kindSource,
-              intent,
             })
           : NEUTRAL_PRIOR),
         kindSource: meta?.kindSource,

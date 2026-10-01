@@ -198,7 +198,7 @@ export class InvocationAssessor {
       plan.impact !== "read_only"
     )
       throw new Error(
-        "No current semantic action contract authorizes this effect. Legacy contracts are history-only.",
+        "This effect was refused: no agent turn, connected runtime or host action owns it.",
       );
     if (
       effect &&

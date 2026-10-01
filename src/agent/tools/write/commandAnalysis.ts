@@ -301,27 +301,12 @@ function isNullRedirectTarget(path: string): boolean {
   return normalized === "/dev/null" || normalized === "nul";
 }
 
-export function isMarkdownNotePath(path: string): boolean {
-  return /\.(?:md|markdown)$/i.test(path.trim());
-}
-
 function normalizeParsedCommandTarget(
   value: string,
   options?: { unquoted?: boolean },
 ): string {
   const path = value.trim();
   return options?.unquoted ? path.replace(/\)+$/g, "") : path;
-}
-
-export function isRelativeCommandPath(path: string): boolean {
-  const trimmed = path.trim();
-  return (
-    Boolean(trimmed) && !isAbsolutePath(trimmed) && !trimmed.startsWith("~")
-  );
-}
-
-export function commandStartsWithDirectoryChange(command: string): boolean {
-  return /^(?:\(\s*)?cd(?:\s+|$)[\s\S]*(?:&&|;)/.test(command.trim());
 }
 
 function parseRedirectTarget(command: string): ReversibleCommandWrite | null {

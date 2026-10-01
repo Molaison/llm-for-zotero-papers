@@ -31,17 +31,10 @@ export type DocumentSpec = Readonly<{
 
 export type DocumentIntegrityPolicy = "research_grounded" | "authored";
 
+/** How a submitted document is validated: its kind and integrity policy. */
 export type DocumentOutcomePolicy = Readonly<{
-  required: boolean;
   documentKind: DocumentSpec["kind"];
   integrityPolicy: DocumentIntegrityPolicy;
-  trigger:
-    | "workflow_material"
-    | "plan_deliverable"
-    | "literature_review_skill"
-    | "literature_review_intent"
-    | "document_intent"
-    | "none";
 }>;
 
 export type PlanCitationSource = Readonly<{

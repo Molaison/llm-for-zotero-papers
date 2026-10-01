@@ -100,7 +100,6 @@ import {
 import { validateLocalPdfDocumentBatch } from "./context/localDocumentBatch";
 import { RAW_PDF_TRANSPORT_POLICY_BLOCK } from "./context/rawPdfTransportPolicy";
 import { loadLatestDocumentForRun } from "./documents/store";
-import { resolveDocumentOutcomePolicy } from "./documents/outcomePolicy";
 import {
   AgentEventLocalDocumentStreamRedactor,
   acquireLocalDocumentPathLease,
@@ -709,20 +708,6 @@ function buildClaudeBridgeCustomInstruction(
     .join("\n\n");
 }
 
-function buildDocumentOutcomeInstruction(request: AgentRuntimeRequest): string {
-  const policy = request.documentOutcomePolicy;
-  if (!policy?.required) return "";
-  const validation =
-    policy.integrityPolicy === "research_grounded"
-      ? "This is a research-grounded document. Read Zotero sources first, include a Scope and limitations section, use [[cite:C1]] tokens for supported claims, and copy the host-issued documentEvidenceRefs from successful read tools into the corresponding citation sources."
-      : "This is an authored document. Give it a complete Markdown structure; citations are optional unless the requested content needs them.";
-  return [
-    "The host requires a first-class document artifact for this turn. Ordinary prose is not a valid terminal answer.",
-    validation,
-    "Call the scoped Zotero MCP submit_document tool exactly once when the document is complete. Do not write a References section manually; Zotero generates it from citation mappings.",
-  ].join(" ");
-}
-
 export function buildClaudeBridgeCustomInstructionForTests(
   rawPdfMode = false,
 ): string {
@@ -1119,14 +1104,9 @@ async function runExternalBridgeTurn(
       claudeSettingSources: getClaudeSettingSourcesByPref(),
       settingSources: getClaudeSettingSourcesCsvByPref(),
       ...buildAgentPermissionMetadata(),
-      customInstruction: [
-        buildClaudeBridgeCustomInstruction({
-          rawPdfMode: requestLocalDocuments(params.request).length > 0,
-        }),
-        buildDocumentOutcomeInstruction(params.request),
-      ]
-        .filter(Boolean)
-        .join("\n\n"),
+      customInstruction: buildClaudeBridgeCustomInstruction({
+        rawPdfMode: requestLocalDocuments(params.request).length > 0,
+      }),
       providerIdentity,
       providerIdentityStack,
       model: resolveClaudeBridgeModelForMetadata(params.request.model),
@@ -1382,7 +1362,6 @@ function buildClaudeZoteroMcpScope(
     sourceMessageTimestamp: Number(request.metadata?.sourceMessageTimestamp),
     executionContext: request.executionContext,
     clarificationHistory: request.clarificationHistory,
-    documentOutcomePolicy: request.documentOutcomePolicy,
     documentReadObservations: request.documentReadObservations,
     documentArtifactObservations: request.documentArtifactObservations,
     profileSignature,
@@ -3143,7 +3122,6 @@ export function createExternalBackendBridgeRuntime(options: {
           makeProfilingEvent("frontend.run_turn.enter"),
         );
         await notifyIfLive(makeProfilingEvent("frontend.run_turn.enter"));
-        params.request.documentOutcomePolicy = resolveDocumentOutcomePolicy();
         const contextEnvelope = buildContextEnvelope(params.request);
         await appendPersistedEvent(
           makeProfilingEvent("frontend.context_envelope.ready"),
@@ -3372,24 +3350,16 @@ export function createExternalBackendBridgeRuntime(options: {
           const runBridge = async (
             request: AgentRuntimeRequest,
             bridgeRuntimeRequest: BridgeRuntimeRequest,
-            correctionAttempt = false,
           ): Promise<AgentRuntimeOutcome> =>
             runExternalBridgeTurn(bridgeUrl, {
               ...params,
               request,
               onStart: async (runId) => {
-                const hadPersistedRun = Boolean(persistedRunId);
-                const logicalRunId =
-                  correctionAttempt && persistedRunId ? persistedRunId : runId;
                 if (scopedMcpToken) {
-                  updateScopedZoteroMcpScope(scopedMcpToken, {
-                    runId: logicalRunId,
-                  });
+                  updateScopedZoteroMcpScope(scopedMcpToken, { runId });
                 }
-                if (!correctionAttempt || !hadPersistedRun) {
-                  await ensurePersistedRun(runId);
-                  if (writeAllowed()) await params.onStart?.(runId);
-                }
+                await ensurePersistedRun(runId);
+                if (writeAllowed()) await params.onStart?.(runId);
               },
               onEvent: emitTurnEvent,
               contextEnvelope,
@@ -3411,33 +3381,6 @@ export function createExternalBackendBridgeRuntime(options: {
           let finalizedDocument = null;
           if (outcome.kind === "completed") {
             finalizedDocument = await loadFinalizedDocument();
-          }
-          if (
-            outcome.kind === "completed" &&
-            params.request.documentOutcomePolicy?.required &&
-            !finalizedDocument
-          ) {
-            const correctionText =
-              "Host correction: this turn requires a finalized document artifact. Complete the requested document now and call the scoped Zotero submit_document tool exactly once. Do not return ordinary answer prose.";
-            const correctionRequest: AgentRuntimeRequest = {
-              ...params.request,
-              userText: correctionText,
-              metadata: {
-                ...(params.request.metadata || {}),
-                documentCorrectionAttempt: 1,
-              },
-            };
-            outcome = await runBridge(
-              correctionRequest,
-              { ...runtimeRequest, userText: correctionText },
-              true,
-            );
-            terminalRunStatus =
-              outcome.kind === "completed" ? "completed" : "failed";
-            await Promise.all(pendingMcpActivity);
-            if (outcome.kind === "completed") {
-              finalizedDocument = await loadFinalizedDocument();
-            }
           }
           if (outcome.kind === "completed") {
             const document = finalizedDocument;
@@ -3473,19 +3416,7 @@ export function createExternalBackendBridgeRuntime(options: {
               usedFallback: false,
             };
           }
-          if (
-            outcome.kind === "completed" &&
-            params.request.documentOutcomePolicy?.required &&
-            !finalizedDocument
-          ) {
-            terminalRunStatus = "failed";
-            outcome = {
-              kind: "completed",
-              runId: outcome.runId,
-              text: "The requested document was not finalized, so ordinary answer text cannot be accepted as the completed outcome.",
-              usedFallback: false,
-            };
-          }
+
           for (const redactedEvent of eventStreamRedactor.flush()) {
             await appendPersistedEvent(redactedEvent);
             await notifyIfLive(redactedEvent);

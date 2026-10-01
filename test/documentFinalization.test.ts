@@ -67,17 +67,9 @@ describe("document finalization persistence", function () {
     const gateway = {} as ZoteroGateway;
     const finalize = () =>
       new DirectDocumentFinalizer(gateway).finalize({
-        request: {
-          conversationKey: 41,
-          documentOutcomePolicy: {
-            required: true,
-            documentKind: "guide",
-            integrityPolicy: "authored",
-            trigger: "document_intent",
-          },
-        } as AgentRuntimeRequest,
+        request: { conversationKey: 41 } as AgentRuntimeRequest,
         runId: "guide-run",
-        input,
+        input: { ...input, documentKind: "guide", integrityPolicy: "authored" },
         now: 4,
       });
     const originalQuery = Zotero.DB.queryAsync;

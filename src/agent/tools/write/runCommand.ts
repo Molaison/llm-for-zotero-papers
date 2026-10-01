@@ -6,17 +6,11 @@
  * Uses Mozilla's Subprocess module (Gecko runtime).
  */
 import type {
-  AgentToolContext,
   AgentActionEvidence,
   AgentToolEffect,
   AgentWriteToolDefinition,
 } from "../../types";
-import { prohibitedInvocationPlan } from "../../authorization/invocationPlan";
 import { getRuntimePlatformInfo } from "../../../utils/runtimePlatform";
-import {
-  isLocalPathInsideOrEqual,
-  parseNotesDirectoryWritePolicy,
-} from "../../../utils/notesDirectoryConfig";
 import { neverSelected } from "../guidance";
 import { ok, fail, validateObject } from "../shared";
 import { executeExternalMutation } from "../../services/externalMutationCoordinator";
@@ -27,13 +21,7 @@ import {
   classifyRunCommandInvocation,
   pathExists,
   resolveReversibleOutputPath,
-  resolvedCommandTargets,
   identifyCommandOutput,
-  parseCommandWriteTargets,
-  isMarkdownNotePath,
-  isRelativeCommandPath,
-  commandStartsWithDirectoryChange,
-  resolveCommandPath,
   type RunCommandInput,
 } from "./commandAnalysis";
 export { classifyRunCommandInvocation } from "./commandAnalysis";
@@ -247,43 +235,6 @@ export async function executeCommand(params: {
   }
 }
 
-function getNoteWriteBypassRefusal(
-  input: Pick<RunCommandInput, "command" | "cwd">,
-  context: AgentToolContext | undefined,
-): string | null {
-  const policy = parseNotesDirectoryWritePolicy(
-    context?.request.metadata?.fileNoteWritePolicy,
-  );
-  if (!policy) return null;
-  const targets = parseCommandWriteTargets(input.command).filter((path) =>
-    isMarkdownNotePath(path),
-  );
-  const relativeMarkdownTargetAfterCd = targets.find(
-    (path) =>
-      isRelativeCommandPath(path) &&
-      commandStartsWithDirectoryChange(input.command),
-  );
-  if (relativeMarkdownTargetAfterCd) {
-    return (
-      `Refusing run_command relative Markdown note write after shell directory change: ${relativeMarkdownTargetAfterCd}. ` +
-      "Use file_io for external Markdown note files or note_write for Zotero notes so MinerU figure-block completeness can be validated before writing."
-    );
-  }
-  const resolvedTargets = targets.map((path) =>
-    resolveCommandPath(path, input.cwd),
-  );
-  const noteTarget = resolvedTargets.find(
-    (path) =>
-      isLocalPathInsideOrEqual(path, policy.defaultTargetPath) ||
-      isLocalPathInsideOrEqual(path, policy.directoryPath),
-  );
-  if (!noteTarget) return null;
-  return (
-    `Refusing run_command Markdown note write to configured notes directory: ${noteTarget}. ` +
-    "Use file_io for external Markdown note files or note_write for Zotero notes so MinerU figure-block completeness can be validated before writing."
-  );
-}
-
 export function createRunCommandTool(): AgentWriteToolDefinition<
   RunCommandInput,
   unknown
@@ -409,17 +360,6 @@ export function createRunCommandTool(): AgentWriteToolDefinition<
 
     async planInvocation(input, context) {
       input.cwd ||= context.request.workingDirectory;
-      if (getNoteWriteBypassRefusal(input, context)) {
-        return prohibitedInvocationPlan({
-          mechanism: "shell",
-          domains: ["filesystem", "local_execution"],
-          effects: ["modify"],
-          targets: resolvedCommandTargets(input),
-          riskSignals: [],
-          reason:
-            "The command attempts to bypass the validated note-writing path.",
-        });
-      }
       return classifyRunCommandInvocation(input);
     },
 
@@ -454,18 +394,6 @@ export function createRunCommandTool(): AgentWriteToolDefinition<
 
     async execute(input, context) {
       const reversibleWrite = identifyCommandOutput(input.command);
-      const noteWriteRefusal = getNoteWriteBypassRefusal(input, context);
-      if (noteWriteRefusal) {
-        return {
-          content: {
-            exitCode: -1,
-            stdout: "",
-            stderr: noteWriteRefusal,
-            command: input.command,
-          },
-          effect: "none",
-        };
-      }
       let outputPath: string | undefined;
       const run = () =>
         executeCommand({

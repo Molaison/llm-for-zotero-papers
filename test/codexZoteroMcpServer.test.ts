@@ -1300,17 +1300,6 @@ describe("Zotero MCP server", function () {
       kind: "global",
       requestInteraction: async () => ({ approved: false }),
     });
-    const required = registerScopedZoteroMcpScope({
-      conversationKey: 7002,
-      libraryID: 1,
-      kind: "global",
-      documentOutcomePolicy: {
-        required: true,
-        documentKind: "literature_review",
-        integrityPolicy: "research_grounded",
-        trigger: "literature_review_skill",
-      },
-    });
     const token = getOrCreateZoteroMcpBearerToken();
     try {
       const listedNames = async (scopeToken: string) => {
@@ -1325,10 +1314,8 @@ describe("Zotero MCP server", function () {
       };
       assert.include(await listedNames(ordinary.token), "submit_document");
       assert.include(await listedNames(ordinary.token), "request_user_input");
-      assert.include(await listedNames(required.token), "submit_document");
     } finally {
       ordinary.clear();
-      required.clear();
     }
   });
   it("carries single-owner reading guidance on the paper_read and library_retrieve descriptions", async function () {

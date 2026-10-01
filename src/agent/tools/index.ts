@@ -100,7 +100,7 @@ const LIBRARY_UPDATE_GUIDANCE: ToolGuidance = {
   matches: (request) =>
     userTextSignal(request, (signals) => signals.mentionsAttachment),
   instruction:
-    "Execute resolved library write obligations with library_update and report verified receipts. Central policy decides whether a review card is required. Use kind:'tags' for tag changes, kind:'collections' for collection membership, and kind:'metadata' for item metadata fields. Batch one uniform change across all applicable item IDs in a single call. For different per-item changes, use assignments when the schema supports them. A zotero_script computation uses the same exact-effect authority; the mechanism alone adds no confirmation. Explicit script prohibitions remain binding. For metadata obligations with permitted external evidence discovery, use literature_search with workflow:'review' and mode:'metadata' to fetch canonical data, then continue through the exact review/update flow. Bind direct metadata updates to the field values in the resolved obligation or approved review." +
+    "Make the requested library changes with library_update and report its verified receipts. Central policy decides whether a review card is required. Use kind:'tags' for tag changes, kind:'collections' for collection membership, and kind:'metadata' for item metadata fields. Batch one uniform change across all applicable item IDs in a single call. For different per-item changes, use assignments when the schema supports them. A zotero_script computation goes through the same authorization; the mechanism alone adds no confirmation. When metadata should come from external sources, use literature_search with workflow:'review' and mode:'metadata' to fetch canonical data, then continue through its review/update flow. Set metadata fields to the values the user asked for or approved in that review." +
     "\n\nUse kind:'attachment' to delete, rename, or re-link a single attachment. To find attachments, use library_read with sections:['attachments'] first. Renaming renames the file on disk, not just the title. Re-linking repairs an attachment whose file has moved or gone missing, and works for stored attachments as well as linked files; only linked URLs cannot be re-linked. Batch renaming with computed filenames requires separately authorized computation and exact attachment targets.",
 };
 
@@ -108,7 +108,7 @@ const LIBRARY_IMPORT_GUIDANCE: ToolGuidance = {
   matches: (request) =>
     userTextSignal(request, (signals) => signals.mentionsImport),
   instruction:
-    "Use library_import with kind:'files' to import local files from the user's filesystem into Zotero. Use only resolved paths within the contract's source boundary. Missing paths require preparation; this import obligation does not independently authorize command execution. A bibliography file (.ris, .bib, .enw, .nbib, RDF) has its references imported as real items; other files are attached, and PDFs go through Zotero's metadata lookup so they arrive with a title and authors. Optionally specify a targetCollectionId to file the results into a collection." +
+    "Use library_import with kind:'files' to import local files from the user's filesystem into Zotero. Use only paths the user gave or that you resolved; when one is missing, find it or ask. Importing files does not authorize running commands. A bibliography file (.ris, .bib, .enw, .nbib, RDF) has its references imported as real items; other files are attached, and PDFs go through Zotero's metadata lookup so they arrive with a title and authors. Optionally specify a targetCollectionId to file the results into a collection." +
     "\n\nkind:'identifiers' resolves DOIs, ISBNs, PMIDs, arXiv IDs and ADS bibcodes. It cannot import from a page URL — Zotero has no translator path for that — so take the DOI or arXiv ID off the page instead.",
 };
 
@@ -177,7 +177,7 @@ function createLibraryUpdateTool(tools: {
             "save",
           ],
           description:
-            "For kind:'tags' and kind:'collections': 'add' or 'remove'. For kind:'tags', 'set' replaces each item's tags with exactly the ones given and serves only a set-tags obligation; add/remove serve add-tags and remove-tags obligations. For kind:'tag' (the tag object itself): 'rename', 'merge', 'delete' or 'setColor'. For kind:'collection': 'create', 'rename', 'move' or 'delete'. For kind:'attachment': 'rename', 'relink' or 'delete'. For kind:'savedSearch': 'save' or 'delete'.",
+            "For kind:'tags' and kind:'collections': 'add' or 'remove'. For kind:'tags', 'set' replaces each item's tags with exactly the ones given: use it only when the user asked to replace the tags, and add or remove otherwise. For kind:'tag' (the tag object itself): 'rename', 'merge', 'delete' or 'setColor'. For kind:'collection': 'create', 'rename', 'move' or 'delete'. For kind:'attachment': 'rename', 'relink' or 'delete'. For kind:'savedSearch': 'save' or 'delete'.",
         },
         itemIds: {
           ...NUMBER_ARRAY_SCHEMA,

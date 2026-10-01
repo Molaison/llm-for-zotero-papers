@@ -592,7 +592,6 @@ export class PdfFigureExtractionService {
       const recordFigures = async (rows: ExtractedPdfFigure[]) => {
         let sourceFingerprint = pdfFingerprint;
         const needsDocumentAssets =
-          params.context.request.documentOutcomePolicy?.required ||
           params.context.authorization?.kind === "external_runtime";
         if (needsDocumentAssets && rows.length) {
           const attachment = Zotero.Items.get(attachmentId);

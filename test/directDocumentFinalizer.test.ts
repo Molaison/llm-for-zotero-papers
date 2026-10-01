@@ -42,14 +42,12 @@ const groundedCitation: PlanCitationCluster = {
 };
 
 function request(
-  policy: DocumentOutcomePolicy,
   observations: readonly TrustedReadObservation[] = [],
 ): AgentRuntimeRequest {
   return {
     conversationKey: 42,
     mode: "agent",
     userText: "Write the requested document",
-    documentOutcomePolicy: policy,
     documentReadObservations: observations,
     turnPaperScope: {} as AgentRuntimeRequest["turnPaperScope"],
     zoteroMetadataContext: {} as AgentRuntimeRequest["zoteroMetadataContext"],
@@ -226,10 +224,8 @@ describe("DirectDocumentFinalizer", function () {
           : undefined,
       };
       const policy: DocumentOutcomePolicy = {
-        required: true,
         documentKind: "custom",
         integrityPolicy,
-        trigger: "document_intent",
       };
       const draft = {
         ...input({
@@ -249,9 +245,12 @@ describe("DirectDocumentFinalizer", function () {
         ],
       };
       const result = await finalizer.finalize({
-        request: request(policy, [observed]),
+        request: request([observed]),
         runId: `direct-quote-${integrityPolicy}`,
-        input: draft,
+        input: {
+          ...draft,
+          ...policy,
+        },
       });
       assert.include(result.document.visibleMarkdown, `> ${quote}`);
       assert.notInclude(result.document.visibleMarkdown, "[[quote:");
@@ -273,11 +272,12 @@ describe("DirectDocumentFinalizer", function () {
         "the quote certificate is persisted, not only returned",
       );
       const duplicate = await finalizer.finalize({
-        request: request(policy, [observed]),
+        request: request([observed]),
         runId: `adjacent-manual-quote-${integrityPolicy}`,
         input: {
           ...draft,
           markdown: `# Finding\n\n> ${quote}\n\n(Fixture, 2024) [[quote:Q1]] [[cite:C1]]\n\n## Scope and limitations\n\nOne paper, one page.`,
+          ...policy,
         },
       });
       assert.equal(
@@ -290,11 +290,12 @@ describe("DirectDocumentFinalizer", function () {
         "(Fixture, 2024) >",
       );
       const inlineAnchor = await finalizer.finalize({
-        request: request(policy, [observed]),
+        request: request([observed]),
         runId: `inline-manual-quote-${integrityPolicy}`,
         input: {
           ...draft,
           markdown: `# Finding\n\n> ${quote} [[quote:Q1]]\n\n(Fixture, 2024)\n\n[[cite:C1]]\n\n## Scope and limitations\n\nOne paper, one page.`,
+          ...policy,
         },
       });
       assert.equal(
@@ -303,11 +304,12 @@ describe("DirectDocumentFinalizer", function () {
         "a verified anchor inside its literal block must not expand a second copy",
       );
       const attributedInlineAnchor = await finalizer.finalize({
-        request: request(policy, [observed]),
+        request: request([observed]),
         runId: `attributed-inline-quote-${integrityPolicy}`,
         input: {
           ...draft,
           markdown: `# Finding\n\n> ${quote} [[quote:Q1]]\n>\n> (Fixture, 2024)\n\n[[cite:C1]]\n\n## Scope and limitations\n\nOne paper, one page.`,
+          ...policy,
         },
       });
       assert.equal(
@@ -328,11 +330,12 @@ describe("DirectDocumentFinalizer", function () {
         ],
       ] as const) {
         const separate = await finalizer.finalize({
-          request: request(policy, [observed]),
+          request: request([observed]),
           runId: `preserve-${name}-${integrityPolicy}`,
           input: {
             ...draft,
             markdown: `# Finding\n\n${markdown}\n\n## Scope and limitations\n\nOne paper, one page.`,
+            ...policy,
           },
         });
         assert.equal(
@@ -352,7 +355,7 @@ describe("DirectDocumentFinalizer", function () {
       const savedCount = countWrites();
       await expectRejected(
         finalizer.finalize({
-          request: request(policy, [observed]),
+          request: request([observed]),
           runId: "fabricated-quote",
           input: {
             ...draft,
@@ -362,15 +365,19 @@ describe("DirectDocumentFinalizer", function () {
                 text: "The study proves causation in every biological brain.",
               },
             ],
+            ...policy,
           },
         }),
         /failed strict PDF.js verification/,
       );
       await expectRejected(
         finalizer.finalize({
-          request: request(policy, [{ ...observed, pageIndex: 1 }]),
+          request: request([{ ...observed, pageIndex: 1 }]),
           runId: "wrong-page-quote",
-          input: draft,
+          input: {
+            ...draft,
+            ...policy,
+          },
           // An otherwise valid quotation cannot borrow evidence from another page.
         }),
         /not backed by trusted evidence on its verified PDF page/,
@@ -401,10 +408,8 @@ describe("DirectDocumentFinalizer", function () {
       sourceFingerprint: "pdfjs:unopened",
     };
     const policy: DocumentOutcomePolicy = {
-      required: true,
       documentKind: "custom",
       integrityPolicy: "research_grounded",
-      trigger: "document_intent",
     };
     const quote = (quoteId: string, text: string) => ({
       quoteId,
@@ -416,7 +421,7 @@ describe("DirectDocumentFinalizer", function () {
     });
     await expectRejected(
       finalizer.finalize({
-        request: request(policy, [observed]),
+        request: request([observed]),
         runId: "unopened-quotes",
         input: {
           ...input({
@@ -425,6 +430,7 @@ describe("DirectDocumentFinalizer", function () {
             citations: [groundedCitation],
           }),
           quotes: [quote("Q1", "First sentence."), quote("Q2", "Second one.")],
+          ...policy,
         },
       }),
       /Quotes Q1 and Q2 need their source PDFs open[\s\S]*\[\[cite:/,
@@ -433,16 +439,17 @@ describe("DirectDocumentFinalizer", function () {
 
   it("rejects literature reviews without verified research evidence", async function () {
     const policy: DocumentOutcomePolicy = {
-      required: true,
       documentKind: "literature_review",
       integrityPolicy: "research_grounded",
-      trigger: "document_intent",
     };
     await expectRejected(
       finalizer.finalize({
-        request: request(policy),
+        request: request(),
         runId: "run-no-evidence",
-        input: input(),
+        input: {
+          ...input(),
+          ...policy,
+        },
       }),
       /host-verified abstract or body evidence/,
     );
@@ -450,24 +457,28 @@ describe("DirectDocumentFinalizer", function () {
 
   it("rejects missing coverage disclosure and missing references", async function () {
     const policy: DocumentOutcomePolicy = {
-      required: true,
       documentKind: "literature_review",
       integrityPolicy: "research_grounded",
-      trigger: "literature_review_skill",
     };
     await expectRejected(
       finalizer.finalize({
-        request: request(policy, [observation]),
+        request: request([observation]),
         runId: "run-no-references",
-        input: input(),
+        input: {
+          ...input(),
+          ...policy,
+        },
       }),
       /requires grounded citations/,
     );
     await expectRejected(
       finalizer.finalize({
-        request: request(policy, [observation]),
+        request: request([observation]),
         runId: "run-no-coverage",
-        input: input({ citations: [groundedCitation] }),
+        input: {
+          ...input({ citations: [groundedCitation] }),
+          ...policy,
+        },
       }),
       /missing required sections: scope and limitations/,
     );
@@ -475,10 +486,8 @@ describe("DirectDocumentFinalizer", function () {
 
   it("rejects fabricated citation evidence references", async function () {
     const policy: DocumentOutcomePolicy = {
-      required: true,
       documentKind: "literature_review",
       integrityPolicy: "research_grounded",
-      trigger: "document_intent",
     };
     const fabricated: PlanCitationCluster = {
       citationId: "C1",
@@ -492,13 +501,16 @@ describe("DirectDocumentFinalizer", function () {
     };
     await expectRejected(
       finalizer.finalize({
-        request: request(policy, [observation]),
+        request: request([observation]),
         runId: "run-fabricated",
-        input: input({
-          markdown:
-            "# Review\n\nEvidence [[cite:C1]].\n\n## Scope and limitations\n\nOne verified paper was reviewed.",
-          citations: [fabricated],
-        }),
+        input: {
+          ...input({
+            markdown:
+              "# Review\n\nEvidence [[cite:C1]].\n\n## Scope and limitations\n\nOne verified paper was reviewed.",
+            citations: [fabricated],
+          }),
+          ...policy,
+        },
       }),
       /invalid evidence reference/,
     );
@@ -506,14 +518,12 @@ describe("DirectDocumentFinalizer", function () {
 
   it("rejects document assets that were not emitted by a host tool", async function () {
     const policy: DocumentOutcomePolicy = {
-      required: true,
       documentKind: "guide",
       integrityPolicy: "authored",
-      trigger: "document_intent",
     };
     await expectRejected(
       finalizer.finalize({
-        request: request(policy),
+        request: request(),
         runId: "run-invented-asset",
         input: {
           ...input(),
@@ -535,6 +545,7 @@ describe("DirectDocumentFinalizer", function () {
               },
             },
           ],
+          ...policy,
         },
       }),
       /not emitted by a successful host tool call/,
@@ -544,17 +555,16 @@ describe("DirectDocumentFinalizer", function () {
   it("does not silently publish a broken relative figure after the asset submission fails", async function () {
     await expectRejected(
       finalizer.finalize({
-        request: request({
-          required: true,
+        request: request(),
+        runId: "run-missing-figure",
+        input: {
+          ...input({
+            markdown:
+              "# Summary\n\n![Actual cropped figure](assets/figure-1-p3.png)\n\nFigure 1, PDF page 3.",
+          }),
           documentKind: "report",
           integrityPolicy: "authored",
-          trigger: "document_intent",
-        }),
-        runId: "run-missing-figure",
-        input: input({
-          markdown:
-            "# Summary\n\n![Actual cropped figure](assets/figure-1-p3.png)\n\nFigure 1, PDF page 3.",
-        }),
+        },
       }),
       /figures.*assets|assets.*figures/i,
     );
@@ -563,19 +573,20 @@ describe("DirectDocumentFinalizer", function () {
 
   it("persists a validated research-grounded document with generated references", async function () {
     const policy: DocumentOutcomePolicy = {
-      required: true,
       documentKind: "literature_review",
       integrityPolicy: "research_grounded",
-      trigger: "literature_review_skill",
     };
     const result = await finalizer.finalize({
-      request: request(policy, [observation]),
+      request: request([observation]),
       runId: "run-grounded",
-      input: input({
-        markdown:
-          "# Review\n\nEvidence [[cite:C1]].\n\n## Scope and limitations\n\nOne verified paper was reviewed.",
-        citations: [groundedCitation],
-      }),
+      input: {
+        ...input({
+          markdown:
+            "# Review\n\nEvidence [[cite:C1]].\n\n## Scope and limitations\n\nOne verified paper was reviewed.",
+          citations: [groundedCitation],
+        }),
+        ...policy,
+      },
       now: 200,
     });
 
@@ -617,20 +628,16 @@ describe("DirectDocumentFinalizer", function () {
       return format(params);
     };
     const result = await finalizer.finalize({
-      request: request(
-        {
-          required: true,
-          documentKind: "guide",
-          integrityPolicy: "authored",
-          trigger: "document_intent",
-        },
-        [observation],
-      ),
+      request: request([observation]),
       runId: "run-styles-readiness",
-      input: input({
-        markdown: "# Guide\n\nContext [[cite:C1]].",
-        citations: [groundedCitation],
-      }),
+      input: {
+        ...input({
+          markdown: "# Guide\n\nContext [[cite:C1]].",
+          citations: [groundedCitation],
+        }),
+        documentKind: "guide",
+        integrityPolicy: "authored",
+      },
       now: 302,
     });
     assert.equal(initializationCalls, 1);
@@ -639,41 +646,45 @@ describe("DirectDocumentFinalizer", function () {
 
   it("accepts authored documents with or without optional citations", async function () {
     const policy: DocumentOutcomePolicy = {
-      required: true,
       documentKind: "guide",
       integrityPolicy: "authored",
-      trigger: "document_intent",
     };
     const uncited = await finalizer.finalize({
-      request: request(policy),
+      request: request(),
       runId: "run-authored-plain",
-      input: input(),
+      input: {
+        ...input(),
+        ...policy,
+      },
       now: 300,
     });
     assert.equal(uncited.document.validation.groundingReviewed, "not_run");
 
     const cited = await finalizer.finalize({
-      request: request(policy),
+      request: request(),
       runId: "run-authored-cited",
-      input: input({
-        markdown: "# Guide\n\nOptional context [[cite:C1]].",
-        citations: [
-          {
-            citationId: "C1",
-            sources: [{ libraryID: 1, itemKey: "AAAA1111", evidenceRefs: [] }],
-          },
-        ],
-      }),
+      input: {
+        ...input({
+          markdown: "# Guide\n\nOptional context [[cite:C1]].",
+          citations: [
+            {
+              citationId: "C1",
+              sources: [
+                { libraryID: 1, itemKey: "AAAA1111", evidenceRefs: [] },
+              ],
+            },
+          ],
+        }),
+        ...policy,
+      },
       now: 301,
     });
     assert.include(cited.document.visibleMarkdown, "## References");
   });
   it("reuses a run's document only for identical content and sequences new content", async function () {
     const policy: DocumentOutcomePolicy = {
-      required: true,
       documentKind: "guide",
       integrityPolicy: "authored",
-      trigger: "document_intent",
     };
     const zotero = (globalThis as any).Zotero;
     const fakeDB = zotero.DB;
@@ -705,9 +716,12 @@ describe("DirectDocumentFinalizer", function () {
       await initPlanDocumentStore();
       const submit = (markdown?: string, now?: number) =>
         finalizer.finalize({
-          request: request(policy),
+          request: request(),
           runId: "session-run",
-          input: input(markdown ? { markdown } : undefined),
+          input: {
+            ...input(markdown ? { markdown } : undefined),
+            ...policy,
+          },
           now,
         });
 
@@ -743,24 +757,23 @@ describe("DirectDocumentFinalizer", function () {
     const markdown = prefix + "x".repeat(max - prefix.length - 10);
     await expectRejected(
       finalizer.finalize({
-        request: request({
-          required: true,
+        request: request(),
+        runId: "run-formatted-limit",
+        input: {
+          ...input({
+            markdown,
+            citations: [
+              {
+                citationId: "C1",
+                sources: [
+                  { libraryID: 1, itemKey: "AAAA1111", evidenceRefs: [] },
+                ],
+              },
+            ],
+          }),
           documentKind: "guide",
           integrityPolicy: "authored",
-          trigger: "document_intent",
-        }),
-        runId: "run-formatted-limit",
-        input: input({
-          markdown,
-          citations: [
-            {
-              citationId: "C1",
-              sources: [
-                { libraryID: 1, itemKey: "AAAA1111", evidenceRefs: [] },
-              ],
-            },
-          ],
-        }),
+        },
         now: 100,
       }),
       /Finalized document exceeds the 2 MiB limit/,

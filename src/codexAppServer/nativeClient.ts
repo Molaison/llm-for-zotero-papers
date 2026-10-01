@@ -114,7 +114,6 @@ export {
   resolveCodexNativeRuntimeCwd,
 } from "./runtimeCwd";
 import { getCanonicalSkillFilePath } from "../agent/skills/nativeSkillPaths";
-import { resolveDocumentOutcomePolicy } from "../agent/documents/outcomePolicy";
 import { loadLatestDocumentForRun } from "../agent/documents/store";
 import { areEquivalentLocalPaths } from "../utils/localPath";
 import {
@@ -190,15 +189,6 @@ export type CodexNativeTurnResult = {
   diagnostics?: CodexNativeDiagnostics;
   verificationFailure?: string;
 };
-
-function buildNativeDocumentOutcomeInstruction(
-  policy: import("../agent/documents/types").DocumentOutcomePolicy,
-): string {
-  if (!policy.required) return "";
-  return policy.integrityPolicy === "research_grounded"
-    ? "This turn requires a first-class research-grounded document. Read Zotero sources, include Scope and limitations, use [[cite:C1]] tokens, copy documentEvidenceRefs from read tools into citation sources, and finish by calling submit_document exactly once. Ordinary prose is not a valid terminal answer."
-    : "This turn requires a first-class authored document. Produce complete structured Markdown and finish by calling submit_document exactly once. Citations are optional unless the requested content needs them; ordinary prose is not a valid terminal answer.";
-}
 
 export type CodexNativeApprovalRequest = {
   signal?: AbortSignal;
@@ -3515,14 +3505,6 @@ export async function runCodexAppServerNativeTurn(input: {
           params.executionRequest.executionContext;
         const turnSkillIds = resolvedSkills.matchedSkillIds;
         const turnSkillInstructionBlock = resolvedSkills.instructionBlock;
-        const documentOutcomePolicy = resolveDocumentOutcomePolicy();
-        documentRequest.documentOutcomePolicy = documentOutcomePolicy;
-        scopedMcpScope.documentOutcomePolicy = documentOutcomePolicy;
-        if (scopedMcp) {
-          updateScopedZoteroMcpScope(scopedMcp.token, {
-            documentOutcomePolicy,
-          });
-        }
         const nativeSkillInputResolution = useNativeSkillInputs
           ? await resolveCodexNativeSkillInputItems({
               proc,
@@ -3545,12 +3527,8 @@ export async function runCodexAppServerNativeTurn(input: {
             )}. Remove the skill selection or update/restart Codex before retrying.`,
           );
         }
-        const skillInstructionBlock = [
-          codexNativeSkillMode === "legacy" ? turnSkillInstructionBlock : "",
-          buildNativeDocumentOutcomeInstruction(documentOutcomePolicy),
-        ]
-          .filter(Boolean)
-          .join("\n\n");
+        const skillInstructionBlock =
+          codexNativeSkillMode === "legacy" ? turnSkillInstructionBlock : "";
         const activatedSkillIds = currentTurnHasLocalPdfs
           ? explicitPdfSkillIds
           : turnSkillIds;
@@ -3819,32 +3797,13 @@ export async function runCodexAppServerNativeTurn(input: {
           input: nativeInput,
           skillIds: activatedSkillIds,
         });
-        const loadRequiredDocument = async (
+        const loadSubmittedDocument = async (
           candidate: CodexNativeTurnResult,
         ) =>
           candidate.turnId ? loadLatestDocumentForRun(candidate.turnId) : null;
-        let document =
-          documentOutcomePolicy.required || submittedDocument
-            ? await loadRequiredDocument(result)
-            : null;
-        if (documentOutcomePolicy.required && !document) {
-          result = await executePreparedThread({
-            thread,
-            input: [
-              {
-                type: "text",
-                text: "Host correction: this turn requires a finalized document artifact. Complete the requested document now and call the scoped Zotero submit_document tool exactly once. Do not return ordinary answer prose.",
-              },
-            ],
-            skillIds: activatedSkillIds,
-          });
-          document = await loadRequiredDocument(result);
-        }
-        if (documentOutcomePolicy.required && !document) {
-          throw new Error(
-            "The requested document was not finalized, so ordinary answer text cannot be accepted as the completed outcome.",
-          );
-        }
+        const document = submittedDocument
+          ? await loadSubmittedDocument(result)
+          : null;
         const actionEvaluation = evaluatePreparedActionContract(hostReceipts);
         const verificationFailure = [
           actionEvaluation.state !== "satisfied" &&

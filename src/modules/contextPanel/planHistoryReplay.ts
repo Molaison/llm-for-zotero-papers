@@ -63,12 +63,6 @@ export async function exercisePlanHistoryReplay(
             mode: "agent",
             libraryID: item.libraryID,
             userText: "Write a hypothetical tutorial document.",
-            documentOutcomePolicy: {
-              required: true,
-              documentKind: "custom",
-              integrityPolicy: "authored",
-              trigger: "document_intent",
-            },
           },
           runId: `${prefix}-document`,
           item,

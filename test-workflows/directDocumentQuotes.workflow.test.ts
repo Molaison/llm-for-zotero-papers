@@ -56,12 +56,6 @@ describe("workflow: direct document quote publication", function () {
           mode: "agent",
           userText: "Publish a research document with an exact source quote.",
           libraryID: paper.libraryID,
-          documentOutcomePolicy: {
-            required: true,
-            documentKind: "custom",
-            integrityPolicy: "authored",
-            trigger: "document_intent",
-          },
         }),
         runId: `native-direct-quote:${paper.key}`,
       };

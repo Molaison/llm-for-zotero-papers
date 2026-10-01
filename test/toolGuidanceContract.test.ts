@@ -159,6 +159,26 @@ describe("tool guidance contracts", function () {
     );
   });
 
+  it("describes current behavior, not retired contracts, in tool text", function () {
+    // Turns carry no action contract, obligations or prepared source
+    // boundary; tool text that names them describes a removed mechanism.
+    const retired = /\bobligations?\b|\bcontract'?s?\b|frozen workflow/i;
+    const failures: string[] = [];
+    const visit = (owner: string, value: unknown) => {
+      if (typeof value === "string") {
+        if (retired.test(value)) failures.push(`${owner}: ${value}`);
+      } else if (value && typeof value === "object") {
+        for (const entry of Object.values(value)) visit(owner, entry);
+      }
+    };
+    for (const tool of stubRegistry().listToolDefinitions()) {
+      visit(tool.spec.name, tool.spec.description);
+      visit(tool.spec.name, tool.spec.inputSchema);
+      visit(tool.spec.name, tool.guidance?.instruction);
+    }
+    assert.deepEqual(failures, []);
+  });
+
   it("does not contain stale pseudo-call examples in shipped guidance", function () {
     const failures: string[] = [];
     for (const source of readSourceFiles()) {

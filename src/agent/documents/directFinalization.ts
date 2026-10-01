@@ -195,15 +195,10 @@ export class DirectDocumentFinalizer {
     input: SubmitPlanDocumentInput;
     now?: number;
   }): Promise<{ document: PlanDocument; outbox: PlanDocumentOutboxRecord }> {
-    const configuredPolicy = params.request.documentOutcomePolicy;
-    const policy: DocumentOutcomePolicy = configuredPolicy?.required
-      ? configuredPolicy
-      : {
-          required: true,
-          documentKind: params.input.documentKind || "custom",
-          integrityPolicy: params.input.integrityPolicy || "authored",
-          trigger: "document_intent",
-        };
+    const policy: DocumentOutcomePolicy = {
+      documentKind: params.input.documentKind || "custom",
+      integrityPolicy: params.input.integrityPolicy || "authored",
+    };
     return this.publish({
       request: params.request,
       runId: params.runId,
@@ -243,12 +238,7 @@ export class DirectDocumentFinalizer {
         groundingReviewed: "passed",
         groundingIssues: [],
       },
-      policy: {
-        required: true,
-        documentKind: "note",
-        integrityPolicy: "authored",
-        trigger: "document_intent",
-      },
+      policy: { documentKind: "note", integrityPolicy: "authored" },
       now: params.now,
     });
   }

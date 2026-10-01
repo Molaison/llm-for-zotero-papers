@@ -200,17 +200,10 @@ describe("PdfFigureExtractionService", function () {
         kind: "figures",
         includeSupplementary: false,
       },
+      // An external runtime records the artifacts a submitted document binds.
       context: {
         ...context,
-        request: {
-          ...context.request,
-          documentOutcomePolicy: {
-            required: true,
-            documentKind: "report",
-            integrityPolicy: "research_grounded",
-            trigger: "document_intent",
-          },
-        },
+        authorization: { kind: "external_runtime" as const, standalone: false },
       },
       paperContexts: [paperContext],
     });
@@ -322,12 +315,6 @@ describe("PdfFigureExtractionService", function () {
             ...context.request,
             userText:
               "Export the actual cached Figure 1 into my existing note.",
-            documentOutcomePolicy: {
-              required: true,
-              documentKind: "report",
-              integrityPolicy: "research_grounded",
-              trigger: "document_intent",
-            },
           },
         },
         paperContexts: [paperContext],
@@ -343,10 +330,14 @@ describe("PdfFigureExtractionService", function () {
         result.figures?.map((figure) => figure.cropPath),
         [cropPath],
       );
-      assert.match(
-        result.figures?.[0].documentAsset?.contentHash || "",
-        /^sha256:[a-f0-9]{64}$/,
-      );
+      // Only an external runtime records the artifacts a submitted document
+      // can bind, so an in-plugin turn gets no document asset.
+      if (runtime === "external")
+        assert.match(
+          result.figures?.[0].documentAsset?.contentHash || "",
+          /^sha256:[a-f0-9]{64}$/,
+        );
+      else assert.isUndefined(result.figures?.[0].documentAsset);
     });
   }
 

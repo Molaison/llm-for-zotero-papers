@@ -1050,12 +1050,6 @@ async function exerciseBackgroundAgentPublication(input: {
           mode: "agent",
           libraryID: paperA.libraryID,
           userText: "Publish a background document.",
-          documentOutcomePolicy: {
-            required: true,
-            documentKind: "custom",
-            integrityPolicy: "authored",
-            trigger: "document_intent",
-          },
         },
         runId: `background-publication-${paperA.key}-${timestamp}`,
         item: paperA,

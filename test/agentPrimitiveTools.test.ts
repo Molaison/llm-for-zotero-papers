@@ -1153,16 +1153,6 @@ describe("primitive agent tools", function () {
       request: {
         ...baseContext.request,
         conversationKey: 43_006,
-        metadata: {
-          fileNoteWritePolicy: {
-            directoryPath: "/tmp/obsidian-vault",
-            defaultFolder: "Zotero Notes",
-            defaultTargetPath: "/tmp/obsidian-vault/Zotero Notes",
-            attachmentsFolder: "Zotero Notes/imgs",
-            attachmentsPath: "/tmp/obsidian-vault/Zotero Notes/imgs",
-            nickname: "Obsidian",
-          },
-        },
       },
     };
 
@@ -1218,16 +1208,6 @@ describe("primitive agent tools", function () {
       request: {
         ...baseContext.request,
         conversationKey: 43_016,
-        metadata: {
-          fileNoteWritePolicy: {
-            directoryPath: "/tmp/obsidian-vault",
-            defaultFolder: "Zotero Notes",
-            defaultTargetPath: "/tmp/obsidian-vault/Zotero Notes",
-            attachmentsFolder: "Zotero Notes/imgs",
-            attachmentsPath: "/tmp/obsidian-vault/Zotero Notes/imgs",
-            nickname: "Obsidian",
-          },
-        },
       },
     };
 
@@ -1597,16 +1577,6 @@ Figure 2 explains the attractor-network interpretation.`;
       request: {
         ...baseContext.request,
         conversationKey: 43_007,
-        metadata: {
-          fileNoteWritePolicy: {
-            directoryPath: "/tmp/obsidian-vault",
-            defaultFolder: "Zotero Notes",
-            defaultTargetPath: "/tmp/obsidian-vault/Zotero Notes",
-            attachmentsFolder: "Zotero Notes/imgs",
-            attachmentsPath: "/tmp/obsidian-vault/Zotero Notes/imgs",
-            nickname: "Obsidian",
-          },
-        },
       },
     };
 
@@ -1856,89 +1826,6 @@ Figure 2 explains the attractor-network interpretation.`;
     assert.equal(commandField.value, command);
     assert.equal(commandField.language, "sh");
   });
-
-  it("run_command refuses obvious Markdown note writes into configured note destinations", async function () {
-    const tool = createRunCommandTool();
-    const existingPaths = new Set<string>();
-    let executed = false;
-    const originalIOUtils = (globalThis as { IOUtils?: unknown }).IOUtils;
-    const originalChromeUtils = (globalThis as { ChromeUtils?: unknown })
-      .ChromeUtils;
-    (globalThis as { IOUtils?: unknown }).IOUtils = {
-      exists: async (path: string) => existingPaths.has(path),
-    };
-    (globalThis as { ChromeUtils?: unknown }).ChromeUtils = {
-      importESModule: () => ({
-        Subprocess: {
-          call: async () => {
-            executed = true;
-            throw new Error("run_command should not execute note writes");
-          },
-        },
-      }),
-    };
-    const context: AgentToolContext = {
-      ...baseContext,
-      request: {
-        ...baseContext.request,
-        conversationKey: 43_015,
-        metadata: {
-          ...(baseContext.request.metadata || {}),
-          fileNoteWritePolicy: {
-            directoryPath: "/tmp/obsidian-vault",
-            defaultFolder: "Zotero Notes",
-            defaultTargetPath: "/tmp/obsidian-vault/Zotero Notes",
-            attachmentsFolder: "assets",
-            attachmentsPath: "/tmp/obsidian-vault/assets",
-            nickname: "vault",
-          },
-        },
-      },
-    };
-
-    try {
-      const refusedCommands = [
-        'printf "note" > "/tmp/obsidian-vault/Zotero Notes/figure.md"',
-        'printf "note" >> "/tmp/obsidian-vault/Zotero Notes/figure.md"',
-        'printf "note" | tee "/tmp/obsidian-vault/Zotero Notes/figure.md"',
-        'cp "/tmp/source.md" "/tmp/obsidian-vault/Zotero Notes/figure.md"',
-        'mv "/tmp/source.md" "/tmp/obsidian-vault/Zotero Notes/figure.md"',
-        'cd "/tmp/obsidian-vault/Zotero Notes" && printf "note" > figure.md',
-        'cd "/tmp/obsidian-vault/Zotero Notes"; printf "note" > figure.md',
-        '(cd "/tmp/obsidian-vault/Zotero Notes" && printf "note" > figure.md)',
-      ];
-      for (const command of refusedCommands) {
-        const validated = tool.validate({ command });
-        assert.isTrue(validated.ok, command);
-        if (!validated.ok) return;
-        const plan = await tool.planInvocation?.(validated.value, context);
-        assert.equal(plan?.impact, "prohibited", command);
-        const result = (
-          await tool.execute({ ...validated.value, allowUnsafe: true }, context)
-        ).content as Record<string, unknown>;
-        assert.equal(result.exitCode, -1, command);
-        assert.include(String(result.stderr || ""), "Refusing run_command");
-        assert.include(String(result.stderr || ""), "file_io");
-      }
-
-      const unrelated = tool.validate({
-        command: 'printf "note" > "/tmp/not-a-note.md"',
-      });
-      assert.isTrue(unrelated.ok);
-      if (!unrelated.ok) return;
-      const unrelatedPlan = await tool.planInvocation?.(
-        unrelated.value,
-        context,
-      );
-      assert.equal(unrelatedPlan?.impact, "state_change");
-      assert.isFalse(executed);
-    } finally {
-      (globalThis as { IOUtils?: unknown }).IOUtils = originalIOUtils;
-      (globalThis as { ChromeUtils?: unknown }).ChromeUtils =
-        originalChromeUtils;
-    }
-  });
-
   it("run_command and file_io independently plan their concrete writes", async function () {
     const commandTool = createRunCommandTool();
     const fileTool = createFileIOTool();

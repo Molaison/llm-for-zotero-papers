@@ -15,6 +15,7 @@ import type {
   SubmitPlanDocumentInput,
 } from "../../documents/types";
 import type { ZoteroGateway } from "../../services/zoteroGateway";
+import { neverSelected } from "../guidance";
 import { fail, ok, validateObject } from "../shared";
 
 type SubmitPlanDocumentResult = {
@@ -267,7 +268,7 @@ export function createSubmitDocumentTool(
     spec: {
       name: "submit_document",
       description:
-        "Finalize the required Agent document. Use internal [[cite:C1]] tokens in Markdown and provide Zotero item mappings; research-grounded documents also require the host-issued evidence IDs returned by read tools. This tool validates and persists the exact authored content, which becomes the visible answer.",
+        "Finalize an Agent document. Use internal [[cite:C1]] tokens in Markdown and provide Zotero item mappings; research-grounded documents also require the host-issued evidence IDs returned by read tools. This tool validates and persists the exact authored content, which becomes the visible answer.",
       inputSchema: {
         type: "object",
         additionalProperties: false,
@@ -470,9 +471,11 @@ export function createSubmitDocumentTool(
      */
     presentation: { hiddenInTrace: true },
     guidance: {
-      matches: (request) => request.documentOutcomePolicy?.required === true,
+      // No turn requires a document now; the instruction reaches MCP clients
+      // through the tool description.
+      matches: neverSelected,
       instruction:
-        "This turn requires durable authored content. Finish the requested work and call submit_document once; to save the document, pass its returned documentId to the save tool instead of reconstructing its content. Write complete Markdown with natural headings. Put [[cite:C1]] tokens at supported claims; citations are required for a literature review and optional for other authored documents. Identify each citation source by libraryID and itemKey; the host binds its durable research evidence, so omit evidenceRefs unless a strict quote or page locator requires a specific record. Record grounding concerns in groundingIssues. The host replaces any draft References section with a Zotero CSL bibliography. Never place internal citation tokens outside this terminal submission.",
+        "Use submit_document to publish authored content as a durable document. Finish the requested work and call submit_document once; to save the document, pass its returned documentId to the save tool instead of reconstructing its content. Write complete Markdown with natural headings. Put [[cite:C1]] tokens at supported claims; citations are required for a literature review and optional for other authored documents. Identify each citation source by libraryID and itemKey; the host binds its durable research evidence, so omit evidenceRefs unless a strict quote or page locator requires a specific record. Record grounding concerns in groundingIssues. The host replaces any draft References section with a Zotero CSL bibliography. Never place internal citation tokens outside this terminal submission.",
     },
     validate: validateSubmitPlanDocument,
     planInvocation: () =>

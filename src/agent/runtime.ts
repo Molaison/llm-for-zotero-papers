@@ -50,7 +50,6 @@ import {
 } from "./context/transcriptCompactor";
 import { AgentRunContinuationSession } from "./continuation/runContinuationSession";
 import { ActionContractRunSession } from "./contracts/actionContractRunSession";
-import { resolveDocumentOutcomePolicy } from "./documents/outcomePolicy";
 import type { MaterialRef } from "./documents/materialRef";
 import { AgentFinalAnswerController } from "./finalization/finalAnswerController";
 import type { RunStopRule } from "./loop/stopRules";
@@ -621,14 +620,7 @@ export class AgentRuntime {
             })),
         )
       ).sort((left, right) => left.id.localeCompare(right.id));
-      request.documentOutcomePolicy = resolveDocumentOutcomePolicy();
       if (!adapter.supportsTools(request)) {
-        if (request.documentOutcomePolicy.required) {
-          const failure =
-            "The requested document cannot be produced because this model does not support Agent tools. Choose a tool-capable model and retry.";
-          await terminateRun("failed", failure, "tools_unsupported_document");
-          throw new Error(failure);
-        }
         const reason =
           "Agent tools unavailable for this model; used direct response instead.";
         await emit({

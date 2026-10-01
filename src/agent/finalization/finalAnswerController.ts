@@ -102,7 +102,6 @@ export type AgentFinalAnswerDecision =
  */
 export class AgentFinalAnswerController {
   private webAttributionCorrectionUsed = false;
-  private documentCorrectionUsed = false;
   private readonly literatureReviewCorrections = new Set<string>();
   /** The ledger's progress when the last outcome correction was given. */
   private outcomeCorrectionSignature?: string;
@@ -136,24 +135,6 @@ export class AgentFinalAnswerController {
     const outcomeCorrection = this.openOutcomeCorrection(params.canCorrect);
     if (outcomeCorrection) {
       return { kind: "correct", correction: outcomeCorrection };
-    }
-
-    if (
-      this.request.documentOutcomePolicy?.required &&
-      !params.toolExecutionRecords.some(
-        (record) => record.name === "submit_document" && record.ok,
-      )
-    ) {
-      const failure =
-        "The requested document was not finalized, so ordinary answer text cannot be accepted as the completed outcome.";
-      if (params.canCorrect && !this.documentCorrectionUsed) {
-        this.documentCorrectionUsed = true;
-        return {
-          kind: "correct",
-          correction: `${failure} Complete the document and call submit_document now.`,
-        };
-      }
-      return { kind: "fail", userMessage: failure };
     }
 
     const lastDiscovery = params.toolExecutionRecords.findLastIndex(

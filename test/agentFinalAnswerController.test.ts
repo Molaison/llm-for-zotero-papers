@@ -47,78 +47,20 @@ describe("AgentFinalAnswerController", function () {
   }
 
   it("accepts completed paper actions and finalized documents", async function () {
-    for (const overrides of [
-      {},
-      { documentOutcomePolicy: { required: true } },
-    ]) {
-      const controller = new AgentFinalAnswerController(
-        makeRequest({ conversationKind: "paper", ...overrides } as never),
-      );
-      const result = await controller.evaluate({
-        candidateText: "Saved.",
-        canCorrect: true,
-        toolExecutionRecords: [
-          { name: "paper_read", ok: true },
-          { name: "submit_document", ok: true },
-        ],
-      });
-      assert.equal(result.kind, "accept");
-    }
-  });
-  it("allows one required-document correction and then fails closed", async function () {
     const controller = new AgentFinalAnswerController(
-      makeRequest({
-        documentOutcomePolicy: {
-          required: true,
-          documentKind: "report",
-          integrityPolicy: "authored",
-          trigger: "document_intent",
-        },
-      }),
+      makeRequest({ conversationKind: "paper" }),
     );
-
-    const first = await controller.evaluate({
-      candidateText: "A long prose answer that bypassed the artifact.",
+    const result = await controller.evaluate({
+      candidateText: "Saved.",
       canCorrect: true,
-      toolExecutionRecords: [],
-    });
-    assert.equal(first.kind, "correct");
-    if (first.kind === "correct") {
-      assert.include(first.correction, "call submit_document now");
-    }
-
-    const second = await controller.evaluate({
-      candidateText: "Another prose answer.",
-      canCorrect: true,
-      toolExecutionRecords: [],
-    });
-    assert.deepEqual(second, {
-      kind: "fail",
-      userMessage:
-        "The requested document was not finalized, so ordinary answer text cannot be accepted as the completed outcome.",
-    });
-  });
-
-  it("accepts a required document only after submit_document succeeds", async function () {
-    const controller = new AgentFinalAnswerController(
-      makeRequest({
-        documentOutcomePolicy: {
-          required: true,
-          documentKind: "guide",
-          integrityPolicy: "authored",
-          trigger: "document_intent",
-        },
-      }),
-    );
-    const decision = await controller.evaluate({
-      candidateText: "# Complete guide",
-      canCorrect: false,
       toolExecutionRecords: [
-        { name: "submit_document", ok: true, content: { documentId: "d1" } },
+        { name: "paper_read", ok: true },
+        { name: "submit_document", ok: true },
       ],
     });
-    assert.equal(decision.kind, "accept");
+    assert.equal(result.kind, "accept");
   });
+
   it("does not invent action obligations for a fresh direct turn", async function () {
     const controller = new AgentFinalAnswerController(
       makeRequest({

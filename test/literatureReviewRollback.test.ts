@@ -10,12 +10,6 @@ describe("literature review without the experimental workflow", function () {
     const request = resolvedAgentRequest({
       conversationKey: 1,
       userText: "Review the literature",
-      documentOutcomePolicy: {
-        required: true,
-        documentKind: "literature_review",
-        integrityPolicy: "research_grounded",
-        trigger: "literature_review_skill",
-      },
     });
 
     const tools = registry.listToolsForRequest(request);

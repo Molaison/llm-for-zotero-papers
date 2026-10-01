@@ -922,8 +922,6 @@ export type AgentRuntimeRequestInput = AgentRequest & {
   clarificationHistory?: Array<{ question: string; answer: string }>;
   /** Validated per-turn skill routing identity; never provider-authored authority. */
   skillRoutingReceipt?: SkillRoutingReceipt;
-  /** Host-resolved visible outcome contract for this Agent turn. */
-  documentOutcomePolicy?: import("./documents/types").DocumentOutcomePolicy;
   /** Host-issued read attestations available to a direct document finalizer. */
   documentReadObservations?: readonly TrustedReadObservation[];
   /** Host-observed tool artifacts eligible for direct document embedding. */

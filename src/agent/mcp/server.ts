@@ -234,7 +234,6 @@ type ZoteroMcpScopeMetadata = {
   reasoning?: ReasoningConfig;
   /** Host-created execution facts; never accepted from MCP tool arguments. */
   executionContext?: AgentRuntimeRequest["executionContext"];
-  documentOutcomePolicy?: AgentRuntimeRequest["documentOutcomePolicy"];
   documentReadObservations?: AgentRuntimeRequest["documentReadObservations"];
   documentArtifactObservations?: AgentRuntimeRequest["documentArtifactObservations"];
   exhaustiveReadBackend?: Extract<
@@ -801,7 +800,6 @@ function normalizeActiveScope(
     requestInteraction: scope.requestInteraction,
     publishHostEvent: scope.publishHostEvent,
     clarificationHistory: scope.clarificationHistory,
-    documentOutcomePolicy: scope.documentOutcomePolicy,
     documentReadObservations: scope.documentReadObservations
       ? cloneTrustedReadObservations(scope.documentReadObservations)
       : undefined,
@@ -1817,7 +1815,6 @@ function createToolContext(
     reasoning: scope?.reasoning,
     executionContext: scope?.executionContext,
     clarificationHistory: scope?.clarificationHistory,
-    documentOutcomePolicy: scope?.documentOutcomePolicy,
     documentReadObservations: scope?.documentReadObservations,
     documentArtifactObservations: scope?.documentArtifactObservations,
     exhaustiveReadBackend,
@@ -2034,11 +2031,7 @@ function rememberDocumentReadObservations(
 ): void {
   if (!observations.length) return;
   const scope = resolveScopedMcpScope(headers);
-  if (
-    !scope ||
-    (!scope.documentOutcomePolicy?.required && !scope.runtimeAuthority)
-  )
-    return;
+  if (!scope?.runtimeAuthority) return;
   const merged = new Map(
     (scope.documentReadObservations || []).map((entry) => [
       entry.observationId,
@@ -2059,11 +2052,7 @@ function rememberDocumentArtifacts(
 ): void {
   if (!artifacts.length) return;
   const scope = resolveScopedMcpScope(headers);
-  if (
-    !scope ||
-    (!scope.documentOutcomePolicy?.required && !scope.runtimeAuthority)
-  )
-    return;
+  if (!scope?.runtimeAuthority) return;
   const merged = new Map(
     (scope.documentArtifactObservations || []).map((artifact) => [
       artifact.storedPath,

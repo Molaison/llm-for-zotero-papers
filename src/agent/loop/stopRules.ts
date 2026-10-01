@@ -6,8 +6,6 @@
  * finished, and it is diagnostic only: nothing decides behavior from it.
  */
 export type RunStopRule =
-  // A model without tool support was asked for a required document.
-  | "tools_unsupported_document"
   // A model without tool support hands the turn back for a direct response.
   | "tools_unsupported_fallback"
   // A /compact request ended the turn without a model step.

@@ -95,6 +95,67 @@ describe("direct-agent execution boundary", function () {
     assert.equal(prepared.kind, "result");
   });
 
+  it("refuses an effect that no agent turn, connected runtime or host action owns", async function () {
+    globalThis.Zotero = {
+      DB: new ChangeJournalTestDb(),
+      Prefs: { get: () => "yolo" },
+      debug: () => undefined,
+    } as never;
+    await initAgentChangeJournal();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({} as never),
+    );
+    let writes = 0;
+    registry.register({
+      effectOperations: ["apply_tags"],
+      spec: {
+        name: "ownerless_tag",
+        description: "fixture",
+        inputSchema: { type: "object" },
+        executionClass: "external_effect",
+        requiresConfirmation: false,
+      },
+      validate: (input) => ({ ok: true, value: input }),
+      describeAction: () => [
+        {
+          id: "apply_tags:41",
+          proofDomain: "zotero_state",
+          capability: "zotero.tags",
+          operation: "apply_tags",
+          source: "zotero_native",
+          requestedTargets: ["item:41"],
+          destinationCollectionIds: [],
+        },
+      ],
+      planInvocation: () =>
+        stateChangeInvocationPlan({
+          domains: ["zotero_library"],
+          effects: ["modify"],
+          targets: ["item:41"],
+          reason: "Apply the concrete tag change.",
+        }),
+      execute: async () => {
+        writes += 1;
+        return { content: { ok: true }, effect: "applied" as const };
+      },
+    });
+    const context = directContext();
+    // No execution context: the call comes from no agent turn.
+    delete (context.request as { executionContext?: unknown }).executionContext;
+    const prepared = await registry.prepareExecution(
+      { id: "ownerless", name: "ownerless_tag", arguments: {} },
+      context,
+      { callerKind: "model" },
+    );
+    assert.equal(prepared.kind, "result");
+    if (prepared.kind !== "result") return;
+    assert.isFalse(prepared.execution.result.ok);
+    assert.equal(writes, 0);
+    const error = JSON.stringify(prepared.execution.result.content);
+    assert.include(error, "no agent turn, connected runtime or host action");
+    assert.notInclude(error, "contract");
+  });
+
   it("executes a typed Auto write without semantic or contract state and journals exact authority", async function () {
     const db = new ChangeJournalTestDb();
     globalThis.Zotero = {
