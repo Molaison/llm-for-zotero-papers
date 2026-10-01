@@ -1,8 +1,11 @@
 import { assert } from "chai";
+import { readFileSync } from "fs";
+import { fileURLToPath } from "url";
 import {
   SECTION_INTENT_EXAMPLES,
   SECTION_INTENT_MARGIN,
   createSectionIntent,
+  sectionKindsFromSimilarities,
 } from "../src/services/retrieval/sectionIntent";
 import {
   chunkKindFromSectionLabel,
@@ -33,7 +36,7 @@ function fakeModel(baseline: number) {
   put(SECTION_INTENT_EXAMPLES.limitations, [0, 0, 1, 0.4, 0, 0]);
   put(SECTION_INTENT_EXAMPLES.general, [0, 0, 0, 1, 0, 0]);
   put([METHODS_ZH], [0.7, 0, 0, 0.35, 0, 1]);
-  put([MIXED_ZH], [0.6, 0.6, 0, 0.3, 0, 1]);
+  put([MIXED_ZH], [0.65, 0.55, 0, 0.3, 0, 1]);
   put([GENERAL_ZH], [0, 0, 0, 0.8, 0, 1]);
   put([UNRELATED_ZH], [0, 0, 0, 0.1, 1, 1]);
   const calls: string[][] = [];
@@ -93,8 +96,8 @@ describe("section intent from a question embedding", function () {
         assert.deepEqual(rankedSections(kinds), ["Methods", "Introduction"]);
       });
 
-      it("names both sections of a question that asks for two", async function () {
-        assert.deepEqual(await wanted(MIXED_ZH), ["methods", "results"]);
+      it("takes the stronger section of a question that asks for two", async function () {
+        assert.deepEqual(await wanted(MIXED_ZH), ["methods"]);
       });
 
       it("leaves a general or unrelated question to the cue words and the base order", async function () {
@@ -106,6 +109,46 @@ describe("section intent from a question embedding", function () {
       });
     });
   }
+
+  it("classifies every live calibration question by its best section alone", function () {
+    const calibration = JSON.parse(
+      readFileSync(
+        fileURLToPath(
+          new URL("./fixtures/sectionIntentCalibration.json", import.meta.url),
+        ),
+        "utf8",
+      ),
+    ) as {
+      model: string;
+      questions: Array<{
+        label: string;
+        language: string;
+        closest: Record<
+          "methods" | "results" | "limitations" | "general",
+          number
+        >;
+      }>;
+    };
+    assert.equal(calibration.model, "gemini-embedding-001");
+    // Each single-section question gets its section; general and unrelated
+    // questions get none; a question asking for two gets its stronger one.
+    const expected: Record<string, string[]> = {
+      methods: ["methods"],
+      results: ["results"],
+      limitations: ["limitations"],
+      general: [],
+      unrelated: [],
+      "methods+results": ["methods"],
+    };
+    for (const question of calibration.questions) {
+      assert.deepEqual(
+        sectionKindsFromSimilarities(question.closest),
+        expected[question.label],
+        `${question.label} (${question.language})`,
+      );
+    }
+    assert.lengthOf(calibration.questions, 24);
+  });
 
   it("needs a margin over general questions, because no one cosine threshold fits both models", function () {
     const best = (baseline: number, question: string) => {

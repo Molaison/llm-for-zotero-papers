@@ -4,12 +4,12 @@
  *
  * The question is compared, in the same embedding model, with short English
  * questions that each ask for one part of papers and with general questions
- * about papers that ask for none. A section is wanted when the question is
- * closer to its examples than to the general questions by
- * SECTION_INTENT_MARGIN. Both sides of that comparison carry the model's
- * similarity scale and the cross-lingual gap of a non-English question, so
- * the rule does not depend on one absolute cosine, which differs between
- * embedding models.
+ * about papers that ask for none. The section it is closest to is wanted
+ * when the question is closer to that section's examples than to the
+ * general questions by SECTION_INTENT_MARGIN. Both sides of that comparison
+ * carry the model's similarity scale and the cross-lingual gap of a
+ * non-English question, so the rule does not depend on one absolute cosine,
+ * which differs between embedding models.
  */
 import { cosineSimilarity } from "../paperContent/pdfContext";
 import {
@@ -20,6 +20,7 @@ import {
 const SECTION_INTENT_KINDS = ["methods", "results", "limitations"] as const;
 const EXAMPLE_GROUPS = [...SECTION_INTENT_KINDS, "general"] as const;
 
+type SectionIntentKind = (typeof SECTION_INTENT_KINDS)[number];
 type ExampleGroup = (typeof EXAMPLE_GROUPS)[number];
 
 export const SECTION_INTENT_EXAMPLES: Readonly<
@@ -48,25 +49,49 @@ export const SECTION_INTENT_EXAMPLES: Readonly<
 };
 
 /**
- * How much closer to a section's examples than to the general questions a
- * question must be. The margin shrinks as a model's baseline similarity
- * rises, so it is kept low: a missed intent only falls back to the cue
- * words, which is what plain chat did before.
+ * How much closer to its best section's examples than to the general
+ * questions a question must be. Calibrated with gemini-embedding-001 on the
+ * live suite's 24 labelled questions in five languages
+ * (test/fixtures/sectionIntentCalibration.json): each single-section
+ * question beat general by 0.089 or more on its own section, and general and
+ * unrelated questions by 0.005 at most. Only the best section counts:
+ * wanting every section over the margin also took wrong ones, since a
+ * results question reached 0.098 on methods and limitations questions 0.05
+ * to 0.10 on methods and results. A question asking for two sections gets
+ * the stronger one.
  */
-export const SECTION_INTENT_MARGIN = 0.05;
+export const SECTION_INTENT_MARGIN = 0.06;
 
 type ExampleEmbeddings = Readonly<Record<ExampleGroup, readonly number[][]>>;
+
+/**
+ * The section a question asks for, from its closest similarity to each
+ * example group: the best section, when it beats the general questions by
+ * SECTION_INTENT_MARGIN.
+ */
+export function sectionKindsFromSimilarities(
+  closest: Readonly<Record<ExampleGroup, number>>,
+): EvidenceSectionKind[] {
+  let best: SectionIntentKind = SECTION_INTENT_KINDS[0];
+  for (const kind of SECTION_INTENT_KINDS)
+    if (closest[kind] > closest[best]) best = kind;
+  return closest[best] - closest.general >= SECTION_INTENT_MARGIN ? [best] : [];
+}
 
 function sectionKindsFromEmbedding(
   question: readonly number[],
   examples: ExampleEmbeddings,
 ): EvidenceSectionKind[] {
-  const closest = (vectors: readonly number[][]) =>
-    Math.max(...vectors.map((vector) => cosineSimilarity(question, vector)));
-  const general = closest(examples.general);
-  return SECTION_INTENT_KINDS.filter(
-    (kind) => closest(examples[kind]) - general >= SECTION_INTENT_MARGIN,
-  );
+  const closest = (group: ExampleGroup) =>
+    Math.max(
+      ...examples[group].map((vector) => cosineSimilarity(question, vector)),
+    );
+  return sectionKindsFromSimilarities({
+    methods: closest("methods"),
+    results: closest("results"),
+    limitations: closest("limitations"),
+    general: closest("general"),
+  });
 }
 
 /**
