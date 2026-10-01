@@ -4146,8 +4146,21 @@ export function isGenericAgentStatusText(text: string): boolean {
   const normalized = text.trim().toLowerCase();
   return (
     normalized === "running agent" ||
-    /^continuing agent \((?:segment \d+, )?\d+\/\d+\)$/.test(normalized) ||
+    // "(round n)"; runs recorded before it said "(n/24)" or "(segment 2, n/32)".
+    /^continuing agent \((?:round \d+|(?:segment \d+, )?\d+\/\d+)\)$/.test(
+      normalized,
+    ) ||
     /^checkpointed agent segment \d+; continuing$/.test(normalized)
+  );
+}
+
+/**
+ * A long job's progress, "Continuing agent (page 2 · 7 of 30)": the live
+ * status shows it as written, and the trace does not repeat it every round.
+ */
+export function isAgentPageProgressText(text: string): boolean {
+  return /^continuing agent \(page \d+ · \d+ of \d+\)$/.test(
+    text.trim().toLowerCase(),
   );
 }
 
@@ -4431,6 +4444,7 @@ function appendLegacyAgentTraceEvent(
       if (
         !statusText ||
         isGenericAgentStatusText(statusText) ||
+        isAgentPageProgressText(statusText) ||
         statusText === ctx.lastMeaningfulStatus
       ) {
         return true;

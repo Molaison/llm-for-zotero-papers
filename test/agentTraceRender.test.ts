@@ -1040,6 +1040,11 @@ describe("agentTrace render", function () {
       "Checkpointed agent segment 1; continuing",
       "Continuing agent (segment 2, 6/32)",
       "Continuing agent (segment 2, 7/32)",
+      "Continuing agent (round 8)",
+      // A long job's page progress shows in the live status, not each round
+      // in the trace.
+      "Continuing agent (page 2 · 7 of 30)",
+      "Continuing agent (page 2 · 8 of 30)",
       "Reading the methods section",
     ];
     const events: AgentRunEventRecord[] = statusTexts.map((text, index) => ({

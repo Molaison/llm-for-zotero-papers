@@ -54,6 +54,8 @@ function createFinalThenHangingRuntime(
         "Continuing agent (2/24)",
         "Checkpointed agent segment 1; continuing",
         "Continuing agent (segment 2, 6/32)",
+        "Continuing agent (round 7)",
+        "Continuing agent (page 2 · 7 of 30)",
       ]) {
         await params.onEvent?.({ type: "status", text });
       }
@@ -447,8 +449,13 @@ describe("agent engine final UI release", function () {
     assert.notInclude(statuses, "Ready");
     assert.include(statuses, "Working");
     assert.isFalse(
-      statuses.some((text) => /Continuing agent|Checkpointed agent/.test(text)),
+      statuses.some((text) =>
+        /Continuing agent \((?!page)|Checkpointed agent/.test(text),
+      ),
+      "round and segment bookkeeping reads as Working",
     );
+    // A long job's page progress is the status itself.
+    assert.include(statuses, "Continuing agent (page 2 · 7 of 30)");
   });
 
   it("preserves and persists the final answer when completion fails after the final event", async function () {

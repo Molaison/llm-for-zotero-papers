@@ -56,9 +56,12 @@ import { TAVILY_API_KEY_PREF } from "../src/webAccess/prefs";
 import type { WebAccessProvider } from "../src/webAccess/types";
 import {
   MAX_AGENT_ROUNDS,
-  MAX_ANSWER_CONTINUATIONS,
   MAX_AGENT_TOOL_CALLS_PER_ROUND,
+  answerContinuationCeiling,
 } from "../src/agent/model/limits";
+import { resolveAgentPromptBudgetLimits } from "../src/agent/context/promptBudget";
+import { resolveOutputReserve } from "../src/utils/outputTokenPolicy";
+import { estimateContextMessagesTokens } from "../src/utils/modelInputCap";
 import {
   BUILTIN_SKILL_FILES,
   parseSkill,
@@ -1953,7 +1956,7 @@ describe("AgentRuntime", function () {
         events.some(
           (event) =>
             event.type === "status" &&
-            event.text === `Continuing agent (5/${MAX_AGENT_ROUNDS})`,
+            event.text === "Continuing agent (round 5)",
         ),
       );
       assert.equal(
@@ -2694,10 +2697,11 @@ describe("AgentRuntime", function () {
     }
   });
 
-  it("bounds answer continuations and delivers what was written", async function () {
+  it("continues a cut-off answer as often as full-size answers fit the budget, and delivers what was written", async function () {
     const restoreDb = installMockDb();
     try {
       let modelSteps = 0;
+      let firstPrompt = 0;
       const runtime = new AgentRuntime({
         registry: new AgentToolRegistry(),
         adapterFactory: () => ({
@@ -2709,6 +2713,8 @@ describe("AgentRuntime", function () {
           supportsTools: () => true,
           async runStep(params: AgentStepParams): Promise<AgentModelStep> {
             modelSteps += 1;
+            if (modelSteps === 1)
+              firstPrompt = estimateContextMessagesTokens(params.messages);
             const chunk = `part ${modelSteps} `;
             await params.onTextDelta?.(chunk);
             return {
@@ -2722,6 +2728,11 @@ describe("AgentRuntime", function () {
         }),
       });
 
+      // A 20,000-token window with 4,000-token answers.
+      const advanced = {
+        inputTokenCap: 20_000,
+        outputTokenLimit: { mode: "custom" as const, tokens: 4_000 },
+      };
       const outcome = await runtime.runTurn({
         request: {
           conversationKey: 1_913,
@@ -2730,15 +2741,30 @@ describe("AgentRuntime", function () {
           model: "deepseek-chat",
           apiBase: "https://api.deepseek.com/v1",
           apiKey: "test",
-          advanced: { outputTokenLimit: { mode: "auto" } },
+          advanced: advanced as never,
         },
       });
 
-      assert.equal(modelSteps, MAX_ANSWER_CONTINUATIONS + 1);
+      const continuations = answerContinuationCeiling({
+        budgetTokens: resolveAgentPromptBudgetLimits({
+          model: "deepseek-chat",
+          inputTokenCap: advanced.inputTokenCap,
+          apiBase: "https://api.deepseek.com/v1",
+          outputTokenLimit: advanced.outputTokenLimit,
+        }).softLimitTokens,
+        promptTokens: firstPrompt,
+        outputTokens: resolveOutputReserve(
+          advanced.outputTokenLimit,
+          "deepseek-chat",
+          { apiBase: "https://api.deepseek.com/v1" },
+        ),
+      });
+      assert.isBelow(continuations, MAX_AGENT_ROUNDS - 1);
+      assert.equal(modelSteps, continuations + 1);
       assert.equal(outcome.kind, "completed");
       if (outcome.kind === "completed") {
         assert.include(outcome.text, "part 1 part 2 ");
-        assert.include(outcome.text, `part ${MAX_ANSWER_CONTINUATIONS + 1} `);
+        assert.include(outcome.text, `part ${continuations + 1} `);
         assert.include(outcome.text.toLowerCase(), "output limit");
       }
     } finally {

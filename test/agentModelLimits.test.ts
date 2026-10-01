@@ -1,5 +1,9 @@
 import { assert } from "chai";
-import { resolveAgentOutputRequestPolicy } from "../src/agent/model/limits";
+import {
+  addsNewAnswerText,
+  answerContinuationCeiling,
+  resolveAgentOutputRequestPolicy,
+} from "../src/agent/model/limits";
 import type { AgentRuntimeRequest } from "../src/agent/types";
 
 describe("agent model limits", function () {
@@ -74,5 +78,52 @@ describe("agent model limits", function () {
       ),
       { mode: "numeric", tokens: 8192, source: "auto_compatibility" },
     );
+  });
+
+  describe("answer continuations", function () {
+    const BEFORE =
+      "The model drifts over days. Place cells remap in new rooms, and the code stays stable.";
+
+    it("counts a continuation that adds text as new, and a near-repeat as not", function () {
+      assert.isTrue(addsNewAnswerText("part 2 ", "part 1 "));
+      assert.isFalse(addsNewAnswerText("part 1 ", "part 1 "));
+      assert.isFalse(addsNewAnswerText("   ", BEFORE));
+      assert.isFalse(
+        addsNewAnswerText(
+          "Place cells remap in new rooms, and the code stays stable.",
+          BEFORE,
+        ),
+      );
+      assert.isTrue(
+        addsNewAnswerText(
+          "Across weeks, a quarter of the cells changed their fields while the population code held.",
+          BEFORE,
+        ),
+      );
+      assert.isFalse(
+        addsNewAnswerText(`${BEFORE} Indeed.`, BEFORE),
+        "a repeat with a word added is still a repeat",
+      );
+    });
+
+    it("allows as many continuations as full-size answers the input budget still holds", function () {
+      assert.equal(
+        answerContinuationCeiling({
+          budgetTokens: 100_000,
+          promptTokens: 4_000,
+          outputTokens: 8_000,
+        }),
+        12,
+      );
+      assert.equal(
+        answerContinuationCeiling({
+          budgetTokens: 20_000,
+          promptTokens: 15_000,
+          outputTokens: 8_000,
+        }),
+        1,
+        "at least one",
+      );
+    });
   });
 });

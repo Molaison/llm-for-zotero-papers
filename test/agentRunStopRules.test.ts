@@ -14,7 +14,6 @@ import type { WebAccessProvider } from "../src/webAccess/types";
 import {
   MAX_AGENT_ROUNDS,
   MAX_AGENT_TOOL_CALLS_PER_ROUND,
-  MAX_ANSWER_CONTINUATIONS,
 } from "../src/agent/model/limits";
 import type {
   AgentModelAdapter,
@@ -463,11 +462,49 @@ describe("Original Agent run endings", function () {
       }),
     });
 
-    const text = `part 1 part 2 part 3 part 4 \n\n[This answer was cut short by the provider's output limit ${MAX_ANSWER_CONTINUATIONS + 1} times. Ask to continue if it is incomplete.]`;
-    assert.equal(adapter.steps(), MAX_ANSWER_CONTINUATIONS + 1);
+    // Each chunk adds new text, and deepseek-chat's 1M window holds about a
+    // hundred full-size answers (891,808 / 8,192), so the continuations run
+    // to the end of the segment, where the kept text ships.
+    const parts = Array.from(
+      { length: MAX_AGENT_ROUNDS },
+      (_, index) => `part ${index + 1} `,
+    ).join("");
+    const text = `${parts}\n\n[This answer was cut short by the provider's output limit ${MAX_AGENT_ROUNDS} times. Ask to continue if it is incomplete.]`;
+    assert.equal(adapter.steps(), MAX_AGENT_ROUNDS);
     assert.deepInclude(ending.outcome, { kind: "completed", text });
     assert.equal(ending.run.status, "completed");
     assert.equal(ending.run.finalText, text);
+    assertStoppedBy(ending, "answer_continuation_limit", "completed");
+  });
+
+  it("answer_continuation_limit: delivers the answer when a continuation only repeats it", async function () {
+    const adapter = scriptedAdapter(
+      async (_step, params) => {
+        const chunk = "The review covers drift in CA1. ";
+        await params.onTextDelta?.(chunk);
+        return {
+          kind: "incomplete",
+          reason: "output_limit",
+          text: chunk,
+          recoveryInstruction: "Continue with a complete tool call.",
+          assistantMessage: { role: "assistant", content: chunk },
+        };
+      },
+      { ...TOOL_CAPABILITIES, streaming: true },
+    );
+    const ending = await runToEnding(installed, {
+      adapter,
+      request: baseRequest(97_318, "Write the full review", {
+        model: "deepseek-chat",
+        apiBase: "https://api.deepseek.com/v1",
+        advanced: { outputTokenLimit: { mode: "auto" } },
+      }),
+    });
+
+    const text = `The review covers drift in CA1. The review covers drift in CA1. \n\n[This answer was cut short by the provider's output limit 2 times. Ask to continue if it is incomplete.]`;
+    assert.equal(adapter.steps(), 2);
+    assert.deepInclude(ending.outcome, { kind: "completed", text });
+    assert.equal(ending.run.status, "completed");
     assertStoppedBy(ending, "answer_continuation_limit", "completed");
   });
 

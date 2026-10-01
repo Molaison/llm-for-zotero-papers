@@ -79,7 +79,13 @@ export type OutcomeEvidence =
        */
       narrowed?: true;
     }
-  | { kind: "answer" };
+  | { kind: "answer" }
+  | {
+      kind: "failed";
+      /** Papers a tool failed on twice the same way; the host gives up on them. */
+      targets: readonly string[];
+      reason: string;
+    };
 
 /** Every reason the host writes into the ledger, for the UI to translate. */
 export const OUTCOME_REASONS = Object.freeze({
@@ -142,6 +148,7 @@ const INTERRUPTING_STOP_RULES: ReadonlySet<RunStopRule> = new Set<RunStopRule>([
   "incomplete_step_limit",
   "segment_without_progress",
   "repeated_tool_errors",
+  "page_failed",
 ]);
 const LOCAL_TASK_ID_LENGTH = 128;
 
@@ -841,6 +848,50 @@ function applyDeclined(
   );
 }
 
+/**
+ * Papers the host gave up on after the same failure twice: a pending part
+ * that names one and has not done it records the failure as its exception,
+ * so the job goes on to the next paper; a part with every paper done or
+ * given up on settles, as after any other exception.
+ */
+function applyFailure(
+  checkpoint: ExecutionCheckpoint,
+  failure: { targets: readonly string[]; reason: string },
+  now: number,
+): EvidenceResult {
+  const reason = failure.reason.trim() || OUTCOME_REASONS.notApplied;
+  return mapTasks(checkpoint, now, (task) => {
+    if (
+      task.origin !== "model" ||
+      !MARKABLE_STATUSES.has(task.status) ||
+      (task.effect !== "read" && task.effect !== "mutation")
+    )
+      return undefined;
+    const targets = task.targets || [];
+    const done = new Set(task.doneTargets || []);
+    const excepted = new Set(
+      (task.exceptions || []).flatMap((entry) => entry.targets),
+    );
+    const given = targets.filter(
+      (target) =>
+        !done.has(target) &&
+        !excepted.has(target) &&
+        resolveTarget(target, failure.targets) !== undefined,
+    );
+    if (!given.length) return undefined;
+    const exceptions = withException(task.exceptions || [], given, reason);
+    const next: Task = { ...task, exceptions, updatedAt: now };
+    const accounted = new Set([
+      ...done,
+      ...exceptions.flatMap((entry) => entry.targets),
+    ]);
+    if (!targets.every((target) => accounted.has(target))) return next;
+    return done.size
+      ? completed(next)
+      : { ...next, status: "skipped", reason: exceptions[0].reason };
+  });
+}
+
 function applyAnswer(
   checkpoint: ExecutionCheckpoint,
   now: number,
@@ -1006,6 +1057,8 @@ export function applyOutcomeEvidence(
       return applyDeclined(checkpoint, evidence, now);
     case "answer":
       return applyAnswer(checkpoint, now);
+    case "failed":
+      return applyFailure(checkpoint, evidence, now);
   }
 }
 

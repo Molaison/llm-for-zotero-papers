@@ -1415,6 +1415,259 @@ describe("long jobs in runtime turns", function () {
   });
 });
 
+describe("derived limits in runtime turns", function () {
+  let environment: DirectJourneyEnvironment;
+  let conversationKey = 998_000;
+  const BROKEN = "The PDF could not be opened";
+
+  function papers(count: number, from = 4001): number[] {
+    return Array.from({ length: count }, (_, index) => from + index);
+  }
+
+  function scopeOf(itemIds: number[]): TaskPaperScopeSet {
+    return {
+      wholeLibrary: false,
+      itemIds,
+      withText: itemIds.length,
+      papers: Object.fromEntries(
+        itemIds.map((itemId) => [
+          itemId,
+          { title: `Paper ${itemId}`, text: "pdf" as const },
+        ]),
+      ),
+    };
+  }
+
+  function readCall(itemId: number, id = `read-${itemId}`): AgentToolCall {
+    return {
+      id,
+      name: "paper_read",
+      arguments: {
+        target: { itemId, contextItemId: itemId + 1000, libraryID: 1 },
+      },
+    };
+  }
+
+  const declareScope = () =>
+    stepOf(
+      declare("declare-1", [
+        {
+          taskId: "read-all",
+          description: "Read each paper in Drift",
+          expectedEffect: "read",
+          scope: true,
+        },
+      ]),
+    );
+
+  /** Reads fail for `failing` papers, and return a short text otherwise. */
+  function readsFailingFor(failing: ReadonlySet<number>) {
+    scriptedPaperRead = (input) => {
+      const itemId = Number((input.target as { itemId?: number })?.itemId);
+      if (failing.has(itemId)) throw new Error(BROKEN);
+      return {
+        mode: "targeted",
+        results: [],
+        papers: [
+          {
+            paperContext: {
+              itemId,
+              contextItemId: itemId + 1000,
+              libraryID: 1,
+            },
+            passages: [
+              {
+                text: `Finding ${itemId}: drift was measured.`,
+                sectionLabel: "Results",
+              },
+            ],
+          },
+        ],
+      };
+    };
+  }
+
+  function statuses(turn: Turn): string[] {
+    return turn.events.flatMap((event) =>
+      event.type === "status" ? [event.text] : [],
+    );
+  }
+
+  beforeEach(async function () {
+    environment = await installDirectJourneyEnvironment();
+    libraryUpdateReceipt = undefined;
+    conversationKey += 10;
+  });
+
+  afterEach(function () {
+    environment.restore();
+    scriptedPaperRead = undefined;
+  });
+
+  it("names the round in its status, or the job's page, never a cap", async function () {
+    readsFailingFor(new Set());
+    const ordinary = await runTurn({
+      conversationKey,
+      userText: "Read the paper twice",
+      steps: [
+        stepOf(paperRead("read-1")),
+        stepOf(paperRead("read-2")),
+        finalStep("Read."),
+      ],
+    });
+    assert.deepEqual(statuses(ordinary), [
+      "Running agent",
+      "Continuing agent (round 2)",
+      "Continuing agent (round 3)",
+    ]);
+
+    conversationKey += 10;
+    const ids = papers(4);
+    let page: number[] = [];
+    const job = await runTurn({
+      conversationKey,
+      userText: "Read every paper in Drift",
+      scope: scopeOf(ids),
+      attached: { advanced: { inputTokenCap: 30_000 } as never },
+      steps: [
+        declareScope(),
+        ...Array.from({ length: 12 }, () => (messages: AgentModelMessage[]) => {
+          const host = [...messages]
+            .reverse()
+            .map((message) => promptText([message]))
+            .find((text) => text.startsWith("Long job"));
+          if (!host || host.startsWith("Long job complete"))
+            return finalStep("Every paper is read.");
+          page = [...host.matchAll(/^- itemId=(\d+)/gm)].map((match) =>
+            Number(match[1]),
+          );
+          return stepOf(...page.map((itemId) => readCall(itemId)));
+        }),
+      ],
+    });
+    assert.equal(job.outcome?.kind, "completed", String(job.error || ""));
+    const texts = statuses(job);
+    assert.include(texts, "Continuing agent (page 1 · 0 of 4)");
+    assert.isTrue(
+      texts.every((text) => !/\d+\/\d+\)$/.test(text)),
+      JSON.stringify(texts),
+    );
+  });
+
+  it("lets a step read every paper of a job at once, past eight calls", async function () {
+    readsFailingFor(new Set());
+    const ids = papers(20);
+    const turn = await runTurn({
+      conversationKey,
+      userText: "Read every paper in Drift",
+      scope: scopeOf(ids),
+      // A window the twenty papers fit in one pass: no page bounds the step.
+      attached: { advanced: { inputTokenCap: 1_000_000 } as never },
+      steps: [
+        declareScope(),
+        stepOf(...ids.map((itemId) => readCall(itemId))),
+        finalStep("Every paper is read."),
+      ],
+    });
+    assert.equal(turn.outcome?.kind, "completed", String(turn.error || ""));
+    assert.isFalse(
+      turn.events.some(
+        (event) =>
+          event.type === "provider_event" &&
+          event.providerType === "agent_tool_call_overflow",
+      ),
+      "twenty reads for twenty papers are one step",
+    );
+    assert.lengthOf(outcome(settled(turn), "read-all").doneTargets!, 20);
+    assert.deepEqual(settled(turn).end, { state: "completed" });
+  });
+
+  it("gives up on a paper that fails the same way twice and goes on, even through a segment of only failures", async function () {
+    const ids = papers(50);
+    // Papers 24 to 35 fail: a whole segment of rounds with no new result.
+    const failing = new Set(ids.slice(23, 35));
+    readsFailingFor(failing);
+    let next = 0;
+    let retried = false;
+    const model = (messages: AgentModelMessage[]) => {
+      const last = messages[messages.length - 1];
+      const failed =
+        last?.role === "tool" && String(last.content).includes(BROKEN);
+      if (failed && !retried) {
+        retried = true;
+        return stepOf(readCall(ids[next - 1], `retry-${ids[next - 1]}`));
+      }
+      retried = false;
+      if (next >= ids.length) return finalStep("Every paper is read.");
+      return stepOf(readCall(ids[next++]));
+    };
+    const turn = await runTurn({
+      conversationKey,
+      userText: "Read every paper in Drift",
+      scope: scopeOf(ids),
+      attached: { advanced: { inputTokenCap: 1_000_000 } as never },
+      steps: [declareScope(), ...Array.from({ length: 80 }, () => model)],
+    });
+    assert.equal(turn.outcome?.kind, "completed", String(turn.error || ""));
+    assert.equal(turn.requests, 1 + 23 + 2 * 12 + 15 + 1);
+    const part = outcome(settled(turn), "read-all");
+    assert.lengthOf(part.doneTargets!, 38);
+    assert.deepEqual(part.exceptions, [
+      {
+        targets: [...failing].map((itemId) => `item:${itemId}`),
+        reason: BROKEN,
+      },
+    ]);
+    assert.deepEqual(settled(turn).end, {
+      state: "completed_with_exceptions",
+    });
+  });
+
+  it("stops a job as interrupted when a page's worth of papers fail in a row", async function () {
+    const ids = papers(6);
+    readsFailingFor(new Set(ids));
+    const asked = new Map<number, number>();
+    const model = (messages: AgentModelMessage[]) => {
+      const host = [...messages]
+        .reverse()
+        .map((message) => promptText([message]))
+        .find((text) => text.startsWith("Long job"));
+      const page = host
+        ? [...host.matchAll(/^- itemId=(\d+)/gm)].map((match) =>
+            Number(match[1]),
+          )
+        : [];
+      const itemId = page.find((id) => (asked.get(id) || 0) < 2);
+      if (itemId === undefined) return finalStep("Nothing could be read.");
+      asked.set(itemId, (asked.get(itemId) || 0) + 1);
+      return stepOf(readCall(itemId, `read-${itemId}-${asked.get(itemId)}`));
+    };
+    const turn = await runTurn({
+      conversationKey,
+      userText: "Read every paper in Drift",
+      scope: scopeOf(ids),
+      attached: { advanced: { inputTokenCap: 30_000 } as never },
+      steps: [declareScope(), ...Array.from({ length: 20 }, () => model)],
+    });
+    assert.equal(turn.outcome?.kind, "completed", String(turn.error || ""));
+    assert.equal(stopStatus(turn), "failed");
+    const stop = turn.events.find(
+      (event) =>
+        event.type === "provider_event" &&
+        event.providerType === "agent_run_stop",
+    );
+    assert.equal(
+      (stop as { payload?: { rule?: string } }).payload?.rule,
+      "page_failed",
+    );
+    assert.deepEqual(settled(turn).end, { state: "interrupted" });
+    if (turn.outcome?.kind === "completed")
+      assert.include(turn.outcome.text, "continue");
+    // Two papers, each failing twice: a page's worth, and more than one.
+    assert.equal(turn.requests, 1 + 4);
+  });
+});
+
 describe("live runs that made every change, as runtime turns (2026-10-01)", function () {
   let environment: DirectJourneyEnvironment;
   let conversationKey = 996_000;

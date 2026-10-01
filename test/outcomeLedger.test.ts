@@ -2577,3 +2577,95 @@ describe("outcome ledger: batches over a part's papers (reorganization)", functi
     assert.notProperty(refused, "exceptions");
   });
 });
+
+describe("outcome ledger: papers the host gave up on", function () {
+  const SCOPE = ["item:1", "item:2", "item:3"];
+  const readAll: OutcomeDeclaration = {
+    taskId: "read-all",
+    description: "Read each paper in Drift",
+    effect: "read",
+    targets: SCOPE,
+    scope: true,
+  };
+  const noteAll: OutcomeDeclaration = {
+    taskId: "note-all",
+    description: "Write a note on each",
+    effect: "mutation",
+    capability: "zotero.notes",
+    targets: SCOPE,
+  };
+  const BROKEN = "The PDF could not be opened";
+
+  it("records the failure as each naming part's exception, and the job goes on", function () {
+    const ledger = ledgerWith(readAll, noteAll);
+    const { checkpoint, changed } = apply(ledger, {
+      kind: "failed",
+      targets: ["item:2"],
+      reason: BROKEN,
+    });
+    assert.isTrue(changed);
+    for (const local of ["read-all", "note-all"]) {
+      const task = find(checkpoint, local);
+      assert.equal(task.status, "pending", local);
+      assert.deepEqual(task.exceptions, [
+        { targets: ["item:2"], reason: BROKEN },
+      ]);
+    }
+  });
+
+  it("settles a part once every paper is done or given up on", function () {
+    let ledger = apply(ledgerWith(readAll), {
+      kind: "read",
+      targets: ["item:1", "item:3"],
+      observationIds: ["obs-1"],
+    }).checkpoint;
+    ledger = apply(ledger, {
+      kind: "failed",
+      targets: ["item:2"],
+      reason: BROKEN,
+    }).checkpoint;
+    assert.include(find(ledger, "read-all"), { status: "completed" });
+    assert.equal(
+      decideRunEnd(ledger, { status: "completed", stopRule: "final_answer" }),
+      "completed_with_exceptions",
+    );
+    // Only failures: skipped, with the failure as the reason.
+    const failedAll = apply(ledgerWith(readAll), {
+      kind: "failed",
+      targets: SCOPE,
+      reason: BROKEN,
+    }).checkpoint;
+    assert.include(find(failedAll, "read-all"), {
+      status: "skipped",
+      reason: BROKEN,
+    });
+  });
+
+  it("leaves a paper already done alone, and changes nothing the second time", function () {
+    const read = apply(ledgerWith(readAll), {
+      kind: "read",
+      targets: ["item:2"],
+      observationIds: ["obs-1"],
+    }).checkpoint;
+    const failure: OutcomeEvidence = {
+      kind: "failed",
+      targets: ["item:2"],
+      reason: BROKEN,
+    };
+    assert.isFalse(apply(read, failure).changed, "item 2 was read");
+    const once = apply(ledgerWith(readAll), failure).checkpoint;
+    assert.isFalse(apply(once, failure).changed);
+  });
+
+  it("ends a run stopped by a failed page as interrupted", function () {
+    const ledger = apply(ledgerWith(readAll), {
+      kind: "failed",
+      targets: ["item:1", "item:2"],
+      reason: BROKEN,
+    }).checkpoint;
+    assert.equal(
+      decideRunEnd(ledger, { status: "failed", stopRule: "page_failed" }),
+      "interrupted",
+    );
+  });
+});

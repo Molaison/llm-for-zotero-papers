@@ -8,6 +8,7 @@ import {
   REQUESTS_PER_PAGE_PRIOR,
   priorPaperTokens,
   readLongJob,
+  settledTargetCount,
   renderLongJobMessage,
   type LongJobPage,
 } from "../src/agent/loop/longJob";
@@ -557,6 +558,136 @@ describe("long job", function () {
         budgetTokens: 50_000,
       });
       assert.deepEqual(checked, { digest: items(5), final: false });
+    });
+  });
+
+  describe("what the host derives from the job", function () {
+    it("names the open page, the papers it still has and the job's progress", function () {
+      const pager = pagerWith(4_000);
+      let ledger = jobLedger(items(30));
+      assert.isNull(pager.openPage(ledger), "no page before paging starts");
+      plannedPage(pager, ledger, 10_000, 22_000);
+      assert.deepInclude(pager.openPage(ledger), {
+        number: 1,
+        targets: items(2),
+        left: items(2),
+        settled: 0,
+        total: 30,
+      });
+      ledger = read(ledger, items(1));
+      assert.deepInclude(pager.openPage(ledger), {
+        left: ["item:2"],
+        settled: 1,
+      });
+    });
+
+    it("lets a step make a call for each paper still open, and one more, never fewer than an ordinary step", function () {
+      const ORDINARY = 8;
+      const pager = pagerWith(1_000);
+      const input = (ledger: ExecutionCheckpoint) => ({
+        checkpoint: ledger,
+        promptTokens: 10_000,
+        budgetTokens: 100_000,
+      });
+      // No job: the ordinary limit.
+      assert.equal(
+        pager.stepLimit(
+          input(createEmptyExecutionCheckpoint(executionContext, 1)),
+          ORDINARY,
+        ),
+        ORDINARY,
+      );
+      // A job that fits one pass: its papers left, as far as the room holds.
+      assert.equal(pager.stepLimit(input(jobLedger(items(20))), ORDINARY), 21);
+      assert.equal(
+        pager.stepLimit(input(jobLedger(items(3))), ORDINARY),
+        ORDINARY,
+      );
+      const roomFor = (budgetTokens: number) =>
+        pager.stepLimit(
+          { ...input(jobLedger(items(20))), budgetTokens },
+          ORDINARY,
+        );
+      // floor((22,000 - 10,000) / 1,000) = 12 papers fit.
+      assert.equal(roomFor(22_000), 13);
+      // A paged job: the open page's papers.
+      const paged = pagerWith(12_000);
+      const ledger = jobLedger(items(200));
+      // Pages double while each is read whole at once: 3, 6, 12.
+      let request = 1;
+      const prompt = 30_000;
+      let page = plannedPage(paged, ledger, prompt, 900_000, request);
+      let current = ledger;
+      for (let index = 0; index < 2; index += 1) {
+        current = read(current, [...page.targets]);
+        request += 1;
+        paged.check({
+          checkpoint: current,
+          promptTokens: prompt + page.targets.length * 12_000,
+          budgetTokens: 900_000,
+          requests: request,
+          reads: page.targets,
+        });
+        page = paged.plan({
+          checkpoint: current,
+          promptTokens: prompt,
+          budgetTokens: 900_000,
+          requests: request,
+        }) as LongJobPage;
+      }
+      assert.lengthOf(page.targets, 12);
+      assert.equal(
+        paged.stepLimit(
+          { checkpoint: current, promptTokens: prompt, budgetTokens: 900_000 },
+          ORDINARY,
+        ),
+        13,
+      );
+    });
+
+    it("leaves papers the host gave up on out of what a paper costs", function () {
+      const pager = pagerWith(4_000);
+      let ledger = jobLedger(items(30));
+      plannedPage(pager, ledger, 10_000, 22_000);
+      // Paper 1 failed twice: a few hundred tokens of errors, no read.
+      ledger = applyOutcomeEvidence(
+        ledger,
+        { kind: "failed", targets: ["item:1"], reason: "Broken PDF" },
+        4,
+      ).checkpoint;
+      pager.check({
+        checkpoint: ledger,
+        promptTokens: 10_400,
+        budgetTokens: 22_000,
+        gaveUp: ["item:1"],
+      });
+      ledger = read(ledger, ["item:2"]);
+      const boundary = pager.check({
+        checkpoint: ledger,
+        promptTokens: 15_400,
+        budgetTokens: 22_000,
+      });
+      assert.deepEqual(boundary, { digest: items(2), final: false });
+      const next = pager.plan({
+        checkpoint: ledger,
+        promptTokens: 11_000,
+        budgetTokens: 22_000,
+      }) as LongJobPage;
+      // Paper 2 alone was read: 5,400 tokens of growth, not 2,700 a paper.
+      assert.equal(next.costPerPaper, 5_400);
+    });
+
+    it("counts the papers every part has settled, done or given up on", function () {
+      let ledger = jobLedger(items(5));
+      assert.equal(settledTargetCount(ledger), 0);
+      ledger = read(ledger, items(2), ["item:3"]);
+      assert.equal(settledTargetCount(ledger), 3);
+      ledger = applyOutcomeEvidence(
+        ledger,
+        { kind: "failed", targets: ["item:4"], reason: "Broken PDF" },
+        4,
+      ).checkpoint;
+      assert.equal(settledTargetCount(ledger), 4);
     });
   });
 

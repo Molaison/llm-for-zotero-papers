@@ -63,12 +63,14 @@ import { ActionContractRunSession } from "./contracts/actionContractRunSession";
 import type { MaterialRef } from "./documents/materialRef";
 import { AgentFinalAnswerController } from "./finalization/finalAnswerController";
 import type { RunStopRule } from "./loop/stopRules";
+import { namedItemTargets, toolFailureReason } from "./loop/paperFailures";
 import {
   LongJobPager,
   priorPaperTokens,
   readLongJob,
   renderLongJobMessage,
   renderLongJobRecord,
+  settledTargetCount,
 } from "./loop/longJob";
 import {
   applyOutcomeEvidence,
@@ -83,7 +85,12 @@ import { isExplicitContinueCommand } from "./continuation/continueCommand";
 import type { AgentModelAdapter } from "./model/adapter";
 import { resolveCapabilitiesContentInputs } from "./model/contentCapabilities";
 import { buildAnswerContinuationInstruction } from "./model/completion";
-import { MAX_ANSWER_CONTINUATIONS, resolveAgentLimits } from "./model/limits";
+import {
+  addsNewAnswerText,
+  answerContinuationCeiling,
+  resolveAgentLimits,
+} from "./model/limits";
+import { resolveOutputReserve } from "../utils/outputTokenPolicy";
 import {
   buildAgentPromptInstructionInventory,
   composeAgentModelInput,
@@ -1211,6 +1218,8 @@ export class AgentRuntime {
       // How many of the turn's reads the pager has seen, so each round
       // tells it only the papers its own read calls carried.
       let longJobReadsSeen = 0;
+      // Papers the host gave up on in the round the pager checks next.
+      let longJobGaveUp: string[] = [];
       // How many batches of per-paper results the transcript holds.
       let longJobRecords = 0;
       const restartFromSemanticCheckpoint = async (params: {
@@ -1838,6 +1847,9 @@ export class AgentRuntime {
       // A final answer the provider cut off at its output limit stays on
       // screen and in the transcript; the model is asked for the remainder.
       let answerContinuations = 0;
+      // How many times a cut-off answer may continue: as many full-size
+      // answers as the input budget holds beside the prompt it started from.
+      let answerContinuationLimit: number | undefined;
       let keptAnswerVisibleText = "";
       let keptAnswerModelText = "";
       const rollbackKeptAnswer = async (): Promise<void> => {
@@ -1887,7 +1899,9 @@ export class AgentRuntime {
           budgetTokens,
           requests: round,
           reads: roundReads,
+          gaveUp: longJobGaveUp,
         });
+        longJobGaveUp = [];
         if (!boundary) return;
         const job = readLongJob(request.executionCheckpoint, longJob.following);
         if (!job) return;
@@ -2087,8 +2101,29 @@ export class AgentRuntime {
       let segment = 1;
       let streamRecoveryUsed = false;
       const seenProgressFingerprints = new Set<string>();
+      // What the status says each round: the round, or the long job's page
+      // and its progress. Segments are progress checks, not a cap.
+      const roundStatus = (): string => {
+        const page = recordsOutcomes()
+          ? longJob.openPage(request.executionCheckpoint)
+          : null;
+        return page
+          ? `Continuing agent (page ${page.number} · ${page.settled} of ${page.total})`
+          : `Continuing agent (round ${round})`;
+      };
+      // Papers a tool failed on, each failure counted by its reason; after
+      // the same failure twice the host gives up on the paper.
+      const paperFailures = new Map<string, number>();
+      // Papers given up on since the last one done, and how many in a row
+      // stop the job: a page's worth (the page the run began in, or before
+      // paging the papers left), and more than one.
+      let failedInARow = 0;
+      let failedInARowLimit = 0;
       while (true) {
         const segmentRecordStart = toolExecutionRecords.length;
+        const settledAtSegmentStart = settledTargetCount(
+          request.executionCheckpoint,
+        );
         for (
           let segmentRound = 1;
           segmentRound <= maxRounds;
@@ -2099,11 +2134,7 @@ export class AgentRuntime {
           try {
             stepResult = await runModelStep(
               round,
-              round === 1
-                ? "Running agent"
-                : segment === 1
-                  ? `Continuing agent (${segmentRound}/${maxRounds})`
-                  : `Continuing agent (segment ${segment}, ${segmentRound}/${maxRounds})`,
+              round === 1 ? "Running agent" : roundStatus(),
             );
           } catch (err) {
             if (err instanceof AgentPromptBudgetError) {
@@ -2139,6 +2170,24 @@ export class AgentRuntime {
             ) {
               // The model was writing its answer, not a tool call: keep what
               // it wrote visible and ask only for the remainder.
+              const addsText = addsNewAnswerText(
+                truncatedAnswerText,
+                keptAnswerModelText,
+              );
+              answerContinuationLimit ??= answerContinuationCeiling({
+                budgetTokens: providerReplaySoftLimit,
+                promptTokens: estimateContextMessagesTokens(messages),
+                outputTokens: resolveOutputReserve(
+                  request.advanced?.outputTokenLimit,
+                  request.model || "",
+                  {
+                    apiBase: request.apiBase,
+                    protocol: request.providerProtocol,
+                    authMode: request.authMode,
+                    profileOverride: request.advanced?.profileOverride,
+                  },
+                ),
+              });
               if (stepStreamedText) {
                 keptAnswerVisibleText += stepStreamedText;
               } else {
@@ -2155,7 +2204,8 @@ export class AgentRuntime {
                   content: truncatedAnswerText,
                 };
               if (
-                answerContinuations >= MAX_ANSWER_CONTINUATIONS ||
+                !addsText ||
+                answerContinuations >= answerContinuationLimit ||
                 segmentRound >= maxRounds
               ) {
                 newTranscriptMessages.push(truncatedAssistantMessage);
@@ -2327,8 +2377,20 @@ export class AgentRuntime {
           await rollbackCommittedStreamedText(stepStreamedText);
           await rollbackKeptAnswer();
 
-          if (step.calls.length > maxToolCallsPerRound) {
-            const overflowMessage = `The model returned ${step.calls.length} tool calls in one step, exceeding the safe limit of ${maxToolCallsPerRound}. None of those calls were executed.`;
+          // Item-scoped work may read a page's open papers in one step; an
+          // ordinary step keeps the ordinary limit.
+          const stepToolCallLimit = recordsOutcomes()
+            ? longJob.stepLimit(
+                {
+                  checkpoint: request.executionCheckpoint,
+                  promptTokens: estimateContextMessagesTokens(messages),
+                  budgetTokens: providerReplaySoftLimit,
+                },
+                maxToolCallsPerRound,
+              )
+            : maxToolCallsPerRound;
+          if (step.calls.length > stepToolCallLimit) {
+            const overflowMessage = `The model returned ${step.calls.length} tool calls in one step, exceeding the safe limit of ${stepToolCallLimit}. None of those calls were executed.`;
             if (toolCallOverflowCorrectionUsed || segmentRound >= maxRounds) {
               return await completeRun(
                 `${overflowMessage} Please narrow the request and try again.`,
@@ -2339,7 +2401,7 @@ export class AgentRuntime {
             toolCallOverflowCorrectionUsed = true;
             await restartFromSemanticCheckpoint({
               sourceMessages: messages,
-              retryInstruction: `${overflowMessage} Retry with a complete new step containing at most ${maxToolCallsPerRound} tool calls. Do not assume that any result exists for the rejected calls.`,
+              retryInstruction: `${overflowMessage} Retry with a complete new step containing at most ${stepToolCallLimit} tool calls. Do not assume that any result exists for the rejected calls.`,
             });
             await emit({
               type: "provider_event",
@@ -2347,7 +2409,7 @@ export class AgentRuntime {
               payload: {
                 action: "checkpoint_and_retry",
                 returnedToolCalls: step.calls.length,
-                maxToolCallsPerRound,
+                maxToolCallsPerRound: stepToolCallLimit,
               },
             });
             continue;
@@ -2371,6 +2433,18 @@ export class AgentRuntime {
           let roundHadSuccessfulToolResult = false;
           let roundHadToolFailure = false;
           let roundHadInputRejection = false;
+          // Papers of the turn's job a call failed on: their failures are the
+          // papers', not the run's, and do not count as repeated tool errors.
+          const givenUp = new Map<string, string[]>();
+          const jobPapers = recordsOutcomes()
+            ? new Set(
+                readLongJob(request.executionCheckpoint, longJob.following)
+                  ?.notDone || [],
+              )
+            : new Set<string>();
+          const doneBeforeRound = settledTargetCount(
+            request.executionCheckpoint,
+          );
           for (const [index, call] of calls.entries()) {
             const outcome = await toolExecution.executeToolWorkflow(
               call,
@@ -2383,8 +2457,20 @@ export class AgentRuntime {
             if (outcome.toolResult.ok) roundHadSuccessfulToolResult = true;
             else if (outcome.toolResult.inputRejected)
               roundHadInputRejection = true;
-            else if (!isUserDeniedToolResult(outcome.toolResult))
-              roundHadToolFailure = true;
+            else if (!isUserDeniedToolResult(outcome.toolResult)) {
+              const papers = namedItemTargets(call.arguments).filter((target) =>
+                jobPapers.has(target),
+              );
+              if (!papers.length) roundHadToolFailure = true;
+              const reason = toolFailureReason(outcome.toolResult.content);
+              for (const target of papers) {
+                const key = `${target}\n${reason}`;
+                const failures = (paperFailures.get(key) || 0) + 1;
+                paperFailures.set(key, failures);
+                if (failures >= 2)
+                  givenUp.set(reason, [...(givenUp.get(reason) || []), target]);
+              }
+            }
             if (outcome.delivery) {
               const toolMessage: AgentToolMessage = {
                 role: "tool",
@@ -2437,6 +2523,38 @@ export class AgentRuntime {
             if (roundHadInputRejection && !roundHadToolFailure)
               consecutiveInputRejectionRounds += 1;
           }
+          if (givenUp.size) {
+            for (const [reason, targets] of givenUp)
+              await recordOutcomeEvidence({ kind: "failed", targets, reason });
+          }
+          longJobGaveUp = [...givenUp.values()].flat();
+          if (recordsOutcomes()) {
+            const given = longJobGaveUp.length;
+            const doneThisRound =
+              settledTargetCount(request.executionCheckpoint) -
+              doneBeforeRound -
+              given;
+            if (doneThisRound > 0) failedInARow = 0;
+            if (given && !failedInARow) {
+              const page = longJob.openPage(request.executionCheckpoint);
+              failedInARowLimit = Math.max(
+                2,
+                page ? page.targets.length : jobPapers.size,
+              );
+            }
+            failedInARow += given;
+            // A page's worth of papers failed in a row: something beyond one
+            // paper is wrong. The job stops where it is, resumable.
+            if (given && failedInARow >= failedInARowLimit) {
+              await persistTranscriptCheckpoint();
+              const [reason] = [...givenUp.keys()];
+              return await completeRun(
+                `Stopped: the last ${failedInARow} papers in a row failed (${reason}). The job's progress is saved; say "continue" to go on with the papers left.`,
+                "failed",
+                "page_failed",
+              );
+            }
+          }
           if (
             consecutiveToolErrorRounds >= 3 ||
             consecutiveInputRejectionRounds >= 6
@@ -2468,7 +2586,12 @@ export class AgentRuntime {
           )
           .map(buildToolProgressFingerprint)
           .filter((fingerprint) => !seenProgressFingerprints.has(fingerprint));
-        if (!newFingerprints.length) {
+        // A newly settled target is progress too: a long job going through
+        // its papers is never stopped here, even when its results repeat.
+        const settledNewTargets =
+          settledTargetCount(request.executionCheckpoint) >
+          settledAtSegmentStart;
+        if (!newFingerprints.length && !settledNewTargets) {
           const finalText =
             currentAnswerText ||
             `Agent stopped after segment ${segment} produced no new successful tool result. The completed transcript was saved; narrow or redirect the request before continuing.`;

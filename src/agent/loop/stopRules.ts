@@ -36,6 +36,8 @@ export type RunStopRule =
   | "repeated_input_rejections"
   // A whole segment of rounds produced no new successful tool result.
   | "segment_without_progress"
+  // A long job's papers failed a page's worth in a row; it stops, resumable.
+  | "page_failed"
   // The user stopped the run before its next model step was sent.
   | "cancelled_before_step"
   // The user stopped the run while a model step or tool was in flight.

@@ -213,6 +213,27 @@ export function readLongJob(
   };
 }
 
+/**
+ * Targets the turn's parts have settled, done or given up on: the progress
+ * a long job makes even when its tool results repeat earlier ones.
+ */
+export function settledTargetCount(
+  checkpoint: ExecutionCheckpoint | undefined,
+): number {
+  return (checkpoint?.tasks || []).reduce(
+    (count, task) =>
+      task.origin === "model"
+        ? count +
+          (task.doneTargets?.length || 0) +
+          (task.exceptions || []).reduce(
+            (sum, entry) => sum + entry.targets.length,
+            0,
+          )
+        : count,
+    0,
+  );
+}
+
 /** What a turn's long job asks of the runtime after a tool round. */
 export type LongJobBoundary = Readonly<{
   /** Settled papers whose reads to digest before the next page. */
@@ -230,6 +251,8 @@ type PagerInput = {
   requests?: number;
   /** The papers this request's read calls carried. */
   reads?: readonly string[];
+  /** Papers the host gave up on this round, after the same failure twice. */
+  gaveUp?: readonly string[];
 };
 
 /**
@@ -259,6 +282,11 @@ export class LongJobPager {
   private pageStart: { requests?: number; reads: number } | null = null;
   /** The job's settled papers as of the previous round. */
   private settledBefore = new Set<string>();
+  /**
+   * Papers the host gave up on: they settle, but a few failed calls are not
+   * what reading a paper costs, so they stay out of c.
+   */
+  private givenUp = new Set<string>();
   private page: readonly string[] | null = null;
   private pages = 0;
   private digested = new Set<string>();
@@ -295,6 +323,56 @@ export class LongJobPager {
       : REQUESTS_PER_PAGE_PRIOR;
   }
 
+  /**
+   * The page the host has named and not yet ended: its papers, those still
+   * open, and the job's progress, "page 3 · 12 of 30".
+   */
+  openPage(checkpoint: ExecutionCheckpoint | undefined): {
+    number: number;
+    targets: readonly string[];
+    left: readonly string[];
+    settled: number;
+    total: number;
+  } | null {
+    if (!this.page || this.finished) return null;
+    const job = readLongJob(checkpoint, this.partIds);
+    if (!job) return null;
+    return {
+      number: this.pages,
+      targets: this.page,
+      left: this.page.filter((target) => !job.settled.has(target)),
+      settled: job.settled.size,
+      total: job.targets.length,
+    };
+  }
+
+  /**
+   * The tool calls one step may make while the turn has a job: one for each
+   * of its papers still open (the open page's, or before paging those the
+   * room holds), and one more beside them, never fewer than `ordinary`.
+   */
+  stepLimit(
+    input: {
+      checkpoint: ExecutionCheckpoint | undefined;
+      promptTokens: number;
+      budgetTokens: number;
+    },
+    ordinary: number,
+  ): number {
+    const job = readLongJob(input.checkpoint, this.partIds);
+    if (!job || !job.open || this.finished) return ordinary;
+    const open = this.page
+      ? this.page.filter((target) => !job.settled.has(target))
+      : job.notDone;
+    const fits = Math.max(
+      1,
+      Math.floor(
+        (input.budgetTokens - input.promptTokens) / this.costPerPaper(job),
+      ),
+    );
+    return Math.max(ordinary, Math.min(open.length, fits) + 1);
+  }
+
   /** Tokens per paper: measured over the job, else the mean prior. */
   costPerPaper(job: LongJob, extra = { tokens: 0, papers: 0 }): number {
     const tokens = this.measured.tokens + extra.tokens;
@@ -308,8 +386,16 @@ export class LongJobPager {
     );
   }
 
+  /** Settled papers that measure c: all but those the host gave up on. */
+  private measuredSettled(job: LongJob): number {
+    let count = 0;
+    for (const target of job.settled) if (!this.givenUp.has(target)) count += 1;
+    return count;
+  }
+
   check(input: PagerInput): LongJobBoundary | null {
     if (this.finished) return null;
+    for (const target of input.gaveUp || []) this.givenUp.add(target);
     const job = readLongJob(input.checkpoint, this.partIds);
     if (!job) return null;
     const carried = new Set(input.reads || []);
@@ -339,10 +425,13 @@ export class LongJobPager {
     if (!this.baseline) {
       this.baseline = {
         promptTokens: input.promptTokens,
-        settled: job.settled.size,
+        settled: this.measuredSettled(job),
       };
     }
-    const settledSince = Math.max(0, job.settled.size - this.baseline.settled);
+    const settledSince = Math.max(
+      0,
+      this.measuredSettled(job) - this.baseline.settled,
+    );
     const growth = Math.max(0, input.promptTokens - this.baseline.promptTokens);
     const sinceBaseline = settledSince
       ? { tokens: growth, papers: settledSince }
@@ -422,7 +511,7 @@ export class LongJobPager {
     }
     this.baseline = {
       promptTokens: input.promptTokens,
-      settled: job.settled.size,
+      settled: this.measuredSettled(job),
     };
     const cost = this.costPerPaper(job);
     const room = input.budgetTokens - input.promptTokens;
