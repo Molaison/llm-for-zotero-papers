@@ -5,7 +5,11 @@ import type {
   AgentTraceDetail,
 } from "../../types";
 import { LiteratureSearchService } from "../../services/literatureSearchService";
-import { identifyLiteratureCandidates } from "../../services/literatureDiscovery";
+import {
+  identifyLiteratureCandidates,
+  MAX_DISCOVERY_COUNT,
+  parseDiscoveryCount,
+} from "../../services/literatureDiscovery";
 import { LITERATURE_REVIEW_SPEC } from "./reviewLiterature";
 import type { ZoteroGateway } from "../../services/zoteroGateway";
 import { readOnlyInvocationPlan } from "../../authorization/invocationPlan";
@@ -47,6 +51,8 @@ type LiteratureSearchInput = {
   query?: string;
   author?: string;
   limit?: number;
+  /** Discovery: the number of papers the user asked for. */
+  count?: number;
   libraryID?: number;
 };
 
@@ -215,6 +221,13 @@ export function createLiteratureSearchTool(
               "Author name to filter results by. When provided alone (without query), returns the author's papers sorted by citation count. When combined with query, narrows keyword results to this author.",
           },
           limit: { type: "number" },
+          count: {
+            type: "integer",
+            minimum: 1,
+            maximum: MAX_DISCOVERY_COUNT,
+            description:
+              "workflow:'review': papers the user asked for, five when unspecified.",
+          },
           libraryID: { type: "number" },
         },
       },
@@ -332,6 +345,11 @@ export function createLiteratureSearchTool(
         args.workflow === "review" || args.workflow === "answer"
           ? args.workflow
           : "answer";
+      const count = parseDiscoveryCount(args.count);
+      if (count === null)
+        return fail(
+          `count must be an integer from 1 to ${MAX_DISCOVERY_COUNT}.`,
+        );
 
       return ok<LiteratureSearchInput>({
         workflow,
@@ -345,6 +363,7 @@ export function createLiteratureSearchTool(
         query,
         author,
         limit: normalizePositiveInt(args.limit),
+        count,
         libraryID: normalizePositiveInt(args.libraryID),
       });
     },
@@ -375,6 +394,7 @@ export function createLiteratureSearchTool(
         context,
         input.workflow === "review",
         routeImports,
+        input.count,
       );
     },
     createResultReviewAction: (input, result, context) =>

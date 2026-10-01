@@ -85,13 +85,17 @@ describe("ranked literature discovery workflow", function () {
     return parsed.value;
   }
 
-  async function search(context = makeContext()) {
+  async function search(
+    context = makeContext(),
+    extra: Record<string, unknown> = {},
+  ) {
     const tool = createLiteratureSearchTool(gateway as never);
     const input = tool.validate({
       mode: "search",
       workflow: "review",
       query: "population coding",
       limit: 12,
+      ...extra,
     });
     if (!input.ok) throw new Error(input.error);
     const content = (await tool.execute(input.value, context)) as any;
@@ -400,91 +404,238 @@ describe("ranked literature discovery workflow", function () {
       );
     });
   });
-  it("expands 5 ranked choices from saved candidates and preserves selections", async function () {
-    // A discovery batch is five papers; no turn carries a requested count.
-    const count = 5;
-    const context = makeContext();
-    context.request.userText = "Find relevant papers for me";
-    const candidates = await search(context);
-    const tool = createLiteratureReviewTool(gateway as never);
-    const review = async (indices: number[], extra = {}) => {
-      const parsed = tool.validate({
-        selections: indices.map((candidateIndex) => ({
-          candidateSetId: candidates.candidateSetId,
-          candidateIndex,
-          reason: "Relevant retrieved evidence",
-        })),
-        ...extra,
-      });
-      if (!parsed.ok) throw new Error(parsed.error);
-      const content = (await tool.execute(parsed.value, context)) as any;
-      const result = resultOf("literature_review", content);
-      const card = await tool.createResultReviewAction!(
-        parsed.value,
-        result,
+  // The model passes the number the user asked for; five when unspecified.
+  for (const [text, requested, count] of [
+    ["Find three relevant papers for me", 3, 3],
+    ["Find five relevant papers for me", 5, 5],
+    ["Find relevant papers for me", undefined, 5],
+  ] as const) {
+    it(`expands ${count} ranked choices from saved candidates and preserves selections${requested === undefined ? " when no count is given" : ""}`, async function () {
+      const context = makeContext();
+      context.request.userText = text;
+      const candidates = await search(
+        context,
+        requested === undefined ? {} : { count: requested },
+      );
+      const tool = createLiteratureReviewTool(gateway as never);
+      const review = async (indices: number[], extra = {}) => {
+        const parsed = tool.validate({
+          selections: indices.map((candidateIndex) => ({
+            candidateSetId: candidates.candidateSetId,
+            candidateIndex,
+            reason: "Relevant retrieved evidence",
+          })),
+          ...extra,
+        });
+        if (!parsed.ok) throw new Error(parsed.error);
+        const content = (await tool.execute(parsed.value, context)) as any;
+        const result = resultOf("literature_review", content);
+        const card = await tool.createResultReviewAction!(
+          parsed.value,
+          result,
+          context,
+        );
+        return { input: parsed.value, content, result, card: card! };
+      };
+      const first = await review(
+        Array.from({ length: count }, (_, i) => i + 1),
+      );
+      const list = first.card.fields[0];
+      if (list.type !== "paper_result_list")
+        throw new Error("Missing paper list");
+      assert.equal(list.loadMoreActionId, "find_more");
+      const selected = [list.rows[0].id];
+      const more = await tool.resolveResultReview!(
+        first.input,
+        first.result,
+        {
+          approved: true,
+          actionId: "find_more",
+          data: { selectedPaperIds: selected },
+        },
         context,
       );
-      return { input: parsed.value, content, result, card: card! };
-    };
-    const first = await review(Array.from({ length: count }, (_, i) => i + 1));
-    const list = first.card.fields[0];
+      assert.equal(
+        more.kind,
+        "deliver",
+        "expansion must resume research, never import",
+      );
+      if (more.kind !== "deliver") return;
+      const continuation = more.toolMessageContent as any;
+      assert.equal(continuation.batchSize, count);
+      assert.equal(continuation.reviewRequired, true);
+      const second = await review(
+        Array.from({ length: count }, (_, i) => count + i + 1),
+        {
+          sessionId: continuation.sessionId,
+          revision: continuation.revision,
+        },
+      );
+      const expanded = second.card.fields[0];
+      if (expanded.type !== "paper_result_list")
+        throw new Error("Missing paper list");
+      assert.lengthOf(expanded.rows, count * 2);
+      assert.deepEqual(
+        expanded.rows.slice(0, count).map((r) => r.id),
+        list.rows.map((r) => r.id),
+      );
+      assert.isTrue(expanded.rows[0].checked);
+      assert.isFalse(expanded.rows[1].checked);
+      assert.isTrue(expanded.rows[count].checked);
+      const imported = await tool.resolveResultReview!(
+        second.input,
+        second.result,
+        {
+          approved: true,
+          actionId: "import",
+          data: { selectedPaperIds: [expanded.rows[count].id] },
+        },
+        context,
+      );
+      assert.equal(imported.kind, "invoke_tool");
+      if (imported.kind === "invoke_tool") {
+        assert.equal(imported.call.name, "library_import");
+        assert.deepInclude(imported.call.arguments, {
+          identifiers: [`10.1000/candidate-${count + 1}`],
+        });
+      }
+    });
+  }
+
+  /** An answer-workflow search saves candidates without opening a discovery. */
+  async function answerSearch(context: AgentToolContext) {
+    const tool = createLiteratureSearchTool(gateway as never);
+    const input = tool.validate({
+      mode: "search",
+      workflow: "answer",
+      query: "population coding",
+      limit: 12,
+    });
+    if (!input.ok) throw new Error(input.error);
+    return (await tool.execute(input.value, context)) as any;
+  }
+  function reviewInput(
+    candidateSetId: string,
+    indices: number[],
+    extra: Record<string, unknown> = {},
+  ) {
+    const parsed = createLiteratureReviewTool(gateway as never).validate({
+      selections: indices.map((candidateIndex) => ({
+        candidateSetId,
+        candidateIndex,
+        reason: "Relevant retrieved evidence",
+      })),
+      ...extra,
+    });
+    if (!parsed.ok) throw new Error(parsed.error);
+    return parsed.value;
+  }
+
+  it("shows the count literature_review asks for when the search opened no discovery", async function () {
+    const context = makeContext();
+    context.request.userText = "Find three relevant papers for me";
+    const candidates = await answerSearch(context);
+    const tool = createLiteratureReviewTool(gateway as never);
+    const content = (await tool.execute(
+      reviewInput(candidates.candidateSetId, [1, 2, 3], { count: 3 }),
+      context,
+    )) as any;
+    assert.equal(content.batchSize, 3);
+    assert.lengthOf(content.results, 3);
+    const card = await tool.createResultReviewAction!(
+      reviewInput(candidates.candidateSetId, [1, 2, 3], { count: 3 }),
+      resultOf("literature_review", content),
+      context,
+    );
+    const list = card!.fields[0];
     if (list.type !== "paper_result_list")
       throw new Error("Missing paper list");
-    assert.equal(list.loadMoreActionId, "find_more");
-    const selected = [list.rows[0].id];
+    assert.lengthOf(list.rows, 3);
+  });
+
+  it("asks for five papers when no count is given", async function () {
+    const context = makeContext();
+    const candidates = await answerSearch(context);
+    let error = "";
+    try {
+      await createLiteratureReviewTool(gateway as never).execute(
+        reviewInput(candidates.candidateSetId, [1, 2, 3]),
+        context,
+      );
+    } catch (reason) {
+      error = String(reason);
+    }
+    assert.include(error, "Review requires 5 new ranked papers, not 3");
+  });
+
+  it("lets literature_review set the count before the first batch is shown", async function () {
+    const context = makeContext();
+    const candidates = await search(context);
+    const content = (await createLiteratureReviewTool(gateway as never).execute(
+      reviewInput(candidates.candidateSetId, [1, 2, 3], { count: 3 }),
+      context,
+    )) as any;
+    assert.equal(content.batchSize, 3);
+    assert.lengthOf(content.results, 3);
+  });
+
+  it("keeps the first batch's size for Find more", async function () {
+    const context = makeContext();
+    const candidates = await search(context, { count: 3 });
+    const tool = createLiteratureReviewTool(gateway as never);
+    const firstInput = reviewInput(candidates.candidateSetId, [1, 2, 3]);
+    const first = (await tool.execute(firstInput, context)) as any;
     const more = await tool.resolveResultReview!(
-      first.input,
-      first.result,
-      {
-        approved: true,
-        actionId: "find_more",
-        data: { selectedPaperIds: selected },
-      },
+      firstInput,
+      resultOf("literature_review", first),
+      { approved: true, actionId: "find_more", data: {} },
       context,
     );
-    assert.equal(
-      more.kind,
-      "deliver",
-      "expansion must resume research, never import",
-    );
-    if (more.kind !== "deliver") return;
+    if (more.kind !== "deliver") throw new Error("Did not continue discovery");
     const continuation = more.toolMessageContent as any;
-    assert.equal(continuation.batchSize, count);
-    assert.equal(continuation.reviewRequired, true);
-    const second = await review(
-      Array.from({ length: count }, (_, i) => count + i + 1),
-      {
-        sessionId: continuation.sessionId,
-        revision: continuation.revision,
-      },
-    );
-    const expanded = second.card.fields[0];
-    if (expanded.type !== "paper_result_list")
-      throw new Error("Missing paper list");
-    assert.lengthOf(expanded.rows, count * 2);
-    assert.deepEqual(
-      expanded.rows.slice(0, count).map((r) => r.id),
-      list.rows.map((r) => r.id),
-    );
-    assert.isTrue(expanded.rows[0].checked);
-    assert.isFalse(expanded.rows[1].checked);
-    assert.isTrue(expanded.rows[count].checked);
-    const imported = await tool.resolveResultReview!(
-      second.input,
-      second.result,
-      {
-        approved: true,
-        actionId: "import",
-        data: { selectedPaperIds: [expanded.rows[count].id] },
-      },
-      context,
-    );
-    assert.equal(imported.kind, "invoke_tool");
-    if (imported.kind === "invoke_tool") {
-      assert.equal(imported.call.name, "library_import");
-      assert.deepInclude(imported.call.arguments, {
-        identifiers: [`10.1000/candidate-${count + 1}`],
-      });
+    assert.equal(continuation.batchSize, 3);
+    let error = "";
+    try {
+      await tool.execute(
+        reviewInput(candidates.candidateSetId, [4, 5, 6, 7, 8], {
+          sessionId: continuation.sessionId,
+          revision: continuation.revision,
+          count: 5,
+        }),
+        context,
+      );
+    } catch (reason) {
+      error = String(reason);
+    }
+    assert.include(error, "batches of 3 papers");
+  });
+
+  it("accepts a count of 1 to 25 papers on both discovery tools", function () {
+    const search = createLiteratureSearchTool(gateway as never);
+    const review = createLiteratureReviewTool(gateway as never);
+    const searchArgs = { mode: "search", workflow: "review", query: "x" };
+    const reviewArgs = {
+      selections: [
+        { candidateSetId: "trh_abc", candidateIndex: 1, reason: "Relevant" },
+      ],
+    };
+    for (const count of [1, 3, 25]) {
+      const parsedSearch = search.validate({ ...searchArgs, count });
+      assert.isTrue(parsedSearch.ok, `search count ${count}`);
+      if (parsedSearch.ok) assert.equal(parsedSearch.value.count, count);
+      const parsedReview = review.validate({ ...reviewArgs, count });
+      assert.isTrue(parsedReview.ok, `review count ${count}`);
+      if (parsedReview.ok) assert.equal(parsedReview.value.count, count);
+    }
+    for (const count of [0, 26, 2.5, "3", -1]) {
+      assert.isFalse(
+        search.validate({ ...searchArgs, count }).ok,
+        `search ${count}`,
+      );
+      assert.isFalse(
+        review.validate({ ...reviewArgs, count }).ok,
+        `review ${count}`,
+      );
     }
   });
 

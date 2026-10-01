@@ -24,6 +24,8 @@ export type LiteratureSelection = {
 };
 export type LiteratureReviewInput = {
   selections: LiteratureSelection[];
+  /** The number of papers the user asked for; sets the first batch's size. */
+  count?: number;
   sessionId?: string;
   revision?: number;
   targetCollectionId?: number;
@@ -54,9 +56,27 @@ export type LiteratureDiscoverySession = {
   outcome: "complete" | "no_more" | "search_failed";
 };
 
-/** A discovery batch is five papers unless the tool call says otherwise. */
+/** A discovery shows the number of papers the user asked for, five when unspecified. */
+export const DEFAULT_DISCOVERY_COUNT = 5;
+export const MAX_DISCOVERY_COUNT = 25;
+
+/** A tool call's count: undefined when absent, null when it is not 1–25. */
+export function parseDiscoveryCount(value: unknown): number | undefined | null {
+  if (value === undefined) return undefined;
+  return Number.isSafeInteger(value) &&
+    (value as number) >= 1 &&
+    (value as number) <= MAX_DISCOVERY_COUNT
+    ? (value as number)
+    : null;
+}
+
+/**
+ * The request a discovery opens with. It seeds the turn's one discovery
+ * record, whose handle derives from this seed, so it never varies with a
+ * call: a requested count is applied to the record after it is found.
+ */
 export function resolveLiteratureDiscoveryRequest(): LiteratureDiscoveryRequest {
-  return { batchSize: 5, mode: undefined, source: undefined };
+  return { batchSize: DEFAULT_DISCOVERY_COUNT };
 }
 
 function assertActive(context: AgentToolContext): void {
@@ -222,6 +242,7 @@ export async function identifyLiteratureCandidates(
   context: AgentToolContext,
   reviewRequired: boolean,
   routeImports = false,
+  count?: number,
 ): Promise<Record<string, unknown>> {
   const results = Array.isArray(content.results) ? content.results : [];
   const discovery = reviewRequired
@@ -247,6 +268,12 @@ export async function identifyLiteratureCandidates(
   if (discovery) {
     if (!discovery.session.candidateSetIds.includes(record.handle))
       discovery.session.candidateSetIds.push(record.handle);
+    // A count asked for before the first batch is shown sets its size.
+    if (count !== undefined && !discovery.session.papers.length)
+      discovery.session.request = {
+        ...discovery.session.request,
+        batchSize: count,
+      };
     await save(discovery.record, context);
   }
   return {
@@ -274,14 +301,14 @@ export async function identifyLiteratureCandidates(
  */
 const IMPORT_ROUTE =
   "If the user asked to import or add papers to Zotero without asking to choose them first, skip the selection card: rank these candidates, skip papers already in the library, then call library_import with the DOI or arXiv identifiers of exactly the number the user requested and the requested destination (targetCollectionId; create the collection first only when the user named a new one).";
-const CANDIDATE_ROUTE = `${IMPORT_ROUTE} If they only asked to find or recommend papers, call literature_review with ranked candidateSetId/candidateIndex selections. Otherwise answer from these results.`;
+const CANDIDATE_ROUTE = `${IMPORT_ROUTE} If they only asked to find or recommend papers, call literature_review with the number they asked for as count (five when unspecified) and that many ranked candidateSetId/candidateIndex selections. Otherwise answer from these results.`;
 
 function discoveryInstruction(
   record: AgentToolResultHandleRecord,
   offerImport = false,
 ): string {
   const s = record.content as LiteratureDiscoverySession;
-  const select = `titles and abstracts and select ${s.request.batchSize} ${s.papers.length ? "additional " : ""}genuinely relevant papers in ranked order. Respect the user's topic and these constraints: ${JSON.stringify(s.request)}. Assess unused saved candidates first; search further if needed. To expand a provider list, increase its retrieval limit rather than repeating the same bounded request.`;
+  const select = `titles and abstracts and select ${s.request.batchSize} ${s.papers.length ? "additional " : ""}genuinely relevant papers in ranked order${s.papers.length ? "" : " (pass the number the user asked for as count when it differs)"}. Respect the user's topic and these constraints: ${JSON.stringify(s.request)}. Assess unused saved candidates first; search further if needed. To expand a provider list, increase its retrieval limit rather than repeating the same bounded request.`;
   const review = `literature_review with sessionId '${record.handle}', revision ${s.revision}, NEW candidateSetId/candidateIndex selections and evidence-based relevance reasons. Do not repeat displayed papers or dump the raw pool. If fewer qualify, explain shortfallReason; use outcome 'no_more' when no further relevant matches were found, or 'search_failed' for a retrieval failure. Empty selections with an explanation are allowed.`;
   return offerImport
     ? `${IMPORT_ROUTE} Otherwise the user only wants discovery: assess ${select} Then call ${review} Discovery never imports and never finishes with prose instead of the card.`
@@ -310,6 +337,15 @@ export async function prepareLiteratureDiscoveryReview(
   }
   const expectedPhase = session.phase;
   const expectedRevision = session.revision;
+  // The first batch takes the count it was asked for; Find more keeps it.
+  const batchSize =
+    input.count !== undefined && !session.papers.length
+      ? input.count
+      : session.request.batchSize;
+  if (input.count !== undefined && input.count !== batchSize)
+    throw new Error(
+      `This discovery shows batches of ${batchSize} papers; Find more keeps the first batch's size.`,
+    );
   const identities = new Set(session.papers.flatMap(literaturePaperIdentities));
   const selected: Record<string, unknown>[] = [];
   for (const selection of input.selections) {
@@ -359,16 +395,17 @@ export async function prepareLiteratureDiscoveryReview(
     });
   }
   if (
-    selected.length > session.request.batchSize ||
-    (selected.length < session.request.batchSize && !input.shortfallReason)
+    selected.length > batchSize ||
+    (selected.length < batchSize && !input.shortfallReason)
   ) {
     throw new Error(
-      `Review requires ${session.request.batchSize} new ranked papers, not ${selected.length}. Search further or disclose a genuine shortfall.`,
+      `Review requires ${batchSize} new ranked papers, not ${selected.length}. Search further or disclose a genuine shortfall.`,
     );
   }
   assertActive(context);
   if (session.phase !== expectedPhase || session.revision !== expectedRevision)
     throw new Error("The discovery changed while preparing this batch.");
+  session.request = { ...session.request, batchSize };
   session.papers.push(...selected);
   session.selectedIds.push(...selected.map((p) => String(p.discoveryPaperId)));
   session.targetCollectionId = destination.targetCollectionId;

@@ -7,6 +7,8 @@ import {
   type LiteratureReviewInput,
   discoveryContent,
   getLiteratureDiscovery,
+  MAX_DISCOVERY_COUNT,
+  parseDiscoveryCount,
   prepareLiteratureDiscoveryReview,
   resolveLiteratureDiscoveryReview,
 } from "../../services/literatureDiscovery";
@@ -51,6 +53,13 @@ export const LITERATURE_REVIEW_SPEC: ToolSpec = {
             },
           },
         },
+      },
+      count: {
+        type: "integer",
+        minimum: 1,
+        maximum: MAX_DISCOVERY_COUNT,
+        description:
+          "Papers the user asked for, five when unspecified. Find more keeps the first batch's size.",
       },
       sessionId: {
         type: "string",
@@ -121,6 +130,11 @@ export function createLiteratureReviewTool(
           reason: entry.reason.trim(),
         });
       }
+      const count = parseDiscoveryCount(args.count);
+      if (count === null)
+        return fail(
+          `count must be an integer from 1 to ${MAX_DISCOVERY_COUNT}.`,
+        );
       const targetCollectionId = normalizePositiveInt(args.targetCollectionId);
       if (args.targetCollectionId !== undefined && !targetCollectionId)
         return fail("Invalid targetCollectionId.");
@@ -152,6 +166,7 @@ export function createLiteratureReviewTool(
         return fail("Explain the shortfall or search failure.");
       return ok({
         selections,
+        count,
         sessionId: args.sessionId as string | undefined,
         revision: args.revision as number | undefined,
         outcome: args.outcome as LiteratureReviewInput["outcome"],
