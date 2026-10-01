@@ -1284,7 +1284,7 @@ const zhCN: Record<string, string> = {
   "Partly done": "部分完成",
   "{done} of {total} done": "已完成 {done}/{total}",
   "{count} not done": "{count} 项未完成",
-  "{count} items": "{count} 项",
+  "{done} of {total}": "{done}/{total}",
   "Say “continue” to resume.": "回复“继续”即可恢复。",
   // The reasons the host writes into a run's outcome ledger (OUTCOME_REASONS).
   "A skipped, blocked, or cancelled task needs the reason.":
@@ -1295,6 +1295,7 @@ const zhCN: Record<string, string> = {
   "Not applied": "未应用",
   "Not done before the answer.": "回答前未完成。",
   "The change was not applied.": "此更改未应用。",
+  "No readable text": "无可读文本",
   Done: "完成",
   "Done when:": "完成条件：",
   Revision: "修订",

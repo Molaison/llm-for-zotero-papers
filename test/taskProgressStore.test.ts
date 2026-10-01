@@ -460,6 +460,29 @@ describe("task progress outcome ledger", function () {
     assert.equal(displayedTaskRunState(record), "working");
   });
 
+  it("sizes the scope its scope-wide parts froze, once per paper, and says nothing without one", function () {
+    beginTaskRun(29, { runId: "run-a" });
+    setTaskOutcomes(
+      29,
+      "run-a",
+      outcomeCheckpoint([
+        outcomeTask("read-all", {
+          effect: "read",
+          scope: true,
+          targets: ["item:1", "item:2", "item:3"],
+        }),
+        outcomeTask("note-all", {
+          scope: true,
+          targets: ["item:2", "item:3", "item:4"],
+        }),
+        save,
+      ]),
+    );
+    assert.equal(getTaskProgress(29)!.checklist?.scopePapers, 4);
+    setTaskOutcomes(29, "run-a", outcomeCheckpoint([read, save]));
+    assert.notProperty(getTaskProgress(29)!.checklist!, "scopePapers");
+  });
+
   it("changes nothing for a checkpoint with no outcome and no end", function () {
     beginTaskRun(21, { runId: "run-a" });
     const version = getTaskProgress(21)!.version;

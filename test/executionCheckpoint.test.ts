@@ -417,6 +417,109 @@ describe("task_update ordinary declarations", function () {
     assert.lengthOf(published, 1);
   });
 
+  describe("a part over the turn's paper scope", function () {
+    const readAll = {
+      taskId: "read-all",
+      description: "Read each paper in Drift",
+      expectedEffect: "read",
+      scope: true,
+    };
+
+    function scoped(itemIds: number[]): AgentToolContext {
+      const ctx = context();
+      ctx.request.turnScopePapers = {
+        wholeLibrary: false,
+        itemIds,
+        withText: itemIds.length,
+      };
+      return ctx;
+    }
+
+    it("freezes every paper of the turn's scope into the part, in scope order", async function () {
+      const result = await call(scoped([30, 10, 20]), { tasks: [readAll] });
+      const [task] = result.checkpoint.tasks;
+      assert.deepEqual(task.targets, ["item:30", "item:10", "item:20"]);
+      assert.isTrue(task.scope);
+      assert.equal(task.effect, "read");
+      assert.equal(task.status, "pending");
+    });
+
+    it("keeps the frozen papers when the scope changes after the declaration", async function () {
+      const ctx = scoped([30, 10, 20]);
+      await call(ctx, { tasks: [readAll] });
+      ctx.request.turnScopePapers = {
+        wholeLibrary: false,
+        itemIds: [10, 40],
+        withText: 2,
+      };
+      const repeated = await call(ctx, { tasks: [readAll] });
+      assert.equal(repeated.note, NOTHING_CHANGED);
+      assert.deepEqual(repeated.checkpoint.tasks[0].targets, [
+        "item:30",
+        "item:10",
+        "item:20",
+      ]);
+      // A part declared after the change takes the scope as it is now.
+      const later = await call(ctx, {
+        tasks: [
+          {
+            taskId: "note-all",
+            description: "Write a note on each paper",
+            expectedEffect: "mutation",
+            expectedCapability: "zotero.notes",
+            scope: true,
+          },
+        ],
+      });
+      assert.deepEqual(
+        later.checkpoint.tasks.map((task) => task.targets),
+        [
+          ["item:30", "item:10", "item:20"],
+          ["item:10", "item:40"],
+        ],
+      );
+    });
+
+    it("refuses scope with targetIds, or without papers in the scope, and publishes nothing", async function () {
+      for (const [ctx, args, message] of [
+        [
+          scoped([10]),
+          { tasks: [{ ...readAll, targetIds: ["10"] }] },
+          "Give a part targetIds or scope:true, not both.",
+        ],
+        [
+          context(),
+          { tasks: [readAll] },
+          "This turn's paper scope lists no papers; name the part's papers in targetIds.",
+        ],
+        [
+          scoped([]),
+          { tasks: [readAll] },
+          "This turn's paper scope lists no papers; name the part's papers in targetIds.",
+        ],
+      ] as const) {
+        const error = await rejectionOf(call(ctx, args));
+        assert.instanceOf(error, ToolInputRejection);
+        assert.equal(error.message, message);
+      }
+      assert.lengthOf(published, 0);
+    });
+
+    it("takes scope as true or false only", function () {
+      const tool = createTaskUpdateTool();
+      assert.isTrue(
+        tool.validate({ tasks: [{ ...readAll, scope: false }] }).ok,
+      );
+      const parsed = tool.validate({ tasks: [{ ...readAll, scope: "all" }] });
+      assert.isFalse(parsed.ok);
+      if (!parsed.ok)
+        assert.equal(
+          parsed.error,
+          "task_update.tasks[0].scope must be true or false",
+        );
+    });
+  });
+
   it("refuses a checkpoint another execution owns", async function () {
     const foreign = createEmptyExecutionCheckpoint(
       { ...executionContext, executionId: "execution-other" },

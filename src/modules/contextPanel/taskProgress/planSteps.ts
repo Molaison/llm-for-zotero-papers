@@ -172,7 +172,11 @@ function targetLabel(
   return resolvePaperLabel(Number(item[1])) || target;
 }
 
-/** A step row: badge, label, and, for an outcome, its reason and pill. */
+/**
+ * A step row: badge, label, and, for an outcome, its reason and pill. A read
+ * or a write over several targets counts them as evidence ticks them, "Read
+ * each paper in Drift · 48 of 48"; a part the answer completes ticks none.
+ */
 function buildChecklistRow(
   doc: Document,
   step: TaskProgressStep,
@@ -195,10 +199,13 @@ function buildChecklistRow(
   content.className = "llm-plan-task-content";
   const label = doc.createElement("span");
   label.className = "llm-plan-task-label";
-  const items = step.outcome?.host ? step.outcome.targets : 0;
+  const outcome = step.outcome;
+  const targets = outcome?.read || outcome?.write ? outcome.targets : 0;
   label.textContent =
-    items > 1
-      ? `${step.label} · ${t("{count} items").replace("{count}", `${items}`)}`
+    targets > 1
+      ? `${step.label} · ${t("{done} of {total}")
+          .replace("{done}", `${outcome!.doneTargets}`)
+          .replace("{total}", `${targets}`)}`
       : step.label;
   content.appendChild(label);
   if (outcomes && step.detail) {

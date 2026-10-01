@@ -1,12 +1,14 @@
 /**
- * The papers a task's scope covers, as the Task progress view lists them.
+ * The papers a task's scope covers, as the Task progress view lists them, and
+ * as the agent's turn states them and a part declared over them freezes them.
  *
  * Computed from the turn's attached papers, folders and tags plus the library
  * index snapshot, with the same union `ZoteroGateway.resolveLibraryScopeItemIds`
  * gives retrieval: explicit papers first, then each collection's direct items
  * (subcollections are not expanded, exactly as retrieval does not), then each
  * tag's items; only live regular items; each paper once, in first-seen order.
- * With nothing attached the whole library is listed, capped.
+ * With nothing attached the whole library is listed, capped; the agent's set
+ * of the whole library is not.
  *
  * Pure: reads only the snapshot object it is given.
  */
@@ -16,6 +18,7 @@ import type {
 } from "../../services/libraryIndex/contracts";
 import { normalizeLibraryIndexTagIdentity } from "../../services/libraryIndex/projection";
 import { taskPaperKey } from "./taskPaperLedger";
+import type { TurnPaperScope } from "./turnPaperScope";
 
 /** The snapshot fields scope listing reads. */
 export type TaskPaperScopeSnapshot = Pick<
@@ -70,6 +73,16 @@ export type TaskPaperScopeListing = {
   totalItems: number;
   listedItems: number;
   truncated: boolean;
+};
+
+/** The papers a turn's scope covers, as the host resolved them. */
+export type TaskPaperScopeSet = {
+  /** Nothing was attached: the scope is the whole library. */
+  wholeLibrary: boolean;
+  /** Every paper of the scope, in scope order, uncapped. */
+  itemIds: number[];
+  /** How many of them have a PDF to read their text from. */
+  withText: number;
 };
 
 export const TASK_PAPER_SCOPE_WHOLE_LIBRARY_CAP = 2000;
@@ -160,6 +173,46 @@ export function resolveTaskPaperScopeItemIds(
   return [...union];
 }
 
+/**
+ * A turn's papers, folders, tags and the papers removed from them, as the
+ * listing reads them: the same scope Task progress lists for the turn.
+ */
+export function taskPaperScopeContextsOf(
+  scope: TurnPaperScope,
+): TaskPaperScopeContexts {
+  const excludedItemIds = [
+    ...new Set(
+      [...scope.collections, ...scope.tags].flatMap(
+        (context) => context.excludedItemIds || [],
+      ),
+    ),
+  ].sort((a, b) => a - b);
+  const contexts: TaskPaperScopeContexts = {};
+  if (excludedItemIds.length) contexts.excludedItemIds = excludedItemIds;
+  if (scope.papers.length) {
+    contexts.papers = scope.papers.map(({ paper }) => ({
+      itemId: paper.itemId,
+      libraryID: paper.libraryID,
+    }));
+  }
+  if (scope.collections.length) {
+    contexts.collections = scope.collections.map((collection) => ({
+      collectionId: collection.collectionId,
+      libraryID: collection.libraryID,
+    }));
+  }
+  if (scope.tags.length) {
+    contexts.tags = scope.tags.map((tag) => ({
+      name: tag.name,
+      normalizedName: tag.normalizedName,
+      libraryID: tag.libraryID,
+      scope: tag.scope,
+      includeAutomatic: tag.includeAutomatic,
+    }));
+  }
+  return contexts;
+}
+
 function hasScopeContexts(contexts: TaskPaperScopeContexts): boolean {
   return Boolean(
     contexts.papers?.length ||
@@ -203,6 +256,27 @@ function scopeEntry(
     }),
     tags: [...new Set(tags)].slice(0, TASK_PAPER_SCOPE_MAX_TAGS),
     text: textHint(snapshot, itemId),
+  };
+}
+
+/**
+ * Every paper of a scope, uncapped (the whole library when nothing is
+ * attached), and how many have a PDF: what the turn context states and what
+ * a part declared over the scope freezes.
+ */
+export function resolveTaskPaperScopeSet(
+  snapshot: TaskPaperScopeSnapshot,
+  contexts: TaskPaperScopeContexts,
+): TaskPaperScopeSet {
+  const wholeLibrary = !hasScopeContexts(contexts);
+  const itemIds = wholeLibrary
+    ? liveRegularItemIds(snapshot)
+    : resolveTaskPaperScopeItemIds(snapshot, contexts);
+  return {
+    wholeLibrary,
+    itemIds,
+    withText: itemIds.filter((itemId) => textHint(snapshot, itemId) === "pdf")
+      .length,
   };
 }
 

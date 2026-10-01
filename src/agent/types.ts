@@ -31,6 +31,7 @@ import type {
 } from "./authorization/types";
 import type { MaterialRef } from "./documents/materialRef";
 import type { TaskPaperLedgerDelta } from "./context/taskPaperLedger";
+import type { TaskPaperScopeSet } from "./context/taskPaperScopeListing";
 import type {
   ResolvedTurnSelectedTextAnchor,
   ResolvedTurnSelectedTextContext,
@@ -974,6 +975,12 @@ export type ResolvedAgentRuntimeRequest = Omit<
   resolvedSelectedTextAnchors?: readonly ResolvedTurnSelectedTextAnchor[];
   localDocuments?: readonly TurnLocalDocument[];
   turnPaperScopeWarnings?: readonly TurnPaperScopeWarning[];
+  /**
+   * Every paper the turn's scope covers, resolved by the host at turn start:
+   * the turn context states it, and a part declared over the scope freezes
+   * these papers. Runtime-set only.
+   */
+  turnScopePapers?: TaskPaperScopeSet;
   /**
    * Tool guidance instructions the model has already received this turn: the
    * rendered prompt's guidance plus any load_skill returned. Runtime-set only.

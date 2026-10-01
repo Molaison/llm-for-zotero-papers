@@ -10,6 +10,7 @@ import type {
   SelectedTextSource,
 } from "../../shared/types";
 import { safeJsonStringify } from "../../utils/safeJsonStringify";
+import type { TaskPaperScopeSet } from "./taskPaperScopeListing";
 import {
   buildTurnPaperScope,
   getActiveTurnPaper,
@@ -65,6 +66,7 @@ type ResolvedTurnContextEnvelopeInput = Pick<
   | "selectedTexts"
   | "turnPaperScope"
   | "turnPaperScopeWarnings"
+  | "turnScopePapers"
   | "zoteroMetadataContext"
 > & {
   activePaperTitle?: string;
@@ -76,6 +78,8 @@ export type TurnContextEnvelopeInput =
 
 export type TurnContextEnvelope = Readonly<{
   paperScope: TurnPaperScope;
+  /** Every paper the scope covers, when the host resolved it. */
+  scopePapers?: TaskPaperScopeSet;
   zoteroMetadataContext?: ResolvedAgentRuntimeRequest["zoteroMetadataContext"];
   activeItemId?: number;
   activePaperTitle?: string;
@@ -205,6 +209,9 @@ export function buildTurnContextEnvelope(
 
   return {
     paperScope: paperScopeResult.scope,
+    ...("turnScopePapers" in input && input.turnScopePapers
+      ? { scopePapers: input.turnScopePapers }
+      : {}),
     zoteroMetadataContext:
       "zoteroMetadataContext" in input
         ? input.zoteroMetadataContext
@@ -329,6 +336,10 @@ export function renderTurnContextEnvelopeForModel(
     );
   });
 
+  if (envelope.scopePapers) {
+    lines.push(renderPaperScopeLine(envelope.paperScope, envelope.scopePapers));
+  }
+
   if (envelope.selectedTextCount) {
     lines.push(
       `Selected text: count=${envelope.selectedTextCount}, sources=${envelope.selectedTextSources.join(", ")}`,
@@ -426,6 +437,28 @@ export function renderTurnContextEnvelopeForModel(
     ...lines,
     'Resolve current-resource references only from the context listed above. "This paper" means the active paper. In Paper Chat, "these papers" or "both papers" means the active paper plus visibly added concrete papers; in Library Chat it means all visibly attached concrete papers. Collections and tags remain lazy resource pools and are never silently included in "these papers". Do not infer missing resource identity from old thread history, citation provenance, retrieved candidates, local PDF transport, or local memory.',
   ].join("\n");
+}
+
+/**
+ * "Paper scope: Drift — 212 papers, 180 with full text": how large the
+ * turn's scope is, so a choice to work through it is an informed one.
+ */
+function renderPaperScopeLine(
+  scope: TurnPaperScope,
+  set: TaskPaperScopeSet,
+): string {
+  const names = set.wholeLibrary
+    ? ["whole library"]
+    : [
+        ...scope.collections.map((collection) => collection.name),
+        ...scope.tags.map((tag) => (tag.scope ? tag.name : `#${tag.name}`)),
+        ...(scope.papers.length ? ["listed papers"] : []),
+      ];
+  const count = set.itemIds.length;
+  const line = `Paper scope: ${names.join(" + ")} — ${count} ${
+    count === 1 ? "paper" : "papers"
+  }, ${set.withText} with full text`;
+  return line.replace(/\s+/g, " ");
 }
 
 function renderPaperRole(role: TurnPaperRole): string {

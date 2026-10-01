@@ -53,8 +53,13 @@ export type ExecutionCheckpointTask = Readonly<{
   /** Receipt-form targets (`item:12`); none: whatever the evidence names. */
   targets?: readonly string[];
   /**
+   * Declared over every paper of the turn's scope: `targets` are those
+   * papers, frozen in scope order when it was declared.
+   */
+  scope?: true;
+  /**
    * Targets a verified receipt applied or found already satisfied, or a read
-   * attested.
+   * attested (at the depth `outcomes.ts` documents).
    */
   doneTargets?: readonly string[];
   exceptions?: readonly OutcomeException[];

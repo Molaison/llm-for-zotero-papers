@@ -12,6 +12,7 @@ import {
   ordinaryExecutionTaskId,
 } from "../../execution/checkpoint";
 import type { ExecutionCheckpoint, OutcomeEffect } from "../../execution/types";
+import type { TaskPaperScopeSet } from "../../context/taskPaperScopeListing";
 import {
   declareOutcomes,
   markOutcomes,
@@ -28,6 +29,8 @@ type TaskDeclaration = {
   expectedEffect?: ExpectedEffect;
   expectedCapability?: string;
   targetIds?: string[];
+  /** The part covers every paper of the turn's scope. */
+  scope?: boolean;
 };
 
 /** A declared part that cannot be done, and why. */
@@ -62,6 +65,7 @@ const DECLARATION_SCHEMA = {
     expectedEffect: { type: "string", enum: [...EXPECTED_EFFECTS] },
     expectedCapability: { type: "string" },
     targetIds: { type: "array", items: { type: "string" } },
+    scope: { type: "boolean" },
   },
 } as const;
 
@@ -83,6 +87,9 @@ const EXPECTED_EFFECT_REQUIRED =
   "Give each new task an expectedEffect: read, artifact, mutation, or reasoning.";
 const HOST_MARKS_DONE =
   "Nothing changed: the host marks parts done from the tools' results, so progress needs no task_update call. Continue the work, or answer when it is done.";
+const SCOPE_OR_TARGETS = "Give a part targetIds or scope:true, not both.";
+const NO_SCOPE_PAPERS =
+  "This turn's paper scope lists no papers; name the part's papers in targetIds.";
 const NO_STATUS =
   "task_update takes no status: the host marks parts done from the tools' results. Declare parts in tasks, and list one that cannot be done under skipped, blocked or cancelled with the reason.";
 
@@ -106,6 +113,9 @@ function parseDeclaration(
   ) {
     return fail(`${label}.expectedEffect is invalid`);
   }
+  if (raw.scope !== undefined && typeof raw.scope !== "boolean") {
+    return fail(`${label}.scope must be true or false`);
+  }
   return ok({
     taskId,
     description: optionalText(raw.description),
@@ -114,6 +124,7 @@ function parseDeclaration(
     targetIds: Array.isArray(raw.targetIds)
       ? raw.targetIds.map(String).filter(Boolean)
       : undefined,
+    ...(raw.scope === true ? { scope: true } : {}),
   });
 }
 
@@ -190,6 +201,25 @@ function actionCapability(
 }
 
 /**
+ * The targets a new part declares: its targetIds, or, with `scope`, every
+ * paper of the turn's scope as the host resolved it, frozen now in scope
+ * order. A later change to the scope never reaches a part declared before.
+ */
+function declaredTargets(
+  request: TaskDeclaration,
+  scopePapers: TaskPaperScopeSet | undefined,
+): string[] | undefined {
+  if (!request.scope) return request.targetIds;
+  if (request.targetIds?.length) {
+    throw new ToolInputRejection(SCOPE_OR_TARGETS);
+  }
+  if (!scopePapers?.itemIds.length) {
+    throw new ToolInputRejection(NO_SCOPE_PAPERS);
+  }
+  return scopePapers.itemIds.map((itemId) => `item:${itemId}`);
+}
+
+/**
  * One ordinary call: its declarations become declared parts, then its
  * skipped, blocked or cancelled parts are marked with their reasons. A
  * repeated declaration changes nothing, and `ignored` says so. A malformed
@@ -199,6 +229,7 @@ function applyOrdinaryTaskUpdates(
   checkpoint: ExecutionCheckpoint,
   input: TaskUpdateInput,
   now: number,
+  scopePapers: TaskPaperScopeSet | undefined,
 ): { checkpoint: ExecutionCheckpoint; ignored: boolean } {
   try {
     const existing = new Map(
@@ -239,7 +270,8 @@ function applyOrdinaryTaskUpdates(
           description: request.description || "",
           effect,
           capability: actionCapability(request.expectedCapability),
-          targets: request.targetIds,
+          targets: declaredTargets(request, scopePapers),
+          ...(request.scope ? { scope: true } : {}),
         });
         continue;
       }
@@ -277,7 +309,7 @@ export function createTaskUpdateTool(): AgentToolDefinition<
     spec: {
       name: "task_update",
       description:
-        "Declare a compound request's parts for the host to track: taskId, description, expectedEffect (read, artifact, mutation, or reasoning), and expectedCapability such as zotero.notes for a write. The host marks parts done; list one that cannot be done under skipped or blocked, with the reason.",
+        "Declare a compound request's parts for the host to track: expectedCapability such as zotero.notes for a write; targetIds, or scope:true for the whole Paper scope. The host marks parts done; list one that cannot be done under skipped or blocked, with the reason.",
       inputSchema: {
         type: "object",
         additionalProperties: false,
@@ -321,7 +353,12 @@ export function createTaskUpdateTool(): AgentToolDefinition<
       let ignored = false;
       const checkpoint = await context.updateExecutionCheckpoint((current) => {
         assertCheckpointOwner(current, execution);
-        const applied = applyOrdinaryTaskUpdates(current, input, Date.now());
+        const applied = applyOrdinaryTaskUpdates(
+          current,
+          input,
+          Date.now(),
+          context.request.turnScopePapers,
+        );
         ignored = applied.ignored;
         return applied.checkpoint;
       });

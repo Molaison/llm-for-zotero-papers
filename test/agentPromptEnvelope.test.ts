@@ -621,3 +621,108 @@ describe("agent prompt envelope direct workflow", function () {
     assert.notInclude(codexManifest, RECEIPT_CONFIRMS);
   });
 });
+
+describe("agent prompt envelope paper scope", function () {
+  const papers = (count: number) =>
+    Array.from({ length: count }, (_, index) => index + 1);
+
+  async function rendered(
+    input: Record<string, unknown>,
+    turnScopePapers?: {
+      wholeLibrary: boolean;
+      itemIds: number[];
+      withText: number;
+    },
+  ) {
+    const request = resolvedAgentRequest({
+      conversationKey: 913_101,
+      mode: "agent",
+      model: "test-model",
+      userText: "Read every paper in the folder",
+      libraryID: 1,
+      ...input,
+    });
+    if (turnScopePapers) request.turnScopePapers = turnScopePapers;
+    const envelope = (await renderAgentPromptEnvelope(request, [], []))
+      .envelope;
+    return {
+      turn: messageText(envelope.turnMessage as AgentModelMessage),
+      system: envelope.systemMessages
+        .map((message) => messageText(message as AgentModelMessage))
+        .join("\n"),
+    };
+  }
+
+  function scopeLines(text: string): string[] {
+    return text.split("\n").filter((line) => line.startsWith("Paper scope:"));
+  }
+
+  it("states a folder's papers and how many have full text, in one line of the turn context", async function () {
+    const { turn, system } = await rendered(
+      {
+        selectedCollectionContexts: [
+          { collectionId: 5, name: "Drift", libraryID: 1 },
+        ],
+      },
+      { wholeLibrary: false, itemIds: papers(212), withText: 180 },
+    );
+    assert.deepEqual(scopeLines(turn), [
+      "Paper scope: Drift — 212 papers, 180 with full text",
+    ]);
+    const context = turn.slice(turn.indexOf("Zotero context for this turn:"));
+    assert.include(
+      context,
+      "\nCollection 1: ",
+      "the line sits in the turn's resource context",
+    );
+    assert.isEmpty(
+      scopeLines(system),
+      "counts change as the library does, so they stay out of the cached prefix",
+    );
+  });
+
+  it("says the whole library, with its count, when nothing is attached", async function () {
+    const { turn } = await rendered(
+      {},
+      { wholeLibrary: true, itemIds: papers(2431), withText: 1900 },
+    );
+    assert.deepEqual(scopeLines(turn), [
+      "Paper scope: whole library — 2431 papers, 1900 with full text",
+    ]);
+  });
+
+  it("names folders, tags and listed papers, and stays one line whatever a name holds", async function () {
+    const { turn } = await rendered(
+      {
+        selectedPaperContexts: [
+          {
+            itemId: 7,
+            contextItemId: 70,
+            title: "Paper seven",
+            libraryID: 1,
+          },
+        ],
+        selectedCollectionContexts: [
+          { collectionId: 5, name: "Drift\n  Rodents", libraryID: 1 },
+        ],
+        selectedTagContexts: [
+          { name: "place cells", libraryID: 1 },
+          { name: "Untagged", libraryID: 1, scope: "untagged" },
+        ],
+      },
+      { wholeLibrary: false, itemIds: [7], withText: 0 },
+    );
+    assert.deepEqual(scopeLines(turn), [
+      "Paper scope: Drift Rodents + #place cells + Untagged + listed papers — 1 paper, 0 with full text",
+    ]);
+  });
+
+  it("states no scope the host could not resolve", async function () {
+    const { turn } = await rendered({
+      selectedCollectionContexts: [
+        { collectionId: 5, name: "Drift", libraryID: 1 },
+      ],
+    });
+    assert.isEmpty(scopeLines(turn));
+  });
+});

@@ -178,6 +178,58 @@ export function taskPaperKey(libraryID: number, itemId: number): string {
   return `${libraryID}:${itemId}`;
 }
 
+/** Read granularities that return a paper's own text, not only its record. */
+const TEXT_GRANULARITIES: ReadonlySet<TaskPaperReadGranularity> =
+  new Set<TaskPaperReadGranularity>([
+    "section",
+    "passage",
+    "full",
+    "figure",
+    "page",
+  ]);
+
+/**
+ * How deep one call read each paper, by item id, for the outcome ledger
+ * (`loop/outcomes.ts` states the rule): `text` when it returned the paper's
+ * text (a passage, section, page, figure, the full text, or an overview of
+ * it, sampled or complete), `shallow` when only an abstract or an outline,
+ * and `noText` when `paper_read` reported the paper has no readable text
+ * (its overview fell back to the Zotero record). A metadata row alone is
+ * none of these, and a search listing never reports missing text: it did
+ * not try to read the paper.
+ */
+export function taskPaperReadDepths(delta: TaskPaperLedgerDelta | null): {
+  text: number[];
+  shallow: number[];
+  noText: number[];
+} {
+  const depths = {
+    text: [] as number[],
+    shallow: [] as number[],
+    noText: [] as number[],
+  };
+  if (!delta) return depths;
+  const textKeys = new Set(
+    delta.reads
+      .filter((read) => TEXT_GRANULARITIES.has(read.granularity))
+      .map((read) => read.key),
+  );
+  for (const paper of delta.papers) {
+    if (
+      stateRank(paper.state) >= stateRank("read") ||
+      textKeys.has(paper.key)
+    ) {
+      depths.text.push(paper.itemId);
+      continue;
+    }
+    if (paper.state === "skimmed") depths.shallow.push(paper.itemId);
+    if (delta.toolName === "paper_read" && paper.text === "none") {
+      depths.noText.push(paper.itemId);
+    }
+  }
+  return depths;
+}
+
 export function stateRank(state: TaskPaperState): number {
   return TASK_PAPER_STATES.indexOf(state);
 }

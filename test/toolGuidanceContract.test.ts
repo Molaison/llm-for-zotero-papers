@@ -155,7 +155,7 @@ describe("tool guidance contracts", function () {
       .find((tool) => tool.name === "task_update");
     assert.equal(
       taskUpdate?.description,
-      "Declare a compound request's parts for the host to track: taskId, description, expectedEffect (read, artifact, mutation, or reasoning), and expectedCapability such as zotero.notes for a write. The host marks parts done; list one that cannot be done under skipped or blocked, with the reason.",
+      "Declare a compound request's parts for the host to track: expectedCapability such as zotero.notes for a write; targetIds, or scope:true for the whole Paper scope. The host marks parts done; list one that cannot be done under skipped or blocked, with the reason.",
     );
   });
 

@@ -22,7 +22,10 @@ import {
   readObservationSourceKey,
   readObservationSourceKeys,
 } from "../context/readObservation";
-import type { TaskPaperLedgerDelta } from "../context/taskPaperLedger";
+import {
+  taskPaperReadDepths,
+  type TaskPaperLedgerDelta,
+} from "../context/taskPaperLedger";
 import { openDeclaredOutcomes, type OutcomeEvidence } from "../loop/outcomes";
 import { canonicalJson } from "../services/libraryMutation/canonicalJson";
 import { sha256Text } from "../store/journalRecoveryBlobStore";
@@ -215,13 +218,21 @@ async function outcomeEvidenceOf(params: {
 }): Promise<OutcomeEvidence[]> {
   const { toolResult } = params;
   const evidence: OutcomeEvidence[] = [];
-  const readTargets = (params.paperLedgerDelta?.papers || [])
-    .filter((paper) => paper.state === "read" || paper.state === "skimmed")
-    .map((paper) => `item:${paper.itemId}`);
-  if (toolResult.ok && (readTargets.length || params.observationIds.length)) {
+  // How deep the call read each paper decides which parts it ticks.
+  const depths = taskPaperReadDepths(params.paperLedgerDelta);
+  const item = (itemId: number) => `item:${itemId}`;
+  if (
+    toolResult.ok &&
+    (depths.text.length ||
+      depths.shallow.length ||
+      depths.noText.length ||
+      params.observationIds.length)
+  ) {
     evidence.push({
       kind: "read",
-      targets: readTargets,
+      targets: depths.text.map(item),
+      ...(depths.shallow.length ? { shallow: depths.shallow.map(item) } : {}),
+      ...(depths.noText.length ? { noText: depths.noText.map(item) } : {}),
       observationIds: params.observationIds,
     });
   }

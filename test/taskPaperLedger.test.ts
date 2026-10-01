@@ -10,6 +10,7 @@ import {
   applyTaskPaperLedgerDelta,
   createTaskPaperLedger,
   deriveTaskPaperLedgerDelta,
+  taskPaperReadDepths,
   type TaskPaperLedgerDelta,
 } from "../src/agent/context/taskPaperLedger";
 import { createTrustedReadObservations } from "../src/agent/context/readObservation";
@@ -529,6 +530,124 @@ describe("taskPaperLedger", function () {
       assert.isAtMost(reads[0].snippet!.length, 280);
       assert.isTrue(reads[0].snippet!.endsWith("…"));
       assert.isAtMost(reads[0].whyMatched!.length, 120);
+    });
+  });
+
+  describe("taskPaperReadDepths", function () {
+    it("sorts a retrieval's papers into text, shallow and metadata-only", function () {
+      const depths = taskPaperReadDepths(
+        derive(
+          "library_retrieve",
+          { query: "drift" },
+          libraryRetrieveFixture(),
+        ),
+      );
+      // 101 and 104 returned body passages; 103 only its abstract; 102 and
+      // 105 only a metadata row, which is no read at all.
+      assert.deepEqual(depths, {
+        text: [101, 104],
+        shallow: [103],
+        noText: [],
+      });
+    });
+
+    it("counts an overview of a paper's text, sampled or complete, and reports a paper with none", function () {
+      const depths = taskPaperReadDepths(
+        derive(
+          "paper_read",
+          { mode: "overview" },
+          {
+            mode: "overview",
+            results: [
+              {
+                backend: "mineru",
+                text: "Full MinerU text",
+                coverage: "complete",
+                paperContext: { itemId: 10, contextItemId: 20 },
+              },
+              {
+                backend: "raw_pdf_text",
+                text: "Opening pages",
+                coverage: "capacity_sampled",
+                paperContext: { itemId: 11, contextItemId: 21 },
+              },
+              {
+                backend: "zotero_metadata",
+                sourceKind: "zotero_metadata",
+                coverage: "abstract_only",
+                text: "Title: C\nAbstract: An abstract about drift.",
+                paperContext: { itemId: 12, contextItemId: 22 },
+              },
+              {
+                backend: "zotero_metadata",
+                sourceKind: "zotero_metadata",
+                coverage: "metadata_only",
+                text: "Title: D",
+                paperContext: { itemId: 13, contextItemId: 23 },
+              },
+            ],
+          },
+        ),
+      );
+      assert.deepEqual(depths, {
+        text: [10, 11],
+        shallow: [12],
+        noText: [12, 13],
+      });
+    });
+
+    it("counts an outline as shallow and a figure or a page as text", function () {
+      assert.deepEqual(
+        taskPaperReadDepths(
+          derive(
+            "paper_read",
+            { mode: "outline" },
+            {
+              mode: "outline",
+              papers: [
+                {
+                  paperContext: { itemId: 10, contextItemId: 20 },
+                  outline: { sections: [{ title: "Intro" }] },
+                },
+              ],
+            },
+          ),
+        ),
+        { text: [], shallow: [10], noText: [] },
+      );
+      assert.deepEqual(
+        taskPaperReadDepths(
+          derive(
+            "paper_read",
+            { target: { itemId: 10 }, mode: "visual", pages: [3] },
+            {
+              target: { itemId: 10, contextItemId: 20 },
+              results: [{ pageIndex: 2, pageLabel: "3" }],
+            },
+          ),
+        ),
+        { text: [10], shallow: [], noText: [] },
+      );
+    });
+
+    it("never reports missing text from a search listing, only from a read that tried", function () {
+      const depths = taskPaperReadDepths(
+        derive(
+          "library_retrieve",
+          { query: "drift" },
+          libraryRetrieveFixture(),
+        ),
+      );
+      assert.notInclude(
+        depths.noText,
+        102,
+        "an unsupported candidate row is a listing, not a read",
+      );
+      assert.deepEqual(taskPaperReadDepths(null), {
+        text: [],
+        shallow: [],
+        noText: [],
+      });
     });
   });
 

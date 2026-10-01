@@ -9,11 +9,16 @@ import {
 } from "../claudeCode/runtime";
 import { clearCodexZoteroMcpPreflightCache } from "../codexAppServer/mcpSetup";
 import { getConversationWriteGeneration } from "../shared/conversationWriteFence";
+import { libraryIndexService } from "../services/libraryIndexService";
 import { createBuiltInActionRegistry, type ActionRegistry } from "./actions";
 import { undoNoteChange } from "./actions/undoNoteChange";
 import { initAgentEvidenceStore } from "./context/cacheManagement";
 import { initAgentCoverageStore } from "./context/coverageLedger";
 import { setLibraryOverviewGateway } from "./context/libraryOverview";
+import {
+  resolveTaskPaperScopeSet,
+  taskPaperScopeContextsOf,
+} from "./context/taskPaperScopeListing";
 import { initPlanDocumentStore } from "./documents/store";
 import { registerMcpServer, unregisterMcpServer } from "./mcp/server";
 import { createAgentModelAdapter } from "./model/factory";
@@ -106,6 +111,14 @@ async function createAgentSubsystemRuntime(
     adapterFactory: (request) => createAgentModelAdapter(request),
     paperContextResolver: (selector) =>
       zoteroGateway.resolvePaperContextTarget(selector),
+    resolveTurnScopePapers: async (request) => {
+      const libraryID = request.turnPaperScope.libraryID || request.libraryID;
+      if (!libraryID) return undefined;
+      return resolveTaskPaperScopeSet(
+        await libraryIndexService.getSnapshot(libraryID),
+        taskPaperScopeContextsOf(request.turnPaperScope),
+      );
+    },
   });
   const actionRegistry = createBuiltInActionRegistry();
 

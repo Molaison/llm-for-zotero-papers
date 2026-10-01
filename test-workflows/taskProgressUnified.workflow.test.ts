@@ -658,7 +658,7 @@ describe("workflow: task progress unified", function () {
         line.querySelector(".llm-plan-task-label")?.textContent || "";
       assert.deepEqual(lines.map(label), [
         "Save the summary as a note",
-        "Added tags · 2 items",
+        "Added tags · 1 of 2",
         "1 not done",
       ]);
       const detail =
@@ -706,6 +706,85 @@ describe("workflow: task progress unified", function () {
       assert.match(batch.tp().count(), /^8 of 10 done/);
     } finally {
       await api.clickPanelDelete(batch.panel.panelId);
+    }
+  });
+
+  it("counts a part over every paper of a folder on its row, and names the folder's size", async function () {
+    const panel = await api.renderPanelForItem(fixtures[0].parentItemId);
+    const restore = showOnScreen(panel.panelId);
+    const handle = await api.startTaskProgressReplay({
+      panelId: panel.panelId,
+      historyTurns: 0,
+      user: {
+        selectedCollectionContexts: [
+          { collectionId: collection.id, name: collection.name, libraryID },
+        ],
+      },
+    });
+    try {
+      const tp = () => view(panel.panelId);
+      const targets = fixtures
+        .slice(0, TITLES.length)
+        .map((fixture) => `item:${fixture.parentItemId}`);
+      const readAll = `Read each paper in ${collection.name}`;
+      await handle.emit({
+        type: "execution_checkpoint",
+        checkpoint: {
+          version: 1,
+          executionId: handle.runId,
+          conversationKey: handle.conversationKey,
+          conversationGeneration: 0,
+          tasks: [
+            {
+              taskId: `${handle.runId}:task:read-all`,
+              description: readAll,
+              dependencies: [],
+              status: "pending",
+              journalActionIds: [],
+              verifiedReceiptIds: [],
+              readEvidenceIds: [],
+              materialRefs: [],
+              createdAt: 1,
+              updatedAt: 2,
+              effect: "read",
+              origin: "model",
+              scope: true,
+              targets,
+              doneTargets: targets.slice(0, 2),
+            },
+          ],
+          createdAt: 1,
+          updatedAt: 2,
+        },
+      } as never);
+      await until(
+        () => {
+          api.flushTaskProgress();
+          return tp().count() === "0/1 steps · 4 papers in scope";
+        },
+        () => `the row names the folder's size: ${tp().count()}`,
+      );
+      assert.equal(tp().row.dataset.state, "working");
+      tp().row.click();
+      await until(() => !tp().steps.hidden, "the Steps block shows the part");
+      const line = tp().steps.querySelector(".llm-plan-task") as HTMLElement;
+      assert.equal(
+        line.querySelector(".llm-plan-task-label")?.textContent,
+        `${readAll} · 2 of 4`,
+      );
+      assert.isTrue(
+        (line.querySelector(".llm-plan-task-pill") as HTMLElement).hidden,
+        "a part still in progress shows no pill",
+      );
+      await until(
+        () => tp().drawer.dataset.state === "open",
+        "the drawer settles open",
+      );
+      await capture(panel.panelId, "tp-scope-part-partial.png");
+      tp().row.click();
+    } finally {
+      handle.finish();
+      restore();
     }
   });
 });

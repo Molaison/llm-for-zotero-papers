@@ -6,6 +6,7 @@ import { createSubmitDocumentTool } from "../src/agent/tools/control/submitDocum
 import { createTaskUpdateTool } from "../src/agent/tools/control/taskUpdate";
 import { createNoteWriteTool } from "../src/agent/tools/write/noteWrite";
 import { OUTCOME_REASONS } from "../src/agent/loop/outcomes";
+import type { TaskPaperScopeSet } from "../src/agent/context/taskPaperScopeListing";
 import { createTestActionContractService } from "./helpers/actionContractService";
 import {
   PARENT_ITEM_ID,
@@ -69,6 +70,11 @@ type Turn = {
 
 /** The receipt the scripted `library_update` call is finalized with. */
 let libraryUpdateReceipt: AgentActionReceipt | undefined;
+
+/** What the scripted `paper_read` returns, when a case scripts it. */
+let scriptedPaperRead:
+  | ((input: Record<string, unknown>) => unknown)
+  | undefined;
 
 function stepOf(...calls: AgentToolCall[]): AgentModelStep {
   return {
@@ -134,20 +140,21 @@ function registry(): AgentToolRegistry {
       workCategory: "retrieval",
     },
     validate: (args: unknown) => ({ ok: true, value: args as never }),
-    execute: async () => ({
-      mode: "targeted",
-      results: [],
-      papers: [
-        {
-          paperContext: {
-            itemId: PARENT_ITEM_ID,
-            contextItemId: PARENT_ITEM_ID,
-            libraryID: 1,
+    execute: async (input: Record<string, unknown>) =>
+      scriptedPaperRead?.(input) ?? {
+        mode: "targeted",
+        results: [],
+        papers: [
+          {
+            paperContext: {
+              itemId: PARENT_ITEM_ID,
+              contextItemId: PARENT_ITEM_ID,
+              libraryID: 1,
+            },
+            passages: [{ text: "Place cells drift.", sectionLabel: "Results" }],
           },
-          passages: [{ text: "Place cells drift.", sectionLabel: "Results" }],
-        },
-      ],
-    }),
+        ],
+      },
   } as never);
   tools.register({
     spec: {
@@ -232,6 +239,8 @@ async function runTurn(params: {
   steps: ScriptStep[];
   approve?: boolean;
   signal?: AbortSignal;
+  /** The papers the host resolves for the turn's scope. */
+  scope?: TaskPaperScopeSet;
 }): Promise<Turn> {
   const events: AgentEvent[] = [];
   const prompts: AgentModelMessage[][] = [];
@@ -239,6 +248,9 @@ async function runTurn(params: {
   let initialCheckpoint: ExecutionCheckpoint | undefined;
   let requests = 0;
   const runtime = new AgentRuntime({
+    ...(params.scope
+      ? { resolveTurnScopePapers: async () => params.scope }
+      : {}),
     registry: registry(),
     adapterFactory: (resolved) => ({
       getCapabilities: () => ({
@@ -364,6 +376,7 @@ describe("outcome ledger in runtime turns", function () {
   beforeEach(async function () {
     environment = await installDirectJourneyEnvironment();
     libraryUpdateReceipt = undefined;
+    scriptedPaperRead = undefined;
     conversationKey += 10;
   });
 
@@ -759,3 +772,204 @@ function installPlanSqlite(): () => void {
     db.close();
   };
 }
+
+describe("parts over the turn's paper scope in runtime turns", function () {
+  let environment: DirectJourneyEnvironment;
+  let conversationKey = 994_000;
+  const READ_ALL = "Read each paper in Drift";
+
+  /** A paper's context, as paper_read rows name it. */
+  const paperOf = (itemId: number) => ({
+    itemId,
+    contextItemId: itemId + 1000,
+    libraryID: 1,
+  });
+
+  /** Body passages for a targeted read, an outline, or no text at all. */
+  function paperReadPayload(input: Record<string, unknown>): unknown {
+    const itemId = Number((input.target as { itemId?: number })?.itemId);
+    if (input.mode === "outline")
+      return {
+        mode: "outline",
+        papers: [
+          {
+            paperContext: paperOf(itemId),
+            outline: { sections: [{ title: "Introduction" }] },
+          },
+        ],
+      };
+    if (input.mode === "overview")
+      return {
+        mode: "overview",
+        results: [
+          {
+            backend: "zotero_metadata",
+            sourceKind: "zotero_metadata",
+            coverage: "metadata_only",
+            text: "Title: A paper without a PDF",
+            paperContext: paperOf(itemId),
+          },
+        ],
+      };
+    return {
+      mode: "targeted",
+      results: [],
+      papers: [
+        {
+          paperContext: paperOf(itemId),
+          passages: [{ text: "Place cells drift.", sectionLabel: "Results" }],
+        },
+      ],
+    };
+  }
+
+  function read(id: string, itemId: number, mode?: string): AgentToolCall {
+    return {
+      id,
+      name: "paper_read",
+      arguments: { target: paperOf(itemId), ...(mode ? { mode } : {}) },
+    };
+  }
+
+  const readAll = {
+    taskId: "read-all",
+    description: READ_ALL,
+    expectedEffect: "read",
+    scope: true,
+  };
+
+  function scope(itemIds: number[], withText: number): TaskPaperScopeSet {
+    return { wholeLibrary: true, itemIds, withText };
+  }
+
+  beforeEach(async function () {
+    environment = await installDirectJourneyEnvironment();
+    libraryUpdateReceipt = undefined;
+    scriptedPaperRead = paperReadPayload;
+    conversationKey += 10;
+  });
+
+  afterEach(function () {
+    environment.restore();
+    scriptedPaperRead = undefined;
+  });
+
+  it("states the scope, freezes it at declaration, and ticks only papers whose text was read", async function () {
+    const turn = await runTurn({
+      conversationKey,
+      userText: "Read every paper in my library and summarize each",
+      scope: scope([101, 102, 103], 2),
+      steps: [
+        stepOf(
+          declare("declare-1", [readAll]),
+          read("read-101", 101),
+          read("read-102", 102, "outline"),
+          read("read-103", 103, "overview"),
+        ),
+        finalStep("I read the papers."),
+        stepOf(read("read-102-text", 102)),
+        finalStep("Each paper, summarized."),
+      ],
+    });
+
+    assert.include(
+      promptText(turn.prompts[0]),
+      "\nPaper scope: whole library — 3 papers, 2 with full text\n",
+    );
+    const declared = checkpoints(turn)[0];
+    assert.deepEqual(outcome(declared, "read-all").targets, [
+      "item:101",
+      "item:102",
+      "item:103",
+    ]);
+    assert.isTrue(outcome(declared, "read-all").scope);
+    // Each change is published once; the outline read changed nothing.
+    assert.deepEqual(
+      checkpoints(turn).map((checkpoint) => {
+        const part = outcome(checkpoint, "read-all");
+        return [
+          part.status,
+          part.doneTargets ?? [],
+          (part.exceptions ?? []).flatMap((entry) => entry.targets),
+        ];
+      }),
+      [
+        ["pending", [], []],
+        ["pending", ["item:101"], []],
+        ["pending", ["item:101"], ["item:103"]],
+        ["completed", ["item:101", "item:102"], ["item:103"]],
+        ["completed", ["item:101", "item:102"], ["item:103"]],
+      ],
+    );
+    assert.include(
+      promptText(turn.prompts[2]),
+      `Before answering, finish the parts of this request you declared that are still open: “${READ_ALL}”.`,
+    );
+    const ledger = settled(turn);
+    const task = outcome(ledger, "read-all");
+    assert.equal(task.status, "completed");
+    assert.deepEqual(task.doneTargets, ["item:101", "item:102"]);
+    assert.deepEqual(task.exceptions, [
+      { targets: ["item:103"], reason: OUTCOME_REASONS.noText },
+    ]);
+    assert.deepEqual(ledger.end, { state: "completed_with_exceptions" });
+  });
+
+  it("an abstract-depth read alone leaves the part open and the answer is corrected once", async function () {
+    const turn = await runTurn({
+      conversationKey,
+      userText: "Read every paper in my library",
+      scope: scope([101], 1),
+      steps: [
+        stepOf(declare("declare-1", [readAll]), read("read-1", 101, "outline")),
+        finalStep("I read it."),
+        finalStep("I read it."),
+      ],
+    });
+    const ledger = settled(turn);
+    assert.equal(turn.requests, 3, "one correction for the open part");
+    assert.isUndefined(outcome(ledger, "read-all").doneTargets);
+    assert.deepEqual(ledger.end, { state: "completed_with_exceptions" });
+  });
+
+  it("a scope that changes later keeps the frozen papers, through an interruption and 'continue'", async function () {
+    const interrupted = await runTurn({
+      conversationKey,
+      userText: "Read every paper in my library and summarize each",
+      scope: scope([101, 102], 2),
+      steps: [
+        stepOf(declare("declare-1", [readAll]), read("read-101", 101)),
+        () => {
+          throw new Error("provider interrupted");
+        },
+      ],
+    });
+    const before = settled(interrupted);
+    assert.deepEqual(before.end, { state: "interrupted" });
+    assert.deepEqual(outcome(before, "read-all").doneTargets, ["item:101"]);
+
+    const resumed = await runTurn({
+      conversationKey,
+      userText: "continue",
+      // A paper joined the scope since the part was declared.
+      scope: scope([101, 102, 104], 3),
+      steps: [
+        stepOf(declare("declare-2", [readAll]), read("read-102", 102)),
+        finalStep("Every paper is summarized."),
+      ],
+    });
+    assert.include(
+      promptText(resumed.prompts[0]),
+      "\nPaper scope: whole library — 3 papers, 3 with full text\n",
+    );
+    assert.deepEqual(outcome(resumed.initialCheckpoint, "read-all").targets, [
+      "item:101",
+      "item:102",
+    ]);
+    const after = settled(resumed);
+    const task = outcome(after, "read-all");
+    assert.deepEqual(task.targets, ["item:101", "item:102"]);
+    assert.equal(task.status, "completed");
+    assert.deepEqual(after.end, { state: "completed" });
+  });
+});

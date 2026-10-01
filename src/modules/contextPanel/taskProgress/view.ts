@@ -314,7 +314,23 @@ function targetedWriteText(record: TaskProgressRecord | null): string {
   });
 }
 
-/** The row's count text, e.g. "37 of 200 read · 12 cited". */
+/** Papers the run's parts over the whole scope cover; 0 without one. */
+function scopeWidePapers(record: TaskProgressRecord | null): number {
+  const checklist = record?.checklist;
+  return checklist?.source === "outcomes" ? checklist.scopePapers || 0 : 0;
+}
+
+function papersInScopeText(count: number): string {
+  return count === 1
+    ? t("1 paper in scope")
+    : format("{count} papers in scope", { count });
+}
+
+/**
+ * The row's count text, e.g. "37 of 200 read · 12 cited". A run with a part
+ * over every paper of its scope counts those papers on the part's own row,
+ * so this names the scope the part froze: "2/4 steps · 212 papers in scope".
+ */
 export function formatTaskProgressCount(
   record: TaskProgressRecord | null,
   recordsReads: boolean,
@@ -335,15 +351,19 @@ export function formatTaskProgressCount(
     const parts = [stepsText, actionText(record)].filter(Boolean);
     return parts.join(" · ");
   }
+  const scopePapers = scopeWidePapers(record);
+  if (scopePapers) {
+    const parts = state === "answering" ? [t("Answering…")] : [];
+    if (stepsText) parts.push(stepsText);
+    parts.push(papersInScopeText(scopePapers));
+    return parts.join(" · ");
+  }
   const papersKnown = counts.total > 0;
   if (!papersKnown) {
     return stepsText;
   }
   if (!recordsReads || state === "idle") {
-    const inScope =
-      counts.total === 1
-        ? t("1 paper in scope")
-        : format("{count} papers in scope", { count: counts.total });
+    const inScope = papersInScopeText(counts.total);
     return stepsText ? `${stepsText} · ${inScope}` : inScope;
   }
   const readText = format("{read} of {total} read", {

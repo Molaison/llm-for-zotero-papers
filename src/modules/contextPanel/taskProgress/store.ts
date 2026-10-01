@@ -52,6 +52,8 @@ export type TaskProgressOutcomeStep = {
   host: boolean;
   /** A write, whose targets the row can count. */
   write: boolean;
+  /** A read, whose papers the row counts as their text is read. */
+  read: boolean;
   /** Receipt-form targets it names, and how many of those are done. */
   targets: number;
   doneTargets: number;
@@ -90,6 +92,8 @@ export type TaskProgressChecklist = {
   detail?: string;
   /** How the run that owns the outcomes ended, once its ledger settled. */
   end?: RunEndState;
+  /** Papers its parts over the whole scope cover, frozen when declared. */
+  scopePapers?: number;
 };
 
 /** The scope a turn attached, and its listing once the snapshot resolved it. */
@@ -647,6 +651,7 @@ export function taskOutcomesChecklist(
     outcome: {
       host: task.origin === "host",
       write: task.effect === "mutation",
+      read: task.effect === "read",
       targets: task.targets?.length || 0,
       doneTargets: task.doneTargets?.length || 0,
       exceptions: (task.exceptions || []).map((entry) => ({
@@ -655,6 +660,9 @@ export function taskOutcomesChecklist(
       })),
     },
   }));
+  const scopePapers = new Set(
+    checkpoint.tasks.flatMap((task) => (task.scope ? task.targets || [] : [])),
+  ).size;
   return {
     source: "outcomes",
     runId,
@@ -664,6 +672,7 @@ export function taskOutcomesChecklist(
     total: steps.length,
     summary: "",
     ...(checkpoint.end ? { end: checkpoint.end.state } : {}),
+    ...(scopePapers ? { scopePapers } : {}),
   };
 }
 

@@ -1379,6 +1379,7 @@ describe("outcome ledger: host reasons", function () {
         notApplied: "Not applied",
         notDone: NOT_DONE,
         writeFailed: WRITE_FAILED,
+        noText: "No readable text",
       },
     );
   });
@@ -1703,5 +1704,273 @@ describe("outcome ledger: how models declare saves (live run, 2026-09-30)", func
       2,
       "the tag write is its own outcome",
     );
+  });
+});
+
+describe("outcome ledger: parts over the turn's paper scope", function () {
+  const SCOPE = ["item:30", "item:10", "item:20"];
+  const readScope: OutcomeDeclaration = {
+    taskId: "read-all",
+    description: "Read each paper in Drift",
+    effect: "read",
+    targets: SCOPE,
+    scope: true,
+  };
+  const noteScope: OutcomeDeclaration = {
+    taskId: "note-all",
+    description: "Write a note on each paper in Drift",
+    effect: "mutation",
+    capability: "zotero.notes",
+    targets: SCOPE,
+    scope: true,
+  };
+
+  function textRead(
+    targets: string[],
+    observationIds: string[] = [],
+  ): OutcomeEvidence {
+    return { kind: "read", targets, observationIds };
+  }
+
+  it("records a scope-wide part with its papers in frozen order", function () {
+    const task = find(ledgerWith(readScope), "read-all");
+    assert.isTrue(task.scope);
+    assert.deepEqual(task.targets, SCOPE);
+    assert.equal(task.status, "pending");
+    assert.notProperty(
+      find(ledgerWith({ ...readScope, scope: undefined }), "read-all"),
+      "scope",
+      "only a scope-wide declaration is marked",
+    );
+  });
+
+  it("keeps the frozen papers when the part is declared again over a changed scope", function () {
+    const ledger = ledgerWith(readScope);
+    assert.strictEqual(
+      declareOutcomes(
+        ledger,
+        [{ ...readScope, targets: ["item:10", "item:40"] }],
+        40,
+      ),
+      ledger,
+    );
+  });
+
+  it("a resumed ledger keeps its frozen papers, and reads still tick them", function () {
+    // Run events persist the ledger as JSON; continue restores that copy.
+    const persisted = JSON.parse(
+      JSON.stringify(
+        apply(ledgerWith(readScope), textRead(["item:30"], ["obs-1"]))
+          .checkpoint,
+      ),
+    ) as ExecutionCheckpoint;
+    const resumed = frozen(
+      declareOutcomes(
+        persisted,
+        [{ ...readScope, targets: ["item:10", "item:99"] }],
+        50,
+      ),
+    );
+    const task = find(resumed, "read-all");
+    assert.deepEqual(task.targets, SCOPE);
+    assert.isTrue(task.scope);
+    assert.deepEqual(task.doneTargets, ["item:30"]);
+    const next = apply(resumed, textRead(["item:10", "item:20"], ["obs-2"]));
+    assert.equal(find(next.checkpoint, "read-all").status, "completed");
+  });
+
+  it("a read that returned a paper's text ticks it; the part completes when every paper is read", function () {
+    const first = apply(
+      ledgerWith(readScope),
+      textRead(["item:10", "item:77"], ["obs-1"]),
+    );
+    const task = find(first.checkpoint, "read-all");
+    assert.equal(task.status, "pending");
+    assert.deepEqual(task.doneTargets, ["item:10"]);
+    assert.deepEqual(task.readEvidenceIds, ["obs-1"]);
+    const done = find(
+      apply(first.checkpoint, textRead(["item:20", "item:30"], ["obs-2"]))
+        .checkpoint,
+      "read-all",
+    );
+    assert.equal(done.status, "completed");
+    assert.deepEqual(done.doneTargets, ["item:10", "item:20", "item:30"]);
+  });
+
+  it("an abstract, an outline or a metadata row does not tick a part that names papers", function () {
+    const ledger = ledgerWith(readScope, {
+      taskId: "read-two",
+      description: "Read both papers",
+      effect: "read",
+      targets: ["item:10", "item:20"],
+    });
+    const shallow = apply(ledger, {
+      kind: "read",
+      targets: [],
+      shallow: ["item:10", "item:20", "item:30"],
+      observationIds: ["obs-abstracts"],
+    });
+    assert.isFalse(shallow.changed);
+    assert.strictEqual(shallow.checkpoint, ledger);
+    assert.equal(
+      outcomeProgressSignature(shallow.checkpoint),
+      outcomeProgressSignature(ledger),
+      "a shallow read is no progress on a part that names papers",
+    );
+  });
+
+  it("a part that names no papers still completes on any read, an abstract included", function () {
+    const ledger = ledgerWith({
+      taskId: "look",
+      description: "Look up papers on drift",
+      effect: "read",
+    });
+    const { checkpoint } = apply(ledger, {
+      kind: "read",
+      targets: [],
+      shallow: ["item:10"],
+      observationIds: [],
+    });
+    const task = find(checkpoint, "look");
+    assert.equal(task.status, "completed");
+    assert.deepEqual(task.doneTargets, ["item:10"]);
+  });
+
+  it("finding that a paper has no text completes no part that names no papers", function () {
+    const ledger = ledgerWith({
+      taskId: "look",
+      description: "Look up papers on drift",
+      effect: "read",
+    });
+    const { changed } = apply(ledger, {
+      kind: "read",
+      targets: [],
+      noText: ["item:10"],
+      observationIds: [],
+    });
+    assert.isFalse(changed);
+  });
+
+  it("a paper the host reports has no readable text is excepted, and the part completes with the rest read", function () {
+    const missing = apply(ledgerWith(readScope), {
+      kind: "read",
+      targets: ["item:10"],
+      noText: ["item:30"],
+      observationIds: ["obs-1"],
+    });
+    const open = find(missing.checkpoint, "read-all");
+    assert.equal(open.status, "pending");
+    assert.deepEqual(open.doneTargets, ["item:10"]);
+    assert.deepEqual(open.exceptions, [
+      { targets: ["item:30"], reason: OUTCOME_REASONS.noText },
+    ]);
+    const { checkpoint } = apply(
+      missing.checkpoint,
+      textRead(["item:20"], ["obs-2"]),
+    );
+    const task = find(checkpoint, "read-all");
+    assert.equal(task.status, "completed");
+    assert.deepEqual(task.exceptions, [
+      { targets: ["item:30"], reason: OUTCOME_REASONS.noText },
+    ]);
+    assert.equal(
+      decideRunEnd(checkpoint, {
+        status: "completed",
+        stopRule: "final_answer",
+      }),
+      "completed_with_exceptions",
+    );
+  });
+
+  it("a paper read after it was excepted is done, not excepted", function () {
+    const excepted = apply(ledgerWith(readScope), {
+      kind: "read",
+      targets: [],
+      noText: ["item:30"],
+      observationIds: ["obs-1"],
+    }).checkpoint;
+    const { checkpoint } = apply(
+      excepted,
+      textRead(["item:30", "item:10"], ["obs-2"]),
+    );
+    const task = find(checkpoint, "read-all");
+    assert.equal(task.status, "pending");
+    assert.deepEqual(task.doneTargets, ["item:30", "item:10"]);
+    assert.notProperty(task, "exceptions");
+  });
+
+  it("a part none of whose papers has text is skipped with the reason", function () {
+    const { checkpoint } = apply(
+      ledgerWith({ ...readScope, targets: ["item:10", "item:20"] }),
+      {
+        kind: "read",
+        targets: [],
+        noText: ["item:10", "item:20"],
+        observationIds: [],
+      },
+    );
+    const task = find(checkpoint, "read-all");
+    assert.equal(task.status, "skipped");
+    assert.equal(task.reason, OUTCOME_REASONS.noText);
+  });
+
+  it("counts every excepted paper as progress", function () {
+    const one = apply(ledgerWith(readScope), {
+      kind: "read",
+      targets: [],
+      noText: ["item:10"],
+      observationIds: [],
+    }).checkpoint;
+    const two = apply(one, {
+      kind: "read",
+      targets: [],
+      noText: ["item:20"],
+      observationIds: [],
+    }).checkpoint;
+    assert.notEqual(
+      outcomeProgressSignature(two),
+      outcomeProgressSignature(one),
+    );
+  });
+
+  it("a scope-wide write part closes paper by paper from the receipts", function () {
+    const note = (id: string, target: string) =>
+      receipt({
+        id,
+        requestedTargets: [target],
+        appliedTargets: [target],
+      });
+    let ledger = ledgerWith(noteScope);
+    ledger = apply(ledger, {
+      kind: "receipt",
+      receipt: note("r-10", "item:10"),
+    }).checkpoint;
+    ledger = apply(ledger, {
+      kind: "receipt",
+      receipt: note("r-30", "item:30"),
+    }).checkpoint;
+    let task = find(ledger, "note-all");
+    assert.equal(task.status, "pending");
+    assert.deepEqual(task.doneTargets, ["item:10", "item:30"]);
+    assert.deepEqual(task.verifiedReceiptIds, ["r-10", "r-30"]);
+
+    // A note on a paper outside the frozen scope is its own outcome.
+    ledger = apply(ledger, {
+      kind: "receipt",
+      receipt: note("r-99", "item:99"),
+    }).checkpoint;
+    assert.lengthOf(ledger.tasks, 2);
+    assert.deepEqual(find(ledger, "note-all").doneTargets, [
+      "item:10",
+      "item:30",
+    ]);
+
+    ledger = apply(ledger, {
+      kind: "receipt",
+      receipt: note("r-20", "item:20"),
+    }).checkpoint;
+    task = find(ledger, "note-all");
+    assert.equal(task.status, "completed");
+    assert.deepEqual(task.doneTargets, ["item:10", "item:30", "item:20"]);
   });
 });

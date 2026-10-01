@@ -1443,7 +1443,7 @@ describe("task progress view of an outcome ledger", function () {
       "run-a",
       outcomeCheckpoint(
         [
-          // A model outcome names its targets without an item count.
+          // A model outcome counts its targets as a host one does.
           {
             ...save,
             status: "completed",
@@ -1485,8 +1485,8 @@ describe("task progress view of an outcome ledger", function () {
       "completed_with_exceptions",
     );
     const [saveRow, hostRow, notDone] = rows(steps);
-    assert.equal(labelOf(saveRow), "Save the summary as a note");
-    assert.equal(labelOf(hostRow), "Added tags · 4 items");
+    assert.equal(labelOf(saveRow), "Save the summary as a note · 2 of 2");
+    assert.equal(labelOf(hostRow), "Added tags · 1 of 4");
     assert.equal(notDone.findByClass("llm-plan-task-badge")!.textContent, "!");
     assert.equal(labelOf(notDone), "3 not done");
     assert.equal(
@@ -1530,7 +1530,7 @@ describe("task progress view of an outcome ledger", function () {
     assert.match(harness.count(), /^8 of 10 done · /);
   });
 
-  it("names a host outcome's items only when there are several, and counts targets only for an exception", function () {
+  it("counts a step's targets only when there are several, and counts targets only for an exception", function () {
     seedScope();
     const harness = track(mount());
     beginTaskRun(KEY, { runId: "run-a" });
@@ -1607,6 +1607,145 @@ describe("task progress view of an outcome ledger", function () {
     // Each repaint rebuilt the Steps block; the labels were read only once.
     assert.equal(detailOf(rows(steps)[2]), expected);
     assert.deepEqual(lookedUp, [11, 12, 13, 14, 15]);
+  });
+
+  describe("a part over every paper in the scope", function () {
+    const items = (count: number, from = 1) =>
+      Array.from({ length: count }, (_, index) => `item:${from + index}`);
+    const readAll = (targets: string[], done: string[]) =>
+      outcomeTask("read-all", {
+        description: "Read each paper in Drift",
+        effect: "read",
+        scope: true,
+        status: done.length === targets.length ? "completed" : "pending",
+        targets,
+        doneTargets: done,
+      });
+    const noteAll = (targets: string[], done: string[]) =>
+      outcomeTask("note-all", {
+        description: "Write a note on each paper",
+        capability: "zotero.notes",
+        scope: true,
+        targets,
+        doneTargets: done,
+      });
+
+    it("counts done of total on its row: Read each paper in Drift · 48 of 48", function () {
+      seedScope(48);
+      const harness = track(mount());
+      beginTaskRun(KEY, { runId: "run-a" });
+      setTaskOutcomes(
+        KEY,
+        "run-a",
+        outcomeCheckpoint([
+          readAll(items(48), items(48)),
+          noteAll(items(48), items(20)),
+        ]),
+      );
+      harness.view.flush();
+      const [readRow, noteRow] = rows(openSteps(harness));
+      assert.equal(labelOf(readRow), "Read each paper in Drift · 48 of 48");
+      assert.equal(labelOf(noteRow), "Write a note on each paper · 20 of 48");
+      assert.equal(
+        readRow.findByClass("llm-plan-task-pill")!.textContent,
+        "Done",
+      );
+    });
+
+    it("names the papers in scope in the row: 2/4 steps · 212 papers in scope", function () {
+      seedScope(200);
+      const harness = track(mount());
+      beginTaskRun(KEY, { runId: "run-a" });
+      setTaskOutcomes(
+        KEY,
+        "run-a",
+        outcomeCheckpoint([
+          readAll(items(212), items(212)),
+          outcomeTask("explain", {
+            description: "Explain the common thread",
+            effect: "answer",
+            status: "completed",
+          }),
+          noteAll(items(212), items(120)),
+          outcomeTask("tag", {
+            description: "Tag the papers",
+            capability: "zotero.tags",
+          }),
+        ]),
+      );
+      harness.view.flush();
+      // The frozen part, not the listing, sizes the scope.
+      assert.equal(harness.count(), "2/4 steps · 212 papers in scope");
+      markTaskAnswering(KEY, "run-a");
+      harness.view.flush();
+      assert.equal(
+        harness.count(),
+        "Answering… · 2/4 steps · 212 papers in scope",
+      );
+    });
+
+    it("sizes a whole-library scope that lists no papers", function () {
+      const harness = track(mount());
+      beginTaskRun(KEY, { runId: "run-a" });
+      setTaskOutcomes(KEY, "run-a", outcomeCheckpoint([readAll(items(1), [])]));
+      harness.view.flush();
+      assert.equal(harness.count(), "0/1 steps · 1 paper in scope");
+      const [row] = rows(openSteps(harness));
+      assert.equal(
+        labelOf(row),
+        "Read each paper in Drift",
+        "one paper needs no count",
+      );
+    });
+
+    it("counts only what reads and writes tick, not a part the answer completes", function () {
+      const harness = track(mount());
+      beginTaskRun(KEY, { runId: "run-a" });
+      setTaskOutcomes(
+        KEY,
+        "run-a",
+        outcomeCheckpoint([
+          outcomeTask("compare", {
+            description: "Compare the papers in Drift",
+            effect: "answer",
+            status: "completed",
+            scope: true,
+            targets: items(12),
+          }),
+          outcomeTask("draft", {
+            description: "Draft a review of Drift",
+            effect: "artifact",
+            targets: items(12),
+          }),
+        ]),
+      );
+      harness.view.flush();
+      const [compareRow, draftRow] = rows(openSteps(harness));
+      assert.equal(labelOf(compareRow), "Compare the papers in Drift");
+      assert.equal(labelOf(draftRow), "Draft a review of Drift");
+    });
+
+    it("keeps the read count for a run without one", function () {
+      seedScope();
+      const harness = track(mount());
+      beginTaskRun(KEY, { runId: "run-a" });
+      setTaskOutcomes(
+        KEY,
+        "run-a",
+        outcomeCheckpoint([
+          outcomeTask("read", {
+            description: "Read both papers",
+            effect: "read",
+            targets: items(2),
+            doneTargets: items(1),
+          }),
+        ]),
+      );
+      harness.view.flush();
+      assert.equal(harness.count(), "0/1 steps · 0 of 200 read");
+      const [row] = rows(openSteps(harness));
+      assert.equal(labelOf(row), "Read both papers · 1 of 2");
+    });
   });
 
   it("blocked: Needs your decision, the steps count, and why", function () {
@@ -1695,7 +1834,7 @@ describe("task progress view of an outcome ledger", function () {
         "Partly done",
         "{done} of {total} done",
         "{count} not done",
-        "{count} items",
+        "{done} of {total}",
         "Say “continue” to resume.",
       ]) {
         assert.notEqual(t(value), value, value);

@@ -40,6 +40,7 @@ import {
   hydrateAgentEvidenceCache,
   type AgentPendingReadActivity,
 } from "./context/resourceContextPlan";
+import type { TaskPaperScopeSet } from "./context/taskPaperScopeListing";
 import {
   buildAgentSemanticCheckpoint,
   buildPortableAgentTranscript,
@@ -161,6 +162,13 @@ type AgentRuntimeDeps = {
   now?: () => number;
   /** Overridable so a failing re-anchoring can be exercised in tests. */
   reanchorCitations?: typeof reanchorQuoteCitationsToClaims;
+  /**
+   * Every paper of a turn's scope, from the library index. Without it a turn
+   * states no scope and no part can be declared over it.
+   */
+  resolveTurnScopePapers?: (
+    request: AgentRuntimeRequest,
+  ) => Promise<TaskPaperScopeSet | undefined>;
 };
 
 /**
@@ -200,6 +208,7 @@ export class AgentRuntime {
   private readonly paperContextResolver?: AgentRequestPaperContextResolver;
   private readonly now: () => number;
   private readonly reanchorCitations: typeof reanchorQuoteCitationsToClaims;
+  private readonly resolveTurnScopePapers?: AgentRuntimeDeps["resolveTurnScopePapers"];
   private readonly pendingConfirmations = new Map<
     string,
     PendingConfirmation
@@ -212,6 +221,7 @@ export class AgentRuntime {
     this.now = deps.now || (() => Date.now());
     this.reanchorCitations =
       deps.reanchorCitations || reanchorQuoteCitationsToClaims;
+    this.resolveTurnScopePapers = deps.resolveTurnScopePapers;
   }
 
   listTools() {
@@ -313,6 +323,22 @@ export class AgentRuntime {
 
   async getRunTrace(runId: string) {
     return getAgentRunTrace(runId);
+  }
+
+  /** The turn's scope, or none when it cannot be resolved: never fails a turn. */
+  private async turnScopePapers(
+    request: AgentRuntimeRequest,
+  ): Promise<TaskPaperScopeSet | undefined> {
+    if (!this.resolveTurnScopePapers) return undefined;
+    try {
+      return await this.resolveTurnScopePapers(request);
+    } catch (error) {
+      logRuntimeWarning(
+        "LLM Agent: resolving the turn's paper scope failed",
+        error,
+      );
+      return undefined;
+    }
   }
 
   async runTurn(params: {
@@ -646,6 +672,9 @@ export class AgentRuntime {
         conversationKey: request.conversationKey,
         request,
       });
+      // Resolved once per turn: the turn context states this scope, and a
+      // part declared over it freezes exactly these papers.
+      request.turnScopePapers = await this.turnScopePapers(request);
       const resourceContextPlan = buildAgentResourceContextPlan(request);
       resourceContextPlan.paperContext = await preparePaperPromptContext(
         request,

@@ -25,6 +25,15 @@ import type { RunStopRule } from "./stopRules";
  * skipped, blocked or cancelled with a reason; only host evidence completes
  * one. Every function returns a new checkpoint, or the same one when nothing
  * changed, and never mutates its input.
+ *
+ * How deep a read must go. A read part that names papers (its targets, or
+ * every paper of the turn's scope) asks for each paper's text: a paper is
+ * done when a read returned its text (passages, sections, pages, figures,
+ * the full text, or an overview of it, sampled or complete). An abstract, an
+ * outline or a metadata row does not tick it. A paper the host reports has
+ * no readable text becomes an exception, so the part can still complete with
+ * the rest read. A read part that names no papers completes on any read, an
+ * abstract included.
  */
 
 export type OutcomeDeclaration = {
@@ -33,6 +42,8 @@ export type OutcomeDeclaration = {
   effect: OutcomeEffect;
   capability?: AgentActionCapability;
   targets?: readonly string[];
+  /** The targets are every paper of the turn's scope, frozen now. */
+  scope?: boolean;
 };
 
 export type OutcomeModelMark = {
@@ -44,7 +55,12 @@ export type OutcomeModelMark = {
 export type OutcomeEvidence =
   | {
       kind: "read";
+      /** Papers whose text the read returned. */
       targets: readonly string[];
+      /** Papers it read no deeper than an abstract or an outline. */
+      shallow?: readonly string[];
+      /** Papers the host reported have no readable text. */
+      noText?: readonly string[];
       observationIds: readonly string[];
     }
   | { kind: "receipt"; receipt: AgentActionReceipt }
@@ -69,6 +85,7 @@ export const OUTCOME_REASONS = Object.freeze({
   notApplied: "Not applied",
   notDone: "Not done before the answer.",
   writeFailed: "The change was not applied.",
+  noText: "No readable text",
 });
 
 type Task = ExecutionCheckpointTask;
@@ -338,35 +355,76 @@ function bindReceipt(
   return bound;
 }
 
-function readInto(
+/** A read part that names no papers: any read completes it. */
+function readAnyInto(
   task: Task,
   read: readonly string[],
   observationIds: readonly string[],
   now: number,
-): Task | undefined {
-  const targets = task.targets || [];
-  const doneTargets = union(
-    task.doneTargets,
-    targets.length ? read.filter((target) => targets.includes(target)) : read,
-  );
-  const readEvidenceIds = union(task.readEvidenceIds, observationIds);
-  const status = targets.every((target) => doneTargets.includes(target))
-    ? "completed"
-    : task.status;
-  if (
-    status === task.status &&
-    doneTargets.length === (task.doneTargets?.length || 0) &&
-    readEvidenceIds.length === task.readEvidenceIds.length
-  ) {
-    return undefined;
-  }
+): Task {
+  const doneTargets = union(task.doneTargets, read);
   return {
     ...task,
-    status,
-    readEvidenceIds,
+    status: "completed",
+    readEvidenceIds: union(task.readEvidenceIds, observationIds),
     ...(doneTargets.length ? { doneTargets } : {}),
     updatedAt: now,
   };
+}
+
+/**
+ * A read part that names papers takes only its own, at the depth the module
+ * doc sets: a paper whose text was read is done, a paper the host found no
+ * text for is excepted, and the part settles once every paper is one or the
+ * other.
+ */
+function readTargetsInto(
+  task: Task,
+  read: readonly string[],
+  noText: readonly string[],
+  observationIds: readonly string[],
+  now: number,
+): Task | undefined {
+  const targets = task.targets || [];
+  const own = (values: readonly string[]) =>
+    values.filter((value) => targets.includes(value));
+  if (!own(read).length && !own(noText).length) return undefined;
+  const doneTargets = union(task.doneTargets, own(read));
+  const done = new Set(doneTargets);
+  // A paper read after the host found no text for it is done, not excepted.
+  const kept = (task.exceptions || []).flatMap((entry) => {
+    const left = entry.targets.filter((target) => !done.has(target));
+    return left.length ? [{ ...entry, targets: left }] : [];
+  });
+  const exceptions = withException(
+    kept,
+    own(noText).filter((target) => !done.has(target)),
+    OUTCOME_REASONS.noText,
+  );
+  const readEvidenceIds = union(task.readEvidenceIds, observationIds);
+  if (
+    doneTargets.length === (task.doneTargets?.length || 0) &&
+    readEvidenceIds.length === task.readEvidenceIds.length &&
+    JSON.stringify(exceptions) === JSON.stringify(task.exceptions || [])
+  ) {
+    return undefined;
+  }
+  const { exceptions: _previous, ...rest } = task;
+  const next: Task = {
+    ...rest,
+    readEvidenceIds,
+    ...(doneTargets.length ? { doneTargets } : {}),
+    ...(exceptions.length ? { exceptions } : {}),
+    updatedAt: now,
+  };
+  const accounted = new Set([
+    ...doneTargets,
+    ...exceptions.flatMap((entry) => entry.targets),
+  ]);
+  if (!targets.every((target) => accounted.has(target))) return next;
+  return doneTargets.length
+    ? completed(next)
+    : { ...next, status: "skipped", reason: exceptions[0].reason };
 }
 
 function applyRead(
@@ -375,19 +433,27 @@ function applyRead(
   now: number,
 ): EvidenceResult {
   const read = unique(evidence.targets);
+  const shallow = unique(evidence.shallow || []);
+  const noText = unique(evidence.noText || []);
   const observationIds = unique(evidence.observationIds);
   const bound = new Set(
     checkpoint.tasks.flatMap((task) => task.readEvidenceIds),
   );
   const alreadyApplied = observationIds.length
     ? observationIds.every((id) => bound.has(id))
-    : !read.length;
+    : !read.length && !shallow.length && !noText.length;
   if (alreadyApplied) return unchanged(checkpoint);
-  return mapTasks(checkpoint, now, (task) =>
-    task.status === "pending" && task.effect === "read" && covers(task, read)
-      ? readInto(task, read, observationIds, now)
-      : undefined,
-  );
+  const anyRead = unique([...read, ...shallow]);
+  return mapTasks(checkpoint, now, (task) => {
+    if (task.status !== "pending" || task.effect !== "read") return undefined;
+    if (task.targets?.length) {
+      return readTargetsInto(task, read, noText, observationIds, now);
+    }
+    // Finding that a paper has no text reads nothing.
+    return anyRead.length || observationIds.length
+      ? readAnyInto(task, anyRead, observationIds, now)
+      : undefined;
+  });
 }
 
 function applyReceipt(
@@ -594,6 +660,7 @@ export function declareOutcomes(
       origin: "model",
       ...(declaration.capability ? { capability: declaration.capability } : {}),
       ...(targets.length ? { targets } : {}),
+      ...(declaration.scope && targets.length ? { scope: true as const } : {}),
     });
   }
   if (!created.length) return checkpoint;
@@ -691,7 +758,10 @@ export function outcomeProgressSignature(
       task.taskId,
       task.status,
       task.doneTargets?.length || 0,
-      task.exceptions?.length || 0,
+      (task.exceptions || []).reduce(
+        (count, entry) => count + entry.targets.length,
+        0,
+      ),
       task.verifiedReceiptIds.length,
       task.readEvidenceIds.length,
       task.materialRefs.length,

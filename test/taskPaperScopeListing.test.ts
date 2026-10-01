@@ -1,10 +1,15 @@
 import { assert } from "chai";
 import {
   TASK_PAPER_SCOPE_MAX_TAGS,
+  TASK_PAPER_SCOPE_WHOLE_LIBRARY_CAP,
   listTaskPaperScope,
   resolveTaskPaperScopeItemIds,
+  resolveTaskPaperScopeSet,
+  taskPaperScopeContextsOf,
   type TaskPaperScopeContexts,
 } from "../src/agent/context/taskPaperScopeListing";
+import { buildTurnPaperScope } from "../src/agent/context/turnPaperScope";
+import { resolveTaskProgressTurnScope } from "../src/modules/contextPanel/taskProgress/visibility";
 import type {
   LibraryIndexItem,
   LibraryIndexSnapshot,
@@ -247,6 +252,87 @@ describe("taskPaperScopeListing", function () {
     assert.equal(listing.totalItems, 5);
     assert.equal(listing.listedItems, 3);
     assert.isTrue(listing.truncated);
+  });
+
+  describe("the set a turn's scope covers", function () {
+    it("is every paper of the scope, uncapped, with how many have a PDF", function () {
+      assert.deepEqual(
+        resolveTaskPaperScopeSet(fakeSnapshot(), {
+          collections: [{ collectionId: 10 }],
+          tags: [{ name: "Learning" }],
+          excludedItemIds: [6],
+        }),
+        { wholeLibrary: false, itemIds: [1, 2], withText: 1 },
+      );
+    });
+
+    it("is the whole library, past the listing's cap, when nothing is attached", function () {
+      const snapshot = fakeSnapshot();
+      const extra = TASK_PAPER_SCOPE_WHOLE_LIBRARY_CAP + 5;
+      const ids = Array.from({ length: extra }, (_, index) => 1000 + index);
+      const itemById = new Map(snapshot.itemById);
+      for (const itemId of ids) itemById.set(itemId, item({ itemId }));
+      const large = {
+        ...snapshot,
+        itemById,
+        topLevelItemOrder: [...snapshot.topLevelItemOrder, ...ids],
+      } as LibraryIndexSnapshot;
+      const set = resolveTaskPaperScopeSet(large, {});
+      assert.isTrue(set.wholeLibrary);
+      assert.deepEqual(set.itemIds.slice(0, 5), [1, 2, 3, 6, 7]);
+      assert.lengthOf(set.itemIds, 5 + extra);
+      assert.equal(set.withText, 1);
+    });
+
+    it("reads a turn's papers, folders, tags and removals as Task progress does", function () {
+      const paper = (itemId: number) => ({
+        itemId,
+        contextItemId: itemId + 100,
+        title: `Paper ${itemId}`,
+        libraryID: 1,
+      });
+      const collections = [
+        {
+          collectionId: 11,
+          name: "Rodents",
+          libraryID: 1,
+          excludedItemIds: [3],
+        },
+      ];
+      const tags = [{ name: "Learning", libraryID: 1 }];
+      const built = buildTurnPaperScope({
+        libraryID: 1,
+        conversationKind: "paper",
+        activeItemId: 7,
+        activePaperContext: paper(7),
+        selectedPaperContexts: [paper(1)],
+        selectedCollectionContexts: collections,
+        selectedTagContexts: tags,
+      });
+      assert.isTrue(built.ok);
+      if (!built.ok) return;
+      const contexts = taskPaperScopeContextsOf(built.scope);
+      const shown = resolveTaskProgressTurnScope({
+        message: {
+          paperContexts: [paper(1)],
+          selectedCollectionContexts: collections,
+          selectedTagContexts: tags,
+        },
+        conversationKind: "paper",
+        libraryID: 1,
+        basePaperItemId: 7,
+      });
+      const snapshot = fakeSnapshot();
+      assert.deepEqual(
+        resolveTaskPaperScopeItemIds(snapshot, contexts),
+        [7, 1, 2, 6],
+      );
+      assert.deepEqual(
+        resolveTaskPaperScopeItemIds(snapshot, contexts),
+        resolveTaskPaperScopeItemIds(snapshot, shown.contexts),
+      );
+      assert.deepEqual(contexts.excludedItemIds, [3]);
+    });
   });
 
   describe("agrees with ZoteroGateway.resolveLibraryScopeItemIds", function () {
