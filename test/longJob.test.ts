@@ -568,6 +568,185 @@ describe("long job", function () {
     });
   });
 
+  describe("a prompt the runtime restarted under a page", function () {
+    const BUDGET = 200_000;
+
+    it("measures nothing from a page whose prompt shrank under its start while its papers settled", function () {
+      const pager = pagerWith(PAPER_TEXT_PRIOR_TOKENS);
+      let ledger = jobLedger(items(30));
+      // Page 1, sized from the 12,000-token prior: three papers.
+      const first = plannedPage(pager, ledger, 40_000, BUDGET, 1);
+      assert.deepEqual(first.targets, items(3));
+      assert.equal(first.readShare, PAPER_TEXT_PRIOR_TOKENS);
+      // A compaction the pager was not told of took the prompt from the
+      // 40,000 tokens the page started from to 35,000, and the page's three
+      // papers settled.
+      ledger = read(ledger, items(3));
+      assert.deepEqual(
+        pager.check({
+          checkpoint: ledger,
+          promptTokens: 35_000,
+          budgetTokens: BUDGET,
+          requests: 2,
+          reads: items(3),
+        }),
+        { digest: items(3), final: false },
+      );
+      const next = pager.plan({
+        checkpoint: ledger,
+        promptTokens: 36_000,
+        budgetTokens: BUDGET,
+        requests: 2,
+      }) as LongJobPage;
+      // Nothing was measured: the next page is priced and read at the prior,
+      // not at one token a paper.
+      assert.include(next, {
+        readShare: PAPER_TEXT_PRIOR_TOKENS,
+        costPerPaper: PAPER_TEXT_PRIOR_TOKENS,
+        measured: false,
+      });
+      assert.equal(
+        pager.costPerPaper(readLongJob(ledger)!),
+        PAPER_TEXT_PRIOR_TOKENS,
+      );
+    });
+
+    it("keeps what a valid page measured when a later page's prompt shrank under its start", function () {
+      const pager = pagerWith(PAPER_TEXT_PRIOR_TOKENS);
+      let ledger = jobLedger(items(30));
+      assert.lengthOf(plannedPage(pager, ledger, 40_000, BUDGET).targets, 3);
+      // Page 1's three papers grew the prompt by 15,000 tokens: 5,000 each.
+      ledger = read(ledger, items(3));
+      pager.check({
+        checkpoint: ledger,
+        promptTokens: 55_000,
+        budgetTokens: BUDGET,
+      });
+      const second = pager.plan({
+        checkpoint: ledger,
+        promptTokens: 40_000,
+        budgetTokens: BUDGET,
+      }) as LongJobPage;
+      assert.include(second, { measured: true, costPerPaper: 5_000 });
+      // Page 2's papers settle under a prompt compacted to 35,000 tokens.
+      ledger = read(ledger, [...second.targets]);
+      assert.deepEqual(
+        pager.check({
+          checkpoint: ledger,
+          promptTokens: 35_000,
+          budgetTokens: BUDGET,
+        }),
+        { digest: second.targets, final: false },
+      );
+      const third = pager.plan({
+        checkpoint: ledger,
+        promptTokens: 36_000,
+        budgetTokens: BUDGET,
+      }) as LongJobPage;
+      // Page 1's 5,000 a paper, not diluted by page 2's papers at nothing.
+      assert.include(third, { costPerPaper: 5_000, readShare: 5_000 });
+    });
+
+    it("measures from the prompt a restart left, once the runtime says it restarted", function () {
+      const pager = pagerWith(PAPER_TEXT_PRIOR_TOKENS);
+      let ledger = jobLedger(items(30));
+      assert.lengthOf(plannedPage(pager, ledger, 40_000, BUDGET).targets, 3);
+      // Paper 1 is read: 12,000 tokens.
+      ledger = read(ledger, items(1));
+      assert.isNull(
+        pager.check({
+          checkpoint: ledger,
+          promptTokens: 52_000,
+          budgetTokens: BUDGET,
+        }),
+      );
+      // The runtime compacts the prompt to 30,000 tokens and says so.
+      pager.restarted({ checkpoint: ledger, promptTokens: 30_000 });
+      // Papers 2 and 3 are read at 8,000 each: 46,000 tokens, back past the
+      // 40,000 the page started from.
+      ledger = read(ledger, items(2, 2));
+      assert.deepEqual(
+        pager.check({
+          checkpoint: ledger,
+          promptTokens: 46_000,
+          budgetTokens: BUDGET,
+        }),
+        { digest: items(3), final: false },
+      );
+      const next = pager.plan({
+        checkpoint: ledger,
+        promptTokens: 36_000,
+        budgetTokens: BUDGET,
+      }) as LongJobPage;
+      // Papers 2 and 3 grew the restarted prompt by 16,000 tokens; paper 1,
+      // read before the restart, measures nothing.
+      assert.include(next, {
+        measured: true,
+        costPerPaper: 8_000,
+        readShare: 8_000,
+      });
+    });
+
+    it("gives a paper it reads, and its digest, at least a record's prior, never past the room's half for digests", function () {
+      const pager = pagerWith(PAPER_TEXT_PRIOR_TOKENS);
+      let ledger = jobLedger(items(30));
+      assert.lengthOf(plannedPage(pager, ledger, 40_000, BUDGET).targets, 3);
+      // None of page 1's papers had readable text: 150 tokens in all.
+      ledger = read(ledger, [], items(3));
+      pager.check({
+        checkpoint: ledger,
+        promptTokens: 40_150,
+        budgetTokens: BUDGET,
+      });
+      const next = pager.plan({
+        checkpoint: ledger,
+        promptTokens: 40_000,
+        budgetTokens: BUDGET,
+      }) as LongJobPage;
+      // 50 tokens a paper, measured: the page is sized at it, and its papers
+      // are read at a record's prior at least.
+      assert.include(next, {
+        measured: true,
+        costPerPaper: 50,
+        readShare: PAPER_RECORD_PRIOR_TOKENS,
+      });
+      assert.equal(
+        next.fitBound,
+        Math.floor((BUDGET - 40_000) / 50) - 1,
+        "the page is priced at what was measured",
+      );
+      // A digest gets a record's prior too, while half the room holds every
+      // paper's...
+      const job = readLongJob(ledger)!;
+      assert.equal(
+        pager.digestShare(job, { promptTokens: 40_000, budgetTokens: BUDGET }),
+        PAPER_RECORD_PRIOR_TOKENS,
+      );
+      // ...and that half's share when it does not.
+      assert.equal(
+        pager.digestShare(job, { promptTokens: 40_000, budgetTokens: 50_000 }),
+        Math.floor(10_000 / (2 * 30)),
+      );
+      // A c over a record's prior bounds a digest as before.
+      const measuredPager = pagerWith(PAPER_TEXT_PRIOR_TOKENS);
+      let measuredLedger = jobLedger(items(30));
+      plannedPage(measuredPager, measuredLedger, 40_000, BUDGET);
+      measuredLedger = read(measuredLedger, items(3));
+      measuredPager.check({
+        checkpoint: measuredLedger,
+        promptTokens: 55_000,
+        budgetTokens: BUDGET,
+      });
+      assert.equal(
+        measuredPager.digestShare(readLongJob(measuredLedger)!, {
+          promptTokens: 40_000,
+          budgetTokens: 900_000,
+        }),
+        5_000,
+      );
+    });
+  });
+
   describe("what the host derives from the job", function () {
     it("names the open page, the papers it still has and the job's progress", function () {
       const pager = pagerWith(4_000);
@@ -928,6 +1107,8 @@ describe("long job", function () {
         budgetTokens: 30_000,
       }) as LongJobPage;
       assert.include(next, { measured: true, costPerPaper: 200 });
+      // No floor prices a change: the page is sized at the 200 measured.
+      assert.equal(next.fitBound, Math.floor((30_000 - 10_400) / 200) - 1);
     });
 
     it("asks a page of changes for the change itself, from the papers' metadata, never for reads", function () {

@@ -28,6 +28,11 @@ import type {
  * - c, what one paper costs: the prompt's growth per paper settled since the
  *   host first saw the job, once any paper has settled, so a job of changes
  *   measures its own calls; before that, the mean prior of the papers left.
+ *   A restart the runtime makes within a page (a provider replay or a prompt
+ *   over budget, a step of too many calls) drops part of that growth: the
+ *   runtime says so (`restarted`), the papers settled before it stay out of
+ *   c, and the growth is measured again from the prompt the restart left. A
+ *   prompt found under the one the measurement started from is taken alike.
  *   Only a paper whose text some open part needs (a read part, an artifact
  *   written from it, a note or an annotation written on it) is priced by its
  *   text hint (`priorCost`); a paper the job only changes otherwise (files,
@@ -90,14 +95,19 @@ import type {
  * per paper, min(c, ⌊(B − P) / (K + 1)⌋): c when the room holds the page and
  * a paper of slack, else what the page's papers and that slack share. A
  * small page thus does not hand each paper the whole room, which would raise
- * c and shrink the next page.
+ * c and shrink the next page. On a page that reads its papers' text, a read
+ * gets at least what a paper's record returns (`PAPER_RECORD_PRIOR_TOKENS`):
+ * a c measured low, from papers without text, say, must still leave a read
+ * something to read. Only the share has that floor, never c: a job of
+ * changes is priced at what its calls measurably cost, however little.
  *
  * A page's end replaces the reads of its papers with per-paper digests
  * (`context/paperDigests.ts`). The job's results and its reading share the
  * room a restarted prompt leaves (B − base): each of the job's N papers gets
- * a digest of d = min(c, ⌊(B − base) / 2N⌋) tokens, so every paper's results
- * together fill at most half of it and every page keeps the other half to
- * read in.
+ * a digest of d = min(max(c, r), ⌊(B − base) / 2N⌋) tokens, r what a paper's
+ * record returns, so every paper's results together fill at most half of it
+ * and every page keeps the other half to read in. The half is a hard bound;
+ * r only keeps a c measured low from cutting a digest to nothing.
  */
 
 type Task = ExecutionCheckpointTask;
@@ -465,11 +475,57 @@ export class LongJobPager {
     );
   }
 
+  /**
+   * d: what each of the job's papers' digest may take of the room a
+   * restarted prompt of `promptTokens` leaves, min(max(c, r), ⌊(B − base) /
+   * 2N⌋), r a record's prior.
+   */
+  digestShare(
+    job: LongJob,
+    input: { promptTokens: number; budgetTokens: number },
+  ): number {
+    return Math.max(
+      0,
+      Math.min(
+        Math.max(PAPER_RECORD_PRIOR_TOKENS, this.costPerPaper(job)),
+        Math.floor(
+          (input.budgetTokens - input.promptTokens) /
+            (2 * Math.max(1, job.targets.length)),
+        ),
+      ),
+    );
+  }
+
   /** Settled papers that measure c: all but those the host gave up on. */
   private measuredSettled(job: LongJob): number {
     let count = 0;
     for (const target of job.settled) if (!this.givenUp.has(target)) count += 1;
     return count;
+  }
+
+  /** Measures c again, from `promptTokens` and the papers settled now. */
+  private rebaseline(
+    job: LongJob,
+    promptTokens: number,
+  ): { promptTokens: number; settled: number } {
+    this.baseline = { promptTokens, settled: this.measuredSettled(job) };
+    return this.baseline;
+  }
+
+  /**
+   * The runtime restarted or compacted the prompt between two rounds, not at
+   * a page's end. Part of the growth since the measurement started is gone,
+   * so it no longer measures the papers settled since: they stay out of c,
+   * and the measurement starts again from the prompt the restart left. A
+   * page's own end needs no word: `plan` starts the next page's measurement.
+   */
+  restarted(input: {
+    checkpoint: ExecutionCheckpoint | undefined;
+    promptTokens: number;
+  }): void {
+    if (this.finished || !this.baseline) return;
+    const job = readLongJob(input.checkpoint, this.partIds);
+    if (job) this.rebaseline(job, input.promptTokens);
   }
 
   check(input: PagerInput): LongJobBoundary | null {
@@ -501,17 +557,18 @@ export class LongJobPager {
         };
     }
     this.settledBefore = new Set(job.settled);
-    if (!this.baseline) {
-      this.baseline = {
-        promptTokens: input.promptTokens,
-        settled: this.measuredSettled(job),
-      };
-    }
+    // A prompt under the one the measurement started from was restarted or
+    // compacted without a word to the pager: its growth since measures
+    // nothing, so the papers settled since stay out of c.
+    const baseline =
+      !this.baseline || input.promptTokens < this.baseline.promptTokens
+        ? this.rebaseline(job, input.promptTokens)
+        : this.baseline;
     const settledSince = Math.max(
       0,
-      this.measuredSettled(job) - this.baseline.settled,
+      this.measuredSettled(job) - baseline.settled,
     );
-    const growth = Math.max(0, input.promptTokens - this.baseline.promptTokens);
+    const growth = input.promptTokens - baseline.promptTokens;
     const sinceBaseline = settledSince
       ? { tokens: growth, papers: settledSince }
       : { tokens: 0, papers: 0 };
@@ -588,10 +645,7 @@ export class LongJobPager {
       this.page = null;
       return { complete: true };
     }
-    this.baseline = {
-      promptTokens: input.promptTokens,
-      settled: this.measuredSettled(job),
-    };
+    this.rebaseline(job, input.promptTokens);
     const cost = this.costPerPaper(job);
     const room = input.budgetTokens - input.promptTokens;
     const papersPerRequest = this.papersPerRequest;
@@ -610,6 +664,11 @@ export class LongJobPager {
     const costBound = Math.max(1, Math.round(papersPerRequest * readsPerPage));
     const size = Math.max(1, Math.min(fitBound, costBound));
     this.page = job.notDone.slice(0, size);
+    // A page that reads its papers' text reads each at least as deep as its
+    // record: a c measured low must not leave a read nothing to read.
+    const leastShare = this.page.some((target) => job.reading.has(target))
+      ? PAPER_RECORD_PRIOR_TOKENS
+      : 1;
     this.pageStart = {
       requests: input.requests,
       reads: this.readRequests,
@@ -630,7 +689,7 @@ export class LongJobPager {
       requestsPerPage: Math.round(requestsPerPage * 100) / 100,
       readsPerPage,
       readShare: Math.max(
-        1,
+        leastShare,
         Math.floor(Math.min(cost, room / (this.page.length + 1))),
       ),
     };

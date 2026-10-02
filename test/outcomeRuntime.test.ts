@@ -6,6 +6,7 @@ import { createSubmitDocumentTool } from "../src/agent/tools/control/submitDocum
 import { createTaskUpdateTool } from "../src/agent/tools/control/taskUpdate";
 import { createNoteWriteTool } from "../src/agent/tools/write/noteWrite";
 import { OUTCOME_REASONS } from "../src/agent/loop/outcomes";
+import { PAPER_RECORD_PRIOR_TOKENS } from "../src/agent/loop/longJob";
 import { ExecutionCheckpointFold } from "../src/agent/execution/checkpointEvents";
 import { estimateContextMessagesTokens } from "../src/utils/modelInputCap";
 import {
@@ -44,6 +45,7 @@ import type {
   AgentRuntimeRequest,
   AgentRuntimeRequestInput,
   AgentToolCall,
+  AgentToolContext,
   ExecutionCheckpoint,
   ExecutionCheckpointTask,
 } from "../src/agent/types";
@@ -95,7 +97,7 @@ let liveReceipts: AgentActionReceipt[] = [];
 
 /** What the scripted `paper_read` returns, when a case scripts it. */
 let scriptedPaperRead:
-  | ((input: Record<string, unknown>) => unknown)
+  | ((input: Record<string, unknown>, context: AgentToolContext) => unknown)
   | undefined;
 
 function stepOf(...calls: AgentToolCall[]): AgentModelStep {
@@ -166,8 +168,11 @@ function registry(): AgentToolRegistry {
       workCategory: "retrieval",
     },
     validate: (args: unknown) => ({ ok: true, value: args as never }),
-    execute: async (input: Record<string, unknown>) =>
-      scriptedPaperRead?.(input) ?? {
+    execute: async (
+      input: Record<string, unknown>,
+      context: AgentToolContext,
+    ) =>
+      scriptedPaperRead?.(input, context) ?? {
         mode: "targeted",
         results: [],
         papers: [
@@ -1382,6 +1387,231 @@ describe("long jobs in runtime turns", function () {
         `batch ${index + 1}`,
       );
     }
+  });
+
+  /**
+   * A job whose page 1 the budget compacts mid-page. The model declares the
+   * part beside an outline of a paper outside the job (`outsideSections`
+   * long: page 1 starts from a larger prompt), outlines page 1's paper
+   * (`pageSections` long: the prompt passes the budget before the paper
+   * settles, so the next request compacts it), then reads each page the
+   * host names. A read takes no more than the page share the host set.
+   */
+  async function compactedMidPage(params: {
+    outsideSections: number;
+    pageSections: number;
+    textOf?: (itemId: number) => string;
+  }): Promise<Turn> {
+    const OUTSIDE = 9001;
+    const paperOf = (itemId: number) => ({
+      itemId,
+      contextItemId: itemId + 1000,
+      libraryID: 1,
+    });
+    const outlineOf = (itemId: number, sections: number) => ({
+      mode: "outline",
+      papers: [
+        {
+          paperContext: paperOf(itemId),
+          outline: {
+            sections: Array.from({ length: sections }, (_, index) => ({
+              title: `Section ${index + 1} of paper ${itemId}: a long heading on representational drift`,
+            })),
+          },
+        },
+      ],
+    });
+    scriptedPaperRead = (input, context) => {
+      const itemId = Number((input.target as { itemId?: number })?.itemId);
+      if (input.mode === "outline")
+        return outlineOf(
+          itemId,
+          itemId === OUTSIDE ? params.outsideSections : params.pageSections,
+        );
+      const share = context.request.runtimeContextBudget?.maxTokensPerPaper;
+      const text = (params.textOf || paperText)(itemId);
+      return {
+        mode: "targeted",
+        results: [],
+        papers: [
+          {
+            paperContext: paperOf(itemId),
+            passages: [
+              {
+                text: share ? text.slice(0, share * 4) : text,
+                sectionLabel: "Results",
+                pageLabel: "3",
+              },
+            ],
+          },
+        ],
+      };
+    };
+    const outline = (id: string, itemId: number): AgentToolCall => ({
+      id,
+      name: "paper_read",
+      arguments: { target: paperOf(itemId), mode: "outline" },
+    });
+    let declared = false;
+    let outlined = false;
+    const asked = new Set<number>();
+    const model: ScriptStep = (messages) => {
+      if (!declared) {
+        declared = true;
+        return stepOf(
+          declare("declare-1", [
+            {
+              taskId: "read-all",
+              description: READ_ALL,
+              expectedEffect: "read",
+              scope: true,
+            },
+          ]),
+          outline("outline-outside", OUTSIDE),
+        );
+      }
+      const host = [...messages]
+        .reverse()
+        .map((message) => promptText([message]))
+        .find((text) => text.startsWith("Long job"));
+      if (!host || host.startsWith("Long job complete"))
+        return finalStep("Every paper is summarized from its results.");
+      const page = [...host.matchAll(/^- itemId=(\d+)/gm)]
+        .map((match) => Number(match[1]))
+        .filter((itemId) => !asked.has(itemId));
+      if (!outlined) {
+        outlined = true;
+        return stepOf(outline("outline-page", page[0]));
+      }
+      const batch = page.slice(0, 8);
+      for (const itemId of batch) asked.add(itemId);
+      return stepOf(
+        ...batch.map((itemId) => ({
+          id: `read-${itemId}`,
+          name: "paper_read",
+          arguments: { target: paperOf(itemId) },
+        })),
+      );
+    };
+    const turn = await runTurn({
+      conversationKey,
+      userText: "Read every paper in Drift and summarize each",
+      scope: {
+        wholeLibrary: false,
+        itemIds: PAPERS,
+        withText: PAPERS.length,
+        papers: Object.fromEntries(
+          PAPERS.map((itemId) => [
+            itemId,
+            { title: `Paper ${itemId}`, text: "pdf" as const },
+          ]),
+        ),
+      },
+      attached: {
+        selectedCollectionContexts: [
+          { collectionId: 9, name: "Drift", libraryID: 1 },
+        ],
+        advanced: { inputTokenCap: 30_000 },
+      },
+      steps: Array.from({ length: 60 }, () => model),
+    });
+    assert.equal(turn.outcome?.kind, "completed", String(turn.error || ""));
+    assert.lengthOf(outcome(settled(turn), "read-all").doneTargets!, 30);
+    // The budget compacted the prompt while page 1 was open.
+    const events = turn.events.flatMap((event) =>
+      event.type === "provider_event" ? [event] : [],
+    );
+    const pageAt = (number: number) =>
+      events.findIndex(
+        (event) =>
+          event.providerType === "agent_long_job_page" &&
+          event.payload?.page === number,
+      );
+    const compactedAt = events.findIndex(
+      (event) =>
+        event.providerType === "agent_context_budget" &&
+        event.payload?.action === "compacted_model_prompt",
+    );
+    assert.isAbove(compactedAt, pageAt(1));
+    assert.isBelow(compactedAt, pageAt(2));
+    return turn;
+  }
+
+  it("measures a page again from a prompt the budget compacted under it: later reads get a real share, and no paper's digest is empty", async function () {
+    const turn = await compactedMidPage({
+      outsideSections: 400,
+      pageSections: 500,
+    });
+    const sized = pageEvents(turn).filter(
+      (page) => typeof page.page === "number",
+    );
+    // The request after the compaction (the third) starts far under page 1.
+    assert.isBelow(
+      estimatePrompt(turn.prompts[2]) + 2_000,
+      sized[0].promptTokens as number,
+    );
+    // Every later page is priced and read at what reading a paper costs
+    // (each paper's text is some 1,000 tokens or more), not at the one
+    // token a prompt measured under its start would leave.
+    assert.isAtLeast(sized.length, 3, JSON.stringify(sized));
+    for (const page of sized.slice(1)) {
+      assert.isTrue(page.measured, JSON.stringify(page));
+      assert.isAtLeast(
+        page.costPerPaper as number,
+        1_000,
+        JSON.stringify(page),
+      );
+      assert.isAtLeast(page.readShare as number, 1_000, JSON.stringify(page));
+      assert.isAtLeast(
+        page.digestShare as number,
+        Math.min(
+          PAPER_RECORD_PRIOR_TOKENS,
+          Math.floor(
+            ((page.budgetTokens as number) - (page.promptTokens as number)) /
+              (2 * 30),
+          ),
+        ),
+        JSON.stringify(page),
+      );
+    }
+    // Every paper's digest keeps its finding.
+    const finalPrompt = promptText(turn.prompts[turn.prompts.length - 1]);
+    assert.include(finalPrompt, "Long job complete");
+    for (const itemId of PAPERS)
+      assert.include(finalPrompt, `Finding ${itemId}:`, `paper ${itemId}`);
+  });
+
+  it("measures a page's papers from the prompt a compaction left, even once their reads take it back past where the page started", async function () {
+    // Page 1's one paper reads some 7,000 tokens, more than the compaction
+    // took the prompt under page 1's start.
+    const turn = await compactedMidPage({
+      outsideSections: 150,
+      pageSections: 800,
+      textOf: (itemId) =>
+        itemId === PAPERS[0]
+          ? `Finding ${itemId}: drift was measured in this paper. ${"Representational drift details. ".repeat(1_000)}`
+          : paperText(itemId),
+    });
+    const [first, second] = pageEvents(turn).filter(
+      (page) => typeof page.page === "number",
+    );
+    // The request after the compaction (the third) starts under page 1's
+    // prompt, and the paper's read takes it back past it.
+    const compacted = estimatePrompt(turn.prompts[2]);
+    assert.isBelow(compacted, first.promptTokens as number);
+    assert.isAbove(
+      compacted + (second.costPerPaper as number),
+      first.promptTokens as number,
+    );
+    // Page 2 is priced at what the paper cost from the compacted prompt: at
+    // least its read, which filled page 1's share, not that read less what
+    // the compaction took under page 1's start.
+    assert.include(second, { page: 2, measured: true });
+    assert.isAtLeast(
+      second.costPerPaper as number,
+      first.readShare as number,
+      JSON.stringify(second),
+    );
   });
 
   it("leaves a job that fits one pass to the model, with no host page", async function () {

@@ -1419,6 +1419,15 @@ export class AgentRuntime {
         newTranscriptMessages.splice(0, newTranscriptMessages.length);
         latestProviderReplayTokens = 0;
         adapter.resetState?.();
+        // Every restart drops the prompt a long job's page measures its
+        // papers' cost from: the pager measures again from this one. A page's
+        // end restarts here too, and its next page then starts a measurement
+        // of its own.
+        if (recordsOutcomes())
+          longJob.restarted({
+            checkpoint: request.executionCheckpoint,
+            promptTokens: estimateContextMessagesTokens(messages),
+          });
       };
 
       for (const skillId of matchedSkills) {
@@ -2228,17 +2237,10 @@ export class AgentRuntime {
           });
           // The job's results take at most half of what the restarted
           // prompt leaves, so every page keeps the other half to read in.
-          const baseTokens = estimateContextMessagesTokens(messages);
-          digestShare = Math.max(
-            0,
-            Math.min(
-              longJob.costPerPaper(job),
-              Math.floor(
-                (budgetTokens - baseTokens) /
-                  (2 * Math.max(1, job.targets.length)),
-              ),
-            ),
-          );
+          digestShare = longJob.digestShare(job, {
+            promptTokens: estimateContextMessagesTokens(messages),
+            budgetTokens,
+          });
           lastDigestShare = digestShare;
           for (const target of toDigest) {
             const found = evidence.get(itemOf(target));
