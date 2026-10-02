@@ -4237,14 +4237,23 @@ function getFinalTraceText(events: readonly AgentRunEventRecord[]): string {
   return "";
 }
 
+/**
+ * Inline text the answer bubble already shows. Text the model streamed before
+ * a tool call and the host kept (an intermediate item) is part of the final
+ * answer; so is the text streamed after it, which ends the answer.
+ */
 function shouldSuppressInlineFinalAnswer(
   item: AgentTraceDisplayItem,
   finalText: string,
+  intermediate: boolean,
 ): boolean {
   if (item.type !== "inline_text") return false;
   const finalKey = normalizeInlineTextForDedupe(finalText);
   const itemKey = normalizeInlineTextForDedupe(item.text);
-  return Boolean(finalKey && itemKey && finalKey === itemKey);
+  if (!finalKey || !itemKey) return false;
+  if (finalKey === itemKey) return true;
+  if (!intermediate) return finalKey.endsWith(` ${itemKey}`);
+  return itemKey.length >= 40 && finalKey.includes(itemKey);
 }
 
 type AgentTraceAdapterContext = {
@@ -5643,24 +5652,39 @@ function projectAgentTrace(
       item.type === "inline_text" &&
       !adapterContext.intermediateInlineTextItems.has(item),
   );
-  const hasCanonicalAssistantText = Boolean(assistantMessage?.text?.trim());
-  const displayItems = isInterleaved
-    ? finalText
-      ? items.filter(
-          (item) => !shouldSuppressInlineFinalAnswer(item, finalText),
-        )
-      : hasCanonicalAssistantText
-        ? items.filter(
-            (item) =>
-              item.type !== "inline_text" ||
-              adapterContext.intermediateInlineTextItems.has(item),
-          )
-        : items
-    : replaceInlineTextWithDraftingAction(items);
+  const canonicalAssistantText = assistantMessage?.text || "";
+  const hasCanonicalAssistantText = Boolean(canonicalAssistantText.trim());
   const inlineTextReplacesAssistantText =
     isInterleaved &&
     !finalText &&
     (!hasTerminalInlineText || !hasCanonicalAssistantText);
+  const displayItems = isInterleaved
+    ? finalText
+      ? items.filter(
+          (item) =>
+            !shouldSuppressInlineFinalAnswer(
+              item,
+              finalText,
+              item.type === "inline_text" &&
+                adapterContext.intermediateInlineTextItems.has(item),
+            ),
+        )
+      : hasCanonicalAssistantText
+        ? // While the answer streams, the bubble already shows text kept
+          // from before a tool call; the trace does not repeat it.
+          items.filter(
+            (item) =>
+              item.type !== "inline_text" ||
+              (adapterContext.intermediateInlineTextItems.has(item) &&
+                (inlineTextReplacesAssistantText ||
+                  !shouldSuppressInlineFinalAnswer(
+                    item,
+                    canonicalAssistantText,
+                    true,
+                  ))),
+          )
+        : items
+    : replaceInlineTextWithDraftingAction(items);
 
   const presentedItems = labels
     ? projectPaperReferencesOntoTraceItems(displayItems, labels)

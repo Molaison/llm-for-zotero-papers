@@ -8,7 +8,11 @@ import { notifyDocumentPublication } from "./publicationEvents";
 
 /**
  * Completes the durable outbox only after the ordinary conversation store has
- * persisted the exact visible assistant text. Repeated calls are idempotent.
+ * persisted the visible assistant text. Repeated calls are idempotent.
+ *
+ * The persisted text is the document's exact markdown, or -- when the model
+ * wrote deliverable text before calling the tool -- that text followed by the
+ * document. The second form is accepted only for the named document id.
  */
 export async function deliverPendingPlanDocumentMessage(params: {
   conversationKey: number;
@@ -28,16 +32,21 @@ export async function deliverPendingPlanDocumentMessage(params: {
     );
     return leftTimestamp - rightTimestamp;
   });
+  const carries = (visibleMarkdown: string) =>
+    params.documentId
+      ? Boolean(visibleMarkdown) &&
+        params.visibleMarkdown.endsWith(visibleMarkdown)
+      : visibleMarkdown === params.visibleMarkdown;
   const outbox = candidates.find(
     (entry) =>
-      entry.visibleMarkdown === params.visibleMarkdown &&
+      carries(entry.visibleMarkdown) &&
       (!params.documentId || entry.documentId === params.documentId),
   );
   if (!outbox) return null;
   const document = await loadPlanDocument(outbox.documentId);
   if (
     !document ||
-    document.visibleMarkdown !== params.visibleMarkdown ||
+    !carries(document.visibleMarkdown) ||
     document.visibleMarkdown !== outbox.visibleMarkdown
   ) {
     throw new Error(

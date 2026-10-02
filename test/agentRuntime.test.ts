@@ -26,6 +26,7 @@ import { clearAgentCoverageLedger } from "../src/agent/context/coverageLedger";
 import {
   createAgentRunEventJournal,
   getAgentRunTrace,
+  getLatestAgentRunForConversation,
   initAgentTraceStore,
   INTERRUPTED_AGENT_RUN_MARKER,
 } from "../src/agent/store/traceStore";
@@ -3337,6 +3338,634 @@ describe("AgentRuntime", function () {
       restoreDb();
     }
   });
+  describe("substantive text streamed before a tool call", function () {
+    const SUMMARIES =
+      "## Per-paper summaries\n\n**1. Smith (2021)**\n\nDrift grows with time across eleven recording days.\n\n**2. Lee (2022)**\n\nDecoding stays stable while single-neuron tuning drifts.\n\n";
+    const REVIEW = "## Review\n\nBoth papers agree.";
+    const capabilities = () => ({
+      streaming: true,
+      toolCalls: true,
+      multimodal: false,
+      fileInputs: false,
+      reasoning: true,
+    });
+    const readContextRegistry = () => {
+      const registry = new AgentToolRegistry();
+      registry.register({
+        spec: {
+          name: "read_context",
+          description: "read",
+          inputSchema: { type: "object" },
+          executionClass: "read",
+          requiresConfirmation: false,
+        },
+        validate: () => ({ ok: true, value: {} }),
+        execute: async () => ({ ok: true }),
+      });
+      return registry;
+    };
+    const runSummaryTurn = async (runtime: AgentRuntime) => {
+      const events: AgentEvent[] = [];
+      const outcome = await runtime.runTurn({
+        request: {
+          conversationKey: 1,
+          mode: "agent",
+          userText: "summarize and review",
+          model: "gpt-5.4",
+          apiBase: "https://api.openai.com/v1/responses",
+          apiKey: "test",
+        },
+        onEvent: async (event) => {
+          events.push(event);
+        },
+      });
+      return { outcome, events };
+    };
+    const streamedText = (events: AgentEvent[]) =>
+      events
+        .filter((event) => event.type === "message_delta")
+        .map((event) => (event as { text: string }).text)
+        .join("");
+    const assertCommittedOnce = async (
+      outcome: Awaited<ReturnType<AgentRuntime["runTurn"]>>,
+      events: AgentEvent[],
+      expected: string,
+    ) => {
+      assert.equal(outcome.kind, "completed");
+      if (outcome.kind !== "completed") return;
+      assert.equal(outcome.text, expected);
+      assert.equal(outcome.text.split("## Per-paper summaries").length - 1, 1);
+      assert.isFalse(events.some((event) => event.type === "message_rollback"));
+      const final = events.find((event) => event.type === "final");
+      assert.equal(final && final.type === "final" ? final.text : "", expected);
+      const trace = await getAgentRunTrace(outcome.runId);
+      assert.equal(trace.run?.finalText, expected);
+      assert.equal(
+        streamedText(events),
+        expected,
+        "the stream and the final agree",
+      );
+    };
+
+    it("keeps it in the answer exactly once (adapter tool callback)", async function () {
+      const restoreDb = installMockDb();
+      try {
+        const runtime = new AgentRuntime({
+          registry: readContextRegistry(),
+          adapterFactory: () => ({
+            getCapabilities: capabilities,
+            supportsTools: () => true,
+            async runStep(params: AgentStepParams): Promise<AgentModelStep> {
+              await params.onTextDelta?.(SUMMARIES);
+              await params.onToolCall?.({
+                id: "call-1",
+                name: "read_context",
+                arguments: {},
+              });
+              await params.onTextDelta?.(REVIEW);
+              return {
+                kind: "final",
+                text: REVIEW,
+                assistantMessage: { role: "assistant", content: REVIEW },
+              };
+            },
+          }),
+        });
+        const { outcome, events } = await runSummaryTurn(runtime);
+        await assertCommittedOnce(outcome, events, `${SUMMARIES}${REVIEW}`);
+        const transcript = readPersistedTranscript(restoreDb, 1);
+        // The durable transcript holds the committed text once, in the answer.
+        const answers = transcript.filter((message) =>
+          String(message.content).includes("## Per-paper summaries"),
+        );
+        assert.lengthOf(answers, 1);
+        assert.equal(answers[0]?.role, "assistant");
+        assert.equal(answers[0]?.content, `${SUMMARIES}${REVIEW}`);
+      } finally {
+        restoreDb();
+      }
+    });
+
+    it("keeps it in the answer exactly once (tool_calls step)", async function () {
+      const restoreDb = installMockDb();
+      try {
+        let steps = 0;
+        const runtime = new AgentRuntime({
+          registry: readContextRegistry(),
+          adapterFactory: () => ({
+            getCapabilities: capabilities,
+            supportsTools: () => true,
+            async runStep(params: AgentStepParams): Promise<AgentModelStep> {
+              if (steps++ === 0) {
+                await params.onTextDelta?.(SUMMARIES);
+                const call = {
+                  id: "call-1",
+                  name: "read_context",
+                  arguments: {},
+                };
+                return {
+                  kind: "tool_calls",
+                  calls: [call],
+                  assistantMessage: {
+                    role: "assistant",
+                    content: SUMMARIES,
+                    tool_calls: [call],
+                  },
+                };
+              }
+              await params.onTextDelta?.(REVIEW);
+              return {
+                kind: "final",
+                text: REVIEW,
+                assistantMessage: { role: "assistant", content: REVIEW },
+              };
+            },
+          }),
+        });
+        const { outcome, events } = await runSummaryTurn(runtime);
+        await assertCommittedOnce(outcome, events, `${SUMMARIES}${REVIEW}`);
+      } finally {
+        restoreDb();
+      }
+    });
+
+    it("does not repeat it when the final step echoes it without streaming", async function () {
+      const restoreDb = installMockDb();
+      try {
+        let steps = 0;
+        const runtime = new AgentRuntime({
+          registry: readContextRegistry(),
+          adapterFactory: () => ({
+            getCapabilities: capabilities,
+            supportsTools: () => true,
+            async runStep(params: AgentStepParams): Promise<AgentModelStep> {
+              if (steps++ === 0) {
+                await params.onTextDelta?.(SUMMARIES);
+                const call = {
+                  id: "call-1",
+                  name: "read_context",
+                  arguments: {},
+                };
+                return {
+                  kind: "tool_calls",
+                  calls: [call],
+                  assistantMessage: {
+                    role: "assistant",
+                    content: SUMMARIES,
+                    tool_calls: [call],
+                  },
+                };
+              }
+              return {
+                kind: "final",
+                text: `${SUMMARIES}${REVIEW}`,
+                assistantMessage: {
+                  role: "assistant",
+                  content: `${SUMMARIES}${REVIEW}`,
+                },
+              };
+            },
+          }),
+        });
+        const { outcome, events } = await runSummaryTurn(runtime);
+        await assertCommittedOnce(outcome, events, `${SUMMARIES}${REVIEW}`);
+      } finally {
+        restoreDb();
+      }
+    });
+
+    it("leads a finalized document with it", async function () {
+      const restoreDb = installMockDb();
+      const restoreDocuments = installAgentStoreSqlite();
+      try {
+        await initPlanDocumentStore();
+        const registry = new AgentToolRegistry();
+        registry.register(createSubmitDocumentTool(submitDocumentGateway));
+        const runtime = new AgentRuntime({
+          registry,
+          adapterFactory: () => ({
+            getCapabilities: capabilities,
+            supportsTools: () => true,
+            async runStep(params: AgentStepParams): Promise<AgentModelStep> {
+              await params.onTextDelta?.(SUMMARIES);
+              const call = {
+                id: "submit-document-1",
+                name: "submit_document",
+                arguments: {
+                  documentKind: "guide",
+                  integrityPolicy: "authored",
+                  title: "Representational drift",
+                  markdown: "# Representational drift\n\nA complete guide.",
+                  citations: [],
+                  quotes: [],
+                  assets: [],
+                  groundingReviewed: "passed",
+                  groundingIssues: [],
+                },
+              };
+              return {
+                kind: "tool_calls",
+                calls: [call],
+                assistantMessage: {
+                  role: "assistant",
+                  content: SUMMARIES,
+                  tool_calls: [call],
+                },
+              };
+            },
+          }),
+        });
+        const events: AgentEvent[] = [];
+        const outcome = await runtime.runTurn({
+          request: {
+            conversationKey: 774412,
+            mode: "agent",
+            userText: "Summarize the papers and write a guide",
+            libraryID: 1,
+            model: "test",
+            apiKey: "test",
+            apiBase: "https://example.invalid",
+            metadata: { sourceMessageTimestamp: 100 },
+          },
+          onEvent: (event) => events.push(event),
+        });
+        assert.equal(outcome.kind, "completed");
+        if (outcome.kind !== "completed") return;
+        assert.isFalse(
+          events.some((event) => event.type === "message_rollback"),
+        );
+        assert.isTrue(outcome.text.startsWith(SUMMARIES));
+        assert.include(
+          outcome.text.slice(SUMMARIES.length),
+          "# Representational drift",
+        );
+        assert.equal(
+          outcome.text.split("## Per-paper summaries").length - 1,
+          1,
+        );
+        const final = events.find((event) => event.type === "final");
+        assert.equal(
+          final && final.type === "final" ? final.text : "",
+          outcome.text,
+        );
+      } finally {
+        restoreDocuments();
+        restoreDb();
+      }
+    });
+
+    /** The chat as the stream builds it: deltas appended, rollbacks cut. */
+    const reconstructStream = (events: AgentEvent[]) => {
+      let text = "";
+      for (const event of events) {
+        if (event.type === "message_delta") text += event.text;
+        else if (event.type === "message_rollback")
+          text = text.slice(
+            0,
+            Math.max(0, text.length - (event.length ?? event.text.length)),
+          );
+      }
+      return text;
+    };
+    const readCall = (id: string) => ({
+      id,
+      name: "read_context",
+      arguments: {},
+    });
+    const toolStep = (
+      content: string,
+      calls = [readCall("call-1")],
+    ): AgentModelStep => ({
+      kind: "tool_calls",
+      calls,
+      assistantMessage: { role: "assistant", content, tool_calls: calls },
+    });
+    const finalStep = (text: string): AgentModelStep => ({
+      kind: "final",
+      text,
+      assistantMessage: { role: "assistant", content: text },
+    });
+    const scriptedRuntime = (
+      script: Array<(params: AgentStepParams) => Promise<AgentModelStep>>,
+      registry = readContextRegistry(),
+    ) => {
+      let step = 0;
+      return new AgentRuntime({
+        registry,
+        adapterFactory: () => ({
+          getCapabilities: capabilities,
+          supportsTools: () => true,
+          async runStep(params: AgentStepParams): Promise<AgentModelStep> {
+            const next = script[Math.min(step, script.length - 1)];
+            step += 1;
+            return await next(params);
+          },
+        }),
+      });
+    };
+    const occurrences = (text: string, needle: string) =>
+      text.split(needle).length - 1;
+
+    it("commits a kept truncated answer with the text streamed after it", async function () {
+      const restoreDb = installMockDb();
+      try {
+        const KEPT = "Here is the first part of the answer, which ran out. ";
+        const runtime = scriptedRuntime([
+          async (params) => {
+            await params.onTextDelta?.(KEPT);
+            return {
+              kind: "incomplete",
+              reason: "output_limit",
+              text: KEPT,
+              assistantMessage: { role: "assistant", content: KEPT },
+              recoveryInstruction: "Continue.",
+            };
+          },
+          async (params) => {
+            await params.onTextDelta?.(SUMMARIES);
+            return toolStep(SUMMARIES);
+          },
+          async (params) => {
+            await params.onTextDelta?.(REVIEW);
+            return finalStep(REVIEW);
+          },
+        ]);
+        const { outcome, events } = await runSummaryTurn(runtime);
+        assert.equal(outcome.kind, "completed");
+        if (outcome.kind !== "completed") return;
+        assert.isFalse(
+          events.some((event) => event.type === "message_rollback"),
+        );
+        const final = events.find((event) => event.type === "final");
+        assert.equal(outcome.text, `${KEPT}${SUMMARIES}${REVIEW}`);
+        assert.equal(final?.type === "final" ? final.text : "", outcome.text);
+        assert.equal(reconstructStream(events), outcome.text);
+      } finally {
+        restoreDb();
+      }
+    });
+
+    it("rolls back a lead-in and then the kept truncated answer before it", async function () {
+      const restoreDb = installMockDb();
+      try {
+        const KEPT = "Short kept text. ";
+        const LEAD_IN = "Let me check one more paper.";
+        const runtime = scriptedRuntime([
+          async (params) => {
+            await params.onTextDelta?.(KEPT);
+            return {
+              kind: "incomplete",
+              reason: "output_limit",
+              text: KEPT,
+              assistantMessage: { role: "assistant", content: KEPT },
+              recoveryInstruction: "Continue.",
+            };
+          },
+          async (params) => {
+            await params.onTextDelta?.(LEAD_IN);
+            return toolStep(LEAD_IN);
+          },
+          async (params) => {
+            await params.onTextDelta?.(REVIEW);
+            return finalStep(REVIEW);
+          },
+        ]);
+        const { outcome, events } = await runSummaryTurn(runtime);
+        assert.equal(outcome.kind, "completed");
+        if (outcome.kind !== "completed") return;
+        assert.deepEqual(
+          events
+            .filter((event) => event.type === "message_rollback")
+            .map((event) =>
+              event.type === "message_rollback" ? event.text : "",
+            ),
+          [LEAD_IN, KEPT],
+        );
+        assert.equal(outcome.text, REVIEW);
+        assert.equal(reconstructStream(events), outcome.text);
+      } finally {
+        restoreDb();
+      }
+    });
+
+    it("keeps two committed segments in order, each once", async function () {
+      const restoreDb = installMockDb();
+      try {
+        const MORE = SUMMARIES.replace(
+          "## Per-paper summaries",
+          "## More summaries",
+        );
+        const runtime = scriptedRuntime([
+          async (params) => {
+            await params.onTextDelta?.(SUMMARIES);
+            return toolStep(SUMMARIES);
+          },
+          async (params) => {
+            await params.onTextDelta?.(MORE.trimEnd());
+            return toolStep(MORE.trimEnd(), [readCall("call-2")]);
+          },
+          async (params) => {
+            await params.onTextDelta?.(REVIEW);
+            return finalStep(REVIEW);
+          },
+        ]);
+        const { outcome, events } = await runSummaryTurn(runtime);
+        assert.equal(outcome.kind, "completed");
+        if (outcome.kind !== "completed") return;
+        assert.equal(outcome.text, `${SUMMARIES}${MORE}${REVIEW}`);
+        assert.equal(occurrences(outcome.text, "## Per-paper summaries"), 1);
+        assert.equal(occurrences(outcome.text, "## More summaries"), 1);
+        assert.equal(reconstructStream(events), outcome.text);
+      } finally {
+        restoreDb();
+      }
+    });
+
+    it("drops a whitespace- and citation-shifted echo of the committed text", async function () {
+      const restoreDb = installMockDb();
+      try {
+        const echoed = `${SUMMARIES.replace(/\n\n/g, "\n").replace(
+          "Drift grows with time.",
+          "Drift grows with time. [[cite:c1]]",
+        )}${REVIEW}`;
+        const runtime = scriptedRuntime([
+          async (params) => {
+            await params.onTextDelta?.(SUMMARIES);
+            return toolStep(SUMMARIES);
+          },
+          async () => finalStep(echoed),
+        ]);
+        const { outcome, events } = await runSummaryTurn(runtime);
+        assert.equal(outcome.kind, "completed");
+        if (outcome.kind !== "completed") return;
+        assert.equal(outcome.text, `${SUMMARIES}${REVIEW}`);
+        assert.equal(reconstructStream(events), outcome.text);
+      } finally {
+        restoreDb();
+      }
+    });
+
+    it("tells a restarted model that the committed text already starts the answer", async function () {
+      const restoreDb = installMockDb();
+      try {
+        let restartedInput = "";
+        const calls = Array.from({ length: 9 }, (_, index) =>
+          readCall(`call-${index}`),
+        );
+        const runtime = scriptedRuntime([
+          async (params) => {
+            await params.onTextDelta?.(SUMMARIES);
+            return toolStep(SUMMARIES, calls);
+          },
+          async (params) => {
+            restartedInput = JSON.stringify(params.messages);
+            await params.onTextDelta?.(REVIEW);
+            return finalStep(REVIEW);
+          },
+        ]);
+        const { outcome, events } = await runSummaryTurn(runtime);
+        assert.equal(outcome.kind, "completed");
+        if (outcome.kind !== "completed") return;
+        assert.include(restartedInput, "already starts the answer");
+        assert.include(restartedInput, "## Per-paper summaries");
+        assert.equal(outcome.text, `${SUMMARIES}${REVIEW}`);
+        assert.equal(reconstructStream(events), outcome.text);
+      } finally {
+        restoreDb();
+      }
+    });
+
+    it("leads a failure message with the committed text", async function () {
+      const restoreDb = installMockDb();
+      try {
+        const registry = new AgentToolRegistry();
+        registry.register({
+          spec: {
+            name: "read_context",
+            description: "read",
+            inputSchema: { type: "object" },
+            executionClass: "read",
+            requiresConfirmation: false,
+          },
+          validate: () => ({ ok: true, value: {} }),
+          execute: async () => {
+            throw new Error("read failed");
+          },
+        });
+        let round = 0;
+        const runtime = scriptedRuntime(
+          [
+            async (params) => {
+              round += 1;
+              if (round === 1) {
+                await params.onTextDelta?.(SUMMARIES);
+                return toolStep(SUMMARIES);
+              }
+              return toolStep("", [readCall(`call-${round}`)]);
+            },
+          ],
+          registry,
+        );
+        const { outcome } = await runSummaryTurn(runtime);
+        assert.equal(outcome.kind, "completed");
+        if (outcome.kind !== "completed") return;
+        assert.isTrue(outcome.text.startsWith(SUMMARIES));
+        assert.include(
+          outcome.text,
+          "Agent stopped after repeated tool errors",
+        );
+        assert.equal(occurrences(outcome.text, "## Per-paper summaries"), 1);
+        const trace = await getAgentRunTrace(outcome.runId);
+        assert.equal(trace.run?.finalText, outcome.text);
+      } finally {
+        restoreDb();
+      }
+    });
+
+    it("leads a continuation-limit ending with the committed text", async function () {
+      const restoreDb = installMockDb();
+      try {
+        const PART = "## Review\n\nBoth papers agree that drift";
+        const runtime = scriptedRuntime([
+          async (params) => {
+            await params.onTextDelta?.(SUMMARIES);
+            return toolStep(SUMMARIES);
+          },
+          async (params) => {
+            await params.onTextDelta?.(PART);
+            return {
+              kind: "incomplete",
+              reason: "output_limit",
+              text: PART,
+              assistantMessage: { role: "assistant", content: PART },
+              recoveryInstruction: "Continue.",
+            };
+          },
+        ]);
+        const { outcome, events } = await runSummaryTurn(runtime);
+        assert.equal(outcome.kind, "completed");
+        if (outcome.kind !== "completed") return;
+        assert.isTrue(outcome.text.startsWith(`${SUMMARIES}${PART}`));
+        assert.include(outcome.text, "cut short");
+        assert.equal(occurrences(outcome.text, "## Per-paper summaries"), 1);
+        assert.isTrue(outcome.text.startsWith(reconstructStream(events)));
+      } finally {
+        restoreDb();
+      }
+    });
+
+    it("keeps the committed text in a stopped run's record", async function () {
+      const restoreDb = installMockDb();
+      try {
+        const controller = new AbortController();
+        const registry = new AgentToolRegistry();
+        registry.register({
+          spec: {
+            name: "read_context",
+            description: "read",
+            inputSchema: { type: "object" },
+            executionClass: "read",
+            requiresConfirmation: false,
+          },
+          validate: () => ({ ok: true, value: {} }),
+          execute: async () => {
+            controller.abort();
+            return { ok: true };
+          },
+        });
+        const runtime = scriptedRuntime(
+          [
+            async (params) => {
+              await params.onTextDelta?.(SUMMARIES);
+              return toolStep(SUMMARIES);
+            },
+            async () => finalStep(REVIEW),
+          ],
+          registry,
+        );
+        await runtime
+          .runTurn({
+            request: {
+              conversationKey: 1,
+              mode: "agent",
+              userText: "summarize and review",
+              model: "gpt-5.4",
+              apiBase: "https://api.openai.com/v1/responses",
+              apiKey: "test",
+            },
+            signal: controller.signal,
+            onEvent: async () => undefined,
+          })
+          .catch(() => undefined);
+        const run = await getLatestAgentRunForConversation(1);
+        assert.equal(run?.status, "cancelled");
+        assert.equal(run?.finalText, SUMMARIES);
+      } finally {
+        restoreDb();
+      }
+    });
+  });
+
   it("preserves an informational final after permitted exploratory reads", async function () {
     const restoreDb = installMockDb();
     try {

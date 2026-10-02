@@ -8655,6 +8655,173 @@ describe("agentTrace render", function () {
     assert.deepEqual(inlineTexts, [intermediateText]);
   });
 
+  it("shows text committed before a tool call once, in the answer, after the final", function () {
+    const summaries =
+      "## Per-paper summaries\n\n**1. Smith (2021)**\n\nDrift grows with time.\n\n**2. Lee (2022)**\n\nDecoding stays stable.\n\n";
+    const review = "## Review\n\nBoth papers agree.";
+    const finalText = `${summaries}${review}`;
+    const runId = "run-committed-segment";
+    const events: AgentRunEventRecord[] = [
+      {
+        runId,
+        seq: 1,
+        eventType: "message_delta",
+        payload: { type: "message_delta", text: summaries },
+        createdAt: 1,
+      },
+      {
+        runId,
+        seq: 2,
+        eventType: "tool_call",
+        payload: {
+          type: "tool_call",
+          callId: "call-1",
+          name: "read_paper",
+          args: { operation: "full_text" },
+        },
+        createdAt: 2,
+      },
+      {
+        runId,
+        seq: 3,
+        eventType: "tool_result",
+        payload: {
+          type: "tool_result",
+          callId: "call-1",
+          name: "read_paper",
+          ok: true,
+          content: { text: "paper text" },
+        },
+        createdAt: 3,
+      },
+      {
+        runId,
+        seq: 4,
+        eventType: "message_delta",
+        payload: { type: "message_delta", text: review },
+        createdAt: 4,
+      },
+      {
+        runId,
+        seq: 5,
+        eventType: "final",
+        payload: { type: "final", text: finalText },
+        createdAt: 5,
+      },
+    ];
+
+    const { items, isInterleaved } = buildAgentTraceDisplayItems(events, null, {
+      role: "assistant",
+      text: finalText,
+      timestamp: 1,
+      runMode: "agent",
+      modelProviderLabel: "OpenAI",
+    });
+    const inlineTexts = items
+      .filter(
+        (
+          item,
+        ): item is Extract<(typeof items)[number], { type: "inline_text" }> =>
+          item.type === "inline_text",
+      )
+      .map((item) => item.text.trim());
+
+    assert.isBoolean(isInterleaved);
+    assert.notInclude(inlineTexts, summaries.trim());
+    assert.notInclude(inlineTexts, review.trim());
+    assert.deepEqual(inlineTexts, []);
+  });
+
+  it("shows text committed before a tool call once while the answer streams", function () {
+    const summaries =
+      "## Per-paper summaries\n\n**1. Smith (2021)**\n\nDrift grows with time.\n\n**2. Lee (2022)**\n\nDecoding stays stable.\n\n";
+    const partial = "## Review\n\nBoth";
+    const runId = "run-committed-segment-streaming";
+    const beforeAnswer: AgentRunEventRecord[] = [
+      {
+        runId,
+        seq: 1,
+        eventType: "message_delta",
+        payload: { type: "message_delta", text: summaries },
+        createdAt: 1,
+      },
+      {
+        runId,
+        seq: 2,
+        eventType: "tool_call",
+        payload: {
+          type: "tool_call",
+          callId: "call-1",
+          name: "read_paper",
+          args: { operation: "full_text" },
+        },
+        createdAt: 2,
+      },
+      {
+        runId,
+        seq: 3,
+        eventType: "tool_result",
+        payload: {
+          type: "tool_result",
+          callId: "call-1",
+          name: "read_paper",
+          ok: true,
+          content: { text: "paper text" },
+        },
+        createdAt: 3,
+      },
+    ];
+    const inlineTextsOf = (
+      items: ReturnType<typeof buildAgentTraceDisplayItems>["items"],
+    ) =>
+      items
+        .filter(
+          (
+            item,
+          ): item is Extract<(typeof items)[number], { type: "inline_text" }> =>
+            item.type === "inline_text",
+        )
+        .map((item) => item.text.trim());
+
+    // Before the answer continues, the trace carries the kept text in place
+    // of the bubble.
+    const waiting = buildAgentTraceDisplayItems(beforeAnswer, null, {
+      role: "assistant",
+      text: summaries,
+      timestamp: 1,
+      runMode: "agent",
+      modelProviderLabel: "OpenAI",
+      streaming: true,
+    });
+    assert.isTrue(waiting.inlineTextReplacesAssistantText);
+    assert.deepEqual(inlineTextsOf(waiting.items), [summaries.trim()]);
+
+    // Once the answer continues, the bubble shows it and the trace does not.
+    const streaming = buildAgentTraceDisplayItems(
+      [
+        ...beforeAnswer,
+        {
+          runId,
+          seq: 4,
+          eventType: "message_delta",
+          payload: { type: "message_delta", text: partial },
+          createdAt: 4,
+        },
+      ],
+      null,
+      {
+        role: "assistant",
+        text: `${summaries}${partial}`,
+        timestamp: 1,
+        runMode: "agent",
+        modelProviderLabel: "OpenAI",
+        streaming: true,
+      },
+    );
+    assert.isFalse(streaming.inlineTextReplacesAssistantText);
+    assert.deepEqual(inlineTextsOf(streaming.items), []);
+  });
+
   it("joins streamed interleaved text across hidden provider events", function () {
     const sentence =
       "Now let me find the Obsidian vault location and look for any existing note for this paper.";

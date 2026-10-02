@@ -54,6 +54,56 @@ describe("document finalization persistence", function () {
     globals.Zotero = original;
     db.close();
   });
+  it("delivers a document whose chat message leads with text written before the tool call", async function () {
+    const markdown = "# Review\n\nThe papers agree.";
+    const { document } = await new DirectDocumentFinalizer(
+      {} as ZoteroGateway,
+    ).finalize({
+      request: { conversationKey: 42 } as AgentRuntimeRequest,
+      runId: "review-run",
+      input: {
+        title: "Review",
+        markdown,
+        citations: [],
+        quotes: [],
+        assets: [],
+        groundingReviewed: "passed" as const,
+        groundingIssues: [],
+        documentKind: "guide",
+        integrityPolicy: "authored",
+      },
+      now: 4,
+    });
+    const messageText = `## Per-paper summaries\n\n**1. Smith (2021)**\n\nDrift grows.\n\n${document.visibleMarkdown}`;
+    // Without the document's id, a prefixed message is not proof of delivery.
+    assert.isNull(
+      await deliverPendingPlanDocumentMessage({
+        conversationKey: 42,
+        visibleMarkdown: messageText,
+        messageTimestamp: 5,
+      }),
+    );
+    // A message that does not end with the document never delivers it.
+    assert.isNull(
+      await deliverPendingPlanDocumentMessage({
+        conversationKey: 42,
+        documentId: document.documentId,
+        visibleMarkdown: `${document.visibleMarkdown}\n\nMore.`,
+        messageTimestamp: 5,
+      }),
+    );
+    const delivered = await deliverPendingPlanDocumentMessage({
+      conversationKey: 42,
+      documentId: document.documentId,
+      visibleMarkdown: messageText,
+      messageTimestamp: 5,
+    });
+    assert.equal(delivered?.documentId, document.documentId);
+    assert.equal(
+      (await loadPlanDocumentOutbox(document.documentId))?.status,
+      "delivered",
+    );
+  });
   it("preserves direct document identity, hash, retry and publication", async function () {
     const input = {
       title: "Guide",

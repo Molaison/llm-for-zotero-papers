@@ -63,6 +63,10 @@ import { AgentRunContinuationSession } from "./continuation/runContinuationSessi
 import { ActionContractRunSession } from "./contracts/actionContractRunSession";
 import type { MaterialRef } from "./documents/materialRef";
 import { AgentFinalAnswerController } from "./finalization/finalAnswerController";
+import {
+  isSubstantiveAnswerText,
+  withoutLeadingRepeat,
+} from "./finalization/answerSegments";
 import type { RunStopRule } from "./loop/stopRules";
 import { namedItemTargets, toolFailureReason } from "./loop/paperFailures";
 import {
@@ -226,6 +230,22 @@ function logRuntimeWarning(message: string, error: unknown): void {
 type PendingConfirmation = {
   resolve: (resolution: AgentConfirmationResolution) => void;
 };
+
+/** Web source anchors moved by `delta` characters (text added or removed before them). */
+function shiftWebAttribution(
+  attribution: WebAttributionAssessment | undefined,
+  delta: number,
+): WebAttributionAssessment | undefined {
+  if (!attribution || attribution.status !== "valid" || !delta)
+    return attribution;
+  return {
+    ...attribution,
+    anchors: attribution.anchors.map((anchor) => ({
+      ...anchor,
+      offset: Math.max(0, anchor.offset + delta),
+    })),
+  };
+}
 
 function createRunId(): string {
   return `agent-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
@@ -712,6 +732,32 @@ export class AgentRuntime {
       };
       let eventSeq = 0;
       let currentAnswerText = "";
+      // Deliverable text the model streamed before calling a tool (per-paper
+      // summaries, a table): already on screen, never rolled back, and the
+      // start of whatever answer the turn ends with.
+      let committedAnswerText = "";
+      /** The visible answer after the committed text. */
+      const uncommittedAnswerText = (): string =>
+        committedAnswerText && currentAnswerText.startsWith(committedAnswerText)
+          ? currentAnswerText.slice(committedAnswerText.length)
+          : currentAnswerText;
+      /** `text` without a leading repeat of the committed text. */
+      const withoutCommittedPrefix = (text: string): string =>
+        withoutLeadingRepeat(text, committedAnswerText);
+      /**
+       * For a model restarted from a checkpoint, which no longer shows what
+       * it wrote before its tool calls: that text is already the answer's
+       * start and must not be written again.
+       */
+      const committedAnswerNote = (): string => {
+        if (!committedAnswerText) return "";
+        const firstLine =
+          committedAnswerText
+            .split("\n")
+            .map((line) => line.trim())
+            .find(Boolean) || "";
+        return `The text you wrote before the tool calls (${committedAnswerText.length} characters, starting "${firstLine.slice(0, 120)}") is already shown to the user and already starts the answer; continue after it and do not repeat it.`;
+      };
       const item = request.item || null;
       await persistIfLive(() =>
         createAgentRun({
@@ -1425,7 +1471,10 @@ export class AgentRuntime {
         const committed = await commitSemanticCheckpoint({
           sourceMessages: params.sourceMessages,
           preservedHandleRecords: params.handleRecords,
-          retryInstruction: params.retryInstruction,
+          retryInstruction:
+            [params.retryInstruction, committedAnswerNote()]
+              .filter(Boolean)
+              .join("\n\n") || undefined,
         });
         requireAcceptedCheckpointWrite(committed.writeResult);
         if (committed.handleCount) {
@@ -1503,6 +1552,16 @@ export class AgentRuntime {
             status === "failed"
               ? `${finalizedMaterial.finalText}\n\n${finalText}`
               : finalizedMaterial.finalText;
+        }
+        if (committedAnswerText && !finalText.startsWith(committedAnswerText)) {
+          finalText = `${committedAnswerText}${finalText}`;
+          options = {
+            ...options,
+            webAttribution: shiftWebAttribution(
+              options.webAttribution,
+              committedAnswerText.length,
+            ),
+          };
         }
         const redactedFinalText =
           turnPathRedactor.redactTerminalText(finalText);
@@ -1613,14 +1672,20 @@ export class AgentRuntime {
           transcriptPrefix?: string;
         } = {},
       ): Promise<AgentRuntimeOutcome> => {
-        const modelFinalText = webAttribution.cleanText;
+        // A provider may repeat the committed text at the start of its final
+        // step; the answer already leads with it.
+        const modelFinalText = withoutCommittedPrefix(webAttribution.cleanText);
+        webAttribution = shiftWebAttribution(
+          webAttribution,
+          modelFinalText.length - webAttribution.cleanText.length,
+        )!;
         const receiptStatus = actionContractSession.receiptStatus();
         const finalText = receiptStatus
           ? `${modelFinalText}\n\n${receiptStatus}`
           : modelFinalText;
         if (finalText) {
           if (!stepStreamedText) {
-            currentAnswerText = finalText;
+            currentAnswerText = `${committedAnswerText}${finalText}`;
             await emit({
               type: "message_delta",
               text: finalText,
@@ -1635,7 +1700,7 @@ export class AgentRuntime {
               });
             }
           } else {
-            currentAnswerText = finalText;
+            currentAnswerText = `${committedAnswerText}${finalText}`;
           }
         }
         return await completeRun(finalText, "completed", "final_answer", {
@@ -1643,6 +1708,74 @@ export class AgentRuntime {
         });
       };
       const providerTerminalOutcomes: ToolWorkflowOutcome[] = [];
+      const rollbackCommittedStreamedText = async (
+        stepStreamedText: string,
+      ): Promise<void> => {
+        if (!stepStreamedText) return;
+        currentAnswerText = currentAnswerText.slice(
+          0,
+          Math.max(0, currentAnswerText.length - stepStreamedText.length),
+        );
+        await emit({
+          type: "message_rollback",
+          length: stepStreamedText.length,
+          text: stepStreamedText,
+        });
+      };
+      // A final answer cut off at the output limit, kept on screen while the
+      // model writes the remainder (see the incomplete-step branch).
+      let keptAnswerVisibleText = "";
+      let keptAnswerModelText = "";
+      const rollbackKeptAnswer = async (): Promise<void> => {
+        if (!keptAnswerVisibleText) {
+          keptAnswerModelText = "";
+          return;
+        }
+        const text = keptAnswerVisibleText;
+        keptAnswerVisibleText = "";
+        keptAnswerModelText = "";
+        currentAnswerText = currentAnswerText.slice(
+          0,
+          Math.max(0, currentAnswerText.length - text.length),
+        );
+        await emit({
+          type: "message_rollback",
+          length: text.length,
+          text,
+        });
+      };
+      /**
+       * Text streamed before a tool call: commit deliverable content, roll
+       * back a lead-in. A kept cut-off answer sits just before `streamed` on
+       * screen, so the two are one segment: committed together, or rolled
+       * back newest first. Returns the newly streamed text when committed,
+       * "" otherwise.
+       */
+      const settleStreamedTextBeforeTools = async (
+        streamed: string,
+      ): Promise<string> => {
+        const segment = `${keptAnswerVisibleText}${streamed}`;
+        if (!segment) return "";
+        if (!isSubstantiveAnswerText(segment)) {
+          await rollbackCommittedStreamedText(streamed);
+          await rollbackKeptAnswer();
+          return "";
+        }
+        keptAnswerVisibleText = "";
+        keptAnswerModelText = "";
+        // What the model writes next starts a new paragraph.
+        const separator = segment.endsWith("\n\n")
+          ? ""
+          : segment.endsWith("\n")
+            ? "\n"
+            : "\n\n";
+        if (separator) {
+          currentAnswerText += separator;
+          await emit({ type: "message_delta", text: separator });
+        }
+        committedAnswerText += `${segment}${separator}`;
+        return streamed;
+      };
       const runModelStep = async (
         round: number,
         statusText: string,
@@ -1678,20 +1811,13 @@ export class AgentRuntime {
             text,
           });
         };
-        const rollbackStepStreamedText = async () => {
+        const settleStepStreamedText = async (): Promise<string> => {
           await flushStepDelta();
-          if (!stepStreamedText) return;
-          currentAnswerText = currentAnswerText.slice(
-            0,
-            Math.max(0, currentAnswerText.length - stepStreamedText.length),
-          );
-          await emit({
-            type: "message_rollback",
-            length: stepStreamedText.length,
-            text: stepStreamedText,
-          });
+          const committed =
+            await settleStreamedTextBeforeTools(stepStreamedText);
           stepStreamedText = "";
           stepPendingDelta = "";
+          return committed;
         };
         if (latestProviderReplayTokens > providerReplaySoftLimit) {
           const replayTokens = latestProviderReplayTokens;
@@ -1902,7 +2028,7 @@ export class AgentRuntime {
             });
           },
           onToolCall: async (call) => {
-            await rollbackStepStreamedText();
+            const committedSegment = await settleStepStreamedText();
             const outcome = await toolExecution.executeToolWorkflow(
               call,
               round,
@@ -1913,7 +2039,7 @@ export class AgentRuntime {
             if (outcome.stopRun) providerTerminalOutcomes.push(outcome);
             newTranscriptMessages.push({
               role: "assistant",
-              content: "",
+              content: committedSegment,
               tool_calls: [call],
             });
             if (outcome.delivery) {
@@ -2038,46 +2164,12 @@ export class AgentRuntime {
         );
         return outcome.toolResult;
       };
-      const rollbackCommittedStreamedText = async (
-        stepStreamedText: string,
-      ): Promise<void> => {
-        if (!stepStreamedText) return;
-        currentAnswerText = currentAnswerText.slice(
-          0,
-          Math.max(0, currentAnswerText.length - stepStreamedText.length),
-        );
-        await emit({
-          type: "message_rollback",
-          length: stepStreamedText.length,
-          text: stepStreamedText,
-        });
-      };
       // A final answer the provider cut off at its output limit stays on
       // screen and in the transcript; the model is asked for the remainder.
       let answerContinuations = 0;
       // How many times a cut-off answer may continue: as many full-size
       // answers as the input budget holds beside the prompt it started from.
       let answerContinuationLimit: number | undefined;
-      let keptAnswerVisibleText = "";
-      let keptAnswerModelText = "";
-      const rollbackKeptAnswer = async (): Promise<void> => {
-        if (!keptAnswerVisibleText) {
-          keptAnswerModelText = "";
-          return;
-        }
-        const text = keptAnswerVisibleText;
-        keptAnswerVisibleText = "";
-        keptAnswerModelText = "";
-        currentAnswerText = currentAnswerText.slice(
-          0,
-          Math.max(0, currentAnswerText.length - text.length),
-        );
-        await emit({
-          type: "message_rollback",
-          length: text.length,
-          text,
-        });
-      };
       /** Handles to the tool results in `source`, by call, and their records. */
       const toolResultHandlesOf = (source: readonly AgentModelMessage[]) => {
         const handles = new Map<string, string>();
@@ -2449,7 +2541,7 @@ export class AgentRuntime {
             )
               await recordOutcomeEvidence({ kind: "answer" });
             return await completeRun(
-              terminalOutcome.finalText || currentAnswerText,
+              terminalOutcome.finalText || uncommittedAnswerText(),
               terminalOutcome.failed ? "failed" : "completed",
               "provider_terminal_outcome",
               { documentId: terminalOutcome.documentId },
@@ -2663,12 +2755,12 @@ export class AgentRuntime {
             );
           }
 
-          // The step returned tool_calls, not a final answer.  Any text the
-          // model streamed during this step is intermediate "thinking" text
-          // (e.g. "Let me read more of the paper...") that should appear in
-          // the agent trace but NOT in the final chat answer.  Roll it back.
-          await rollbackCommittedStreamedText(stepStreamedText);
-          await rollbackKeptAnswer();
+          // The step returned tool_calls, not a final answer.  A lead-in the
+          // model streamed during this step ("Let me read more of the
+          // paper...") belongs in the agent trace, not the chat answer, and is
+          // rolled back; deliverable content (per-paper summaries) stays and
+          // starts the answer.
+          await settleStreamedTextBeforeTools(stepStreamedText);
 
           // Item-scoped work may read a page's open papers in one step; an
           // ordinary step keeps the ordinary limit.
@@ -2788,7 +2880,8 @@ export class AgentRuntime {
             }
             if (outcome.stopRun) {
               appendRoundContinuation();
-              const stopFinalText = outcome.finalText || currentAnswerText;
+              const stopFinalText =
+                outcome.finalText || uncommittedAnswerText();
               if (stopFinalText && !outcome.preserveToolOnlyTranscript) {
                 newTranscriptMessages.push({
                   role: "assistant",
@@ -2862,7 +2955,7 @@ export class AgentRuntime {
                 ? "repeated_input_rejections"
                 : "repeated_tool_errors";
             const finalText =
-              currentAnswerText ||
+              uncommittedAnswerText() ||
               (stopRule === "repeated_input_rejections"
                 ? "Agent stopped after repeated invalid tool inputs. Please adjust the request and try again."
                 : "Agent stopped after repeated tool errors. Please adjust the request and try again.");
@@ -2892,7 +2985,7 @@ export class AgentRuntime {
           settledAtSegmentStart;
         if (!newFingerprints.length && !settledNewTargets) {
           const finalText =
-            currentAnswerText ||
+            uncommittedAnswerText() ||
             `Agent stopped after segment ${segment} produced no new successful tool result. The completed transcript was saved; narrow or redirect the request before continuing.`;
           return await completeRun(
             finalText,

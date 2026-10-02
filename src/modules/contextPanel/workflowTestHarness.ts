@@ -1091,7 +1091,9 @@ async function exerciseBackgroundAgentPublication(input: {
     sourceConversationKey: conversationKey,
     otherConversationKey: paperBKey,
     persistedConversationKeys: rows.map((row) => Number(row.conversationKey)),
-    exactMarkdown: rows.every((row) => row.text === prepared.visibleMarkdown),
+    exactMarkdown: rows.every((row) =>
+      row.text.endsWith(prepared.visibleMarkdown),
+    ),
     outboxStatus: outbox?.status,
     otherPanelContainsDocument: Boolean(
       panel.body
