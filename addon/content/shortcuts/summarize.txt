@@ -1,1 +1,1 @@
-Give a concise narrative overview of the paper in 1-2 short paragraphs, covering the research question, approach, main findings, and significance.
+Give a one-sentence overview, then summarize the paper section by section under its own headings, with 1-3 sentences per section.
