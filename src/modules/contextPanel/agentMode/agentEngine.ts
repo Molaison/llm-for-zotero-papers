@@ -725,7 +725,8 @@ async function finalizeAgentTurnOutcome(ctx: {
   );
   // Anchors are bound on use: the completed answer keeps only the quotes it
   // actually used, so what is rendered matches what is persisted.  The full
-  // retrieved set stays in the run trace.
+  // retrieved set stays in the run's tool results (a big one by handle); the
+  // final event already carries only the citations the answer uses.
   assistantMessage.quoteCitations = selectUsedQuoteCitations({
     text: assistantMessage.text,
     quoteCitations: assistantMessage.quoteCitations,

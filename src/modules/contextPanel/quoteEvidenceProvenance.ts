@@ -13,7 +13,12 @@
  */
 
 import { appLogger } from "../../core/logging";
-import { listAgentRunEvents } from "../../agent/store/traceStore";
+import {
+  getAgentRunRecord,
+  isTruncatedToolResultContent,
+  listAgentRunEvents,
+} from "../../agent/store/traceStore";
+import { getAgentToolResultHandle } from "../../agent/store/toolResultHandles";
 import { MIN_NEAR_COMPLETE_QUOTE_SUPPORT_COVERAGE } from "../../services/quotes/quoteCitations";
 import { summarizeQuoteTextSupport } from "../../services/quotes/quoteTextSearch";
 import { sanitizeText } from "../../utils/textSanitization";
@@ -121,6 +126,23 @@ function readIdPair(
   return itemId && contextItemId ? { itemId, contextItemId } : null;
 }
 
+/**
+ * A result the trace stored by handle, read back from the handle store.
+ * Undefined, never a throw, when the handle or its conversation is gone.
+ */
+async function readStoredToolResult(
+  conversationKey: number | undefined,
+  handle: string | undefined,
+): Promise<unknown> {
+  if (!conversationKey || !handle) return undefined;
+  try {
+    return (await getAgentToolResultHandle({ conversationKey, handle }))
+      ?.content;
+  } catch {
+    return undefined;
+  }
+}
+
 async function loadRunEvidencePassages(
   agentRunId: string,
 ): Promise<EvidencePassage[] | null> {
@@ -129,12 +151,26 @@ async function loadRunEvidencePassages(
   const passages: EvidencePassage[] = [];
   try {
     const events = await listAgentRunEvents(agentRunId);
+    // The conversation a stored result's handle belongs to, read once and
+    // only when the run stored a result by handle.
+    let conversationKey: Promise<number | undefined> | undefined;
     for (const event of events) {
       if (event.eventType !== "tool_result") continue;
       const record = event.payload as Record<string, unknown> | null;
       // A failed tool call proves nothing about where a quote came from.
       if (!record || record.ok === false) continue;
-      passages.push(...collectEvidencePassages(record.content));
+      let content = record.content;
+      if (isTruncatedToolResultContent(content)) {
+        conversationKey ??= getAgentRunRecord(agentRunId).then(
+          (run) => run?.conversationKey,
+          () => undefined,
+        );
+        content = await readStoredToolResult(
+          await conversationKey,
+          content.handle,
+        );
+      }
+      passages.push(...collectEvidencePassages(content));
       passages.push(...collectEvidencePassages(record.artifacts));
     }
   } catch (error) {

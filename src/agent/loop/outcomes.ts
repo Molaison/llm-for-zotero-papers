@@ -1209,8 +1209,8 @@ function applyAnswer(
     if (task.status !== "pending") return undefined;
     if (!task.effect || task.effect === "answer")
       return { ...task, status: "completed", updatedAt: now };
-    // TODO(runtime answer evidence): the task that owns runtime.ts passes the
-    // answer's cited targets; until then they are unknown and parts complete whole.
+    // The runtime passes the papers the answer cites; unknown (undefined)
+    // completes the part whole.
     if (task.effect === "artifact")
       return coverTargets(task, evidence.citedTargets, now);
     return undefined;

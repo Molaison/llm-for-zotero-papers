@@ -97,6 +97,10 @@ import {
 import { createTestActionContractService } from "./helpers/actionContractService";
 import { stateChangeInvocationPlan } from "../src/agent/authorization/invocationPlan";
 import { initDormantPlanTables } from "../src/agent/store/dormantPlanTables";
+import { createTaskUpdateTool } from "../src/agent/tools/control/taskUpdate";
+import { OUTCOME_REASONS } from "../src/agent/loop/outcomes";
+import { ExecutionCheckpointFold } from "../src/agent/execution/checkpointEvents";
+import { isTruncatedToolResultContent } from "../src/agent/store/traceStore";
 
 function registerZeroEffectLibraryUpdate(registry: AgentToolRegistry): void {
   registry.register({
@@ -10618,6 +10622,350 @@ describe("tool result review delivery", function () {
         noteReceipts || [],
         "the chained write still produces its receipt",
       );
+    } finally {
+      restoreDb();
+    }
+  });
+});
+
+describe("run event payloads", function () {
+  beforeEach(function () {
+    clearAgentReadLedger();
+    clearAgentCoverageLedger();
+    clearAgentTranscriptStore();
+    clearAgentToolResultHandleStore();
+  });
+
+  const request = (conversationKey: number, userText: string) => ({
+    conversationKey,
+    mode: "agent" as const,
+    userText,
+    model: "test-model",
+    apiBase: "",
+    apiKey: "test",
+    libraryID: 1,
+  });
+
+  function toolStep(
+    calls: Array<{ id: string; name: string; arguments: unknown }>,
+  ): AgentModelStep {
+    return {
+      kind: "tool_calls",
+      calls,
+      assistantMessage: { role: "assistant", content: "", tool_calls: calls },
+    } as AgentModelStep;
+  }
+
+  function finalStep(text: string): AgentModelStep {
+    return {
+      kind: "final",
+      text,
+      assistantMessage: { role: "assistant", content: text },
+    };
+  }
+
+  function scriptedRuntime(
+    registry: AgentToolRegistry,
+    steps: Array<
+      AgentModelStep | ((params: AgentStepParams) => Promise<AgentModelStep>)
+    >,
+    streaming = false,
+  ): AgentRuntime {
+    let index = 0;
+    return new AgentRuntime({
+      registry,
+      adapterFactory: () => ({
+        getCapabilities: () => ({
+          streaming,
+          toolCalls: true,
+          multimodal: false,
+          fileInputs: false,
+          reasoning: true,
+        }),
+        supportsTools: () => true,
+        async runStep(params): Promise<AgentModelStep> {
+          const step = steps[index];
+          index += 1;
+          if (!step) throw new Error(`no scripted step ${index}`);
+          return typeof step === "function" ? step(params) : step;
+        },
+      }),
+    });
+  }
+
+  /** A paper_read whose result cites one passage per paper. */
+  function citingPaperRead(itemIds: number[]): AgentToolRegistry {
+    const registry = new AgentToolRegistry(createTestActionContractService());
+    registry.register(createTaskUpdateTool());
+    registry.register({
+      spec: {
+        name: "paper_read",
+        description: "read papers",
+        inputSchema: { type: "object" },
+        executionClass: "read",
+        requiresConfirmation: false,
+      },
+      validate: (args) => ({ ok: true, value: args }),
+      execute: async () => ({
+        mode: "targeted",
+        results: itemIds.map((itemId) => ({
+          paperContext: { itemId, contextItemId: itemId + 1000 },
+          sourceKind: "paper_text",
+          chunkIndex: 1,
+          text: `Paper ${itemId} reports finding number ${itemId}.`,
+          quoteCitationIds: [`q${itemId}`],
+        })),
+        quoteCitations: itemIds.map((itemId) => ({
+          id: `q${itemId}`,
+          quoteText: `Paper ${itemId} reports finding number ${itemId}.`,
+          citationLabel: `(Author ${itemId}, 2025)`,
+          itemId,
+          contextItemId: itemId + 1000,
+        })),
+      }),
+    });
+    return registry;
+  }
+
+  it("publishes only the citations the final answer uses", async function () {
+    const restoreDb = installMockDb();
+    try {
+      const events: AgentEvent[] = [];
+      const runtime = scriptedRuntime(citingPaperRead([1, 2, 3]), [
+        toolStep([{ id: "read-1", name: "paper_read", arguments: {} }]),
+        finalStep("Paper 1 reports finding number 1 [[quote:q1]]."),
+      ]);
+      const outcome = await runtime.runTurn({
+        request: request(4801, "What does paper 1 find?"),
+        onEvent: (event) => {
+          events.push(event);
+        },
+      });
+      assert.equal(outcome.kind, "completed");
+      const final = events.find((event) => event.type === "final");
+      if (final?.type !== "final") return assert.fail("no final event");
+      assert.deepEqual(
+        (final.quoteCitations || []).map((citation) => citation.id),
+        ["q1"],
+      );
+      if (outcome.kind !== "completed") return;
+      assert.deepEqual(
+        (outcome.quoteCitations || []).map((citation) => citation.id),
+        ["q1"],
+      );
+      // The live tool result still carries every citation it retrieved.
+      const result = events.find((event) => event.type === "tool_result");
+      assert.lengthOf(
+        (result as { content: { quoteCitations: unknown[] } }).content
+          .quoteCitations || [],
+        3,
+      );
+    } finally {
+      restoreDb();
+    }
+  });
+
+  it("publishes no citations when the answer uses none", async function () {
+    const restoreDb = installMockDb();
+    try {
+      const events: AgentEvent[] = [];
+      const runtime = scriptedRuntime(citingPaperRead([1, 2]), [
+        toolStep([{ id: "read-1", name: "paper_read", arguments: {} }]),
+        finalStep("Both papers report findings."),
+      ]);
+      const outcome = await runtime.runTurn({
+        request: request(4802, "What do the papers find?"),
+        onEvent: (event) => {
+          events.push(event);
+        },
+      });
+      const final = events.find((event) => event.type === "final");
+      if (final?.type !== "final") return assert.fail("no final event");
+      assert.isUndefined(final.quoteCitations);
+      if (outcome.kind === "completed")
+        assert.isUndefined(outcome.quoteCitations);
+    } finally {
+      restoreDb();
+    }
+  });
+
+  it("delivers a delta before its row is written, and writes a tool call or final before delivering it", async function () {
+    const restoreDb = installMockDb();
+    try {
+      const delivered: Array<{
+        type: string;
+        seq: number;
+        persisted: boolean;
+      }> = [];
+      const registry = new AgentToolRegistry(createTestActionContractService());
+      registry.register({
+        spec: {
+          name: "paper_read",
+          description: "read",
+          inputSchema: { type: "object" },
+          executionClass: "read",
+          requiresConfirmation: false,
+        },
+        validate: (args) => ({ ok: true, value: args }),
+        execute: async () => ({ text: "A short passage." }),
+      });
+      const runtime = scriptedRuntime(
+        registry,
+        [
+          toolStep([{ id: "read-1", name: "paper_read", arguments: {} }]),
+          async (params) => {
+            await params.onTextDelta?.("Hello ");
+            await params.onTextDelta?.("there ");
+            return finalStep("Hello there world.");
+          },
+        ],
+        true,
+      );
+      const outcome = await runtime.runTurn({
+        request: request(4803, "hello"),
+        onEvent: (event) => {
+          const seq = delivered.length + 1;
+          delivered.push({
+            type: event.type,
+            seq,
+            persisted: restoreDb.events.some((row) => Number(row.seq) === seq),
+          });
+        },
+      });
+      assert.equal(outcome.kind, "completed");
+      const deltas = delivered.filter(
+        (entry) => entry.type === "message_delta",
+      );
+      assert.isNotEmpty(deltas);
+      assert.isTrue(
+        deltas.every((entry) => !entry.persisted),
+        "a delta reaches the panel before its row is written",
+      );
+      for (const type of ["tool_call", "tool_result", "final"]) {
+        const entry = delivered.find((candidate) => candidate.type === type);
+        assert.isTrue(entry?.persisted, `${type} is written before delivery`);
+      }
+      // After the turn, every emitted event is in the store, in order.
+      const runId = String(restoreDb.events[0].runId);
+      const seqs = restoreDb.events
+        .filter((row) => row.runId === runId)
+        .map((row) => Number(row.seq));
+      assert.deepEqual(
+        seqs,
+        Array.from({ length: seqs.length }, (_, index) => index + 1),
+      );
+      assert.isAtLeast(seqs.length, delivered.length);
+    } finally {
+      restoreDb();
+    }
+  });
+
+  it("stores a big tool result by handle in the trace and delivers it whole", async function () {
+    const restoreDb = installMockDb();
+    try {
+      const events: AgentEvent[] = [];
+      const bigText = "p".repeat(40_000);
+      const registry = new AgentToolRegistry(createTestActionContractService());
+      registry.register({
+        spec: {
+          name: "paper_read",
+          description: "read",
+          inputSchema: { type: "object" },
+          executionClass: "read",
+          requiresConfirmation: false,
+        },
+        validate: (args) => ({ ok: true, value: args }),
+        execute: async () => ({ text: bigText }),
+      });
+      const runtime = scriptedRuntime(registry, [
+        toolStep([{ id: "read-big", name: "paper_read", arguments: {} }]),
+        finalStep("Done."),
+      ]);
+      await runtime.runTurn({
+        request: request(4804, "read it"),
+        onEvent: (event) => {
+          events.push(event);
+        },
+      });
+      const live = events.find((event) => event.type === "tool_result");
+      if (live?.type !== "tool_result") return assert.fail("no tool result");
+      assert.match(live.toolResultHandle || "", /^trh_/);
+      assert.include(JSON.stringify(live.content), bigText);
+      const row = restoreDb.events.find(
+        (entry) => entry.eventType === "tool_result",
+      );
+      const persisted = JSON.parse(String(row?.payloadJson)) as {
+        content: unknown;
+        toolResultHandle?: string;
+      };
+      assert.isTrue(isTruncatedToolResultContent(persisted.content));
+      assert.deepInclude(persisted.content as object, {
+        handle: live.toolResultHandle,
+      });
+      const stored = await getAgentToolResultHandle({
+        conversationKey: 4804,
+        handle: live.toolResultHandle!,
+      });
+      assert.include(JSON.stringify(stored?.content), bigText);
+      assert.isBelow(String(row?.payloadJson).length, 2_000);
+    } finally {
+      restoreDb();
+    }
+  });
+
+  it("a targeted artifact part finished by an answer citing two of three papers covers those two", async function () {
+    const restoreDb = installMockDb();
+    try {
+      const events: AgentEvent[] = [];
+      const answer =
+        "Paper 101 reports finding number 101 [[quote:q101]].\n\nPaper 102 reports finding number 102 [[quote:q102]].";
+      const runtime = scriptedRuntime(citingPaperRead([101, 102, 103]), [
+        toolStep([
+          {
+            id: "declare-1",
+            name: "task_update",
+            arguments: {
+              tasks: [
+                {
+                  taskId: "summaries",
+                  description: "Write a summary of each paper",
+                  expectedEffect: "artifact",
+                  targetIds: ["101", "102", "103"],
+                },
+              ],
+            },
+          },
+          { id: "read-1", name: "paper_read", arguments: {} },
+        ]),
+        finalStep(answer),
+        // The open part draws one correction; the same answer is accepted.
+        finalStep(answer),
+      ]);
+      const outcome = await runtime.runTurn({
+        request: request(4805, "Summarize each of these three papers"),
+        onEvent: (event) => {
+          events.push(event);
+        },
+      });
+      assert.equal(outcome.kind, "completed");
+      const fold = new ExecutionCheckpointFold();
+      const ledgers = events.flatMap((event) =>
+        event.type === "execution_checkpoint" ||
+        event.type === "execution_checkpoint_delta"
+          ? [fold.apply(event)!]
+          : [],
+      );
+      const ledger = ledgers[ledgers.length - 1];
+      const part = ledger?.tasks.find((task) =>
+        task.taskId.endsWith(":task:summaries"),
+      );
+      assert.exists(part);
+      assert.equal(part!.status, "completed");
+      assert.deepEqual(part!.doneTargets, ["item:101", "item:102"]);
+      assert.deepEqual(part!.exceptions, [
+        { targets: ["item:103"], reason: OUTCOME_REASONS.notCovered },
+      ]);
+      assert.deepEqual(ledger!.end, { state: "completed_with_exceptions" });
     } finally {
       restoreDb();
     }

@@ -103,6 +103,10 @@ import {
   buildToolResultTraceInfo,
   type ToolResultTraceInfo,
 } from "./toolResultTraceInfo";
+import {
+  isTruncatedToolResultContent,
+  toolResultContentForDisplay,
+} from "../../../agent/store/truncatedToolResult";
 import { getAgentRuntime } from "../../../agent";
 import { projectStageEvents } from "./stageProjection";
 import { resolveAgentToolPresentation } from "./toolPresentation";
@@ -4526,13 +4530,16 @@ function projectToolCall(
     return known;
   agentTraceProjectionCounters.toolCallDetails += 1;
   const resultInfo = projectToolResultTraceInfo(result);
+  // A result the trace stored by handle is read from its preview.
+  const resultContent = toolResultContentForDisplay(result?.content);
+  const storedByHandle = isTruncatedToolResultContent(result?.content);
   let presentationDetails: AgentTraceDetail[] = [];
   if (result) {
     try {
       presentationDetails =
         presentation?.buildTraceDetails?.({
           args: payload.args,
-          content: result.content,
+          content: resultContent,
         }) ?? [];
     } catch {
       presentationDetails = [];
@@ -4540,7 +4547,17 @@ function projectToolCall(
   }
   const details = dedupeAgentTraceDetails(
     presentationDetails.length
-      ? presentationDetails
+      ? [
+          ...presentationDetails,
+          // A stored result also says how big it was and where it is.
+          ...(storedByHandle
+            ? (resultInfo?.details || []).filter(
+                (detail) =>
+                  detail.label === "Result size" ||
+                  detail.label === "Stored by handle",
+              )
+            : []),
+        ]
       : [
           ...buildAgentTraceArgsDetails(payload.name, payload.args),
           ...(resultInfo?.details || []),
@@ -4553,7 +4570,7 @@ function projectToolCall(
       summary =
         presentation.buildTraceSummary({
           args: payload.args,
-          content: result.content,
+          content: resultContent,
         }) || null;
     } catch {
       // Keep the regular call summary when display-only formatting fails.
@@ -4663,7 +4680,8 @@ function appendLegacyAgentTraceEvent(
       let row = summarizeAgentTraceToolResult(
         entry.payload.name,
         entry.payload.ok,
-        entry.payload.content,
+        // A result the trace stored by handle is summarized from its preview.
+        toolResultContentForDisplay(entry.payload.content),
         entry.payload.toolLabel,
         entry.payload.effect,
         ctx.requestSummary,

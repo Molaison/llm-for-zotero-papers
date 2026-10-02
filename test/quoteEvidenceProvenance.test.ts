@@ -3,6 +3,10 @@ import {
   clearQuoteEvidenceProvenanceCacheForTests,
   resolveQuoteEvidenceProvenance,
 } from "../src/modules/contextPanel/quoteEvidenceProvenance";
+import {
+  clearAgentToolResultHandleStore,
+  upsertAgentToolResultHandles,
+} from "../src/agent/store/toolResultHandles";
 
 const globalScope = globalThis as typeof globalThis & {
   Zotero?: any;
@@ -332,5 +336,111 @@ describe("quote evidence provenance", function () {
     });
 
     assert.equal(reads, 1);
+  });
+
+  describe("a result the trace stored by handle", function () {
+    const conversationKey = 7;
+
+    /** The run row, its events, and an empty handle table, by statement. */
+    function installStoredRun(events: unknown[]): { runReads: () => number } {
+      let runReads = 0;
+      globalScope.ztoolkit = { log: () => undefined };
+      globalScope.Zotero = {
+        DB: {
+          queryAsync: async (sql: string) => {
+            if (sql.includes("llm_for_zotero_agent_run_events"))
+              return events.map((payload, index) => ({
+                runId: "run-1",
+                seq: index + 1,
+                eventType: "tool_result",
+                payloadJson: JSON.stringify(payload),
+                createdAt: 1,
+              }));
+            if (sql.includes("llm_for_zotero_agent_runs")) {
+              runReads += 1;
+              return [
+                {
+                  runId: "run-1",
+                  conversationKey,
+                  mode: "agent",
+                  modelName: "test",
+                  status: "completed",
+                  createdAt: 1,
+                  completedAt: 2,
+                  finalText: "",
+                },
+              ];
+            }
+            return [];
+          },
+        },
+      };
+      clearQuoteEvidenceProvenanceCacheForTests();
+      clearAgentToolResultHandleStore();
+      return { runReads: () => runReads };
+    }
+
+    afterEach(function () {
+      clearAgentToolResultHandleStore();
+    });
+
+    function storedEvent(handle: string) {
+      return {
+        ...libraryRetrieveEvent([]),
+        toolResultHandle: handle,
+        content: { truncated: true, handle, bytes: 40_000 },
+      };
+    }
+
+    it("reads the passages from the handle the marker names", async function () {
+      const run = installStoredRun([storedEvent("trh_stored")]);
+      await upsertAgentToolResultHandles([
+        {
+          handle: "trh_stored",
+          conversationKey,
+          toolName: "library_retrieve",
+          toolCallId: "call_1",
+          content: libraryRetrieveEvent(DEFAULT_SNIPPETS).content,
+          createdAt: 1,
+        },
+      ]);
+
+      const resolved = await resolveQuoteEvidenceProvenance({
+        agentRunId: "run-1",
+        quoteText: `"${KEINATH_PASSAGE}."`,
+      });
+
+      assert.deepEqual(
+        resolved.map((entry) => [entry.itemId, entry.contextItemId]),
+        [[2242, 2241]],
+      );
+      assert.equal(run.runReads(), 1, "the run is read once for its key");
+    });
+
+    it("skips a marker whose handle is gone, and never throws", async function () {
+      installStoredRun([
+        storedEvent("trh_missing"),
+        libraryRetrieveEvent(DEFAULT_SNIPPETS),
+      ]);
+
+      const resolved = await resolveQuoteEvidenceProvenance({
+        agentRunId: "run-1",
+        quoteText: `"${KEINATH_PASSAGE}."`,
+      });
+
+      assert.deepEqual(
+        resolved.map((entry) => entry.contextItemId),
+        [2241],
+      );
+    });
+
+    it("does not read the run when no result was stored by handle", async function () {
+      const run = installStoredRun([libraryRetrieveEvent(DEFAULT_SNIPPETS)]);
+      await resolveQuoteEvidenceProvenance({
+        agentRunId: "run-1",
+        quoteText: `"${KEINATH_PASSAGE}."`,
+      });
+      assert.equal(run.runReads(), 0);
+    });
   });
 });

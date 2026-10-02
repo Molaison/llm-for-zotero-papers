@@ -132,6 +132,9 @@ export async function loadMaterialOutcomesForConversation(
               materialRefKey(receiptRef)
           )
             continue;
+          // A result with receipts is persisted whole (only receipt-less
+          // successes above the size bound are stored by handle), so its
+          // content still names the journal action.
           const actionId = collectJournalActionIds(event.content)[0];
           saved.entry = {
             ...saved.entry,

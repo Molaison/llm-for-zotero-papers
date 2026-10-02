@@ -18,6 +18,9 @@ import {
   renderPendingActionCard,
   selectToolResultTraceCards,
 } from "../src/modules/contextPanel/agentTrace/render";
+import { buildToolResultTraceInfo } from "../src/modules/contextPanel/agentTrace/toolResultTraceInfo";
+import { compactRunEventForPersistence } from "../src/agent/store/traceStore";
+import { bigPaperReadOverview } from "./helpers/bigPaperReadResult";
 import { buildNoteChangeResultCards } from "../src/agent/tools/write/noteChangePresentation";
 import { buildClaudeMcpToolActivityEvent } from "../src/agent/externalBackendBridge";
 import { buildCodexNativeEffectActivityEvent } from "../src/codexAppServer/nativeClient";
@@ -12309,5 +12312,125 @@ describe("action card row detail wiring", function () {
     assert.equal(headerPill.textContent, "Saved");
     assert.isTrue(node.findByClass("llm-agent-action-row")!.open);
     assert.exists(node.findByClass("llm-spy-detail"));
+  });
+});
+
+describe("tool results stored by handle", function () {
+  const truncated = {
+    type: "tool_result" as const,
+    callId: "call-big",
+    name: "paper_read",
+    ok: true,
+    actionReceipts: [],
+    toolResultHandle: "trh_abc",
+    content: { truncated: true, handle: "trh_abc", bytes: 1_300_000 },
+  };
+
+  it("reports the result's size, its handle and the preview the marker kept", function () {
+    const info = buildToolResultTraceInfo({
+      ...truncated,
+      content: { ...truncated.content, preview: { mode: "overview" } },
+    });
+    assert.deepEqual(
+      info?.details.map((detail) => detail.label),
+      ["Result size", "Stored by handle", "Result preview"],
+    );
+    assert.include(info!.details[2].value, '"mode": "overview"');
+  });
+
+  it("reports the result's size and its handle, and no preview when the marker kept none", function () {
+    const info = buildToolResultTraceInfo(truncated);
+    assert.deepEqual(
+      info?.details.map((detail) => [detail.label, detail.value]),
+      [
+        ["Result size", "1,300,000 chars"],
+        ["Stored by handle", "trh_abc"],
+      ],
+    );
+  });
+
+  it("summarizes a reloaded paper read from its preview exactly as it did live", function () {
+    const live = {
+      type: "tool_result" as const,
+      callId: "call-overview",
+      name: "paper_read",
+      ok: true,
+      actionReceipts: [],
+      toolResultHandle: "trh_overview",
+      content: bigPaperReadOverview(),
+    };
+    const reloaded = compactRunEventForPersistence(live);
+    const trace = (result: typeof live | typeof reloaded) =>
+      withToolPresentationsReturning(
+        { paper_read: paperReadPresentation() },
+        () =>
+          traceRowTexts(
+            buildAgentTraceDisplayItems(
+              [
+                {
+                  runId: "run-1",
+                  seq: 1,
+                  eventType: "tool_call",
+                  payload: {
+                    type: "tool_call",
+                    callId: "call-overview",
+                    name: "paper_read",
+                    args: { mode: "overview" },
+                  },
+                  createdAt: 1,
+                },
+                {
+                  runId: "run-1",
+                  seq: 2,
+                  eventType: "tool_result",
+                  payload: result,
+                  createdAt: 2,
+                },
+              ],
+              null,
+            ).items,
+          ),
+      );
+    const liveRows = trace(live);
+    assert.isTrue(
+      liveRows.some((text) => text.startsWith("Read paper overviews from")),
+      liveRows.join(" | "),
+    );
+    assert.deepEqual(trace(reloaded), liveRows);
+  });
+
+  it("projects a persisted trace with a stored result and a gap in its sequence", function () {
+    const events: AgentRunEventRecord[] = [
+      {
+        runId: "run-1",
+        seq: 1,
+        eventType: "tool_call",
+        payload: {
+          type: "tool_call",
+          callId: "call-big",
+          name: "paper_read",
+          args: { mode: "full" },
+        },
+        createdAt: 1,
+      },
+      // Rows 2-4 were a lost delta buffer.
+      {
+        runId: "run-1",
+        seq: 5,
+        eventType: "tool_result",
+        payload: truncated,
+        createdAt: 5,
+      },
+      {
+        runId: "run-1",
+        seq: 6,
+        eventType: "final",
+        payload: { type: "final", text: "Done." },
+        createdAt: 6,
+      },
+    ];
+    const { items } = buildAgentTraceDisplayItems(events, null);
+    assert.isNotEmpty(items);
+    assert.notInclude(JSON.stringify(items), "Result preview");
   });
 });

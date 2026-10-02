@@ -34,6 +34,7 @@ import {
 } from "../loop/outcomes";
 import { canonicalJson } from "../services/libraryMutation/canonicalJson";
 import { sha256Text } from "../store/journalRecoveryBlobStore";
+import { PERSISTED_TOOL_RESULT_MAX_BYTES } from "../store/truncatedToolResult";
 import {
   createAgentToolResultHandleRecord,
   type AgentToolResultHandleRecord,
@@ -77,6 +78,8 @@ export type ExecutedToolCall = {
   toolDefinition?: import("../types").AgentToolDefinition<any, any>;
   input?: unknown;
   documentEvidenceRefs?: unknown[];
+  /** The model's sized view of a successful result, for a tool that sizes it. */
+  modelView?: Record<string, unknown>;
 };
 
 /** What the turn remembers about a tool call for its own summaries. */
@@ -368,6 +371,9 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
   // evidence cache answers attests its papers again (a part declared since
   // the first read still takes them).
   const readEvidenceByCall = new Map<string, OutcomeEvidence>();
+  // The handle each call's result was stored under this turn, so the trace
+  // names that one instead of storing the same result twice.
+  const handleByCallId = new Map<string, string>();
   /**
    * Stores a result the model reads only part of under a trh_ handle that
    * context_read pages for the rest of the conversation. Undefined when no
@@ -392,10 +398,59 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
     });
     if (!record) return undefined;
     await deps.persistToolResultHandles([record]);
+    handleByCallId.set(params.call.id, record.handle);
     deps.preservedTurnHandleRecords.push(record);
     deps.setToolResultReadAvailable(true);
     setToolResultReadAvailability(deps.request, true);
     return record.handle;
+  };
+
+  /**
+   * The handle holding a result too big for the run's trace, so the trace
+   * can persist a marker naming it (`compactRunEventForPersistence`). A call
+   * whose result was already stored for the model (its sized view, or a
+   * paper read's original) names that handle; otherwise the result is stored
+   * here. Unlike `persistResultHandle` this does not offer the handle to the
+   * model: the model's view of the result is unchanged. The handle is a
+   * digest of the call and the content, so storing it again is an upsert.
+   * Results carrying receipts are persisted whole and need no handle.
+   */
+  const storeOversizedResultForTrace = async (params: {
+    call: AgentToolCall;
+    input: unknown;
+    toolResult: AgentToolResult;
+  }): Promise<string | undefined> => {
+    const { toolResult } = params;
+    if (!toolResult.ok || toolResult.actionReceipts?.length) return undefined;
+    let bytes: number;
+    try {
+      bytes = JSON.stringify(toolResult.content ?? null).length;
+    } catch {
+      return undefined;
+    }
+    if (bytes <= PERSISTED_TOOL_RESULT_MAX_BYTES) return undefined;
+    const stored = handleByCallId.get(params.call.id);
+    if (stored) return stored;
+    try {
+      const inputDigest = `sha256:${await sha256Text(
+        canonicalJson(params.input),
+      )}`;
+      const record = createAgentToolResultHandleRecord({
+        conversationKey: deps.request.conversationKey,
+        toolName: params.call.name,
+        toolCallId: params.call.id,
+        inputDigest,
+        resourceSignature: deps.resourceContextPlan.resourceSignature,
+        content: toolResult.content,
+        createdAt: deps.now(),
+      });
+      if (!record) return undefined;
+      await deps.persistToolResultHandles([record]);
+      return record.handle;
+    } catch {
+      // Without a handle the trace stores the result whole, as before.
+      return undefined;
+    }
   };
 
   /**
@@ -626,12 +681,7 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
             resourceSignature: deps.resourceContextPlan.resourceSignature,
           })
         : null;
-    let executedCall: {
-      toolResult: AgentToolResult;
-      toolDefinition?: import("../types").AgentToolDefinition<any, any>;
-      input?: unknown;
-      documentEvidenceRefs?: unknown[];
-    };
+    let executedCall: ExecutedToolCall;
     /** The arguments a review card showed the user before the call ran. */
     let reviewedArguments: unknown;
     const writtenInJob = cachedPaperEvidence
@@ -851,6 +901,22 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
         : undefined,
       materialRef: toolResult.materialRef,
     });
+    // The model's view is stored before the result is announced, so a big
+    // result's trace row can name the handle the view already stored.
+    if (toolResult.ok && executedCall.toolDefinition?.buildModelView) {
+      executedCall.modelView = await buildModelViewContent({
+        call,
+        toolDefinition: executedCall.toolDefinition,
+        input: executedCall.input,
+        toolResult,
+        documentEvidenceRefs: executedCall.documentEvidenceRefs,
+      });
+    }
+    const toolResultHandle = await storeOversizedResultForTrace({
+      call,
+      input: executedCall.input,
+      toolResult,
+    });
     await deps.emit({
       type: "tool_result",
       callId: toolResult.callId,
@@ -863,6 +929,7 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
       actionReceipts: toolResult.actionReceipts,
       content: toolResult.content,
       artifacts: toolResult.artifacts,
+      ...(toolResultHandle ? { toolResultHandle } : {}),
     });
     if (paperLedgerDelta) {
       await deps.emit(buildPaperLedgerUpdateEvent(paperLedgerDelta));
@@ -1063,19 +1130,14 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
     const executedCall = await executePreparedToolCall(call, round, {
       inheritedApproval: options.inheritedApproval,
     });
-    const { toolResult, toolDefinition, input, documentEvidenceRefs } =
-      executedCall;
+    const {
+      toolResult,
+      toolDefinition,
+      input,
+      documentEvidenceRefs,
+      modelView,
+    } = executedCall;
     const deliveryCallId = options.modelCallId || call.id;
-    const modelView =
-      toolResult.ok && toolDefinition?.buildModelView
-        ? await buildModelViewContent({
-            call,
-            toolDefinition,
-            input,
-            toolResult,
-            documentEvidenceRefs,
-          })
-        : undefined;
     const contentForModel =
       modelView ||
       (documentEvidenceRefs?.length

@@ -487,6 +487,13 @@ export type AgentEvent =
       actionReceipts: AgentActionReceipt[];
       content: unknown;
       artifacts?: AgentToolArtifact[];
+      /**
+       * The trh_ handle holding the whole content, for a result too big to
+       * persist in the trace. The live event carries the content too; the
+       * persisted row carries `{ truncated: true, handle, bytes }` instead.
+       * Optional: small results and older events carry none.
+       */
+      toolResultHandle?: string;
     }
   | {
       type: "tool_error";

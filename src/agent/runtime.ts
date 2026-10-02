@@ -1,5 +1,10 @@
 import { ensureModelCapabilities } from "../modelCapabilities";
 import { reanchorQuoteCitationsToClaims } from "../services/quotes/claimAnchoring";
+import {
+  QUOTE_CITATION_PATTERN,
+  selectUsedQuoteCitations,
+} from "../services/quotes/quoteCitations";
+import { paragraphCitationIds } from "../services/quotes/paragraphCitations";
 import type { QuoteCitation } from "../shared/types";
 import {
   areConversationWritesFrozen,
@@ -131,13 +136,17 @@ import {
 } from "./store/toolResultHandles";
 import { listResumableBatches } from "./store/batchItemStore";
 import {
-  appendAgentRunEvent,
+  appendAgentRunEvents,
   createAgentRun,
   finishAgentRun,
   getAgentRunTrace,
   getLatestAgentRunForConversation,
   INTERRUPTED_AGENT_RUN_MARKER,
 } from "./store/traceStore";
+import {
+  createRunEventWriter,
+  type RunEventWriter,
+} from "./store/runEventWriter";
 import {
   appendAgentTranscriptMessages,
   PORTABLE_TRANSCRIPT_KEY,
@@ -275,6 +284,26 @@ const END_STATES_RECORDED_WITHOUT_OUTCOMES: ReadonlySet<RunEndState> =
  * import) is not waited for: the turn goes on as it did before it waited.
  */
 const STOPPED_RUN_WAIT_MS = 60_000;
+
+/**
+ * Run events written (with every row buffered before them) before the panel
+ * sees them: the durable boundaries a reload must find. Deltas, statuses and
+ * other progress reach the panel first and are written with their batch, at
+ * most 250 ms or 64 rows later; a crash loses at most that buffer.
+ */
+const FLUSH_BEFORE_DELIVERY: ReadonlySet<AgentEvent["type"]> = new Set<
+  AgentEvent["type"]
+>([
+  "tool_call",
+  "tool_result",
+  "tool_error",
+  "final",
+  "material_finalized",
+  "execution_checkpoint",
+  "execution_checkpoint_delta",
+  "confirmation_required",
+  "confirmation_resolved",
+]);
 
 /**
  * The latest turn this process started in each conversation, until it
@@ -564,6 +593,9 @@ export class AgentRuntime {
     // The run's event stream, once it is open. An ending before then has no
     // stream to record its stop rule in.
     let emitRunEvent: ((event: AgentEvent) => Promise<void>) | undefined;
+    // The run's event rows, written in batches off the stream's critical
+    // path once the stream is open; flushed before every durable boundary.
+    let runEvents: RunEventWriter | undefined;
     // Records the results of a long job's unfinished page, once the turn has
     // a job to record; a Stop or an error calls it before the run ends.
     let recordUnfinishedPage: (() => Promise<void>) | undefined;
@@ -650,6 +682,8 @@ export class AgentRuntime {
       stopRule: RunStopRule,
     ): Promise<void> => {
       runTerminating = true;
+      // Every event emitted so far is written before the ending is.
+      await runEvents?.flush();
       if (recordsOutcomes()) {
         try {
           const end = decideRunEnd(request.executionCheckpoint, {
@@ -684,6 +718,7 @@ export class AgentRuntime {
         // how the run ends.
         logRuntimeWarning("LLM Agent: recording the stop rule failed", error);
       }
+      await runEvents?.flush();
       await persistIfLive(() => finishAgentRun(runId, status, finalText));
     };
     // A turn started while the one before it in this conversation is still
@@ -779,6 +814,73 @@ export class AgentRuntime {
       // from, so the terminal answer can be re-anchored to the claims it makes.
       const passageCitations = new PassageCitationCollector();
       let passageCollectionFailed = false;
+      /**
+       * The papers an answer cites (`item:<id>`), from the citations this
+       * turn's tools delivered that the answer uses. Undefined when that
+       * cannot be told: citation collection failed, or the answer cites only
+       * ids no tool delivered, or (for a document, whose citations may be
+       * structured rather than tokens in its text) nothing resolves. An
+       * empty list means a prose answer that cites nothing.
+       */
+      const answerCitedTargets = (
+        text: string,
+        options: { document?: boolean } = {},
+      ): string[] | undefined => {
+        if (passageCollectionFailed) return undefined;
+        let used: QuoteCitation[];
+        try {
+          used = selectUsedQuoteCitations({
+            text,
+            quoteCitations: passageCitations.quoteCitations,
+          });
+        } catch (error) {
+          logRuntimeWarning(
+            "LLM Agent: reading the answer's citations failed",
+            error,
+          );
+          return undefined;
+        }
+        const referenced = new Set<string>(paragraphCitationIds(text));
+        for (const match of text.matchAll(
+          new RegExp(QUOTE_CITATION_PATTERN.source, "g"),
+        ))
+          referenced.add(match[1]);
+        // A selected-text anchor is offered with every answer; it counts
+        // only when the answer cites it.
+        const cited = used.filter(
+          (citation) =>
+            citation.sourceMatchKind !== "selected-text" ||
+            referenced.has(citation.id),
+        );
+        const targets = [
+          ...new Set(
+            cited.flatMap((citation) => {
+              const itemId = Number(citation.itemId);
+              return Number.isInteger(itemId) && itemId > 0
+                ? [`item:${itemId}`]
+                : [];
+            }),
+          ),
+        ];
+        if (targets.length) return targets;
+        if (options.document || cited.length || referenced.size)
+          return undefined;
+        return [];
+      };
+      const writer = createRunEventWriter({
+        persist: (rows) =>
+          persistIfLive(() => appendAgentRunEvents(runId, rows)).then(
+            () => undefined,
+          ),
+        setTimeout: (fn, ms) => globalThis.setTimeout(fn, ms),
+        clearTimeout: (handle) =>
+          globalThis.clearTimeout(
+            handle as ReturnType<typeof globalThis.setTimeout>,
+          ),
+        onError: (error) =>
+          logRuntimeWarning("LLM Agent: run event persistence failed", error),
+      });
+      runEvents = writer;
       const emit = async (event: AgentEvent) => {
         if (!writeAllowed()) return;
         // Collected before redaction: the collector keeps only quote and
@@ -801,9 +903,15 @@ export class AgentRuntime {
         }
         for (const redactedEvent of eventStreamRedactor.process(event)) {
           eventSeq += 1;
-          await persistIfLive(() =>
-            appendAgentRunEvent(runId, eventSeq, redactedEvent),
-          );
+          writer.enqueue({
+            seq: eventSeq,
+            event: redactedEvent,
+            createdAt: this.now(),
+          });
+          // A durable boundary is written before the panel sees it; a delta
+          // reaches the panel first and is written with its batch.
+          if (FLUSH_BEFORE_DELIVERY.has(redactedEvent.type))
+            await writer.flush();
           if (writeAllowed()) await params.onEvent?.(redactedEvent);
         }
       };
@@ -1386,6 +1494,8 @@ export class AgentRuntime {
           requireAccepted?: boolean;
         } = {},
       ): Promise<AgentTranscriptWriteResult | undefined> => {
+        // The trace is written up to here before the transcript moves on.
+        await runEvents?.flush();
         if (!newTranscriptMessages.length) return "skipped";
         const portable = buildPortableAgentTranscript({
           messages: [...transcriptSegment.messages, ...newTranscriptMessages],
@@ -1617,13 +1727,21 @@ export class AgentRuntime {
         // improvement on it, never a condition of publishing it: if
         // re-anchoring or its redaction throws, the final event and the
         // outcome still carry the answer, without citations.
+        //
+        // Only the citations the answer uses are published: the tool results
+        // already delivered the whole retrieved set to the panel, and a final
+        // event carrying every passage of a long run froze it at completion.
         let finalQuoteCitations: QuoteCitation[] | undefined;
         try {
-          finalQuoteCitations = passageCitations.quoteCitations.length
+          const usedCitations = selectUsedQuoteCitations({
+            text: redactedFinalText,
+            quoteCitations: passageCitations.quoteCitations,
+          });
+          finalQuoteCitations = usedCitations.length
             ? turnPathRedactor.redactTerminalValue(
                 this.reanchorCitations({
                   text: redactedFinalText,
-                  quoteCitations: passageCitations.quoteCitations,
+                  quoteCitations: usedCitations,
                   passageTextByCitationId:
                     passageCitations.passageTextByCitationId,
                 }).quoteCitations,
@@ -2539,7 +2657,13 @@ export class AgentRuntime {
               terminalOutcome.documentId &&
               recordsOutcomes()
             )
-              await recordOutcomeEvidence({ kind: "answer" });
+              await recordOutcomeEvidence({
+                kind: "answer",
+                citedTargets: answerCitedTargets(
+                  `${committedAnswerText}${terminalOutcome.finalText || uncommittedAnswerText()}`,
+                  { document: true },
+                ),
+              });
             return await completeRun(
               terminalOutcome.finalText || uncommittedAnswerText(),
               terminalOutcome.failed ? "failed" : "completed",
@@ -2743,10 +2867,14 @@ export class AgentRuntime {
               );
             }
             const answerPrefix = keptAnswerVisibleText;
+            const acceptedAnswerText = `${committedAnswerText}${keptAnswerModelText}${rawModelFinalText}`;
             keptAnswerVisibleText = "";
             keptAnswerModelText = "";
             if (recordsOutcomes())
-              await recordOutcomeEvidence({ kind: "answer" });
+              await recordOutcomeEvidence({
+                kind: "answer",
+                citedTargets: answerCitedTargets(acceptedAnswerText),
+              });
             return await emitFinalStep(
               step,
               `${answerPrefix}${stepStreamedText}`,
@@ -2891,7 +3019,13 @@ export class AgentRuntime {
               await persistTranscriptCheckpoint();
               // A finalized document that ends the turn is its answer.
               if (!outcome.failed && outcome.documentId && recordsOutcomes())
-                await recordOutcomeEvidence({ kind: "answer" });
+                await recordOutcomeEvidence({
+                  kind: "answer",
+                  citedTargets: answerCitedTargets(
+                    `${committedAnswerText}${stopFinalText}`,
+                    { document: true },
+                  ),
+                });
               return await completeRun(
                 stopFinalText,
                 outcome.failed ? "failed" : "completed",
@@ -3027,6 +3161,9 @@ export class AgentRuntime {
       }
       throw error;
     } finally {
+      // Every event row is written before the turn counts as settled. The
+      // writer reports its own failures; closing it never throws.
+      await runEvents?.close();
       if (unsettledTurns.get(request.conversationKey) === settling)
         unsettledTurns.delete(request.conversationKey);
       settled();
