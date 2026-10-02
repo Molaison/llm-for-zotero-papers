@@ -13,8 +13,17 @@ export type ExecutionTaskStatus =
   | "skipped"
   | "cancelled";
 
-/** What completes an outcome. */
-export type OutcomeEffect = "read" | "artifact" | "mutation" | "answer";
+/**
+ * What completes an outcome. A `digest` part is one the host does itself: it
+ * summarizes each paper the part names and ticks the paper when its summary
+ * is complete.
+ */
+export type OutcomeEffect =
+  | "read"
+  | "artifact"
+  | "mutation"
+  | "answer"
+  | "digest";
 
 /** Targets a receipt rejected or could not do, with the host's reason. */
 export type OutcomeException = Readonly<{

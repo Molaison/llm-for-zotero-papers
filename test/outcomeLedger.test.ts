@@ -3363,3 +3363,296 @@ describe("outcome ledger: one part per note", function () {
     });
   });
 });
+
+describe("outcome ledger: digest parts", function () {
+  const digestPart: OutcomeDeclaration = {
+    taskId: "summaries",
+    description: "Summarize each selected paper",
+    effect: "digest",
+    targets: ["item:1", "item:2", "item:3"],
+    scope: true,
+  };
+  const evidence = (
+    done: string[],
+    failed: Array<{ target: string; reason: string }> = [],
+    local = "summaries",
+  ): OutcomeEvidence => ({
+    kind: "digest",
+    taskId: taskId(local),
+    done,
+    failed,
+  });
+
+  it("declares a digest part pending with its frozen targets", function () {
+    const ledger = ledgerWith(digestPart);
+    const task = ledger.tasks[0];
+    assert.equal(task.effect, "digest");
+    assert.equal(task.status, "pending");
+    assert.deepEqual(task.targets, ["item:1", "item:2", "item:3"]);
+    assert.isTrue(task.scope);
+  });
+
+  it("grows doneTargets one paper at a time and completes on the last", function () {
+    let ledger = ledgerWith(digestPart);
+    ledger = frozen(
+      applyOutcomeEvidence(ledger, evidence(["item:1"]), 30).checkpoint,
+    );
+    assert.deepEqual(ledger.tasks[0].doneTargets, ["item:1"]);
+    assert.equal(ledger.tasks[0].status, "pending");
+    ledger = frozen(
+      applyOutcomeEvidence(ledger, evidence(["item:2"]), 31).checkpoint,
+    );
+    ledger = frozen(
+      applyOutcomeEvidence(ledger, evidence(["item:3"]), 32).checkpoint,
+    );
+    assert.equal(ledger.tasks[0].status, "completed");
+    assert.deepEqual(ledger.tasks[0].doneTargets, [
+      "item:1",
+      "item:2",
+      "item:3",
+    ]);
+    assert.isUndefined(ledger.tasks[0].exceptions);
+    assert.equal(ledger.tasks[0].updatedAt, 32);
+  });
+
+  it("is idempotent: the same paper's digest again changes nothing", function () {
+    const once = frozen(
+      applyOutcomeEvidence(ledgerWith(digestPart), evidence(["item:1"]), 30)
+        .checkpoint,
+    );
+    const again = applyOutcomeEvidence(once, evidence(["item:1"]), 31);
+    assert.isFalse(again.changed);
+    assert.strictEqual(again.checkpoint, once);
+  });
+
+  it("completes with an exception naming the paper that failed", function () {
+    let ledger = ledgerWith(digestPart);
+    ledger = frozen(
+      applyOutcomeEvidence(ledger, evidence(["item:1", "item:2"]), 30)
+        .checkpoint,
+    );
+    ledger = frozen(
+      applyOutcomeEvidence(
+        ledger,
+        evidence([], [{ target: "item:3", reason: OUTCOME_REASONS.noText }]),
+        31,
+      ).checkpoint,
+    );
+    assert.equal(ledger.tasks[0].status, "completed");
+    assert.deepEqual(ledger.tasks[0].exceptions, [
+      { targets: ["item:3"], reason: OUTCOME_REASONS.noText },
+    ]);
+    assert.equal(
+      decideRunEnd(ledger, {
+        status: "completed",
+        stopRule: "final_answer" as RunStopRule,
+      }),
+      "completed_with_exceptions",
+    );
+  });
+
+  it("stays pending while a failure leaves papers unaccounted", function () {
+    const ledger = applyOutcomeEvidence(
+      ledgerWith(digestPart),
+      evidence([], [{ target: "item:1", reason: "Timed out" }]),
+      30,
+    ).checkpoint;
+    assert.equal(ledger.tasks[0].status, "pending");
+    assert.isUndefined(ledger.tasks[0].doneTargets);
+    assert.deepEqual(ledger.tasks[0].exceptions, [
+      { targets: ["item:1"], reason: "Timed out" },
+    ]);
+  });
+
+  it("is skipped with the first reason when every paper failed", function () {
+    const ledger = applyOutcomeEvidence(
+      ledgerWith(digestPart),
+      evidence(
+        [],
+        [
+          { target: "item:1", reason: "No readable text" },
+          { target: "item:2", reason: "No readable text" },
+          { target: "item:3", reason: "Timed out" },
+        ],
+      ),
+      30,
+    ).checkpoint;
+    assert.equal(ledger.tasks[0].status, "skipped");
+    assert.equal(ledger.tasks[0].reason, "No readable text");
+    assert.deepEqual(ledger.tasks[0].exceptions, [
+      { targets: ["item:1", "item:2"], reason: "No readable text" },
+      { targets: ["item:3"], reason: "Timed out" },
+    ]);
+  });
+
+  it("a blank failure reason falls back to the host's reason", function () {
+    const ledger = applyOutcomeEvidence(
+      ledgerWith(digestPart),
+      evidence([], [{ target: "item:1", reason: "  " }]),
+      30,
+    ).checkpoint;
+    assert.deepEqual(ledger.tasks[0].exceptions, [
+      { targets: ["item:1"], reason: OUTCOME_REASONS.notApplied },
+    ]);
+  });
+
+  it("never excepts a paper already done", function () {
+    let ledger = frozen(
+      applyOutcomeEvidence(ledgerWith(digestPart), evidence(["item:1"]), 30)
+        .checkpoint,
+    );
+    const result = applyOutcomeEvidence(
+      ledger,
+      evidence([], [{ target: "item:1", reason: "Timed out" }]),
+      31,
+    );
+    assert.isFalse(result.changed);
+    ledger = frozen(
+      applyOutcomeEvidence(
+        ledger,
+        evidence(["item:2"], [{ target: "item:2", reason: "Timed out" }]),
+        32,
+      ).checkpoint,
+    );
+    assert.deepEqual(ledger.tasks[0].doneTargets, ["item:1", "item:2"]);
+    assert.isUndefined(ledger.tasks[0].exceptions);
+  });
+
+  it("a retry that digests an excepted paper clears its exception", function () {
+    let ledger = ledgerWith(digestPart);
+    ledger = frozen(
+      applyOutcomeEvidence(ledger, evidence(["item:1", "item:2"]), 30)
+        .checkpoint,
+    );
+    ledger = frozen(
+      applyOutcomeEvidence(
+        ledger,
+        evidence([], [{ target: "item:3", reason: "Timed out" }]),
+        31,
+      ).checkpoint,
+    );
+    assert.equal(ledger.tasks[0].status, "completed");
+    ledger = frozen(
+      applyOutcomeEvidence(ledger, evidence(["item:3"]), 32).checkpoint,
+    );
+    assert.equal(ledger.tasks[0].status, "completed");
+    assert.isUndefined(ledger.tasks[0].exceptions);
+    assert.isUndefined(ledger.tasks[0].reason);
+  });
+
+  it("a retry turns a part skipped for failures into a completed one", function () {
+    let ledger = frozen(
+      applyOutcomeEvidence(
+        ledgerWith(digestPart),
+        evidence(
+          [],
+          ["item:1", "item:2", "item:3"].map((target) => ({
+            target,
+            reason: "Timed out",
+          })),
+        ),
+        30,
+      ).checkpoint,
+    );
+    assert.equal(ledger.tasks[0].status, "skipped");
+    ledger = frozen(
+      applyOutcomeEvidence(ledger, evidence(["item:2"]), 31).checkpoint,
+    );
+    assert.equal(ledger.tasks[0].status, "completed");
+    assert.isUndefined(ledger.tasks[0].reason);
+    assert.deepEqual(ledger.tasks[0].doneTargets, ["item:2"]);
+    assert.deepEqual(ledger.tasks[0].exceptions, [
+      { targets: ["item:1", "item:3"], reason: "Timed out" },
+    ]);
+  });
+
+  it("touches only the part it names and ignores papers it does not name", function () {
+    const ledger = ledgerWith(digestPart, {
+      taskId: "other",
+      description: "Summarize the rest",
+      effect: "digest",
+      targets: ["item:9"],
+    });
+    const { checkpoint, changed } = applyOutcomeEvidence(
+      ledger,
+      evidence(
+        ["item:1"],
+        [{ target: "item:2", reason: "Timed out" }],
+        "other",
+      ),
+      30,
+    );
+    assert.isFalse(changed);
+    assert.strictEqual(checkpoint, ledger);
+  });
+
+  it("moves no part of another effect, nor a blocked or cancelled digest part", function () {
+    const read = ledgerWith({
+      taskId: "summaries",
+      description: "Read each paper",
+      effect: "read",
+      targets: ["item:1"],
+    });
+    assert.isFalse(
+      applyOutcomeEvidence(read, evidence(["item:1"]), 30).changed,
+    );
+    const cancelled = frozen(
+      markOutcomes(
+        ledgerWith(digestPart),
+        [{ taskId: "summaries", status: "cancelled", reason: "User stopped" }],
+        25,
+      ).checkpoint,
+    );
+    assert.isFalse(
+      applyOutcomeEvidence(cancelled, evidence(["item:1"]), 30).changed,
+    );
+  });
+
+  it("reads and papers given up on leave a digest part alone", function () {
+    const ledger = ledgerWith(digestPart);
+    for (const other of [
+      {
+        kind: "read",
+        targets: ["item:1"],
+        observationIds: ["obs-1"],
+      },
+      { kind: "failed", targets: ["item:1"], reason: "Timed out" },
+    ] as OutcomeEvidence[]) {
+      assert.isFalse(applyOutcomeEvidence(ledger, other, 30).changed);
+    }
+  });
+
+  it("the answer does not complete a digest part; the run ends with exceptions", function () {
+    const ledger = applyOutcomeEvidence(
+      ledgerWith(digestPart),
+      { kind: "answer" },
+      30,
+    ).checkpoint;
+    assert.equal(ledger.tasks[0].status, "pending");
+    assert.lengthOf(openDeclaredOutcomes(ledger), 1);
+    assert.equal(
+      decideRunEnd(ledger, {
+        status: "completed",
+        stopRule: "final_answer" as RunStopRule,
+      }),
+      "completed_with_exceptions",
+    );
+    assert.equal(
+      settleOutcomes(ledger, "completed_with_exceptions", 40).tasks[0].status,
+      "skipped",
+    );
+  });
+
+  it("each paper's digest moves the progress signature", function () {
+    const before = ledgerWith(digestPart);
+    const after = applyOutcomeEvidence(
+      before,
+      evidence(["item:1"]),
+      30,
+    ).checkpoint;
+    assert.notEqual(
+      outcomeProgressSignature(before),
+      outcomeProgressSignature(after),
+    );
+  });
+});

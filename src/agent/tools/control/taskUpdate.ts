@@ -25,7 +25,7 @@ import {
   type OutcomeModelMark,
 } from "../../loop/outcomes";
 
-type ExpectedEffect = "read" | "artifact" | "mutation" | "reasoning";
+type ExpectedEffect = "read" | "artifact" | "mutation" | "reasoning" | "digest";
 
 /** A part of the request the model declares for the host to track. */
 type TaskDeclaration = {
@@ -58,6 +58,7 @@ const EXPECTED_EFFECTS: readonly ExpectedEffect[] = [
   "artifact",
   "mutation",
   "reasoning",
+  "digest",
 ];
 
 const DECLARATION_SCHEMA = {
@@ -89,7 +90,9 @@ const EXCEPTION_SCHEMA = {
 } as const;
 
 const EXPECTED_EFFECT_REQUIRED =
-  "Give each new task an expectedEffect: read, artifact, mutation, or reasoning.";
+  "Give each new task an expectedEffect: read, artifact, mutation, reasoning, or digest (one host-made summary per paper).";
+const DIGEST_NEEDS_PAPERS =
+  "A digest part names the papers it digests: targetIds, or scope:true for the whole Paper scope.";
 const HOST_MARKS_DONE =
   "Nothing changed: the host marks parts done from the tools' results, so progress needs no task_update call. Continue the work, or answer when it is done.";
 /** The note for skips refused because nothing was delivered for their parts. */
@@ -285,18 +288,48 @@ function declaredTargets(
   };
 }
 
+/** A digest part the host is asked to run, and the papers to digest now. */
+export type DigestPartRun = { taskId: string; targets: string[] };
+
+/**
+ * The papers a repeated digest declaration asks for: its targetIds, as the
+ * part's own targets in the part's own order, or, without targetIds, every
+ * paper the part has not done (a resume after Stop, or a retry of failures).
+ */
+function digestRetryTargets(
+  task: ExecutionCheckpointTask,
+  targetIds: readonly string[] | undefined,
+): string[] {
+  const targets = task.targets || [];
+  if (targetIds?.length) {
+    const named = new Set(
+      targetIds.map((id) => (/^[1-9]\d*$/.test(id) ? `item:${id}` : id)),
+    );
+    return targets.filter((target) => named.has(target));
+  }
+  const done = new Set(task.doneTargets || []);
+  return targets.filter((target) => !done.has(target));
+}
+
 /**
  * One ordinary call: its declarations become declared parts, then its
  * skipped, blocked or cancelled parts are marked with their reasons. A
- * repeated declaration changes nothing, and `ignored` says so. A malformed
- * call is an input rejection.
+ * repeated declaration changes nothing, and `ignored` says so, except for a
+ * digest part: declaring one, or repeating it, asks the host to run it, and
+ * `digestParts` lists those runs with their papers. A malformed call is an
+ * input rejection.
  */
-function applyOrdinaryTaskUpdates(
+export function applyOrdinaryTaskUpdates(
   checkpoint: ExecutionCheckpoint,
   input: TaskUpdateInput,
   now: number,
   scopePapers: TaskPaperScopeSet | undefined,
-): { checkpoint: ExecutionCheckpoint; ignored: boolean; refused: string[] } {
+): {
+  checkpoint: ExecutionCheckpoint;
+  ignored: boolean;
+  refused: string[];
+  digestParts: DigestPartRun[];
+} {
   try {
     const existing = new Map(
       checkpoint.tasks.map((task) => [task.taskId, task]),
@@ -321,6 +354,9 @@ function applyOrdinaryTaskUpdates(
     const declarations: OutcomeDeclaration[] = [];
     const declared = new Set<string>();
     let ignored = false;
+    // Digest parts this call asks to run: new ones with every paper, repeated
+    // ones with the papers the repeat names (`digestRetryTargets`).
+    const digestRuns: Array<{ taskId: string; targetIds?: string[] }> = [];
     for (const request of input.tasks) {
       const taskId = qualified(request.taskId);
       onlyOnce(declared, taskId);
@@ -332,6 +368,9 @@ function applyOrdinaryTaskUpdates(
             : request.expectedEffect;
         if (!effect) throw new ToolInputRejection(EXPECTED_EFFECT_REQUIRED);
         const { targets, scope } = declaredTargets(request, scopePapers);
+        if (effect === "digest" && !targets?.length)
+          throw new ToolInputRejection(DIGEST_NEEDS_PAPERS);
+        if (effect === "digest") digestRuns.push({ taskId });
         declarations.push({
           taskId,
           description: request.description || "",
@@ -349,6 +388,10 @@ function applyOrdinaryTaskUpdates(
           description: request.description,
           effect: prior.effect || "answer",
         });
+      if (prior.effect === "digest") {
+        digestRuns.push({ taskId, targetIds: request.targetIds });
+        continue;
+      }
       if (!marked.has(taskId)) ignored = true;
     }
     const applied = markOutcomes(
@@ -357,8 +400,20 @@ function applyOrdinaryTaskUpdates(
       now,
     );
     const prefix = `${checkpoint.executionId}:task:`;
+    const tasks = new Map(
+      applied.checkpoint.tasks.map((task) => [task.taskId, task]),
+    );
+    const digestParts = digestRuns.flatMap(({ taskId, targetIds }) => {
+      const task = tasks.get(taskId);
+      // A part the same call marks, or one a write capability made a
+      // mutation, runs no digest.
+      if (task?.effect !== "digest" || marked.has(taskId)) return [];
+      const targets = digestRetryTargets(task, targetIds);
+      return targets.length ? [{ taskId, targets }] : [];
+    });
     return {
       checkpoint: applied.checkpoint,
+      digestParts,
       ignored: ignored || applied.ignored.length > 0,
       refused: applied.refused.map(({ taskId }) =>
         taskId.startsWith(prefix) ? taskId.slice(prefix.length) : taskId,
@@ -380,7 +435,7 @@ export function createTaskUpdateTool(): AgentToolDefinition<
     spec: {
       name: "task_update",
       description:
-        "Declare a compound request's parts for the host to track: expectedCapability such as zotero.notes for a write; targetIds, or scope:true for the whole Paper scope. The host marks parts done; list one that cannot be done under skipped or blocked, with the reason.",
+        "Declare a compound request's parts for the host to track: expectedCapability such as zotero.notes for a write; targetIds, or scope:true for the whole Paper scope; expectedEffect 'digest' asks the host to summarize each named paper itself and return the summaries. The host marks parts done; list one that cannot be done under skipped or blocked, with the reason.",
       inputSchema: {
         type: "object",
         additionalProperties: false,

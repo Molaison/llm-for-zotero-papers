@@ -1087,6 +1087,50 @@ describe("long job", function () {
         assert.equal(priced(part), PAPER_TEXT_PRIOR_TOKENS, part.description);
     });
 
+    it("never pages a digest part and does not price its papers as text", function () {
+      // The host digests each paper itself; the model reads none of their
+      // text, so a digest part is no job of the pager's.
+      const digestOnly = declareOutcomes(
+        createEmptyExecutionCheckpoint(executionContext, 1),
+        [
+          {
+            taskId: "summaries",
+            description: "Summarize each paper",
+            effect: "digest",
+            targets: items(120),
+            scope: true,
+          },
+        ],
+        3,
+      );
+      assert.equal(digestOnly.tasks[0].effect, "digest");
+      assert.isNull(readLongJob(digestOnly));
+      assert.isNull(
+        libraryPager().check({
+          checkpoint: digestOnly,
+          promptTokens: 10_000,
+          budgetTokens: 30_000,
+        }),
+      );
+      // Beside a job of changes, its papers still cost only their records.
+      const withMoves = declareOutcomes(
+        moveLedger(items(60)),
+        [
+          {
+            taskId: "summaries",
+            description: "Summarize each paper",
+            effect: "digest",
+            targets: items(60),
+          },
+        ],
+        3,
+      );
+      assert.equal(
+        plannedPage(libraryPager(), withMoves, 10_000, 30_000).costPerPaper,
+        PAPER_RECORD_PRIOR_TOKENS,
+      );
+    });
+
     it("measures a page of changes from its own calls", function () {
       const pager = libraryPager();
       let ledger = moveLedger(items(60));

@@ -16,6 +16,7 @@ import type {
   OutcomeException,
   RunEndState,
 } from "../execution/types";
+import type { PaperDigestFailure } from "../digests/paperDigestWorker";
 import type { RunStopRule } from "./stopRules";
 
 /**
@@ -34,6 +35,17 @@ import type { RunStopRule } from "./stopRules";
  * no readable text becomes an exception, so the part can still complete with
  * the rest read. A read part that names no papers completes on any read, an
  * abstract included.
+ *
+ * Digest parts. A digest part asks the host to summarize each paper it names
+ * itself (`digests/paperDigestWorker.ts`); the model reads none of their
+ * text. Only digest evidence that names the part moves it: each paper whose
+ * summary is complete is done, and each paper the host gave up on is an
+ * exception with the host's reason. A paper done is never excepted again,
+ * and a later digest of an excepted paper clears its exception, even after
+ * the part settled. Once every paper is one or the other the part completes
+ * when any is done, and is skipped with the first reason when none is. The
+ * answer does not complete a digest part, and the long-job pager never pages
+ * one.
  */
 
 export type OutcomeDeclaration = {
@@ -98,6 +110,15 @@ export type OutcomeEvidence =
       /** Papers a tool failed on twice the same way; the host gives up on them. */
       targets: readonly string[];
       reason: string;
+    }
+  | {
+      kind: "digest";
+      /** The digest part, qualified (`<executionId>:task:<local>`). */
+      taskId: string;
+      /** Papers whose digest is complete, in the part's own target form. */
+      done: readonly string[];
+      /** Papers whose digest failed for good, with the host's reason. */
+      failed: readonly Pick<PaperDigestFailure, "target" | "reason">[];
     };
 
 /** Every reason the host writes into the ledger, for the UI to translate. */
@@ -122,6 +143,7 @@ const OUTCOME_EFFECTS: ReadonlySet<string> = new Set<OutcomeEffect>([
   "artifact",
   "mutation",
   "answer",
+  "digest",
 ]);
 const MARK_STATUSES: ReadonlySet<string> = new Set([
   "skipped",
@@ -132,6 +154,12 @@ const MARKABLE_STATUSES: ReadonlySet<string> = new Set([
   "pending",
   "in_progress",
   "blocked",
+]);
+/** A digest part takes evidence while open, and a retry after it settled. */
+const DIGEST_CANDIDATE_STATUSES: ReadonlySet<string> = new Set([
+  "pending",
+  "completed",
+  "skipped",
 ]);
 const RECEIPT_CANDIDATE_STATUSES: ReadonlySet<string> = new Set([
   "pending",
@@ -1117,6 +1145,60 @@ function applyFailure(
   });
 }
 
+/**
+ * Per-paper digests for the part the evidence names, as the module doc sets:
+ * the papers it names grow its done papers, its failures become exceptions,
+ * and it settles once every paper is one or the other. A settled part that
+ * gets a paper done again is open for that retry: it is pending until every
+ * paper is accounted for. Nothing moves for evidence it already holds.
+ */
+function applyDigest(
+  checkpoint: ExecutionCheckpoint,
+  evidence: Extract<OutcomeEvidence, { kind: "digest" }>,
+  now: number,
+): EvidenceResult {
+  return mapTasks(checkpoint, now, (task) => {
+    if (
+      task.taskId !== evidence.taskId ||
+      task.effect !== "digest" ||
+      !DIGEST_CANDIDATE_STATUSES.has(task.status)
+    )
+      return undefined;
+    const targets = task.targets || [];
+    const doneTargets = union(
+      task.doneTargets,
+      unique(evidence.done).filter((target) => targets.includes(target)),
+    );
+    let exceptions = withoutDone(task.exceptions || [], doneTargets);
+    for (const failure of evidence.failed) {
+      if (
+        !targets.includes(failure.target) ||
+        doneTargets.includes(failure.target)
+      )
+        continue;
+      exceptions = exceptTargets(
+        exceptions,
+        [failure.target],
+        failure.reason.trim() || OUTCOME_REASONS.notApplied,
+      );
+    }
+    if (
+      doneTargets.length === (task.doneTargets?.length || 0) &&
+      JSON.stringify(exceptions) === JSON.stringify(task.exceptions || [])
+    )
+      return undefined;
+    const { exceptions: _previous, reason: _reason, ...rest } = task;
+    const next: Task = {
+      ...rest,
+      status: "pending",
+      ...(doneTargets.length ? { doneTargets } : {}),
+      ...(exceptions.length ? { exceptions } : {}),
+      updatedAt: now,
+    };
+    return settleTargets(next);
+  });
+}
+
 function applyAnswer(
   checkpoint: ExecutionCheckpoint,
   evidence: Extract<OutcomeEvidence, { kind: "answer" }>,
@@ -1181,7 +1263,7 @@ export function declareOutcomes(
     }
     if (!OUTCOME_EFFECTS.has(declaration.effect)) {
       throw new Error(
-        `New task ${taskId} requires an effect: read, artifact, mutation, or answer`,
+        `New task ${taskId} requires an effect: read, artifact, mutation, answer, or digest`,
       );
     }
     const targets = outcomeTargets(declaration.targets, declaration.capability);
@@ -1321,6 +1403,8 @@ export function applyOutcomeEvidence(
       return applyAnswer(checkpoint, evidence, now);
     case "failed":
       return applyFailure(checkpoint, evidence, now);
+    case "digest":
+      return applyDigest(checkpoint, evidence, now);
   }
 }
 

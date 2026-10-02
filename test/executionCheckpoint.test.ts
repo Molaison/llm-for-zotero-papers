@@ -9,7 +9,10 @@ import {
 } from "../src/agent/loop/outcomes";
 import { renderExecutionCheckpointBlock } from "../src/agent/model/messageBuilder";
 import { ToolInputRejection } from "../src/agent/tools/execution/failure";
-import { createTaskUpdateTool } from "../src/agent/tools/control/taskUpdate";
+import {
+  applyOrdinaryTaskUpdates,
+  createTaskUpdateTool,
+} from "../src/agent/tools/control/taskUpdate";
 import type {
   AgentExecutionContext,
   AgentToolContext,
@@ -340,7 +343,7 @@ describe("task_update ordinary declarations", function () {
     assert.instanceOf(error, ToolInputRejection);
     assert.equal(
       error.message,
-      "Give each new task an expectedEffect: read, artifact, mutation, or reasoning.",
+      "Give each new task an expectedEffect: read, artifact, mutation, reasoning, or digest (one host-made summary per paper).",
     );
     assert.lengthOf(published, 0);
     assert.isUndefined(ctx.request.executionCheckpoint);
@@ -685,6 +688,158 @@ describe("task_update ordinary declarations", function () {
           parsed.error,
           "task_update.tasks[0].scope must be true or false",
         );
+    });
+
+    describe("a digest part", function () {
+      const summaries = {
+        taskId: "summaries",
+        description: "Summarize each paper",
+        expectedEffect: "digest",
+      };
+
+      it("declares a digest part over the scope and refuses one without papers", async function () {
+        const ctx = scoped([5, 6]);
+        const error = await rejectionOf(call(ctx, { tasks: [summaries] }));
+        assert.instanceOf(error, ToolInputRejection);
+        assert.include(error.message, "A digest part names the papers");
+        assert.lengthOf(published, 0);
+        const answer = await call(ctx, {
+          tasks: [{ ...summaries, scope: true }],
+        });
+        assert.deepEqual(answer.parts[0], {
+          taskId: "summaries",
+          status: "pending",
+          done: 0,
+          total: 2,
+          scope: true,
+        });
+        assert.equal(ledgerOf(ctx).tasks[0].effect, "digest");
+        assert.deepEqual(ledgerOf(ctx).tasks[0].targets, ["item:5", "item:6"]);
+      });
+
+      it("lists digest in the schema's expectedEffect enum and in the description", function () {
+        const tool = createTaskUpdateTool();
+        const schema = tool.spec.inputSchema as any;
+        assert.include(
+          schema.properties.tasks.items.properties.expectedEffect.enum,
+          "digest",
+        );
+        assert.include(tool.spec.description, "expectedEffect 'digest'");
+        assert.isTrue(
+          tool.validate({ tasks: [{ ...summaries, targetIds: ["5"] }] }).ok,
+        );
+      });
+
+      it("names digest in the message for a part without an effect", async function () {
+        const error = await rejectionOf(
+          call(scoped([5]), {
+            tasks: [{ taskId: "x", description: "Do it", scope: true }],
+          }),
+        );
+        assert.include(error.message, "or digest");
+      });
+
+      it("a repeated digest part is a request to run it, not an ignored repeat", async function () {
+        const ctx = scoped([5, 6]);
+        await call(ctx, { tasks: [{ ...summaries, scope: true }] });
+        const repeated = await call(ctx, {
+          tasks: [{ taskId: "summaries" }],
+        });
+        assert.isUndefined(repeated.note);
+      });
+
+      it("returns the digest parts to run and their papers", function () {
+        const scope = { wholeLibrary: false, itemIds: [5, 6, 7], withText: 3 };
+        const input = (tasks: unknown[]) => {
+          const parsed = createTaskUpdateTool().validate({ tasks });
+          if (!parsed.ok) throw new Error(parsed.error);
+          return parsed.value;
+        };
+        const declared = applyOrdinaryTaskUpdates(
+          createEmptyExecutionCheckpoint(executionContext, 10),
+          input([{ ...summaries, scope: true }, declareSave]),
+          20,
+          scope,
+        );
+        assert.deepEqual(declared.digestParts, [
+          {
+            taskId: "execution-direct-1:task:summaries",
+            targets: ["item:5", "item:6", "item:7"],
+          },
+        ]);
+        const progressed = applyOutcomeEvidence(
+          declared.checkpoint,
+          {
+            kind: "digest",
+            taskId: "execution-direct-1:task:summaries",
+            done: ["item:5"],
+            failed: [],
+          },
+          30,
+        ).checkpoint;
+        // A repeat without targetIds resumes the papers not done.
+        assert.deepEqual(
+          applyOrdinaryTaskUpdates(
+            progressed,
+            input([{ taskId: "summaries" }]),
+            40,
+            scope,
+          ).digestParts,
+          [
+            {
+              taskId: "execution-direct-1:task:summaries",
+              targets: ["item:6", "item:7"],
+            },
+          ],
+        );
+        // targetIds narrow it to the part's own papers, in either id form.
+        assert.deepEqual(
+          applyOrdinaryTaskUpdates(
+            progressed,
+            input([{ taskId: "summaries", targetIds: ["7", "item:5", "99"] }]),
+            40,
+            scope,
+          ).digestParts,
+          [
+            {
+              taskId: "execution-direct-1:task:summaries",
+              targets: ["item:5", "item:7"],
+            },
+          ],
+        );
+        // A part the same call cancels runs nothing.
+        const cancelled = applyOrdinaryTaskUpdates(
+          progressed,
+          {
+            ...input([{ taskId: "summaries" }]),
+            cancelled: [{ taskId: "summaries", reason: "User changed mind" }],
+          },
+          40,
+          scope,
+        );
+        assert.deepEqual(cancelled.digestParts, []);
+      });
+
+      it("a digest part that names a write capability is a write and runs no digest", function () {
+        const parsed = createTaskUpdateTool().validate({
+          tasks: [
+            {
+              ...summaries,
+              expectedCapability: "zotero.notes",
+              targetIds: ["5"],
+            },
+          ],
+        });
+        if (!parsed.ok) throw new Error(parsed.error);
+        const applied = applyOrdinaryTaskUpdates(
+          createEmptyExecutionCheckpoint(executionContext, 10),
+          parsed.value,
+          20,
+          undefined,
+        );
+        assert.equal(applied.checkpoint.tasks[0].effect, "mutation");
+        assert.deepEqual(applied.digestParts, []);
+      });
     });
   });
 
