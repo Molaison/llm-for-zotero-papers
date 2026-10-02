@@ -315,6 +315,23 @@ export async function getAgentToolResultHandle(params: {
   return handleStore.get(storeKey(conversationKey, handle)) || null;
 }
 
+/** A conversation's stored results of one tool, oldest first. */
+export async function listAgentToolResultHandles(params: {
+  conversationKey: number;
+  toolName: string;
+}): Promise<AgentToolResultHandleRecord[]> {
+  const conversationKey = normalizePositiveInt(params.conversationKey);
+  if (!conversationKey) return [];
+  await hydrateAgentToolResultHandles(conversationKey);
+  return Array.from(handleStore.values())
+    .filter(
+      (record) =>
+        record.conversationKey === conversationKey &&
+        record.toolName === params.toolName,
+    )
+    .sort((left, right) => left.createdAt - right.createdAt);
+}
+
 export function hasAgentToolResultHandles(
   conversationKeyValue: number,
 ): boolean {

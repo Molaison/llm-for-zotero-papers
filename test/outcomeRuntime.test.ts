@@ -13,8 +13,10 @@ import {
   clearAgentTranscriptStore,
   loadAgentTranscriptSegment,
   PORTABLE_TRANSCRIPT_KEY,
+  replaceAgentTranscriptSegment,
 } from "../src/agent/store/transcriptStore";
 import { initAgentTraceStore } from "../src/agent/store/traceStore";
+import { listAgentToolResultHandles } from "../src/agent/store/toolResultHandles";
 
 const estimatePrompt = (messages: AgentModelMessage[]) =>
   estimateContextMessagesTokens(messages);
@@ -77,7 +79,9 @@ const submitDocumentGateway = {
 
 type ScriptStep =
   | AgentModelStep
-  | ((messages: AgentModelMessage[]) => AgentModelStep);
+  | ((
+      messages: AgentModelMessage[],
+    ) => AgentModelStep | Promise<AgentModelStep>);
 
 type Turn = {
   outcome?: AgentRuntimeOutcome;
@@ -104,6 +108,15 @@ let liveReceipts: AgentActionReceipt[] = [];
  * is left running, as a quit leaves it.
  */
 const ZOTERO_QUITS = { kind: "zotero_quits" } as unknown as AgentModelStep;
+
+/** A promise, and the function that settles it. */
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve: () => void = () => undefined;
+  const promise = new Promise<void>((settle) => {
+    resolve = settle;
+  });
+  return { promise, resolve };
+}
 
 /**
  * Zotero starting again: its startup marks every run left running as
@@ -317,6 +330,11 @@ async function runTurn(params: {
   onResolveScope?: () => void;
   /** Contexts the user attached to the question, and other request fields. */
   attached?: Partial<AgentRuntimeRequestInput>;
+  /**
+   * How long the turn waits for a stopped turn before it to settle; 0 starts
+   * at once, as when the wait's bound has run out.
+   */
+  stoppedRunWaitMs?: number;
 }): Promise<Turn> {
   const events: AgentEvent[] = [];
   const prompts: AgentModelMessage[][] = [];
@@ -328,6 +346,9 @@ async function runTurn(params: {
     quit = () => resolve(ZOTERO_QUITS);
   });
   const runtime = new AgentRuntime({
+    ...(params.stoppedRunWaitMs !== undefined
+      ? { stoppedRunWaitMs: params.stoppedRunWaitMs }
+      : {}),
     ...(params.scope
       ? {
           resolveTurnScopePapers: async () => {
@@ -357,7 +378,7 @@ async function runTurn(params: {
             `The script ends at ${params.steps.length} steps; the model was asked for step ${requests}.`,
           );
         const next =
-          typeof step === "function" ? step(stepParams.messages) : step;
+          typeof step === "function" ? await step(stepParams.messages) : step;
         if (next !== ZOTERO_QUITS) return next;
         quit();
         return new Promise<AgentModelStep>(() => undefined);
@@ -2382,6 +2403,327 @@ describe("resuming a long job in runtime turns", function () {
     assert.lengthOf(outcome(after, "read-all").doneTargets!, 30);
     // Run A's per-paper results carry forward to the last step.
     const last = promptText(third.prompts[third.prompts.length - 1]);
+    assert.include(last, "Long job complete");
+    for (const itemId of PAPERS) assert.include(last, `Finding ${itemId}`);
+  });
+
+  describe("Stop with a question queued behind it", function () {
+    const QUESTION = "What is representational drift?";
+    const ANSWER = "A gradual change in a neural representation.";
+
+    /** What the conversation's transcript holds now. */
+    const storedTranscript = async () =>
+      promptText(
+        (
+          await loadAgentTranscriptSegment({
+            conversationKey,
+            compatibilityKey: PORTABLE_TRANSCRIPT_KEY,
+          })
+        ).messages,
+      );
+
+    /**
+     * A job the user stops while one of its reads is running, with a
+     * question queued behind it. Stop releases the conversation at once, so
+     * the question runs, and writes its request into the transcript, while
+     * the stopped run still finishes that read and records its open page;
+     * `order` says which of the two ends first. With `readAfter`, another
+     * read follows the running one in its
+     * step, so Stop keeps the step from finishing; with `endsPage`, the
+     * running read is the last its page had. `read` names the papers whose
+     * reads came back into the run, and `afterStop` the transcript as the
+     * stopped run left it.
+     */
+    async function stopWithQueuedQuestion(params: {
+      order: "question first" | "stopped run first";
+      readAfter?: boolean;
+      endsPage?: boolean;
+    }): Promise<{
+      stopped: Turn;
+      question: Turn;
+      read: number[];
+      running: number;
+      afterStop: string;
+    }> {
+      const reading = deferred();
+      const finishRead = deferred();
+      let running: number | undefined;
+      let following: number | undefined;
+      const read = scriptedPaperRead!;
+      scriptedPaperRead = async (input, context) => {
+        const itemId = Number((input.target as { itemId?: number })?.itemId);
+        if (itemId === running) {
+          reading.resolve();
+          await finishRead.promise;
+        }
+        return read(input, context);
+      };
+      // The job reads its first pages, then a paper of the next page alone
+      // (with `endsPage`, every paper of it but the last), then the paper
+      // that is running when the user stops it.
+      const controller = new AbortController();
+      const asked: number[] = [];
+      let declared = false;
+      let alone = 0;
+      const worker = (messages: AgentModelMessage[]) => {
+        if (!declared) {
+          declared = true;
+          return stepOf(
+            declare("declare-1", [
+              {
+                taskId: "read-all",
+                description: READ_ALL,
+                expectedEffect: "read",
+                scope: true,
+              },
+            ]),
+          );
+        }
+        const host = hostText(messages);
+        const page = (host ? pageOf(host) : []).filter(
+          (itemId) => !asked.includes(itemId),
+        );
+        if (asked.length < 6 || (params.endsPage && page.length > 1)) {
+          const batch = page.slice(0, asked.length < 6 ? 8 : -1);
+          asked.push(...batch);
+          return stepOf(...batch.map(readCall));
+        }
+        const [next, after] = page;
+        asked.push(next);
+        if (!params.endsPage && alone++ === 0) return stepOf(readCall(next));
+        running = next;
+        if (!params.readAfter) return stepOf(readCall(next));
+        following = after;
+        asked.push(after);
+        return stepOf(readCall(next), readCall(after));
+      };
+      const stoppedRun = runTurn({
+        conversationKey,
+        userText: "Read every paper in Drift and summarize each",
+        scope,
+        attached,
+        signal: controller.signal,
+        steps: Array.from({ length: 20 }, () => worker),
+      });
+      await reading.promise;
+      controller.abort();
+      const asking = deferred();
+      const answering = deferred();
+      const questionRun = runTurn({
+        conversationKey,
+        userText: QUESTION,
+        scope,
+        attached,
+        // A turn waits for the stopped turn before it to settle
+        // (continueAfterStop.test.ts); these cases are the ones that wait
+        // does not cover, where its bound has run out and both turns write.
+        stoppedRunWaitMs: 0,
+        steps: [
+          async () => {
+            asking.resolve();
+            if (params.order === "stopped run first") await answering.promise;
+            return finalStep(ANSWER);
+          },
+        ],
+      });
+      let question: Turn | undefined;
+      if (params.order === "question first") question = await questionRun;
+      else await asking.promise;
+      finishRead.resolve();
+      const stopped = await stoppedRun;
+      const afterStop = await storedTranscript();
+      answering.resolve();
+      question ??= await questionRun;
+      // The stopped run ends as the user stopped it, whatever the question
+      // wrote meanwhile.
+      assert.equal(stopStatus(stopped), "cancelled");
+      assert.equal((stopped.error as Error | undefined)?.message, "Aborted");
+      assert.equal(question.outcome?.kind, "completed");
+      return {
+        stopped,
+        question,
+        afterStop,
+        running: running!,
+        // Stop keeps the read after the running one from starting, and the
+        // step from taking the running one's result.
+        read: params.readAfter
+          ? asked.filter((itemId) => itemId !== running && itemId !== following)
+          : asked,
+      };
+    }
+
+    /** The papers whose results the job's records hold, by its ledger. */
+    const recordedResults = async (stopped: Turn) => {
+      const executionId = settled(stopped).executionId;
+      const records = await listAgentToolResultHandles({
+        conversationKey,
+        toolName: "long_job_results",
+      });
+      return records.flatMap((record) => {
+        const content = record.content as {
+          executionId?: string;
+          digests?: Array<{ itemId: number; excerpts: { text: string }[] }>;
+        };
+        return content.executionId === executionId
+          ? (content.digests || []).filter((digest) =>
+              digest.excerpts.some((excerpt) =>
+                excerpt.text.startsWith(`Finding ${digest.itemId}:`),
+              ),
+            )
+          : [];
+      });
+    };
+
+    for (const readAfter of [false, true])
+      it(`keeps the question's messages when the question ends before the stopped run${
+        readAfter ? ", the running read followed by another" : ""
+      }, and the stopped page's results`, async function () {
+        const { stopped, read } = await stopWithQueuedQuestion({
+          order: "question first",
+          readAfter,
+        });
+        const transcript = await storedTranscript();
+        assert.include(transcript, QUESTION);
+        assert.include(transcript, ANSWER);
+        const recorded = (await recordedResults(stopped)).map(
+          (digest) => digest.itemId,
+        );
+        for (const itemId of read)
+          assert.include(recorded, itemId, `paper ${itemId}`);
+      });
+
+    it("ends a run stopped during the read that ends its page as stopped, planning no page, and keeps the question's messages and the page's results", async function () {
+      const { stopped, read, running } = await stopWithQueuedQuestion({
+        order: "question first",
+        endsPage: true,
+      });
+      const ranAt = stopped.events.findIndex(
+        (event) =>
+          event.type === "tool_result" &&
+          event.callId.startsWith(`read-${running}-`),
+      );
+      assert.isAbove(ranAt, 0);
+      assert.isEmpty(
+        stopped.events
+          .slice(ranAt)
+          .filter(
+            (event) =>
+              event.type === "provider_event" &&
+              event.providerType === "agent_long_job_page",
+          ),
+      );
+      const transcript = await storedTranscript();
+      assert.include(transcript, QUESTION);
+      assert.include(transcript, ANSWER);
+      const recorded = (await recordedResults(stopped)).map(
+        (digest) => digest.itemId,
+      );
+      for (const itemId of read)
+        assert.include(recorded, itemId, `paper ${itemId}`);
+    });
+
+    it("keeps the question's messages when the stopped run ends while the question is still running, and the stopped page's results", async function () {
+      const { stopped, read, afterStop } = await stopWithQueuedQuestion({
+        order: "stopped run first",
+      });
+      assert.include(
+        afterStop,
+        QUESTION,
+        "the stopped run left the question's request where it was written",
+      );
+      const transcript = await storedTranscript();
+      assert.include(transcript, QUESTION);
+      assert.include(transcript, ANSWER);
+      const recorded = (await recordedResults(stopped)).map(
+        (digest) => digest.itemId,
+      );
+      for (const itemId of read)
+        assert.include(recorded, itemId, `paper ${itemId}`);
+    });
+  });
+
+  it("carries a stopped job's per-paper results on continue from where they are stored, though the transcript lost their records", async function () {
+    const controller = new AbortController();
+    const asked = new Set<number>();
+    let declared = false;
+    const reader = (messages: AgentModelMessage[]) => {
+      if (!declared) {
+        declared = true;
+        return stepOf(
+          declare("declare-1", [
+            {
+              taskId: "read-all",
+              description: READ_ALL,
+              expectedEffect: "read",
+              scope: true,
+            },
+          ]),
+        );
+      }
+      if (asked.size >= 12) {
+        controller.abort();
+        throw new Error("The request was aborted.");
+      }
+      const host = hostText(messages);
+      const page = (host ? pageOf(host) : [])
+        .filter((itemId) => !asked.has(itemId))
+        .slice(0, 8);
+      for (const itemId of page) asked.add(itemId);
+      return stepOf(...page.map(readCall));
+    };
+    const stopped = await runTurn({
+      conversationKey,
+      userText: "Read every paper in Drift and summarize each",
+      scope,
+      attached,
+      signal: controller.signal,
+      steps: Array.from({ length: 20 }, () => reader),
+    });
+    assert.equal(stopStatus(stopped), "cancelled");
+    // A write that dropped the job's records from the transcript.
+    const stored = await loadAgentTranscriptSegment({
+      conversationKey,
+      compatibilityKey: PORTABLE_TRANSCRIPT_KEY,
+    });
+    const kept = stored.messages.filter(
+      (message) =>
+        !(
+          message.role === "user" &&
+          message.retainedTool?.name === "long_job_results"
+        ),
+    );
+    assert.isBelow(kept.length, stored.messages.length);
+    await replaceAgentTranscriptSegment({ ...stored, messages: kept });
+    // "continue": every paper's results reach the job's last step.
+    const resumedAsked: number[] = [];
+    const resumer = (messages: AgentModelMessage[]) => {
+      const host = hostText(messages);
+      if (host?.startsWith("Long job complete"))
+        return finalStep("Every paper is summarized from its results.");
+      const named = host
+        ? pageOf(host)
+        : (/papers? left, in order: ([\d, ]+)\./
+            .exec(promptText(messages))?.[1]
+            ?.split(", ")
+            .map(Number) ?? []);
+      const page = named
+        .filter((itemId) => !resumedAsked.includes(itemId))
+        .slice(0, 3);
+      if (!page.length) return finalStep("Every paper is summarized.");
+      resumedAsked.push(...page);
+      return stepOf(...page.map(readCall));
+    };
+    const resumed = await runTurn({
+      conversationKey,
+      userText: "continue",
+      scope,
+      attached,
+      steps: Array.from({ length: 30 }, () => resumer),
+    });
+    assert.equal(resumed.outcome?.kind, "completed", String(resumed.error));
+    for (const itemId of asked)
+      assert.notInclude(resumedAsked, itemId, `paper ${itemId} was read`);
+    const last = promptText(resumed.prompts[resumed.prompts.length - 1]);
     assert.include(last, "Long job complete");
     for (const itemId of PAPERS) assert.include(last, `Finding ${itemId}`);
   });

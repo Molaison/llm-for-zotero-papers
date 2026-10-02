@@ -475,6 +475,27 @@ export async function replaceAgentTranscriptSegment(
   return persistence === "persisted" ? "persisted" : "memory_only";
 }
 
+/**
+ * Replaces a segment only while the store still holds the messages of
+ * `expected`, the segment as its writer last saw it; otherwise the write is
+ * skipped, so a writer whose view another has since written over never
+ * drops what that one wrote. The caller holds the conversation's write lock,
+ * so nothing writes between the check and the write.
+ */
+export async function replaceAgentTranscriptSegmentIfUnchanged(
+  expected: AgentTranscriptSegment,
+  next: AgentTranscriptSegment,
+): Promise<AgentTranscriptWriteResult> {
+  const stored = await loadAgentTranscriptSegment({
+    conversationKey: next.conversationKey,
+    compatibilityKey: next.compatibilityKey,
+  });
+  return stableJson(stored.messages) ===
+    stableJson(normalizeMessages(expected.messages))
+    ? replaceAgentTranscriptSegment(next)
+    : "skipped";
+}
+
 export async function appendAgentTranscriptMessages(params: {
   conversationKey: number;
   compatibilityKey: string;

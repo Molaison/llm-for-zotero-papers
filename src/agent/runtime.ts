@@ -119,9 +119,9 @@ import { listJournalActions } from "./store/changeJournal";
 import { recordAgentTurn } from "./store/conversationMemory";
 import {
   createAgentToolResultHandleRecord,
-  getAgentToolResultHandle,
   hasAgentToolResultHandles,
   hydrateAgentToolResultHandles,
+  listAgentToolResultHandles,
   upsertAgentToolResultHandles,
   type AgentToolResultHandleRecord,
 } from "./store/toolResultHandles";
@@ -140,6 +140,8 @@ import {
   loadAgentTranscriptSegment,
   loadLatestAgentTranscriptSegment,
   replaceAgentTranscriptSegment,
+  replaceAgentTranscriptSegmentIfUnchanged,
+  type AgentTranscriptSegment,
   type AgentTranscriptWriteResult,
 } from "./store/transcriptStore";
 import { resolveAgentToolCallWorkCategory } from "./workCategory";
@@ -1262,6 +1264,18 @@ export class AgentRuntime {
         }
       }
       const newTranscriptMessages: AgentModelMessage[] = [];
+      /**
+       * Writes the run's transcript. Stop releases the conversation at once,
+       * and a turn queued behind it may write the transcript while this run
+       * still finishes a call: once stopped, the run writes only over the
+       * transcript as it last saw it, never over what that turn wrote.
+       */
+      const writeTranscriptSegment = (next: AgentTranscriptSegment) =>
+        persistIfLive(() =>
+          params.signal?.aborted
+            ? replaceAgentTranscriptSegmentIfUnchanged(transcriptSegment, next)
+            : replaceAgentTranscriptSegment(next),
+        );
       let latestProviderReplayTokens = 0;
       const commitSemanticCheckpoint = async (params: {
         sourceMessages: AgentModelMessage[];
@@ -1298,9 +1312,7 @@ export class AgentRuntime {
           ...transcriptSegment,
           compactedAt: this.now(),
         };
-        const writeResult = await persistIfLive(() =>
-          replaceAgentTranscriptSegment(nextSegment),
-        );
+        const writeResult = await writeTranscriptSegment(nextSegment);
         if (
           writeAllowed() &&
           (writeResult === "persisted" || writeResult === "memory_only")
@@ -1340,9 +1352,7 @@ export class AgentRuntime {
           messages: portable.messages,
         };
         const committed = {
-          writeResult: await persistIfLive(() =>
-            replaceAgentTranscriptSegment(nextSegment),
-          ),
+          writeResult: await writeTranscriptSegment(nextSegment),
         };
         if (
           committed.writeResult === "persisted" ||
@@ -1371,22 +1381,18 @@ export class AgentRuntime {
       const longJobDigests = new Map<string, PaperDigest>();
       // A job "continue" picked back up: the per-paper results its earlier
       // turns recorded carry forward, so its last step still sees every
-      // paper. Such a digest is re-cut to this turn's share at its first
-      // page, and recorded again only with new evidence.
+      // paper. They are read where each batch was stored, by the job, not
+      // from the transcript, whose copy of a batch is the model's view and
+      // may be gone. Such a digest is re-cut to this turn's share at its
+      // first page, and recorded again only with new evidence.
       const carriedDigests = new Set<string>();
       if (recordsOutcomes() && readLongJob(request.executionCheckpoint)) {
-        for (const message of transcriptSegment.messages) {
-          if (
-            message.role !== "user" ||
-            message.retainedTool?.name !== "long_job_results" ||
-            !message.retainedTool.handle
-          )
-            continue;
-          const record = await getAgentToolResultHandle({
-            conversationKey: request.conversationKey,
-            handle: message.retainedTool.handle,
-          });
-          const content = record?.content as
+        const batches = await listAgentToolResultHandles({
+          conversationKey: request.conversationKey,
+          toolName: "long_job_results",
+        });
+        for (const record of batches) {
+          const content = record.content as
             | { executionId?: unknown; digests?: unknown }
             | undefined;
           if (content?.executionId !== request.executionCheckpoint?.executionId)
@@ -2145,8 +2151,10 @@ export class AgentRuntime {
       /**
        * Stop, or an error, ends a long job wherever it stands, often inside a
        * page. The papers that page had read keep their results: recorded as
-       * a page's are, straight into the stored transcript (the turn's own
-       * unfinished messages are not kept), so "continue" finds them.
+       * a page's are, under a handle "continue" finds by the job, and
+       * straight into the stored transcript (the turn's own unfinished
+       * messages are not kept), unless a turn queued behind Stop wrote it
+       * first.
        */
       recordUnfinishedPage = async (): Promise<void> => {
         if (!recordsOutcomes()) return;
@@ -2198,9 +2206,10 @@ export class AgentRuntime {
         });
         await persistToolResultHandles(portable.handleRecords);
         const next = { ...transcriptSegment, messages: portable.messages };
-        const written = await persistIfLive(() =>
-          replaceAgentTranscriptSegment(next),
-        );
+        // The digests are stored above whatever this write does: a turn
+        // queued behind Stop that wrote the transcript first keeps its
+        // messages, and "continue" still finds the results by the job.
+        const written = await writeTranscriptSegment(next);
         if (written === "persisted" || written === "memory_only")
           transcriptSegment = next;
       };
@@ -2860,7 +2869,9 @@ export class AgentRuntime {
             return await completeRun(finalText, "failed", stopRule);
           }
           await persistTranscriptCheckpoint();
-          await advanceLongJob();
+          // A stopped run advances no page: its next step ends it, and
+          // records what the open page had read.
+          if (!params.signal?.aborted) await advanceLongJob();
         }
 
         const newFingerprints = toolExecutionRecords
