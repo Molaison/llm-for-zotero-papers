@@ -9137,19 +9137,16 @@ label.llm-search-results-item:hover {
   -webkit-overflow-scrolling: touch;
 }
 
-.llm-rendered-markdown .math-display > .katex-display > .katex > .katex-html {
-  box-sizing: border-box;
-  min-width: 100%;
-  padding-right: 3.25em;
-}
-
-.llm-rendered-markdown
-  .math-display
-  > .katex-display
-  > .katex
-  > .katex-html
-  > .tag {
-  right: 0;
+/* KaTeX pins a \tag label absolutely at the right edge and relies on spare
+   width to keep it clear of the equation. Chat panels are narrow and labels
+   can be long ("(Equation 1)"), so the label paints over the formula. Let it
+   flow after the equation instead; wide equations already scroll. Unscoped so
+   the quote-card preview, which renders outside .llm-rendered-markdown, gets
+   it too. */
+.math-display .katex-display > .katex > .katex-html > .tag,
+.math-display-inline .katex-display > .katex > .katex-html > .tag {
+  position: static;
+  margin-left: 1em;
 }
 
 /* Math error styling */

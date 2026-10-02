@@ -426,6 +426,16 @@ describe("quote card UI contract", function () {
     assert.include(css, ".llm-quote-card-preview .katex-display");
   });
 
+  it("flows a \\tag label after display math instead of over it", function () {
+    const css = source("addon/content/zoteroPane.css");
+    const match = css.match(
+      /\.math-display \.katex-display > \.katex > \.katex-html > \.tag,\s*\.math-display-inline \.katex-display > \.katex > \.katex-html > \.tag\s*\{([^}]*)\}/,
+    );
+
+    assert.isNotNull(match);
+    assert.match(match?.[1] || "", /position:\s*static/);
+  });
+
   it("does not construct a hidden preview for rejected quote cards", function () {
     const renderSource = source(
       "src/modules/contextPanel/assistantCitationLinks.ts",
