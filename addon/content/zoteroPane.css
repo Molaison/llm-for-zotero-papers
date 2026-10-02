@@ -15443,6 +15443,12 @@ item-pane-sidenav .llm-persistent-rail-entry[hidden] {
   border-bottom: 0;
 }
 
+/* A step's label may wrap; steps sit further apart than its lines do, so
+   each step reads as one block. */
+.llm-task-progress-steps .llm-plan-task + .llm-plan-task {
+  margin-top: 6px;
+}
+
 .llm-task-progress-steps .llm-plan-task-line {
   min-height: 26px;
   padding: 2px 0;

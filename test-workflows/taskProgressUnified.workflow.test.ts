@@ -671,6 +671,14 @@ describe("workflow: task progress unified", function () {
         tp().steps.querySelector(".llm-plan-status")?.textContent,
         "Completed with exceptions",
       );
+      // Steps sit further apart than a wrapped label's lines, so each step
+      // reads as one block.
+      for (const [index, line] of lines.slice(1).entries()) {
+        const gap =
+          line.getBoundingClientRect().top -
+          lines[index].getBoundingClientRect().bottom;
+        assert.isAtLeast(gap, 6, `the gap above step ${index + 2}`);
+      }
       // The pill fades in and the drawer opens before the screenshot.
       await Zotero.Promise.delay(400);
       await capture(summary.panel.panelId, "tp-outcomes-reopened.png");
