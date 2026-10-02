@@ -406,6 +406,21 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
   };
 
   /**
+   * Stores records a tool made itself (a host digest per paper) under trh_
+   * handles that context_read pages, kept for the turn's own recovery like
+   * the handles this collaborator stores.
+   */
+  const storeToolHandles = async (
+    records: AgentToolResultHandleRecord[],
+  ): Promise<void> => {
+    if (!records.length) return;
+    await deps.persistToolResultHandles(records);
+    deps.preservedTurnHandleRecords.push(...records);
+    deps.setToolResultReadAvailable(true);
+    setToolResultReadAvailability(deps.request, true);
+  };
+
+  /**
    * The handle holding a result too big for the run's trace, so the trace
    * can persist a marker naming it (`compactRunEventForPersistence`). A call
    * whose result was already stored for the model (its sized view, or a
@@ -711,6 +726,10 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
         {
           ...deps.context,
           currentAnswerText: deps.getCurrentAnswerText(),
+          toolCallId: call.id,
+          publishPaperLedgerDelta: (delta) =>
+            deps.emit(buildPaperLedgerUpdateEvent(delta)),
+          persistToolResultHandles: storeToolHandles,
           requestActionReview: async (action) =>
             (await deps.requestActionResolution(action)).resolution,
           resolvePreparedAction: (prepared) =>

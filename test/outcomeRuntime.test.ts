@@ -3,7 +3,10 @@ import { DatabaseSync } from "node:sqlite";
 import { AgentRuntime } from "../src/agent/runtime";
 import { AgentToolRegistry } from "../src/agent/tools/registry";
 import { createSubmitDocumentTool } from "../src/agent/tools/control/submitDocument";
-import { createTaskUpdateTool } from "../src/agent/tools/control/taskUpdate";
+import {
+  createTaskUpdateTool,
+  type TaskUpdateToolDeps,
+} from "../src/agent/tools/control/taskUpdate";
 import { createNoteWriteTool } from "../src/agent/tools/write/noteWrite";
 import { OUTCOME_REASONS } from "../src/agent/loop/outcomes";
 import { PAPER_RECORD_PRIOR_TOKENS } from "../src/agent/loop/longJob";
@@ -127,6 +130,9 @@ async function restartZotero(): Promise<void> {
   clearAgentTranscriptStore();
 }
 
+/** The digest host task_update runs, when a case scripts one. */
+let taskUpdateDeps: TaskUpdateToolDeps | undefined;
+
 /** What the scripted `paper_read` returns, when a case scripts it. */
 let scriptedPaperRead:
   | ((input: Record<string, unknown>, context: AgentToolContext) => unknown)
@@ -190,7 +196,7 @@ function registry(): AgentToolRegistry {
       getCollectionSummary: () => null,
     } as unknown as ZoteroGateway),
   );
-  tools.register(createTaskUpdateTool());
+  tools.register(createTaskUpdateTool(taskUpdateDeps));
   tools.register({
     spec: {
       name: "paper_read",
@@ -3521,5 +3527,111 @@ describe("live runs that made every change, as runtime turns (2026-10-01)", func
     assert.deepEqual(outcome(ledger, "import").verifiedReceiptIds, [
       imported.id,
     ]);
+  });
+});
+
+describe("a digest part in runtime turns", function () {
+  let environment: DirectJourneyEnvironment;
+  let conversationKey = 996_000;
+  const SUMMARIZE = "Summarize each selected paper";
+  const TEXT =
+    "# Introduction\nPlace cells drift slowly across days.\n\n## Methods\nWe recorded forty cells over ten days.";
+
+  beforeEach(async function () {
+    environment = await installDirectJourneyEnvironment();
+    libraryUpdateReceipt = undefined;
+    conversationKey += 10;
+    taskUpdateDeps = {
+      digests: {
+        resolvePaper: async (_request, itemId) => ({
+          libraryID: 1,
+          itemId,
+          contextItemId: itemId + 1000,
+          title: `Paper ${itemId}`,
+        }),
+        // Paper 103 has no text.
+        readText: async (paper) =>
+          paper.itemId === 103
+            ? null
+            : { backend: "mineru", text: TEXT, totalCharacters: TEXT.length },
+        llmCall: async (chat) => ({
+          text: JSON.stringify({
+            summary: `Summary of ${/Title: (Paper \d+)/.exec(chat.prompt)?.[1]}.`,
+            contributions: ["Drift is slow."],
+            methods: "Imaging.",
+            limitations: "Not stated",
+            evidence: [{ quote: "We recorded forty cells over ten days." }],
+          }),
+          completion: { status: "complete" },
+        }),
+      },
+    };
+  });
+
+  afterEach(function () {
+    environment.restore();
+    taskUpdateDeps = undefined;
+  });
+
+  it("the host digests each paper, the model writes the review, and the run ends with the part at 2 of 3", async function () {
+    const turn = await runTurn({
+      conversationKey,
+      userText: "Summarize all papers for me and write a literature review",
+      scope: { wholeLibrary: true, itemIds: [101, 102, 103], withText: 2 },
+      steps: [
+        stepOf(
+          declare("declare-digest", [
+            {
+              taskId: "summaries",
+              description: SUMMARIZE,
+              expectedEffect: "digest",
+              scope: true,
+            },
+          ]),
+        ),
+        (messages) => {
+          // The model reads every summary from the tool result.
+          const text = promptText(messages);
+          assert.include(text, "Summary of Paper 101.");
+          assert.include(text, "Summary of Paper 102.");
+          assert.include(text, "No readable text");
+          return finalStep(
+            "## Literature review\n\nPaper 101 and Paper 102 agree that drift is slow.",
+          );
+        },
+      ],
+    });
+
+    assert.equal(turn.outcome?.kind, "completed", String(turn.error || ""));
+    assert.equal(turn.requests, 2, "the digests cost the turn no model step");
+    // The part rises paper by paper while the call runs.
+    const counts = checkpoints(turn).map((checkpoint) => {
+      const part = outcome(checkpoint, "summaries");
+      return (
+        (part.doneTargets?.length || 0) +
+        (part.exceptions || []).flatMap((entry) => entry.targets).length
+      );
+    });
+    assert.deepEqual(counts.slice(0, 4), [0, 1, 2, 3]);
+    // Each paper's row is updated once, from the host's digest.
+    const rows = turn.events.flatMap((event) =>
+      event.type === "paper_ledger_update" &&
+      (event as { delta: { toolName: string } }).delta.toolName ===
+        "task_update"
+        ? [(event as { delta: { papers: Array<{ itemId: number }> } }).delta]
+        : [],
+    );
+    assert.sameMembers(
+      rows.map((delta) => delta.papers[0].itemId),
+      [101, 102, 103],
+    );
+    const ledger = settled(turn);
+    const part = outcome(ledger, "summaries");
+    assert.equal(part.status, "completed");
+    assert.sameMembers(part.doneTargets || [], ["item:101", "item:102"]);
+    assert.deepEqual(part.exceptions, [
+      { targets: ["item:103"], reason: "No readable text" },
+    ]);
+    assert.deepEqual(ledger.end, { state: "completed_with_exceptions" });
   });
 });

@@ -1343,6 +1343,22 @@ export type AgentToolContext = {
   updateExecutionCheckpoint?: (
     apply: (checkpoint: ExecutionCheckpoint) => ExecutionCheckpoint,
   ) => Promise<ExecutionCheckpoint>;
+  /** The model's id for the call being executed; set per call by the host. */
+  toolCallId?: string;
+  /**
+   * Publish a paper-row change the tool built itself while it runs (a host
+   * digest per paper), through the turn's one event emitter.
+   */
+  publishPaperLedgerDelta?: (
+    delta: import("./context/taskPaperLedger").TaskPaperLedgerDelta,
+  ) => Promise<void>;
+  /**
+   * Store records in the conversation's tool-result handle store, through
+   * the turn's writer, and offer context_read for them.
+   */
+  persistToolResultHandles?: (
+    records: import("./store/toolResultHandles").AgentToolResultHandleRecord[],
+  ) => Promise<void>;
 };
 
 export type AgentToolInputValidation<T> =

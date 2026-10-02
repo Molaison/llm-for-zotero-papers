@@ -27,6 +27,7 @@ import type { AgentToolDefinition } from "../types";
 import { createRequestUserInputTool } from "./control/requestUserInput";
 import { createSubmitDocumentTool } from "./control/submitDocument";
 import { createTaskUpdateTool } from "./control/taskUpdate";
+import { createZoteroPaperDigestSources } from "../digests/digestJobHost";
 import { SEARCH_CONDITION_SCHEMA } from "./searchConditions";
 import {
   fail,
@@ -697,7 +698,14 @@ export function createBuiltInToolRegistry(
     }),
   );
   registry.register(createRequestUserInputTool());
-  registry.register(createTaskUpdateTool());
+  registry.register(
+    createTaskUpdateTool({
+      digests: createZoteroPaperDigestSources({
+        zoteroGateway: deps.zoteroGateway,
+        pdfService: deps.pdfService,
+      }),
+    }),
+  );
   registry.register(createSubmitDocumentTool(deps.zoteroGateway));
   return registry;
 }

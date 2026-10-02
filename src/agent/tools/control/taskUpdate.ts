@@ -19,6 +19,11 @@ import type {
 } from "../../execution/types";
 import type { TaskPaperScopeSet } from "../../context/taskPaperScopeListing";
 import {
+  runDigestParts,
+  type DigestJobHostDeps,
+  type DigestRunResult,
+} from "../../digests/digestJobHost";
+import {
   declareOutcomes,
   markOutcomes,
   type OutcomeDeclaration,
@@ -427,10 +432,22 @@ export function applyOrdinaryTaskUpdates(
   }
 }
 
-export function createTaskUpdateTool(): AgentToolDefinition<
-  TaskUpdateInput,
-  { parts: TaskUpdatePart[]; note?: string }
-> {
+export type TaskUpdateToolDeps = {
+  /**
+   * The host that runs a declared digest part. Without it a digest part is
+   * declared and tracked, and nothing digests it.
+   */
+  digests?: DigestJobHostDeps;
+};
+
+type TaskUpdateResult = {
+  parts: TaskUpdatePart[];
+  note?: string;
+} & DigestRunResult;
+
+export function createTaskUpdateTool(
+  deps: TaskUpdateToolDeps = {},
+): AgentToolDefinition<TaskUpdateInput, TaskUpdateResult> {
   return {
     spec: {
       name: "task_update",
@@ -478,7 +495,8 @@ export function createTaskUpdateTool(): AgentToolDefinition<
       }
       let ignored = false;
       let refused: string[] = [];
-      const checkpoint = await context.updateExecutionCheckpoint((current) => {
+      let digestParts: DigestPartRun[] = [];
+      let checkpoint = await context.updateExecutionCheckpoint((current) => {
         assertCheckpointOwner(current, execution);
         const applied = applyOrdinaryTaskUpdates(
           current,
@@ -488,15 +506,34 @@ export function createTaskUpdateTool(): AgentToolDefinition<
         );
         ignored = applied.ignored;
         refused = applied.refused;
+        digestParts = applied.digestParts;
         return applied.checkpoint;
       });
+      let digests: DigestRunResult = {};
+      if (digestParts.length && deps.digests) {
+        const prefix = `${checkpoint.executionId}:task:`;
+        digests = await runDigestParts({
+          parts: digestParts,
+          context,
+          deps: deps.digests,
+          localTaskId: (taskId) =>
+            taskId.startsWith(prefix) ? taskId.slice(prefix.length) : taskId,
+        });
+        // The ledger as the papers' outcomes left it.
+        checkpoint = await context.updateExecutionCheckpoint(
+          (current) => current,
+        );
+      }
       const parts = checkpoint.tasks.map((task) =>
         answerPart(checkpoint, task),
       );
       // A refused skip is the note the model must act on; it outranks the
       // reminder that progress needs no call.
-      if (refused.length) return { parts, note: skipRefusedNote(refused) };
-      return ignored ? { parts, note: HOST_MARKS_DONE } : { parts };
+      if (refused.length)
+        return { parts, note: skipRefusedNote(refused), ...digests };
+      return ignored
+        ? { parts, note: HOST_MARKS_DONE, ...digests }
+        : { parts, ...digests };
     },
   };
 }
