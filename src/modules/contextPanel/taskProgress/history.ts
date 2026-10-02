@@ -7,6 +7,7 @@
  * - every run's `paper_ledger_update` events (in-plugin Agent runs and the
  *   Codex/Claude Code run snapshots, which carry the MCP deltas);
  * - each finished answer's `quoteCitations`, the citations it rendered;
+ * - each submitted document's sources (`material_finalized.citedSources`);
  * - whether a plan ran (`plan_*` events), Codex kept a plan (its
  *   `codex-plan-checklist` event) or a run had outcomes (its
  *   `execution_checkpoint` events): the row then stays for the conversation;
@@ -22,7 +23,10 @@
 import { ExecutionCheckpointFold } from "../../../agent/execution/checkpointEvents";
 import { listAgentRunEventsForRuns } from "../../../agent/store/traceStore";
 import type { AgentRunEventRecord, AgentEvent } from "../../../agent/types";
-import type { TaskPaperLedgerDelta } from "../../../agent/context/taskPaperLedger";
+import type {
+  TaskPaperDocumentCitation,
+  TaskPaperLedgerDelta,
+} from "../../../agent/context/taskPaperLedger";
 import { isConversationKeyRetiredInMemory } from "../../../shared/conversationKeyLedger";
 import {
   areConversationWritesFrozen,
@@ -44,6 +48,7 @@ import {
 /** Event kinds a rebuild reads; everything else in a trace is skipped. */
 export const TASK_PROGRESS_HISTORY_EVENT_TYPES = [
   "paper_ledger_update",
+  "material_finalized",
   "codex_progress",
   "plan_updated",
   "plan_ready",
@@ -86,11 +91,15 @@ export function buildTaskProgressHistory(
     if (message.role !== "assistant" || !runId || question < 1) continue;
     const events = eventsByRun.get(runId) || [];
     const deltas: TaskPaperLedgerDelta[] = [];
+    // Every document the run finalized: each names only its own sources.
+    const documentCitations: TaskPaperDocumentCitation[] = [];
     const ledger = new ExecutionCheckpointFold();
     for (const entry of events) {
       const payload: AgentEvent = entry.payload;
       if (payload.type === "paper_ledger_update" && payload.delta) {
         deltas.push(payload.delta);
+      } else if (payload.type === "material_finalized") {
+        documentCitations.push(...(payload.citedSources || []));
       } else if (
         payload.type === "execution_checkpoint" ||
         payload.type === "execution_checkpoint_delta"
@@ -108,6 +117,7 @@ export function buildTaskProgressHistory(
       live: Boolean(message.streaming),
       deltas,
       quoteCitations: message.quoteCitations,
+      ...(documentCitations.length ? { documentCitations } : {}),
     });
   }
   const last = messages[messages.length - 1];

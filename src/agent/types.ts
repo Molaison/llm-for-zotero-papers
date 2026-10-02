@@ -30,7 +30,10 @@ import type {
   ActionRiskSignal,
 } from "./authorization/types";
 import type { MaterialRef } from "./documents/materialRef";
-import type { TaskPaperLedgerDelta } from "./context/taskPaperLedger";
+import type {
+  TaskPaperDocumentCitation,
+  TaskPaperLedgerDelta,
+} from "./context/taskPaperLedger";
 import type { TaskPaperScopeSet } from "./context/taskPaperScopeListing";
 import type {
   ResolvedTurnSelectedTextAnchor,
@@ -622,6 +625,12 @@ export type AgentEvent =
       materialTitle?: string;
       /** The tool call that finalized it; absent for host-side publication. */
       callId?: string;
+      /**
+       * The sources the finalized document cites, with the heading each
+       * first appears under, for the Task progress rows. Optional: older
+       * events and non-document material carry none.
+       */
+      citedSources?: TaskPaperDocumentCitation[];
     }
   | {
       /**
@@ -1113,6 +1122,8 @@ export type AgentToolResult = {
   materialRef?: MaterialRef;
   materialKind?: string;
   materialTitle?: string;
+  /** Sources the finalized document cites; announced on `material_finalized`. */
+  materialCitedSources?: TaskPaperDocumentCitation[];
   /**
    * Per-item outcomes of a durable batch. The host announces one run event
    * each, so a batch's material is recoverable per item instead of collapsing
@@ -1196,6 +1207,7 @@ export type AgentToolExecutionOutput<TResult = unknown> =
       materialRef?: MaterialRef;
       materialKind?: string;
       materialTitle?: string;
+      materialCitedSources?: TaskPaperDocumentCitation[];
       batchItems?: AgentBatchItemOutcome[];
     };
 

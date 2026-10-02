@@ -1,4 +1,5 @@
 import type { ActionProposal } from "../../authorization/types";
+import type { TaskPaperDocumentCitation } from "../../context/taskPaperLedger";
 import {
   readFlatMaterialRef,
   type MaterialRef,
@@ -172,6 +173,7 @@ export function normalizeExecutionOutput(
   materialRef?: MaterialRef;
   materialKind?: string;
   materialTitle?: string;
+  materialCitedSources?: TaskPaperDocumentCitation[];
   batchItems?: AgentBatchItemOutcome[];
 } {
   if (value && typeof value === "object" && !Array.isArray(value)) {
@@ -183,6 +185,7 @@ export function normalizeExecutionOutput(
       materialRef?: unknown;
       materialKind?: unknown;
       materialTitle?: unknown;
+      materialCitedSources?: unknown;
       batchItems?: unknown;
     };
     if (Object.prototype.hasOwnProperty.call(record, "content")) {
@@ -209,6 +212,9 @@ export function normalizeExecutionOutput(
           typeof record.materialTitle === "string"
             ? record.materialTitle
             : undefined,
+        materialCitedSources: Array.isArray(record.materialCitedSources)
+          ? (record.materialCitedSources as TaskPaperDocumentCitation[])
+          : undefined,
         batchItems: Array.isArray(record.batchItems)
           ? (record.batchItems as AgentBatchItemOutcome[])
           : undefined,

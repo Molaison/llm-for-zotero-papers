@@ -2,8 +2,9 @@
  * "Source" on a passage the Task progress card lists: a click opens the
  * paper's PDF in the reader and highlights the passage through the same
  * pipeline a quote card's jump uses; a passage not in the PDF's text falls
- * back to the page its label names; a paper with no PDF says so. The card
- * stays as it was (the paper expanded, the drawer open).
+ * back to the page its label names; a paper with no PDF says so; a
+ * whole-paper read opens the paper at its first page without a search. The
+ * card stays as it was (the paper expanded, the drawer open).
  */
 import { assert } from "chai";
 import { getReaderContextPanelForTab } from "../src/modules/contextPanel/readerPopupPanelRouting";
@@ -404,6 +405,77 @@ describe("workflow: task progress passage source", function () {
         () => `a paper without a PDF says so: status "${status()}"`,
       );
       assert.equal(activeReader()?.itemID, fixtures[1].pdfAttachmentId);
+
+      // 4. A whole-paper read: the row says "Full text", and Source opens the
+      // paper at its first page without searching for the snippet.
+      await handle.emit({
+        type: "paper_ledger_update",
+        callId: "overview-1",
+        delta: {
+          version: 1,
+          callId: "overview-1",
+          toolName: "paper_read",
+          papers: [
+            {
+              key: key(fixtures[0].parentItemId),
+              libraryID,
+              itemId: fixtures[0].parentItemId,
+              contextItemId: fixtures[0].pdfAttachmentId,
+              title: TITLES[0],
+              text: "pdf_text",
+              state: "read",
+            },
+          ],
+          reads: [
+            {
+              key: key(fixtures[0].parentItemId),
+              callId: "overview-1",
+              toolName: "paper_read",
+              granularity: "full",
+              method: "overview",
+              // Not in the PDF's text: a search would fail, an open does not.
+              snippet: "A body paragraph the PDF text layer does not hold.",
+            },
+          ],
+        },
+      } as never);
+      const fullRead = (): HTMLElement | undefined => {
+        const reads = (paper(fixtures[0].parentItemId)?.querySelectorAll(
+          ".llm-task-paper-read",
+        ) || []) as unknown as ArrayLike<HTMLElement>;
+        return Array.from(reads).find(
+          (node) =>
+            node.querySelector(".llm-task-paper-how")?.textContent ===
+            "Full text",
+        );
+      };
+      await until(() => {
+        api.flushTaskProgress();
+        return Boolean(fullRead());
+      }, "the full-text read lists under its paper");
+      assert.equal(
+        paper(fixtures[0].parentItemId)!
+          .querySelector(".llm-task-paper-tail")
+          ?.textContent?.trim(),
+        "Full text",
+        "the row says Full text, not a passage count",
+      );
+      const fullSource = fullRead()!.querySelector(
+        ".llm-task-paper-open",
+      ) as HTMLButtonElement;
+      assert.isOk(fullSource, "a full-text read offers Source");
+      fullSource.click();
+      await until(
+        () => status() === "Opened the paper",
+        () => `the paper opens: status "${status()}"`,
+        30000,
+      );
+      const fullReader = activeReader();
+      assert.equal(fullReader?.itemID, fixtures[0].pdfAttachmentId);
+      await until(
+        () => readerPageIndex(fullReader) === 0,
+        () => `the paper opens at page 1 (${readerPageIndex(fullReader)})`,
+      );
     } finally {
       handle.finish();
       restore();

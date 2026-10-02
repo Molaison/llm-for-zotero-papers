@@ -3993,7 +3993,8 @@ function resolveTaskPaperPassagePdf(
  * the same background verification, reader opening and FindController
  * highlight a quote card's jump uses, with the paper already known. When the
  * text is not found, the passage's page (if its label names one) or else the
- * paper is opened, and the status line says so.
+ * paper is opened, and the status line says so. A whole-paper ("full") read
+ * opens the paper without a search.
  */
 export async function navigateToTaskPaperPassage(params: {
   body: Element;
@@ -4033,6 +4034,18 @@ export async function navigateToTaskPaperPassage(params: {
       return "no-pdf";
     }
     const pdfId = Math.floor(pdf.id);
+    // A whole-paper read has no passage to find: its snippet is only the
+    // paper's opening. Source opens the paper itself, at its first page.
+    if (target.granularity === "full") {
+      const reader = await openReaderForItem(pdfId, { pageIndex: 0 });
+      if (!reader) {
+        report(t("Could not open the paper."), "error");
+        return "failed";
+      }
+      Zotero.getMainWindow()?.focus();
+      report(t("Opened the paper"), "ready");
+      return "page";
+    }
     const searchTexts = buildTaskPaperPassageSearchTexts(
       target.cleanedSnippet,
       target.rawSnippet,

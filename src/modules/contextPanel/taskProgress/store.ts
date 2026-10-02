@@ -14,12 +14,16 @@
  * the conversations being opened beside them.
  */
 import {
+  applyDocumentCitations,
   applyFinalCitations,
   applyTaskPaperLedgerDelta,
   createTaskPaperLedger,
+  type TaskPaperDocumentCitation,
   type TaskPaperLedger,
   type TaskPaperLedgerDelta,
+  type TaskPaperResolvedRef,
 } from "../../../agent/context/taskPaperLedger";
+import { resolveZoteroPaperRef } from "../../../agent/context/taskPaperLedgerRecorder";
 import type {
   TaskPaperScopeContexts,
   TaskPaperScopeListing,
@@ -134,6 +138,16 @@ export type TaskProgressRecord = {
   collapseSeq: number;
   /** True once the persisted history was folded in. */
   hydrated: boolean;
+  /**
+   * Every source the question's submitted documents cited, by question, and
+   * the run that cited them: a run may finalize more than one document, and
+   * each `material_finalized` names only its own; a re-run of the question
+   * replaces them. In memory only; rebuilt from the run events.
+   */
+  documentCitations?: Record<
+    number,
+    { runId?: string; citations: TaskPaperDocumentCitation[] }
+  >;
   /** Identity of this record; a cleared and recreated record gets a new one. */
   epoch: number;
 };
@@ -408,6 +422,95 @@ export function completeTaskRun(
     record.runState = "completed";
   }
   changed(record);
+}
+
+/**
+ * The paper a document source names, as Zotero knows it: the item its key
+ * names, or that item's parent when the key names an attachment.
+ */
+function resolveDocumentCitationItem(
+  citation: TaskPaperDocumentCitation,
+): TaskPaperResolvedRef | null {
+  try {
+    let itemId = Number(citation.itemId) || 0;
+    if (!(itemId > 0)) {
+      const items = (
+        globalThis as {
+          Zotero?: {
+            Items?: {
+              getIDFromLibraryAndKey?: (
+                libraryID: number,
+                key: string,
+              ) => number | false;
+            };
+          };
+        }
+      ).Zotero?.Items;
+      itemId = Number(
+        items?.getIDFromLibraryAndKey?.(citation.libraryID, citation.itemKey),
+      );
+    }
+    if (!Number.isInteger(itemId) || itemId <= 0) return null;
+    const paper = resolveZoteroPaperRef({ itemId });
+    return paper
+      ? { itemId: paper.itemId, libraryID: citation.libraryID }
+      : { itemId, libraryID: citation.libraryID };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A submitted document's sources: mark the papers it cites, under the run's
+ * question, with the section each first appears in. Re-applying the same
+ * sources changes nothing.
+ */
+export function applyTaskDocumentCitations(
+  conversationKey: number,
+  runId: string | undefined,
+  citations: readonly TaskPaperDocumentCitation[],
+): void {
+  const record = writable(conversationKey);
+  if (!record || !citations?.length) return;
+  const turn = turnFor(record, runId);
+  if (!turn) return;
+  if (foldDocumentCitations(record, citations, turn, runId)) changed(record);
+}
+
+function documentCitationIdentity(citation: TaskPaperDocumentCitation): string {
+  return [citation.libraryID, citation.itemKey, citation.citationId].join(
+    "\u0000",
+  );
+}
+
+/** Add a document's sources to its question's and re-mark them; true on change. */
+function foldDocumentCitations(
+  record: TaskProgressRecord,
+  citations: readonly TaskPaperDocumentCitation[],
+  turn: number,
+  runId: string | undefined,
+): boolean {
+  const byTurn = (record.documentCitations ||= {});
+  const held = byTurn[turn];
+  // Another run of the same question: its sources replace the earlier run's.
+  const merged =
+    held && (held.runId || "") === (runId || "") ? [...held.citations] : [];
+  const known = new Set(merged.map(documentCitationIdentity));
+  for (const citation of citations) {
+    const identity = documentCitationIdentity(citation);
+    if (known.has(identity)) continue;
+    known.add(identity);
+    merged.push(citation);
+  }
+  byTurn[turn] = runId ? { runId, citations: merged } : { citations: merged };
+  const before = JSON.stringify(record.ledger.papers);
+  applyDocumentCitations(
+    record.ledger,
+    merged,
+    turn,
+    resolveDocumentCitationItem,
+  );
+  return JSON.stringify(record.ledger.papers) !== before;
 }
 
 /** The run stopped early. The partial ledger stays. */
@@ -725,6 +828,8 @@ export type TaskProgressHistoryRun = {
   deltas: TaskPaperLedgerDelta[];
   /** The citations the persisted answer kept. */
   quoteCitations?: readonly QuoteCitation[];
+  /** The sources the run's submitted documents cite (`material_finalized`). */
+  documentCitations?: readonly TaskPaperDocumentCitation[];
 };
 
 export type TaskProgressHistory = {
@@ -773,6 +878,9 @@ export function hydrateTaskProgress(
         turn,
         history.libraryID,
       );
+    }
+    if (run.documentCitations?.length) {
+      foldDocumentCitations(record, run.documentCitations, turn, run.runId);
     }
   }
   if (history.planSeen) record.planSeen = true;

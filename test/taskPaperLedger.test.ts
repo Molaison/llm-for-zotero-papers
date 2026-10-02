@@ -6,14 +6,17 @@ import {
   TASK_PAPER_MAX_CITATIONS_PER_TURN,
   TASK_PAPER_MAX_PAPERS,
   TASK_PAPER_MAX_READS_PER_TURN,
+  applyDocumentCitations,
   applyFinalCitations,
   applyTaskPaperLedgerDelta,
   createTaskPaperLedger,
   deriveTaskPaperLedgerDelta,
+  firstBodyParagraph,
   taskPaperReadDepths,
   type TaskPaperLedgerDelta,
 } from "../src/agent/context/taskPaperLedger";
 import { createTrustedReadObservations } from "../src/agent/context/readObservation";
+import { attestAndRecordRead } from "../src/agent/context/taskPaperLedgerRecorder";
 import type { QuoteCitation } from "../src/shared/types";
 
 function derive(
@@ -281,6 +284,68 @@ describe("taskPaperLedger", function () {
       );
       assert.equal(paperState(delta, "1:13"), "matched");
       assert.isUndefined(paperState(delta, "1:14"));
+    });
+
+    it("takes a complete overview read's snippet from the first body paragraph, not the title block", function () {
+      const text =
+        "[chunk 0]\n# Emergence of stable ensembles\nMeng-jun Sheng, Di Lu and Mu-ming Poo\nInstitute of Neuroscience, Shanghai\n\n## Abstract\n\nRepresentational drift was measured in 124 mice across 30 days, and the population code stayed decodable while single cells drifted.\n\n[chunk 1]\nMethods follow.";
+      assert.equal(
+        firstBodyParagraph(text),
+        "Representational drift was measured in 124 mice across 30 days, and the population code stayed decodable while single cells drifted.",
+      );
+      const delta = derive(
+        "paper_read",
+        { mode: "overview" },
+        {
+          mode: "overview",
+          results: [
+            {
+              backend: "mineru",
+              text,
+              coverage: "complete",
+              paperContext: { itemId: 10, contextItemId: 20, title: "A" },
+            },
+          ],
+        },
+      );
+      assert.equal(readsFor(delta, "1:10")[0].granularity, "full");
+      assert.match(
+        readsFor(delta, "1:10")[0].snippet || "",
+        /^Representational drift was measured/,
+      );
+      assert.notInclude(readsFor(delta, "1:10")[0].snippet, "[chunk");
+      assert.notInclude(readsFor(delta, "1:10")[0].snippet, "#");
+    });
+
+    it("takes a Chinese paper's abstract as its body paragraph, not its title block", function () {
+      const abstract =
+        "表征漂移是指在行为表现保持稳定的情况下，单个神经元的反应特性随时间逐渐改变的现象。本研究在一百二十四只小鼠中连续记录了三十天的海马CA1区神经元活动，发现群体编码在单细胞漂移的同时仍然可以准确解码动物的位置。";
+      assert.isAtLeast(abstract.length, 100);
+      const text = `[chunk 0]\n# 稳定神经集群的涌现\n张三，李四，王五\n中国科学院神经科学研究所\n\n## 摘要\n\n${abstract}\n\n[chunk 1]\n方法如下。`;
+      assert.equal(firstBodyParagraph(text), abstract);
+    });
+
+    it("keeps an abstract that names a university once it reads as prose", function () {
+      const abstract =
+        "Patients treated at the University hospital over five years showed fewer relapses, and the effect held after adjustment for age and severity.";
+      assert.equal(
+        firstBodyParagraph(`# Title\nA. Author, B. Author\n\n${abstract}`),
+        abstract,
+      );
+    });
+
+    it("skips affiliation and short paragraphs, and falls back to the first paragraph", function () {
+      assert.equal(
+        firstBodyParagraph(
+          "[passage p. 1]\nTitle\n\nDepartment of Neurobiology, University of Somewhere, 1 Road, City, State, Zip, Country, Planet, Galaxy\n\nWe recorded place cells in CA1 over many weeks and found that their tuning reorganized gradually while the decoded position stayed accurate.",
+        ),
+        "We recorded place cells in CA1 over many weeks and found that their tuning reorganized gradually while the decoded position stayed accurate.",
+      );
+      assert.equal(
+        firstBodyParagraph("[chunk 0]\n# Only a title"),
+        "Only a title",
+      );
+      assert.equal(firstBodyParagraph(""), "");
     });
 
     it("maps paper_read targeted passages to sections, passages and pages", function () {
@@ -851,6 +916,191 @@ describe("taskPaperLedger", function () {
     });
   });
 
+  describe("applyDocumentCitations", function () {
+    function readLedger() {
+      const ledger = createTaskPaperLedger();
+      applyTaskPaperLedgerDelta(
+        ledger,
+        {
+          version: 1,
+          callId: "r1",
+          toolName: "paper_read",
+          papers: [
+            {
+              key: "1:7",
+              libraryID: 1,
+              itemId: 7,
+              itemKey: "SEVEN777",
+              state: "read",
+            },
+            { key: "1:8", libraryID: 1, itemId: 8, state: "read" },
+          ],
+          reads: [],
+        },
+        2,
+      );
+      return ledger;
+    }
+
+    it("joins by item key, keeps the section label, and replays idempotently", function () {
+      const ledger = readLedger();
+      assert.equal(ledger.papers["1:7"].itemKey, "SEVEN777");
+      const citations = [
+        {
+          citationId: "c1",
+          libraryID: 1,
+          itemKey: "SEVEN777",
+          sectionLabel: "Discussion",
+        },
+        { citationId: "c2", libraryID: 1, itemKey: "EIGHT888", itemId: 8 },
+      ];
+      applyDocumentCitations(ledger, citations, 2);
+      const seven = ledger.papers["1:7"];
+      assert.equal(seven.state, "cited");
+      assert.deepEqual(seven.turns[2].citations, [
+        {
+          citationId: "c1",
+          turnIndex: 2,
+          source: "document",
+          sectionLabel: "Discussion",
+        },
+      ]);
+      const eight = ledger.papers["1:8"];
+      assert.equal(eight.state, "cited");
+      assert.equal(eight.itemKey, "EIGHT888", "learns the key it was cited by");
+      assert.isUndefined(eight.turns[2].citations[0].sectionLabel);
+      const snapshot = JSON.stringify(ledger);
+      applyDocumentCitations(ledger, citations, 2);
+      assert.equal(JSON.stringify(ledger), snapshot);
+      // Dropping a document citation falls back to the reads' state.
+      applyDocumentCitations(ledger, [citations[0]], 2);
+      assert.equal(ledger.papers["1:8"].state, "read");
+      assert.lengthOf(ledger.papers["1:8"].turns[2].citations, 0);
+    });
+
+    it("creates an entry for an unknown cited item through the resolver, else drops it", function () {
+      const ledger = readLedger();
+      applyDocumentCitations(
+        ledger,
+        [
+          { citationId: "x", libraryID: 1, itemKey: "NINE9999" },
+          { citationId: "y", libraryID: 1, itemKey: "GONE0000" },
+        ],
+        2,
+        (citation) => (citation.itemKey === "NINE9999" ? { itemId: 9 } : null),
+      );
+      assert.equal(ledger.papers["1:9"].state, "cited");
+      assert.equal(ledger.papers["1:9"].itemKey, "NINE9999");
+      assert.deepEqual(Object.keys(ledger.papers).sort(), [
+        "1:7",
+        "1:8",
+        "1:9",
+      ]);
+    });
+
+    it("files a source that names an attachment under its paper, not a row of its own", function () {
+      const ledger = createTaskPaperLedger();
+      applyTaskPaperLedgerDelta(
+        ledger,
+        {
+          version: 1,
+          callId: "r1",
+          toolName: "paper_read",
+          papers: [
+            {
+              key: "1:7",
+              libraryID: 1,
+              itemId: 7,
+              contextItemId: 70,
+              state: "read",
+            },
+          ],
+          reads: [],
+        },
+        2,
+      );
+      // Known attachment: matched through the paper's context items.
+      applyDocumentCitations(
+        ledger,
+        [{ citationId: "a", libraryID: 1, itemKey: "PDF70000", itemId: 70 }],
+        2,
+      );
+      // Unknown attachment: the resolver climbs to its parent paper.
+      applyDocumentCitations(
+        ledger,
+        [
+          { citationId: "a", libraryID: 1, itemKey: "PDF70000", itemId: 70 },
+          { citationId: "b", libraryID: 1, itemKey: "PDF71000", itemId: 71 },
+        ],
+        2,
+        (citation) =>
+          citation.itemId === 71 ? { itemId: 7, libraryID: 1 } : null,
+      );
+      assert.deepEqual(Object.keys(ledger.papers), ["1:7"]);
+      assert.deepEqual(
+        ledger.papers["1:7"].turns[2].citations.map((c) => c.citationId),
+        ["a", "b"],
+      );
+      assert.include(ledger.papers["1:7"].contextItemIds, 71);
+      assert.isUndefined(
+        ledger.papers["1:7"].itemKey,
+        "an attachment's key is not the paper's",
+      );
+    });
+
+    it("names a paper only the document cited by the title the source carries", function () {
+      const ledger = createTaskPaperLedger();
+      applyDocumentCitations(
+        ledger,
+        [
+          {
+            citationId: "c",
+            libraryID: 1,
+            itemKey: "ONLY1234",
+            itemId: 1234,
+            title: "Drift in the cortex",
+            firstCreator: "Smith",
+            year: "2021",
+          },
+        ],
+        1,
+      );
+      assert.include(ledger.papers["1:1234"], {
+        title: "Drift in the cortex",
+        creator: "Smith",
+        year: "2021",
+        itemKey: "ONLY1234",
+      });
+    });
+
+    it("never disturbs the answer's citations, nor the answer the document's", function () {
+      const ledger = readLedger();
+      applyFinalCitations(
+        ledger,
+        [{ id: "q1", quoteText: "Quoted", itemId: 7 }],
+        2,
+        1,
+      );
+      applyDocumentCitations(
+        ledger,
+        [{ citationId: "d1", libraryID: 1, itemKey: "SEVEN777" }],
+        2,
+      );
+      assert.deepEqual(
+        ledger.papers["1:7"].turns[2].citations.map((c) => c.citationId),
+        ["q1", "d1"],
+      );
+      applyFinalCitations(ledger, [], 2, 1);
+      assert.deepEqual(
+        ledger.papers["1:7"].turns[2].citations.map((c) => c.citationId),
+        ["d1"],
+      );
+      assert.equal(ledger.papers["1:7"].state, "cited");
+      applyDocumentCitations(ledger, [], 2);
+      assert.equal(ledger.papers["1:7"].state, "read");
+    });
+  });
+
   describe("alignment with readObservation", function () {
     const priorZotero = (globalThis as { Zotero?: unknown }).Zotero;
     const items = new Map<number, Record<string, unknown>>([
@@ -939,6 +1189,36 @@ describe("taskPaperLedger", function () {
       "visual",
       "capture",
     ];
+
+    it("files each read of a paper_read overview with its paper's observation ids and item key", async function () {
+      const { observations, paperLedgerDelta } = await attestAndRecordRead({
+        toolName: "paper_read",
+        callId: "obs",
+        input: { mode: "overview" },
+        result: {
+          mode: "overview",
+          results: [
+            {
+              backend: "mineru",
+              text: "Body text of the paper.",
+              coverage: "complete",
+              paperContext: { itemId: 10, contextItemId: 20 },
+            },
+          ],
+        },
+        conversationKey: 5,
+        libraryID: 1,
+      });
+      const ids = observations
+        .filter((entry) => entry.itemKey === "AAAA1111")
+        .map((entry) => entry.observationId);
+      assert.isNotEmpty(ids);
+      assert.equal(paperLedgerDelta!.papers[0].itemKey, "AAAA1111");
+      assert.isNotEmpty(paperLedgerDelta!.reads);
+      for (const read of paperLedgerDelta!.reads) {
+        assert.deepEqual(read.observationIds, ids);
+      }
+    });
 
     it("records every read readObservation attests", async function () {
       const names = discoveredToolNames();

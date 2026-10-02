@@ -247,7 +247,31 @@ async function outcomeEvidenceOf(params: {
     evidence.push({ kind: "receipt", receipt });
   }
   if (toolResult.materialRef) {
-    evidence.push({ kind: "material", materialRef: toolResult.materialRef });
+    // The part the call named, the document's kind and the papers it cites
+    // decide which part the material completes and which of its papers.
+    const named = (params.input as { taskId?: unknown } | null | undefined)
+      ?.taskId;
+    const taskId =
+      typeof named === "string" && named.trim() ? named.trim() : undefined;
+    const citedTargets = [
+      ...new Set(
+        (toolResult.materialCitedSources || []).flatMap((source) =>
+          typeof source.itemId === "number" && source.itemId > 0
+            ? [item(source.itemId)]
+            : [],
+        ),
+      ),
+    ];
+    evidence.push({
+      kind: "material",
+      materialRef: toolResult.materialRef,
+      ...(taskId ? { taskId } : {}),
+      ...(toolResult.materialKind
+        ? { documentKind: toolResult.materialKind }
+        : {}),
+      // Known for every material, so an empty list means it cites nothing.
+      citedTargets,
+    });
   }
   if (
     isUserDeniedToolResult(toolResult) &&
@@ -864,6 +888,9 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
         materialKind: toolResult.materialKind,
         materialTitle: toolResult.materialTitle,
         callId: toolResult.callId,
+        ...(toolResult.materialCitedSources?.length
+          ? { citedSources: toolResult.materialCitedSources }
+          : {}),
       });
     }
     // A batch announces its items one by one. They are deliberately not

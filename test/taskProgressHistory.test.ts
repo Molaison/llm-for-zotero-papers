@@ -180,6 +180,73 @@ describe("task progress history rebuild", function () {
     assert.equal(getTaskProgress(KEY)!.ledger.papers["1:2"].state, "cited");
   });
 
+  it("rehydrates the papers a submitted document cited, with their sections", async function () {
+    const finalized = (
+      seq: number,
+      documentId: string,
+      citedSources: Array<{
+        citationId: string;
+        libraryID: number;
+        itemKey: string;
+        itemId?: number;
+        sectionLabel?: string;
+      }>,
+    ) =>
+      record("run-2", seq, {
+        type: "material_finalized",
+        materialRef: { documentId, documentVersion: 1, contentHash: "h" },
+        materialKind: "document",
+        callId: `submit-${documentId}`,
+        citedSources,
+      });
+    assert.include(
+      TASK_PROGRESS_HISTORY_EVENT_TYPES as readonly string[],
+      "material_finalized",
+    );
+    const events = [
+      ...EVENTS,
+      finalized(3, "summaries", [
+        {
+          citationId: "c1",
+          libraryID: 1,
+          itemKey: "PAPER001",
+          itemId: 1,
+          sectionLabel: "Summaries",
+        },
+      ]),
+      finalized(4, "review", [
+        {
+          citationId: "c1",
+          libraryID: 1,
+          itemKey: "PAPER003",
+          itemId: 3,
+          sectionLabel: "Discussion",
+        },
+      ]),
+    ];
+    setTaskProgressHistoryLoaderForTests(async (runIds) =>
+      events.filter((event) => runIds.includes(event.runId)),
+    );
+    ensureTaskProgressHydrated(KEY, 1);
+    await waitForTaskProgressHydrationForTests(KEY);
+    const ledger = getTaskProgress(KEY)!.ledger;
+    assert.equal(ledger.papers["1:3"].state, "cited");
+    assert.deepEqual(ledger.papers["1:3"].turns[2].citations, [
+      {
+        citationId: "c1",
+        turnIndex: 2,
+        source: "document",
+        sectionLabel: "Discussion",
+      },
+    ]);
+    assert.equal(
+      ledger.papers["1:1"].turns[2].state,
+      "cited",
+      "both documents of the run count",
+    );
+    assert.equal(ledger.papers["1:1"].itemKey, "PAPER001");
+  });
+
   it("waits for the conversation's history to load", async function () {
     loadedConversationKeys.delete(KEY);
     ensureTaskProgressHydrated(KEY, 1);

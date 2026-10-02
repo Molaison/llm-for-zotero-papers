@@ -1,7 +1,11 @@
 import { assert } from "chai";
 import type { TaskPaperScopeEntry } from "../src/agent/context/taskPaperScopeListing";
-import type { TaskPaperReadEvent } from "../src/agent/context/taskPaperLedger";
+import type {
+  TaskPaperLedgerEntry,
+  TaskPaperReadEvent,
+} from "../src/agent/context/taskPaperLedger";
 import {
+  applyTaskDocumentCitations,
   applyTaskPaperUpdate,
   beginTaskAction,
   beginTaskRun,
@@ -32,11 +36,13 @@ import {
   createTaskProgressRow,
   cleanTaskPaperSnippet,
   formatTaskPaperPassageLabel,
+  formatTaskPaperTail,
   formatTaskProgressCount,
   getRememberedTaskProgressDrawerHeight,
   mountTaskProgressView,
   resetTaskProgressDrawerHeight,
   type TaskProgressLayout,
+  type TaskProgressPaperRow,
   type TaskProgressView,
   type TaskProgressViewInput,
 } from "../src/modules/contextPanel/taskProgress/view";
@@ -491,7 +497,8 @@ describe("task progress view", function () {
     assert.equal(third.dataset.state, "matched");
     assert.equal(
       second.findByClass("llm-task-paper-tail")!.textContent,
-      "1 passage",
+      "Results",
+      "a labelled passage names its section, not a passage count",
     );
     assert.equal(
       second.findByClass("llm-task-paper-meta-text")!.textContent,
@@ -562,6 +569,234 @@ describe("task progress view", function () {
       ),
       "Emergence of stable ensembles Meng-jun Sheng, Di Lu and Mu-ming Poo",
     );
+  });
+
+  it("says Full text for a complete read, names sections for targeted reads, and counts passages otherwise", function () {
+    const row = (
+      reads: Partial<TaskPaperReadEvent>[],
+      options: { citations?: number } = {},
+    ): TaskProgressPaperRow => {
+      const entry: TaskPaperLedgerEntry = {
+        key: "1:1",
+        libraryID: 1,
+        itemId: 1,
+        contextItemIds: [],
+        text: "unknown",
+        state: options.citations ? "cited" : "read",
+        latestTurn: 1,
+        turns: {
+          1: {
+            state: options.citations ? "cited" : "read",
+            readState: "read",
+            reads: reads.map((read) => ({
+              key: "1:1",
+              callId: "c",
+              toolName: "paper_read",
+              granularity: "passage" as const,
+              ...read,
+            })),
+            droppedReads: 0,
+            citations: Array.from(
+              { length: options.citations || 0 },
+              (_, index) => ({ citationId: `q${index}`, turnIndex: 1 }),
+            ),
+            droppedCitations: 0,
+          },
+        },
+      };
+      return {
+        key: "1:1",
+        index: 1,
+        libraryID: 1,
+        itemId: 1,
+        title: "Paper",
+        creator: "",
+        year: "",
+        folders: [],
+        tags: [],
+        scopeText: "unknown",
+        inScope: true,
+        entry,
+        state: entry.state,
+        turnState: entry.state,
+      };
+    };
+    assert.equal(
+      formatTaskPaperTail(row([{ granularity: "full", snippet: "Body." }])),
+      "Full text",
+    );
+    assert.equal(
+      formatTaskPaperTail(
+        row([
+          { granularity: "section", label: "Methods", snippet: "a" },
+          { granularity: "section", label: "Results", snippet: "b" },
+        ]),
+      ),
+      "Methods, Results",
+    );
+    assert.equal(
+      formatTaskPaperTail(
+        row(
+          ["A", "B", "C", "D"].map((label) => ({
+            granularity: "section" as const,
+            label,
+            snippet: label,
+          })),
+        ),
+      ),
+      "A, B, C…",
+    );
+    assert.equal(
+      formatTaskPaperTail(row([{ snippet: "a" }, { snippet: "b" }])),
+      "2 passages",
+    );
+    assert.equal(
+      formatTaskPaperTail(
+        row([
+          { label: "p. 4", snippet: "a" },
+          { label: "Paper", snippet: "b" },
+        ]),
+      ),
+      "2 passages",
+      "a page label or the paper's own title names no section",
+    );
+    assert.equal(
+      formatTaskPaperTail(
+        row([{ granularity: "full", snippet: "Body." }], { citations: 2 }),
+      ),
+      "Full text · cited 2",
+    );
+    assert.equal(
+      cleanTaskPaperSnippet("[chunk 0] # Title\nBody"),
+      "Title Body",
+    );
+    assert.equal(
+      cleanTaskPaperSnippet("[chunk 3 p. 2]\n## Results\nBody"),
+      "Results Body",
+    );
+  });
+
+  it("folds papers paper_read found no text for into the count, not the list", function () {
+    seedScope(13);
+    const harness = track(mount());
+    beginTaskRun(KEY, { runId: "run-a" });
+    applyTaskPaperUpdate(
+      KEY,
+      {
+        version: 1,
+        callId: "overview",
+        runId: "run-a",
+        toolName: "paper_read",
+        papers: Array.from({ length: 12 }, (_, index) => ({
+          key: `1:${index + 1}`,
+          libraryID: 1,
+          itemId: index + 1,
+          text: "none" as const,
+          state: "matched" as const,
+        })),
+        reads: Array.from({ length: 12 }, (_, index) => ({
+          key: `1:${index + 1}`,
+          callId: "overview",
+          toolName: "paper_read",
+          granularity: "metadata" as const,
+          method: "overview",
+        })),
+      },
+      "run-a",
+    );
+    applyTaskPaperUpdate(
+      KEY,
+      {
+        version: 1,
+        callId: "search",
+        runId: "run-a",
+        toolName: "library_search",
+        papers: [{ key: "1:13", libraryID: 1, itemId: 13, state: "matched" }],
+        reads: [
+          {
+            key: "1:13",
+            callId: "search",
+            toolName: "library_search",
+            granularity: "metadata",
+            method: "search",
+          },
+        ],
+      },
+      "run-a",
+    );
+    harness.runTimers();
+    const before = harness.count();
+    harness.row.dispatchFakeEvent("click");
+    const titles = harness
+      .items()
+      .map((item) => item.findByClass("llm-task-paper-title")!.textContent);
+    assert.deepEqual(titles, ["Paper 13"]);
+    assert.equal(harness.count(), before, "the header still counts them");
+    assert.include(before, "of 13");
+  });
+
+  it("lists a document's citations of a paper by section, and opens the paper from them", function () {
+    seedScope(3);
+    class FakeCustomEvent {
+      constructor(
+        public type: string,
+        public init: { bubbles?: boolean; detail?: unknown },
+      ) {}
+    }
+    const doc = {
+      ...(fakeDocument as unknown as Record<string, unknown>),
+      defaultView: { CustomEvent: FakeCustomEvent },
+    } as unknown as Document;
+    const harness = track(mount({}, { doc }));
+    beginTaskRun(KEY, { runId: "run-a" });
+    applyTaskPaperUpdate(
+      KEY,
+      ledgerDelta("c1", [[2, "read", "Drift grows with time."]]),
+      "run-a",
+    );
+    applyTaskDocumentCitations(KEY, "run-a", [
+      {
+        citationId: "d1",
+        libraryID: 1,
+        itemKey: "PAPER002",
+        itemId: 2,
+        sectionLabel: "Discussion",
+      },
+      { citationId: "d2", libraryID: 1, itemKey: "PAPER002", itemId: 2 },
+    ]);
+    harness.row.dispatchFakeEvent("click");
+    const paper = harness.items()[1];
+    assert.equal(paper.dataset.state, "cited");
+    assert.equal(
+      paper.findByClass("llm-task-paper-tail")!.textContent,
+      "Results · cited 2",
+    );
+    paper.findByClass("llm-task-paper-summary")!.dispatchFakeEvent("click");
+    const details = paper.findByClass("llm-task-paper-details")!;
+    const text = collectFakeText(details);
+    assert.include(text, "Cited in document");
+    assert.notInclude(text, "Cited in answer");
+    const links = details.findAllByClass("llm-task-paper-citation");
+    assert.deepEqual(
+      links.map((link) => link.textContent),
+      ["↳ Discussion", "↳ Cited in document"],
+    );
+    const dispatched: FakeCustomEvent[] = [];
+    (links[0] as any).dispatchEvent = (event: FakeCustomEvent) => {
+      dispatched.push(event);
+      return true;
+    };
+    links[0].dispatchFakeEvent("click");
+    assert.lengthOf(dispatched, 1);
+    assert.equal(dispatched[0].type, TASK_PROGRESS_OPEN_PASSAGE_EVENT);
+    assert.deepInclude(dispatched[0].init.detail as object, {
+      itemId: 2,
+      libraryID: 1,
+      granularity: "full",
+      rawSnippet: "",
+      label: "Discussion",
+    });
+    assert.deepEqual(harness.navigated, [], "no quote chip jump");
   });
 
   it("closes on Escape and returns focus to the row", function () {
@@ -766,7 +1001,7 @@ describe("task progress view", function () {
     assert.equal(item.dataset.state, "cited");
     assert.equal(
       item.findByClass("llm-task-paper-tail")!.textContent,
-      "1 passage · cited 1",
+      "Results · cited 1",
     );
     item.findByClass("llm-task-paper-summary")!.dispatchFakeEvent("click");
     const link = item.findByClass("llm-task-paper-citation")!;
@@ -857,7 +1092,7 @@ describe("task progress view", function () {
     assert.equal(fourth.dataset.state, "listed");
     assert.equal(
       first.findByClass("llm-task-paper-tail")!.textContent,
-      "1 passage",
+      "Results",
     );
     const head = harness.drawer.findByClass("llm-task-progress-head")!;
     assert.isTrue(head.hidden, "no summary line above the paper list");

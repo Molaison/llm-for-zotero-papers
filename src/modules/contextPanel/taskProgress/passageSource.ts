@@ -35,8 +35,12 @@ export function taskPaperPassagePageLabel(label: string | undefined): string {
   return match ? match[1] : "";
 }
 
-/** A read the card offers to open: some text to find, or a page to go to. */
+/**
+ * A read the card offers to open: a whole-paper read (opens the paper), some
+ * text to find, or a page to go to.
+ */
 export function canOpenTaskPaperPassage(read: TaskPaperReadEvent): boolean {
+  if (read.granularity === "full") return true;
   if ((read.snippet || "").trim()) return true;
   return (
     read.granularity === "page" &&

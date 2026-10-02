@@ -44,6 +44,7 @@ import type { RunEndState } from "../../../agent/execution/types";
 import { t } from "../../../utils/i18n";
 import {
   canOpenTaskPaperPassage,
+  taskPaperPassagePageLabel,
   type TaskPaperPassageTarget,
 } from "./passageSource";
 import { renderChecklistSteps, resolveTaskPaperLabel } from "./planSteps";
@@ -435,9 +436,10 @@ export function formatTaskPaperPassageLabel(
   return label;
 }
 
-/** A snippet as prose: no Markdown heading marks, no TeX, one line. */
+/** A snippet as prose: no chunk markers, no Markdown heading marks, no TeX, one line. */
 export function cleanTaskPaperSnippet(snippet: string): string {
   return snippet
+    .replace(/\[chunk \d+[^\]]*\]\s*/g, "")
     .replace(/(^|\n)\s*#{1,6}\s+/g, "$1")
     .replace(/\$\$[\s\S]*?\$\$|\$[^$\n]*\$/g, " ")
     .replace(/\s+/g, " ")
@@ -474,7 +476,34 @@ function metaText(row: TaskProgressPaperRow): string {
     .join(" · ");
 }
 
-/** The row's tail over every question: "3 passages · cited 2". */
+/** Section names a targeted read gave: neither a page nor the paper's title. */
+function readSectionLabel(
+  read: TaskPaperReadEvent,
+  paperTitle: string,
+): string {
+  if (read.granularity !== "section" && read.granularity !== "passage")
+    return "";
+  const label = (read.label || "").trim();
+  if (!label || taskPaperPassagePageLabel(label)) return "";
+  const title = looseText(paperTitle);
+  const loose = looseText(label);
+  if (
+    title &&
+    loose &&
+    (loose === title || title.startsWith(loose) || loose.startsWith(title))
+  )
+    return "";
+  return label;
+}
+
+/** Section names the tail lists before it says "…". */
+const TAIL_SECTIONS = 3;
+
+/**
+ * The row's tail over every question: "Full text" for a whole-paper read,
+ * the sections a targeted read named ("Methods, Results"), else a passage
+ * count; then "cited N". Never a byte size or a section count.
+ */
 export function formatTaskPaperTail(row: TaskProgressPaperRow): string {
   if (row.state === "listed") return "";
   if (row.state === "matched") return t("title/abstract");
@@ -483,7 +512,19 @@ export function formatTaskPaperTail(row: TaskProgressPaperRow): string {
   const citations = turns.flatMap((entry) => entry.citations);
   const passages = reads.filter((read) => read.snippet).length;
   const parts: string[] = [];
-  if (passages) {
+  const sections = [
+    ...new Set(
+      reads.map((read) => readSectionLabel(read, row.title)).filter(Boolean),
+    ),
+  ];
+  if (reads.some((read) => read.granularity === "full")) {
+    parts.push(t("Full text"));
+  } else if (sections.length) {
+    parts.push(
+      sections.slice(0, TAIL_SECTIONS).join(", ") +
+        (sections.length > TAIL_SECTIONS ? "…" : ""),
+    );
+  } else if (passages) {
     parts.push(
       passages === 1
         ? t("1 passage")
@@ -497,6 +538,37 @@ export function formatTaskPaperTail(row: TaskProgressPaperRow): string {
     parts.push(format("cited {count}", { count: citations.length }));
   }
   return parts.join(" · ");
+}
+
+/**
+ * A row whose summarized question only had `paper_read` find no text for it
+ * (metadata reads alone) and cited nothing. Such rows fold into the count
+ * instead of listing; a search listing's matched rows still list.
+ */
+export function isMetadataOnlyRow(
+  row: TaskProgressPaperRow,
+  turn: number,
+): boolean {
+  const entry = row.entry;
+  if (!entry || STATE_RANK[row.state] >= STATE_RANK.skimmed) return false;
+  const turns = turn
+    ? [entry.turns[turn]].filter(Boolean)
+    : Object.values(entry.turns);
+  const reads = turns.flatMap((record) => record.reads);
+  if (!reads.length) return false;
+  if (turns.some((record) => record.citations.length)) return false;
+  return reads.every(
+    (read) => read.granularity === "metadata" && read.toolName === "paper_read",
+  );
+}
+
+/** The rows the drawer lists: every row but the metadata-only ones. */
+export function listedTaskProgressPaperRows(
+  record: TaskProgressRecord | null,
+  rows: TaskProgressPaperRow[] = buildTaskProgressPaperRows(record),
+): TaskProgressPaperRow[] {
+  const turn = summaryTurn(record);
+  return rows.filter((row) => !isMetadataOnlyRow(row, turn));
 }
 
 const STATE_LABELS: Record<TaskPaperState, string> = {
@@ -1270,23 +1342,61 @@ export function mountTaskProgressView(params: {
       event.preventDefault?.();
       event.stopPropagation?.();
       if (button.disabled) return;
-      const View = (doc.defaultView as any)?.CustomEvent;
-      if (typeof View !== "function") return;
-      const detail: TaskPaperPassageTarget = {
-        itemId: model.itemId,
-        libraryID: model.libraryID,
+      dispatchOpenPassage(button, model, {
         rawSnippet: read.snippet || "",
         cleanedSnippet,
         label: read.label || "",
         granularity: read.granularity,
-      };
-      const contextItemId = model.entry?.contextItemIds?.[0];
-      if (contextItemId) detail.contextItemId = contextItemId;
-      button.dispatchEvent(
-        new View(TASK_PROGRESS_OPEN_PASSAGE_EVENT, { bubbles: true, detail }),
-      );
+      });
     });
     return button;
+  };
+
+  const dispatchOpenPassage = (
+    from: HTMLElement,
+    model: TaskProgressPaperRow,
+    detail: Omit<TaskPaperPassageTarget, "itemId" | "libraryID">,
+  ) => {
+    const View = (doc.defaultView as any)?.CustomEvent;
+    if (typeof View !== "function") return;
+    const target: TaskPaperPassageTarget = {
+      itemId: model.itemId,
+      libraryID: model.libraryID,
+      ...detail,
+    };
+    const contextItemId = model.entry?.contextItemIds?.[0];
+    if (contextItemId) target.contextItemId = contextItemId;
+    from.dispatchEvent(
+      new View(TASK_PROGRESS_OPEN_PASSAGE_EVENT, {
+        bubbles: true,
+        detail: target,
+      }),
+    );
+  };
+
+  /** A document's citation of the paper: its section; a click opens the paper. */
+  const documentCitationButton = (
+    model: TaskProgressPaperRow,
+    section: string,
+  ) => {
+    const link = el(
+      doc,
+      "button",
+      "llm-task-paper-citation",
+      `↳ ${section || t("Cited in document")}`,
+    );
+    link.type = "button";
+    link.addEventListener("click", (event: Event) => {
+      event.preventDefault?.();
+      event.stopPropagation?.();
+      dispatchOpenPassage(link, model, {
+        rawSnippet: "",
+        cleanedSnippet: "",
+        label: section,
+        granularity: "full",
+      });
+    });
+    return link;
   };
 
   const renderDetails = (refs: PaperRowRefs) => {
@@ -1297,6 +1407,7 @@ export function mountTaskProgressView(params: {
       .filter((turn) => Number.isFinite(turn))
       .sort((a, b) => a - b);
     const citations: Array<{ id: string; quote: string; turn: number }> = [];
+    const documentSections: string[] = [];
     const readsByTurn = new Map(
       turns.map((turn) => [turn, visibleReads(model.entry!.turns[turn].reads)]),
     );
@@ -1356,6 +1467,12 @@ export function mountTaskProgressView(params: {
         }
       }
       for (const citation of turnRecord.citations) {
+        if (citation.source === "document") {
+          const section = (citation.sectionLabel || "").trim();
+          if (!documentSections.includes(section))
+            documentSections.push(section);
+          continue;
+        }
         citations.push({
           id: citation.citationId,
           quote: citation.quote || citation.label || citation.citationId,
@@ -1411,6 +1528,16 @@ export function mountTaskProgressView(params: {
           jumpToCitation(citation.id);
         });
         citedIn.append(link);
+      }
+      children.push(citedIn);
+    }
+    if (documentSections.length) {
+      const citedIn = el(doc, "div", "llm-task-paper-cited");
+      citedIn.append(
+        el(doc, "div", "llm-task-paper-turn", t("Cited in document")),
+      );
+      for (const section of documentSections) {
+        citedIn.append(documentCitationButton(model, section));
       }
       children.push(citedIn);
     }
@@ -1579,7 +1706,7 @@ export function mountTaskProgressView(params: {
   };
 
   const renderList = (current: TaskProgressRecord | null) => {
-    const rows = buildTaskProgressPaperRows(current);
+    const rows = listedTaskProgressPaperRows(current);
     const window = rows.slice(0, limit);
     const nextByKey = new Map<string, PaperRowRefs>();
     const nextOrder: PaperRowRefs[] = [];
@@ -1803,7 +1930,7 @@ export function mountTaskProgressView(params: {
     remember();
   };
   const growWindow = () => {
-    const total = buildTaskProgressPaperRows(record()).length;
+    const total = listedTaskProgressPaperRows(record()).length;
     if (limit >= total) return;
     const remaining =
       Number(body.scrollHeight || 0) -

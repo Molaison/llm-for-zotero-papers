@@ -42,6 +42,10 @@ describe("task progress passage source", function () {
       canOpenTaskPaperPassage(read({ granularity: "page", label: "Figures" })),
     );
     assert.isFalse(canOpenTaskPaperPassage(read({ granularity: "outline" })));
+    assert.isTrue(
+      canOpenTaskPaperPassage(read({ granularity: "full" })),
+      "a whole-paper read opens the paper, with or without a snippet",
+    );
   });
 
   it("looks for the shown text first, without a clipped ellipsis or cut word", function () {
@@ -201,6 +205,82 @@ describe("task progress passage source", function () {
       assert.equal(status.className, "llm-status llm-status-error");
       assert.isFalse(button.disabled);
       assert.equal(button.dataset.loading, "false");
+    });
+
+    it("opens the paper for a full-text read, without searching for its snippet", async function () {
+      const opened: Array<{ itemId: number; location: unknown }> = [];
+      let searched = 0;
+      let focused = 0;
+      const reader = { itemID: 8 };
+      scope.Zotero = {
+        Items: {
+          get: (id: number) =>
+            id === 7
+              ? {
+                  id: 7,
+                  isRegularItem: () => true,
+                  isAttachment: () => false,
+                  getAttachments: () => [8],
+                }
+              : id === 8
+                ? {
+                    id: 8,
+                    isAttachment: () => true,
+                    attachmentContentType: "application/pdf",
+                    // Any text search reads the attachment's text.
+                    get attachmentText() {
+                      searched += 1;
+                      return Promise.resolve("");
+                    },
+                  }
+                : null,
+        },
+        Reader: {
+          open: async (itemId: number, location: unknown) => {
+            opened.push({ itemId, location });
+            return reader;
+          },
+        },
+        getMainWindow: () => ({
+          focus: () => {
+            focused += 1;
+          },
+        }),
+      };
+      const { body, status } = panel();
+      const shown: string[] = [];
+      let text = "";
+      Object.defineProperty(status, "textContent", {
+        get: () => text,
+        set: (value: string) => {
+          text = value;
+          shown.push(value);
+        },
+      });
+      const button = { dataset: {} as Record<string, string>, disabled: false };
+      const outcome = await navigateToTaskPaperPassage({
+        body,
+        target: target({
+          granularity: "full",
+          label: "",
+          rawSnippet: "Representational drift was measured in 124 mice.",
+          cleanedSnippet: "Representational drift was measured in 124 mice.",
+        }),
+        button: button as unknown as HTMLButtonElement,
+      });
+      assert.equal(outcome, "page");
+      assert.lengthOf(opened, 1);
+      assert.equal(opened[0].itemId, 8);
+      assert.deepInclude(
+        opened[0].location as object,
+        { pageIndex: 0 },
+        "the paper opens at its first page",
+      );
+      assert.equal(focused, 1);
+      assert.equal(searched, 0, "no text search was attempted");
+      assert.deepEqual(shown, ["Opened the paper"], "never 'Locating…'");
+      assert.equal(status.textContent, "Opened the paper");
+      assert.isFalse(button.disabled);
     });
 
     it("ignores a click while the button is already opening", async function () {

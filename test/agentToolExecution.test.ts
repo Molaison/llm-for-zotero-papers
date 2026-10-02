@@ -875,6 +875,121 @@ describe("agent tool execution collaborator", function () {
     }
   });
 
+  it("announces the sources a finalized document cites on material_finalized", async function () {
+    const restoreDb = installMockDb();
+    try {
+      const registry = new AgentToolRegistry(createTestActionContractService());
+      const citedSources = [
+        {
+          citationId: "c1",
+          libraryID: 1,
+          itemKey: "PAPER001",
+          itemId: 11,
+          sectionLabel: "Discussion",
+        },
+      ];
+      registry.register({
+        spec: {
+          name: "submit_document",
+          description: "submit",
+          inputSchema: { type: "object" },
+          executionClass: "read",
+          workCategory: "generation",
+        },
+        validate: (args: unknown) => ({ ok: true, value: args as never }),
+        execute: async () => ({
+          content: { documentId: "doc-1" },
+          materialRef: {
+            documentId: "doc-1",
+            documentVersion: 1,
+            contentHash: "hash-1",
+          },
+          materialKind: "document",
+          materialTitle: "Review",
+          materialCitedSources: citedSources,
+        }),
+      } as never);
+      const harness = await createHarness(registry);
+      const toolExecution = createToolExecution(harness.deps);
+      await toolExecution.executeToolWorkflow(
+        { id: "call-submit", name: "submit_document", arguments: {} },
+        1,
+        { modelCallId: "provider-submit" },
+      );
+      const finalized = harness.events.find(
+        (event) => event.type === "material_finalized",
+      ) as Extract<AgentEvent, { type: "material_finalized" }> | undefined;
+      assert.exists(finalized);
+      assert.deepEqual(finalized!.citedSources, citedSources);
+    } finally {
+      restoreDb();
+    }
+  });
+
+  it("records the part a document names, its kind and the papers it cites on the material evidence", async function () {
+    const restoreDb = installMockDb();
+    try {
+      const registry = new AgentToolRegistry(createTestActionContractService());
+      registry.register({
+        spec: {
+          name: "submit_document",
+          description: "submit",
+          inputSchema: { type: "object" },
+          executionClass: "read",
+          workCategory: "generation",
+        },
+        validate: (args: unknown) => ({ ok: true, value: args as never }),
+        execute: async () => ({
+          content: { documentId: "doc-1" },
+          materialRef: {
+            documentId: "doc-1",
+            documentVersion: 1,
+            contentHash: "hash-1",
+          },
+          materialKind: "literature_review",
+          materialTitle: "Review",
+          materialCitedSources: [
+            { citationId: "c1", libraryID: 1, itemKey: "A", itemId: 11 },
+            { citationId: "c2", libraryID: 1, itemKey: "B", itemId: 12 },
+            { citationId: "c3", libraryID: 1, itemKey: "A", itemId: 11 },
+            { citationId: "c4", libraryID: 1, itemKey: "GONE" },
+          ],
+        }),
+      } as never);
+      const harness = await createHarness(registry);
+      const recorded: OutcomeEvidence[] = [];
+      harness.deps.recordOutcomeEvidence = async (evidence) => {
+        recorded.push(evidence);
+      };
+      const toolExecution = createToolExecution(harness.deps);
+      await toolExecution.executeToolWorkflow(
+        {
+          id: "call-submit",
+          name: "submit_document",
+          arguments: { taskId: "review" },
+        },
+        1,
+        { modelCallId: "provider-submit" },
+      );
+      const materials = recorded.filter((entry) => entry.kind === "material");
+      assert.deepEqual(materials, [
+        {
+          kind: "material",
+          materialRef: {
+            documentId: "doc-1",
+            documentVersion: 1,
+            contentHash: "hash-1",
+          },
+          taskId: "review",
+          documentKind: "literature_review",
+          citedTargets: ["item:11", "item:12"],
+        },
+      ]);
+    } finally {
+      restoreDb();
+    }
+  });
+
   it("hands an accepted document back while declared parts beyond the answer remain open, naming only those", async function () {
     const restoreDb = installMockDb();
     try {

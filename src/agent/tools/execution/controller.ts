@@ -599,6 +599,7 @@ export class InvocationController {
             materialRef: output.materialRef,
             materialKind: output.materialKind,
             materialTitle: output.materialTitle,
+            materialCitedSources: output.materialCitedSources,
             batchItems: output.batchItems,
           },
         });

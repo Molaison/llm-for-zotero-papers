@@ -76,6 +76,8 @@ export type TaskPaperReadEvent = {
   snippet?: string;
   /** At most `TASK_PAPER_WHY_MATCHED_MAX_CHARS` characters. */
   whyMatched?: string;
+  /** Host observation ids this read attested. */
+  observationIds?: string[];
 };
 
 export type TaskPaperCitation = {
@@ -86,6 +88,25 @@ export type TaskPaperCitation = {
   label?: string;
   sectionLabel?: string;
   pageLabel?: string;
+  /**
+   * "document" for a source a `submit_document` call cited; absent (or
+   * "answer") for a quote chip of the final answer.
+   */
+  source?: "answer" | "document";
+};
+
+/** One source a submitted document cites, as `material_finalized` names it. */
+export type TaskPaperDocumentCitation = {
+  citationId: string;
+  libraryID: number;
+  itemKey: string;
+  itemId?: number;
+  /** The document heading the citation first appears under. */
+  sectionLabel?: string;
+  /** The paper's record, for a paper no read recorded. */
+  title?: string;
+  firstCreator?: string;
+  year?: string;
 };
 
 export type TaskPaperDeltaPaper = {
@@ -96,6 +117,8 @@ export type TaskPaperDeltaPaper = {
   title?: string;
   year?: string;
   creator?: string;
+  /** Zotero key of the paper, when the payload or the host names it. */
+  itemKey?: string;
   text?: TaskPaperTextSource;
   state: TaskPaperState;
 };
@@ -124,13 +147,18 @@ export type TaskPaperTurnRecord = {
   reads: TaskPaperReadEvent[];
   droppedReads: number;
   citations: TaskPaperCitation[];
+  /** Answer citations beyond the per-turn cap. */
   droppedCitations: number;
+  /** Document citations beyond the per-turn cap. */
+  droppedDocumentCitations?: number;
 };
 
 export type TaskPaperLedgerEntry = {
   key: string;
   libraryID: number;
   itemId: number;
+  /** Zotero key of the paper, once a read or a document citation named it. */
+  itemKey?: string;
   contextItemIds: number[];
   title?: string;
   year?: string;
@@ -322,6 +350,79 @@ export function clipTaskPaperText(
   return `${clean.slice(0, Math.max(0, max - 1)).trimEnd()}…`;
 }
 
+const CHUNK_MARKER_LINE = /^\s*\[chunk \d+[^\]]*\]\s*$/i;
+const PASSAGE_MARKER_LINE = /^\s*\[passage [^\]]+\]\s*$/i;
+const HEADING_LINE = /^\s*#{1,6}\s+/;
+const FRONT_MATTER =
+  /\b(University|Institute|Department|Laboratory|Hospital|Correspondence|e-?mail)\b|@/i;
+const BODY_PARAGRAPH_MIN_WORDS = 25;
+const SENTENCE_PARAGRAPH_MIN_WORDS = 8;
+/** Prose without spaces between words (Chinese, Japanese) is long by length. */
+const UNSPACED_PROSE_MIN_CHARS = 60;
+const SENTENCE_END = /[.!?。！？]["'')\]」』）]?$/u;
+const FRONT_MATTER_PARAGRAPHS = 5;
+
+/**
+ * First prose paragraph after the title block: no chunk markers, no heading
+ * marks. A whole-paper read starts with the title, the authors and their
+ * affiliations; the row's snippet should say what the paper is about.
+ * Falls back to the first non-empty paragraph, heading marks stripped.
+ */
+export function firstBodyParagraph(text: string): string {
+  const lines = String(text || "")
+    .split(/\r?\n/)
+    .filter((line) => !CHUNK_MARKER_LINE.test(line))
+    .filter((line) => !PASSAGE_MARKER_LINE.test(line));
+  const paragraphs: string[][] = [];
+  let current: string[] = [];
+  for (const line of lines) {
+    if (line.trim()) {
+      current.push(line);
+      continue;
+    }
+    if (current.length) paragraphs.push(current);
+    current = [];
+  }
+  if (current.length) paragraphs.push(current);
+  const oneLine = (value: string) => value.replace(/\s+/g, " ").trim();
+  let fallback = "";
+  for (let index = 0; index < paragraphs.length; index += 1) {
+    const paragraph = paragraphs[index];
+    if (!fallback) {
+      fallback = oneLine(
+        paragraph.map((line) => line.replace(HEADING_LINE, "")).join(" "),
+      );
+    }
+    const prose = oneLine(
+      paragraph.filter((line) => !HEADING_LINE.test(line)).join(" "),
+    );
+    if (!prose) continue;
+    const spaced = prose.split(" ").length;
+    // Unspaced scripts read as one "word" per run: count them by length.
+    const words =
+      spaced < 3 && prose.length >= UNSPACED_PROSE_MIN_CHARS
+        ? BODY_PARAGRAPH_MIN_WORDS
+        : spaced;
+    const endsSentence = SENTENCE_END.test(prose);
+    // Prose: a long paragraph, or a shorter one that ends a sentence (a
+    // title, an author list or a running head ends in neither).
+    if (
+      words < BODY_PARAGRAPH_MIN_WORDS &&
+      !(endsSentence && words >= SENTENCE_PARAGRAPH_MIN_WORDS)
+    )
+      continue;
+    // Affiliations and author lists do not end a sentence; an abstract that
+    // names a university does.
+    if (index < FRONT_MATTER_PARAGRAPHS && !endsSentence) {
+      if (FRONT_MATTER.test(prose)) continue;
+      const commas = (prose.match(/,/g) || []).length;
+      if (commas > 6) continue;
+    }
+    return prose;
+  }
+  return fallback;
+}
+
 type PaperRef = {
   itemId?: number;
   contextItemId?: number;
@@ -329,6 +430,7 @@ type PaperRef = {
   title?: string;
   year?: string;
   creator?: string;
+  itemKey?: string;
 };
 
 function paperRef(value: unknown): PaperRef | null {
@@ -355,6 +457,8 @@ function paperRef(value: unknown): PaperRef | null {
       text(parent?.firstCreator) ||
       (Array.isArray(input.creators) ? text(input.creators[0]) : undefined),
   };
+  const itemKey = text(paper?.itemKey) || text(input.itemKey);
+  if (itemKey) ref.itemKey = itemKey;
   return ref.itemId || ref.contextItemId ? ref : null;
 }
 
@@ -664,7 +768,9 @@ function paperReadOverviewSeed(row: Row, ref: PaperRef): Seed | null {
     read: readSeed({
       granularity: complete ? "full" : "passage",
       method: "overview",
-      snippet: firstText(row, ["text", "content", "body"]),
+      snippet: complete
+        ? firstBodyParagraph(firstText(row, ["text", "content", "body"]))
+        : firstText(row, ["text", "content", "body"]),
     }),
   };
 }
@@ -762,7 +868,10 @@ function paperReadSeeds(input: unknown, result: unknown): Seed[] {
         read: readSeed({
           granularity: mode === "full" ? "full" : "passage",
           method: mode,
-          snippet: firstText(output, BODY_KEYS),
+          snippet:
+            mode === "full"
+              ? firstBodyParagraph(firstText(output, BODY_KEYS))
+              : firstText(output, BODY_KEYS),
         }),
       },
     ];
@@ -803,7 +912,15 @@ function bodyRowSeeds(row: Row, ref: PaperRef, mode: string): Seed[] {
     ];
   }
   if (hasText(row, BODY_KEYS)) {
-    return [{ ref, state: "read", read: passageReadSeed(row, mode) }];
+    const read = passageReadSeed(row, mode);
+    if (mode === "full") {
+      const snippet = clipTaskPaperText(
+        firstBodyParagraph(firstText(row, BODY_KEYS)),
+        TASK_PAPER_SNIPPET_MAX_CHARS,
+      );
+      if (snippet) read.snippet = snippet;
+    }
+    return [{ ref, state: "read", read }];
   }
   return [];
 }
@@ -987,6 +1104,9 @@ export function deriveTaskPaperLedgerDelta(
       if (!existing.contextItemId && seed.ref.contextItemId) {
         existing.contextItemId = seed.ref.contextItemId;
       }
+      if (!existing.itemKey && seed.ref.itemKey) {
+        existing.itemKey = seed.ref.itemKey;
+      }
       if (existing.text === "unknown") delete existing.text;
     } else {
       const paper: TaskPaperDeltaPaper = {
@@ -999,6 +1119,7 @@ export function deriveTaskPaperLedgerDelta(
       if (seed.ref.title) paper.title = seed.ref.title;
       if (seed.ref.year) paper.year = seed.ref.year;
       if (seed.ref.creator) paper.creator = seed.ref.creator;
+      if (seed.ref.itemKey) paper.itemKey = seed.ref.itemKey;
       if (seed.text && seed.text !== "unknown") paper.text = seed.text;
       papers.set(key, paper);
     }
@@ -1140,6 +1261,7 @@ export function applyTaskPaperLedgerDelta(
     if (!entry.title && paper.title) entry.title = paper.title;
     if (!entry.year && paper.year) entry.year = paper.year;
     if (!entry.creator && paper.creator) entry.creator = paper.creator;
+    if (!entry.itemKey && paper.itemKey) entry.itemKey = paper.itemKey;
     entry.text = strongerText(entry.text, paper.text);
     if (
       paper.contextItemId &&
@@ -1165,12 +1287,38 @@ export function applyTaskPaperLedgerDelta(
   return ledger;
 }
 
+function isDocumentCitation(citation: TaskPaperCitation): boolean {
+  return citation.source === "document";
+}
+
+/** A turn's state from its reads and whatever citations it still holds. */
+function settleTurnState(turn: TaskPaperTurnRecord): void {
+  turn.state =
+    turn.citations.length ||
+    turn.droppedCitations ||
+    turn.droppedDocumentCitations
+      ? "cited"
+      : turn.readState;
+}
+
+/** A paper's state is the strongest over its turns. */
+function settleEntryStates(entries: Iterable<TaskPaperLedgerEntry>): void {
+  for (const entry of entries) {
+    let state: TaskPaperState = "listed";
+    for (const turn of Object.values(entry.turns)) {
+      state = strongerState(state, turn.state);
+    }
+    entry.state = state;
+  }
+}
+
 /**
  * Mark the papers the final answer cites, in place, and return the ledger.
  *
- * Replaces that turn's citations exactly: applying the same answer twice is
- * a no-op, and a citation the new answer dropped no longer counts, so a
- * paper cited only by it falls back to the strongest state its reads earned.
+ * Replaces that turn's answer citations exactly: applying the same answer
+ * twice is a no-op, and a citation the new answer dropped no longer counts,
+ * so a paper cited only by it falls back to the strongest state its reads
+ * earned. A document's citations (`applyDocumentCitations`) are kept.
  * Citations naming only an attachment attach to the paper already known to
  * own it; citations naming nothing known are dropped.
  */
@@ -1184,10 +1332,13 @@ export function applyFinalCitations(
   for (const entry of Object.values(ledger.papers)) {
     const turn = entry.turns[turnIndex];
     if (!turn) continue;
-    if (turn.citations.length || turn.droppedCitations) touched.add(entry);
-    turn.citations = [];
+    const kept = turn.citations.filter(isDocumentCitation);
+    if (kept.length !== turn.citations.length || turn.droppedCitations) {
+      touched.add(entry);
+    }
+    turn.citations = kept;
     turn.droppedCitations = 0;
-    turn.state = turn.readState;
+    settleTurnState(turn);
   }
   const seen = new Set<string>();
   for (const citation of quoteCitations || []) {
@@ -1199,7 +1350,10 @@ export function applyFinalCitations(
     touched.add(entry);
     const turn = turnOf(entry, turnIndex);
     turn.state = "cited";
-    if (turn.citations.length >= TASK_PAPER_MAX_CITATIONS_PER_TURN) {
+    const answerCitations = turn.citations.filter(
+      (cited) => !isDocumentCitation(cited),
+    ).length;
+    if (answerCitations >= TASK_PAPER_MAX_CITATIONS_PER_TURN) {
       turn.droppedCitations += 1;
       continue;
     }
@@ -1214,17 +1368,133 @@ export function applyFinalCitations(
       cited.sectionLabel = citation.sourceSectionLabel;
     }
     if (citation.pageHintLabel) cited.pageLabel = citation.pageHintLabel;
+    // Answer citations lead; a document's follow them.
+    turn.citations.splice(answerCitations, 0, cited);
+  }
+  settleEntryStates(touched);
+  return ledger;
+}
+
+/**
+ * Mark the papers a submitted document cites, in place, and return the
+ * ledger.
+ *
+ * Mirrors `applyFinalCitations` for the turn's `source: "document"`
+ * citations only: re-applying the same sources is a no-op, a source the new
+ * document dropped no longer counts, and the answer's own citations are
+ * untouched. A source joins its paper by item key first, then by item id
+ * (its own, or the one `resolve` finds), creating the entry when no read
+ * recorded the paper; a source naming nothing resolvable is dropped.
+ */
+export function applyDocumentCitations(
+  ledger: TaskPaperLedger,
+  citations: readonly TaskPaperDocumentCitation[],
+  turnIndex: number,
+  resolve?: (
+    citation: TaskPaperDocumentCitation,
+  ) => TaskPaperResolvedRef | null | undefined,
+): TaskPaperLedger {
+  const touched = new Set<TaskPaperLedgerEntry>();
+  for (const entry of Object.values(ledger.papers)) {
+    const turn = entry.turns[turnIndex];
+    if (!turn) continue;
+    const kept = turn.citations.filter((cited) => !isDocumentCitation(cited));
+    if (kept.length !== turn.citations.length || turn.droppedDocumentCitations)
+      touched.add(entry);
+    turn.citations = kept;
+    delete turn.droppedDocumentCitations;
+    settleTurnState(turn);
+  }
+  const seen = new Set<string>();
+  for (const citation of citations || []) {
+    if (!citation?.citationId) continue;
+    const entry = documentCitationEntry(ledger, citation, resolve);
+    if (!entry) continue;
+    const identity = `${entry.key}\u0000${citation.citationId}`;
+    if (seen.has(identity)) continue;
+    seen.add(identity);
+    touched.add(entry);
+    if (!entry.itemKey && citation.itemKey && namesPaperItself(entry, citation))
+      entry.itemKey = citation.itemKey;
+    const turn = turnOf(entry, turnIndex);
+    turn.state = "cited";
+    const documentCitations = turn.citations.filter(isDocumentCitation).length;
+    if (documentCitations >= TASK_PAPER_MAX_CITATIONS_PER_TURN) {
+      turn.droppedDocumentCitations = (turn.droppedDocumentCitations || 0) + 1;
+      continue;
+    }
+    const cited: TaskPaperCitation = {
+      citationId: citation.citationId,
+      turnIndex,
+      source: "document",
+    };
+    const sectionLabel = clipTaskPaperText(citation.sectionLabel, 120);
+    if (sectionLabel) cited.sectionLabel = sectionLabel;
     turn.citations.push(cited);
   }
-  // A paper's state is the strongest over its turns.
-  for (const entry of touched) {
-    let state: TaskPaperState = "listed";
-    for (const turn of Object.values(entry.turns)) {
-      state = strongerState(state, turn.state);
-    }
-    entry.state = state;
-  }
+  settleEntryStates(touched);
   return ledger;
+}
+
+function documentCitationEntry(
+  ledger: TaskPaperLedger,
+  citation: TaskPaperDocumentCitation,
+  resolve?: (
+    citation: TaskPaperDocumentCitation,
+  ) => TaskPaperResolvedRef | null | undefined,
+): TaskPaperLedgerEntry | null {
+  const libraryID = positive(citation.libraryID);
+  const itemKey = text(citation.itemKey);
+  const entries = Object.values(ledger.papers);
+  if (libraryID && itemKey) {
+    const known = entries.find(
+      (entry) => entry.libraryID === libraryID && entry.itemKey === itemKey,
+    );
+    if (known) return known;
+  }
+  const ownId = positive(citation.itemId);
+  // A source that names an attachment belongs to the paper known to own it.
+  if (ownId) {
+    const owner = entries.find(
+      (entry) =>
+        (!libraryID || entry.libraryID === libraryID) &&
+        entry.contextItemIds.includes(ownId),
+    );
+    if (owner) return owner;
+  }
+  // The host resolver climbs from an attachment to its parent paper.
+  const resolved = resolve?.(citation);
+  const itemId = positive(resolved?.itemId) || ownId;
+  const resolvedLibrary = libraryID || positive(resolved?.libraryID);
+  if (!itemId || !resolvedLibrary) return null;
+  const key = taskPaperKey(resolvedLibrary, itemId);
+  const created = !ledger.papers[key];
+  const entry =
+    ledger.papers[key] ||
+    ensureEntry(ledger, { key, libraryID: resolvedLibrary, itemId });
+  if (!entry) return null;
+  if (ownId && ownId !== itemId && !entry.contextItemIds.includes(ownId)) {
+    entry.contextItemIds.push(ownId);
+  }
+  if (created || !entry.title) {
+    const title = text(citation.title);
+    if (title && !entry.title) entry.title = title;
+    const creator = text(citation.firstCreator);
+    if (creator && !entry.creator) entry.creator = creator;
+    const year = text(citation.year);
+    if (year && !entry.year) entry.year = year;
+  }
+  return entry;
+}
+
+/** The citation names this paper itself, not one of its attachments. */
+function namesPaperItself(
+  entry: TaskPaperLedgerEntry,
+  citation: TaskPaperDocumentCitation,
+): boolean {
+  const ownId = positive(citation.itemId);
+  if (ownId) return ownId === entry.itemId;
+  return !entry.contextItemIds.length;
 }
 
 function citationEntry(

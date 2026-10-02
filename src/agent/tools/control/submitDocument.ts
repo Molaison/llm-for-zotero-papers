@@ -15,14 +15,163 @@ import type {
   SubmitPlanDocumentInput,
 } from "../../documents/types";
 import type { ZoteroGateway } from "../../services/zoteroGateway";
+import type { TaskPaperDocumentCitation } from "../../context/taskPaperLedger";
 import { neverSelected } from "../guidance";
 import { fail, ok, validateObject } from "../shared";
+
+const CITE_TOKEN = /\[\[cite:([A-Za-z0-9._:-]+)\]\]/g;
+const HEADING = /^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$/;
+
+/**
+ * The heading each citation first appears under, by citation id. A heading
+ * that only repeats the document's title names no section; a citation before
+ * any other heading has none.
+ */
+export function citationSectionLabels(
+  markdown: string,
+  title = "",
+): Map<string, string> {
+  const labels = new Map<string, string>();
+  const seen = new Set<string>();
+  const ownTitle = title.trim().toLowerCase();
+  let section = "";
+  let fenced = false;
+  let titled = false;
+  for (const line of String(markdown || "").split(/\r?\n/)) {
+    if (/^\s{0,3}(```|~~~)/.test(line)) fenced = !fenced;
+    if (fenced) continue;
+    const heading = HEADING.exec(line);
+    if (heading) {
+      const text = heading[1].trim();
+      // The document's first H1 is its title, as is any heading repeating it.
+      const firstH1 = !titled && /^\s{0,3}#\s/.test(line);
+      if (firstH1) titled = true;
+      section = firstH1 || text.toLowerCase() === ownTitle ? "" : text;
+      continue;
+    }
+    for (const match of line.matchAll(CITE_TOKEN)) {
+      const id = match[1];
+      if (seen.has(id)) continue;
+      seen.add(id);
+      if (section) labels.set(id, section);
+    }
+  }
+  return labels;
+}
+
+/** What a source's Zotero item says about its paper. */
+export type CitedSourceItem = {
+  /** The item the source's key names (an attachment stays an attachment). */
+  itemId?: number;
+  title?: string;
+  firstCreator?: string;
+  year?: string;
+};
+
+/**
+ * The sources a submitted document cites, one entry per source of every
+ * cluster its Markdown uses, for the Task progress rows.
+ */
+export function documentCitedSources(params: {
+  markdown: string;
+  title?: string;
+  clusters: readonly PlanCitationCluster[];
+  itemOf?: (libraryID: number, itemKey: string) => CitedSourceItem | undefined;
+}): TaskPaperDocumentCitation[] {
+  const used = new Set(
+    [...String(params.markdown || "").matchAll(CITE_TOKEN)].map(
+      (match) => match[1],
+    ),
+  );
+  const labels = citationSectionLabels(params.markdown, params.title);
+  const out: TaskPaperDocumentCitation[] = [];
+  for (const cluster of params.clusters) {
+    if (!used.has(cluster.citationId)) continue;
+    const sectionLabel = labels.get(cluster.citationId);
+    for (const source of cluster.sources) {
+      const entry: TaskPaperDocumentCitation = {
+        citationId: cluster.citationId,
+        libraryID: source.libraryID,
+        itemKey: source.itemKey,
+      };
+      const item = params.itemOf?.(source.libraryID, source.itemKey);
+      if (item?.itemId) entry.itemId = item.itemId;
+      if (item?.title) entry.title = item.title;
+      if (item?.firstCreator) entry.firstCreator = item.firstCreator;
+      if (item?.year) entry.year = item.year;
+      if (sectionLabel) entry.sectionLabel = sectionLabel;
+      out.push(entry);
+    }
+  }
+  return out;
+}
+
+type ZoteroItemLike = {
+  id?: number;
+  parentItem?: ZoteroItemLike | false | null;
+  firstCreator?: string;
+  getField?: (field: string) => unknown;
+};
+
+function fieldOf(item: ZoteroItemLike, field: string): string | undefined {
+  try {
+    const value = item.getField?.(field);
+    return typeof value === "string" && value.trim() ? value.trim() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The item a source names and its paper's record, when Zotero is there to
+ * ask. An attachment keeps its own id; its title, creator and year are its
+ * parent paper's.
+ */
+function zoteroCitedSourceItem(
+  libraryID: number,
+  itemKey: string,
+): CitedSourceItem | undefined {
+  try {
+    const items = (
+      globalThis as {
+        Zotero?: {
+          Items?: {
+            getByLibraryAndKey?: (
+              libraryID: number,
+              key: string,
+            ) => ZoteroItemLike | false | undefined;
+          };
+        };
+      }
+    ).Zotero?.Items;
+    const item = items?.getByLibraryAndKey?.(libraryID, itemKey);
+    if (!item) return undefined;
+    const paper = item.parentItem || item;
+    const out: CitedSourceItem = {};
+    const id = Number(item.id);
+    if (Number.isInteger(id) && id > 0) out.itemId = id;
+    const title = fieldOf(paper, "title");
+    if (title) out.title = title;
+    const creator =
+      typeof paper.firstCreator === "string" && paper.firstCreator.trim()
+        ? paper.firstCreator.trim()
+        : undefined;
+    if (creator) out.firstCreator = creator;
+    const year = /\d{4}/.exec(fieldOf(paper, "date") || "")?.[0];
+    if (year) out.year = year;
+    return out;
+  } catch {
+    return undefined;
+  }
+}
 
 type SubmitPlanDocumentResult = {
   documentId: string;
   contentHash: string;
   materialRef: MaterialRef;
   visibleMarkdown: string;
+  /** Format repairs the host made instead of rejecting; omitted when none. */
+  repairs?: string[];
 };
 
 function requiredString(value: unknown, label: string): string {
@@ -196,9 +345,15 @@ function parseAsset(value: unknown, index: number): PlanDocumentAsset {
   };
 }
 
+/**
+ * The call's input: the document, and the declared part it fulfils. The part
+ * binds the outcome ledger only; it is not document content.
+ */
+type SubmitDocumentToolInput = SubmitPlanDocumentInput & { taskId?: string };
+
 function validateSubmitPlanDocument(
   args: unknown,
-): AgentToolInputValidation<SubmitPlanDocumentInput> {
+): AgentToolInputValidation<SubmitDocumentToolInput> {
   try {
     if (!validateObject<Record<string, unknown>>(args)) {
       return fail("submit_document expects an object");
@@ -254,6 +409,9 @@ function validateSubmitPlanDocument(
       groundingIssues: args.groundingIssues.map((entry, index) =>
         requiredString(entry, `groundingIssues[${index}]`),
       ),
+      ...(typeof args.taskId === "string" && args.taskId.trim()
+        ? { taskId: args.taskId.trim() }
+        : {}),
     });
   } catch (error) {
     return fail(error instanceof Error ? error.message : String(error));
@@ -262,13 +420,13 @@ function validateSubmitPlanDocument(
 
 export function createSubmitDocumentTool(
   gateway: ZoteroGateway,
-): AgentToolDefinition<SubmitPlanDocumentInput, SubmitPlanDocumentResult> {
+): AgentToolDefinition<SubmitDocumentToolInput, SubmitPlanDocumentResult> {
   const directFinalizer = new DirectDocumentFinalizer(gateway);
   return {
     spec: {
       name: "submit_document",
       description:
-        "Finalize an Agent document. Use internal [[cite:C1]] tokens in Markdown and provide Zotero item mappings; research-grounded documents also require the host-issued evidence IDs returned by read tools. This tool validates and persists the exact authored content, which becomes the visible answer.",
+        "Finalize an Agent document. Use internal [[cite:C1]] tokens in Markdown and provide Zotero item mappings; research-grounded documents also require the host-issued evidence IDs returned by read tools. This tool validates and persists the exact authored content, which becomes the visible answer. The host repairs unused quotes, unverifiable quotes, and missing required headings, and lists the repairs in the result; it rejects only unresolved tokens, fabricated evidence, and quotes the open PDF does not contain.",
       inputSchema: {
         type: "object",
         additionalProperties: false,
@@ -282,6 +440,11 @@ export function createSubmitDocumentTool(
           "groundingIssues",
         ],
         properties: {
+          taskId: {
+            type: "string",
+            description:
+              "The task_update part this document fulfils (its taskId), when parts were declared. Name it so the host ticks the right part.",
+          },
           documentKind: {
             type: "string",
             enum: [
@@ -475,7 +638,7 @@ export function createSubmitDocumentTool(
       // through the tool description.
       matches: neverSelected,
       instruction:
-        "Use submit_document to publish authored content as a durable document. Finish the requested work and call submit_document once; to save the document, pass its returned documentId to the save tool instead of reconstructing its content. Write complete Markdown with natural headings. Put [[cite:C1]] tokens at supported claims; citations are required for a literature review and optional for other authored documents. Identify each citation source by libraryID and itemKey; the host binds its durable research evidence, so omit evidenceRefs unless a strict quote or page locator requires a specific record. Record grounding concerns in groundingIssues. The host replaces any draft References section with a Zotero CSL bibliography. Never place internal citation tokens outside this terminal submission.",
+        "Use submit_document to publish authored content as a durable document. Finish the requested work and call submit_document once; to save the document, pass its returned documentId to the save tool instead of reconstructing its content. Write complete Markdown with natural headings. Put [[cite:C1]] tokens at supported claims; citations are required for a literature review and optional for other authored documents. Identify each citation source by libraryID and itemKey; the host binds its durable research evidence, so omit evidenceRefs unless a strict quote or page locator requires a specific record. Record grounding concerns in groundingIssues. The host replaces any draft References section with a Zotero CSL bibliography. Never place internal citation tokens outside this terminal submission. When task_update declared parts, pass the taskId of the part this document fulfils.",
     },
     validate: validateSubmitPlanDocument,
     planInvocation: () =>
@@ -484,8 +647,8 @@ export function createSubmitDocumentTool(
         reason:
           "This host-owned control submits an already prepared workflow document.",
       }),
-    execute: async (input, context) => {
-      const { document } = await directFinalizer.finalize({
+    execute: async ({ taskId: _part, ...input }, context) => {
+      const { document, repairs } = await directFinalizer.finalize({
         request: context.request,
         runId:
           context.runId ||
@@ -503,11 +666,18 @@ export function createSubmitDocumentTool(
           contentHash: document.contentHash,
           materialRef,
           visibleMarkdown: document.visibleMarkdown,
+          ...(repairs.length ? { repairs } : {}),
         },
         materialRef,
         materialKind:
           document.version === 2 ? document.documentKind : undefined,
         materialTitle: document.title,
+        materialCitedSources: documentCitedSources({
+          markdown: input.markdown,
+          title: document.title,
+          clusters: document.citationBundle.clusters,
+          itemOf: zoteroCitedSourceItem,
+        }),
       };
     },
     resolveTerminalResult: (_input, result: AgentToolResult) => {

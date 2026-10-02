@@ -1,5 +1,6 @@
 import { scheduleChatContentScroll } from "../chatScrollSnapshots";
 import {
+  applyTaskDocumentCitations,
   applyTaskPaperUpdate,
   beginTaskRun,
   completeTaskRun,
@@ -540,6 +541,18 @@ export function createAgentTurnEventHandler(
           assistantMessage.agentRunId,
         );
         return;
+      case "material_finalized":
+        // The papers a submitted document cites, under their sections.
+        if (event.citedSources?.length) {
+          applyTaskDocumentCitations(
+            conversationKey,
+            assistantMessage.agentRunId,
+            event.citedSources,
+          );
+        }
+        // As before: the assistant refreshes after the event (the store
+        // repaints the Task progress view on its own).
+        break;
       case "execution_checkpoint":
       case "execution_checkpoint_delta": {
         // The run's outcomes, as its ledger stands, are its Task progress steps.

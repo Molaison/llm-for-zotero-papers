@@ -1,6 +1,7 @@
 import { assert } from "chai";
 import {
   TASK_PROGRESS_MAX_CONVERSATIONS,
+  applyTaskDocumentCitations,
   applyTaskPaperUpdate,
   beginTaskRun,
   clearAllTaskProgress,
@@ -128,6 +129,134 @@ describe("task progress store", function () {
     assert.equal(record.ledger.papers["1:1"].state, "cited");
     assert.equal(record.ledger.papers["1:2"].state, "read");
     assert.lengthOf(record.ledger.papers["1:1"].turns[1].citations, 1);
+  });
+
+  it("marks a document's sources under the run's question, idempotently, beside the answer's", function () {
+    beginTaskRun(7, { runId: "run-a" });
+    applyTaskPaperUpdate(
+      7,
+      ledgerDelta("c1", [
+        [1, "read", "One"],
+        [2, "read", "Two"],
+      ]),
+      "run-a",
+    );
+    let notified = 0;
+    const unsubscribe = subscribeTaskProgress(() => {
+      notified += 1;
+    });
+    try {
+      const review = [
+        {
+          citationId: "d1",
+          libraryID: 1,
+          itemKey: "PAPER002",
+          itemId: 2,
+          sectionLabel: "Discussion",
+        },
+      ];
+      applyTaskDocumentCitations(7, "run-a", review);
+      assert.equal(notified, 1);
+      applyTaskDocumentCitations(7, "run-a", review);
+      assert.equal(notified, 1, "a replay changes nothing");
+      // A second document of the same run adds its own sources.
+      applyTaskDocumentCitations(7, "run-a", [
+        { citationId: "d1", libraryID: 1, itemKey: "PAPER001", itemId: 1 },
+      ]);
+      completeTaskRun(7, {
+        runId: "run-a",
+        quoteCitations: [quoteCitation("q1", 2)],
+      });
+    } finally {
+      unsubscribe();
+    }
+    const record = getTaskProgress(7)!;
+    assert.equal(record.ledger.papers["1:1"].state, "cited");
+    assert.deepEqual(
+      record.ledger.papers["1:2"].turns[1].citations.map((c) => [
+        c.citationId,
+        c.source,
+        c.sectionLabel,
+      ]),
+      [
+        ["q1", undefined, undefined],
+        ["d1", "document", "Discussion"],
+      ],
+    );
+    applyTaskDocumentCitations(7, "run-unknown", [
+      { citationId: "x", libraryID: 1, itemKey: "K", itemId: 3 },
+    ]);
+    assert.isUndefined(
+      record.ledger.papers["1:3"],
+      "an unknown run's sources are not filed under a guessed question",
+    );
+  });
+
+  it("replaces a question's document sources when the question re-runs under a new run", function () {
+    beginTaskRun(7, { runId: "run-a", turnIndex: 1 });
+    applyTaskPaperUpdate(
+      7,
+      ledgerDelta("c1", [
+        [1, "read", "One"],
+        [2, "read", "Two"],
+      ]),
+      "run-a",
+    );
+    applyTaskDocumentCitations(7, "run-a", [
+      { citationId: "d1", libraryID: 1, itemKey: "PAPER001", itemId: 1 },
+    ]);
+    completeTaskRun(7, { runId: "run-a" });
+    beginTaskRun(7, { runId: "run-b", turnIndex: 1 });
+    applyTaskDocumentCitations(7, "run-b", [
+      { citationId: "d1", libraryID: 1, itemKey: "PAPER002", itemId: 2 },
+    ]);
+    const live = getTaskProgress(7)!;
+    assert.equal(
+      live.ledger.papers["1:1"].state,
+      "read",
+      "run-a's source is gone",
+    );
+    assert.equal(live.ledger.papers["1:2"].state, "cited");
+    const papers = JSON.stringify(live.ledger.papers);
+    // Replaying both runs of the question gives the same rows.
+    clearTaskProgress(7);
+    hydrateTaskProgress(7, {
+      runs: [
+        {
+          runId: "run-a",
+          turn: 1,
+          deltas: [
+            ledgerDelta("c1", [
+              [1, "read", "One"],
+              [2, "read", "Two"],
+            ]),
+          ],
+          documentCitations: [
+            { citationId: "d1", libraryID: 1, itemKey: "PAPER001", itemId: 1 },
+          ],
+        },
+        {
+          runId: "run-b",
+          turn: 1,
+          deltas: [],
+          documentCitations: [
+            { citationId: "d1", libraryID: 1, itemKey: "PAPER002", itemId: 2 },
+          ],
+        },
+      ],
+      latestTurn: 1,
+      settled: null,
+      planSeen: false,
+      checklist: null,
+      libraryID: 1,
+    });
+    const replayed = getTaskProgress(7)!;
+    assert.equal(replayed.ledger.papers["1:1"].state, "read");
+    assert.equal(replayed.ledger.papers["1:2"].state, "cited");
+    assert.equal(
+      JSON.stringify(replayed.ledger.papers["1:2"].turns[1].citations),
+      JSON.stringify(JSON.parse(papers)["1:2"].turns[1].citations),
+    );
   });
 
   it("keeps the partial ledger when a run fails or is cancelled", function () {

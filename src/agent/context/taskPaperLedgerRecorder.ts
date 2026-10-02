@@ -25,6 +25,7 @@ export type PaperLedgerUpdateEvent = Extract<
 
 type ZoteroItemLike = {
   id?: number;
+  key?: string;
   libraryID?: number;
   parentID?: number | false | null;
 };
@@ -122,7 +123,54 @@ export async function attestAndRecordRead(params: {
     libraryID: params.libraryID,
     runId: params.runId,
   });
+  if (paperLedgerDelta && observations.length) {
+    joinReadObservations(paperLedgerDelta, observations);
+  }
   return { observations, paperLedgerDelta };
+}
+
+/**
+ * File each read with the observation ids the host issued for its paper,
+ * and each paper with its Zotero key, in place. Observations name papers by
+ * key, the delta by item id; the key is looked up only for papers some
+ * observation could name.
+ */
+export function joinReadObservations(
+  delta: TaskPaperLedgerDelta,
+  observations: readonly Pick<
+    TrustedReadObservation,
+    "observationId" | "libraryID" | "itemKey"
+  >[],
+  itemKeyOf: (itemId: number) => string | undefined = (itemId) => {
+    const key = zoteroItem(itemId)?.key;
+    return typeof key === "string" ? key : undefined;
+  },
+): void {
+  const idsByPaper = new Map<string, string[]>();
+  for (const observation of observations) {
+    const identity = `${observation.libraryID}:${observation.itemKey}`;
+    const ids = idsByPaper.get(identity) || [];
+    if (!ids.includes(observation.observationId)) {
+      ids.push(observation.observationId);
+    }
+    idsByPaper.set(identity, ids);
+  }
+  if (!idsByPaper.size) return;
+  const idsByKey = new Map<string, string[]>();
+  for (const paper of delta.papers) {
+    if (!paper.itemKey) {
+      const itemKey = itemKeyOf(paper.itemId);
+      if (!itemKey || !idsByPaper.has(`${paper.libraryID}:${itemKey}`))
+        continue;
+      paper.itemKey = itemKey;
+    }
+    const ids = idsByPaper.get(`${paper.libraryID}:${paper.itemKey}`);
+    if (ids?.length) idsByKey.set(paper.key, ids);
+  }
+  for (const read of delta.reads) {
+    const ids = idsByKey.get(read.key);
+    if (ids) read.observationIds = [...ids];
+  }
 }
 
 export function buildPaperLedgerUpdateEvent(

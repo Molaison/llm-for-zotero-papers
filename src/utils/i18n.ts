@@ -1240,6 +1240,7 @@ const zhCN: Record<string, string> = {
   "and {count} more reads": "以及另外 {count} 次阅读",
   "Question {number}": "第 {number} 个问题",
   "Cited in answer": "回答中的引用",
+  "Cited in document": "文档中的引用",
   "Listed in scope; not read for this question.": "在范围内；本问题未阅读。",
   "Matched by title or abstract; text not opened.":
     "按标题或摘要匹配；未打开正文。",
@@ -1296,6 +1297,7 @@ const zhCN: Record<string, string> = {
   "Not done before the answer.": "回答前未完成。",
   "The change was not applied.": "此更改未应用。",
   "No readable text": "无可读文本",
+  "Not covered by the delivered content": "交付的内容未涵盖",
   Done: "完成",
   "Done when:": "完成条件：",
   Revision: "修订",
@@ -1317,6 +1319,7 @@ const zhCN: Record<string, string> = {
   "Opened page {page}": "已打开第 {page} 页",
   "No PDF for this paper": "这篇论文没有 PDF",
   "Could not open the paper.": "无法打开论文。",
+  "Opened the paper": "已打开论文",
 
   // ── Language setting ────────────────────────────────────────────────────
   Language: "语言",

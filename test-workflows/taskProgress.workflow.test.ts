@@ -912,6 +912,66 @@ describe("workflow: task progress", function () {
         0,
         "no floating plan capsule",
       );
+
+      // A finalized document cites a paper from its Discussion: the paper's
+      // row counts it as cited and lists the section under "Cited in
+      // document"; a source named only by key joins the same row.
+      await handle.emit({
+        type: "material_finalized",
+        materialRef: {
+          documentId: "review-1",
+          documentVersion: 1,
+          contentHash: "review-hash",
+        },
+        materialKind: "literature_review",
+        materialTitle: "Drift review",
+        callId: "submit-1",
+        citedSources: [
+          {
+            citationId: "C1",
+            libraryID,
+            itemKey: Zotero.Items.get(paperId(2)).key,
+            itemId: paperId(2),
+            sectionLabel: "Discussion",
+          },
+          {
+            citationId: "C2",
+            libraryID,
+            itemKey: Zotero.Items.get(paperId(2)).key,
+          },
+        ],
+      });
+      api.flushTaskProgress();
+      assert.equal(view.count(), "3 of 6 read · 2 cited");
+      view.row.click();
+      await settle(view, "open", `document citations (${surface})`);
+      const documentCited = view
+        .items()
+        .find((item) => item.dataset.key === paperKey(2))!;
+      assert.equal(documentCited.dataset.state, "cited");
+      const documentSummary = documentCited.querySelector(
+        ".llm-task-paper-summary",
+      ) as HTMLElement;
+      if (documentSummary.getAttribute("aria-expanded") !== "true")
+        documentSummary.click();
+      const documentDetails = documentCited.querySelector(
+        ".llm-task-paper-details",
+      ) as HTMLElement;
+      assert.include(documentDetails.textContent!, "Cited in document");
+      assert.deepEqual(
+        Array.from(
+          documentDetails.querySelectorAll(".llm-task-paper-citation"),
+        ).map((node) => (node as HTMLElement).textContent),
+        ["↳ Discussion", "↳ Cited in document"],
+      );
+      assert.notInclude(
+        documentDetails.textContent!,
+        "Cited in answer",
+        "a document's citations are not the answer's",
+      );
+      documentSummary.click();
+      view.row.click();
+      await settle(view, "closed", `document citations (${surface})`);
     } finally {
       handle.finish();
     }
