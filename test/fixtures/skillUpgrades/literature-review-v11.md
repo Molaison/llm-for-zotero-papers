@@ -1,7 +1,7 @@
 ---
 id: literature-review
 description: Structured scientific review with thematic synthesis and citations
-version: 12
+version: 11
 contexts: paper-set,library-corpus
 activation: auto
 ---
@@ -16,23 +16,14 @@ A review is an argument about a body of work, not a catalog of it: a faithful ac
 1. **Scope.** The host states the turn's papers or collection in the context.
    If only a collection or a search is named, list its papers once with `library_search` and work from that list.
    Treat an explicitly selected corpus as the evidence pool, not as a sample.
-2. **Parts.** In your first step, declare the parts with `task_update`.
-   When the user asked for something per paper (summaries, each paper's method, a table with a row per paper), or when the review must account for more than four papers, declare a digest part: `{ taskId:'summaries', description:'Summarize each selected paper', expectedEffect:'digest', scope:true }` (or explicit `targetIds`), and do not also declare a read part over the same papers.
-   The host then summarizes each paper itself inside that call and returns the summaries; do not read those papers with `paper_read` first.
-   Then declare the review (`expectedEffect:'artifact'`) and, only when the user asked to save it, the note (`expectedEffect:'mutation'`, `expectedCapability:'zotero.notes'`).
-   For four papers or fewer without a per-paper request, declare a read part (`expectedEffect:'read'`) instead and read them with `paper_read`.
+2. **Parts.** In your first step, declare the parts with `task_update`: read the papers (`expectedEffect:'read'`), write the review (`expectedEffect:'artifact'`), and, only when the user asked to save it, save it as a note (`expectedEffect:'mutation'`, `expectedCapability:'zotero.notes'`).
    The host marks each part done from the tools' results.
-3. **Read.** With a digest part, write from the digests the host returned: each has the paper's summary, contributions, methods, limitations and verified quotes with section labels, and a handle for `context_read source:'tool_result'` when you need the full record.
-   Use `paper_read({ mode:'targeted', query:'...' })` only to verify a decisive cross-paper claim or an apparent contradiction; never re-read a digested paper in overview or full mode.
-   If the host reports digest failures, declare the part again once with `targetIds` of the failed papers only; a paper that still fails is named as not read.
-   If the part is still open after a Stop and the user says continue, call `task_update` again with the same `taskId` and no description to finish the remaining papers.
-   Without a digest part, read the scope's papers with `paper_read`, passing them as `targets` and grouping related papers in one call.
+3. **Read.** Read the scope's papers with `paper_read`, passing them as `targets` and grouping related papers in one call.
    The host fits each paper's text to the remaining context, and each result reports which papers came back complete, sampled, abstract only, or metadata only.
    When papers come back sampled, read fewer at a time or read their missing sections rather than moving on.
    As you go, note each paper's main claims, methods, and evidence, and its role in the argument: central, supporting, contradictory, theoretical, methodological, or context.
    Use `paper_read({ mode:'targeted', query:'...' })` only to check a decisive claim, test an apparent contradiction against both papers, or find a precise location.
-4. **Write.** Write one cited document and finish with `submit_document`, as described under Document; pass the `taskId` of the review part.
-   When the user asked for summaries, the document opens with a 'Paper summaries' section: one paragraph per paper, in scope order, each from that paper's digest, before the review sections below.
+4. **Write.** Write one cited document and finish with `submit_document`, as described under Document.
 5. **Save.** Save it with `note_write` and the returned `documentId` only when the user asked; do not offer afterward, because the document card owns Copy Markdown, Save Note, Export, and Expand.
 
 ### Scope and method
@@ -72,6 +63,5 @@ Prefer these sections unless the user asks for another structure:
 - Put `[[cite:C1]]` tokens at supported claims and identify each citation source by `libraryID` and `itemKey`; the host binds the evidence your reads produced.
 - Cite only papers you read for this review; a direct quotation uses a `[[quote:Q1]]` token whose mapping carries the verbatim text and the evidence IDs the read returned.
 - Never hand-format author-year citations or a References section; Zotero's CSL service formats both.
-- In Scope and limitations, name each paper whose digest failed and the reason the host gave.
 - In Scope and limitations, state the coverage: how many papers were read in full, in part, and from metadata only, as `paper_read` reported them, and name any paper that stayed unread.
 - State the actual coverage frontier and its limitations, and never imply an exhaustive review from sampled text.

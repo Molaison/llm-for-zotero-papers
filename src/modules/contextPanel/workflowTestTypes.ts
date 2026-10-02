@@ -723,13 +723,36 @@ export type WorkflowTestApi = {
     checklist: {
       source: "action" | "codex" | "outcomes";
       title: string;
-      steps: Array<{ label: string; status: string }>;
+      steps: Array<{
+        label: string;
+        status: string;
+        detail?: string;
+        /** Set on a step that is a run's outcome (a declared part). */
+        outcome?: import("./taskProgress/store").TaskProgressOutcomeStep;
+      }>;
       outcome?: string;
       detail?: string;
       /** How the run that owns an outcomes checklist ended. */
       end?: string;
     } | null;
     paperStates: Record<string, string>;
+    /** Each paper row's reads over every turn, by `libraryID:itemId`. */
+    paperRows: Record<
+      string,
+      {
+        state: string;
+        title?: string;
+        reads: Array<{
+          turnIndex?: number;
+          toolName: string;
+          granularity: string;
+          method?: string;
+          label?: string;
+          snippet?: string;
+          whyMatched?: string;
+        }>;
+      }
+    >;
   } | null;
   exerciseNativeStreamingReplay: (input: {
     surface: "embedded" | "standalone";

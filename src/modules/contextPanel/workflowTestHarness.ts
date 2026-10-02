@@ -5738,6 +5738,26 @@ export function installWorkflowTestHarness(targetAddon: {
             entry.state,
           ]),
         ),
+        paperRows: Object.fromEntries(
+          Object.values(record.ledger.papers).map((entry) => [
+            entry.key,
+            {
+              state: entry.state,
+              title: entry.title,
+              reads: Object.values(entry.turns).flatMap((turn) =>
+                turn.reads.map((read) => ({
+                  turnIndex: read.turnIndex,
+                  toolName: read.toolName,
+                  granularity: read.granularity,
+                  method: read.method,
+                  label: read.label,
+                  snippet: read.snippet,
+                  whyMatched: read.whyMatched,
+                })),
+              ),
+            },
+          ]),
+        ),
       };
     },
     exerciseAgentDeliveryReplay: (input) =>

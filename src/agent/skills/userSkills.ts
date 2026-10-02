@@ -221,6 +221,10 @@ const BUILTIN_BOOTSTRAP_RAW_HASHES: Partial<
     // Both parallel v8 texts (main and the tool-consolidation branch).
     "jch7ho",
     "11c76b5",
+    // v9, the text v10's digest part extends, as shipped and as the
+    // canonical copy carrying its native `name:` line.
+    "l93iop",
+    "jop719",
   ],
   "analyze-figures.md": [
     "msvqtf",
@@ -281,6 +285,10 @@ const BUILTIN_BOOTSTRAP_RAW_HASHES: Partial<
     "fjgktb",
     // v10, the investigation-loop text the ordinary v11 replaces.
     "liv5sv",
+    // v11, the text v12's digest parts replace, as shipped and as the
+    // canonical copy carrying its native `name:` line.
+    "1hrhlxd",
+    "3mijhi",
   ],
   "import-cited-reference.md": [
     "19bomz1",
@@ -309,6 +317,8 @@ const BUILTIN_BOOTSTRAP_BODY_HASHES: Partial<
     // Both parallel v8 bodies (main and the tool-consolidation branch).
     "1eveisf",
     "8zlow4",
+    // v9, the body v10's digest part extends.
+    "1s8bw97",
   ],
   "evidence-based-qa.md": [
     "41yh3d",

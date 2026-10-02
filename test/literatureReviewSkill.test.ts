@@ -64,4 +64,44 @@ describe("literature-review skill", function () {
       /`note_write`[^\n]*only when the user asked/,
     );
   });
+
+  it("hands per-paper work to a host digest part and never pages the same papers", function () {
+    const text = skill.instruction;
+    assert.include(text, "expectedEffect:'digest'");
+    assert.include(
+      text,
+      "do not also declare a read part over the same papers",
+    );
+    assert.include(text, "do not read those papers with `paper_read` first");
+    assert.include(text, "write from the digests the host returned");
+    assert.match(
+      text,
+      /`paper_read\(\{ mode:'targeted'[^\n]*only to verify a decisive cross-paper claim/,
+    );
+    assert.include(
+      text,
+      "never re-read a digested paper in overview or full mode",
+    );
+    assert.include(text, "same `taskId` and no description");
+  });
+
+  it("puts the per-paper summaries into the submitted document", function () {
+    const text = skill.instruction;
+    assert.include(text, "'Paper summaries' section");
+    assert.match(text, /`submit_document`[^\n]*`taskId`/);
+    assert.include(
+      text,
+      "name each paper whose digest failed and the reason the host gave",
+    );
+  });
+});
+
+describe("compare-papers skill", function () {
+  it("builds a comparison of three or more papers from a host digest part", function () {
+    const text = parseSkill(
+      BUILTIN_SKILL_FILES["compare-papers.md"],
+    ).instruction;
+    assert.include(text, "expectedEffect:'digest'");
+    assert.include(text, "build the comparison from the returned digests");
+  });
 });
