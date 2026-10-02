@@ -287,6 +287,73 @@ async function tryReadMineruOverview(
   }
 }
 
+/**
+ * The text a host-owned paper digest reads for one paper: MinerU `full.md`
+ * when its cache is readable, else the PDF overview excerpt, exactly as the
+ * overview read picks them. `null` when neither yields text.
+ */
+export async function readPaperTextForDigest(params: {
+  paperContext: NonNullable<PdfTarget["paperContext"]>;
+  pdfService: Pick<PdfService, "getOverviewExcerpt">;
+  maxChars: number;
+}): Promise<{
+  backend: "mineru" | "pdf";
+  text: string;
+  totalCharacters: number;
+} | null> {
+  // Same selection as `tryReadMineruOverview`, read here because its
+  // `totalCharacters` counts the untrimmed file while the selected text is
+  // trimmed, which would report every fully read paper as sampled.
+  const cacheDir = normalizeString(params.paperContext.mineruCacheDir);
+  if (cacheDir) {
+    try {
+      const clean = stripMineruSourceImageEmbedsFromMarkdown(
+        await readTextFile(joinLocalPath(cacheDir, "full.md")),
+      ).trim();
+      const { text } = selectMineruOverview(clean, params.maxChars);
+      if (text) {
+        return {
+          backend: "mineru",
+          text,
+          // Complete only when the selection is the whole paper; a stitched
+          // intro + tail can be as long without being contiguous.
+          totalCharacters:
+            text === clean
+              ? clean.length
+              : Math.max(clean.length, text.length + 1),
+        };
+      }
+    } catch {
+      // Unreadable MinerU cache: fall back to the PDF, as the overview read does.
+    }
+  }
+  try {
+    const overview = await params.pdfService.getOverviewExcerpt({
+      paperContext: params.paperContext,
+      maxChars: params.maxChars,
+    });
+    const text = typeof overview.text === "string" ? overview.text : "";
+    if (!text.trim()) return null;
+    const chunksRead = Array.isArray(overview.chunkIndexes)
+      ? overview.chunkIndexes.length
+      : 0;
+    const totalChunks = Number(overview.totalChunks) || 0;
+    // The excerpt does not carry chunk lengths. A complete excerpt is the
+    // whole text; a sampled one is scaled by its chunk share so the digest
+    // never reports a sample as complete.
+    const totalCharacters =
+      chunksRead >= totalChunks
+        ? text.length
+        : Math.max(
+            text.length + 1,
+            Math.round((text.length * totalChunks) / Math.max(1, chunksRead)),
+          );
+    return { backend: "pdf", text, totalCharacters };
+  } catch {
+    return null;
+  }
+}
+
 function targetForPageTool(input: PaperReadInput): Record<string, unknown> {
   const target = input.target || input.targets?.[0];
   return {
