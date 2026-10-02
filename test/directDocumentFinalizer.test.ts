@@ -727,7 +727,7 @@ describe("DirectDocumentFinalizer", function () {
           input: {
             ...input({
               markdown:
-                "# Finding\n\nA claim. [[cite:C1]] and [[cite:C1,C3]]\n\n## Scope and limitations\n\nOne paper.",
+                "# Finding\n\nA claim. [[cite:C1]] and [[cite:C1,,C3]]\n\n## Scope and limitations\n\nOne paper.",
               citations: [
                 groundedCitation,
                 { ...groundedCitation, citationId: "C3" },
@@ -736,7 +736,66 @@ describe("DirectDocumentFinalizer", function () {
             ...custom,
           },
         }),
-        /malformed citation token \[\[cite:C1,C3\]\]/,
+        /malformed citation token \[\[cite:C1,,C3\]\]/,
+      );
+    });
+
+    it("splits a comma-joined citation token whose ids all resolve and reports the repair", async function () {
+      const result = await finalizer.finalize({
+        request: request([observation]),
+        runId: "comma-joined-citation",
+        input: {
+          ...input({
+            markdown:
+              "# Finding\n\nA claim [[cite:C1, C2,C3]].\n\n## Scope and limitations\n\nOne paper.",
+            citations: [
+              groundedCitation,
+              { ...groundedCitation, citationId: "C2" },
+              { ...groundedCitation, citationId: "C3" },
+            ],
+          }),
+          ...custom,
+        },
+      });
+      const visible = result.document.visibleMarkdown;
+      assert.notInclude(visible, "[[cite:");
+      assert.equal(
+        occurrences(
+          visible,
+          "[(Author, 2024)](zotero://select/library/items/AAAA1111)",
+        ),
+        3,
+        "each of the three citations renders as its own linked label",
+      );
+      assert.include(
+        visible,
+        "A claim [(Author, 2024)](zotero://select/library/items/AAAA1111) [(Author, 2024)]",
+        "adjacent citations keep the separator consecutive tokens get",
+      );
+      assert.deepEqual(clusterIds(result), ["C1", "C2", "C3"]);
+      assert.deepEqual(result.repairs, [
+        "split comma-joined citation token [[cite:C1, C2,C3]]",
+      ]);
+    });
+
+    it("still rejects a comma-joined citation token with an unknown id, naming it", async function () {
+      await expectRejected(
+        finalizer.finalize({
+          request: request([observation]),
+          runId: "comma-joined-unknown",
+          input: {
+            ...input({
+              markdown:
+                "# Finding\n\nA claim [[cite:C1,C9,C3]].\n\n## Scope and limitations\n\nOne paper.",
+              citations: [
+                groundedCitation,
+                { ...groundedCitation, citationId: "C3" },
+              ],
+            }),
+            ...custom,
+          },
+        }),
+        /unresolved citation token C9/,
       );
     });
 

@@ -423,8 +423,8 @@ describe("live perf: agent library chat lag", function () {
           : null;
         const digestWindowRows = runId
           ? await Zotero.DB.queryAsync(
-              "SELECT MIN(created_at) AS first_at, MAX(created_at) AS last_at, COUNT(*) AS n FROM llm_for_zotero_agent_run_events WHERE run_id = ? AND event_type = 'paper_ledger_update' AND payload_json LIKE '%\"granularity\":\"digest\"%'",
-              [runId],
+              "SELECT MIN(created_at) AS first_at, MAX(created_at) AS last_at, COUNT(*) AS n FROM llm_for_zotero_agent_run_events WHERE run_id = ? AND event_type = 'paper_ledger_update' AND payload_json LIKE ?",
+              [runId, '%"granularity":"digest"%'],
             )
           : [];
 

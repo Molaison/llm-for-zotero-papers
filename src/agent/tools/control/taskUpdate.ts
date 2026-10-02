@@ -316,13 +316,46 @@ function digestRetryTargets(
   return targets.filter((target) => !done.has(target));
 }
 
+/** The host effect a model's expectedEffect names. */
+function outcomeEffect(
+  expected: ExpectedEffect | undefined,
+): OutcomeEffect | undefined {
+  return expected === "reasoning" ? "answer" : expected;
+}
+
+/**
+ * Whether a declared part still holds nothing the host bound to it: it is
+ * pending, the model declared it, and no read, write, material, digested
+ * paper or exception is on it. Only such a part may take a new effect.
+ */
+function redeclarable(task: ExecutionCheckpointTask): boolean {
+  return (
+    task.status === "pending" &&
+    task.origin !== "host" &&
+    [
+      task.journalActionIds,
+      task.verifiedReceiptIds,
+      task.readEvidenceIds,
+      task.materialRefs,
+      task.receiptIds || [],
+      task.doneTargets || [],
+      task.exceptions || [],
+    ].every((entries) => entries.length === 0)
+  );
+}
+
 /**
  * One ordinary call: its declarations become declared parts, then its
  * skipped, blocked or cancelled parts are marked with their reasons. A
  * repeated declaration changes nothing, and `ignored` says so, except for a
  * digest part: declaring one, or repeating it, asks the host to run it, and
- * `digestParts` lists those runs with their papers. A malformed call is an
- * input rejection.
+ * `digestParts` lists those runs with their papers. A repeat with a new
+ * expectedEffect re-declares a part that holds no evidence yet: the part is
+ * replaced in place under its id, pending, with the new effect, description
+ * and capability, and with targets frozen again when the repeat gives
+ * targetIds or scope (else it keeps its own). `changed` lists those parts. A
+ * part with evidence keeps its effect, and the repeat is refused. A
+ * malformed call is an input rejection.
  */
 export function applyOrdinaryTaskUpdates(
   checkpoint: ExecutionCheckpoint,
@@ -334,6 +367,7 @@ export function applyOrdinaryTaskUpdates(
   ignored: boolean;
   refused: string[];
   digestParts: DigestPartRun[];
+  changed: string[];
 } {
   try {
     const existing = new Map(
@@ -362,25 +396,49 @@ export function applyOrdinaryTaskUpdates(
     // Digest parts this call asks to run: new ones with every paper, repeated
     // ones with the papers the repeat names (`digestRetryTargets`).
     const digestRuns: Array<{ taskId: string; targetIds?: string[] }> = [];
+    // Parts this call re-declares with a new effect, by id.
+    const redeclared = new Map<string, ExecutionCheckpointTask>();
     for (const request of input.tasks) {
       const taskId = qualified(request.taskId);
       onlyOnce(declared, taskId);
       const prior = existing.get(taskId);
-      if (!prior) {
-        const effect: OutcomeEffect | undefined =
-          request.expectedEffect === "reasoning"
-            ? "answer"
-            : request.expectedEffect;
+      const requestedEffect = outcomeEffect(request.expectedEffect);
+      // The effect the part would take: a write capability makes it a
+      // mutation (`declareOutcomes`), so repeating such a declaration word
+      // for word is a repeat, not a new effect.
+      const capability = actionCapability(request.expectedCapability);
+      const effectiveEffect =
+        requestedEffect && capability && capability !== "zotero.read"
+          ? "mutation"
+          : requestedEffect;
+      const newEffect =
+        prior !== undefined &&
+        effectiveEffect !== undefined &&
+        effectiveEffect !== (prior.effect || "answer");
+      if (newEffect && !redeclarable(prior)) {
+        throw new Error(
+          `Existing task ${taskId} has immutable presentation: it already has progress, so its effect cannot change; declare a new part instead`,
+        );
+      }
+      if (!prior || newEffect) {
+        const effect = requestedEffect;
         if (!effect) throw new ToolInputRejection(EXPECTED_EFFECT_REQUIRED);
-        const { targets, scope } = declaredTargets(request, scopePapers);
+        const { targets, scope } =
+          prior && !request.scope && !request.targetIds?.length
+            ? {
+                targets: prior.targets ? [...prior.targets] : undefined,
+                scope: prior.scope,
+              }
+            : declaredTargets(request, scopePapers);
+        if (prior) redeclared.set(taskId, prior);
         if (effect === "digest" && !targets?.length)
           throw new ToolInputRejection(DIGEST_NEEDS_PAPERS);
         if (effect === "digest") digestRuns.push({ taskId });
         declarations.push({
           taskId,
-          description: request.description || "",
+          description: request.description || prior?.description || "",
           effect,
-          capability: actionCapability(request.expectedCapability),
+          capability,
           targets,
           ...(scope ? { scope } : {}),
         });
@@ -400,7 +458,22 @@ export function applyOrdinaryTaskUpdates(
       if (!marked.has(taskId)) ignored = true;
     }
     const applied = markOutcomes(
-      declareOutcomes(checkpoint, declarations, now),
+      replaceInPlace(
+        checkpoint,
+        declareOutcomes(
+          redeclared.size
+            ? {
+                ...checkpoint,
+                tasks: checkpoint.tasks.filter(
+                  (task) => !redeclared.has(task.taskId),
+                ),
+              }
+            : checkpoint,
+          declarations,
+          now,
+        ),
+        redeclared,
+      ),
       marks,
       now,
     );
@@ -416,13 +489,14 @@ export function applyOrdinaryTaskUpdates(
       const targets = digestRetryTargets(task, targetIds);
       return targets.length ? [{ taskId, targets }] : [];
     });
+    const local = (taskId: string) =>
+      taskId.startsWith(prefix) ? taskId.slice(prefix.length) : taskId;
     return {
       checkpoint: applied.checkpoint,
       digestParts,
+      changed: [...redeclared.keys()].map(local),
       ignored: ignored || applied.ignored.length > 0,
-      refused: applied.refused.map(({ taskId }) =>
-        taskId.startsWith(prefix) ? taskId.slice(prefix.length) : taskId,
-      ),
+      refused: applied.refused.map(({ taskId }) => local(taskId)),
     };
   } catch (error) {
     if (error instanceof ToolInputRejection) throw error;
@@ -430,6 +504,32 @@ export function applyOrdinaryTaskUpdates(
       error instanceof Error ? error.message : String(error),
     );
   }
+}
+
+/**
+ * Put each re-declared part back where its predecessor stood, keeping when it
+ * was first declared; `declared` appended it as new.
+ */
+function replaceInPlace(
+  original: ExecutionCheckpoint,
+  declared: ExecutionCheckpoint,
+  redeclared: ReadonlyMap<string, ExecutionCheckpointTask>,
+): ExecutionCheckpoint {
+  if (!redeclared.size) return declared;
+  const byId = new Map(declared.tasks.map((task) => [task.taskId, task]));
+  const placed = new Set(original.tasks.map((task) => task.taskId));
+  const tasks = original.tasks.map((task) => {
+    const prior = redeclared.get(task.taskId);
+    const next = byId.get(task.taskId)!;
+    return prior ? { ...next, createdAt: prior.createdAt } : next;
+  });
+  return {
+    ...declared,
+    tasks: [
+      ...tasks,
+      ...declared.tasks.filter((task) => !placed.has(task.taskId)),
+    ],
+  };
 }
 
 export type TaskUpdateToolDeps = {
@@ -442,6 +542,8 @@ export type TaskUpdateToolDeps = {
 
 type TaskUpdateResult = {
   parts: TaskUpdatePart[];
+  /** Parts this call re-declared with a new effect. */
+  changed?: string[];
   note?: string;
 } & DigestRunResult;
 
@@ -496,6 +598,7 @@ export function createTaskUpdateTool(
       let ignored = false;
       let refused: string[] = [];
       let digestParts: DigestPartRun[] = [];
+      let changed: string[] = [];
       let checkpoint = await context.updateExecutionCheckpoint((current) => {
         assertCheckpointOwner(current, execution);
         const applied = applyOrdinaryTaskUpdates(
@@ -507,6 +610,7 @@ export function createTaskUpdateTool(
         ignored = applied.ignored;
         refused = applied.refused;
         digestParts = applied.digestParts;
+        changed = applied.changed;
         return applied.checkpoint;
       });
       let digests: DigestRunResult = {};
@@ -527,13 +631,17 @@ export function createTaskUpdateTool(
       const parts = checkpoint.tasks.map((task) =>
         answerPart(checkpoint, task),
       );
+      const reported = {
+        parts,
+        ...(changed.length ? { changed } : {}),
+      };
       // A refused skip is the note the model must act on; it outranks the
       // reminder that progress needs no call.
       if (refused.length)
-        return { parts, note: skipRefusedNote(refused), ...digests };
+        return { ...reported, note: skipRefusedNote(refused), ...digests };
       return ignored
-        ? { parts, note: HOST_MARKS_DONE, ...digests }
-        : { parts, ...digests };
+        ? { ...reported, note: HOST_MARKS_DONE, ...digests }
+        : { ...reported, ...digests };
     },
   };
 }

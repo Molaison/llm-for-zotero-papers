@@ -820,6 +820,123 @@ describe("task_update ordinary declarations", function () {
         assert.deepEqual(cancelled.digestParts, []);
       });
 
+      describe("a re-declaration with a new effect", function () {
+        const scope = { wholeLibrary: false, itemIds: [5, 6, 7], withText: 3 };
+        const input = (tasks: unknown[]) => {
+          const parsed = createTaskUpdateTool().validate({ tasks });
+          if (!parsed.ok) throw new Error(parsed.error);
+          return parsed.value;
+        };
+        const reasoning = {
+          taskId: "summaries",
+          description: "Summarize each of the 12 selected papers",
+          expectedEffect: "reasoning",
+          scope: true,
+        };
+        const first = () =>
+          applyOrdinaryTaskUpdates(
+            createEmptyExecutionCheckpoint(executionContext, 10),
+            input([declareSave, reasoning]),
+            20,
+            scope,
+          ).checkpoint;
+
+        it("replaces a part with no evidence in place and lists a new digest part to run", function () {
+          const redeclared = applyOrdinaryTaskUpdates(
+            first(),
+            input([
+              {
+                ...reasoning,
+                description: "Digest each selected paper",
+                expectedEffect: "digest",
+              },
+            ]),
+            30,
+            scope,
+          );
+          const tasks = redeclared.checkpoint.tasks;
+          assert.deepEqual(
+            tasks.map((task) => task.taskId),
+            [taskId("save"), taskId("summaries")],
+            "the part keeps its id and its place",
+          );
+          assert.equal(tasks[1].effect, "digest");
+          assert.equal(tasks[1].status, "pending");
+          assert.equal(tasks[1].description, "Digest each selected paper");
+          assert.deepEqual(tasks[1].targets, ["item:5", "item:6", "item:7"]);
+          assert.isFalse(redeclared.ignored);
+          assert.deepEqual(redeclared.changed, ["summaries"]);
+          assert.deepEqual(redeclared.digestParts, [
+            {
+              taskId: taskId("summaries"),
+              targets: ["item:5", "item:6", "item:7"],
+            },
+          ]);
+        });
+
+        it("reports the changed part to the model", async function () {
+          const ctx = scoped([5, 6]);
+          await call(ctx, { tasks: [reasoning] });
+          const answer = (await call(ctx, {
+            tasks: [{ ...reasoning, expectedEffect: "digest" }],
+          })) as Answer & { changed?: string[] };
+          assert.deepEqual(answer.changed, ["summaries"]);
+          assert.isUndefined(answer.note);
+          assert.lengthOf(ledgerOf(ctx).tasks, 1);
+          assert.equal(ledgerOf(ctx).tasks[0].effect, "digest");
+        });
+
+        it("refuses a new effect for a part that already has evidence", function () {
+          const progressed = first();
+          const withEvidence = {
+            ...progressed,
+            tasks: progressed.tasks.map((task) =>
+              task.taskId === taskId("summaries")
+                ? { ...task, readEvidenceIds: ["read-1"] }
+                : task,
+            ),
+          };
+          assert.throws(
+            () =>
+              applyOrdinaryTaskUpdates(
+                withEvidence,
+                input([{ ...reasoning, expectedEffect: "digest" }]),
+                30,
+                scope,
+              ),
+            ToolInputRejection,
+            /immutable/,
+          );
+        });
+
+        it("allows digest to artifact before any paper is digested", function () {
+          const digest = applyOrdinaryTaskUpdates(
+            createEmptyExecutionCheckpoint(executionContext, 10),
+            input([{ ...summaries, scope: true }]),
+            20,
+            scope,
+          ).checkpoint;
+          const artifact = applyOrdinaryTaskUpdates(
+            digest,
+            input([
+              {
+                taskId: "summaries",
+                description: "Write the review",
+                expectedEffect: "artifact",
+                targetIds: ["5"],
+              },
+            ]),
+            30,
+            scope,
+          );
+          assert.equal(artifact.checkpoint.tasks[0].effect, "artifact");
+          assert.deepEqual(artifact.checkpoint.tasks[0].targets, ["item:5"]);
+          assert.notProperty(artifact.checkpoint.tasks[0], "scope");
+          assert.deepEqual(artifact.digestParts, []);
+          assert.deepEqual(artifact.changed, ["summaries"]);
+        });
+      });
+
       it("a digest part that names a write capability is a write and runs no digest", function () {
         const parsed = createTaskUpdateTool().validate({
           tasks: [
