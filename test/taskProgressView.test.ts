@@ -142,7 +142,12 @@ function mount(
         timers.set(++handle, { callback, ms });
         return handle;
       },
-      clearTimeout: (id) => timers.delete(id as number),
+      clearTimeout: (id) => {
+        if (options.windowClosed?.value) {
+          throw new Error("Component not initialized");
+        }
+        timers.delete(id as number);
+      },
       now: () => now,
       resolveMineru: options.mineru
         ? async ({ itemId }) => {
@@ -288,6 +293,35 @@ describe("task progress view", function () {
     windowClosed.value = false;
     beginTaskRun(KEY, { runId: "run-b" });
     assert.equal(harness.timers.size, 0, "a dead view schedules nothing");
+  });
+
+  it("tears down whole when its window closed with timers pending", function () {
+    seedScope(5);
+    const windowClosed = { value: false };
+    const motion = fakeLayout({ ms: 200 });
+    const harness = track(mount({}, { windowClosed, layout: motion.layout }));
+    fakeHeights(harness, 300, 700);
+    beginTaskRun(KEY, { runId: "run-a" });
+    harness.runTimers();
+    // The drawer is mid-motion and a repaint is due when the window closes.
+    harness.row.dispatchFakeEvent("click");
+    applyTaskPaperUpdate(KEY, ledgerDelta("c1", [[1, "read"]]), "run-a");
+    assert.isAtLeast(harness.timers.size, 2, "timers are pending");
+    windowClosed.value = true;
+    // A closed window's clearTimeout throws, as its setTimeout does.
+    assert.doesNotThrow(() => harness.view.dispose());
+    windowClosed.value = false;
+    assert.isFalse(
+      harness.row.dispatchFakeEvent("click").defaultPrevented,
+      "the row stopped listening",
+    );
+    assert.isFalse(
+      harness.grip.dispatchFakeEvent("dblclick").defaultPrevented,
+      "the grip stopped listening",
+    );
+    const resized = motion.chatResized();
+    motion.fireResize();
+    assert.equal(motion.chatResized(), resized, "the drawer is not observed");
   });
 
   it("hides the row where it does not apply and names the scope where it does", function () {

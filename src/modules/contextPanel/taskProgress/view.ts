@@ -1872,12 +1872,22 @@ export function mountTaskProgressView(params: {
       if (disposed) return;
       disposed = true;
       unsubscribe();
-      if (paintTimer !== null) deps.clearTimeout(paintTimer);
-      for (const timer of flashTimers) deps.clearTimeout(timer);
+      // A closed standalone window's clearTimeout throws, as its setTimeout
+      // does (`schedule`); its timers died with it. Each clear is guarded so
+      // the rest of the teardown, and the panel's own, still runs.
+      const clearing = (clear: () => void) => {
+        try {
+          clear();
+        } catch {
+          // The window is gone, and its timers with it.
+        }
+      };
+      if (paintTimer !== null) clearing(() => deps.clearTimeout(paintTimer));
+      for (const timer of flashTimers) clearing(() => deps.clearTimeout(timer));
       flashTimers.clear();
       endDrag();
-      clearSettleTimer();
-      clearCurtainTimer();
+      clearing(clearSettleTimer);
+      clearing(clearCurtainTimer);
       stopObservingDrawer();
       stopObservingCurtain();
       row.removeEventListener("click", onRowClick);
