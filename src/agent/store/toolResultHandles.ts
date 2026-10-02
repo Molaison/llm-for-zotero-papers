@@ -255,23 +255,33 @@ export async function hydrateAgentToolResultHandles(
   hydratedConversations.add(conversationKey);
 }
 
+/**
+ * Keeps the records in memory and writes them to the database. Resolves to
+ * whether every record reached the database: false when there was nothing
+ * valid to write, the store is unavailable, the conversation was retired,
+ * or the write failed (which is logged, never thrown).
+ */
 export async function upsertAgentToolResultHandles(
   records: AgentToolResultHandleRecord[],
-): Promise<void> {
+): Promise<boolean> {
   const normalized = records
     .map((record) => normalizeRecord(record))
     .filter((record): record is AgentToolResultHandleRecord => Boolean(record));
-  if (!normalized.length) return;
+  if (!normalized.length) return false;
   for (const record of normalized) {
     if (isConversationKeyRetiredInMemory(record.conversationKey)) continue;
     handleStore.set(storeKey(record.conversationKey, record.handle), record);
   }
   const dbReady = await ensureAgentToolResultHandleStore();
   const db = getDb();
-  if (!dbReady || !db) return;
+  if (!dbReady || !db) return false;
+  let written = true;
   try {
     for (const record of normalized) {
-      if (isConversationKeyRetiredInMemory(record.conversationKey)) continue;
+      if (isConversationKeyRetiredInMemory(record.conversationKey)) {
+        written = false;
+        continue;
+      }
       await db.queryAsync(
         `INSERT OR REPLACE INTO ${TOOL_RESULT_HANDLE_TABLE}
           (conversation_key, handle, tool_name, tool_call_id, input_digest, resource_signature, content_json, created_at)
@@ -301,7 +311,9 @@ export async function upsertAgentToolResultHandles(
       "LLM Agent: Failed to persist tool-result handles",
       error,
     );
+    return false;
   }
+  return written;
 }
 
 export async function getAgentToolResultHandle(params: {

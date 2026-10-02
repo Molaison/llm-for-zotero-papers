@@ -1,7 +1,10 @@
 import { assert } from "chai";
 import { DatabaseSync } from "node:sqlite";
 import { DirectDocumentFinalizer } from "../src/agent/documents/directFinalization";
-import { deliverPendingPlanDocumentMessage } from "../src/agent/documents/publication";
+import {
+  deliverPendingPlanDocumentMessage,
+  documentMessageLead,
+} from "../src/agent/documents/publication";
 import {
   initPlanDocumentStore,
   loadPlanDocument,
@@ -102,6 +105,26 @@ describe("document finalization persistence", function () {
     assert.equal(
       (await loadPlanDocumentOutbox(document.documentId))?.status,
       "delivered",
+    );
+    // The chat shows the lead above the card; Copy, Export and Save Note
+    // deliver the stored document, which is the message's suffix alone.
+    assert.equal(
+      documentMessageLead(messageText, delivered!.visibleMarkdown),
+      "## Per-paper summaries\n\n**1. Smith (2021)**\n\nDrift grows.",
+    );
+    assert.equal(
+      (await loadPlanDocument(document.documentId))?.visibleMarkdown,
+      document.visibleMarkdown,
+    );
+    assert.equal(
+      documentMessageLead(document.visibleMarkdown, document.visibleMarkdown),
+      "",
+    );
+    assert.isUndefined(
+      documentMessageLead(
+        `${document.visibleMarkdown}\n\nMore.`,
+        document.visibleMarkdown,
+      ),
     );
   });
   it("preserves direct document identity, hash, retry and publication", async function () {

@@ -33,28 +33,53 @@ describe("answerSegments", function () {
     assert.equal(classifyStreamedText(summaries).reason, "heading");
   });
 
-  it("keeps structure from 160 characters, tables at any length, and plain text from 400", function () {
+  it("keeps structure from 320 characters with two paragraphs or a citation, tables at any length, and plain text from 400", function () {
     const body =
       "A finding the reader needs, stated in a full sentence. ".repeat(3);
     assert.equal(
-      classifyStreamedText(`## Findings\n\n${body}`).reason,
+      classifyStreamedText(`## Findings\n\n${body}\n\n${body}`).reason,
       "heading",
     );
     assert.equal(
-      classifyStreamedText(`- first: ${body}\n- second: ${body}`).reason,
+      classifyStreamedText(`- first: ${body}\n\n- second: ${body}`).reason,
       "list",
+    );
+    assert.equal(
+      classifyStreamedText(`- first: ${body} [[quote:q1]]\n- second: ${body}`)
+        .reason,
+      "list",
+      "one paragraph with a citation is content",
     );
     assert.equal(
       classifyStreamedText("| a | b |\n|---|---|\n| 1 | 2 |").reason,
       "table",
     );
     assert.equal(
-      classifyStreamedText(`**1. Smith (2021)**\n\n${body}`).reason,
+      classifyStreamedText(`**1. Smith (2021)**\n\n${body}\n\n${body}`).reason,
       "bold_numbered",
+    );
+    // One paragraph of structure without a citation is a plan, not content.
+    assert.equal(
+      classifyStreamedText(`- first: ${body}\n- second: ${body}`).reason,
+      "lead_in",
+    );
+    // Structure below 320 characters is a plan even with two paragraphs.
+    assert.equal(
+      classifyStreamedText(`## Findings\n\n${body}`).reason,
+      "lead_in",
     );
     assert.equal(classifyStreamedText("x".repeat(400)).reason, "length");
     assert.equal(classifyStreamedText("x".repeat(399)).reason, "lead_in");
     assert.equal(classifyStreamedText("   \n").reason, "lead_in");
+  });
+
+  it("rolls back an opening plan written as a numbered list", function () {
+    const plan =
+      "I'll help you compare these two papers on representational drift. Let me start by:\n\n1. Searching your library for both papers\n2. Reading each paper's methods and results\n3. Comparing their main findings";
+    // The recorded plan was 201 characters: past the old 160 floor.
+    assert.isAtLeast(plan.length, 200);
+    assert.equal(classifyStreamedText(plan).reason, "lead_in");
+    assert.isFalse(isSubstantiveAnswerText(plan));
   });
 
   it("rolls back short structured lead-ins", function () {
@@ -64,7 +89,7 @@ describe("answerSegments", function () {
       "**1. Read the paper**",
       "## Findings\n\nOne line.",
     ]) {
-      assert.isBelow(leadIn.trim().length, 160);
+      assert.isBelow(leadIn.trim().length, 320);
       assert.equal(classifyStreamedText(leadIn).reason, "lead_in", leadIn);
     }
   });

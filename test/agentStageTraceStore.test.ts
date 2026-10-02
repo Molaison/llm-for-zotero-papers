@@ -20,6 +20,10 @@ import {
   PERSISTED_TOOL_RESULT_MAX_BYTES,
 } from "../src/agent/store/traceStore";
 import {
+  buildToolResultPreview,
+  PREVIEW_MAX_BYTES,
+} from "../src/agent/store/truncatedToolResult";
+import {
   clearAgentToolResultHandleStore,
   createAgentToolResultHandleRecord,
   getAgentToolResultHandle,
@@ -381,7 +385,8 @@ describe("tool results in the trace store", function () {
     );
     // The text and the citation list shrink.
     assert.isBelow(preview.results[0].text.length, 202);
-    assert.lengthOf(preview.quoteCitations, 3);
+    assert.isAtLeast(preview.quoteCitations.length, 3);
+    assert.isBelow(preview.quoteCitations.length, 360);
     // The source result is not changed.
     assert.lengthOf(content.quoteCitations as unknown[], 360);
   });
@@ -461,5 +466,155 @@ describe("tool results in the trace store", function () {
       handle: record!.handle,
     });
     assert.deepEqual(stored?.content, content);
+  });
+
+  it("the handle store reports whether a record reached the database", async function () {
+    const record = createAgentToolResultHandleRecord({
+      conversationKey,
+      toolName: "paper_read",
+      toolCallId: "call-confirm",
+      inputDigest: "sha256:input",
+      content: { text: "kept" },
+      createdAt: 5,
+    })!;
+    // The store creates its table once per process; this database is fresh.
+    db.exec(`CREATE TABLE IF NOT EXISTS llm_for_zotero_agent_tool_result_handles (
+      conversation_key INTEGER NOT NULL,
+      handle TEXT NOT NULL,
+      tool_name TEXT NOT NULL,
+      tool_call_id TEXT NOT NULL,
+      input_digest TEXT,
+      resource_signature TEXT,
+      content_json TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY(conversation_key, handle)
+    )`);
+    assert.isTrue(await upsertAgentToolResultHandles([record]));
+    const zotero = globalScope.Zotero as {
+      DB: { queryAsync: (sql: string, params?: unknown[]) => unknown };
+    };
+    const query = zotero.DB.queryAsync;
+    zotero.DB.queryAsync = async (sql: string, params?: unknown[]) => {
+      if (sql.includes("INSERT OR REPLACE INTO llm_for_zotero_agent_tool"))
+        throw new Error("database is locked");
+      return query(sql, params);
+    };
+    assert.isFalse(
+      await upsertAgentToolResultHandles([{ ...record, createdAt: 6 }]),
+      "a write the database refused is not reported as stored",
+    );
+    assert.isFalse(await upsertAgentToolResultHandles([]));
+  });
+
+  it("builds a big result's preview before the batch transaction opens", async function () {
+    let inTransaction = false;
+    let readInside = 0;
+    const zotero = globalScope.Zotero as {
+      DB: { executeTransaction: (task: () => Promise<unknown>) => unknown };
+    };
+    const transaction = zotero.DB.executeTransaction;
+    zotero.DB.executeTransaction = async (task) =>
+      transaction(async () => {
+        inTransaction = true;
+        try {
+          return await task();
+        } finally {
+          inTransaction = false;
+        }
+      });
+    const content: Record<string, unknown> = {};
+    Object.defineProperty(content, "text", {
+      enumerable: true,
+      get() {
+        if (inTransaction) readInside += 1;
+        return "a".repeat(40_000);
+      },
+    });
+    await appendAgentRunEvents(runId, [
+      {
+        seq: 1,
+        event: toolResult(0, { toolResultHandle: "trh_outside", content }),
+        createdAt: 10,
+      },
+    ]);
+    const trace = await getAgentRunTrace(runId);
+    const persisted = (trace.events[0].payload as { content?: unknown })
+      .content as { preview?: { text?: string } };
+    assert.isTrue(isTruncatedToolResultContent(persisted));
+    assert.equal(persisted.preview?.text, `${"a".repeat(200)}\u2026`);
+    assert.equal(readInside, 0, "the transaction only inserts rows");
+  });
+});
+
+describe("tool result preview cost", function () {
+  /** The median of seven runs, in milliseconds, after a warm-up run. */
+  function timed(content: unknown): { ms: number; preview: unknown } {
+    let preview = buildToolResultPreview(content);
+    const runs: number[] = [];
+    for (let run = 0; run < 7; run += 1) {
+      const start = performance.now();
+      preview = buildToolResultPreview(content);
+      runs.push(performance.now() - start);
+    }
+    runs.sort((left, right) => left - right);
+    return { ms: runs[3], preview };
+  }
+
+  const rows = (count: number) => ({
+    rows: Array.from({ length: count }, (_, index) => ({
+      id: index,
+      text: "x".repeat(250),
+      values: [index, index + 1, index + 2, index + 3, index + 4],
+    })),
+  });
+
+  const listing = (count: number) => ({
+    entity: "items",
+    mode: "list",
+    totalCount: count,
+    items: Array.from({ length: count }, (_, index) => ({
+      itemId: index,
+      title: `A study of thing ${index} `.repeat(4),
+      creators: ["Alpha A", "Beta B", "Gamma C", "Delta D", "Eps E"],
+      tags: ["t1", "t2", "t3", "t4"],
+      collections: [1, 2, 3, 4],
+      year: "2020",
+    })),
+  });
+
+  it("previews 3,000 rows of five-entry arrays and a 1,000-item listing in linear time", function () {
+    const big = timed(rows(3_000));
+    const small = timed(rows(1_000));
+    const items = timed(listing(1_000));
+    assert.isBelow(big.ms, 50, `3,000 rows took ${big.ms.toFixed(1)} ms`);
+    assert.isBelow(items.ms, 30, `1,000 items took ${items.ms.toFixed(1)} ms`);
+    assert.isBelow(
+      big.ms,
+      4 * Math.max(small.ms, 1),
+      `3,000 rows ${big.ms.toFixed(1)} ms vs 1,000 rows ${small.ms.toFixed(1)} ms`,
+    );
+    for (const { preview } of [big, small, items]) {
+      assert.exists(preview);
+      assert.isAtMost(JSON.stringify(preview).length, PREVIEW_MAX_BYTES);
+    }
+    const listed = items.preview as ReturnType<typeof listing>;
+    assert.equal(listed.mode, "list");
+    assert.equal(listed.totalCount, 1_000);
+    assert.isAtLeast(listed.items.length, 3);
+    // Every kept row keeps its fields, its arrays cut to at least three.
+    for (const item of listed.items) {
+      assert.isAtLeast(item.creators.length, 3);
+      assert.equal(item.year, "2020");
+    }
+  });
+
+  it("keeps a preview that fits untouched and refuses one that never fits", function () {
+    const small = { mode: "list", items: [1, 2, 3, 4, 5, 6] };
+    assert.deepEqual(buildToolResultPreview(small), small);
+    // Keys alone exceed the bound: no copy fits.
+    const keys = Object.fromEntries(
+      Array.from({ length: 2_000 }, (_, index) => [`key_${index}`, index]),
+    );
+    assert.isUndefined(buildToolResultPreview(keys));
   });
 });

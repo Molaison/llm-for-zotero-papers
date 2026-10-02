@@ -3,17 +3,31 @@ import type { AgentEvent } from "../types";
 /** One run event row, as the trace store inserts it. */
 export type RunEventRow = { seq: number; event: AgentEvent; createdAt: number };
 
+/**
+ * What the batches settled since the last report did: how many rows were
+ * written, and which rows were lost with a failed batch.
+ */
+export type RunEventFlushReport = {
+  written: number;
+  failed: Array<{ seq: number; type: AgentEvent["type"] }>;
+};
+
 export type RunEventWriter = {
   /** Buffers the row for a later write. Never throws, never awaits. */
   enqueue(row: RunEventRow): void;
-  /** Writes everything buffered; resolves once it and every earlier batch is written. */
-  flush(): Promise<void>;
+  /**
+   * Writes everything buffered; resolves once it and every earlier batch is
+   * settled, with what the batches settled since the last report did.
+   */
+  flush(): Promise<RunEventFlushReport>;
   /** A final flush, after which `enqueue` is a no-op. */
-  close(): Promise<void>;
+  close(): Promise<RunEventFlushReport>;
 };
 
 const DEFAULT_FLUSH_INTERVAL_MS = 250;
 const DEFAULT_MAX_BUFFERED = 64;
+/** Failures a run logs; later ones are still announced to `onBatchFailed`. */
+const MAX_REPORTED_FAILURES = 5;
 
 /**
  * Takes a run's event rows off the stream's critical path.
@@ -22,9 +36,10 @@ const DEFAULT_MAX_BUFFERED = 64;
  * buffered row), the size cap (`maxBuffered` rows) or an explicit `flush`
  * writes them. Batches are written one at a time on a single promise chain,
  * so rows reach the store in the order they were enqueued; a crash loses at
- * most the rows still buffered. A failed batch is reported (the first failure
- * only, so a locked database cannot flood the log) and dropped; later batches
- * still go through.
+ * most the rows still buffered. A failed batch is dropped and later batches
+ * still go through. Every failed batch is announced to `onBatchFailed` with
+ * its rows and named in the next flush report; `onError` logs the first five
+ * failures of a run, so a locked database cannot flood the log.
  */
 export function createRunEventWriter(params: {
   persist: (rows: readonly RunEventRow[]) => Promise<void>;
@@ -33,6 +48,8 @@ export function createRunEventWriter(params: {
   setTimeout: (fn: () => void, ms: number) => unknown;
   clearTimeout: (handle: unknown) => void;
   onError: (error: unknown) => void;
+  /** A batch that failed, with its rows; called before its flush resolves. */
+  onBatchFailed?: (rows: readonly RunEventRow[], error: unknown) => void;
 }): RunEventWriter {
   const flushIntervalMs = params.flushIntervalMs ?? DEFAULT_FLUSH_INTERVAL_MS;
   const maxBuffered = Math.max(1, params.maxBuffered ?? DEFAULT_MAX_BUFFERED);
@@ -40,8 +57,9 @@ export function createRunEventWriter(params: {
   let timer: unknown = undefined;
   let timerArmed = false;
   let closed = false;
-  let reported = false;
+  let reported = 0;
   let draining: Promise<void> = Promise.resolve();
+  let report: RunEventFlushReport = { written: 0, failed: [] };
 
   const disarm = () => {
     if (!timerArmed) return;
@@ -54,14 +72,20 @@ export function createRunEventWriter(params: {
     timer = undefined;
   };
 
-  const report = (error: unknown) => {
-    if (reported) return;
-    reported = true;
+  const logError = (error: unknown) => {
+    if (reported >= MAX_REPORTED_FAILURES) return;
+    reported += 1;
     try {
       params.onError(error);
     } catch {
       // Reporting is best effort.
     }
+  };
+
+  const takeReport = (): RunEventFlushReport => {
+    const taken = report;
+    report = { written: 0, failed: [] };
+    return taken;
   };
 
   /** Moves the buffer onto the write chain; returns the chain's tail. */
@@ -73,8 +97,17 @@ export function createRunEventWriter(params: {
       draining = draining.then(async () => {
         try {
           await params.persist(rows);
+          report.written += rows.length;
         } catch (error) {
-          report(error);
+          report.failed.push(
+            ...rows.map((row) => ({ seq: row.seq, type: row.event.type })),
+          );
+          logError(error);
+          try {
+            params.onBatchFailed?.(rows, error);
+          } catch {
+            // The owner's bookkeeping must not break the write chain.
+          }
         }
       });
     }
@@ -92,7 +125,7 @@ export function createRunEventWriter(params: {
       timerArmed = true;
     } catch (error) {
       // Without a timer the rows wait for the cap or an explicit flush.
-      report(error);
+      logError(error);
     }
   };
 
@@ -104,12 +137,11 @@ export function createRunEventWriter(params: {
       else arm();
     },
     flush() {
-      return drain();
+      return drain().then(takeReport);
     },
     close() {
-      if (closed) return draining;
       closed = true;
-      return drain();
+      return drain().then(takeReport);
     },
   };
 }

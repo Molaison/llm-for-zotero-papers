@@ -19,6 +19,7 @@ import {
 } from "../../../agent/documents/store";
 import type { PlanDocument } from "../../../agent/documents/types";
 import { subscribeDocumentPublication } from "../../../agent/documents/publicationEvents";
+import { documentMessageLead } from "../../../agent/documents/publication";
 import {
   isContentLikeToolArgumentKey,
   isMalformedToolArgumentsDiagnostic,
@@ -5044,6 +5045,12 @@ type LiveTraceState = {
     projection: TraceProjection;
     user: Message | null | undefined;
     hasText: boolean;
+    /**
+     * The answer text's length and hash: the projection reads the text to
+     * hide inline text the answer already shows, so a changed text projects
+     * again even when no event arrived.
+     */
+    textKey: string;
     providerLabel: Message["modelProviderLabel"];
     runMode: Message["runMode"];
     /** The shown item the last compacted entry produced, when reasoning. */
@@ -5148,6 +5155,16 @@ function readAgentTraceEventScan(
  * every tool payload was read once and remembered; a refresh that only
  * lengthened the last thinking block patches that block alone.
  */
+/** The answer text's length and FNV-1a hash, as one cache key. */
+function answerTextKey(text: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return `${text.length}:${(hash >>> 0).toString(36)}`;
+}
+
 export function buildAgentTraceDisplayItems(
   events: AgentRunEventRecord[],
   userMessage?: Message | null,
@@ -5163,12 +5180,14 @@ export function buildAgentTraceDisplayItems(
   }
   const state = advanceLiveTrace(events, assistantMessage);
   const hasText = Boolean(assistantMessage.text?.trim());
+  const textKey = answerTextKey(assistantMessage.text || "");
   const cached = state.cached;
   const ownEvents = liveTraceReadsOwnEvents(state.scan);
   const sameInputs =
     cached &&
     cached.user === userMessage &&
     cached.hasText === hasText &&
+    cached.textKey === textKey &&
     cached.providerLabel === assistantMessage.modelProviderLabel &&
     cached.runMode === assistantMessage.runMode;
   if (cached && sameInputs && !state.changed) return cached.projection;
@@ -5225,6 +5244,7 @@ export function buildAgentTraceDisplayItems(
     projection,
     user: userMessage,
     hasText,
+    textKey,
     providerLabel: assistantMessage.modelProviderLabel,
     runMode: assistantMessage.runMode,
     tailReasoning,
@@ -6299,11 +6319,96 @@ async function pickMarkdownExportPath(
     : picker.file?.path || null;
 }
 
+/** The visible markdown of documents a card painted, by document id. */
+const documentMarkdownById = new Map<string, string>();
+const DOCUMENT_MARKDOWN_CACHE_LIMIT = 64;
+
+function rememberDocumentMarkdown(document: PlanDocument): void {
+  documentMarkdownById.delete(document.documentId);
+  documentMarkdownById.set(document.documentId, document.visibleMarkdown);
+  if (documentMarkdownById.size > DOCUMENT_MARKDOWN_CACHE_LIMIT) {
+    const oldest = documentMarkdownById.keys().next().value;
+    if (oldest !== undefined) documentMarkdownById.delete(oldest);
+  }
+}
+
+/**
+ * A document's visible markdown, when known without loading it: from a card
+ * that painted it, else from the submit_document result in the run's events
+ * (a stored result too big for the trace keeps only a preview, which does
+ * not count). Undefined until the card loads it.
+ */
+function knownDocumentMarkdown(
+  documentId: string,
+  events: readonly AgentRunEventRecord[],
+): string | undefined {
+  const known = documentMarkdownById.get(documentId);
+  if (known !== undefined) return known;
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const payload = events[index].payload;
+    if (payload.type !== "tool_result" || !payload.ok) continue;
+    const content = payload.content as
+      | { documentId?: unknown; visibleMarkdown?: unknown }
+      | null
+      | undefined;
+    if (
+      content &&
+      typeof content === "object" &&
+      !isTruncatedToolResultContent(content) &&
+      content.documentId === documentId &&
+      typeof content.visibleMarkdown === "string"
+    )
+      return content.visibleMarkdown;
+  }
+  return undefined;
+}
+
+/**
+ * Shows the text a message carries before its document (text the model
+ * wrote before calling the tool) directly above the document card. The
+ * answer bubble below stays hidden, since it would repeat the document; the
+ * card's Copy, Export and Save Note deliver the document alone.
+ */
+function syncDocumentLead(
+  doc: Document,
+  documentView: NonNullable<TraceView["document"]>,
+  documentMarkdown: string,
+): void {
+  const text = documentMessageLead(
+    documentView.message.text || "",
+    documentMarkdown,
+  );
+  if (!text) {
+    documentView.lead?.node.remove();
+    documentView.lead = undefined;
+    return;
+  }
+  const card = documentView.node;
+  if (documentView.lead?.text !== text) {
+    documentView.lead?.node.remove();
+    const node = doc.createElement("div");
+    node.className = "llm-agent-inline-text llm-plan-document-lead";
+    const markdown = buildAgentTraceMarkdownForRender(
+      text,
+      documentView.message,
+    );
+    try {
+      renderRenderedMarkdownInto(node, markdown, doc);
+    } catch {
+      node.textContent = markdown;
+    }
+    documentView.lead = { text, node };
+  }
+  const lead = documentView.lead!.node;
+  if (card.parentElement && lead.nextSibling !== card)
+    card.parentElement.insertBefore(lead, card);
+}
+
 function renderPlanDocumentCard(params: {
   doc: Document;
   documentId: string;
   citationContext?: import("../assistantRichText").AssistantCitationContext;
-  onReady?: () => void;
+  onReady?: (document: PlanDocument) => void;
 }): HTMLElement {
   const root = params.doc.createElement("section");
   root.className = "llm-plan-container llm-plan-document-card";
@@ -6418,7 +6523,7 @@ function renderPlanDocumentCard(params: {
     if (figures) root.appendChild(figures);
     if (coverage) root.appendChild(coverage);
     unsubscribe();
-    params.onReady?.();
+    params.onReady?.(document);
   };
 
   const reload = () => {
@@ -6471,6 +6576,8 @@ type TraceView = {
     message: Message;
     node: HTMLElement;
     caption: HTMLElement;
+    /** Text the message carries before the document, shown above the card. */
+    lead?: { text: string; node: HTMLElement };
   };
   streaming?: boolean;
   eventCount?: number;
@@ -6968,6 +7075,7 @@ export function renderAgentTrace({
         child !== view.plan?.node &&
         child !== view.document?.node &&
         child !== view.document?.caption &&
+        child !== view.document?.lead?.node &&
         child !== view.discovery?.node
       )
         child?.remove();
@@ -7118,6 +7226,7 @@ export function renderAgentTrace({
       if (existing) {
         disposePlanCard(existing.node);
         existing.caption.remove();
+        existing.lead?.node.remove();
       }
       const caption = doc.createElement("p");
       caption.className = "llm-plan-document-completion-caption";
@@ -7133,8 +7242,11 @@ export function renderAgentTrace({
               pairedUserMessage: userMessage,
             }
           : undefined,
-        onReady: () => {
+        onReady: (document) => {
           caption.hidden = false;
+          rememberDocumentMarkdown(document);
+          if (view.document?.node === card)
+            syncDocumentLead(doc, view.document, document.visibleMarkdown);
         },
       });
       view.document = {
@@ -7148,9 +7260,12 @@ export function renderAgentTrace({
       };
       wrap.append(card, caption);
     }
+    const markdown = knownDocumentMarkdown(planDocumentId, events);
+    if (markdown !== undefined) syncDocumentLead(doc, view.document!, markdown);
   } else if (view.document) {
     disposePlanCard(view.document.node);
     view.document.caption.remove();
+    view.document.lead?.node.remove();
     view.document = undefined;
   }
 

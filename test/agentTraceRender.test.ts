@@ -12434,3 +12434,95 @@ describe("tool results stored by handle", function () {
     assert.notInclude(JSON.stringify(items), "Result preview");
   });
 });
+
+describe("text kept before a document", function () {
+  const documentId = "run-kept:document:1";
+  const KEPT =
+    "## Per-paper summaries\n\n**1. Smith (2021)** Drift grows with time.";
+  const DOCUMENT = "# Review\n\nBoth papers agree that drift grows.";
+
+  const keptEvents = (): AgentRunEventRecord[] =>
+    [
+      { type: "message_delta", text: KEPT },
+      {
+        type: "tool_call",
+        callId: "submit-1",
+        name: "submit_document",
+        args: { title: "Review" },
+      },
+      {
+        type: "tool_result",
+        callId: "submit-1",
+        name: "submit_document",
+        ok: true,
+        actionReceipts: [],
+        content: { documentId, visibleMarkdown: DOCUMENT },
+      },
+      {
+        type: "material_finalized",
+        callId: "submit-1",
+        materialRef: {
+          documentId,
+          documentVersion: 1,
+          contentHash: "sha256:kept",
+        },
+        materialTitle: "Review",
+      },
+      { type: "final", text: `${KEPT}\n\n${DOCUMENT}` },
+    ].map((payload, index) => ({
+      runId: "run-kept",
+      seq: index + 1,
+      eventType: payload.type,
+      createdAt: index + 1,
+      payload: payload as AgentEvent,
+    })) as AgentRunEventRecord[];
+
+  const render = (text: string) => {
+    let hidden = false;
+    const trace = renderAgentTrace({
+      doc: fakeDocument,
+      message: {
+        role: "assistant",
+        text,
+        timestamp: 1,
+        runMode: "agent",
+        agentRunId: "run-kept",
+        documentId,
+        streaming: false,
+      },
+      events: keptEvents(),
+      onInterleavedText: () => {
+        hidden = true;
+      },
+    }) as unknown as FakeElement;
+    return { trace, hidden };
+  };
+
+  it("shows the text written before the document above its card", function () {
+    const { trace, hidden } = render(`${KEPT}\n\n${DOCUMENT}`);
+    const lead = trace.findByClass("llm-plan-document-lead");
+    assert.exists(lead, "the kept text stays visible");
+    const shown = `${lead!.textContent}${lead!.innerHTML}`;
+    assert.include(shown, "Drift grows with time.");
+    assert.notInclude(shown, "Both papers agree");
+    const order = trace.children.map((child) => child.className);
+    const leadIndex = order.findIndex((name) =>
+      name.includes("llm-plan-document-lead"),
+    );
+    const cardIndex = order.findIndex((name) =>
+      name.includes("llm-plan-document-card"),
+    );
+    assert.isAtLeast(cardIndex, 0);
+    assert.isBelow(leadIndex, cardIndex, "the kept text sits above the card");
+    // The answer bubble would repeat the document; the card delivers it.
+    assert.isTrue(hidden);
+    disposeAgentTrace(trace as unknown as HTMLElement);
+  });
+
+  it("shows no lead when the message is the document alone", function () {
+    const { trace, hidden } = render(DOCUMENT);
+    assert.isNull(trace.findByClass("llm-plan-document-lead"));
+    assert.isTrue(hidden);
+    disposeAgentTrace(trace as unknown as HTMLElement);
+  });
+});

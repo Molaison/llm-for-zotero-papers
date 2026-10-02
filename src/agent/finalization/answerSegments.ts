@@ -8,11 +8,12 @@
 /** Unstructured text at least this long is deliverable content. */
 export const SUBSTANTIVE_ANSWER_MIN_CHARS = 400;
 /**
- * Headings, lists and bold numbered lines count only from this length: a
- * short plan ("## Plan\nRead first.", "I'll do two things:\n- …\n- …") is a
- * lead-in in markdown.
+ * Headings, lists and bold numbered lines count only from this length, and
+ * only with two or more paragraphs or a citation: a plan ("## Plan\nRead
+ * first.", "Let me start by:\n\n1. Searching…\n2. Reading…") is a lead-in
+ * in markdown.
  */
-export const STRUCTURED_ANSWER_MIN_CHARS = 160;
+export const STRUCTURED_ANSWER_MIN_CHARS = 320;
 
 export type StreamedTextReason =
   | "length"
@@ -26,12 +27,21 @@ const HEADING = /^#{1,6}\s+\S/m;
 const LIST_ITEM = /^\s*(?:[-*+]|\d+[.)])\s+\S/gm;
 const TABLE_SEPARATOR = /^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/m;
 const BOLD_NUMBERED = /^\s*\*\*\s*\d+[.)]?\s+[^*\n]{2,}\*\*/m;
+const PARAGRAPH_BREAK = /\n[ \t]*\n/g;
+const CITATION_TOKEN = /\[\[(?:quote|cite):[^\]\n]+\]\]/;
+
+/** Two or more paragraphs (blank-line separated), or a citation token. */
+function carriesContent(text: string): boolean {
+  if (CITATION_TOKEN.test(text)) return true;
+  return text.split(PARAGRAPH_BREAK).filter((part) => part.trim()).length >= 2;
+}
 
 /**
  * Classification detail for logs and tests. Structure is checked before
  * length, so the reason names the most specific signal. A table counts at
  * any length; a heading, two list items or a bold numbered line count from
- * STRUCTURED_ANSWER_MIN_CHARS; anything else from SUBSTANTIVE_ANSWER_MIN_CHARS.
+ * STRUCTURED_ANSWER_MIN_CHARS when the text has two or more paragraphs or a
+ * citation token; anything else from SUBSTANTIVE_ANSWER_MIN_CHARS.
  */
 export function classifyStreamedText(text: string): {
   substantive: boolean;
@@ -41,7 +51,10 @@ export function classifyStreamedText(text: string): {
   if (!trimmed) return { substantive: false, reason: "lead_in" };
   if (TABLE_SEPARATOR.test(trimmed))
     return { substantive: true, reason: "table" };
-  if (trimmed.length >= STRUCTURED_ANSWER_MIN_CHARS) {
+  if (
+    trimmed.length >= STRUCTURED_ANSWER_MIN_CHARS &&
+    carriesContent(trimmed)
+  ) {
     if (HEADING.test(trimmed)) return { substantive: true, reason: "heading" };
     if ((trimmed.match(LIST_ITEM) || []).length >= 2)
       return { substantive: true, reason: "list" };

@@ -109,8 +109,9 @@ describe("run event writer", function () {
     assert.deepEqual(order, ["start 1", "end 1", "start 2", "end 2"]);
   });
 
-  it("a failing persist reports once and keeps later batches flowing", async function () {
+  it("a failing persist reports each failed batch, keeps later batches flowing, and the flush names the lost rows", async function () {
     const errors: unknown[] = [];
+    const lost: number[][] = [];
     const written: number[][] = [];
     let failures = 2;
     const writer = createRunEventWriter({
@@ -124,18 +125,53 @@ describe("run event writer", function () {
       setTimeout: () => 1,
       clearTimeout: () => undefined,
       onError: (error) => errors.push(error),
+      onBatchFailed: (rows) => lost.push(rows.map((row) => row.seq)),
     });
     writer.enqueue(delta(1));
-    await writer.flush();
+    const first = await writer.flush();
+    assert.deepEqual(first, {
+      written: 0,
+      failed: [{ seq: 1, type: "message_delta" }],
+    });
     writer.enqueue(delta(2));
-    await writer.flush();
-    writer.enqueue(delta(3));
-    await writer.flush();
+    writer.enqueue({
+      seq: 3,
+      event: { type: "final", text: "Done." },
+      createdAt: 3,
+    });
+    const second = await writer.flush();
+    assert.deepEqual(second.failed, [
+      { seq: 2, type: "message_delta" },
+      { seq: 3, type: "final" },
+    ]);
     writer.enqueue(delta(4));
-    await writer.close();
-    assert.lengthOf(errors, 1, "a run's failures are reported once");
+    assert.deepEqual(await writer.flush(), { written: 1, failed: [] });
+    writer.enqueue(delta(5));
+    assert.deepEqual(await writer.close(), { written: 1, failed: [] });
+    assert.lengthOf(errors, 2, "every failed batch is reported");
     assert.match(String(errors[0]), /database is locked/);
-    assert.deepEqual(written, [[3], [4]]);
+    assert.deepEqual(lost, [[1], [2, 3]]);
+    assert.deepEqual(written, [[4], [5]]);
+  });
+
+  it("reports at most five failed batches a run, so a locked database cannot flood the log", async function () {
+    const errors: unknown[] = [];
+    const lost: number[] = [];
+    const writer = createRunEventWriter({
+      persist: async () => {
+        throw new Error("database is locked");
+      },
+      setTimeout: () => 1,
+      clearTimeout: () => undefined,
+      onError: (error) => errors.push(error),
+      onBatchFailed: (rows) => lost.push(...rows.map((row) => row.seq)),
+    });
+    for (let seq = 1; seq <= 7; seq += 1) {
+      writer.enqueue(delta(seq));
+      await writer.flush();
+    }
+    assert.lengthOf(errors, 5);
+    assert.deepEqual(lost, [1, 2, 3, 4, 5, 6, 7], "every loss is announced");
   });
 
   it("never throws from enqueue, even when the timer cannot be armed", function () {

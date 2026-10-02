@@ -466,6 +466,59 @@ describe("incremental agent trace projection", function () {
     assert.equal(readAgentTraceProjectionCountersForTests().liveResets, 3);
   });
 
+  it("projects again when the answer text changes with no new event", function () {
+    const kept =
+      "Smith 2021 reports that drift grows with time across recording days.";
+    const message: Message = {
+      role: "assistant",
+      text: "An unrelated draft that does not repeat the kept text.",
+      timestamp: 1,
+      runMode: "agent",
+      streaming: true,
+    };
+    const events: AgentRunEventRecord[] = [
+      record({ type: "message_delta", text: kept }, 1),
+      record(
+        {
+          type: "tool_call",
+          callId: "read-1",
+          name: "paper_read",
+          args: {},
+        } as AgentEvent,
+        2,
+      ),
+      record(
+        {
+          type: "tool_result",
+          callId: "read-1",
+          name: "paper_read",
+          ok: true,
+          actionReceipts: [],
+          content: { results: [] },
+        },
+        3,
+      ),
+      record({ type: "message_delta", text: "The rest of the answer." }, 4),
+    ];
+    const before = buildAgentTraceDisplayItems(events, null, message);
+    assert.deepEqual(
+      before,
+      buildAgentTraceDisplayItemsCanonical(events, null, message),
+    );
+    // The bubble now shows the kept text, so the trace stops repeating it.
+    message.text = `${kept}\n\nThe rest of the answer.`;
+    const canonical = buildAgentTraceDisplayItemsCanonical(
+      events,
+      null,
+      message,
+    );
+    assert.notDeepEqual(canonical, before, "the text decides what is shown");
+    assert.deepEqual(
+      buildAgentTraceDisplayItems(events, null, message),
+      canonical,
+    );
+  });
+
   it("drops a run's live state once its message stops streaming", function () {
     const message: Message = {
       role: "assistant",

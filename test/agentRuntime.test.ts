@@ -3343,8 +3343,9 @@ describe("AgentRuntime", function () {
     }
   });
   describe("substantive text streamed before a tool call", function () {
+    // Past the 320-character floor for structured content (answerSegments).
     const SUMMARIES =
-      "## Per-paper summaries\n\n**1. Smith (2021)**\n\nDrift grows with time across eleven recording days.\n\n**2. Lee (2022)**\n\nDecoding stays stable while single-neuron tuning drifts.\n\n";
+      "## Per-paper summaries\n\n**1. Smith (2021)**\n\nDrift grows with time across eleven separate recording days, while the population code keeps a stable low-dimensional geometry.\n\n**2. Lee (2022)**\n\nDecoding stays stable while single-neuron tuning drifts, and a fixed linear readout trained on day one still separates the task conditions.\n\n";
     const REVIEW = "## Review\n\nBoth papers agree.";
     const capabilities = () => ({
       streaming: true,
@@ -10937,8 +10938,7 @@ describe("run event payloads", function () {
           },
           { id: "read-1", name: "paper_read", arguments: {} },
         ]),
-        finalStep(answer),
-        // The open part draws one correction; the same answer is accepted.
+        // The answer delivers the open part itself: no correction.
         finalStep(answer),
       ]);
       const outcome = await runtime.runTurn({
@@ -10966,6 +10966,124 @@ describe("run event payloads", function () {
         { targets: ["item:103"], reason: OUTCOME_REASONS.notCovered },
       ]);
       assert.deepEqual(ledger!.end, { state: "completed_with_exceptions" });
+    } finally {
+      restoreDb();
+    }
+  });
+
+  /** Makes the mock store refuse the first `count` inserts of an event type. */
+  function failEventInserts(eventType: string, count = 1): () => number {
+    const zotero = (globalThis as { Zotero?: any }).Zotero;
+    const query = zotero.DB.queryAsync;
+    let refused = 0;
+    zotero.DB.queryAsync = async (sql: string, params: unknown[] = []) => {
+      if (
+        sql.includes("INSERT INTO llm_for_zotero_agent_run_events") &&
+        params[2] === eventType &&
+        refused < count
+      ) {
+        refused += 1;
+        throw new Error("database is locked");
+      }
+      return query(sql, params);
+    };
+    return () => refused;
+  }
+
+  it("publishes the ledger whole again after a batch holding a ledger delta failed to write", async function () {
+    const restoreDb = installMockDb();
+    try {
+      const refused = failEventInserts("execution_checkpoint_delta");
+      const events: AgentEvent[] = [];
+      const answer =
+        "Paper 101 reports finding number 101 [[quote:q101]].\n\nPaper 102 reports finding number 102 [[quote:q102]].";
+      const runtime = scriptedRuntime(citingPaperRead([101, 102]), [
+        toolStep([
+          {
+            id: "declare-1",
+            name: "task_update",
+            arguments: {
+              tasks: [
+                {
+                  taskId: "summaries",
+                  description: "Write a summary of each paper",
+                  expectedEffect: "artifact",
+                  targetIds: ["101", "102"],
+                },
+              ],
+            },
+          },
+          { id: "read-1", name: "paper_read", arguments: {} },
+        ]),
+        finalStep(answer),
+        finalStep(answer),
+      ]);
+      const outcome = await runtime.runTurn({
+        request: request(4806, "Summarize each of these two papers"),
+        onEvent: (event) => {
+          events.push(event);
+        },
+      });
+      assert.equal(outcome.kind, "completed");
+      assert.equal(refused(), 1, "one delta was lost");
+      const live = new ExecutionCheckpointFold();
+      let liveLedger: unknown;
+      for (const event of events) {
+        if (
+          event.type === "execution_checkpoint" ||
+          event.type === "execution_checkpoint_delta"
+        )
+          liveLedger = live.apply(event);
+      }
+      const stored = restoreDb.events
+        .filter(
+          (row) =>
+            row.eventType === "execution_checkpoint" ||
+            row.eventType === "execution_checkpoint_delta",
+        )
+        .sort((left, right) => Number(left.seq) - Number(right.seq))
+        .map((row) => JSON.parse(String(row.payloadJson)) as AgentEvent);
+      assert.isAbove(stored.length, 1, "the ledger changed after the loss");
+      // The first ledger row after the lost delta is whole.
+      const lostSeq = events.findIndex(
+        (event) => event.type === "execution_checkpoint_delta",
+      );
+      assert.isAtLeast(lostSeq, 0);
+      const afterLoss = stored.slice(1);
+      assert.equal(afterLoss[0]?.type, "execution_checkpoint");
+      const fold = new ExecutionCheckpointFold();
+      let storedLedger: unknown;
+      for (const event of stored) storedLedger = fold.apply(event as never);
+      assert.deepEqual(
+        storedLedger,
+        liveLedger,
+        "the stored rows rebuild the ledger the panel saw",
+      );
+    } finally {
+      restoreDb();
+    }
+  });
+
+  it("writes a final event row lost with its batch once more at run end", async function () {
+    const restoreDb = installMockDb();
+    try {
+      const refused = failEventInserts("final");
+      const runtime = scriptedRuntime(citingPaperRead([1]), [
+        finalStep("The answer."),
+      ]);
+      const outcome = await runtime.runTurn({
+        request: request(4807, "Answer briefly"),
+      });
+      assert.equal(outcome.kind, "completed");
+      assert.equal(refused(), 1);
+      const finals = restoreDb.events.filter(
+        (row) => row.eventType === "final",
+      );
+      assert.lengthOf(finals, 1, "the retry wrote the final row");
+      assert.equal(
+        (JSON.parse(String(finals[0].payloadJson)) as { text?: string }).text,
+        "The answer.",
+      );
     } finally {
       restoreDb();
     }

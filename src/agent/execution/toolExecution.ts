@@ -130,10 +130,14 @@ export type ToolExecutionDeps = {
   paperEvidenceFrontier: PaperEvidenceFrontier;
   /** The turn's resource plan, whose signature keys evidence reuse. */
   resourceContextPlan: ReturnType<typeof buildAgentResourceContextPlan>;
-  /** Durable persistence for compacted tool-result handles. */
+  /**
+   * Durable persistence for compacted tool-result handles. Resolves to false
+   * when the records did not reach the database; a writer that reports
+   * nothing (void) is taken at its word.
+   */
   persistToolResultHandles: (
     records: AgentToolResultHandleRecord[],
-  ) => Promise<void>;
+  ) => Promise<boolean | void>;
   /** Raises a confirmation card and waits for the user's resolution. */
   requestActionResolution: (action: AgentPendingAction) => Promise<{
     requestId: string;
@@ -398,8 +402,9 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
       createdAt: deps.now(),
     });
     if (!record) return undefined;
-    await deps.persistToolResultHandles([record]);
-    handleByCallId.set(params.call.id, record.handle);
+    // Only a handle the database holds may name the result in the trace.
+    if ((await deps.persistToolResultHandles([record])) !== false)
+      handleByCallId.set(params.call.id, record.handle);
     deps.preservedTurnHandleRecords.push(record);
     deps.setToolResultReadAvailable(true);
     setToolResultReadAvailability(deps.request, true);
@@ -446,7 +451,10 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
    * here. Unlike `persistResultHandle` this does not offer the handle to the
    * model: the model's view of the result is unchanged. The handle is a
    * digest of the call and the content, so storing it again is an upsert.
-   * Results carrying receipts are persisted whole and need no handle.
+   * Results carrying receipts are persisted whole and need no handle. A
+   * handle is returned only once its write is confirmed: a marker naming a
+   * handle the database never held would point at nothing after a restart,
+   * so without one the trace stores the result whole.
    */
   const storeOversizedResultForTrace = async (params: {
     call: AgentToolCall;
@@ -478,8 +486,8 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
         createdAt: deps.now(),
       });
       if (!record) return undefined;
-      await deps.persistToolResultHandles([record]);
-      return record.handle;
+      const written = await deps.persistToolResultHandles([record]);
+      return written === false ? undefined : record.handle;
     } catch {
       // Without a handle the trace stores the result whole, as before.
       return undefined;

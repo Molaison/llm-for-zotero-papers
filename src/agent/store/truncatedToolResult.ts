@@ -31,100 +31,175 @@ export const PREVIEW_ARRAY_MIN_ENTRIES = 3;
 export const PREVIEW_MAX_BYTES = 8 * 1024 - 256;
 const PREVIEW_MAX_DEPTH = 32;
 
-function shortenStrings(
+/**
+ * An array of the copy and its JSON length; `leaf` when it holds no array,
+ * `outer` when no array holds it.
+ */
+type MeasuredArray = {
+  array: unknown[];
+  size: number;
+  leaf: boolean;
+  outer: boolean;
+};
+
+/** A shortened copy of a value, with the length of its JSON. */
+type Measured = { value: unknown; size: number; hasArray: boolean };
+
+/**
+ * Copies `value` with every string cut to `maxChars`, and measures the
+ * copy's JSON as it goes, in one walk: the copy's length, and each array
+ * longer than the minimum with its own length. A value JSON leaves out
+ * (undefined, a function) measures as JSON would place it.
+ */
+function shortenAndMeasure(
   value: unknown,
   maxChars: number,
   depth: number,
-): unknown {
-  if (typeof value === "string")
-    return value.length > maxChars ? `${value.slice(0, maxChars)}…` : value;
-  if (!value || typeof value !== "object") return value;
+  arrays: MeasuredArray[],
+  withinArray = false,
+): Measured | undefined {
+  if (typeof value === "string") {
+    const text =
+      value.length > maxChars ? `${value.slice(0, maxChars)}\u2026` : value;
+    return { value: text, size: JSON.stringify(text).length, hasArray: false };
+  }
+  if (value === null) return { value, size: 4, hasArray: false };
+  if (typeof value !== "object") {
+    const json = JSON.stringify(value);
+    return json === undefined
+      ? undefined
+      : { value, size: json.length, hasArray: false };
+  }
   if (depth > PREVIEW_MAX_DEPTH) return undefined;
-  if (Array.isArray(value))
-    return value.map(
-      (entry) => shortenStrings(entry, maxChars, depth + 1) ?? null,
+  if (Array.isArray(value)) {
+    const out: unknown[] = [];
+    let size = 2 + Math.max(0, value.length - 1);
+    let hasArray = false;
+    for (const entry of value) {
+      const measured = shortenAndMeasure(
+        entry,
+        maxChars,
+        depth + 1,
+        arrays,
+        true,
+      );
+      out.push(measured ? measured.value : null);
+      size += measured ? measured.size : 4;
+      hasArray ||= Boolean(measured?.hasArray);
+    }
+    if (out.length > PREVIEW_ARRAY_MIN_ENTRIES)
+      arrays.push({
+        array: out,
+        size,
+        leaf: !hasArray,
+        outer: !withinArray,
+      });
+    return { value: out, size, hasArray: true };
+  }
+  if (typeof (value as { toJSON?: unknown }).toJSON === "function")
+    return shortenAndMeasure(
+      (value as { toJSON: () => unknown }).toJSON(),
+      maxChars,
+      depth,
+      arrays,
+      withinArray,
     );
   const out: Record<string, unknown> = {};
+  let size = 2;
+  let fields = 0;
+  let hasArray = false;
   for (const [key, entry] of Object.entries(value)) {
-    const shortened = shortenStrings(entry, maxChars, depth + 1);
-    if (shortened !== undefined) out[key] = shortened;
+    const measured = shortenAndMeasure(
+      entry,
+      maxChars,
+      depth + 1,
+      arrays,
+      withinArray,
+    );
+    if (!measured) continue;
+    out[key] = measured.value;
+    size += JSON.stringify(key).length + 1 + measured.size;
+    fields += 1;
+    hasArray ||= measured.hasArray;
   }
-  return out;
+  size += Math.max(0, fields - 1);
+  return { value: out, size, hasArray };
+}
+
+/**
+ * The fraction of their entries the given arrays keep so that, entries
+ * being alike in size, they give up `excess` characters of JSON.
+ */
+function keptFraction(arrays: readonly MeasuredArray[], excess: number) {
+  const total = arrays.reduce((sum, entry) => sum + entry.size, 0);
+  return total ? Math.max(0, (total - excess) / total) : 1;
+}
+
+/** Cuts arrays of a copy in place to `keep` of their entries, never below three. */
+function cutArrays(arrays: readonly MeasuredArray[], keep: number): void {
+  for (const { array } of arrays) {
+    array.length = Math.max(
+      PREVIEW_ARRAY_MIN_ENTRIES,
+      Math.min(array.length, Math.floor(array.length * keep)),
+    );
+  }
 }
 
 function jsonLength(value: unknown): number {
   return JSON.stringify(value ?? null).length;
 }
 
-function containsArray(value: unknown): boolean {
-  if (!value || typeof value !== "object") return false;
-  return Object.values(value).some(
-    (entry) => Array.isArray(entry) || containsArray(entry),
-  );
-}
-
-/** Arrays longer than the minimum; with `leavesOnly`, those holding no array. */
-function shortenableArrays(
-  value: unknown,
-  leavesOnly: boolean,
-  out: unknown[][] = [],
-): unknown[][] {
-  if (!value || typeof value !== "object") return out;
-  if (
-    Array.isArray(value) &&
-    value.length > PREVIEW_ARRAY_MIN_ENTRIES &&
-    (!leavesOnly || !containsArray(value))
-  )
-    out.push(value);
-  for (const entry of Object.values(value))
-    shortenableArrays(entry, leavesOnly, out);
-  return out;
-}
-
-/** Drops the last entries of the largest arrays, down to their first few. */
-function shortenArrays(preview: unknown, leavesOnly: boolean): number {
-  let size = jsonLength(preview);
-  while (size > PREVIEW_MAX_BYTES) {
-    const arrays = shortenableArrays(preview, leavesOnly);
-    if (!arrays.length) break;
-    let largest = arrays[0];
-    let largestSize = jsonLength(largest);
-    for (const array of arrays.slice(1)) {
-      const arraySize = jsonLength(array);
-      if (arraySize > largestSize) {
-        largest = array;
-        largestSize = arraySize;
-      }
-    }
-    while (
-      largest.length > PREVIEW_ARRAY_MIN_ENTRIES &&
-      size > PREVIEW_MAX_BYTES
-    ) {
-      size -= jsonLength(largest.pop()) + 1;
-    }
-    size = jsonLength(preview);
-  }
-  return size;
-}
-
 /**
  * The bounded copy of a tool result a truncated marker keeps, or undefined
  * when even the shortest copy does not fit. Keys and scalar fields survive
- * (a result's `mode`, receipts, labels, counts). In order, until the JSON
- * fits: every string is cut to 200 characters; the largest arrays that hold
- * no array (passage ids, citation lists) lose their last entries; strings
- * are cut to 60 characters; then any array loses its last entries. No array
- * is cut below its first three entries.
+ * (a result's `mode`, receipts, labels, counts). Until the JSON fits: every
+ * string is cut to 200 characters; then the arrays that hold no array
+ * (passage ids, citation lists, listed rows) lose their last entries, all by
+ * one fraction; then strings are cut to 60 characters and every array loses
+ * its last entries by one fraction. No array is cut below its first three
+ * entries.
+ *
+ * Cost is linear in the result: each step is one walk that copies and
+ * measures, and the cuts are sized from those measures instead of being
+ * measured entry by entry. A result that fits after the first cut is walked
+ * twice; the shortest copy takes two more walks.
  */
 export function buildToolResultPreview(content: unknown): unknown {
   try {
-    let preview = shortenStrings(content, PREVIEW_STRING_MAX_CHARS, 0);
-    if (shortenArrays(preview, true) <= PREVIEW_MAX_BYTES) return preview;
-    preview = shortenStrings(preview, PREVIEW_SHORT_STRING_MAX_CHARS, 0);
-    if (jsonLength(preview) <= PREVIEW_MAX_BYTES) return preview;
-    return shortenArrays(preview, false) <= PREVIEW_MAX_BYTES
-      ? preview
-      : undefined;
+    let arrays: MeasuredArray[] = [];
+    let measured = shortenAndMeasure(
+      content,
+      PREVIEW_STRING_MAX_CHARS,
+      0,
+      arrays,
+    );
+    if (!measured) return undefined;
+    if (measured.size <= PREVIEW_MAX_BYTES) return measured.value;
+    // Arrays that hold no array never hold one another, so their sizes add.
+    const leaves = arrays.filter((entry) => entry.leaf);
+    cutArrays(leaves, keptFraction(leaves, measured.size - PREVIEW_MAX_BYTES));
+    let size = jsonLength(measured.value);
+    if (size <= PREVIEW_MAX_BYTES) return measured.value;
+    arrays = [];
+    measured = shortenAndMeasure(
+      measured.value,
+      PREVIEW_SHORT_STRING_MAX_CHARS,
+      0,
+      arrays,
+    );
+    if (!measured) return undefined;
+    if (measured.size <= PREVIEW_MAX_BYTES) return measured.value;
+    // An array's size includes the arrays it holds, so the fraction is sized
+    // on the outermost arrays; the arrays they hold are cut by it too.
+    cutArrays(
+      arrays,
+      keptFraction(
+        arrays.filter((entry) => entry.outer),
+        measured.size - PREVIEW_MAX_BYTES,
+      ),
+    );
+    size = jsonLength(measured.value);
+    return size <= PREVIEW_MAX_BYTES ? measured.value : undefined;
   } catch {
     return undefined;
   }

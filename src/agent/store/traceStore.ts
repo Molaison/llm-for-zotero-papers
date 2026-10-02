@@ -639,13 +639,18 @@ function isRunRetired(runId: string): boolean {
   );
 }
 
+/**
+ * Inserts one event row. `event` is compacted here unless the caller passes
+ * it already compacted (`compacted`), as a batch does before its transaction.
+ */
 async function insertAgentRunEvent(
   runId: string,
   seq: number,
   event: AgentEvent,
   createdAt: number,
+  compacted = false,
 ): Promise<void> {
-  const persisted = compactRunEventForPersistence(event);
+  const persisted = compacted ? event : compactRunEventForPersistence(event);
   await Zotero.DB.queryAsync(
     `INSERT INTO ${AGENT_RUN_EVENTS_TABLE}
       (run_id, seq, event_type, payload_json, created_at)
@@ -667,16 +672,22 @@ export async function appendAgentRunEvent(
 
 /**
  * Appends a batch of a run's events in one transaction, one row each, in the
- * order given; the trace export is scheduled once for the batch.
+ * order given; the trace export is scheduled once for the batch. A big
+ * result's marker and preview are built before the transaction opens, so the
+ * transaction only inserts rows.
  */
 export async function appendAgentRunEvents(
   runId: string,
   rows: readonly RunEventRow[],
 ): Promise<void> {
   if (!rows.length || isRunRetired(runId)) return;
+  const compacted = rows.map((row) => ({
+    ...row,
+    event: compactRunEventForPersistence(row.event),
+  }));
   await Zotero.DB.executeTransaction(async () => {
-    for (const row of rows)
-      await insertAgentRunEvent(runId, row.seq, row.event, row.createdAt);
+    for (const row of compacted)
+      await insertAgentRunEvent(runId, row.seq, row.event, row.createdAt, true);
   });
   scheduleAgentRunTraceExport(runId);
 }

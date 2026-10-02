@@ -145,6 +145,7 @@ import {
 } from "./store/traceStore";
 import {
   createRunEventWriter,
+  type RunEventRow,
   type RunEventWriter,
 } from "./store/runEventWriter";
 import {
@@ -607,6 +608,20 @@ export class AgentRuntime {
     // a delta from it; the first change, and the one after a publication
     // that failed, is published whole.
     let publishedCheckpoint: ExecutionCheckpoint | undefined;
+    // Set when a batch holding a published ledger failed to write: the
+    // stored deltas no longer chain, so the next publication is whole.
+    let checkpointChainBroken = false;
+    // The run's `final` rows a failed batch lost; retried once at run end.
+    const lostFinalRows: RunEventRow[] = [];
+    const retryLostFinalRows = async (): Promise<void> => {
+      const rows = lostFinalRows.splice(0);
+      if (!rows.length) return;
+      try {
+        await persistIfLive(() => appendAgentRunEvents(runId, rows));
+      } catch (error) {
+        logRuntimeWarning("LLM Agent: rewriting the final event failed", error);
+      }
+    };
     // The turn's reads, so a read part declared after them still takes them.
     const turnReads: OutcomeEvidence[] = [];
     const updateExecutionCheckpoint = (
@@ -624,7 +639,12 @@ export class AgentRuntime {
         if (next !== current) {
           request.executionCheckpoint = next;
           if (emitRunEvent) {
-            const event = executionCheckpointEvent(publishedCheckpoint, next);
+            const event = executionCheckpointEvent(
+              checkpointChainBroken ? undefined : publishedCheckpoint,
+              next,
+            );
+            if (event.type === "execution_checkpoint")
+              checkpointChainBroken = false;
             publishedCheckpoint = undefined;
             await emitRunEvent(event);
             publishedCheckpoint = next;
@@ -642,8 +662,13 @@ export class AgentRuntime {
     const publishExecutionCheckpoint = (): Promise<void> => {
       const write = executionCheckpointWrites.then(async () => {
         const current = request.executionCheckpoint;
-        if (!current || !emitRunEvent || publishedCheckpoint === current)
+        if (
+          !current ||
+          !emitRunEvent ||
+          (publishedCheckpoint === current && !checkpointChainBroken)
+        )
           return;
+        checkpointChainBroken = false;
         publishedCheckpoint = undefined;
         await emitRunEvent(executionCheckpointEvent(undefined, current));
         publishedCheckpoint = current;
@@ -719,6 +744,7 @@ export class AgentRuntime {
         logRuntimeWarning("LLM Agent: recording the stop rule failed", error);
       }
       await runEvents?.flush();
+      await retryLostFinalRows();
       await persistIfLive(() => finishAgentRun(runId, status, finalText));
     };
     // A turn started while the one before it in this conversation is still
@@ -758,12 +784,17 @@ export class AgentRuntime {
       );
       redactRunTerminalText = (value) =>
         turnPathRedactor.redactTerminalText(value);
+      // Resolves to whether the records reached the database.
       const persistToolResultHandles = async (
         records: AgentToolResultHandleRecord[],
-      ): Promise<void> => {
-        if (!records.length) return;
+      ): Promise<boolean> => {
+        if (!records.length) return false;
         const sanitized = turnPathRedactor.redactTerminalValue(records);
-        await persistIfLive(() => upsertAgentToolResultHandles(sanitized));
+        return (
+          (await persistIfLive(() =>
+            upsertAgentToolResultHandles(sanitized),
+          )) === true
+        );
       };
       let eventSeq = 0;
       let currentAnswerText = "";
@@ -882,6 +913,16 @@ export class AgentRuntime {
           ),
         onError: (error) =>
           logRuntimeWarning("LLM Agent: run event persistence failed", error),
+        onBatchFailed: (rows) => {
+          for (const row of rows) {
+            if (
+              row.event.type === "execution_checkpoint" ||
+              row.event.type === "execution_checkpoint_delta"
+            )
+              checkpointChainBroken = true;
+            if (row.event.type === "final") lostFinalRows.push(row);
+          }
+        },
       });
       runEvents = writer;
       const emit = async (event: AgentEvent) => {
@@ -3167,6 +3208,7 @@ export class AgentRuntime {
       // Every event row is written before the turn counts as settled. The
       // writer reports its own failures; closing it never throws.
       await runEvents?.close();
+      await retryLostFinalRows();
       if (unsettledTurns.get(request.conversationKey) === settling)
         unsettledTurns.delete(request.conversationKey);
       settled();

@@ -1644,3 +1644,62 @@ describe("library_search list model view delivery", function () {
     }
   });
 });
+
+describe("a big result's trace handle", function () {
+  function bigReadRegistry(): AgentToolRegistry {
+    const registry = new AgentToolRegistry(createTestActionContractService());
+    registry.register({
+      spec: {
+        name: "paper_read",
+        description: "read papers",
+        inputSchema: { type: "object" },
+        executionClass: "read",
+        requiresConfirmation: false,
+      },
+      validate: (args) => ({ ok: true, value: args }),
+      execute: async () => ({ text: "p".repeat(40_000) }),
+    });
+    return registry;
+  }
+
+  async function runBigRead(written: boolean | void) {
+    const harness = await createHarness(bigReadRegistry());
+    const stored: AgentToolResultHandleRecord[] = [];
+    harness.deps.persistToolResultHandles = async (records) => {
+      stored.push(...records);
+      return written;
+    };
+    await createToolExecution(harness.deps).executeToolWorkflow(
+      { id: "call-big", name: "paper_read", arguments: {} },
+      1,
+      { modelCallId: "call-big" },
+    );
+    const event = harness.events.find(
+      (entry) => entry.type === "tool_result",
+    ) as Extract<AgentEvent, { type: "tool_result" }>;
+    return { event, stored };
+  }
+
+  it("names the handle once its write is confirmed", async function () {
+    const restoreDb = installMockDb();
+    try {
+      const { event, stored } = await runBigRead(true);
+      assert.lengthOf(stored, 1);
+      assert.equal(event.toolResultHandle, stored[0].handle);
+    } finally {
+      restoreDb();
+    }
+  });
+
+  it("names no handle when the write did not reach the database, so the trace keeps the result whole", async function () {
+    const restoreDb = installMockDb();
+    try {
+      const { event, stored } = await runBigRead(false);
+      assert.lengthOf(stored, 1, "the write was attempted");
+      assert.notProperty(event, "toolResultHandle");
+      assert.lengthOf((event.content as { text: string }).text, 40_000);
+    } finally {
+      restoreDb();
+    }
+  });
+});

@@ -7,6 +7,22 @@ import type { PlanDocument } from "./types";
 import { notifyDocumentPublication } from "./publicationEvents";
 
 /**
+ * The text a chat message carries before the document it ends with, trimmed:
+ * "" when the message is the document alone, undefined when it does not end
+ * with the document. A message that leads with text the model wrote before
+ * calling the tool shows that text above the document card; Copy, Export
+ * and Save Note deliver the document alone.
+ */
+export function documentMessageLead(
+  messageText: string,
+  documentMarkdown: string,
+): string | undefined {
+  if (!documentMarkdown || !messageText.endsWith(documentMarkdown))
+    return undefined;
+  return messageText.slice(0, -documentMarkdown.length).trim();
+}
+
+/**
  * Completes the durable outbox only after the ordinary conversation store has
  * persisted the visible assistant text. Repeated calls are idempotent.
  *
@@ -34,8 +50,8 @@ export async function deliverPendingPlanDocumentMessage(params: {
   });
   const carries = (visibleMarkdown: string) =>
     params.documentId
-      ? Boolean(visibleMarkdown) &&
-        params.visibleMarkdown.endsWith(visibleMarkdown)
+      ? documentMessageLead(params.visibleMarkdown, visibleMarkdown) !==
+        undefined
       : visibleMarkdown === params.visibleMarkdown;
   const outbox = candidates.find(
     (entry) =>
