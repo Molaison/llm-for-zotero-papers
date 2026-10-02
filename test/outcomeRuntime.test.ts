@@ -10,9 +10,11 @@ import { PAPER_RECORD_PRIOR_TOKENS } from "../src/agent/loop/longJob";
 import { ExecutionCheckpointFold } from "../src/agent/execution/checkpointEvents";
 import { estimateContextMessagesTokens } from "../src/utils/modelInputCap";
 import {
+  clearAgentTranscriptStore,
   loadAgentTranscriptSegment,
   PORTABLE_TRANSCRIPT_KEY,
 } from "../src/agent/store/transcriptStore";
+import { initAgentTraceStore } from "../src/agent/store/traceStore";
 
 const estimatePrompt = (messages: AgentModelMessage[]) =>
   estimateContextMessagesTokens(messages);
@@ -80,6 +82,8 @@ type ScriptStep =
 type Turn = {
   outcome?: AgentRuntimeOutcome;
   error?: unknown;
+  /** Zotero quit during the turn: it never finished. */
+  quit?: true;
   events: AgentEvent[];
   prompts: AgentModelMessage[][];
   request?: AgentRuntimeRequest;
@@ -94,6 +98,21 @@ let libraryUpdateReceipt: AgentActionReceipt | undefined;
 
 /** Receipts the scripted library writes return in turn, before the above. */
 let liveReceipts: AgentActionReceipt[] = [];
+
+/**
+ * A step during which Zotero quits: the request never returns, and the run
+ * is left running, as a quit leaves it.
+ */
+const ZOTERO_QUITS = { kind: "zotero_quits" } as unknown as AgentModelStep;
+
+/**
+ * Zotero starting again: its startup marks every run left running as
+ * interrupted, and the transcript is read back from the database.
+ */
+async function restartZotero(): Promise<void> {
+  await initAgentTraceStore();
+  clearAgentTranscriptStore();
+}
 
 /** What the scripted `paper_read` returns, when a case scripts it. */
 let scriptedPaperRead:
@@ -304,6 +323,10 @@ async function runTurn(params: {
   let request: AgentRuntimeRequest | undefined;
   let initialCheckpoint: ExecutionCheckpoint | undefined;
   let requests = 0;
+  let quit: () => void = () => undefined;
+  const quitting = new Promise<typeof ZOTERO_QUITS>((resolve) => {
+    quit = () => resolve(ZOTERO_QUITS);
+  });
   const runtime = new AgentRuntime({
     ...(params.scope
       ? {
@@ -333,15 +356,20 @@ async function runTurn(params: {
           throw new Error(
             `The script ends at ${params.steps.length} steps; the model was asked for step ${requests}.`,
           );
-        return typeof step === "function" ? step(stepParams.messages) : step;
+        const next =
+          typeof step === "function" ? step(stepParams.messages) : step;
+        if (next !== ZOTERO_QUITS) return next;
+        quit();
+        return new Promise<AgentModelStep>(() => undefined);
       },
     }),
   });
   let outcome: AgentRuntimeOutcome | undefined;
   let error: unknown;
+  let quitDuring = false;
   timestamp += 100;
   try {
-    outcome = await runtime.runTurn({
+    const running = runtime.runTurn({
       request: {
         conversationKey: params.conversationKey,
         mode: "agent",
@@ -363,12 +391,16 @@ async function runTurn(params: {
           );
       },
     });
+    const ended = await Promise.race([running, quitting]);
+    if (ended === ZOTERO_QUITS) quitDuring = true;
+    else outcome = ended as AgentRuntimeOutcome;
   } catch (caught) {
     error = caught;
   }
   return {
     outcome,
     error,
+    ...(quitDuring ? { quit: true as const } : {}),
     events,
     prompts,
     request,
@@ -2237,6 +2269,121 @@ describe("resuming a long job in runtime turns", function () {
     } finally {
       liveReceipts = [];
     }
+  });
+
+  it("resumes a job after Zotero quit twice, the second time before the resumed run recorded anything, with every paper's results", async function () {
+    // Run A reads pages of the job; Zotero quits after a dozen papers.
+    const asked = new Set<number>();
+    let declared = false;
+    const reader = (messages: AgentModelMessage[]) => {
+      if (!declared) {
+        declared = true;
+        return stepOf(
+          declare("declare-1", [
+            {
+              taskId: "read-all",
+              description: READ_ALL,
+              expectedEffect: "read",
+              scope: true,
+            },
+          ]),
+        );
+      }
+      if (asked.size >= 12) return ZOTERO_QUITS;
+      const host = hostText(messages);
+      const page = (host ? pageOf(host) : [])
+        .filter((itemId) => !asked.has(itemId))
+        .slice(0, 8);
+      for (const itemId of page) asked.add(itemId);
+      return stepOf(...page.map(readCall));
+    };
+    const first = await runTurn({
+      conversationKey,
+      userText: "Read every paper in Drift and summarize each",
+      scope,
+      attached,
+      steps: Array.from({ length: 20 }, () => reader),
+    });
+    assert.isTrue(first.quit, String(first.error || ""));
+    const left = checkpoints(first).at(-1)!;
+    assert.notProperty(left, "end", "a quit settles nothing");
+    const doneBefore = outcome(left, "read-all").doneTargets || [];
+    assert.isAtLeast(doneBefore.length, 12);
+    await restartZotero();
+
+    // Run B picks the job back up, and Zotero quits again before B's first
+    // request returns: B has recorded nothing of its own.
+    const second = await runTurn({
+      conversationKey,
+      userText: "continue",
+      scope,
+      attached,
+      steps: [ZOTERO_QUITS],
+    });
+    assert.isTrue(second.quit, String(second.error || ""));
+    assert.equal(second.initialCheckpoint?.executionId, left.executionId);
+    // B published the ledger it resumed, whole, once.
+    const published = second.events.filter(
+      (event) =>
+        event.type === "execution_checkpoint" ||
+        event.type === "execution_checkpoint_delta",
+    );
+    assert.lengthOf(published, 1);
+    assert.equal(published[0].type, "execution_checkpoint");
+    assert.equal(checkpoints(second)[0].executionId, left.executionId);
+    assert.deepEqual(
+      outcome(checkpoints(second)[0], "read-all").doneTargets,
+      doneBefore,
+    );
+    await restartZotero();
+
+    // "continue" once more: A's job, from the first paper not settled.
+    const leftPapers = PAPERS.filter(
+      (itemId) => !doneBefore.includes(`item:${itemId}`),
+    );
+    const resumedAsked: number[] = [];
+    const resumer = (messages: AgentModelMessage[]) => {
+      const host = hostText(messages);
+      if (host?.startsWith("Long job complete"))
+        return finalStep("Every paper is summarized from its results.");
+      const named = host
+        ? pageOf(host)
+        : (/papers? left, in order: ([\d, ]+)\./
+            .exec(promptText(messages))?.[1]
+            ?.split(", ")
+            .map(Number) ?? []);
+      const page = named
+        .filter((itemId) => !resumedAsked.includes(itemId))
+        .slice(0, 3);
+      if (!page.length) return finalStep("Every paper is summarized.");
+      resumedAsked.push(...page);
+      return stepOf(...page.map(readCall));
+    };
+    const third = await runTurn({
+      conversationKey,
+      userText: "continue",
+      scope,
+      attached,
+      steps: Array.from({ length: 30 }, () => resumer),
+    });
+    assert.equal(third.outcome?.kind, "completed", String(third.error || ""));
+    assert.equal(third.initialCheckpoint?.executionId, left.executionId);
+    assert.include(
+      promptText(third.prompts[0]),
+      `Long job to resume: “${READ_ALL}” ${doneBefore.length} of 30 done. The ${leftPapers.length} papers left, in order: ${leftPapers.join(", ")}.`,
+    );
+    assert.deepEqual(
+      [...resumedAsked].sort(),
+      [...leftPapers].sort(),
+      "only the papers left are read, each once",
+    );
+    const after = settled(third);
+    assert.deepEqual(after.end, { state: "completed" });
+    assert.lengthOf(outcome(after, "read-all").doneTargets!, 30);
+    // Run A's per-paper results carry forward to the last step.
+    const last = promptText(third.prompts[third.prompts.length - 1]);
+    assert.include(last, "Long job complete");
+    for (const itemId of PAPERS) assert.include(last, `Finding ${itemId}`);
   });
 
   it("runs any other message after Stop as an ordinary turn, with no ledger", async function () {

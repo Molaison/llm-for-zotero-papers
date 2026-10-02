@@ -581,6 +581,22 @@ export class AgentRuntime {
       executionCheckpointWrites = write.catch(() => undefined);
       return write;
     };
+    /**
+     * Publishes the ledger as it stands, whole, unless the run's events carry
+     * it already: through the one writer, after any change queued before.
+     */
+    const publishExecutionCheckpoint = (): Promise<void> => {
+      const write = executionCheckpointWrites.then(async () => {
+        const current = request.executionCheckpoint;
+        if (!current || !emitRunEvent || publishedCheckpoint === current)
+          return;
+        publishedCheckpoint = undefined;
+        await emitRunEvent(executionCheckpointEvent(undefined, current));
+        publishedCheckpoint = current;
+      });
+      executionCheckpointWrites = write.catch(() => undefined);
+      return write;
+    };
     // Outcome evidence and the end state belong to ordinary turns.
     const recordsOutcomes = () =>
       request.executionContext?.permissionOwner === "original_agent";
@@ -1009,6 +1025,17 @@ export class AgentRuntime {
         } catch (error) {
           logRuntimeWarning(
             "LLM Agent: reconciling the resumed ledger with the change journal failed",
+            error,
+          );
+        }
+        // The resumed ledger is this run's from its start, and published
+        // whole now: a run that ends before it changes the ledger (Zotero
+        // quits again, say) still leaves it for the next "continue".
+        try {
+          await publishExecutionCheckpoint();
+        } catch (error) {
+          logRuntimeWarning(
+            "LLM Agent: publishing the resumed ledger failed",
             error,
           );
         }
