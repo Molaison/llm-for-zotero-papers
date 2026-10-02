@@ -589,6 +589,82 @@ describe("outcome ledger in runtime turns", function () {
     );
   });
 
+  it("a skip claiming delivery is refused and the part stays open, so the final answer is corrected once", async function () {
+    const REVIEW = "Write the literature review";
+    const turn = await runTurn({
+      conversationKey,
+      userText: "Write a literature review of these papers",
+      steps: [
+        stepOf(
+          declare("declare-1", [
+            {
+              taskId: "review",
+              description: REVIEW,
+              expectedEffect: "artifact",
+            },
+          ]),
+        ),
+        stepOf({
+          id: "skip-1",
+          name: "task_update",
+          arguments: {
+            skipped: [
+              {
+                taskId: "review",
+                reason: "Already delivered in this conversation",
+              },
+            ],
+          },
+        }),
+        finalStep("The review is above."),
+        finalStep("# Review\n\nThe papers agree on drift."),
+      ],
+    });
+
+    assert.equal(turn.outcome?.kind, "completed");
+    assert.equal(turn.requests, 4);
+    assert.include(
+      promptText(turn.prompts[2]),
+      "Skip refused for review: nothing was delivered for it in this run",
+    );
+    assert.include(
+      promptText(turn.prompts[3]),
+      `Before answering, finish the parts of this request you declared that are still open: “${REVIEW}”.`,
+    );
+    const ledger = settled(turn);
+    assert.deepEqual(ledger.end, { state: "completed" });
+    assert.equal(outcome(ledger, "review").status, "completed");
+  });
+
+  it("a skip of a save with a delivery-worded reason is accepted, as a write is not content", async function () {
+    const turn = await runTurn({
+      conversationKey,
+      userText: "Summarize this paper and save it as a note",
+      steps: [
+        stepOf(declare("declare-1", [saveDeclaration])),
+        stepOf({
+          id: "skip-1",
+          name: "task_update",
+          arguments: {
+            skipped: [
+              {
+                taskId: "save",
+                reason: "The note was previously created in an earlier session",
+              },
+            ],
+          },
+        }),
+        finalStep("The note already exists."),
+      ],
+    });
+
+    assert.equal(turn.requests, 3, "no correction: the save is settled");
+    assert.notInclude(promptText(turn.prompts[2]), "Skip refused");
+    const ledger = settled(turn);
+    assert.deepEqual(ledger.end, { state: "completed_with_exceptions" });
+    assert.equal(outcome(ledger, "save").status, "skipped");
+  });
+
   it("does not repeat the correction when no new evidence arrived; it accepts and settles instead", async function () {
     const turn = await runTurn({
       conversationKey,

@@ -979,7 +979,7 @@ describe("outcome ledger: host evidence binding", function () {
     assert.strictEqual(checkpoint, ledger);
   });
 
-  it("material: completes the first pending artifact outcome", function () {
+  it("material: without taskId or a kind match it completes the first pending artifact outcome", function () {
     const ledger = ledgerWith(
       {
         taskId: "draft",
@@ -1000,6 +1000,371 @@ describe("outcome ledger: host evidence binding", function () {
     assert.equal(find(checkpoint, "draft").status, "completed");
     assert.deepEqual(find(checkpoint, "draft").materialRefs, [material]);
     assert.equal(find(checkpoint, "second").status, "pending");
+  });
+
+  it("material: binds to the part named by taskId", function () {
+    const ledger = ledgerWith(
+      {
+        taskId: "summaries",
+        description: "Per-paper summaries",
+        effect: "artifact",
+        targets: ["item:1", "item:2"],
+      },
+      {
+        taskId: "review",
+        description: "Write the literature review",
+        effect: "artifact",
+        targets: ["item:1", "item:2"],
+      },
+    );
+    const { checkpoint } = apply(ledger, {
+      kind: "material",
+      materialRef: material,
+      taskId: "review",
+      documentKind: "literature_review",
+      citedTargets: ["item:1", "item:2"],
+    });
+    assert.equal(find(checkpoint, "summaries").status, "pending");
+    assert.equal(find(checkpoint, "review").status, "completed");
+    assert.deepEqual(find(checkpoint, "review").doneTargets, [
+      "item:1",
+      "item:2",
+    ]);
+    assert.isUndefined(find(checkpoint, "review").exceptions);
+    assert.deepEqual(find(checkpoint, "review").materialRefs, [material]);
+  });
+
+  it("material: without taskId it binds to the pending artifact part whose description matches the document kind", function () {
+    const ledger = ledgerWith(
+      {
+        taskId: "summaries",
+        description: "Per-paper summaries",
+        effect: "artifact",
+      },
+      {
+        taskId: "review",
+        description: "Write the literature review",
+        effect: "artifact",
+      },
+    );
+    const { checkpoint } = apply(ledger, {
+      kind: "material",
+      materialRef: material,
+      documentKind: "literature_review",
+    });
+    assert.equal(find(checkpoint, "summaries").status, "pending");
+    assert.equal(find(checkpoint, "review").status, "completed");
+  });
+
+  it("material: a taskId naming no part, or malformed, falls back to the kind match", function () {
+    const ledger = ledgerWith(
+      {
+        taskId: "summaries",
+        description: "Per-paper summaries",
+        effect: "artifact",
+      },
+      {
+        taskId: "review",
+        description: "Write the literature review",
+        effect: "artifact",
+      },
+    );
+    for (const named of ["nonexistent", "the review part"]) {
+      const { checkpoint } = apply(ledger, {
+        kind: "material",
+        materialRef: material,
+        taskId: named,
+        documentKind: "literature_review",
+      });
+      assert.equal(find(checkpoint, "summaries").status, "pending", named);
+      assert.equal(find(checkpoint, "review").status, "completed", named);
+    }
+  });
+
+  it("material: a taskId naming a completed artifact part binds a revision to it and leaves its counts and the other parts alone", function () {
+    const ledger = ledgerWith(
+      {
+        taskId: "summaries",
+        description: "Per-paper summaries",
+        effect: "artifact",
+        targets: ["item:1", "item:2"],
+      },
+      {
+        taskId: "review",
+        description: "Write the literature review",
+        effect: "artifact",
+        targets: ["item:1", "item:2"],
+      },
+    );
+    const first = apply(ledger, {
+      kind: "material",
+      materialRef: material,
+      taskId: "review",
+      citedTargets: ["item:1"],
+    }).checkpoint;
+    const revision = {
+      ...material,
+      documentVersion: 3,
+      contentHash: "sha256:v3",
+    };
+    const { checkpoint, changed } = apply(first, {
+      kind: "material",
+      materialRef: revision,
+      taskId: "review",
+      documentKind: "literature_review",
+      citedTargets: ["item:1", "item:2"],
+    });
+    assert.isTrue(changed);
+    assert.equal(find(checkpoint, "summaries").status, "pending");
+    assert.deepEqual(find(checkpoint, "summaries").materialRefs, []);
+    const review = find(checkpoint, "review");
+    assert.equal(review.status, "completed");
+    assert.deepEqual(review.materialRefs, [material, revision]);
+    assert.deepEqual(review.doneTargets, ["item:1"]);
+    assert.deepEqual(review.exceptions, [
+      { targets: ["item:2"], reason: OUTCOME_REASONS.notCovered },
+    ]);
+  });
+
+  it("material: a taskId naming a part that is not an artifact binds nothing", function () {
+    const ledger = ledgerWith(saveNote, {
+      taskId: "review",
+      description: "Write the literature review",
+      effect: "artifact",
+    });
+    const result = apply(ledger, {
+      kind: "material",
+      materialRef: material,
+      taskId: "save",
+      documentKind: "literature_review",
+      citedTargets: [],
+    });
+    assert.isFalse(result.changed);
+    assert.strictEqual(result.checkpoint, ledger);
+  });
+
+  it("material: two documents, each naming its own part, complete each part with its own papers", function () {
+    const ledger = ledgerWith(
+      {
+        taskId: "summaries",
+        description: "Per-paper summaries",
+        effect: "artifact",
+        targets: ["item:1", "item:2"],
+      },
+      {
+        taskId: "review",
+        description: "Write the literature review",
+        effect: "artifact",
+        targets: ["item:1", "item:2"],
+      },
+    );
+    const summaries = { ...material, documentId: "document-summaries" };
+    const review = { ...material, documentId: "document-review" };
+    const afterReview = apply(ledger, {
+      kind: "material",
+      materialRef: review,
+      taskId: "review",
+      documentKind: "literature_review",
+      citedTargets: ["item:1", "item:2"],
+    }).checkpoint;
+    assert.equal(find(afterReview, "summaries").status, "pending");
+    const { checkpoint } = apply(afterReview, {
+      kind: "material",
+      materialRef: summaries,
+      taskId: "summaries",
+      documentKind: "report",
+      citedTargets: ["item:2"],
+    });
+    assert.deepEqual(find(checkpoint, "review").materialRefs, [review]);
+    assert.deepEqual(find(checkpoint, "review").doneTargets, [
+      "item:1",
+      "item:2",
+    ]);
+    assert.deepEqual(find(checkpoint, "summaries").materialRefs, [summaries]);
+    assert.deepEqual(find(checkpoint, "summaries").doneTargets, ["item:2"]);
+    assert.deepEqual(find(checkpoint, "summaries").exceptions, [
+      { targets: ["item:1"], reason: OUTCOME_REASONS.notCovered },
+    ]);
+  });
+
+  it("coverage: unknown cited targets complete a targeted artifact part whole; an empty list excepts every target", function () {
+    const ledger = ledgerWith({
+      taskId: "summaries",
+      description: "Summaries",
+      effect: "artifact",
+      targets: ["item:1", "item:2"],
+    });
+    for (const evidence of [
+      { kind: "answer" },
+      { kind: "material", materialRef: material },
+    ] as OutcomeEvidence[]) {
+      const task = find(apply(ledger, evidence).checkpoint, "summaries");
+      assert.equal(task.status, "completed", evidence.kind);
+      assert.isUndefined(task.exceptions, evidence.kind);
+    }
+    for (const evidence of [
+      { kind: "answer", citedTargets: [] },
+      { kind: "material", materialRef: material, citedTargets: [] },
+    ] as OutcomeEvidence[]) {
+      const task = find(apply(ledger, evidence).checkpoint, "summaries");
+      assert.equal(task.status, "completed", evidence.kind);
+      assert.deepEqual(task.doneTargets, [], evidence.kind);
+      assert.deepEqual(
+        task.exceptions,
+        [{ targets: ["item:1", "item:2"], reason: OUTCOME_REASONS.notCovered }],
+        evidence.kind,
+      );
+    }
+  });
+
+  it("material: a targeted part the document cites only partly completes with an exception for the rest", function () {
+    const ledger = ledgerWith({
+      taskId: "review",
+      description: "Review",
+      effect: "artifact",
+      targets: ["item:1", "item:2", "item:3"],
+    });
+    const { checkpoint } = apply(ledger, {
+      kind: "material",
+      materialRef: material,
+      taskId: "review",
+      citedTargets: ["item:1", "item:3", "item:9"],
+    });
+    const task = find(checkpoint, "review");
+    assert.equal(task.status, "completed");
+    assert.deepEqual(task.doneTargets, ["item:1", "item:3"]);
+    assert.deepEqual(task.exceptions, [
+      { targets: ["item:2"], reason: OUTCOME_REASONS.notCovered },
+    ]);
+    assert.equal(
+      decideRunEnd(checkpoint, {
+        status: "completed",
+        stopRule: "final_answer",
+      }),
+      "completed_with_exceptions",
+    );
+  });
+
+  it("answer: a targeted artifact part completes per cited target, the rest excepted", function () {
+    const ledger = ledgerWith({
+      taskId: "summaries",
+      description: "Summaries",
+      effect: "artifact",
+      targets: ["item:1", "item:2"],
+    });
+    const { checkpoint } = apply(ledger, {
+      kind: "answer",
+      citedTargets: ["item:2"],
+    });
+    assert.equal(find(checkpoint, "summaries").status, "completed");
+    assert.deepEqual(find(checkpoint, "summaries").doneTargets, ["item:2"]);
+    assert.deepEqual(find(checkpoint, "summaries").exceptions, [
+      { targets: ["item:1"], reason: OUTCOME_REASONS.notCovered },
+    ]);
+    const untargeted = ledgerWith({
+      taskId: "answer",
+      description: "Answer",
+      effect: "answer",
+    });
+    assert.equal(
+      find(apply(untargeted, { kind: "answer" }).checkpoint, "answer").status,
+      "completed",
+    );
+  });
+
+  it("mark: refuses a skip that claims delivery for a part with no evidence", function () {
+    const ledger = ledgerWith({
+      taskId: "review",
+      description: "Review",
+      effect: "artifact",
+    });
+    const result = markOutcomes(
+      ledger,
+      [
+        {
+          taskId: taskId("review"),
+          status: "skipped",
+          reason: "Already delivered in this conversation",
+        },
+      ],
+      30,
+    );
+    assert.strictEqual(result.checkpoint, ledger);
+    assert.deepEqual(
+      result.refused.map((entry) => entry.taskId),
+      [taskId("review")],
+    );
+    assert.equal(find(ledger, "review").status, "pending");
+    const bound = apply(ledger, {
+      kind: "material",
+      materialRef: material,
+      taskId: "review",
+    }).checkpoint;
+    const accepted = markOutcomes(
+      bound,
+      [
+        {
+          taskId: taskId("review"),
+          status: "skipped",
+          reason: "Already delivered",
+        },
+      ],
+      31,
+    );
+    assert.lengthOf(accepted.refused, 0);
+  });
+
+  it("mark: refuses a rephrased delivery claim on an artifact part with no evidence", function () {
+    const ledger = ledgerWith({
+      taskId: "review",
+      description: "Review",
+      effect: "artifact",
+    });
+    for (const reason of ["Delivered above", "See the review"]) {
+      const result = markOutcomes(
+        ledger,
+        [{ taskId: "review", status: "skipped", reason }],
+        30,
+      );
+      assert.strictEqual(result.checkpoint, ledger, reason);
+      assert.deepEqual(
+        result.refused.map((entry) => entry.taskId),
+        [taskId("review")],
+        reason,
+      );
+    }
+  });
+
+  it("mark: accepts a delivery-worded skip on a mutation part", function () {
+    const ledger = ledgerWith(saveNote);
+    const result = markOutcomes(
+      ledger,
+      [
+        {
+          taskId: "save",
+          status: "skipped",
+          reason: "The note was previously created in an earlier session",
+        },
+      ],
+      30,
+    );
+    assert.lengthOf(result.refused, 0);
+    assert.equal(find(result.checkpoint, "save").status, "skipped");
+  });
+
+  it("mark: a skip with an ordinary reason is still accepted without evidence", function () {
+    const ledger = ledgerWith({
+      taskId: "review",
+      description: "Review",
+      effect: "artifact",
+    });
+    const result = markOutcomes(
+      ledger,
+      [{ taskId: "review", status: "skipped", reason: "User changed scope" }],
+      30,
+    );
+    assert.lengthOf(result.refused, 0);
+    assert.equal(find(result.checkpoint, "review").status, "skipped");
   });
 
   it("material: with no artifact outcome it creates nothing", function () {
@@ -1388,6 +1753,7 @@ describe("outcome ledger: host reasons", function () {
         notDone: NOT_DONE,
         writeFailed: WRITE_FAILED,
         noText: "No readable text",
+        notCovered: "Not covered by the delivered content",
       },
     );
   });

@@ -2,6 +2,7 @@ import { assert } from "chai";
 import { createLibrarySearchTool } from "../src/agent/tools/read/librarySearch";
 import { createLibraryReadTool } from "../src/agent/tools/read/libraryRead";
 import { createSubmitDocumentTool } from "../src/agent/tools/control/submitDocument";
+import { DirectDocumentFinalizer } from "../src/agent/documents/directFinalization";
 import { createFileIOTool } from "../src/agent/tools/write/fileIO";
 import type { AgentToolContext } from "../src/agent/types";
 import { createMalformedToolArgumentsDiagnostic } from "../src/agent/toolArgumentDiagnostics";
@@ -190,6 +191,59 @@ describe("tool validation compatibility", function () {
       "materialOutputId",
       "the guidance does not describe the removed field",
     );
+  });
+
+  it("submit_document carries taskId to the call input but never into the finalized document", async function () {
+    const submit = createSubmitDocumentTool({} as never);
+    assert.property(
+      (submit.spec.inputSchema as { properties: object }).properties,
+      "taskId",
+    );
+    const parsed = submit.validate({
+      taskId: "  review  ",
+      documentKind: "literature_review",
+      title: "Review",
+      markdown: "# Review\n\nText.",
+      citations: [],
+      quotes: [],
+      assets: [],
+      groundingReviewed: "passed",
+      groundingIssues: [],
+    });
+    assert.isTrue(parsed.ok, parsed.ok ? "" : parsed.error);
+    if (!parsed.ok) return;
+    assert.equal(parsed.value.taskId, "review");
+    const original = DirectDocumentFinalizer.prototype.finalize;
+    const inputs: unknown[] = [];
+    DirectDocumentFinalizer.prototype.finalize = async function (params) {
+      inputs.push(params.input);
+      return {
+        document: {
+          version: 2,
+          documentId: "doc-1",
+          documentVersion: 1,
+          contentHash: "sha256:doc",
+          documentKind: "literature_review",
+          title: "Review",
+          visibleMarkdown: "# Review\n\nText.",
+          citationBundle: { clusters: [] },
+        },
+        outbox: {},
+        repairs: [],
+      } as never;
+    };
+    try {
+      const output = (await submit.execute(parsed.value, {
+        ...baseContext,
+        runId: "run-1",
+      })) as { materialRef?: { documentId: string } };
+      assert.equal(output.materialRef?.documentId, "doc-1");
+    } finally {
+      DirectDocumentFinalizer.prototype.finalize = original;
+    }
+    assert.lengthOf(inputs, 1);
+    assert.notProperty(inputs[0], "taskId");
+    assert.equal((inputs[0] as { title: string }).title, "Review");
   });
 
   it("normalizes file_io canonical and deprecated alias shapes", async function () {

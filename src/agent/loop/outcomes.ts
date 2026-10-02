@@ -64,7 +64,16 @@ export type OutcomeEvidence =
       observationIds: readonly string[];
     }
   | { kind: "receipt"; receipt: AgentActionReceipt }
-  | { kind: "material"; materialRef: MaterialRef }
+  | {
+      kind: "material";
+      materialRef: MaterialRef;
+      /** The part the producing call named (its local taskId), if any. */
+      taskId?: string;
+      /** The document's kind, as submit_document's documentKind names it. */
+      documentKind?: string;
+      /** `item:ID` of every source the material cites. */
+      citedTargets?: readonly string[];
+    }
   | {
       kind: "declined";
       /** The declined tool call, which identifies the decline. */
@@ -79,7 +88,11 @@ export type OutcomeEvidence =
        */
       narrowed?: true;
     }
-  | { kind: "answer" }
+  | {
+      kind: "answer";
+      /** `item:ID` of every source the accepted answer cites. */
+      citedTargets?: readonly string[];
+    }
   | {
       kind: "failed";
       /** Papers a tool failed on twice the same way; the host gives up on them. */
@@ -97,6 +110,7 @@ export const OUTCOME_REASONS = Object.freeze({
   notDone: "Not done before the answer.",
   writeFailed: "The change was not applied.",
   noText: "No readable text",
+  notCovered: "Not covered by the delivered content",
 });
 
 type Task = ExecutionCheckpointTask;
@@ -882,33 +896,128 @@ function applyReceipt(
   return appended(checkpoint, bindReceipt(host, receipt, now), now);
 }
 
+/*
+ * Delivered content. A document, or the accepted answer, is the artifact a
+ * part asked for. A part that names papers is accounted per paper: the papers
+ * the content cites are done, and the rest become exceptions, so "12/12"
+ * means twelve papers were covered. A part that names none completes.
+ */
+
+/** A document kind's words in a part's description, for an unnamed binding. */
+const KIND_DESCRIPTION_PATTERNS: Readonly<Record<string, RegExp>> = {
+  literature_review: /\b(review|synthesis|synthesi[sz]e)\b/i,
+  research_brief: /\bbrief\b/i,
+  comparison: /\bcompar/i,
+  report: /\breport\b/i,
+  guide: /\b(guide|tutorial|how[- ]to)\b/i,
+};
+
+function isPendingArtifact(task: Task): boolean {
+  return task.status === "pending" && task.effect === "artifact";
+}
+
+/**
+ * The part delivered content binds to, and whether it binds as a revision.
+ *
+ * A call that names a part binds only to it: an open artifact part is
+ * covered; a settled artifact part takes the material as a revision of what
+ * it already delivered, its counts unchanged; any other part takes nothing.
+ * A call that names no existing part binds to the first pending artifact part
+ * whose description names the content's kind, else to the first pending
+ * artifact part. Undefined when nothing takes it.
+ */
+function artifactPartFor(
+  checkpoint: ExecutionCheckpoint,
+  named: { taskId?: string; kind?: string },
+): { index: number; revision: boolean } | undefined {
+  let taskId: string | undefined;
+  try {
+    taskId = named.taskId
+      ? ordinaryExecutionTaskId(checkpoint.executionId, named.taskId)
+      : undefined;
+  } catch {
+    // A malformed id names no part; the content still binds by its kind.
+  }
+  const own = taskId
+    ? checkpoint.tasks.findIndex((task) => task.taskId === taskId)
+    : -1;
+  if (own >= 0) {
+    const task = checkpoint.tasks[own];
+    if (task.effect !== "artifact") return undefined;
+    return { index: own, revision: !MARKABLE_STATUSES.has(task.status) };
+  }
+  const pattern = named.kind
+    ? KIND_DESCRIPTION_PATTERNS[named.kind]
+    : undefined;
+  const byKind = pattern
+    ? checkpoint.tasks.findIndex(
+        (task) => isPendingArtifact(task) && pattern.test(task.description),
+      )
+    : -1;
+  const index =
+    byKind >= 0 ? byKind : checkpoint.tasks.findIndex(isPendingArtifact);
+  return index >= 0 ? { index, revision: false } : undefined;
+}
+
+/**
+ * Complete an artifact part from content citing `cited`. With `cited`
+ * unknown the part completes whole. Otherwise each of its targets the content
+ * cites is done, and each other target is excepted as not covered.
+ */
+function coverTargets(
+  task: Task,
+  cited: readonly string[] | undefined,
+  now: number,
+): Task {
+  const targets = task.targets || [];
+  if (!targets.length || !cited) return { ...completed(task), updatedAt: now };
+  const doneTargets = union(
+    task.doneTargets,
+    targets.filter((target) => cited.includes(target)),
+  );
+  const done = new Set(doneTargets);
+  const exceptions = exceptTargets(
+    task.exceptions || [],
+    targets.filter((target) => !done.has(target)),
+    OUTCOME_REASONS.notCovered,
+  );
+  return {
+    ...completed(task),
+    doneTargets,
+    ...(exceptions.length ? { exceptions } : {}),
+    updatedAt: now,
+  };
+}
+
 function applyMaterial(
   checkpoint: ExecutionCheckpoint,
-  materialRef: MaterialRef,
+  evidence: Extract<OutcomeEvidence, { kind: "material" }>,
   now: number,
 ): EvidenceResult {
-  const key = materialRefKey(materialRef);
+  const key = materialRefKey(evidence.materialRef);
   const bound = checkpoint.tasks.some((task) =>
     task.materialRefs.some((reference) => materialRefKey(reference) === key),
   );
   if (bound) return unchanged(checkpoint);
-  const chosen = checkpoint.tasks.findIndex(
-    (task) => task.status === "pending" && task.effect === "artifact",
-  );
-  const { documentId, documentVersion, contentHash } = materialRef;
-  return mapTasks(checkpoint, now, (task, index) =>
-    index === chosen
-      ? {
-          ...task,
-          status: "completed",
-          materialRefs: [
-            ...task.materialRefs,
-            { documentId, documentVersion, contentHash },
-          ],
-          updatedAt: now,
-        }
-      : undefined,
-  );
+  const chosen = artifactPartFor(checkpoint, {
+    taskId: evidence.taskId,
+    kind: evidence.documentKind,
+  });
+  if (!chosen) return unchanged(checkpoint);
+  const { documentId, documentVersion, contentHash } = evidence.materialRef;
+  return mapTasks(checkpoint, now, (task, index) => {
+    if (index !== chosen.index) return undefined;
+    const next = chosen.revision
+      ? { ...task, updatedAt: now }
+      : coverTargets(task, evidence.citedTargets, now);
+    return {
+      ...next,
+      materialRefs: [
+        ...task.materialRefs,
+        { documentId, documentVersion, contentHash },
+      ],
+    };
+  });
 }
 
 function applyDeclined(
@@ -1010,15 +1119,20 @@ function applyFailure(
 
 function applyAnswer(
   checkpoint: ExecutionCheckpoint,
+  evidence: Extract<OutcomeEvidence, { kind: "answer" }>,
   now: number,
 ): EvidenceResult {
   // Content written in the accepted answer is the artifact a part asked for.
-  return mapTasks(checkpoint, now, (task) =>
-    task.status === "pending" &&
-    (!task.effect || task.effect === "answer" || task.effect === "artifact")
-      ? { ...task, status: "completed", updatedAt: now }
-      : undefined,
-  );
+  return mapTasks(checkpoint, now, (task) => {
+    if (task.status !== "pending") return undefined;
+    if (!task.effect || task.effect === "answer")
+      return { ...task, status: "completed", updatedAt: now };
+    // TODO(runtime answer evidence): the task that owns runtime.ts passes the
+    // answer's cited targets; until then they are unknown and parts complete whole.
+    if (task.effect === "artifact")
+      return coverTargets(task, evidence.citedTargets, now);
+    return undefined;
+  });
 }
 
 function hasEvidence(task: Task): boolean {
@@ -1111,18 +1225,40 @@ export function declaresReadPart(
   );
 }
 
-/** Apply skipped, blocked or cancelled marks; `ignored` lists refused ones. */
+/**
+ * A skip reason claiming the part was delivered. Only host evidence says
+ * that, so a part with none keeps open under such a skip.
+ */
+const DELIVERY_CLAIMS: readonly RegExp[] = [
+  /\b(already|previously)\s+(been\s+)?(delivered|done|complete|completed|written|produced|submitted|provided|generated|created|saved|covered|answered)\b/i,
+  /\b(delivered|covered|included|provided|written|addressed)\s+(above|below|in|within)\b/i,
+  /\bsee\s+(the\s+)?(document|review|answer|above)\b/i,
+];
+
+/** Parts whose delivery is content: a document or the answer. */
+const CONTENT_EFFECTS: ReadonlySet<string> = new Set(["artifact", "answer"]);
+
+/**
+ * Apply skipped, blocked or cancelled marks. `ignored` lists marks on parts
+ * that cannot take one; `refused` lists skips claiming a delivery the part
+ * has no evidence of, with the claimed reason.
+ */
 export function markOutcomes(
   checkpoint: ExecutionCheckpoint,
   marks: readonly OutcomeModelMark[],
   now: number,
-): { checkpoint: ExecutionCheckpoint; ignored: string[] } {
+): {
+  checkpoint: ExecutionCheckpoint;
+  ignored: string[];
+  refused: Array<{ taskId: string; reason: string }>;
+} {
   const indexById = new Map(
     checkpoint.tasks.map((task, index) => [task.taskId, index]),
   );
   const tasks = [...checkpoint.tasks];
   const seen = new Set<string>();
   const ignored: string[] = [];
+  const refused: Array<{ taskId: string; reason: string }> = [];
   let changed = false;
   for (const mark of marks) {
     const taskId = ordinaryExecutionTaskId(checkpoint.executionId, mark.taskId);
@@ -1142,6 +1278,15 @@ export function markOutcomes(
       ignored.push(taskId);
       continue;
     }
+    if (
+      mark.status === "skipped" &&
+      CONTENT_EFFECTS.has(tasks[index].effect || "") &&
+      DELIVERY_CLAIMS.some((claim) => claim.test(reason)) &&
+      !hasEvidence(tasks[index])
+    ) {
+      refused.push({ taskId, reason });
+      continue;
+    }
     tasks[index] = {
       ...tasks[index],
       status: mark.status,
@@ -1153,6 +1298,7 @@ export function markOutcomes(
   return {
     checkpoint: changed ? { ...checkpoint, tasks, updatedAt: now } : checkpoint,
     ignored,
+    refused,
   };
 }
 
@@ -1168,11 +1314,11 @@ export function applyOutcomeEvidence(
     case "receipt":
       return applyReceipt(checkpoint, evidence.receipt, now);
     case "material":
-      return applyMaterial(checkpoint, evidence.materialRef, now);
+      return applyMaterial(checkpoint, evidence, now);
     case "declined":
       return applyDeclined(checkpoint, evidence, now);
     case "answer":
-      return applyAnswer(checkpoint, now);
+      return applyAnswer(checkpoint, evidence, now);
     case "failed":
       return applyFailure(checkpoint, evidence, now);
   }

@@ -19,9 +19,9 @@ import {
  * cannot silently grow a turn.
  */
 const TURN_BUDGETS: Record<string, number> = {
-  global: 34_641,
+  global: 34_662,
   paper: 34_764,
-  collection: 34_739,
+  collection: 34_760,
 };
 
 const TURNS: Record<string, Record<string, unknown>> = {

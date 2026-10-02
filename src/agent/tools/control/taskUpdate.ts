@@ -92,6 +92,11 @@ const EXPECTED_EFFECT_REQUIRED =
   "Give each new task an expectedEffect: read, artifact, mutation, or reasoning.";
 const HOST_MARKS_DONE =
   "Nothing changed: the host marks parts done from the tools' results, so progress needs no task_update call. Continue the work, or answer when it is done.";
+/** The note for skips refused because nothing was delivered for their parts. */
+function skipRefusedNote(ids: readonly string[]): string {
+  const list = ids.join(", ");
+  return `Skip refused for ${list}: nothing was delivered for ${ids.length === 1 ? "it" : "them"} in this run (no document, note, or read evidence is bound to it). Produce it with the tools, or list it under blocked with the concrete obstacle.`;
+}
 const NO_SCOPE_PAPERS =
   "This turn states no paper scope to cover; name the part's papers in targetIds.";
 const NO_STATUS =
@@ -291,7 +296,7 @@ function applyOrdinaryTaskUpdates(
   input: TaskUpdateInput,
   now: number,
   scopePapers: TaskPaperScopeSet | undefined,
-): { checkpoint: ExecutionCheckpoint; ignored: boolean } {
+): { checkpoint: ExecutionCheckpoint; ignored: boolean; refused: string[] } {
   try {
     const existing = new Map(
       checkpoint.tasks.map((task) => [task.taskId, task]),
@@ -351,9 +356,13 @@ function applyOrdinaryTaskUpdates(
       marks,
       now,
     );
+    const prefix = `${checkpoint.executionId}:task:`;
     return {
       checkpoint: applied.checkpoint,
       ignored: ignored || applied.ignored.length > 0,
+      refused: applied.refused.map(({ taskId }) =>
+        taskId.startsWith(prefix) ? taskId.slice(prefix.length) : taskId,
+      ),
     };
   } catch (error) {
     if (error instanceof ToolInputRejection) throw error;
@@ -413,6 +422,7 @@ export function createTaskUpdateTool(): AgentToolDefinition<
         );
       }
       let ignored = false;
+      let refused: string[] = [];
       const checkpoint = await context.updateExecutionCheckpoint((current) => {
         assertCheckpointOwner(current, execution);
         const applied = applyOrdinaryTaskUpdates(
@@ -422,11 +432,15 @@ export function createTaskUpdateTool(): AgentToolDefinition<
           context.request.turnScopePapers,
         );
         ignored = applied.ignored;
+        refused = applied.refused;
         return applied.checkpoint;
       });
       const parts = checkpoint.tasks.map((task) =>
         answerPart(checkpoint, task),
       );
+      // A refused skip is the note the model must act on; it outranks the
+      // reminder that progress needs no call.
+      if (refused.length) return { parts, note: skipRefusedNote(refused) };
       return ignored ? { parts, note: HOST_MARKS_DONE } : { parts };
     },
   };
