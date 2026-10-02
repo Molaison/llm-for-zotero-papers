@@ -257,18 +257,20 @@ export async function formatDocumentCitations(params: {
 }): Promise<{
   visibleMarkdown: string;
   citationBundle: FormattedCitationBundle;
+  /** Unused citation mappings the host dropped instead of rejecting. */
+  repairs: string[];
 }> {
   const draftMarkdown = stripHandwrittenReferences(params.draftMarkdown);
   const corpusKeys = new Set(params.corpus.map(sourceKey));
   const evidenceByRef = new Map(
     params.evidence.map((record) => [record.evidenceRef, record]),
   );
-  const clusters =
+  const boundClusters =
     params.requireEvidence === false
       ? [...params.clusters]
       : bindCitationEvidenceRefs(params.clusters, params.evidence);
   const clustersById = new Map<string, PlanCitationCluster>();
-  const resolved = clusters.map((cluster) => {
+  const allResolved = boundClusters.map((cluster) => {
     if (!cluster.citationId.trim() || clustersById.has(cluster.citationId)) {
       throw new ToolInputRejection(
         `Duplicate or empty citation ID: ${cluster.citationId}`,
@@ -332,11 +334,6 @@ export async function formatDocumentCitations(params: {
   for (const match of draftMarkdown.matchAll(CITATION_TOKEN)) {
     tokenIds.push(match[1]);
   }
-  if (!tokenIds.length && clusters.length) {
-    throw new ToolInputRejection(
-      "Citation mappings were supplied but the document has no citation tokens",
-    );
-  }
   for (const citationId of tokenIds) {
     if (!clustersById.has(citationId)) {
       throw new ToolInputRejection(
@@ -344,13 +341,34 @@ export async function formatDocumentCitations(params: {
       );
     }
   }
-  for (const citationId of clustersById.keys()) {
-    if (!tokenIds.includes(citationId)) {
+  // A token the strict form does not match would otherwise ship as literal
+  // text while its clusters are dropped as unused.
+  for (const [token] of draftMarkdown.matchAll(/\[\[cite:[^\]]*\]\]/g)) {
+    if (!/^\[\[cite:[A-Za-z0-9._:-]+\]\]$/.test(token)) {
       throw new ToolInputRejection(
-        `Citation ${citationId} is not used in the document`,
+        `Document contains malformed citation token ${token}; use one [[cite:ID]] token per citation`,
       );
     }
   }
+  if (!tokenIds.length && boundClusters.length) {
+    throw new ToolInputRejection(
+      "Citation mappings were supplied but the document has no citation tokens",
+    );
+  }
+  // A mapping no token uses is dropped: it changes nothing the reader sees.
+  const repairs: string[] = [];
+  for (const citationId of [...clustersById.keys()]) {
+    if (!tokenIds.includes(citationId)) {
+      clustersById.delete(citationId);
+      repairs.push(`dropped unused citation ${citationId}`);
+    }
+  }
+  const clusters = boundClusters.filter((cluster) =>
+    clustersById.has(cluster.citationId),
+  );
+  const resolved = allResolved.filter((cluster) =>
+    clustersById.has(cluster.citationId),
+  );
   if (!clusters.length) {
     if (params.spec.requiresReferences) {
       throw new ToolInputRejection(
@@ -368,6 +386,7 @@ export async function formatDocumentCitations(params: {
         },
         locale: params.spec.citationStyle.locale,
       },
+      repairs,
     };
   }
 
@@ -508,6 +527,7 @@ export async function formatDocumentCitations(params: {
       style: { id: formatted.styleId, title: formatted.styleTitle },
       locale: formatted.locale,
     },
+    repairs,
   };
 }
 

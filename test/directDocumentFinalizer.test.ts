@@ -391,25 +391,12 @@ describe("DirectDocumentFinalizer", function () {
     });
   }
 
-  it("names every quote whose PDF is not open in one rejection, with what to do instead", async function () {
-    const originalLookup = Zotero.Items.getByLibraryAndKey;
-    (Zotero.Items as any).getByLibraryAndKey = (
-      libraryID: number,
-      key: string,
-    ) =>
-      key === "PDF11111" && libraryID === 1
-        ? { id: 102, parentID: 101, isAttachment: () => true }
-        : originalLookup(libraryID, key);
-    (Zotero as any).Reader = { _readers: [] };
+  describe("repairs instead of rejecting", function () {
     const observed = {
       ...observation,
       attachmentItemKey: "PDF11111",
       pageIndex: 0,
       sourceFingerprint: "pdfjs:unopened",
-    };
-    const policy: DocumentOutcomePolicy = {
-      documentKind: "custom",
-      integrityPolicy: "research_grounded",
     };
     const quote = (quoteId: string, text: string) => ({
       quoteId,
@@ -419,8 +406,56 @@ describe("DirectDocumentFinalizer", function () {
       attachmentItemKey: "PDF11111",
       evidenceRefs: [observed.observationId],
     });
-    await expectRejected(
-      finalizer.finalize({
+    const custom: DocumentOutcomePolicy = {
+      documentKind: "custom",
+      integrityPolicy: "research_grounded",
+    };
+
+    beforeEach(function () {
+      const originalLookup = Zotero.Items.getByLibraryAndKey;
+      (Zotero.Items as any).getByLibraryAndKey = (
+        libraryID: number,
+        key: string,
+      ) =>
+        key === "PDF11111" && libraryID === 1
+          ? { id: 102, parentID: 101, isAttachment: () => true }
+          : originalLookup(libraryID, key);
+      (Zotero as any).Reader = { _readers: [] };
+    });
+
+    it("drops a declared quote no token uses and reports the repair", async function () {
+      const result = await finalizer.finalize({
+        request: request([observation]),
+        runId: "unused-quote",
+        input: {
+          ...input({
+            markdown:
+              "# Finding\n\nA claim. [[cite:C1]]\n\n## Scope and limitations\n\nOne paper.",
+            citations: [groundedCitation],
+          }),
+          quotes: [
+            {
+              quoteId: "Q1",
+              text: "Never used.",
+              libraryID: 1,
+              itemKey: "AAAA1111",
+              attachmentItemKey: "PDF11111",
+              evidenceRefs: [observation.observationId],
+            },
+          ],
+          ...custom,
+        },
+      });
+      assert.deepEqual(result.repairs, ["dropped unused quote Q1"]);
+      assert.notInclude(result.document.visibleMarkdown, "Never used.");
+      assert.include(
+        result.document.validation.issues,
+        "dropped unused quote Q1",
+      );
+    });
+
+    it("downgrades a quote whose PDF is not open to cited prose instead of rejecting", async function () {
+      const result = await finalizer.finalize({
         request: request([observed]),
         runId: "unopened-quotes",
         input: {
@@ -430,13 +465,334 @@ describe("DirectDocumentFinalizer", function () {
             citations: [groundedCitation],
           }),
           quotes: [quote("Q1", "First sentence."), quote("Q2", "Second one.")],
-          ...policy,
+          ...custom,
         },
-      }),
-      /Quotes Q1 and Q2 need their source PDFs open[\s\S]*\[\[cite:/,
-    );
-  });
+      });
+      assert.include(result.document.visibleMarkdown, "First sentence. [");
+      assert.notInclude(result.document.visibleMarkdown, "> First sentence.");
+      assert.notInclude(result.document.visibleMarkdown, "[[quote:");
+      assert.notInclude(result.document.visibleMarkdown, "[[cite:");
+      assert.deepEqual(result.document.verifiedQuotes, []);
+      assert.equal(result.document.validation.quoteVerified, "not_applicable");
+      const repairs = [
+        "quote Q1 could not be verified (PDF not open); kept as cited text",
+        "quote Q2 could not be verified (PDF not open); kept as cited text",
+      ];
+      assert.deepEqual(result.repairs, repairs);
+      assert.includeMembers(result.document.validation.issues, repairs);
+      assert.deepEqual(
+        result.document.version === 2
+          ? result.document.citationBundle.clusters.map(
+              (cluster) => cluster.citationId,
+            )
+          : [],
+        ["C1"],
+        "the paper's existing citation is reused, no cite-Q1 is created",
+      );
+    });
 
+    it("cites a downgraded quote through a new citation when its source has none", async function () {
+      const result = await finalizer.finalize({
+        request: request([observed]),
+        runId: "unopened-uncited-quote",
+        input: {
+          ...input({
+            markdown:
+              "# Finding\n\n[[quote:Q1]]\n\n## Scope and limitations\n\nOne paper.",
+            citations: [],
+          }),
+          quotes: [quote("Q1", "First sentence.")],
+          documentKind: "custom",
+          integrityPolicy: "authored",
+        },
+      });
+      assert.include(result.document.visibleMarkdown, "First sentence. [");
+      assert.notInclude(result.document.visibleMarkdown, "[[cite:");
+      assert.deepEqual(
+        result.document.version === 2
+          ? result.document.citationBundle.clusters.map(
+              (cluster) => cluster.citationId,
+            )
+          : [],
+        ["cite-Q1"],
+      );
+      assert.deepEqual(result.repairs, [
+        "quote Q1 could not be verified (PDF not open); kept as cited text",
+      ]);
+    });
+
+    it("drops an unused citation cluster and reports the repair", async function () {
+      const result = await finalizer.finalize({
+        request: request([observation]),
+        runId: "unused-citation",
+        input: {
+          ...input({
+            markdown:
+              "# Finding\n\nA claim. [[cite:C1]]\n\n## Scope and limitations\n\nOne paper.",
+            citations: [
+              groundedCitation,
+              { ...groundedCitation, citationId: "C3" },
+            ],
+          }),
+          ...custom,
+        },
+      });
+      assert.deepEqual(result.repairs, ["dropped unused citation C3"]);
+      assert.deepEqual(
+        result.document.version === 2
+          ? result.document.citationBundle.clusters.map(
+              (cluster) => cluster.citationId,
+            )
+          : [],
+        ["C1"],
+      );
+      assert.include(
+        result.document.validation.issues,
+        "dropped unused citation C3",
+      );
+    });
+
+    const downgrade = (runId: string, markdown: string) =>
+      finalizer.finalize({
+        request: request([observed]),
+        runId,
+        input: {
+          ...input({
+            markdown: `# Finding\n\n${markdown}\n\n## Scope and limitations\n\nOne paper.`,
+            citations: [groundedCitation],
+          }),
+          quotes: [quote("Q1", "First sentence.")],
+          ...custom,
+        },
+      });
+    const occurrences = (text: string, part: string) =>
+      text.split(part).length - 1;
+
+    it("downgrades a quote whose PDF attachment does not resolve", async function () {
+      const originalLookup = Zotero.Items.getByLibraryAndKey;
+      (Zotero.Items as any).getByLibraryAndKey = (
+        libraryID: number,
+        key: string,
+      ) => (key === "PDF11111" ? false : originalLookup(libraryID, key));
+      const result = await downgrade(
+        "missing-attachment",
+        "[[quote:Q1]] [[cite:C1]]",
+      );
+      assert.deepEqual(result.repairs, [
+        "quote Q1 could not be verified (PDF attachment not found); kept as cited text",
+      ]);
+      assert.include(result.document.visibleMarkdown, "First sentence. [");
+    });
+
+    it("replaces a literal blockquote anchored by an unverifiable inline quote token with cited prose once", async function () {
+      const result = await downgrade(
+        "downgraded-inline-anchor",
+        "> First sentence. [[quote:Q1]]\n\n(Fixture, 2024)\n\n[[cite:C1]]",
+      );
+      const visible = result.document.visibleMarkdown;
+      assert.notInclude(visible, "> First sentence.");
+      assert.equal(occurrences(visible, "First sentence."), 1);
+      assert.include(visible, "First sentence. [");
+    });
+
+    it("replaces a literal blockquote followed by an unverifiable quote anchor with cited prose once", async function () {
+      const result = await downgrade(
+        "downgraded-adjacent-anchor",
+        "> First sentence.\n\n[[quote:Q1]] [[cite:C1]]",
+      );
+      const visible = result.document.visibleMarkdown;
+      assert.notInclude(visible, "> First sentence.");
+      assert.equal(occurrences(visible, "First sentence."), 1);
+      assert.equal(
+        occurrences(visible, "(Author, 2024)"),
+        1,
+        "the anchor's own citation is not doubled",
+      );
+    });
+
+    it("does not leave a downgraded quote token alone in a blockquote", async function () {
+      const result = await downgrade(
+        "downgraded-bare-blockquote",
+        "> [[quote:Q1]] [[cite:C1]]",
+      );
+      const visible = result.document.visibleMarkdown;
+      assert.notInclude(visible, "> First sentence.");
+      assert.include(visible, "First sentence. [");
+      assert.equal(occurrences(visible, "(Author, 2024)"), 1);
+    });
+
+    it("removes quotation marks around a downgraded quote token", async function () {
+      for (const [open, close] of [
+        ['"', '"'],
+        ["“", "”"],
+      ]) {
+        const result = await downgrade(
+          `downgraded-quoted-${open}`,
+          `The authors state ${open}[[quote:Q1]]${close}.`,
+        );
+        const visible = result.document.visibleMarkdown;
+        assert.include(visible, "The authors state First sentence. [");
+        assert.notInclude(visible, `${open}First sentence`);
+        assert.notInclude(visible, `2024)${close}`);
+        assert.notInclude(visible, `)${close}`);
+      }
+    });
+
+    const clusterIds = (result: { document: { version?: number } }) =>
+      (result.document as any).citationBundle.clusters.map(
+        (cluster: { citationId: string }) => cluster.citationId,
+      );
+
+    it("removes enclosing marks when the sentence punctuation sits inside them", async function () {
+      const result = await downgrade(
+        "downgraded-punctuation-inside",
+        'They note "[[quote:Q1]]."',
+      );
+      const visible = result.document.visibleMarkdown;
+      assert.include(visible, "They note First sentence. [");
+      assert.notInclude(visible, '"First sentence');
+      assert.notInclude(visible, '."');
+      assert.deepEqual(clusterIds(result), ["C1"]);
+    });
+
+    it("treats a citation after the closing mark as the downgraded quote's citation", async function () {
+      const result = await downgrade(
+        "downgraded-cite-after-close",
+        "They note \u201c[[quote:Q1]].\u201d [[cite:C1]]",
+      );
+      const visible = result.document.visibleMarkdown;
+      assert.include(visible, "They note First sentence. [");
+      assert.notInclude(visible, "\u201c");
+      assert.notInclude(visible, "\u201d");
+      assert.equal(occurrences(visible, "(Author, 2024)"), 1);
+      assert.deepEqual(clusterIds(result), ["C1"]);
+    });
+
+    it("removes single quotation marks around a downgraded quote token", async function () {
+      for (const [open, close] of [
+        ["'", "'"],
+        ["\u2018", "\u2019"],
+      ]) {
+        const result = await downgrade(
+          `downgraded-single-${open}`,
+          `They note ${open}[[quote:Q1]]${close}.`,
+        );
+        const visible = result.document.visibleMarkdown;
+        assert.include(visible, "They note First sentence. [");
+        assert.notInclude(visible, `${open}First sentence`);
+        assert.notInclude(visible, `)${close}`);
+      }
+    });
+
+    for (const [name, markdown] of [
+      ["with model wording", "> Model wording. [[quote:Q1]]"],
+      ["with an attribution", "> [[quote:Q1]] (Author, 2024)"],
+    ] as const) {
+      it(`takes a downgraded quote out of a blockquote ${name}`, async function () {
+        const result = await downgrade(
+          `downgraded-blockquote-${name}`,
+          markdown,
+        );
+        const visible = result.document.visibleMarkdown;
+        assert.notMatch(visible, /^\s*>/m);
+        assert.include(visible, "First sentence. [");
+      });
+    }
+
+    it("rejects a downgraded quote token next to an unpaired quotation mark", async function () {
+      await expectRejected(
+        downgrade(
+          "downgraded-unpaired-mark",
+          'They note "[[quote:Q1]] [[cite:C1]]" here.',
+        ),
+        /Quote Q1 could not be verified and sits next to a quotation mark/,
+      );
+    });
+
+    it("rejects a downgraded quote token in a blockquote nested in a list", async function () {
+      await expectRejected(
+        downgrade(
+          "downgraded-list-blockquote",
+          "- > Model wording [[quote:Q1]]",
+        ),
+        /Quote Q1 could not be verified and sits inside a blockquote/,
+      );
+    });
+
+    it("rejects a malformed citation token instead of dropping its clusters", async function () {
+      await expectRejected(
+        finalizer.finalize({
+          request: request([observation]),
+          runId: "malformed-citation",
+          input: {
+            ...input({
+              markdown:
+                "# Finding\n\nA claim. [[cite:C1]] and [[cite:C1,C3]]\n\n## Scope and limitations\n\nOne paper.",
+              citations: [
+                groundedCitation,
+                { ...groundedCitation, citationId: "C3" },
+              ],
+            }),
+            ...custom,
+          },
+        }),
+        /malformed citation token \[\[cite:C1,C3\]\]/,
+      );
+    });
+
+    it("still rejects citations supplied with no citation tokens", async function () {
+      await expectRejected(
+        finalizer.finalize({
+          request: request([observation]),
+          runId: "no-citation-tokens",
+          input: {
+            ...input({
+              markdown:
+                "# Finding\n\nA claim.\n\n## Scope and limitations\n\nOne paper.",
+              citations: [groundedCitation],
+            }),
+            ...custom,
+          },
+        }),
+        /Citation mappings were supplied but the document has no citation tokens/,
+      );
+    });
+    it("still rejects an unresolved quote token and fabricated quote evidence", async function () {
+      await expectRejected(
+        finalizer.finalize({
+          request: request([observed]),
+          runId: "unresolved-quote",
+          input: {
+            ...input({
+              markdown:
+                "# Finding\n\n[[quote:Q9]]\n[[cite:C1]]\n\n## Scope and limitations\n\nOne paper.",
+              citations: [groundedCitation],
+            }),
+            ...custom,
+          },
+        }),
+        /unresolved quote token Q9/,
+      );
+      await expectRejected(
+        finalizer.finalize({
+          request: request([observed]),
+          runId: "fabricated-quote-evidence",
+          input: {
+            ...input({
+              markdown:
+                "# Finding\n\n[[quote:Q1]]\n[[cite:C1]]\n\n## Scope and limitations\n\nOne paper.",
+              citations: [groundedCitation],
+            }),
+            quotes: [
+              { ...quote("Q1", "First sentence."), evidenceRefs: ["made-up"] },
+            ],
+            ...custom,
+          },
+        }),
+        /Quote Q1 has an invalid evidence reference/,
+      );
+    });
+  });
   it("rejects literature reviews without verified research evidence", async function () {
     const policy: DocumentOutcomePolicy = {
       documentKind: "literature_review",
@@ -455,7 +811,7 @@ describe("DirectDocumentFinalizer", function () {
     );
   });
 
-  it("rejects missing coverage disclosure and missing references", async function () {
+  it("still rejects a literature review without citations", async function () {
     const policy: DocumentOutcomePolicy = {
       documentKind: "literature_review",
       integrityPolicy: "research_grounded",
@@ -471,19 +827,119 @@ describe("DirectDocumentFinalizer", function () {
       }),
       /requires grounded citations/,
     );
-    await expectRejected(
-      finalizer.finalize({
-        request: request([observation]),
-        runId: "run-no-coverage",
-        input: {
-          ...input({ citations: [groundedCitation] }),
-          ...policy,
-        },
-      }),
-      /missing required sections: scope and limitations/,
+  });
+
+  it("appends a missing required section with a placeholder and reports it", async function () {
+    const policy: DocumentOutcomePolicy = {
+      documentKind: "literature_review",
+      integrityPolicy: "research_grounded",
+    };
+    const result = await finalizer.finalize({
+      request: request([observation]),
+      runId: "run-no-coverage",
+      input: {
+        ...input({
+          citations: [groundedCitation],
+          markdown: "# Representational drift\n\nA claim. [[cite:C1]]",
+        }),
+        ...policy,
+      },
+    });
+    assert.match(
+      result.document.visibleMarkdown,
+      /## Scope and limitations\n\nNot stated in the submitted document\./,
+    );
+    assert.deepEqual(result.repairs, [
+      'added missing section "Scope and limitations"',
+    ]);
+    assert.include(
+      result.document.validation.issues,
+      'added missing section "Scope and limitations"',
     );
   });
 
+  it("inserts a missing section before a draft References section", async function () {
+    const result = await finalizer.finalize({
+      request: request([observation]),
+      runId: "run-section-before-references",
+      input: {
+        ...input({
+          citations: [groundedCitation],
+          markdown:
+            "# Representational drift\n\nA claim. [[cite:C1]]\n\n## References\n\n- A handwritten entry.",
+        }),
+        documentKind: "literature_review",
+        integrityPolicy: "research_grounded",
+      },
+    });
+    const visible = result.document.visibleMarkdown;
+    assert.include(
+      visible,
+      "## Scope and limitations\n\nNot stated in the submitted document.",
+    );
+    assert.isBelow(
+      visible.indexOf("## Scope and limitations"),
+      visible.indexOf("## References"),
+    );
+    assert.notInclude(visible, "A handwritten entry.");
+    assert.deepEqual(result.repairs, [
+      'added missing section "Scope and limitations"',
+    ]);
+  });
+
+  it("does not add the section again when the repaired draft is resubmitted", async function () {
+    const policy: DocumentOutcomePolicy = {
+      documentKind: "literature_review",
+      integrityPolicy: "research_grounded",
+    };
+    const first = await finalizer.finalize({
+      request: request([observation]),
+      runId: "run-idempotent-section",
+      input: {
+        ...input({
+          citations: [groundedCitation],
+          markdown: "# Representational drift\n\nA claim. [[cite:C1]]",
+        }),
+        ...policy,
+      },
+    });
+    // The host's bibliography is regenerated on every submission.
+    const published =
+      first.document.visibleMarkdown.split("\n\n## References")[0];
+    const second = await finalizer.finalize({
+      request: request([observation]),
+      runId: "run-idempotent-section-again",
+      input: {
+        ...input({
+          citations: [groundedCitation],
+          markdown: `${published}\n\nAgain. [[cite:C1]]`,
+        }),
+        ...policy,
+      },
+    });
+    assert.deepEqual(second.repairs, []);
+    assert.equal(
+      second.document.visibleMarkdown.split("## Scope and limitations").length -
+        1,
+      1,
+    );
+  });
+  it("adds a title heading to an authored document that has none", async function () {
+    const result = await finalizer.finalize({
+      request: request(),
+      runId: "run-no-heading",
+      input: {
+        ...input({ markdown: "Just a paragraph." }),
+        documentKind: "guide",
+        integrityPolicy: "authored",
+      },
+    });
+    assert.match(
+      result.document.visibleMarkdown,
+      /^# Representational drift\n\nJust a paragraph\./,
+    );
+    assert.deepEqual(result.repairs, ["added title heading"]);
+  });
   it("rejects fabricated citation evidence references", async function () {
     const policy: DocumentOutcomePolicy = {
       documentKind: "literature_review",
@@ -811,6 +1267,18 @@ describe("DirectDocumentFinalizer", function () {
       assert.equal(
         (await loadPlanDocument(second.document.documentId))?.visibleMarkdown,
         second.document.visibleMarkdown,
+      );
+
+      const repaired = await submit("A body with no heading.", 403);
+      const repairedRetry = await submit("A body with no heading.", 404);
+      assert.equal(
+        repairedRetry.document.documentId,
+        repaired.document.documentId,
+      );
+      assert.deepEqual(
+        repairedRetry.repairs,
+        ["added title heading"],
+        "an identical retry reports the repairs its content carries",
       );
     } finally {
       zotero.DB = fakeDB;

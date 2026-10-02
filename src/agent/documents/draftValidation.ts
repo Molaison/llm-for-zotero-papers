@@ -18,7 +18,7 @@ const DIRECT_QUOTATION_MIN_WORDS = 5;
 const QUOTATION_PREVIEW_CHARS = 60;
 const QUOTATION_PREVIEW_COUNT = 3;
 
-function normalizeHeading(value: string): string {
+export function normalizeHeading(value: string): string {
   return value
     .trim()
     .replace(HEADING_ENUMERATOR, "")
@@ -68,7 +68,7 @@ function hasCoverageDisclosure(headings: ReadonlySet<string>): boolean {
   return hasScope && hasLimitations;
 }
 
-function collectMissingSections(params: {
+export function collectMissingSections(params: {
   headings: ReadonlySet<string>;
   requiredSections: readonly string[];
   requiresCoverageSection: boolean;

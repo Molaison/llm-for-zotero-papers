@@ -233,7 +233,12 @@ export class DirectDocumentFinalizer {
     runId: string;
     input: SubmitPlanDocumentInput;
     now?: number;
-  }): Promise<{ document: PlanDocument; outbox: PlanDocumentOutboxRecord }> {
+  }): Promise<{
+    document: PlanDocument;
+    outbox: PlanDocumentOutboxRecord;
+    /** Format repairs the host made instead of rejecting. */
+    repairs: string[];
+  }> {
     const policy: DocumentOutcomePolicy = {
       documentKind: params.input.documentKind || "custom",
       integrityPolicy: params.input.integrityPolicy || "authored",
@@ -267,7 +272,12 @@ export class DirectDocumentFinalizer {
     title: string;
     markdown: string;
     now?: number;
-  }): Promise<{ document: PlanDocument; outbox: PlanDocumentOutboxRecord }> {
+  }): Promise<{
+    document: PlanDocument;
+    outbox: PlanDocumentOutboxRecord;
+    /** Format repairs the host made instead of rejecting. */
+    repairs: string[];
+  }> {
     return this.publish({
       request: params.request,
       runId: params.runId,
@@ -293,7 +303,12 @@ export class DirectDocumentFinalizer {
     input: SubmitPlanDocumentInput;
     policy: DocumentOutcomePolicy;
     now?: number;
-  }): Promise<{ document: PlanDocument; outbox: PlanDocumentOutboxRecord }> {
+  }): Promise<{
+    document: PlanDocument;
+    outbox: PlanDocumentOutboxRecord;
+    /** Format repairs the host made instead of rejecting. */
+    repairs: string[];
+  }> {
     const { policy } = params;
     const prior = await loadLatestDocumentForRun(params.runId);
     if (prior && prior.conversationKey !== params.request.conversationKey)
@@ -391,7 +406,11 @@ export class DirectDocumentFinalizer {
       duplicate &&
       duplicate.conversationKey === params.request.conversationKey
     )
-      return storedDocumentResult(duplicate);
+      // Identical content means the same repairs were made again.
+      return {
+        ...(await storedDocumentResult(duplicate)),
+        repairs: finalized.repairs,
+      };
     await persistFinalizedDocument(finalized);
     return finalized;
   }
