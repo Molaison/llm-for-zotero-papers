@@ -355,7 +355,9 @@ export async function setTaskProgressComposerContexts(
   set(selectedCollectionContextCache, input.collectionContexts);
   set(selectedTagContextCache, input.tagContexts);
   initializedConversationComposeContextKeys.add(item.id);
-  refreshConversationPanels(body, item);
+  // The panel state too: the chips redraw, and Task progress follows them
+  // through the same sync a chip added by hand goes through.
+  refreshConversationPanels(body, item, { includePanelState: true });
   await Zotero.Promise.delay(50);
   flushTaskProgressPanels();
 }

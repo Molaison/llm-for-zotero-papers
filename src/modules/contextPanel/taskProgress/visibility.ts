@@ -1,10 +1,16 @@
 /**
- * When the Task progress row shows, and what scope a turn covers.
+ * When the Task progress row shows, how it gets there, and what scope a turn
+ * covers.
  *
- * The row shows for library chat, for any turn that attached a folder or a
- * tag, for a paper chat over five papers or more, and for the rest of a
- * conversation once a plan ran in it. It never shows in WebChat or in a note
- * chat. Everything here is pure.
+ * The row shows only when it has something to show: the papers, folders and
+ * tags the context bar holds (in library chat any of them; in a paper chat a
+ * folder, a tag or five papers or more), or a run's steps, which keep it for
+ * the rest of the conversation. A run's steps are what `planSeen` records: a
+ * built-in action's, a plan's, Codex's own checklist, or the outcomes a run
+ * declares (a long job's paged parts among them), live or finished, rebuilt
+ * from history after a restart. A run with no steps (a plain question over
+ * the whole library) adds nothing to show. The row never shows in WebChat or
+ * in a note chat. Everything here is pure.
  */
 import type { TaskPaperScopeContexts } from "../../../agent/context/taskPaperScopeListing";
 import type {
@@ -23,9 +29,29 @@ export type TaskProgressVisibilityInput = {
   collectionCount: number;
   tagCount: number;
   paperCount: number;
-  /** A plan ran in this conversation. */
+  /**
+   * A run's steps were seen in this conversation: an action, a plan, a Codex
+   * checklist or a run's outcomes.
+   */
   planSeen: boolean;
 };
+
+/**
+ * Whether the context bar holds something the row lists: in library chat any
+ * paper, folder or tag; in a paper chat a folder, a tag or five papers (its
+ * own included).
+ */
+export function taskProgressContextApplies(
+  input: Pick<
+    TaskProgressVisibilityInput,
+    "conversationKind" | "collectionCount" | "tagCount" | "paperCount"
+  >,
+): boolean {
+  if (input.collectionCount > 0 || input.tagCount > 0) return true;
+  return input.conversationKind === "global"
+    ? input.paperCount > 0
+    : input.paperCount >= TASK_PROGRESS_PAPER_THRESHOLD;
+}
 
 export function shouldShowTaskProgress(
   input: TaskProgressVisibilityInput,
@@ -33,13 +59,45 @@ export function shouldShowTaskProgress(
   if (input.isWebChat || input.isNoteSession) return false;
   if (input.conversationKind !== "global" && input.conversationKind !== "paper")
     return false;
-  if (input.planSeen) return true;
-  if (input.conversationKind === "global") return true;
-  return (
-    input.collectionCount > 0 ||
-    input.tagCount > 0 ||
-    input.paperCount >= TASK_PROGRESS_PAPER_THRESHOLD
-  );
+  return input.planSeen || taskProgressContextApplies(input);
+}
+
+/** What one paint of the row stood on, for deciding how the next change moves. */
+export type TaskProgressRowFrame = {
+  /** The conversation and mode shown; another one is a switch. */
+  identity: string;
+  shown: boolean;
+  /** `taskProgressContextApplies` held. */
+  contextApplies: boolean;
+  /** A run's steps were seen (`planSeen`). */
+  runSteps: boolean;
+  /** The context bar was the conversation's own, not yet a stand-in. */
+  composerReady: boolean;
+  /** A run was working, answering or waiting on the user. */
+  runLive: boolean;
+};
+
+/**
+ * Whether the row lowers or raises with motion. Only a change made in the
+ * conversation on screen moves: the user adding or removing context, or a
+ * live run declaring its steps. Everything else puts the row in its state at
+ * once: a mount, a conversation switch, a mode change, and the conversation's
+ * own state arriving as it loads (its context bar set up from history, its
+ * steps rebuilt from history, its record cleared).
+ */
+export function shouldAnimateTaskProgressRow(
+  previous: TaskProgressRowFrame | null,
+  next: TaskProgressRowFrame,
+): boolean {
+  if (!previous || previous.identity !== next.identity) return false;
+  if (previous.shown === next.shown) return false;
+  if (
+    previous.contextApplies !== next.contextApplies &&
+    !previous.composerReady
+  )
+    return false;
+  if (previous.runSteps !== next.runSteps && !next.runLive) return false;
+  return true;
 }
 
 /** The contexts a user message attached, as the turn scope reads them. */

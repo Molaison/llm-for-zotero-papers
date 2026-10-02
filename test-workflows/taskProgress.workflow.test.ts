@@ -5,7 +5,9 @@
  * paper ledger updates, the first answer text, and the final answer with a
  * quote citation. The drawer's geometry is read from live layout: attached
  * under the row, as tall as a short list, capped above a strip of chat for a
- * long one, draggable, and never moving the chat's reading place.
+ * long one, draggable, and never moving the chat's reading place. A Library
+ * chat with nothing added has no row; a folder added lowers it from under
+ * the header and taking it away raises it, the chat following it smoothly.
  */
 import { assert } from "chai";
 import { buildQuoteCitation } from "../src/services/quotes/quoteCitations";
@@ -58,6 +60,8 @@ describe("workflow: task progress", function () {
   const longItems: Zotero.Item[] = [];
   let libraryID: number;
   const shots: string[] = [];
+  /** Keeps Zotero's own banners out of this file's layout; removed after. */
+  let bannerStyle: Element | null = null;
 
   async function until(check: () => boolean, message: string | (() => string)) {
     const deadline = Date.now() + 15000;
@@ -235,6 +239,7 @@ describe("workflow: task progress", function () {
   function part(root: HTMLElement) {
     return {
       row: root.querySelector("#llm-task-progress") as HTMLButtonElement,
+      curtain: root.querySelector(".llm-task-progress-curtain") as HTMLElement,
       card: root.querySelector(".llm-task-progress-card") as HTMLElement,
       count: () =>
         root.querySelector(".llm-task-progress-count")?.textContent || "",
@@ -257,6 +262,23 @@ describe("workflow: task progress", function () {
         `${label}: the drawer settles ${state} (${view.drawer.dataset.state})`,
     );
     // One more frame for the chat's scroll owner.
+    await Zotero.Promise.delay(40);
+  }
+
+  /** The row lowered (open) or rose (closed) and settled there. */
+  async function settleRow(
+    rootOf: () => HTMLElement,
+    state: "open" | "closed",
+    label: string,
+  ) {
+    await until(
+      () => {
+        api.flushTaskProgress();
+        return part(rootOf()).curtain.dataset.curtain === state;
+      },
+      () =>
+        `${label}: the row settles ${state} (${part(rootOf()).curtain.dataset.curtain})`,
+    );
     await Zotero.Promise.delay(40);
   }
 
@@ -403,7 +425,8 @@ describe("workflow: task progress", function () {
           : {},
       });
       try {
-        api.flushTaskProgress();
+        // A card left by an earlier run rises first.
+        await settleRow(rootOf, "closed", `${papers.length + 1} papers`);
         assert.isTrue(
           part(rootOf()).row.hidden,
           `a ${papers.length + 1}-paper chat has no card (${surface})`,
@@ -434,6 +457,7 @@ describe("workflow: task progress", function () {
             itemId: rootOf().dataset.itemId,
           })}`,
       );
+      await settleRow(rootOf, "open", `five papers (${surface})`);
       noHeaderDivider("with the card");
       const root = rootOf();
       const view = part(root);
@@ -496,6 +520,137 @@ describe("workflow: task progress", function () {
     );
   }
 
+  /**
+   * A Library chat with nothing added has no row. A folder added to the
+   * context bar lowers it from under the header, frame by frame, the chat
+   * below following it down; taking the folder away raises it, and the chat
+   * comes back to where it was. Read from live layout on each surface.
+   */
+  async function exerciseCurtain(
+    rootOf: () => HTMLElement,
+    surface: Surface,
+    shotWindow: any,
+  ) {
+    const surfaceKey = surfaceOf(surface);
+    const win$ = rootOf().ownerDocument.defaultView as any;
+    // A new Library chat (or the empty draft the button takes up again).
+    (rootOf().querySelector("#llm-history-new") as HTMLElement).dispatchEvent(
+      new win$.MouseEvent("click", { bubbles: true, cancelable: true }),
+    );
+    await until(
+      () => rootOf()?.dataset.conversationKind === "global",
+      `a new Library chat opens (${surface})`,
+    );
+    await Zotero.Promise.delay(300);
+    const key = Number(rootOf().dataset.itemId);
+    assert.isNotOk(
+      api.getTaskProgressSnapshot(key)?.planSeen,
+      `no run's steps in this Library chat (${surface})`,
+    );
+    await api.setTaskProgressComposerContexts({ surface: surfaceKey });
+    await settleRow(rootOf, "closed", `nothing added (${surface})`);
+    const empty = part(rootOf());
+    assert.isTrue(
+      empty.row.hidden,
+      `no row in a Library chat with nothing added (${surface})`,
+    );
+    assert.isTrue(empty.curtain.hidden);
+    assert.equal(empty.card.getBoundingClientRect().height, 0);
+    const rest = empty.box.getBoundingClientRect().top;
+    await capture(shotWindow, `tp-curtain-empty-${surface}.png`);
+
+    // Lowering, sampled every frame.
+    const frames: Array<{ state: string; boxTop: number; curtain: number }> =
+      [];
+    let sampling = true;
+    const sample = () => {
+      if (!sampling) return;
+      const view = part(rootOf());
+      frames.push({
+        state: view.curtain.dataset.curtain || "",
+        boxTop: view.box.getBoundingClientRect().top,
+        curtain: view.curtain.getBoundingClientRect().height,
+      });
+      win$.requestAnimationFrame(sample);
+    };
+    win$.requestAnimationFrame(sample);
+    await api.setTaskProgressComposerContexts({
+      surface: surfaceKey,
+      collectionContexts: [
+        { collectionId: collection.id, name: collection.name, libraryID },
+      ],
+    });
+    await settleRow(rootOf, "open", `a folder added (${surface})`);
+    sampling = false;
+    const shown = part(rootOf());
+    const down = shown.box.getBoundingClientRect().top;
+    const trace = JSON.stringify(
+      frames.map((frame) => [frame.state, Math.round(frame.boxTop)]),
+    );
+    const lowering = frames.filter((frame) => frame.state === "opening");
+    assert.isAtLeast(
+      lowering.filter((frame) => frame.curtain > 1 && frame.curtain < 45)
+        .length,
+      2,
+      `the row lowers through partial heights (${surface}): ${trace}`,
+    );
+    assert.isAbove(down, rest + 20, `the chat moves down (${surface})`);
+    for (let index = 1; index < frames.length; index++) {
+      assert.isAtLeast(
+        frames[index].boxTop,
+        frames[index - 1].boxTop - 0.5,
+        `the chat only moves down (${surface}): ${trace}`,
+      );
+    }
+    assert.isAtLeast(
+      new Set(
+        frames
+          .map((frame) => Math.round(frame.boxTop))
+          .filter((top) => top > rest + 0.5 && top < down - 0.5),
+      ).size,
+      3,
+      `the chat follows the row, never jumping (${surface}): ${trace}`,
+    );
+    assert.closeTo(shown.row.getBoundingClientRect().height, 38, 1);
+    assert.closeTo(shown.card.getBoundingClientRect().height, 40, 1);
+    assert.isAtMost(
+      shown.card.getBoundingClientRect().top -
+        shown.shell.getBoundingClientRect().top,
+      4,
+      `the card sits at the top of the chat area (${surface})`,
+    );
+    assert.closeTo(
+      down,
+      shown.card.getBoundingClientRect().bottom + CARD_GAP,
+      1,
+      `the chat starts below the card (${surface})`,
+    );
+    assert.equal(shown.curtain.style.height, "", "no height left behind");
+    await capture(shotWindow, `tp-curtain-shown-${surface}.png`);
+
+    // Rising: the folder taken away.
+    await api.setTaskProgressComposerContexts({ surface: surfaceKey });
+    assert.equal(
+      part(rootOf()).curtain.dataset.curtain,
+      "closing",
+      `the row rises (${surface})`,
+    );
+    if (surface === "independent") {
+      await Zotero.Promise.delay(90);
+      assert.equal(part(rootOf()).curtain.dataset.curtain, "closing");
+      await capture(shotWindow, "tp-curtain-mid-rise-independent.png");
+    }
+    await settleRow(rootOf, "closed", `the folder taken away (${surface})`);
+    const gone = part(rootOf());
+    assert.isTrue(gone.row.hidden, `the row is gone (${surface})`);
+    assert.closeTo(
+      gone.box.getBoundingClientRect().top,
+      rest,
+      1,
+      `the chat is back where it was (${surface})`,
+    );
+  }
+
   async function exerciseLibraryRun(
     rootOf: () => HTMLElement,
     surface: Surface,
@@ -529,6 +684,7 @@ describe("workflow: task progress", function () {
         "the folder's papers are the scope",
       );
       assert.equal(snapshot.label, collection.name);
+      await settleRow(rootOf, "open", `the folder's run (${surface})`);
       assert.isFalse(
         view.row.hidden,
         `library chat shows the row (${surface})`,
@@ -818,7 +974,7 @@ describe("workflow: task progress", function () {
           api.getTaskProgressSnapshot(handle.conversationKey)?.listingLoaded,
         );
       }, "the long folder lists");
-      api.flushTaskProgress();
+      await settleRow(rootOf, "open", `long list (${surface})`);
       assert.equal(view.count(), `0 of ${LONG_COUNT} read`);
       view.box.scrollTop = Math.max(
         0,
@@ -916,6 +1072,16 @@ describe("workflow: task progress", function () {
         await Zotero.Promise.delay(50);
     }
     savedLayout = Zotero.Prefs.get(layoutPref, true);
+    // Zotero raises its own banners (post-upgrade, sync reminder, ...) a while
+    // after startup, above every pane: arriving mid-measurement, one moves
+    // the whole sidebar by its height. Keep them out of this file's layout.
+    const style = win.document.createElementNS(
+      "http://www.w3.org/1999/xhtml",
+      "style",
+    );
+    style.textContent = ".banner-container { display: none !important; }";
+    win.document.documentElement.appendChild(style);
+    bannerStyle = style;
     for (const [key, value] of agentPrefs) {
       savedAgentPrefs.set(key, Zotero.Prefs.get(key, true));
       Zotero.Prefs.set(key, value as never, true);
@@ -978,6 +1144,7 @@ describe("workflow: task progress", function () {
     }
     if (savedLayout === undefined) Zotero.Prefs.clear(layoutPref, true);
     else Zotero.Prefs.set(layoutPref, savedLayout as string, true);
+    bannerStyle?.remove();
     Zotero.debug(`TASK_PROGRESS_SCREENSHOTS ${JSON.stringify(shots)}`, 1);
   });
 
@@ -990,6 +1157,7 @@ describe("workflow: task progress", function () {
         ) as HTMLElement;
       await assertPaperChatThreshold(rootOf, layout, win);
       await switchToLibrary(rootOf, layout);
+      await exerciseCurtain(rootOf, layout, win);
       await exerciseLibraryRun(rootOf, layout, win);
       await exerciseLongList(rootOf, layout, win);
     });
@@ -1003,6 +1171,7 @@ describe("workflow: task progress", function () {
       ) as HTMLElement;
     await assertPaperChatThreshold(rootOf, "standalone", window);
     await switchToLibrary(rootOf, "standalone");
+    await exerciseCurtain(rootOf, "standalone", window);
     await exerciseLibraryRun(rootOf, "standalone", window);
     await exerciseLongList(rootOf, "standalone", window);
     await api.closeStandalone();

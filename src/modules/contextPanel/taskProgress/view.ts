@@ -17,6 +17,15 @@
  * heights (CSS cannot transition to `auto`); with reduced motion, or without
  * a layout (unit tests), every change settles at once.
  *
+ * The row itself is there only when it has something to show
+ * (`visibility.ts`). When it comes or goes in the conversation on screen it
+ * lowers from under the header, or rises back, like a curtain: the card sits
+ * in a curtain whose height moves between 0 and the card's, while the card
+ * slides by its own height inside it, clipped at the curtain's top edge. The
+ * chat below follows the curtain's height and keeps its reading place on
+ * every frame. A mount, a conversation switch and a conversation still
+ * loading put the row in its state at once.
+ *
  * Across questions the view accumulates: a paper shows the strongest state
  * any question gave it, its details are grouped by question, and the counts
  * (row and header) describe the latest question.
@@ -42,13 +51,17 @@ import {
   displayedTaskRunState,
   getTaskProgress,
   getTaskProgressViewMemo,
+  isTaskRunLive,
   rememberTaskProgressView,
   subscribeTaskProgress,
   type TaskProgressRecord,
   type TaskRunState,
 } from "./store";
 import {
+  shouldAnimateTaskProgressRow,
   shouldShowTaskProgress,
+  taskProgressContextApplies,
+  type TaskProgressRowFrame,
   type TaskProgressVisibilityInput,
 } from "./visibility";
 
@@ -83,6 +96,10 @@ export const TASK_PROGRESS_OPEN_PASSAGE_EVENT =
   "llm-task-progress-open-passage";
 /** On the chat shell while the Task progress card is in it. */
 const PRESENT_CLASS = "llm-task-progress-present";
+/** The box the card lowers from and rises into (`createTaskProgressCurtain`). */
+const CURTAIN_CLASS = "llm-task-progress-curtain";
+/** On the chat shell while the card is in it: where the row's curtain stands. */
+const SHELL_CURTAIN_ATTR = "data-task-progress-curtain";
 /** On the panel while the drag handle is held. */
 const RESIZING_CLASS = "llm-task-progress-resizing";
 /** On the row's parent while the row shows: the header drops its divider. */
@@ -635,6 +652,21 @@ export function createTaskProgressCard(doc: Document): HTMLElement {
 }
 
 /**
+ * The curtain the card lowers from and rises into, first in
+ * `#llm-chat-shell`. At rest it makes no box (`display: contents`), so the
+ * card lays out as the shell's own child; while the row lowers or rises it is
+ * a box as tall as the part of the card shown, clipped at its top edge.
+ * Hidden, with the card, until the row has something to show.
+ */
+export function createTaskProgressCurtain(doc: Document): HTMLElement {
+  const curtain = el(doc, "div", CURTAIN_CLASS);
+  curtain.hidden = true;
+  curtain.dataset.curtain = "closed";
+  curtain.append(createTaskProgressCard(doc));
+  return curtain;
+}
+
+/**
  * The drawer, first in `#llm-chat-shell`: a scrolling body and a drag handle
  * on its bottom edge. Hidden until the row opens it.
  */
@@ -706,6 +738,8 @@ export type TaskProgressViewDeps = {
 export type TaskProgressLayout = {
   /** The drawer's height transition in ms; 0 when motion is reduced. */
   motionMs: () => number;
+  /** The row's lowering and rising in ms; 0 when motion is reduced. */
+  curtainMs: () => number;
   /** The least height the chat keeps below the shown drawer. */
   chatStripPx: () => number;
   /** Watch the drawer's size; returns the disconnect. */
@@ -715,6 +749,8 @@ export type TaskProgressLayout = {
 };
 
 export type TaskProgressDrawerState = "closed" | "opening" | "open" | "closing";
+/** The row: up and gone, lowering, down, or rising. */
+export type TaskProgressCurtainState = TaskProgressDrawerState;
 
 export type TaskProgressViewInput = {
   conversationKey: number | null;
@@ -723,6 +759,12 @@ export type TaskProgressViewInput = {
   visibility: Omit<TaskProgressVisibilityInput, "planSeen">;
   /** False in plain chat: reads are not recorded, only the scope lists. */
   recordsReads: boolean;
+  /**
+   * False while the context bar is not yet set up for the conversation (the
+   * latest question's contexts stand in): a change then is the conversation
+   * loading, and the row takes it without motion. Absent means set up.
+   */
+  composerReady?: boolean;
 };
 
 export type TaskProgressView = {
@@ -731,7 +773,9 @@ export type TaskProgressView = {
   /** The state asked for; the drawer may still be animating toward it. */
   isOpen: () => boolean;
   drawerState: () => TaskProgressDrawerState;
+  /** Whether the row has something to show; it may still be lowering or rising. */
   isVisible: () => boolean;
+  curtainState: () => TaskProgressCurtainState;
   /** Repaint now, skipping the coalescing delay. */
   flush: () => void;
   dispose: () => void;
@@ -775,6 +819,8 @@ export function mountTaskProgressView(params: {
     ".llm-task-progress-pill",
   ) as HTMLElement | null;
   const card = row.closest(".llm-task-progress-card") as HTMLElement | null;
+  const curtain = (card &&
+    row.closest(`.${CURTAIN_CLASS}`)) as HTMLElement | null;
 
   let input: TaskProgressViewInput = {
     conversationKey: null,
@@ -850,6 +896,25 @@ export function mountTaskProgressView(params: {
       ...input.visibility,
       planSeen: Boolean(current?.planSeen),
     });
+
+  /** What this paint stands on: how the next change of the row moves. */
+  const rowFrame = (
+    current: TaskProgressRecord | null,
+  ): TaskProgressRowFrame => ({
+    identity: [
+      input.conversationKey ?? "",
+      input.visibility.conversationKind,
+      input.visibility.isWebChat,
+      input.visibility.isNoteSession,
+    ].join("\u0000"),
+    shown: visible,
+    contextApplies: taskProgressContextApplies(input.visibility),
+    runSteps: Boolean(current?.planSeen),
+    composerReady: input.composerReady !== false,
+    runLive: isTaskRunLive(current),
+  });
+  /** The previous paint's frame; null before the first. */
+  let lastFrame: TaskProgressRowFrame | null = null;
 
   // -------------------------------------------------------------------------
   // Drawer motion
@@ -931,6 +996,8 @@ export function mountTaskProgressView(params: {
     animated = true,
     options: { remember?: boolean } = {},
   ) => {
+    // The card must keep its height while the row lowers: finish lowering.
+    if (curtainState === "opening") settleCurtain("open");
     open = next;
     row.setAttribute("aria-expanded", next ? "true" : "false");
     moveDrawer(next ? "open" : "closed", animated);
@@ -953,6 +1020,128 @@ export function mountTaskProgressView(params: {
   };
   const stopObservingDrawer =
     deps.layout?.observeResize(drawer, onDrawerResize) || (() => undefined);
+
+  // -------------------------------------------------------------------------
+  // The row lowering and rising
+  // -------------------------------------------------------------------------
+
+  /** Up and gone at mount: `createTaskProgressCurtain` builds it hidden. */
+  let curtainState: TaskProgressCurtainState = row.hidden ? "closed" : "open";
+  let curtainTimer: unknown = null;
+  /** The curtain's height with the row down, measured as a motion starts. */
+  let curtainOpenPx = 0;
+
+  const clearCurtainTimer = () => {
+    if (curtainTimer === null) return;
+    deps.clearTimeout(curtainTimer);
+    curtainTimer = null;
+  };
+
+  /**
+   * The shell says where the row stands while it is in the flow: its gap
+   * under the header is taken back only while the row lowers or is down
+   * (never in the pose a lowering starts from), and moves with the row.
+   */
+  const syncShellCurtain = () => {
+    const value = shell.classList.contains(PRESENT_CLASS) ? curtainState : null;
+    if (shell.getAttribute(SHELL_CURTAIN_ATTR) === value) return;
+    if (value) shell.setAttribute(SHELL_CURTAIN_ATTR, value);
+    else shell.removeAttribute(SHELL_CURTAIN_ATTR);
+  };
+
+  const setCurtainState = (next: TaskProgressCurtainState) => {
+    curtainState = next;
+    if (curtain && curtain.dataset.curtain !== next)
+      curtain.dataset.curtain = next;
+    syncShellCurtain();
+  };
+
+  /** The row's boxes are in the flow from the moment it lowers until it is up. */
+  const setRowPresent = (present: boolean) => {
+    if (row.hidden !== !present) row.hidden = !present;
+    if (card && card.hidden !== !present) card.hidden = !present;
+    if (curtain && curtain.hidden !== !present) curtain.hidden = !present;
+    if (shell.classList.contains(PRESENT_CLASS) !== present)
+      shell.classList.toggle(PRESENT_CLASS, present);
+    syncShellCurtain();
+  };
+
+  /** End the motion, or skip it: the row down at its own height, or gone. */
+  function settleCurtain(target: "open" | "closed") {
+    clearCurtainTimer();
+    if (curtain?.style.height) curtain.style.height = "";
+    if (card?.style.height) card.style.height = "";
+    setCurtainState(target);
+    setRowPresent(target === "open");
+    // Nothing to roll the drawer up toward once the row itself is gone.
+    if (target === "closed") closeAtOnce();
+  }
+
+  /**
+   * Lower or raise the row. The curtain's height moves between measured
+   * pixel heights while the card, rigid inside it, slides by its own height
+   * (the CSS), so the card's lower edge rides the curtain's. A reversal
+   * mid-way runs both back from where they are. Without motion (reduced, no
+   * layout, or a change that must not move) it settles at once.
+   */
+  const moveCurtain = (target: "open" | "closed", animated: boolean) => {
+    if (curtainState === target) return;
+    const ms =
+      animated && curtain && card && deps.layout ? deps.layout.curtainMs() : 0;
+    if (!(ms > 0) || !curtain || !card) {
+      settleCurtain(target);
+      return;
+    }
+    if (curtainState === (target === "open" ? "opening" : "closing")) return;
+    clearCurtainTimer();
+    if (target === "open") {
+      if (curtainState === "closed") {
+        // The pose it lowers from: the card above the curtain's top edge.
+        setRowPresent(true);
+        curtain.style.height = "";
+        curtainOpenPx = heightOf(curtain);
+        curtain.style.height = "0px";
+        heightOf(curtain); // Flush, so the motion starts from here.
+      }
+      curtain.style.height = `${curtainOpenPx}px`;
+      setCurtainState("opening");
+    } else {
+      if (curtainState === "open") {
+        // The card rises as it stands, an open drawer in it included.
+        card.style.height = `${heightOf(card)}px`;
+        setCurtainState("closing");
+        curtain.style.height = "";
+        curtainOpenPx = heightOf(curtain);
+        curtain.style.height = `${curtainOpenPx}px`;
+        heightOf(curtain);
+      } else {
+        setCurtainState("closing");
+      }
+      curtain.style.height = "0px";
+    }
+    // Flush once more: the curtain and the card start moving together.
+    heightOf(curtain);
+    curtainTimer = deps.setTimeout(() => {
+      curtainTimer = null;
+      settleCurtain(curtainState === "closing" ? "closed" : "open");
+    }, ms + SETTLE_GRACE_MS);
+  };
+
+  const onCurtainTransitionEnd = (event: Event) => {
+    if (event.target !== curtain) return;
+    if ((event as TransitionEvent).propertyName !== "height") return;
+    if (curtainState === "opening") settleCurtain("open");
+    else if (curtainState === "closing") settleCurtain("closed");
+  };
+
+  /** Every frame the row moves, the chat keeps its bottom or reading place. */
+  const onCurtainResize = () => {
+    if (curtainState !== "opening" && curtainState !== "closing") return;
+    deps.layout?.onChatResized();
+  };
+  const stopObservingCurtain =
+    (curtain && deps.layout?.observeResize(curtain, onCurtainResize)) ||
+    (() => undefined);
 
   // -------------------------------------------------------------------------
   // Drag handle
@@ -1450,12 +1639,21 @@ export function mountTaskProgressView(params: {
     adoptRecord(current);
     paintedVersion = current?.version ?? -1;
     visible = computeVisible(current);
+    const frame = rowFrame(current);
+    const animated = shouldAnimateTaskProgressRow(lastFrame, frame);
+    // Only a new target or another conversation moves the row; any other
+    // repaint lets a motion under way run through.
+    const target = visible ? "open" : "closed";
+    const placeRow =
+      !lastFrame ||
+      lastFrame.identity !== frame.identity ||
+      lastFrame.shown !== frame.shown ||
+      (curtainState !== target &&
+        curtainState !== (visible ? "opening" : "closing"));
+    lastFrame = frame;
     // Unchanged values are not written: a same-value write is still a DOM
-    // mutation, and a streaming answer must cause none here.
-    if (row.hidden !== !visible) row.hidden = !visible;
-    if (card && card.hidden !== !visible) card.hidden = !visible;
-    if (shell.classList.contains(PRESENT_CLASS) !== visible)
-      shell.classList.toggle(PRESENT_CLASS, visible);
+    // mutation, and a streaming answer must cause none here. The row's own
+    // boxes follow the curtain (`moveCurtain`), below.
     // The card is the separation under the header: the header's own divider
     // gives way while it shows.
     const rowHost = (row.closest(".llm-panel") ||
@@ -1482,11 +1680,9 @@ export function mountTaskProgressView(params: {
       .join(", ");
     if (row.getAttribute("aria-label") !== ariaLabel)
       row.setAttribute("aria-label", ariaLabel);
-    if (!visible) {
-      // Nothing to roll up toward: the row itself is gone.
-      closeAtOnce();
-      return;
-    }
+    // The row rises with an open drawer in it, rolled up once the row is up.
+    if (placeRow) moveCurtain(target, animated);
+    if (!visible) return;
     if (current && current.collapseSeq !== seenCollapseSeq) {
       seenCollapseSeq = current.collapseSeq;
       if (open) {
@@ -1636,6 +1832,7 @@ export function mountTaskProgressView(params: {
   keyTarget.addEventListener("keydown", onKeyDown);
   body.addEventListener("scroll", onScroll);
   drawer.addEventListener("transitionend", onTransitionEnd);
+  curtain?.addEventListener("transitionend", onCurtainTransitionEnd);
   grip.addEventListener("mousedown", onGripMouseDown);
   grip.addEventListener("keydown", onGripKeyDown);
   grip.addEventListener("dblclick", onGripDoubleClick);
@@ -1668,6 +1865,7 @@ export function mountTaskProgressView(params: {
     isOpen: () => open,
     drawerState: () => drawerState,
     isVisible: () => visible,
+    curtainState: () => curtainState,
     flush,
     renderedRowCount: () => orderedRefs.length,
     dispose() {
@@ -1679,11 +1877,14 @@ export function mountTaskProgressView(params: {
       flashTimers.clear();
       endDrag();
       clearSettleTimer();
+      clearCurtainTimer();
       stopObservingDrawer();
+      stopObservingCurtain();
       row.removeEventListener("click", onRowClick);
       keyTarget.removeEventListener("keydown", onKeyDown);
       body.removeEventListener("scroll", onScroll);
       drawer.removeEventListener("transitionend", onTransitionEnd);
+      curtain?.removeEventListener("transitionend", onCurtainTransitionEnd);
       grip.removeEventListener("mousedown", onGripMouseDown);
       grip.removeEventListener("keydown", onGripKeyDown);
       grip.removeEventListener("dblclick", onGripDoubleClick);

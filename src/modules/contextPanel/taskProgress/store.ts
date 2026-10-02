@@ -175,6 +175,13 @@ function isLive(state: TaskRunState): boolean {
   return state === "working" || state === "answering" || state === "waiting";
 }
 
+/** True while the record's run works, answers or waits on the user. */
+export function isTaskRunLive(
+  record: TaskProgressRecord | null | undefined,
+): boolean {
+  return Boolean(record && isLive(record.runState));
+}
+
 /**
  * Evict the least recently written idle records beyond the limit, never
  * `keep` (the record the caller is making room for) and never a live one.

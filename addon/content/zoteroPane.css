@@ -14869,6 +14869,67 @@ item-pane-sidenav .llm-persistent-rail-entry[hidden] {
   display: none;
 }
 
+/* The row lowers from under the header and rises back like a curtain, with
+   the motion of the sidebar header's mode switch: 300 ms on its ease, the
+   card fading in over 200 ms and out over 180 ms. */
+.llm-chat-shell {
+  --llm-task-progress-curtain-duration: 300ms;
+  --llm-task-progress-curtain-ease: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* At rest the curtain makes no box: the card is the shell's own flex item.
+   view.ts moves its height (inline) between measured heights. */
+.llm-task-progress-curtain {
+  display: contents;
+  transition: height var(--llm-task-progress-curtain-duration)
+    var(--llm-task-progress-curtain-ease);
+}
+
+.llm-task-progress-curtain[hidden] {
+  display: none !important;
+}
+
+/* Moving, a box as tall as the part of the card shown, clipped at its top
+   edge only (the dark theme's shadow still falls on the chat). The card
+   keeps its height inside and slides by it, its lower edge on the
+   curtain's. */
+.llm-task-progress-curtain:not([data-curtain="open"]) {
+  position: relative;
+  z-index: 8;
+  display: flow-root;
+  flex: 0 0 auto;
+  box-sizing: border-box;
+  min-height: 0;
+  clip-path: inset(0 -24px -24px -24px);
+}
+
+.llm-task-progress-curtain[data-curtain="closed"] > .llm-task-progress-card,
+.llm-task-progress-curtain[data-curtain="closing"] > .llm-task-progress-card {
+  opacity: 0;
+  transform: translateY(-100%);
+}
+
+.llm-task-progress-curtain[data-curtain="opening"] > .llm-task-progress-card {
+  transition:
+    transform var(--llm-task-progress-curtain-duration)
+      var(--llm-task-progress-curtain-ease),
+    opacity 200ms ease;
+}
+
+.llm-task-progress-curtain[data-curtain="closing"] > .llm-task-progress-card {
+  transition:
+    transform var(--llm-task-progress-curtain-duration)
+      var(--llm-task-progress-curtain-ease),
+    opacity 180ms ease;
+}
+
+/* The shell's gap under the header moves with the row. */
+.llm-chat-shell[data-task-progress-curtain="opening"],
+.llm-chat-shell[data-task-progress-curtain="closing"] {
+  transition: margin-top var(--llm-task-progress-curtain-duration)
+    var(--llm-task-progress-curtain-ease);
+}
+
 /* Paragraph evidence uses the shared source footer and its accessible popover. */
 .llm-paper-source-icon {
   width: 1em;
@@ -15179,8 +15240,10 @@ item-pane-sidenav .llm-persistent-rail-entry[hidden] {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .llm-task-progress-curtain,
   .llm-task-progress-card,
-  .llm-task-progress-card * {
+  .llm-task-progress-card *,
+  .llm-chat-shell[data-task-progress-curtain] {
     animation: none !important;
     transition: none !important;
   }
@@ -15195,16 +15258,23 @@ item-pane-sidenav .llm-persistent-rail-entry[hidden] {
 }
 
 /* The card is the third header row: the same gap under the actions row as
-   between the toggle and the actions (the panel's own gap is taken back). */
+   between the toggle and the actions (the panel's own gap is taken back).
+   Only while the row lowers or is down: the gap moves with the row. */
 .llm-panel:not([data-standalone="true"])
-  .llm-chat-shell.llm-task-progress-present {
+  .llm-chat-shell.llm-task-progress-present[data-task-progress-curtain="opening"],
+.llm-panel:not([data-standalone="true"])
+  .llm-chat-shell.llm-task-progress-present[data-task-progress-curtain="open"] {
   margin-top: -8px;
 }
 
 :root:not([data-llm-pane-view="stacked"])
   .llm-dedicated-chat-pane
   .llm-panel:not([data-standalone="true"])
-  .llm-chat-shell.llm-task-progress-present {
+  .llm-chat-shell.llm-task-progress-present[data-task-progress-curtain="opening"],
+:root:not([data-llm-pane-view="stacked"])
+  .llm-dedicated-chat-pane
+  .llm-panel:not([data-standalone="true"])
+  .llm-chat-shell.llm-task-progress-present[data-task-progress-curtain="open"] {
   margin-top: -12px;
 }
 

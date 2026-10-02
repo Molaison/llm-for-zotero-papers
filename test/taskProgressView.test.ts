@@ -14,6 +14,7 @@ import {
   completeTaskRun,
   endTaskRun,
   getTaskProgress,
+  hydrateTaskProgress,
   markTaskAnswering,
   markTaskWaiting,
   setTaskOutcomes,
@@ -26,6 +27,7 @@ import {
   TASK_PROGRESS_OPEN_PASSAGE_EVENT,
   TASK_PROGRESS_DRAWER_MIN_PX,
   TASK_PROGRESS_WINDOW,
+  createTaskProgressCurtain,
   createTaskProgressDrawer,
   createTaskProgressRow,
   cleanTaskPaperSnippet,
@@ -199,6 +201,7 @@ function fakeLayout(options: { ms?: number; strip?: number } = {}) {
   let chatResized = 0;
   const layout: TaskProgressLayout = {
     motionMs: () => options.ms ?? 200,
+    curtainMs: () => options.ms ?? 200,
     chatStripPx: () => options.strip ?? 96,
     observeResize: (_target, onResize) => {
       observers.push(onResize);
@@ -1872,5 +1875,407 @@ describe("task progress view of an outcome ledger", function () {
       assert.notEqual(t("Needs input"), "Needs input");
       assert.equal(detailOf(pickRow), "Needs input");
     });
+  });
+});
+
+describe("task progress curtain", function () {
+  const views: TaskProgressView[] = [];
+  afterEach(function () {
+    for (const view of views.splice(0)) view.dispose();
+    clearAllTaskProgress();
+    resetTaskProgressDrawerHeight();
+  });
+
+  /** The card's collapsed height: the 38px row and its 1px borders. */
+  const CARD = 40;
+  /** The card's gap to the chat below, inside the curtain while it moves. */
+  const GAP = 6;
+  /** The drawer's content height when it is open. */
+  const DRAWER = 300;
+
+  const libraryInput = (
+    contexts: { paperCount?: number; collectionCount?: number } = {},
+    extra: Partial<TaskProgressViewInput> = {},
+  ): TaskProgressViewInput => ({
+    conversationKey: KEY,
+    recordsReads: true,
+    composerReady: true,
+    visibility: {
+      conversationKind: "global",
+      isWebChat: false,
+      isNoteSession: false,
+      collectionCount: contexts.collectionCount || 0,
+      tagCount: 0,
+      paperCount: contexts.paperCount || 0,
+    },
+    ...extra,
+  });
+
+  /**
+   * The row as `buildUI` places it: in its card, in the curtain, first in
+   * the chat shell. Heights are faked: the card is 40px (more with the drawer
+   * open) unless frozen; the curtain is its inline height, or the card and
+   * its gap.
+   */
+  function mountCurtain(
+    input: TaskProgressViewInput = libraryInput(),
+    options: { curtainMs?: number; layout?: false } = {},
+  ) {
+    const timers = new Map<number, { callback: () => void; ms: number }>();
+    let handle = 0;
+    const curtain = createTaskProgressCurtain(
+      fakeDocument,
+    ) as unknown as FakeElement;
+    const card = curtain.findByClass("llm-task-progress-card")!;
+    const row = card.findByClass("llm-task-progress")!;
+    const drawer = card.findByClass("llm-task-progress-drawer")!;
+    const shell = new FakeElement("div");
+    shell.className = "llm-chat-shell";
+    const messages = new FakeElement("div");
+    messages.className = "llm-messages";
+    shell.append(curtain, messages);
+    const panel = new FakeElement("div");
+    panel.className = "llm-panel";
+    panel.append(shell);
+    const observed: Array<{ target: unknown; onResize: () => void }> = [];
+    let chatResized = 0;
+    const cardHeight = () => {
+      const inline = parseFloat(String(card.style.height || ""));
+      if (Number.isFinite(inline)) return inline;
+      return CARD + ((drawer as any).hidden === false ? DRAWER : 0);
+    };
+    (card as any).getBoundingClientRect = () => ({ height: cardHeight() });
+    (curtain as any).getBoundingClientRect = () => {
+      const inline = parseFloat(String(curtain.style.height || ""));
+      return { height: Number.isFinite(inline) ? inline : cardHeight() + GAP };
+    };
+    (drawer as any).getBoundingClientRect = () => ({
+      height: (drawer as any).hidden === false ? DRAWER : 0,
+    });
+    const layout: TaskProgressLayout = {
+      motionMs: () => 0,
+      curtainMs: () => options.curtainMs ?? 300,
+      chatStripPx: () => 96,
+      observeResize: (target, onResize) => {
+        const entry = { target, onResize };
+        observed.push(entry);
+        return () => observed.splice(observed.indexOf(entry), 1);
+      },
+      onChatResized: () => {
+        chatResized += 1;
+      },
+    };
+    const view = mountTaskProgressView({
+      doc: fakeDocument,
+      row: row as unknown as HTMLButtonElement,
+      drawer: drawer as unknown as HTMLElement,
+      shell: shell as unknown as HTMLElement,
+      chatBox: messages as unknown as HTMLElement,
+      keyTarget: panel as unknown as HTMLElement,
+      deps: {
+        setTimeout: (callback, ms) => {
+          timers.set(++handle, { callback, ms });
+          return handle;
+        },
+        clearTimeout: (id) => timers.delete(id as number),
+        now: () => 0,
+        layout: options.layout === false ? undefined : layout,
+      },
+    });
+    views.push(view);
+    view.setInput(input);
+    return {
+      view,
+      curtain,
+      card,
+      row,
+      drawer,
+      shell,
+      panel,
+      timers,
+      chatResized: () => chatResized,
+      /** The curtain's own resize observer, as the browser would fire it. */
+      resizeCurtain: () =>
+        observed
+          .filter((entry) => entry.target === curtain)
+          .forEach((entry) => entry.onResize()),
+      /** The context bar now holds this many papers and folders. */
+      context: (
+        contexts: { paperCount?: number; collectionCount?: number },
+        extra: Partial<TaskProgressViewInput> = {},
+      ) => view.setInput(libraryInput(contexts, extra)),
+      settleByTimer: () => {
+        for (const [id, timer] of Array.from(timers)) {
+          if (timer.ms < 300) continue;
+          timers.delete(id);
+          timer.callback();
+        }
+      },
+      state: () => curtain.dataset.curtain,
+    };
+  }
+
+  const hidden = (node: FakeElement) => (node as any).hidden === true;
+  /** The inline height a node carries; "" when none was ever written. */
+  const inline = (node: FakeElement) => String(node.style.height || "");
+  const curtainAttr = "data-task-progress-curtain";
+
+  it("shows no row in a library chat with nothing added", function () {
+    const tp = mountCurtain();
+    assert.isFalse(tp.view.isVisible());
+    assert.equal(tp.state(), "closed");
+    assert.isTrue(hidden(tp.curtain), "the curtain takes no room");
+    assert.isTrue(hidden(tp.card));
+    assert.isTrue(hidden(tp.row));
+    assert.isFalse(tp.shell.classList.contains("llm-task-progress-present"));
+    assert.isNull(tp.shell.getAttribute(curtainAttr));
+  });
+
+  it("lowers the row from under the header when a paper is added, and raises it when the last goes", function () {
+    const tp = mountCurtain();
+    // What the shell says while the row moves: its gap under the header
+    // follows "opening" and "open" only, never the pose a lowering starts
+    // from.
+    const shellStates: Array<string | null> = [];
+    const setAttribute = tp.shell.setAttribute.bind(tp.shell);
+    tp.shell.setAttribute = (name: string, value: string) => {
+      if (name === curtainAttr) shellStates.push(value);
+      setAttribute(name, value);
+    };
+    tp.context({ paperCount: 1 });
+    assert.deepEqual(shellStates, ["closed", "opening"]);
+    assert.isTrue(tp.view.isVisible());
+    assert.equal(tp.state(), "opening");
+    assert.isFalse(hidden(tp.curtain));
+    assert.isFalse(hidden(tp.card));
+    assert.isFalse(hidden(tp.row));
+    assert.equal(
+      inline(tp.curtain),
+      `${CARD + GAP}px`,
+      "toward the card and its gap",
+    );
+    assert.isTrue(tp.shell.classList.contains("llm-task-progress-present"));
+    assert.equal(tp.shell.getAttribute(curtainAttr), "opening");
+    assert.isTrue(
+      Array.from(tp.timers.values()).some((timer) => timer.ms === 380),
+      "a fallback settles a missed transitionend",
+    );
+    // Only the curtain's own height ends the motion.
+    tp.curtain.dispatchFakeEvent("transitionend", {
+      target: tp.card,
+      propertyName: "transform",
+    } as never);
+    assert.equal(tp.state(), "opening");
+    tp.curtain.dispatchFakeEvent("transitionend", {
+      target: tp.curtain,
+      propertyName: "height",
+    } as never);
+    assert.equal(tp.state(), "open");
+    assert.equal(inline(tp.curtain), "", "released to the card");
+    assert.equal(tp.shell.getAttribute(curtainAttr), "open");
+
+    tp.context({ paperCount: 0 });
+    assert.isFalse(tp.view.isVisible());
+    assert.equal(tp.state(), "closing");
+    assert.equal(inline(tp.curtain), "0px");
+    assert.equal(inline(tp.card), `${CARD}px`, "the card moves rigid");
+    assert.isFalse(hidden(tp.row), "the row stays drawn while it rises");
+    assert.equal(tp.shell.getAttribute(curtainAttr), "closing");
+    assert.isTrue(tp.shell.classList.contains("llm-task-progress-present"));
+    tp.curtain.dispatchFakeEvent("transitionend", {
+      target: tp.curtain,
+      propertyName: "height",
+    } as never);
+    assert.equal(tp.state(), "closed");
+    assert.isTrue(hidden(tp.curtain));
+    assert.isTrue(hidden(tp.card));
+    assert.isTrue(hidden(tp.row));
+    assert.equal(inline(tp.curtain), "");
+    assert.equal(inline(tp.card), "");
+    assert.isFalse(tp.shell.classList.contains("llm-task-progress-present"));
+    assert.isNull(tp.shell.getAttribute(curtainAttr));
+  });
+
+  it("reverses mid-way, and settles where the last change points", function () {
+    const tp = mountCurtain();
+    tp.context({ paperCount: 1 });
+    tp.context({ paperCount: 0 });
+    assert.equal(tp.state(), "closing");
+    assert.equal(inline(tp.curtain), "0px");
+    tp.context({ paperCount: 1 });
+    assert.equal(tp.state(), "opening");
+    assert.equal(inline(tp.curtain), `${CARD + GAP}px`);
+    tp.settleByTimer();
+    assert.equal(tp.state(), "open");
+    assert.isFalse(hidden(tp.row));
+    assert.equal(inline(tp.curtain), "");
+
+    tp.context({ paperCount: 0 });
+    tp.context({ paperCount: 1 });
+    tp.context({ paperCount: 0 });
+    assert.equal(tp.state(), "closing");
+    tp.settleByTimer();
+    assert.equal(tp.state(), "closed");
+    assert.isTrue(hidden(tp.row));
+    assert.equal(inline(tp.card), "");
+    assert.isFalse(tp.shell.classList.contains("llm-task-progress-present"));
+  });
+
+  it("lets a motion run through repaints that change nothing it shows", function () {
+    const tp = mountCurtain();
+    beginTaskRun(KEY, { runId: "run-a" });
+    tp.view.flush();
+    tp.context({ paperCount: 1 });
+    assert.equal(tp.state(), "opening");
+    applyTaskPaperUpdate(KEY, ledgerDelta("c1", [[1, "read"]]), "run-a");
+    tp.view.flush();
+    tp.context({ paperCount: 2 });
+    assert.equal(tp.state(), "opening", "still lowering");
+    assert.equal(inline(tp.curtain), `${CARD + GAP}px`);
+    tp.settleByTimer();
+    tp.context({ paperCount: 0 });
+    assert.equal(tp.state(), "closing");
+    applyTaskPaperUpdate(KEY, ledgerDelta("c2", [[2, "read"]]), "run-a");
+    tp.view.flush();
+    assert.equal(tp.state(), "closing", "still rising");
+    assert.isFalse(hidden(tp.row));
+  });
+
+  it("puts the row in its state at once on mount and on a conversation switch, even mid-way", function () {
+    const shown = mountCurtain(libraryInput({ paperCount: 1 }));
+    assert.equal(shown.state(), "open", "a mount shows it as it is");
+    assert.isFalse(hidden(shown.row));
+    assert.equal(inline(shown.curtain), "");
+    assert.equal(shown.shell.getAttribute(curtainAttr), "open");
+
+    shown.view.setInput(libraryInput({}, { conversationKey: KEY + 1 }));
+    assert.equal(shown.state(), "closed", "another conversation, no motion");
+    assert.isTrue(hidden(shown.row));
+    shown.view.setInput(libraryInput({ paperCount: 1 }));
+    assert.equal(shown.state(), "open");
+
+    shown.context({ paperCount: 0 });
+    assert.equal(shown.state(), "closing");
+    shown.view.setInput(
+      libraryInput({ collectionCount: 1 }, { conversationKey: KEY + 1 }),
+    );
+    assert.equal(shown.state(), "open", "the switch lands on its state");
+    assert.equal(inline(shown.curtain), "");
+    assert.equal(inline(shown.card), "");
+    assert.equal(shown.shell.getAttribute(curtainAttr), "open");
+    shown.view.setInput(libraryInput({ paperCount: 1 }));
+    shown.context({ paperCount: 0 });
+    shown.view.setInput(libraryInput({}, { conversationKey: KEY + 1 }));
+    assert.equal(shown.state(), "closed");
+    assert.isTrue(hidden(shown.curtain));
+    assert.isFalse(shown.shell.classList.contains("llm-task-progress-present"));
+  });
+
+  it("puts the row in its state at once while the context bar is set up from history", function () {
+    const tp = mountCurtain(libraryInput({}, { composerReady: false }));
+    tp.context({ paperCount: 1 });
+    assert.equal(tp.state(), "open");
+    assert.equal(tp.shell.getAttribute(curtainAttr), "open");
+  });
+
+  it("lowers the row for a live run's steps with nothing added, never for a run without steps", function () {
+    const tp = mountCurtain();
+    beginTaskRun(KEY, { runId: "run-a" });
+    tp.view.flush();
+    assert.equal(tp.state(), "closed", "a run with no steps shows nothing");
+    setTaskOutcomes(
+      KEY,
+      "run-a",
+      outcomeCheckpoint([outcomeTask("read", { effect: "read" })]),
+    );
+    tp.view.flush();
+    assert.equal(tp.state(), "opening");
+    tp.settleByTimer();
+    completeTaskRun(KEY, { runId: "run-a" });
+    tp.view.flush();
+    assert.equal(tp.state(), "open", "and it stays once the run is done");
+  });
+
+  it("shows steps rebuilt from history at once", function () {
+    const tp = mountCurtain();
+    hydrateTaskProgress(KEY, {
+      runs: [],
+      latestTurn: 1,
+      settled: "completed",
+      planSeen: true,
+      checklist: null,
+    });
+    tp.view.flush();
+    assert.equal(tp.state(), "open");
+    assert.isFalse(hidden(tp.row));
+  });
+
+  it("keeps the row when the last context goes while a run's steps are there", function () {
+    const tp = mountCurtain(libraryInput({ paperCount: 1 }));
+    beginTaskAction(KEY, { runId: "action-1", title: "Auto Tag" });
+    tp.view.flush();
+    tp.context({ paperCount: 0 });
+    assert.equal(tp.state(), "open");
+    assert.isFalse(hidden(tp.row));
+    assert.equal(tp.shell.getAttribute(curtainAttr), "open");
+  });
+
+  it("settles at once when motion is reduced, or without a window", function () {
+    for (const options of [{ curtainMs: 0 }, { layout: false as const }]) {
+      const tp = mountCurtain(libraryInput(), options);
+      tp.context({ paperCount: 1 });
+      assert.equal(tp.state(), "open", JSON.stringify(options));
+      assert.isFalse(hidden(tp.row));
+      assert.equal(inline(tp.curtain), "");
+      tp.context({ paperCount: 0 });
+      assert.equal(tp.state(), "closed", JSON.stringify(options));
+      assert.isTrue(hidden(tp.row));
+      assert.isNull(tp.shell.getAttribute(curtainAttr));
+    }
+  });
+
+  it("raises an open drawer with the row, and rolls it up once the row is gone", function () {
+    seedScope(5);
+    const tp = mountCurtain(libraryInput({ collectionCount: 1 }));
+    tp.row.dispatchFakeEvent("click");
+    assert.isTrue(tp.view.isOpen());
+    tp.context({});
+    assert.equal(tp.state(), "closing");
+    assert.isTrue(tp.view.isOpen(), "the drawer rises inside the card");
+    assert.equal(inline(tp.card), `${CARD + DRAWER}px`);
+    assert.equal(tp.drawer.dataset.state, "open");
+    tp.settleByTimer();
+    assert.equal(tp.state(), "closed");
+    assert.isFalse(tp.view.isOpen());
+    assert.equal(tp.drawer.dataset.state, "closed");
+    assert.isTrue(hidden(tp.drawer));
+    assert.equal(tp.row.getAttribute("aria-expanded"), "false");
+  });
+
+  it("finishes lowering at once when the drawer is opened mid-way", function () {
+    seedScope(5);
+    const tp = mountCurtain();
+    tp.context({ collectionCount: 1 });
+    assert.equal(tp.state(), "opening");
+    tp.row.dispatchFakeEvent("click");
+    assert.equal(tp.state(), "open");
+    assert.equal(inline(tp.curtain), "");
+    assert.isTrue(tp.view.isOpen());
+  });
+
+  it("keeps the chat's place on every frame the row moves", function () {
+    const tp = mountCurtain();
+    tp.resizeCurtain();
+    assert.equal(tp.chatResized(), 0, "nothing at rest");
+    tp.context({ paperCount: 1 });
+    tp.resizeCurtain();
+    tp.resizeCurtain();
+    assert.equal(tp.chatResized(), 2);
+    tp.settleByTimer();
+    tp.resizeCurtain();
+    assert.equal(tp.chatResized(), 2, "nothing once it settled");
+    tp.context({ paperCount: 0 });
+    tp.resizeCurtain();
+    assert.equal(tp.chatResized(), 3);
   });
 });

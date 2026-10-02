@@ -192,8 +192,8 @@ export function installTaskProgressRequestLifecycle(): void {
   if (lifecycleInstalled) return;
   lifecycleInstalled = true;
   // An action, a Codex plan or a run's outcomes make the row apply
-  // mid-conversation (a one-paper chat included): its panels sync once so
-  // the scope lists.
+  // mid-conversation (a one-paper chat, or a library chat with nothing
+  // added, included): its panels sync once so the scope lists.
   const stepsSeen = new Set<number>();
   subscribeTaskProgress((conversationKey) => {
     const record = getTaskProgress(conversationKey);
@@ -246,6 +246,7 @@ function resolvePanelInput(body: Element): TaskProgressViewInput | null {
     return {
       conversationKey: null,
       recordsReads,
+      composerReady: true,
       visibility: {
         conversationKind: "",
         isWebChat,
@@ -318,6 +319,10 @@ function resolvePanelInput(body: Element): TaskProgressViewInput | null {
   return {
     conversationKey,
     recordsReads,
+    // Until the context bar is set up for the conversation, the latest
+    // question's contexts stand in: the row takes that change at once.
+    composerReady:
+      initializedConversationComposeContextKeys.has(conversationKey),
     visibility,
     ...(conversationKind === "paper" && basePaperItemId > 0
       ? { basePaperItemId }
@@ -362,6 +367,9 @@ export function mountTaskProgressPanel(body: Element): TaskProgressView | null {
   const chatBox = body.querySelector("#llm-chat-box") as HTMLElement | null;
   const panelRoot = body.querySelector("#llm-main") as HTMLElement | null;
   if (!row || !drawer || !shell || !chatBox || !panelRoot) return null;
+  const curtain = row.closest(
+    ".llm-task-progress-curtain",
+  ) as HTMLElement | null;
   if (existing?.row === row) return existing.view;
   if (existing) {
     existing.view.dispose();
@@ -403,6 +411,8 @@ export function mountTaskProgressPanel(body: Element): TaskProgressView | null {
       layout: win
         ? {
             motionMs: () => transitionMs(win.getComputedStyle(drawer)),
+            curtainMs: () =>
+              curtain ? transitionMs(win.getComputedStyle(curtain)) : 0,
             chatStripPx: () =>
               parseFloat(win.getComputedStyle(chatBox)?.minHeight || "") || 0,
             observeResize: (target, onResize) => {
