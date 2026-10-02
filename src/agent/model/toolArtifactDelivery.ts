@@ -33,6 +33,11 @@ export type ToolWorkflowDelivery = {
 
 export type ToolWorkflowOutcome = {
   failed?: boolean;
+  /**
+   * Stop kept the call from starting: it ran nothing, and is neither a
+   * success nor a failure of the round.
+   */
+  notStarted?: true;
   toolResult: AgentToolResult;
   delivery?: ToolWorkflowDelivery;
   stopRun?: boolean;

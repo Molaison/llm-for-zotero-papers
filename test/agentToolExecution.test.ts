@@ -960,6 +960,78 @@ describe("agent tool execution collaborator", function () {
     }
   });
 
+  it("answers a call Stop kept from starting as not started: nothing runs, nothing is published, no receipt", async function () {
+    const restoreDb = installMockDb();
+    try {
+      const registry = new AgentToolRegistry(createTestActionContractService());
+      registerWriteTool(registry);
+      let executed = 0;
+      const tool = registry.getTool("note_write")!;
+      const execute = tool.execute.bind(tool);
+      tool.execute = (async (...args: Parameters<typeof execute>) => {
+        executed += 1;
+        return execute(...args);
+      }) as typeof tool.execute;
+      const harness = await createHarness(registry);
+      const stop = new AbortController();
+      stop.abort();
+      const evidence: OutcomeEvidence[] = [];
+      const toolExecution = createToolExecution({
+        ...harness.deps,
+        signal: stop.signal,
+        recordOutcomeEvidence: async (entry) => {
+          evidence.push(entry);
+        },
+      });
+
+      const outcome = await toolExecution.executeToolWorkflow(
+        { id: "call-after-stop", name: "note_write", arguments: {} },
+        1,
+        { modelCallId: "call-after-stop" },
+      );
+
+      assert.equal(executed, 0, "the tool never ran");
+      assert.deepEqual(
+        harness.events,
+        [],
+        "a call that never ran says nothing",
+      );
+      assert.deepEqual(
+        harness.records,
+        [],
+        "nor is it one of the turn's calls",
+      );
+      assert.deepEqual(evidence, [], "it is no evidence for the ledger");
+      assert.isTrue(outcome.notStarted);
+      assert.isUndefined(outcome.stopRun, "the next model step ends the run");
+      assert.deepEqual(outcome.toolResult, {
+        callId: "call-after-stop",
+        name: "note_write",
+        ok: false,
+        effect: "none",
+        actionReceipts: [],
+        content: {
+          status: "not_started",
+          error:
+            "Stopped before it started: the user pressed Stop, so this call did not run and changed nothing.",
+        },
+      });
+      assert.deepEqual(outcome.delivery, {
+        callId: "call-after-stop",
+        name: "note_write",
+        content: {
+          status: "not_started",
+          error:
+            "Stopped before it started: the user pressed Stop, so this call did not run and changed nothing.",
+          actionReceipts: [],
+        },
+        followupMessages: [],
+      });
+    } finally {
+      restoreDb();
+    }
+  });
+
   it("lets an ordinary turn's document include a figure its own figure read returned", async function () {
     const turn = await startFigureTurn();
     try {

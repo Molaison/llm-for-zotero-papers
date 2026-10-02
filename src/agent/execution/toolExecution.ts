@@ -986,7 +986,32 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
       followingCallCount?: number;
     } = {},
   ): Promise<ToolWorkflowOutcome> => {
-    if (deps.signal?.aborted) throw new Error("Aborted");
+    // Stop kept this call from starting. It is answered, not thrown: the
+    // round completes, so the results of the calls that ran before it (the
+    // only record of what they did) reach the transcript with it, and the
+    // next model step ends the run as cancelled. Nothing ran, so nothing is
+    // published, recorded or proved.
+    if (deps.signal?.aborted) {
+      const toolResult: AgentToolResult = {
+        callId: call.id,
+        name: call.name,
+        ok: false,
+        effect: "none",
+        actionReceipts: [],
+        content: {
+          status: "not_started",
+          error:
+            "Stopped before it started: the user pressed Stop, so this call did not run and changed nothing.",
+        },
+      };
+      return {
+        notStarted: true,
+        toolResult,
+        delivery: options.suppressModelDelivery
+          ? undefined
+          : await buildToolDelivery(toolResult, options.modelCallId || call.id),
+      };
+    }
     if (!deps.writeAllowed()) {
       return {
         failed: true,

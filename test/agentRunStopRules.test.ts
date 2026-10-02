@@ -5,7 +5,11 @@ import { AgentRuntime } from "../src/agent/runtime";
 import { AgentToolRegistry } from "../src/agent/tools/registry";
 import { clearAgentReadLedger } from "../src/agent/context/resourceContextPlan";
 import { clearAgentCoverageLedger } from "../src/agent/context/coverageLedger";
-import { clearAgentTranscriptStore } from "../src/agent/store/transcriptStore";
+import {
+  clearAgentTranscriptStore,
+  loadAgentTranscriptSegment,
+  PORTABLE_TRANSCRIPT_KEY,
+} from "../src/agent/store/transcriptStore";
 import { clearAgentToolResultHandleStore } from "../src/agent/store/toolResultHandles";
 import { INTERRUPTED_AGENT_RUN_MARKER } from "../src/agent/store/traceStore";
 import { createWebSearchTool } from "../src/agent/tools/read/webSearch";
@@ -641,6 +645,52 @@ describe("Original Agent run endings", function () {
     assert.isNull(ending.run.finalText);
     assertStoppedBy(ending, "cancelled_before_step", "cancelled");
   });
+
+  it("cancelled_before_step: a round Stop cut short keeps the result it let finish, beside the call it kept from starting", async function () {
+    const controller = new AbortController();
+    const registry = new AgentToolRegistry();
+    let runs = 0;
+    registerReadTool(registry, async () => {
+      runs += 1;
+      // The user presses Stop while the round's first call runs.
+      controller.abort();
+      return { notes: ["kept note"] };
+    });
+    const adapter = scriptedAdapter(() =>
+      toolStep([readCall("c1"), readCall("c2")]),
+    );
+    const ending = await runToEnding(installed, {
+      registry,
+      adapter,
+      signal: controller.signal,
+      request: baseRequest(97_319, "Read the notes twice"),
+    });
+
+    assert.equal(runs, 1, "Stop kept the second call from starting");
+    assert.equal(adapter.steps(), 1);
+    // The round reaches the stored transcript whole, so a resumed model
+    // neither redoes the call that ran nor takes the other for done.
+    const stored = await loadAgentTranscriptSegment({
+      conversationKey: 97_319,
+      compatibilityKey: PORTABLE_TRANSCRIPT_KEY,
+    });
+    const results = new Map(
+      stored.messages.flatMap((message) =>
+        message.role === "user" && message.retainedTool
+          ? [[message.retainedTool.callId, String(message.content)] as const]
+          : [],
+      ),
+    );
+    assert.deepEqual([...results.keys()], ["c1", "c2"]);
+    assert.include(results.get("c1"), "kept note");
+    assert.notInclude(results.get("c1"), "not_started");
+    assert.include(results.get("c2"), '"status":"not_started"');
+    assert.include(results.get("c2"), "Stopped before it started");
+    // The next model step ends the run, as Stop between rounds does.
+    assert.equal((ending.error as Error).message, "Aborted");
+    assert.equal(ending.run.status, "cancelled");
+    assertStoppedBy(ending, "cancelled_before_step", "cancelled");
+  });
   it("cancelled_in_flight: finishes as cancelled when the user stops a step in flight", async function () {
     const controller = new AbortController();
     const adapter = scriptedAdapter(() => {
@@ -674,6 +724,45 @@ describe("Original Agent run endings", function () {
     assert.equal(ending.run.status, "failed");
     assert.equal(ending.run.finalText, INTERRUPTED_AGENT_RUN_MARKER);
     assertStoppedBy(ending, "interrupted_by_error", "failed");
+  });
+
+  it("ends once: a run whose ending fails partway is not ended a second time", async function () {
+    // The answer is accepted, and then the run row's write fails.
+    const db = (globalThis as any).Zotero.DB;
+    const query = db.queryAsync;
+    let rowWrites = 0;
+    db.queryAsync = async (sql: string, params?: unknown[]) => {
+      if (
+        sql.includes("UPDATE llm_for_zotero_agent_runs") &&
+        !sql.includes("WHERE status = 'running'")
+      ) {
+        rowWrites += 1;
+        if (rowWrites === 1) throw new Error("Injected run row write failure");
+      }
+      return query(sql, params);
+    };
+    const ending = await runToEnding(installed, {
+      adapter: scriptedAdapter(() => finalStep("The answer.")),
+      request: baseRequest(97_320, "Explain this topic"),
+    });
+
+    assert.equal(
+      (ending.error as Error)?.message,
+      "Injected run row write failure",
+    );
+    assert.deepEqual(
+      ending.liveStops,
+      [{ rule: "final_answer", status: "completed" }],
+      "the run's one ending is the only one heard",
+    );
+    assert.deepEqual(ending.persistedStops, [
+      { rule: "final_answer", status: "completed" },
+    ]);
+    assert.equal(rowWrites, 1, "the run row is finished once");
+    // Its one write failed, so the row stays as the startup sweep finds it,
+    // never marked interrupted after the run answered.
+    assert.equal(ending.run.status, "running");
+    assert.isNull(ending.run.finalText);
   });
 
   it("tools_unsupported_fallback: hands a tool-less model back for a direct response", async function () {

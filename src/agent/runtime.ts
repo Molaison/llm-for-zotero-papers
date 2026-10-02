@@ -202,6 +202,11 @@ type AgentRuntimeDeps = {
   resolveTurnScopePapers?: (
     request: AgentRuntimeRequest,
   ) => Promise<TaskPaperScopeSet | undefined>;
+  /**
+   * How long a turn waits for its conversation's stopped run to settle;
+   * {@link STOPPED_RUN_WAIT_MS} unless a test exercises the bound.
+   */
+  stoppedRunWaitMs?: number;
 };
 
 /**
@@ -235,6 +240,74 @@ function createConfirmationRequestId(): string {
 const END_STATES_RECORDED_WITHOUT_OUTCOMES: ReadonlySet<RunEndState> =
   new Set<RunEndState>(["blocked", "interrupted", "completed_with_exceptions"]);
 
+/**
+ * How long a turn waits for its conversation's stopped run to settle.
+ * Stop is checked before a tool starts, so a tool running when it landed
+ * runs to its end, and the run settles after it. The tools that read the
+ * signal (web reads, retrieval, full-text reads, commands) end at once; the
+ * rest end within their own limits: a script's default deadline is 30 s, a
+ * literature search request 15 s, a note batch stops after its note in
+ * flight, and Zotero's own reads and writes take seconds. A minute covers
+ * them with room, and is about as long as a user watches a waiting status.
+ * A tool that runs longer (a script given its 120 s maximum, a large
+ * import) is not waited for: the turn goes on as it did before it waited.
+ */
+const STOPPED_RUN_WAIT_MS = 60_000;
+
+/**
+ * The latest turn this process started in each conversation, until it
+ * settles: the promise resolves once the turn has written everything it
+ * writes (the ledger's end, the run row, the transcript). A turn waits for
+ * the one before it (`latestSettledRun`), so turns started one after
+ * another settle in that order.
+ */
+const unsettledTurns = new Map<number, Promise<void>>();
+
+/** Whether `settling` resolves within `ms`. */
+function settlesWithin(settling: Promise<void>, ms: number): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    const timer = setTimeout(() => resolve(false), ms);
+    void settling.then(() => {
+      clearTimeout(timer);
+      resolve(true);
+    });
+  });
+}
+
+/**
+ * The conversation's latest run, once the turn before this one has
+ * settled. Stop releases the composer at once, while the run it stopped
+ * finishes the tool in flight and only then records its page and settles
+ * its ledger: read before that, the run is still running, so "continue"
+ * finds nothing to resume and starts the job over, and the two turns
+ * overwrite each other's transcript. So while the latest run is running and
+ * the turn before this one has not settled, this one waits for it, up to
+ * `waitMs`, and reads the latest run again. A run left running by a crash
+ * has no turn of this process behind it: it is the interrupted run the turn
+ * recovers.
+ */
+async function latestSettledRun(params: {
+  conversationKey: number;
+  /** The turn this process started before this one, until it settles. */
+  priorTurn: Promise<void> | undefined;
+  waitMs: number;
+  /** Says what the turn waits for; an observer failing on it is ignored. */
+  announce: () => void | Promise<void>;
+}): Promise<Awaited<ReturnType<typeof getLatestAgentRunForConversation>>> {
+  const latest = await getLatestAgentRunForConversation(params.conversationKey);
+  if (latest?.status !== "running" || !params.priorTurn) return latest;
+  try {
+    await params.announce();
+  } catch (error) {
+    logRuntimeWarning(
+      "LLM Agent: announcing the wait for a stopped run failed",
+      error,
+    );
+  }
+  if (!(await settlesWithin(params.priorTurn, params.waitMs))) return latest;
+  return getLatestAgentRunForConversation(params.conversationKey);
+}
+
 export class AgentRuntime {
   private readonly registry: AgentToolRegistry;
   private readonly adapterFactory: AgentRuntimeDeps["adapterFactory"];
@@ -242,6 +315,7 @@ export class AgentRuntime {
   private readonly now: () => number;
   private readonly reanchorCitations: typeof reanchorQuoteCitationsToClaims;
   private readonly resolveTurnScopePapers?: AgentRuntimeDeps["resolveTurnScopePapers"];
+  private readonly stoppedRunWaitMs: number;
   private readonly pendingConfirmations = new Map<
     string,
     PendingConfirmation
@@ -255,6 +329,7 @@ export class AgentRuntime {
     this.reanchorCitations =
       deps.reanchorCitations || reanchorQuoteCitationsToClaims;
     this.resolveTurnScopePapers = deps.resolveTurnScopePapers;
+    this.stoppedRunWaitMs = deps.stoppedRunWaitMs ?? STOPPED_RUN_WAIT_MS;
   }
 
   listTools() {
@@ -460,7 +535,9 @@ export class AgentRuntime {
       request.localDocuments?.map((entry) => entry.resource),
     );
     let webSourceRunId: string | undefined;
-    let runTerminalized = false;
+    // Set as the run starts to end: a run ends once, so an ending that fails
+    // partway (its run row's write throwing) is not followed by a second.
+    let runTerminating = false;
     let redactRunTerminalText = (value: string) => value;
     // The run's event stream, once it is open. An ending before then has no
     // stream to record its stop rule in.
@@ -534,6 +611,7 @@ export class AgentRuntime {
       finalText: string | undefined,
       stopRule: RunStopRule,
     ): Promise<void> => {
+      runTerminating = true;
       if (recordsOutcomes()) {
         try {
           const end = decideRunEnd(request.executionCheckpoint, {
@@ -569,12 +647,28 @@ export class AgentRuntime {
         logRuntimeWarning("LLM Agent: recording the stop rule failed", error);
       }
       await persistIfLive(() => finishAgentRun(runId, status, finalText));
-      runTerminalized = true;
     };
+    // A turn started while the one before it in this conversation is still
+    // settling waits for it (`latestSettledRun`); the next waits for this.
+    const priorTurn = unsettledTurns.get(request.conversationKey);
+    let settled = () => {};
+    const settling = new Promise<void>((resolve) => {
+      settled = resolve;
+    });
+    unsettledTurns.set(request.conversationKey, settling);
     try {
-      const latestPriorRun = await getLatestAgentRunForConversation(
-        request.conversationKey,
-      );
+      const latestPriorRun = await latestSettledRun({
+        conversationKey: request.conversationKey,
+        priorTurn,
+        waitMs: this.stoppedRunWaitMs,
+        announce: () =>
+          writeAllowed()
+            ? params.onEvent?.({
+                type: "status",
+                text: "Waiting for the stopped run to finish",
+              })
+            : undefined,
+      });
       const interruptedPriorRun =
         latestPriorRun?.status === "failed" &&
         latestPriorRun.finalText === INTERRUPTED_AGENT_RUN_MARKER
@@ -2618,7 +2712,11 @@ export class AgentRuntime {
             if (outcome.toolResult.ok) roundHadSuccessfulToolResult = true;
             else if (outcome.toolResult.inputRejected)
               roundHadInputRejection = true;
-            else if (!isUserDeniedToolResult(outcome.toolResult)) {
+            else if (
+              // A call Stop kept from starting failed at nothing.
+              !outcome.notStarted &&
+              !isUserDeniedToolResult(outcome.toolResult)
+            ) {
               const papers = namedItemTargets(call.arguments).filter((target) =>
                 jobPapers.has(target),
               );
@@ -2776,7 +2874,7 @@ export class AgentRuntime {
         segment += 1;
       }
     } catch (error) {
-      if (webSourceRunId && !runTerminalized) {
+      if (webSourceRunId && !runTerminating) {
         const message = redactRunTerminalText(
           error instanceof Error ? error.message : String(error),
         );
@@ -2796,6 +2894,9 @@ export class AgentRuntime {
       }
       throw error;
     } finally {
+      if (unsettledTurns.get(request.conversationKey) === settling)
+        unsettledTurns.delete(request.conversationKey);
+      settled();
       // Completion, provider failure, and abort all land here: write the one
       // usage row for this turn. It never throws, and it is not awaited so a
       // slow database cannot delay the turn's teardown.
