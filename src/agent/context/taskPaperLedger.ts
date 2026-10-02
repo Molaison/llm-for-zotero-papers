@@ -56,7 +56,13 @@ export type TaskPaperReadGranularity =
   | "passage"
   | "full"
   | "figure"
-  | "page";
+  | "page"
+  /**
+   * A host digest of the paper (`digests/paperDigestWorker.ts`): its summary
+   * as the snippet, or, without one, why the digest failed (`whyMatched`).
+   * Not the paper's own text: its evidence is recorded as `passage` reads.
+   */
+  | "digest";
 
 /** One thing the agent read from one paper during one tool call. */
 export type TaskPaperReadEvent = {
@@ -72,10 +78,15 @@ export type TaskPaperReadEvent = {
   method?: string;
   /** Section or page label, when the payload names one. */
   label?: string;
-  /** At most `TASK_PAPER_SNIPPET_MAX_CHARS` characters. */
+  /**
+   * At most `TASK_PAPER_SNIPPET_MAX_CHARS` characters
+   * (`TASK_PAPER_DIGEST_SNIPPET_MAX_CHARS` for a `digest` read).
+   */
   snippet?: string;
   /** At most `TASK_PAPER_WHY_MATCHED_MAX_CHARS` characters. */
   whyMatched?: string;
+  /** Chunk index of the paper's text the snippet came from, when known. */
+  chunk?: number;
   /** Host observation ids this read attested. */
   observationIds?: string[];
 };
@@ -187,6 +198,12 @@ export const TASK_PAPER_MAX_READS_PER_TURN = 12;
 export const TASK_PAPER_MAX_CITATIONS_PER_TURN = 8;
 export const TASK_PAPER_MAX_PAPERS = 5000;
 export const TASK_PAPER_SNIPPET_MAX_CHARS = 280;
+/**
+ * A host digest's summary is read in full on the paper's row, so its read
+ * keeps up to this many characters; its evidence passages keep the
+ * ordinary snippet cap.
+ */
+export const TASK_PAPER_DIGEST_SNIPPET_MAX_CHARS = 1600;
 export const TASK_PAPER_WHY_MATCHED_MAX_CHARS = 120;
 export const TASK_PAPER_CITATION_QUOTE_MAX_CHARS = 160;
 
@@ -206,7 +223,11 @@ export function taskPaperKey(libraryID: number, itemId: number): string {
   return `${libraryID}:${itemId}`;
 }
 
-/** Read granularities that return a paper's own text, not only its record. */
+/**
+ * Read granularities that return a paper's own text, not only its record.
+ * A `digest` read is the host's summary, not the paper's text: a digested
+ * paper counts by its state (`read`), a failed digest not at all.
+ */
 const TEXT_GRANULARITIES: ReadonlySet<TaskPaperReadGranularity> =
   new Set<TaskPaperReadGranularity>([
     "section",
@@ -1175,6 +1196,209 @@ function resolveRef(
     ref.libraryID || resolved?.libraryID || positive(params.libraryID);
   if (!itemId || !libraryID) return null;
   return { itemId, libraryID };
+}
+
+// ---------------------------------------------------------------------------
+// Host digests
+// ---------------------------------------------------------------------------
+
+/** The paper a host digest belongs to, as the host resolved it. */
+export type TaskPaperDigestPaper = {
+  libraryID: number;
+  itemId: number;
+  contextItemId?: number;
+  title?: string;
+  year?: string;
+  creator?: string;
+  itemKey?: string;
+};
+
+/**
+ * The fields of a `HostPaperDigest` (`digests/paperDigestWorker.ts`) the
+ * ledger records. Declared here, not imported: the worker's model client
+ * would otherwise join this module's import graph (and close a cycle
+ * through `agent/types.ts`). A `HostPaperDigest` is assignable to it.
+ */
+export type TaskPaperDigestInput = {
+  contextItemId?: number;
+  summary: string;
+  evidence?: ReadonlyArray<{ section?: string; quote: string; chunk?: number }>;
+  source?: { backend: "mineru" | "pdf" | "text" };
+};
+
+/** The fields of a `PaperDigestFailure` the ledger records. */
+export type TaskPaperDigestFailureInput = { reason: string };
+
+export type BuildDigestLedgerDeltaParams = {
+  runId?: string;
+  /** The `task_update` call that ran the digest job. */
+  callId: string;
+  toolName: string;
+  turnIndex?: number;
+  digest: TaskPaperDigestInput;
+  paper: TaskPaperDigestPaper;
+};
+
+export type BuildDigestFailureLedgerDeltaParams = Omit<
+  BuildDigestLedgerDeltaParams,
+  "digest"
+> & { failure: TaskPaperDigestFailureInput };
+
+/**
+ * `DIGEST_FAILURE_REASONS.noText`, kept here so this module stays free of the
+ * worker's model client; a unit test keeps the two equal.
+ */
+export const TASK_PAPER_DIGEST_NO_TEXT_REASON = "No readable text";
+
+const DIGEST_TEXT_SOURCE: Record<
+  NonNullable<TaskPaperDigestInput["source"]>["backend"],
+  TaskPaperTextSource
+> = {
+  mineru: "mineru",
+  pdf: "pdf_text",
+  text: "indexed",
+};
+
+function digestDeltaShell(
+  params: Omit<BuildDigestLedgerDeltaParams, "digest">,
+  callId: string,
+  paper: TaskPaperDeltaPaper,
+): TaskPaperLedgerDelta {
+  const delta: TaskPaperLedgerDelta = {
+    version: 1,
+    callId,
+    toolName: params.toolName,
+    papers: [paper],
+    reads: [],
+  };
+  if (params.runId) delta.runId = params.runId;
+  if (params.turnIndex !== undefined) delta.turnIndex = params.turnIndex;
+  return delta;
+}
+
+function digestPaper(
+  paper: TaskPaperDigestPaper,
+  state: TaskPaperState,
+  contextItemId?: number,
+): TaskPaperDeltaPaper {
+  const row: TaskPaperDeltaPaper = {
+    key: taskPaperKey(paper.libraryID, paper.itemId),
+    libraryID: paper.libraryID,
+    itemId: paper.itemId,
+    state,
+  };
+  // Only defined values: the delta is persisted as JSON.
+  const context = positive(contextItemId) || positive(paper.contextItemId);
+  if (context) row.contextItemId = context;
+  const title = text(paper.title);
+  if (title) row.title = title;
+  const year = text(paper.year);
+  if (year) row.year = year;
+  const creator = text(paper.creator);
+  if (creator) row.creator = creator;
+  const itemKey = text(paper.itemKey);
+  if (itemKey) row.itemKey = itemKey;
+  return row;
+}
+
+function digestRead(
+  delta: TaskPaperLedgerDelta,
+  key: string,
+  seed: ReadSeed,
+): TaskPaperReadEvent {
+  const read: TaskPaperReadEvent = {
+    key,
+    callId: delta.callId,
+    toolName: delta.toolName,
+    ...seed,
+  };
+  if (delta.runId) read.runId = delta.runId;
+  if (delta.turnIndex !== undefined) read.turnIndex = delta.turnIndex;
+  return read;
+}
+
+/**
+ * What one completed host digest adds to the ledger: the paper read, one
+ * `digest` read holding its summary (up to
+ * `TASK_PAPER_DIGEST_SNIPPET_MAX_CHARS`), and one `passage` read per verified
+ * evidence quote under its section. Built directly, never through
+ * `deriveTaskPaperLedgerDelta` (the digest is no read tool's payload). Its
+ * call id is the job's call id qualified by the paper, so each paper of one
+ * `task_update` call applies once (`applyTaskPaperLedgerDelta` is idempotent
+ * by `runId:callId`).
+ */
+export function buildDigestLedgerDelta(
+  params: BuildDigestLedgerDeltaParams,
+): TaskPaperLedgerDelta {
+  const { digest } = params;
+  const paper = digestPaper(params.paper, "read", digest.contextItemId);
+  const backend = digest.source?.backend;
+  const source = backend ? DIGEST_TEXT_SOURCE[backend] : undefined;
+  if (source) paper.text = source;
+  const delta = digestDeltaShell(
+    params,
+    `${params.callId}:digest:${params.paper.itemId}`,
+    paper,
+  );
+  const summary = readSeed({ granularity: "digest", method: "digest" });
+  const clipped = clipTaskPaperText(
+    digest.summary,
+    TASK_PAPER_DIGEST_SNIPPET_MAX_CHARS,
+  );
+  if (clipped) summary.snippet = clipped;
+  const seeds: ReadSeed[] = [summary];
+  for (const evidence of digest.evidence || []) {
+    const seed = readSeed({
+      granularity: "passage",
+      method: "digest",
+      label: evidence.section,
+      snippet: evidence.quote,
+    });
+    if (!seed.snippet) continue;
+    const chunk = nonNegative(evidence.chunk);
+    if (chunk !== undefined) seed.chunk = chunk;
+    seeds.push(seed);
+  }
+  const kept = seeds.slice(0, TASK_PAPER_MAX_READS_PER_TURN);
+  delta.reads = kept.map((seed) => digestRead(delta, paper.key, seed));
+  if (seeds.length > kept.length) {
+    delta.droppedReads = seeds.length - kept.length;
+  }
+  return delta;
+}
+
+/**
+ * What a failed host digest adds to the ledger: the paper as matched (its
+ * text was not summarized) and one `digest` read with no snippet whose
+ * `whyMatched` is the host's reason, which the paper's row shows. Its call
+ * id differs from a success's, so a later digest of the paper in the same
+ * call still applies.
+ */
+export function buildDigestFailureLedgerDelta(
+  params: BuildDigestFailureLedgerDeltaParams,
+): TaskPaperLedgerDelta {
+  const paper = digestPaper(params.paper, "matched");
+  // Only a missing text says anything about the paper's text source.
+  if (params.failure.reason === TASK_PAPER_DIGEST_NO_TEXT_REASON) {
+    paper.text = "none";
+  }
+  const delta = digestDeltaShell(
+    params,
+    `${params.callId}:digest:${params.paper.itemId}:failed`,
+    paper,
+  );
+  delta.reads = [
+    digestRead(
+      delta,
+      paper.key,
+      readSeed({
+        granularity: "digest",
+        method: "digest",
+        whyMatched: params.failure.reason,
+      }),
+    ),
+  ];
+  return delta;
 }
 
 // ---------------------------------------------------------------------------

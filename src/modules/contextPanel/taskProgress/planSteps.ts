@@ -173,9 +173,10 @@ function targetLabel(
 }
 
 /**
- * A step row: badge, label, and, for an outcome, its reason and pill. A read
- * or a write over several targets counts them as evidence ticks them, "Read
- * each paper in Drift · 48 of 48"; a part the answer completes ticks none.
+ * A step row: badge, label, and, for an outcome, its reason and pill. A read,
+ * a digest or a write over several targets counts them as evidence ticks
+ * them, "Read each paper in Drift · 48 of 48", "Summarize each selected
+ * paper · 7 of 12"; a part the answer completes ticks none.
  */
 function buildChecklistRow(
   doc: Document,
@@ -200,7 +201,8 @@ function buildChecklistRow(
   const label = doc.createElement("span");
   label.className = "llm-plan-task-label";
   const outcome = step.outcome;
-  const targets = outcome?.read || outcome?.write ? outcome.targets : 0;
+  const targets =
+    outcome?.read || outcome?.write || outcome?.digest ? outcome.targets : 0;
   label.textContent =
     targets > 1
       ? `${step.label} · ${t("{done} of {total}")

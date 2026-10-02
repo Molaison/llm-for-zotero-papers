@@ -37,9 +37,11 @@ export function taskPaperPassagePageLabel(label: string | undefined): string {
 
 /**
  * A read the card offers to open: a whole-paper read (opens the paper), some
- * text to find, or a page to go to.
+ * text to find, or a page to go to. Never a host digest: its summary is not
+ * the paper's text (its evidence passages are, and open).
  */
 export function canOpenTaskPaperPassage(read: TaskPaperReadEvent): boolean {
+  if (read.granularity === "digest") return false;
   if (read.granularity === "full") return true;
   if ((read.snippet || "").trim()) return true;
   return (

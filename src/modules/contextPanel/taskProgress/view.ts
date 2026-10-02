@@ -406,6 +406,7 @@ const GRANULARITY_LABELS: Record<TaskPaperReadEvent["granularity"], string> = {
   full: "Full text",
   figure: "Figure",
   page: "Page",
+  digest: "Summary",
 };
 
 function looseText(value: string): string {
@@ -431,6 +432,9 @@ export function formatTaskPaperPassageLabel(
   const repeatsTitle =
     Boolean(title && loose) &&
     (loose === title || title.startsWith(loose) || loose.startsWith(title));
+  if (read.granularity === "digest") {
+    return read.snippet ? kind : t("Summary failed");
+  }
   if (!label || repeatsTitle || read.granularity === "full") return kind;
   if (read.granularity === "outline") return `${kind}: ${label}`;
   return label;
@@ -446,11 +450,15 @@ export function cleanTaskPaperSnippet(snippet: string): string {
     .trim();
 }
 
-/** The reads worth showing: what was actually read, once each. */
+/**
+ * The reads worth listing: what was actually read, once each. A host
+ * digest shows in its own Summary block (`paperDigest`), not as a read.
+ */
 function visibleReads(reads: readonly TaskPaperReadEvent[]) {
   const seen = new Set<string>();
   return reads.filter((read) => {
-    if (read.granularity === "metadata") return false;
+    if (read.granularity === "metadata" || read.granularity === "digest")
+      return false;
     const key = `${read.granularity}\u0000${read.label || ""}\u0000${read.snippet || ""}`;
     if (seen.has(key)) return false;
     seen.add(key);
@@ -496,21 +504,53 @@ function readSectionLabel(
   return label;
 }
 
+/**
+ * The paper's host digest: the latest one with a summary, else the latest
+ * failure (no summary; `whyMatched` holds the host's reason), else null.
+ */
+function paperDigest(
+  reads: readonly TaskPaperReadEvent[],
+): TaskPaperReadEvent | null {
+  let failed: TaskPaperReadEvent | null = null;
+  let done: TaskPaperReadEvent | null = null;
+  for (const read of reads) {
+    if (read.granularity !== "digest") continue;
+    if (read.snippet) done = read;
+    else failed = read;
+  }
+  return done || failed;
+}
+
 /** Section names the tail lists before it says "…". */
 const TAIL_SECTIONS = 3;
 
 /**
- * The row's tail over every question: "Full text" for a whole-paper read,
- * the sections a targeted read named ("Methods, Results"), else a passage
- * count; then "cited N". Never a byte size or a section count.
+ * The row's tail over every question: "Full text" for a whole-paper read;
+ * for a paper the host digested, its evidence passage count ("Summary" when
+ * no evidence survived); else the sections a targeted read named ("Methods,
+ * Results"), else a passage count; then "cited N". A paper whose digest
+ * failed and that nothing else read says "Summary failed". Never a byte
+ * size or a section count.
  */
 export function formatTaskPaperTail(row: TaskProgressPaperRow): string {
   if (row.state === "listed") return "";
-  if (row.state === "matched") return t("title/abstract");
   const turns = Object.values(row.entry?.turns || {});
   const reads = turns.flatMap((entry) => entry.reads);
+  const digest = paperDigest(reads);
+  if (row.state === "matched") {
+    return digest && !digest.snippet
+      ? t("Summary failed")
+      : t("title/abstract");
+  }
   const citations = turns.flatMap((entry) => entry.citations);
-  const passages = reads.filter((read) => read.snippet).length;
+  // The digest's summary is the host's words, not a passage of the paper.
+  const passages = reads.filter(
+    (read) => read.snippet && read.granularity !== "digest",
+  ).length;
+  const passageCount = () =>
+    passages === 1
+      ? t("1 passage")
+      : format("{count} passages", { count: passages });
   const parts: string[] = [];
   const sections = [
     ...new Set(
@@ -519,17 +559,15 @@ export function formatTaskPaperTail(row: TaskProgressPaperRow): string {
   ];
   if (reads.some((read) => read.granularity === "full")) {
     parts.push(t("Full text"));
+  } else if (digest?.snippet) {
+    parts.push(passages ? passageCount() : t("Summary"));
   } else if (sections.length) {
     parts.push(
       sections.slice(0, TAIL_SECTIONS).join(", ") +
         (sections.length > TAIL_SECTIONS ? "…" : ""),
     );
   } else if (passages) {
-    parts.push(
-      passages === 1
-        ? t("1 passage")
-        : format("{count} passages", { count: passages }),
-    );
+    parts.push(passageCount());
   } else if (row.state === "skimmed") {
     const last = reads[reads.length - 1];
     parts.push(last?.granularity === "outline" ? t("outline") : t("abstract"));
@@ -1411,6 +1449,28 @@ export function mountTaskProgressView(params: {
     const readsByTurn = new Map(
       turns.map((turn) => [turn, visibleReads(model.entry!.turns[turn].reads)]),
     );
+    // The host's digest of the paper leads: its summary, or why it failed.
+    const digest = paperDigest(
+      turns.flatMap((turn) => model.entry!.turns[turn].reads),
+    );
+    if (digest) {
+      const block = el(doc, "div", "llm-task-paper-read llm-task-paper-digest");
+      block.append(el(doc, "div", "llm-task-paper-turn", t("Summary")));
+      const summary = digest.snippet
+        ? cleanTaskPaperSnippet(digest.snippet)
+        : "";
+      block.append(
+        summary
+          ? el(doc, "blockquote", "llm-task-paper-snippet", summary)
+          : el(
+              doc,
+              "div",
+              "llm-task-paper-empty",
+              digest.whyMatched ? t(digest.whyMatched) : t("Summary failed"),
+            ),
+      );
+      children.push(block);
+    }
     // Question headings only help when more than one question read it.
     const headed =
       turns.filter((turn) => readsByTurn.get(turn)!.length).length > 1;
@@ -1495,6 +1555,7 @@ export function mountTaskProgressView(params: {
       );
     } else if (
       state === "matched" &&
+      !digest &&
       !turns.some((turn) =>
         model.entry!.turns[turn].reads.some((read) => read.snippet),
       )

@@ -25,6 +25,7 @@ import {
   setTaskScope,
 } from "../src/modules/contextPanel/taskProgress/store";
 import { OUTCOME_REASONS } from "../src/agent/loop/outcomes";
+import { DIGEST_FAILURE_REASONS } from "../src/agent/digests/paperDigestWorker";
 import { initI18n, t } from "../src/utils/i18n";
 import {
   TASK_PROGRESS_FLASH_MS,
@@ -48,6 +49,7 @@ import {
 } from "../src/modules/contextPanel/taskProgress/view";
 import { collectFakeText, fakeDocument, FakeElement } from "./helpers/fakeDom";
 import {
+  digestLedgerDelta,
   ledgerDelta,
   outcomeCheckpoint,
   outcomeTask,
@@ -2085,6 +2087,219 @@ describe("task progress view of an outcome ledger", function () {
     assert.isTrue((steps as any).hidden);
   });
 
+  describe("a digest part", function () {
+    const items = (count: number) =>
+      Array.from({ length: count }, (_, index) => `item:${index + 1}`);
+    const summaries = (done: number, total = 12) =>
+      outcomeTask("summaries", {
+        description: "Summarize each selected paper",
+        effect: "digest",
+        scope: true,
+        targets: items(total),
+        doneTargets: items(done),
+      });
+    function paperRow(harness: Harness, key: string): FakeElement {
+      const found = harness.items().find((item) => item.dataset.key === key);
+      assert.isOk(found, `row ${key}`);
+      return found!;
+    }
+    const tailOf = (row: FakeElement) =>
+      row.findByClass("llm-task-paper-tail")!.textContent;
+    function expand(row: FakeElement): FakeElement {
+      row.findByClass("llm-task-paper-summary")!.dispatchFakeEvent("click");
+      return row.findByClass("llm-task-paper-details")!;
+    }
+
+    it("counts its papers on its row: Summarize each selected paper · 7 of 12", function () {
+      seedScope(12);
+      const harness = track(mount());
+      beginTaskRun(KEY, { runId: "run-d" });
+      setTaskOutcomes(KEY, "run-d", outcomeCheckpoint([summaries(7)]));
+      harness.view.flush();
+      const [row] = rows(openSteps(harness));
+      assert.equal(labelOf(row), "Summarize each selected paper · 7 of 12");
+    });
+
+    it("a digested paper's row counts its evidence passages and shows the summary and its evidence by section", function () {
+      seedScope(2);
+      const harness = track(mount());
+      beginTaskRun(KEY, { runId: "run-d" });
+      applyTaskPaperUpdate(
+        KEY,
+        digestLedgerDelta("call-s", 1, {
+          runId: "run-d",
+          summary: "Cells drift slowly over days.",
+          evidence: [
+            { section: "Methods", quote: "We recorded 40 cells over 10 days." },
+            { section: "Results", quote: "Drift grew with experience." },
+          ],
+        }),
+        "run-d",
+      );
+      applyTaskPaperUpdate(
+        KEY,
+        digestLedgerDelta("call-s", 2, {
+          runId: "run-d",
+          summary: "No passage survived verification.",
+        }),
+        "run-d",
+      );
+      harness.row.dispatchFakeEvent("click");
+      const first = paperRow(harness, "1:1");
+      assert.equal(first.dataset.state, "read");
+      assert.equal(tailOf(first), "2 passages");
+      assert.equal(
+        tailOf(paperRow(harness, "1:2")),
+        "Summary",
+        "a digest with no surviving evidence still has its summary",
+      );
+      const details = expand(first);
+      const text = collectFakeText(details);
+      assert.include(text, "Summary");
+      assert.include(text, "Cells drift slowly over days.");
+      assert.include(text, "Methods");
+      assert.include(text, "We recorded 40 cells over 10 days.");
+      assert.include(text, "Results");
+      const block = details.findByClass("llm-task-paper-digest")!;
+      assert.equal(
+        block.findByClass("llm-task-paper-turn")!.textContent,
+        "Summary",
+        "the summary sits in a block like Cited in document",
+      );
+      assert.equal(
+        block.findByClass("llm-task-paper-snippet")!.textContent,
+        "Cells drift slowly over days.",
+      );
+      assert.equal(
+        text.split("Cells drift slowly over days.").length - 1,
+        1,
+        "the summary shows once",
+      );
+      assert.lengthOf(
+        details.findAllByClass("llm-task-paper-open"),
+        2,
+        "only the evidence passages open the source",
+      );
+    });
+
+    it("shows a long summary whole in its Summary block", function () {
+      seedScope(2);
+      const harness = track(mount());
+      beginTaskRun(KEY, { runId: "run-d" });
+      const summary = `${"Place fields drift across days of recording. ".repeat(33).trim()} End.`;
+      assert.isAbove(summary.length, 1400);
+      applyTaskPaperUpdate(
+        KEY,
+        digestLedgerDelta("call-s", 1, { runId: "run-d", summary }),
+        "run-d",
+      );
+      harness.row.dispatchFakeEvent("click");
+      const details = expand(paperRow(harness, "1:1"));
+      assert.equal(
+        details
+          .findByClass("llm-task-paper-digest")!
+          .findByClass("llm-task-paper-snippet")!.textContent,
+        summary,
+      );
+    });
+
+    it("a whole-paper read keeps Full text on the row, and a citation follows", function () {
+      seedScope(2);
+      const harness = track(mount());
+      beginTaskRun(KEY, { runId: "run-d" });
+      applyTaskPaperUpdate(
+        KEY,
+        {
+          version: 1,
+          callId: "full",
+          runId: "run-d",
+          toolName: "paper_read",
+          papers: [{ key: "1:1", libraryID: 1, itemId: 1, state: "read" }],
+          reads: [
+            {
+              key: "1:1",
+              callId: "full",
+              toolName: "paper_read",
+              granularity: "full",
+              method: "full",
+            },
+          ],
+        },
+        "run-d",
+      );
+      applyTaskPaperUpdate(
+        KEY,
+        digestLedgerDelta("call-s", 1, {
+          runId: "run-d",
+          evidence: [{ section: "Methods", quote: "We recorded cells." }],
+        }),
+        "run-d",
+      );
+      applyTaskDocumentCitations(KEY, "run-d", [
+        { citationId: "d1", libraryID: 1, itemKey: "P1", itemId: 1 },
+      ]);
+      harness.row.dispatchFakeEvent("click");
+      assert.equal(tailOf(paperRow(harness, "1:1")), "Full text · cited 1");
+    });
+
+    it("a failed digest shows its reason on the row", function () {
+      seedScope(2);
+      const harness = track(mount());
+      beginTaskRun(KEY, { runId: "run-d" });
+      applyTaskPaperUpdate(
+        KEY,
+        digestLedgerDelta("call-s", 1, {
+          runId: "run-d",
+          failure: "No readable text",
+        }),
+        "run-d",
+      );
+      harness.row.dispatchFakeEvent("click");
+      const row = paperRow(harness, "1:1");
+      assert.equal(row.dataset.state, "matched");
+      assert.equal(tailOf(row), "Summary failed");
+      const details = expand(row);
+      const text = collectFakeText(details);
+      assert.include(text, "Summary");
+      assert.include(text, "No readable text");
+      assert.notInclude(
+        text,
+        "Matched by title or abstract",
+        "the failure explains the row",
+      );
+      assert.lengthOf(details.findAllByClass("llm-task-paper-open"), 0);
+    });
+
+    it("a later digest of a failed paper replaces its failure", function () {
+      seedScope(2);
+      const harness = track(mount());
+      beginTaskRun(KEY, { runId: "run-d" });
+      applyTaskPaperUpdate(
+        KEY,
+        digestLedgerDelta("call-s", 1, {
+          runId: "run-d",
+          failure: "The summary call timed out",
+        }),
+        "run-d",
+      );
+      applyTaskPaperUpdate(
+        KEY,
+        digestLedgerDelta("call-t", 1, {
+          runId: "run-d",
+          summary: "Retried and summarized.",
+          evidence: [{ quote: "One sentence." }],
+        }),
+        "run-d",
+      );
+      harness.row.dispatchFakeEvent("click");
+      const row = paperRow(harness, "1:1");
+      assert.equal(tailOf(row), "1 passage");
+      const text = collectFakeText(expand(row));
+      assert.include(text, "Retried and summarized.");
+      assert.notInclude(text, "timed out");
+    });
+  });
+
   describe("in Chinese", function () {
     const globals = globalThis as unknown as { Zotero?: unknown };
     let previousZotero: unknown;
@@ -2143,6 +2358,21 @@ describe("task progress view of an outcome ledger", function () {
       assert.equal(labelOf(askRow), "Ask which collection to use");
       assert.notEqual(t("Needs input"), "Needs input");
       assert.equal(detailOf(pickRow), "Needs input");
+    });
+
+    it("translates the digest labels and the host's digest failure reasons", function () {
+      for (const value of [
+        "Summary",
+        "Summary failed",
+        ...Object.values(DIGEST_FAILURE_REASONS),
+      ]) {
+        assert.notEqual(t(value), value, value);
+      }
+      assert.notEqual(
+        t("Summary"),
+        t("Abstract"),
+        "a summary is not an abstract",
+      );
     });
   });
 });

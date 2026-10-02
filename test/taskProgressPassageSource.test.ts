@@ -48,6 +48,19 @@ describe("task progress passage source", function () {
     );
   });
 
+  it("never offers a digest's summary, which is not the paper's text; its evidence opens", function () {
+    assert.isFalse(
+      canOpenTaskPaperPassage(
+        read({ granularity: "digest", method: "digest", snippet: "In brief." }),
+      ),
+    );
+    assert.isTrue(
+      canOpenTaskPaperPassage(
+        read({ method: "digest", label: "Methods", snippet: "We recorded." }),
+      ),
+    );
+  });
+
   it("looks for the shown text first, without a clipped ellipsis or cut word", function () {
     assert.deepEqual(
       buildTaskPaperPassageSearchTexts(

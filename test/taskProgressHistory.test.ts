@@ -6,6 +6,10 @@
  */
 import { assert } from "chai";
 import type { AgentRunEventRecord } from "../src/agent/types";
+import {
+  applyTaskPaperLedgerDelta,
+  createTaskPaperLedger,
+} from "../src/agent/context/taskPaperLedger";
 import { executionCheckpointEvent } from "../src/agent/execution/checkpointEvents";
 import { rememberConversationKeyRetired } from "../src/shared/conversationKeyLedger";
 import {
@@ -32,6 +36,7 @@ import {
 } from "../src/modules/contextPanel/taskProgress/store";
 import type { Message } from "../src/modules/contextPanel/types";
 import {
+  digestLedgerDelta,
   ledgerDelta,
   outcomeCheckpoint,
   outcomeTask,
@@ -418,6 +423,81 @@ describe("task progress history rebuild of outcome ledgers", function () {
       ],
     );
     assert.isTrue(history.planSeen);
+  });
+
+  it("replays a digest part: its count, each paper's summary and evidence, and a failure's reason", async function () {
+    const part = (done: string[]) =>
+      outcomeTask("summaries", {
+        description: "Summarize each selected paper",
+        effect: "digest",
+        targets: ["item:1", "item:2", "item:3"],
+        doneTargets: done,
+      });
+    const first = outcomeCheckpoint([part(["item:1"])]);
+    const second = outcomeCheckpoint(
+      [part(["item:1", "item:2"])],
+      undefined,
+      3,
+    );
+    const deltas = [
+      digestLedgerDelta("call-s", 1, {
+        runId: "run-outcomes",
+        summary: "Paper one in brief.",
+        evidence: [{ section: "Methods", quote: "We recorded cells." }],
+      }),
+      digestLedgerDelta("call-s", 2, {
+        runId: "run-outcomes",
+        summary: "Paper two in brief.",
+      }),
+      digestLedgerDelta("call-s", 3, {
+        runId: "run-outcomes",
+        failure: "No readable text",
+      }),
+    ];
+    const digestEvents = [
+      record("run-outcomes", 1, executionCheckpointEvent(undefined, first)),
+      ...deltas.map((delta, index) =>
+        record("run-outcomes", 2 + index, {
+          type: "paper_ledger_update",
+          callId: delta.callId,
+          delta,
+        }),
+      ),
+      record("run-outcomes", 5, executionCheckpointEvent(first, second)),
+    ];
+    assert.equal(digestEvents[4].payload.type, "execution_checkpoint_delta");
+    const history = buildTaskProgressHistory(
+      stored(),
+      new Map([["run-outcomes", digestEvents]]),
+      1,
+    );
+    assert.deepEqual(
+      history.checklist?.steps.map((step) => [
+        step.label,
+        step.outcome?.digest,
+        step.outcome?.doneTargets,
+        step.outcome?.targets,
+      ]),
+      [["Summarize each selected paper", true, 2, 3]],
+    );
+
+    setTaskProgressHistoryLoaderForTests(async () => digestEvents);
+    chatHistory.set(KEY, stored());
+    loadedConversationKeys.add(KEY);
+    ensureTaskProgressHydrated(KEY, 1);
+    await waitForTaskProgressHydrationForTests(KEY);
+    const rebuilt = getTaskProgress(KEY)!;
+    const live = createTaskPaperLedger();
+    for (const delta of deltas) applyTaskPaperLedgerDelta(live, delta, 1);
+    assert.deepEqual(
+      rebuilt.ledger.papers,
+      live.papers,
+      "the rebuilt rows equal the live ones",
+    );
+    assert.equal(
+      rebuilt.ledger.papers["1:3"].turns[1].reads[0].whyMatched,
+      "No readable text",
+    );
   });
 
   it("keeps an ending with no outcome off the steps, and an earlier run's outcomes to the row", async function () {

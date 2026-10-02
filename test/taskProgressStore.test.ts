@@ -612,6 +612,38 @@ describe("task progress outcome ledger", function () {
     assert.notProperty(getTaskProgress(29)!.checklist!, "scopePapers");
   });
 
+  it("marks a digest part's step so its row counts the papers summarized", function () {
+    beginTaskRun(30, { runId: "run-a" });
+    setTaskOutcomes(
+      30,
+      "run-a",
+      outcomeCheckpoint([
+        outcomeTask("summaries", {
+          description: "Summarize each selected paper",
+          effect: "digest",
+          targets: ["item:1", "item:2"],
+          doneTargets: ["item:1"],
+        }),
+        read,
+        save,
+      ]),
+    );
+    assert.deepEqual(
+      getTaskProgress(30)!.checklist?.steps.map((step) => [
+        step.outcome?.digest,
+        step.outcome?.read,
+        step.outcome?.write,
+        step.outcome?.targets,
+        step.outcome?.doneTargets,
+      ]),
+      [
+        [true, false, false, 2, 1],
+        [false, true, false, 0, 1],
+        [false, false, true, 1, 0],
+      ],
+    );
+  });
+
   it("changes nothing for a checkpoint with no outcome and no end", function () {
     beginTaskRun(21, { runId: "run-a" });
     const version = getTaskProgress(21)!.version;

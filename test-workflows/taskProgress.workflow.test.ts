@@ -11,6 +11,15 @@
  */
 import { assert } from "chai";
 import { buildQuoteCitation } from "../src/services/quotes/quoteCitations";
+import {
+  buildDigestFailureLedgerDelta,
+  buildDigestLedgerDelta,
+} from "../src/agent/context/taskPaperLedger";
+import { executionCheckpointEvent } from "../src/agent/execution/checkpointEvents";
+import type {
+  HostPaperDigest,
+  PaperDigestFailure,
+} from "../src/agent/digests/paperDigestWorker";
 import { getReaderContextPanelForTab } from "../src/modules/contextPanel/readerPopupPanelRouting";
 import type {
   WorkflowTestApi,
@@ -977,6 +986,177 @@ describe("workflow: task progress", function () {
     }
   }
 
+  /**
+   * A digest part: the host summarizes each paper itself. The steps block
+   * counts the papers summarized ("· 1 of 2"), a digested paper's row counts
+   * its verified evidence and shows its summary in a Summary block, and a
+   * paper whose digest failed says why.
+   */
+  async function exerciseDigestRun(
+    rootOf: () => HTMLElement,
+    surface: Surface,
+  ) {
+    const handle = await api.startTaskProgressReplay({
+      surface: surfaceOf(surface),
+      historyTurns: 1,
+      user: {
+        selectedCollectionContexts: [
+          { collectionId: collection.id, name: collection.name, libraryID },
+        ],
+      },
+    });
+    const view = part(rootOf());
+    try {
+      await until(() => {
+        api.flushTaskProgress();
+        return Boolean(
+          api.getTaskProgressSnapshot(handle.conversationKey)?.listingLoaded,
+        );
+      }, `the scope listing resolves (${surface})`);
+      const targets = [0, 1].map((index) => `item:${paperId(index)}`);
+      const ledger = (done: string[], updatedAt: number) => ({
+        version: 1 as const,
+        executionId: `digest-${surface}`,
+        conversationKey: handle.conversationKey,
+        conversationGeneration: 0,
+        createdAt: 1,
+        updatedAt,
+        tasks: [
+          {
+            taskId: `digest-${surface}:task:summaries`,
+            description: "Summarize each selected paper",
+            dependencies: [],
+            status: "in_progress" as const,
+            journalActionIds: [],
+            verifiedReceiptIds: [],
+            readEvidenceIds: [],
+            materialRefs: [],
+            createdAt: 1,
+            updatedAt,
+            effect: "digest" as const,
+            origin: "model" as const,
+            targets,
+            doneTargets: done,
+          },
+        ],
+      });
+      const before = ledger([], 2);
+      const after = ledger(targets.slice(0, 1), 3);
+      await handle.emit(executionCheckpointEvent(undefined, before));
+      const summaryText =
+        "Place fields reorganize over weeks as spines turn over.";
+      // Typed as the worker's own records: the builders take them as they are.
+      const digest: HostPaperDigest = {
+        itemId: paperId(0),
+        contextItemId: fixtures[0].pdfAttachmentId,
+        title: PAPERS[0].title,
+        summary: summaryText,
+        contributions: [],
+        methods: "",
+        limitations: "",
+        evidence: [{ section: "Results", quote: SNIPPETS[2] }],
+        source: { backend: "pdf", characters: 2000, complete: true },
+        model: "workflow-model",
+        producedAt: 1,
+        cacheKey: `digest-${surface}`,
+      };
+      const digested = buildDigestLedgerDelta({
+        runId: handle.runId,
+        callId: "task-update-1",
+        toolName: "task_update",
+        digest,
+        paper: { ...paperRef(0) },
+      });
+      await handle.emit({
+        type: "paper_ledger_update",
+        callId: digested.callId,
+        delta: digested,
+      });
+      const delta = executionCheckpointEvent(before, after);
+      assert.equal(delta.type, "execution_checkpoint_delta");
+      await handle.emit(delta);
+      const failure: PaperDigestFailure = {
+        target: targets[1],
+        itemId: paperId(1),
+        reason: "No readable text",
+      };
+      const failed = buildDigestFailureLedgerDelta({
+        runId: handle.runId,
+        callId: "task-update-1",
+        toolName: "task_update",
+        failure,
+        paper: { ...paperRef(1) },
+      });
+      await handle.emit({
+        type: "paper_ledger_update",
+        callId: failed.callId,
+        delta: failed,
+      });
+      api.flushTaskProgress();
+      await settleRow(rootOf, "open", `the digest run (${surface})`);
+      if (view.row.getAttribute("aria-expanded") !== "true") {
+        view.row.click();
+        await settle(view, "open", `digest drawer (${surface})`);
+      }
+      const label = () =>
+        Array.from(
+          rootOf().querySelectorAll(
+            ".llm-task-progress-steps .llm-plan-task-label",
+          ),
+        ).map((node) => (node as HTMLElement).textContent);
+      await until(
+        () => {
+          api.flushTaskProgress();
+          return label().includes("Summarize each selected paper · 1 of 2");
+        },
+        () => `the digest step counts 1 of 2 (${label().join(" | ")})`,
+      );
+      const rowOf = (index: number) =>
+        view.items().find((item) => item.dataset.key === paperKey(index))!;
+      const tailOf = (index: number) =>
+        rowOf(index).querySelector(".llm-task-paper-tail")!.textContent;
+      assert.equal(rowOf(0).dataset.state, "read");
+      assert.equal(tailOf(0), "1 passage", "the evidence passage count");
+      assert.equal(tailOf(1), "Summary failed");
+      (
+        rowOf(0).querySelector(".llm-task-paper-summary") as HTMLElement
+      ).click();
+      const details = rowOf(0).querySelector(
+        ".llm-task-paper-details",
+      ) as HTMLElement;
+      assert.isFalse(details.hidden, "the digested paper expands");
+      const block = details.querySelector(".llm-task-paper-digest")!;
+      assert.isOk(block, "a Summary block");
+      assert.equal(
+        block.querySelector(".llm-task-paper-turn")!.textContent,
+        "Summary",
+      );
+      assert.equal(
+        block.querySelector(".llm-task-paper-snippet")!.textContent,
+        summaryText,
+      );
+      assert.include(details.textContent!, "Results");
+      assert.include(details.textContent!, SNIPPETS[2]);
+      assert.lengthOf(
+        details.querySelectorAll(".llm-task-paper-open"),
+        1,
+        "only the evidence opens its source",
+      );
+      (
+        rowOf(1).querySelector(".llm-task-paper-summary") as HTMLElement
+      ).click();
+      assert.include(
+        (rowOf(1).querySelector(".llm-task-paper-details") as HTMLElement)
+          .textContent!,
+        "No readable text",
+      );
+      view.row.click();
+      await settle(view, "closed", `digest drawer (${surface})`);
+    } finally {
+      handle.finish();
+    }
+  }
+
   /** Drag the drawer's handle by `dy` pixels, as a mouse would. */
   async function dragGrip(view: View, dy: number) {
     const doc = view.grip.ownerDocument;
@@ -1219,6 +1399,7 @@ describe("workflow: task progress", function () {
       await switchToLibrary(rootOf, layout);
       await exerciseCurtain(rootOf, layout, win);
       await exerciseLibraryRun(rootOf, layout, win);
+      await exerciseDigestRun(rootOf, layout);
       await exerciseLongList(rootOf, layout, win);
     });
   }
@@ -1233,6 +1414,7 @@ describe("workflow: task progress", function () {
     await switchToLibrary(rootOf, "standalone");
     await exerciseCurtain(rootOf, "standalone", window);
     await exerciseLibraryRun(rootOf, "standalone", window);
+    await exerciseDigestRun(rootOf, "standalone");
     await exerciseLongList(rootOf, "standalone", window);
     await api.closeStandalone();
     // A closed window's elements still report isConnected; its panel must

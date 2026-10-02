@@ -58,6 +58,8 @@ export type TaskProgressOutcomeStep = {
   write: boolean;
   /** A read, whose papers the row counts as their text is read. */
   read: boolean;
+  /** A digest, whose papers the row counts as the host summarizes them. */
+  digest: boolean;
   /** Receipt-form targets it names, and how many of those are done. */
   targets: number;
   doneTargets: number;
@@ -762,6 +764,7 @@ export function taskOutcomesChecklist(
       host: task.origin === "host",
       write: task.effect === "mutation",
       read: task.effect === "read",
+      digest: task.effect === "digest",
       targets: task.targets?.length || 0,
       doneTargets: task.doneTargets?.length || 0,
       exceptions: (task.exceptions || []).map((entry) => ({

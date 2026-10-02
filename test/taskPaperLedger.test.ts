@@ -2,13 +2,18 @@ import { assert } from "chai";
 import fs from "node:fs";
 import path from "node:path";
 import {
+  TASK_PAPER_DIGEST_SNIPPET_MAX_CHARS,
   TASK_PAPER_LEDGER_TOOL_NAMES,
   TASK_PAPER_MAX_CITATIONS_PER_TURN,
   TASK_PAPER_MAX_PAPERS,
   TASK_PAPER_MAX_READS_PER_TURN,
+  TASK_PAPER_DIGEST_NO_TEXT_REASON,
+  TASK_PAPER_SNIPPET_MAX_CHARS,
   applyDocumentCitations,
   applyFinalCitations,
   applyTaskPaperLedgerDelta,
+  buildDigestFailureLedgerDelta,
+  buildDigestLedgerDelta,
   createTaskPaperLedger,
   deriveTaskPaperLedgerDelta,
   firstBodyParagraph,
@@ -17,6 +22,10 @@ import {
 } from "../src/agent/context/taskPaperLedger";
 import { createTrustedReadObservations } from "../src/agent/context/readObservation";
 import { attestAndRecordRead } from "../src/agent/context/taskPaperLedgerRecorder";
+import {
+  DIGEST_FAILURE_REASONS,
+  type HostPaperDigest,
+} from "../src/agent/digests/paperDigestWorker";
 import type { QuoteCitation } from "../src/shared/types";
 
 function derive(
@@ -808,6 +817,253 @@ describe("taskPaperLedger", function () {
       );
       assert.lengthOf(ledger.order, TASK_PAPER_MAX_PAPERS);
       assert.equal(ledger.droppedPapers, 3);
+    });
+  });
+
+  describe("host paper digests", function () {
+    function digest(
+      itemId: number,
+      overrides: Partial<HostPaperDigest> = {},
+    ): HostPaperDigest {
+      return {
+        itemId,
+        contextItemId: itemId + 100,
+        title: `Paper ${itemId}`,
+        summary:
+          "Cells drift slowly over days while the population code stays stable.",
+        contributions: ["Drift is slow."],
+        methods: "Two-photon imaging.",
+        limitations: "Not stated",
+        evidence: [
+          {
+            section: "Methods",
+            quote: "We recorded 40 cells over 10 days.",
+            chunk: 3,
+          },
+          { quote: "Population readouts stayed stable." },
+        ],
+        source: { backend: "mineru", characters: 4000, complete: true },
+        model: "m",
+        producedAt: 1,
+        cacheKey: "k",
+        ...overrides,
+      };
+    }
+    const paper = (itemId: number) => ({
+      libraryID: 1,
+      itemId,
+      contextItemId: itemId + 100,
+      title: `Paper ${itemId}`,
+      year: "2021",
+      creator: "Smith",
+    });
+
+    it("records one digest read and one passage per verified evidence entry, never through the tool switch", function () {
+      const delta = buildDigestLedgerDelta({
+        runId: "run-d",
+        callId: "call-7",
+        toolName: "task_update",
+        digest: digest(1),
+        paper: paper(1),
+      });
+      assert.equal(delta.callId, "call-7:digest:1");
+      assert.equal(delta.runId, "run-d");
+      assert.equal(delta.toolName, "task_update");
+      assert.isFalse(TASK_PAPER_LEDGER_TOOL_NAMES.has("task_update"));
+      assert.deepEqual(delta.papers, [
+        {
+          key: "1:1",
+          libraryID: 1,
+          itemId: 1,
+          contextItemId: 101,
+          title: "Paper 1",
+          year: "2021",
+          creator: "Smith",
+          text: "mineru",
+          state: "read",
+        },
+      ]);
+      assert.deepEqual(
+        delta.reads.map((read) => [
+          read.granularity,
+          read.method,
+          read.label,
+          read.snippet,
+          read.chunk,
+          read.callId,
+          read.runId,
+        ]),
+        [
+          [
+            "digest",
+            "digest",
+            undefined,
+            "Cells drift slowly over days while the population code stays stable.",
+            undefined,
+            "call-7:digest:1",
+            "run-d",
+          ],
+          [
+            "passage",
+            "digest",
+            "Methods",
+            "We recorded 40 cells over 10 days.",
+            3,
+            "call-7:digest:1",
+            "run-d",
+          ],
+          [
+            "passage",
+            "digest",
+            undefined,
+            "Population readouts stayed stable.",
+            undefined,
+            "call-7:digest:1",
+            "run-d",
+          ],
+        ],
+      );
+      assert.deepEqual(
+        JSON.parse(JSON.stringify(delta)),
+        delta,
+        "no undefined keys: the live and replayed deltas are equal",
+      );
+      assert.deepEqual(taskPaperReadDepths(delta).text, [1]);
+    });
+
+    it("keeps a summary whole up to its own cap, evidence at the snippet cap, and caps the reads per paper", function () {
+      // A 220-word summary (the worker's upper bound) is about 1,500 characters.
+      const whole = "Representational drift ".repeat(65).trim();
+      assert.isAbove(whole.length, TASK_PAPER_SNIPPET_MAX_CHARS);
+      assert.isAtMost(whole.length, TASK_PAPER_DIGEST_SNIPPET_MAX_CHARS);
+      const kept = buildDigestLedgerDelta({
+        callId: "call-7",
+        toolName: "task_update",
+        digest: digest(2, {
+          summary: whole,
+          evidence: [{ section: "Results", quote: "quote ".repeat(100) }],
+        }),
+        paper: paper(2),
+      });
+      assert.equal(kept.reads[0].snippet, whole, "read in full on the row");
+      assert.isAtMost(
+        kept.reads[1].snippet!.length,
+        TASK_PAPER_SNIPPET_MAX_CHARS,
+        "evidence keeps the ordinary cap",
+      );
+
+      const long = "word ".repeat(400);
+      const delta = buildDigestLedgerDelta({
+        callId: "call-7",
+        toolName: "task_update",
+        digest: digest(2, {
+          summary: long,
+          source: { backend: "pdf", characters: 1, complete: false },
+          evidence: Array.from({ length: 20 }, (_, index) => ({
+            quote: `Quote ${index}.`,
+          })),
+        }),
+        paper: paper(2),
+      });
+      assert.equal(
+        delta.reads[0].snippet!.length,
+        TASK_PAPER_DIGEST_SNIPPET_MAX_CHARS,
+      );
+      assert.isTrue(delta.reads[0].snippet!.endsWith("…"));
+      assert.lengthOf(delta.reads, TASK_PAPER_MAX_READS_PER_TURN);
+      assert.equal(delta.droppedReads, 21 - TASK_PAPER_MAX_READS_PER_TURN);
+      assert.equal(delta.papers[0].text, "pdf_text");
+      assert.notProperty(delta, "runId");
+    });
+
+    it("applies one delta per paper under the same task_update call", function () {
+      const ledger = createTaskPaperLedger();
+      for (const itemId of [1, 2]) {
+        applyTaskPaperLedgerDelta(
+          ledger,
+          buildDigestLedgerDelta({
+            runId: "run-d",
+            callId: "call-7",
+            toolName: "task_update",
+            digest: digest(itemId),
+            paper: paper(itemId),
+          }),
+          1,
+        );
+      }
+      assert.deepEqual(ledger.order, ["1:1", "1:2"]);
+      assert.equal(ledger.papers["1:2"].state, "read");
+      assert.lengthOf(ledger.papers["1:2"].turns[1].reads, 3);
+    });
+
+    it("records a failure's reason on the paper's row without reading it", function () {
+      const failed = buildDigestFailureLedgerDelta({
+        runId: "run-d",
+        callId: "call-7",
+        toolName: "task_update",
+        failure: {
+          target: "item:3",
+          itemId: 3,
+          reason: "No readable text",
+          detail: "provider said no",
+        },
+        paper: paper(3),
+      });
+      assert.equal(failed.callId, "call-7:digest:3:failed");
+      assert.deepEqual(
+        failed.papers.map((row) => [row.state, row.text]),
+        [["matched", "none"]],
+      );
+      assert.deepEqual(
+        failed.reads.map((read) => [
+          read.granularity,
+          read.method,
+          read.snippet,
+          read.whyMatched,
+        ]),
+        [["digest", "digest", undefined, "No readable text"]],
+      );
+      assert.deepEqual(taskPaperReadDepths(failed), {
+        text: [],
+        shallow: [],
+        noText: [],
+      });
+      const timeout = buildDigestFailureLedgerDelta({
+        callId: "call-7",
+        toolName: "task_update",
+        failure: {
+          target: "item:4",
+          itemId: 4,
+          reason: "The summary call timed out",
+        },
+        paper: paper(4),
+      });
+      assert.notProperty(
+        timeout.papers[0],
+        "text",
+        "a timeout says nothing about the text",
+      );
+      assert.equal(
+        TASK_PAPER_DIGEST_NO_TEXT_REASON,
+        DIGEST_FAILURE_REASONS.noText,
+        "the ledger names the worker's no-text reason",
+      );
+
+      // A later success in the same call is not swallowed by the failure.
+      const ledger = createTaskPaperLedger();
+      applyTaskPaperLedgerDelta(ledger, failed, 1);
+      applyTaskPaperLedgerDelta(
+        ledger,
+        buildDigestLedgerDelta({
+          runId: "run-d",
+          callId: "call-7",
+          toolName: "task_update",
+          digest: digest(3),
+          paper: paper(3),
+        }),
+        1,
+      );
+      assert.equal(ledger.papers["1:3"].state, "read");
     });
   });
 

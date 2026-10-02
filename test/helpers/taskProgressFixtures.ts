@@ -1,7 +1,9 @@
 /** Ledger deltas, quote citations and outcome ledgers the Task progress tests share. */
-import type {
-  TaskPaperLedgerDelta,
-  TaskPaperState,
+import {
+  buildDigestFailureLedgerDelta,
+  buildDigestLedgerDelta,
+  type TaskPaperLedgerDelta,
+  type TaskPaperState,
 } from "../../src/agent/context/taskPaperLedger";
 import type {
   ExecutionCheckpoint,
@@ -88,4 +90,50 @@ export function quoteCitation(id: string, itemId: number): QuoteCitation {
     citationLabel: "(Smith, 2021)",
     itemId,
   };
+}
+
+/**
+ * What the host records for one paper of a digest part: its summary and
+ * verified evidence, or, given `failure`, why it has none. Built by the
+ * production builders, as `task_update` emits them.
+ */
+export function digestLedgerDelta(
+  callId: string,
+  itemId: number,
+  options: {
+    runId?: string;
+    summary?: string;
+    evidence?: Array<{ section?: string; quote: string; chunk?: number }>;
+    failure?: string;
+  } = {},
+): TaskPaperLedgerDelta {
+  const paper = { libraryID: 1, itemId, title: `Paper ${itemId}` };
+  if (options.failure) {
+    return buildDigestFailureLedgerDelta({
+      runId: options.runId,
+      callId,
+      toolName: "task_update",
+      failure: { target: `item:${itemId}`, itemId, reason: options.failure },
+      paper,
+    });
+  }
+  return buildDigestLedgerDelta({
+    runId: options.runId,
+    callId,
+    toolName: "task_update",
+    digest: {
+      itemId,
+      contextItemId: itemId + 100,
+      summary: options.summary ?? `Paper ${itemId} in brief.`,
+      contributions: [],
+      methods: "",
+      limitations: "",
+      evidence: options.evidence ?? [],
+      source: { backend: "mineru", characters: 1000, complete: true },
+      model: "test-model",
+      producedAt: 1,
+      cacheKey: `digest-${itemId}`,
+    },
+    paper,
+  });
 }
