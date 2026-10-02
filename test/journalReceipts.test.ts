@@ -102,6 +102,44 @@ describe("resume reconciliation with the change journal", function () {
     assert.strictEqual(again.checkpoint, first.checkpoint);
   });
 
+  it("gives each journaled note the ledger lacks to the next part that owes its paper one", function () {
+    // Two notes a paper, a part for each: paper 1's summary reached the
+    // ledger in the stopped run; its methods note and paper 2's summary did
+    // not.
+    const parts = declareOutcomes(
+      createEmptyExecutionCheckpoint(executionContext, 10),
+      ["summary", "methods"].map((kind) => ({
+        taskId: `${kind}-all`,
+        description: `Save a ${kind} note on each paper`,
+        effect: "mutation" as const,
+        capability: "zotero.notes" as const,
+        targets: PAPERS.map(String),
+      })),
+      20,
+    );
+    const held = applyOutcomeEvidence(
+      parts,
+      { kind: "receipt", receipt: noteReceipt("in-run-1", 1) },
+      30,
+    ).checkpoint;
+    const journaled = [
+      noteReceipt("journal:a:1", 1),
+      noteReceipt("journal:a:2", 1),
+      noteReceipt("journal:a:3", 2),
+    ];
+
+    const first = reconcileJournaledReceipts(held, journaled, 40);
+    assert.isTrue(first.changed);
+    const [summary, methods] = first.checkpoint.tasks;
+    assert.deepEqual(summary.doneTargets, ["item:1", "item:2"]);
+    assert.deepEqual(summary.receiptIds, ["in-run-1", "journal:a:3"]);
+    assert.deepEqual(methods.doneTargets, ["item:1"]);
+    assert.deepEqual(methods.receiptIds, ["journal:a:2"]);
+
+    const again = reconcileJournaledReceipts(first.checkpoint, journaled, 50);
+    assert.isFalse(again.changed);
+  });
+
   it("leaves a part the journal does not name, and a settled ledger, alone", function () {
     const journaled = [noteReceipt("journal:a:1", 1)];
     const tags = declareOutcomes(

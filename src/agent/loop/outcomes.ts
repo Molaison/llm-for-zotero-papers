@@ -142,6 +142,12 @@ const NOTE_CONTENT_OPERATIONS: ReadonlySet<string> = new Set([
   "note_edit",
   "note_append",
 ]);
+/** Writes that create a note on a paper: repeating one writes it twice. */
+const NOTE_CREATING_OPERATIONS: ReadonlySet<string> = new Set([
+  "note_create",
+  "save_note",
+  "save_notes_batch",
+]);
 const INTERRUPTING_STOP_RULES: ReadonlySet<RunStopRule> = new Set<RunStopRule>([
   "interrupted_by_error",
   "stream_interrupted_again",
@@ -225,6 +231,16 @@ function resolveTarget(
   return matches.length === 1 ? matches[0] : undefined;
 }
 
+/** Whether one of a part's `values` (its targets, done or excepted) means `target`. */
+function namesTarget(
+  values: readonly string[] | undefined,
+  target: string,
+): boolean {
+  return (values || []).some(
+    (value) => resolveTarget(value, [target]) !== undefined,
+  );
+}
+
 function covers(task: Task, targets: readonly string[]): boolean {
   return (
     !task.targets?.length ||
@@ -253,6 +269,42 @@ function isNoteContent(receipt: AgentActionReceipt): boolean {
 /** A read is not a write, so it neither closes a mutation nor becomes one. */
 function isWrite(write: Pick<Write, "capability">): boolean {
   return write.capability !== "zotero.read";
+}
+
+/** A write that creates a note on each paper it names. */
+function createsNotes(
+  write: Pick<AgentActionProposal, "capability" | "operation">,
+): boolean {
+  return (
+    write.capability === "zotero.notes" &&
+    NOTE_CREATING_OPERATIONS.has(write.operation)
+  );
+}
+
+/**
+ * Whether a new note on `paper` would be this part's note on it: a part that
+ * takes notes and names the paper without having it done, open to the note's
+ * receipt (pending or blocked, or settled with the paper excepted, which a
+ * note on it clears). The note's receipt binds such a part
+ * (`notePapersByPart`); the duplicate-note guard (`papersAlreadyWritten`)
+ * and the resume reconciliation ask whether one is left.
+ */
+function owesNote(task: Task, paper: string): boolean {
+  if (
+    task.effect !== "mutation" ||
+    (task.capability && task.capability !== "zotero.notes") ||
+    !namesTarget(task.targets, paper) ||
+    namesTarget(task.doneTargets, paper)
+  )
+    return false;
+  return (
+    RECEIPT_CANDIDATE_STATUSES.has(task.status) ||
+    ((task.status === "completed" || task.status === "skipped") &&
+      namesTarget(
+        (task.exceptions || []).flatMap((entry) => entry.targets),
+        paper,
+      ))
+  );
 }
 
 /** Whether a receipt or a declined call is already bound to some outcome. */
@@ -502,21 +554,28 @@ function declineBatch(
   });
 }
 
+/**
+ * Bind a receipt to one part. `papers`, for a note, are the receipt's
+ * targets it gives this part (`notePapersByPart`); the part takes no other.
+ */
 function bindReceipt(
   task: Task,
   receipt: AgentActionReceipt,
   now: number,
+  papers?: readonly string[],
 ): Task {
   const targets = task.targets || [];
   // The part's own targets a receipt's list names, in the part's own form.
-  const own = (values: readonly string[]): string[] =>
-    unique(
+  const own = (values: readonly string[]): string[] => {
+    const given = papers
+      ? values.filter((value) => papers.includes(value))
+      : values;
+    return unique(
       targets.length
-        ? targets.filter(
-            (target) => resolveTarget(target, values) !== undefined,
-          )
-        : values,
+        ? targets.filter((target) => resolveTarget(target, given) !== undefined)
+        : given,
     );
+  };
   const proves =
     PROOF_VERIFICATIONS.has(receipt.verification) &&
     DONE_RECEIPT_STATUSES.has(receipt.status);
@@ -703,6 +762,41 @@ function provenWrites(receipt: AgentActionReceipt): AgentActionReceipt[] {
   ];
 }
 
+/**
+ * One part per note: the papers a note-creating write gives each of the
+ * parts for notes that take it (`candidates`, in declaration order). A
+ * paper goes to the first of them that names it and has not got it done, so
+ * the next note on the paper goes to the next such part, and two parts that
+ * each ask a note of a paper take two. A paper every one of them has done
+ * goes to the first that names it, which it ticks no further. A tag, a
+ * folder or a field set twice is one state, so those writes bind every part
+ * that names their targets instead.
+ */
+function notePapersByPart(
+  tasks: readonly Task[],
+  candidates: readonly number[],
+  write: AgentActionReceipt,
+): Map<number, string[]> {
+  const papers = unique([
+    ...write.requestedTargets,
+    ...write.appliedTargets,
+    ...write.alreadySatisfiedTargets,
+    ...write.rejectedTargets,
+  ]);
+  const byPart = new Map<number, string[]>();
+  for (const paper of papers) {
+    const naming = candidates.filter((index) =>
+      namesTarget(tasks[index].targets, paper),
+    );
+    const index =
+      naming.find((at) => !namesTarget(tasks[at].doneTargets, paper)) ??
+      naming[0];
+    if (index !== undefined)
+      byPart.set(index, [...(byPart.get(index) || []), paper]);
+  }
+  return byPart;
+}
+
 function applyReceipt(
   checkpoint: ExecutionCheckpoint,
   receipt: AgentActionReceipt,
@@ -712,8 +806,12 @@ function applyReceipt(
     return unchanged(checkpoint);
   }
   // Each write the receipt proves binds every part that names its targets,
-  // else the first part without targets that takes it.
-  const chosen = new Map<number, AgentActionReceipt>();
+  // else the first part without targets that takes it; a note binds one
+  // part for notes on each paper (`notePapersByPart`).
+  const chosen = new Map<
+    number,
+    { write: AgentActionReceipt; papers?: string[] }
+  >();
   for (const write of provenWrites(receipt)) {
     const membership = write !== receipt;
     const candidates = checkpoint.tasks.flatMap((task, index) =>
@@ -730,13 +828,31 @@ function applyReceipt(
     const targeted = candidates.filter(
       (index) => checkpoint.tasks[index].targets?.length,
     );
+    if (targeted.length && createsNotes(write)) {
+      // A part that takes any write may be a tag's or a folder's as well as
+      // a note's: it takes every note on its papers, as it takes any write.
+      const forNotes = targeted.filter(
+        (index) => checkpoint.tasks[index].capability,
+      );
+      for (const [index, papers] of notePapersByPart(
+        checkpoint.tasks,
+        forNotes,
+        write,
+      ))
+        chosen.set(index, { write, papers });
+      for (const index of targeted)
+        if (!checkpoint.tasks[index].capability) chosen.set(index, { write });
+      continue;
+    }
     for (const index of targeted.length ? targeted : candidates.slice(0, 1))
-      chosen.set(index, write);
+      chosen.set(index, { write });
   }
   if (chosen.size) {
     return mapTasks(checkpoint, now, (task, index) => {
-      const write = chosen.get(index);
-      return write ? bindReceipt(task, write, now) : undefined;
+      const binding = chosen.get(index);
+      return binding
+        ? bindReceipt(task, binding.write, now, binding.papers)
+        : undefined;
     });
   }
   // Written content saved as a note is the artifact a part asked for.
@@ -1071,6 +1187,13 @@ export function applyOutcomeEvidence(
  * papers it proves and no part that takes it holds that paper done already:
  * a write the ledger knows, by whichever receipt, is never applied twice, and
  * a paper no open part asks for gets no part of its own.
+ *
+ * A note is counted rather than looked up, as it binds one part for notes a
+ * paper: the ledger holds as many notes on a paper as it has parts for notes
+ * with the paper done, and the journal names the run's notes in the order
+ * they were written, so the notes on a paper past that many are the ones the
+ * ledger lacks. Each goes to the next part that still owes the paper a note,
+ * if one does.
  */
 export function reconcileJournaledReceipts(
   checkpoint: ExecutionCheckpoint,
@@ -1078,12 +1201,38 @@ export function reconcileJournaledReceipts(
   now: number,
 ): EvidenceResult {
   let current = checkpoint;
+  const notesHeld = (paper: string) =>
+    checkpoint.tasks.filter(
+      (task) =>
+        task.effect === "mutation" &&
+        task.capability === "zotero.notes" &&
+        namesTarget(task.doneTargets, paper),
+    ).length;
+  const notesJournaled = new Map<string, number>();
   for (const receipt of receipts) {
-    if (!isWrite(receipt) || isBound(current, receipt.id)) continue;
+    if (!isWrite(receipt)) continue;
     const proven = unique([
       ...receipt.appliedTargets,
       ...receipt.alreadySatisfiedTargets,
     ]);
+    if (createsNotes(receipt)) {
+      const lacked = proven.map((paper) => {
+        const count = (notesJournaled.get(paper) || 0) + 1;
+        notesJournaled.set(paper, count);
+        return count > notesHeld(paper);
+      });
+      if (
+        isBound(current, receipt.id) ||
+        !lacked.every(Boolean) ||
+        !proven.some((paper) =>
+          current.tasks.some((task) => owesNote(task, paper)),
+        )
+      )
+        continue;
+      current = applyReceipt(current, receipt, now).checkpoint;
+      continue;
+    }
+    if (isBound(current, receipt.id)) continue;
     const takes = (task: Task) => acceptsWrite(task, receipt);
     const held = current.tasks.some(
       (task) =>
@@ -1106,20 +1255,22 @@ export function reconcileJournaledReceipts(
     : { checkpoint: current, changed: true };
 }
 
-/** Writes that create a note on a paper: repeating one writes it twice. */
-const NOTE_CREATING_OPERATIONS: ReadonlySet<string> = new Set([
-  "note_create",
-  "save_note",
-  "save_notes_batch",
-]);
-
 /**
- * The papers a note-creating write names that the job has already written a
- * note on: a declared part for notes holds each as done, by its receipt, and
- * no open part still asks for a note on it. Such a write would write the
+ * The papers a note-creating write names that the job has already written
+ * every note it asks for on: a declared part for notes holds each as done,
+ * by its receipt, and no part still owes it a note (`owesNote`). Each note
+ * binds one part (`notePapersByPart`), so a paper two parts ask a note of
+ * takes two notes before a third is refused. Such a write would write the
  * paper twice, so the host does not run it (`toolExecution.ts`); the
  * receipts that ticked the papers stay the proof. `left` are the papers the
  * same write names that are still owed; null when none is written already.
+ *
+ * A part holds one done flag a paper, so a single part that asks for two
+ * notes on each paper cannot count the second; the host's answer asks the
+ * model to declare that note as a part of its own, which then owes it. The
+ * guard does not tell two notes apart by their text: a note written again
+ * in other words, as a model that starts its page over writes it, is the
+ * same note twice.
  *
  * Only note creation is held to this: setting a folder, a tag or a field
  * again changes nothing ("already satisfied"), and a second, different one
@@ -1134,11 +1285,7 @@ export function papersAlreadyWritten(
 ): { written: string[]; left: string[]; parts: string[] } | null {
   const targets = unique(
     proposals
-      .filter(
-        (proposal) =>
-          proposal.capability === "zotero.notes" &&
-          NOTE_CREATING_OPERATIONS.has(proposal.operation),
-      )
+      .filter(createsNotes)
       .flatMap((proposal) =>
         proposal.requestedTargets.filter((target) =>
           target.startsWith("item:"),
@@ -1153,27 +1300,16 @@ export function papersAlreadyWritten(
       Boolean(task.targets?.length),
   );
   if (!targets.length || !noteParts.length) return null;
-  const names = (values: readonly string[] | undefined, target: string) =>
-    (values || []).some(
-      (value) => resolveTarget(value, [target]) !== undefined,
-    );
   const written: string[] = [];
   const parts = new Set<string>();
   for (const target of targets) {
-    const naming = noteParts.filter((task) => names(task.targets, target));
-    const holders = naming.filter(
+    const holders = noteParts.filter(
       (task) =>
-        task.capability === "zotero.notes" && names(task.doneTargets, target),
+        task.capability === "zotero.notes" &&
+        namesTarget(task.targets, target) &&
+        namesTarget(task.doneTargets, target),
     );
-    const owed = naming.some(
-      (task) =>
-        task.status === "pending" &&
-        !names(task.doneTargets, target) &&
-        !names(
-          (task.exceptions || []).flatMap((entry) => entry.targets),
-          target,
-        ),
-    );
+    const owed = noteParts.some((task) => owesNote(task, target));
     if (!holders.length || owed) continue;
     written.push(target);
     for (const task of holders) parts.add(task.description);

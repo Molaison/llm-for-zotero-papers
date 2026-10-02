@@ -2167,6 +2167,197 @@ describe("a note batch over papers a job already wrote", function () {
   });
 });
 
+describe("a job that writes two notes on each paper", function () {
+  let environment: BatchJourneyEnvironment;
+  let conversationKey = 999_700;
+  const SUMMARY_ALL = "Save a summary note on each paper";
+  const METHODS_ALL = "Save a methods note on each paper";
+  const PAPERS = PAPER_IDS.map((paper) => `item:${paper}`);
+  const ASK =
+    "For each of the 3 papers in Drift, save a summary note and a separate methods note";
+
+  beforeEach(async function () {
+    environment = await installBatchJourneyEnvironment();
+    conversationKey += 10;
+  });
+
+  afterEach(function () {
+    environment.restore();
+  });
+
+  function jobRegistry(): AgentToolRegistry {
+    const tools = createBatchJourneyRegistry(environment.library);
+    tools.register(createTaskUpdateTool());
+    tools.register(
+      createNoteWriteTool({
+        getItem: (itemId: number) =>
+          (globalThis.Zotero as any).Items.get(itemId),
+        getCollectionSummary: () => null,
+      } as unknown as ZoteroGateway),
+    );
+    return tools;
+  }
+
+  const part = (taskId: string, description: string) => ({
+    taskId,
+    description,
+    expectedEffect: "mutation",
+    expectedCapability: "zotero.notes",
+    targetIds: PAPER_IDS.map(String),
+  });
+
+  const body = (kind: "summary" | "methods", paper: number) =>
+    kind === "summary"
+      ? `# Summary of paper ${paper}\n\nWhat paper ${paper} found.`
+      : `# Methods of paper ${paper}\n\nHow paper ${paper} measured it.`;
+
+  const note = (
+    kind: "summary" | "methods",
+    paper: number,
+    id = `${kind}-${paper}`,
+  ): AgentToolCall => ({
+    id,
+    name: "note_write",
+    arguments: {
+      mode: "create",
+      targetItemId: paper,
+      content: body(kind, paper),
+    },
+  });
+
+  const batch = (kind: "summary" | "methods"): AgentToolCall => ({
+    id: `${kind}-batch`,
+    name: "note_write_batch",
+    arguments: {
+      notes: PAPER_IDS.map((paper) => ({
+        targetItemId: paper,
+        content: body(kind, paper),
+      })),
+    },
+  });
+
+  /** Live notes on each paper, by paper. */
+  const notesPerPaper = () =>
+    PAPER_IDS.map(
+      (paper) =>
+        [...environment.library.notes.values()].filter(
+          (entry) => entry.parentID === paper && !entry.deleted,
+        ).length,
+    );
+
+  const skipped = (events: AgentEvent[]) =>
+    events.filter(
+      (event) =>
+        event.type === "tool_result" &&
+        ((event.content as { skipped?: unknown })?.skipped === true ||
+          event.inputRejected),
+    );
+
+  function assertEveryPartDone(events: AgentEvent[], parts: string[]) {
+    const ledger = settled({ events } as Turn);
+    for (const local of parts) {
+      const task = outcome(ledger, local);
+      assert.equal(task.status, "completed", local);
+      assert.deepEqual(task.doneTargets, PAPERS, local);
+    }
+    assert.deepEqual(ledger.end, { state: "completed" });
+  }
+
+  it("writes a summary note and a methods note on each of three papers: six notes, and the run ends completed", async function () {
+    const turn = await runJourneyTurn({
+      registry: jobRegistry(),
+      conversationKey,
+      userText: ASK,
+      sourceMessageTimestamp: conversationKey,
+      steps: [
+        stepOf(
+          declare("declare-1", [
+            part("summary-all", SUMMARY_ALL),
+            part("methods-all", METHODS_ALL),
+          ]),
+        ),
+        ...PAPER_IDS.map((paper) =>
+          stepOf(note("summary", paper), note("methods", paper)),
+        ),
+        finalStep("Each paper has its summary note and its methods note."),
+      ],
+    });
+    assert.equal(turn.outcome?.kind, "completed");
+    assert.isEmpty(skipped(turn.events), "no note was skipped or refused");
+    assert.equal(environment.library.nativeSaves(), 6);
+    assert.deepEqual(notesPerPaper(), [2, 2, 2]);
+    assertEveryPartDone(turn.events, ["summary-all", "methods-all"]);
+  });
+
+  it("writes them in two batches, the summaries and then the methods", async function () {
+    const turn = await runJourneyTurn({
+      registry: jobRegistry(),
+      conversationKey,
+      userText: ASK,
+      sourceMessageTimestamp: conversationKey,
+      steps: [
+        stepOf(
+          declare("declare-1", [
+            part("summary-all", SUMMARY_ALL),
+            part("methods-all", METHODS_ALL),
+          ]),
+        ),
+        stepOf(batch("summary")),
+        stepOf(batch("methods")),
+        finalStep("Each paper has its summary note and its methods note."),
+      ],
+    });
+    assert.equal(turn.outcome?.kind, "completed");
+    assert.isEmpty(skipped(turn.events), "no batch was skipped or refused");
+    assert.deepEqual(notesPerPaper(), [2, 2, 2]);
+    assertEveryPartDone(turn.events, ["summary-all", "methods-all"]);
+  });
+
+  it("tells a one-part job how to ask for a second note on a paper, then writes all six", async function () {
+    const turn = await runJourneyTurn({
+      registry: jobRegistry(),
+      conversationKey,
+      userText: ASK,
+      sourceMessageTimestamp: conversationKey,
+      steps: [
+        // Both notes declared as one part: it holds one done flag a paper.
+        stepOf(
+          declare("declare-1", [
+            part(
+              "notes-all",
+              "Save a summary and a methods note on each paper",
+            ),
+          ]),
+          note("summary", 1),
+        ),
+        stepOf(note("methods", 1, "methods-1-refused")),
+        // The model asks for the second note with a part of its own.
+        stepOf(
+          declare("declare-2", [part("methods-all", METHODS_ALL)]),
+          note("methods", 1),
+        ),
+        ...[2, 3].map((paper) =>
+          stepOf(note("summary", paper), note("methods", paper)),
+        ),
+        finalStep("Each paper has its summary note and its methods note."),
+      ],
+    });
+    assert.equal(turn.outcome?.kind, "completed");
+    const [first, ...others] = skipped(turn.events);
+    assert.isEmpty(others, "only the note sent before its part was skipped");
+    assert.equal(
+      first?.type === "tool_result" ? first.callId : undefined,
+      "methods-1-refused",
+    );
+    assert.include(
+      JSON.stringify(first?.type === "tool_result" ? first.content : null),
+      "declare it as a part of its own with task_update",
+    );
+    assert.deepEqual(notesPerPaper(), [2, 2, 2]);
+    assertEveryPartDone(turn.events, ["notes-all", "methods-all"]);
+  });
+});
+
 describe("derived limits in runtime turns", function () {
   let environment: DirectJourneyEnvironment;
   let conversationKey = 998_000;

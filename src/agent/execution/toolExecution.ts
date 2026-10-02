@@ -438,7 +438,10 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
    * gets a second note, and the model reads why. A call that mixes such
    * papers with papers still owed a note is refused, to be sent again
    * without them. The receipts that ticked the papers stay the proof
-   * (`papersAlreadyWritten`). Null for every other call, which runs as ever.
+   * (`papersAlreadyWritten`). A part counts one note a paper, so the answer
+   * also says how a request for a second, different note on a paper is
+   * asked: by a part of its own, which then owes that note. Null for every
+   * other call, which runs as ever.
    */
   const answerNoteWrittenInJob = async (
     call: AgentToolCall,
@@ -484,6 +487,8 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
     } the note this job writes (${found.parts
       .map((part) => `“${part}”`)
       .join(", ")})`;
+    const another =
+      "If the request asks for another, different note on a paper, declare it as a part of its own with task_update, then send it again.";
     if (!found.left.length)
       return {
         callId: call.id,
@@ -493,7 +498,7 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
         actionReceipts: [],
         content: {
           skipped: true,
-          note: `Skipped by the host: ${which}, so nothing was written. Go on with the papers left.`,
+          note: `Skipped by the host: ${which}, so nothing was written. Go on with the papers left. ${another}`,
         },
       };
     return {
@@ -505,7 +510,7 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
       content: {
         error: `Not run: ${which}, and a second would write ${
           one ? "it" : "them"
-        } twice. Send the call again with only the papers left: ${ids(found.left)}.`,
+        } twice. Send the call again with only the papers left: ${ids(found.left)}. ${another}`,
       },
     };
   };

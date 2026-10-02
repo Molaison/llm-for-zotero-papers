@@ -2745,8 +2745,8 @@ describe("outcome ledger: resuming a job, and the notes it already wrote", funct
       taskId: "methods",
       description: "Save a methods note on each paper",
     };
-    // One note receipt ticks every part that names its paper, so a part
-    // that still owes paper 1 a note is one declared after it was written.
+    // A part declared after paper 1's note was written still owes it one;
+    // two parts declared up front are in "one part per note" below.
     const one = noted(ledgerWith(noteAll), "item:1");
     const ledger = frozen(declareOutcomes(one, [second], 40));
     assert.isNull(
@@ -2804,5 +2804,196 @@ describe("outcome ledger: resuming a job, and the notes it already wrote", funct
       "failed",
     ] as const)
       assert.isFalse(resumesOnContinue(ended(state)), state);
+  });
+});
+
+describe("outcome ledger: one part per note", function () {
+  const SCOPE = ["item:1", "item:2", "item:3"];
+  const SUMMARY = "Save a summary note on each paper";
+  const METHODS = "Save a methods note on each paper";
+  const summaryAll: OutcomeDeclaration = {
+    taskId: "summary-all",
+    description: SUMMARY,
+    effect: "mutation",
+    capability: "zotero.notes",
+    targets: SCOPE,
+    scope: true,
+  };
+  const methodsAll: OutcomeDeclaration = {
+    ...summaryAll,
+    taskId: "methods-all",
+    description: METHODS,
+  };
+  const notesOn = (...targets: string[]) =>
+    targets.map((target) => ({
+      capability: "zotero.notes" as const,
+      operation: "note_create" as const,
+      requestedTargets: [target],
+    }));
+  const batchOver = (...targets: string[]) => [
+    {
+      capability: "zotero.notes" as const,
+      operation: "save_notes_batch" as const,
+      requestedTargets: targets,
+    },
+  ];
+  let notes = 0;
+  /** The verified receipt of one more note created on `target`. */
+  const noted = (checkpoint: ExecutionCheckpoint, target: string) =>
+    apply(checkpoint, {
+      kind: "receipt",
+      receipt: receipt({
+        id: `note-${(notes += 1)}:${target}`,
+        requestedTargets: [target],
+        appliedTargets: [target],
+      }),
+    }).checkpoint;
+
+  it("binds a note to the first part that still owes its paper one, and the next note to the next part", function () {
+    let ledger = noted(ledgerWith(summaryAll, methodsAll), "item:1");
+    assert.deepEqual(find(ledger, "summary-all").doneTargets, ["item:1"]);
+    assert.isUndefined(
+      find(ledger, "methods-all").doneTargets,
+      "one note is one part's note",
+    );
+    assert.isUndefined(find(ledger, "methods-all").receiptIds);
+    assert.isNull(
+      papersAlreadyWritten(ledger, notesOn("item:1")),
+      "the methods part still owes paper 1 its note",
+    );
+
+    ledger = noted(ledger, "item:1");
+    assert.deepEqual(find(ledger, "methods-all").doneTargets, ["item:1"]);
+    assert.lengthOf(
+      find(ledger, "summary-all").receiptIds!,
+      1,
+      "the second note binds the methods part alone",
+    );
+    assert.deepEqual(papersAlreadyWritten(ledger, notesOn("item:1")), {
+      written: ["item:1"],
+      left: [],
+      parts: [SUMMARY, METHODS],
+    });
+
+    // Setting a tag twice changes nothing, so a tag still binds every part
+    // that names its paper.
+    const tagged = apply(
+      ledgerWith(
+        { ...tagAny, taskId: "tag-method", targets: SCOPE },
+        { ...tagAny, taskId: "tag-topic", targets: SCOPE },
+      ),
+      {
+        kind: "receipt",
+        receipt: receipt({
+          id: "tags-1",
+          capability: "zotero.tags",
+          operation: "apply_tags",
+          requestedTargets: ["item:1"],
+          appliedTargets: ["item:1"],
+        }),
+      },
+    ).checkpoint;
+    for (const local of ["tag-method", "tag-topic"])
+      assert.deepEqual(find(tagged, local).doneTargets, ["item:1"], local);
+  });
+
+  it("splits a note batch paper by paper among the parts that owe each", function () {
+    const ledger = apply(noted(ledgerWith(summaryAll, methodsAll), "item:1"), {
+      kind: "receipt",
+      receipt: receipt({
+        id: "batch-1",
+        operation: "save_notes_batch",
+        requestedTargets: SCOPE,
+        appliedTargets: SCOPE,
+      }),
+    }).checkpoint;
+    const summary = find(ledger, "summary-all");
+    assert.equal(summary.status, "completed");
+    assert.deepEqual(summary.doneTargets, SCOPE);
+    const methods = find(ledger, "methods-all");
+    assert.equal(methods.status, "pending");
+    assert.deepEqual(methods.doneTargets, ["item:1"]);
+    assert.include(methods.receiptIds!, "batch-1");
+    assert.deepEqual(papersAlreadyWritten(ledger, batchOver(...SCOPE)), {
+      written: ["item:1"],
+      left: ["item:2", "item:3"],
+      parts: [SUMMARY, METHODS],
+    });
+  });
+
+  it("lets a part that takes any write take every note on its papers, as before, so it never opens the guard", function () {
+    // A part with no capability may be a tag's or a folder's: a note fills
+    // no slot of it, and it owes no note once a note named its paper.
+    const updateAll: OutcomeDeclaration = {
+      taskId: "update-all",
+      description: "Update each paper",
+      effect: "mutation",
+      targets: SCOPE,
+    };
+    let ledger = noted(ledgerWith(updateAll, summaryAll, methodsAll), "item:1");
+    assert.deepEqual(find(ledger, "update-all").doneTargets, ["item:1"]);
+    assert.deepEqual(find(ledger, "summary-all").doneTargets, ["item:1"]);
+    assert.isUndefined(find(ledger, "methods-all").doneTargets);
+    ledger = noted(ledger, "item:1");
+    assert.deepEqual(find(ledger, "methods-all").doneTargets, ["item:1"]);
+    assert.deepEqual(papersAlreadyWritten(ledger, notesOn("item:1"))?.written, [
+      "item:1",
+    ]);
+    const one = noted(ledgerWith(updateAll, summaryAll), "item:1");
+    assert.deepEqual(papersAlreadyWritten(one, notesOn("item:1"))?.written, [
+      "item:1",
+    ]);
+  });
+
+  it("asks a one-part job for a part of its own before a second note on a paper, then counts each note once", function () {
+    // "A summary and a methods note on each paper", declared as one part:
+    // the part holds one done flag a paper, so it cannot count two notes.
+    const both = { ...summaryAll, description: "Save two notes on each paper" };
+    let ledger = noted(ledgerWith(both), "item:1");
+    assert.deepEqual(
+      papersAlreadyWritten(ledger, notesOn("item:1"))?.written,
+      ["item:1"],
+      "the second note is refused until a part asks for it",
+    );
+    ledger = frozen(declareOutcomes(ledger, [methodsAll], 40));
+    assert.isNull(papersAlreadyWritten(ledger, notesOn("item:1")));
+
+    ledger = noted(ledger, "item:1");
+    assert.deepEqual(find(ledger, "methods-all").doneTargets, ["item:1"]);
+    assert.lengthOf(find(ledger, "summary-all").receiptIds!, 1);
+    // Paper 2's first note is the first part's, so its second still runs.
+    ledger = noted(ledger, "item:2");
+    assert.deepEqual(find(ledger, "summary-all").doneTargets, [
+      "item:1",
+      "item:2",
+    ]);
+    assert.deepEqual(find(ledger, "methods-all").doneTargets, ["item:1"]);
+    assert.isNull(papersAlreadyWritten(ledger, notesOn("item:2")));
+    ledger = noted(ledger, "item:2");
+    assert.deepEqual(find(ledger, "methods-all").doneTargets, [
+      "item:1",
+      "item:2",
+    ]);
+  });
+
+  it("still skips a note sent again after Stop once every part has its paper, and names the papers a batch has left", function () {
+    let ledger = ledgerWith(summaryAll, methodsAll);
+    for (const target of ["item:1", "item:1", "item:2"])
+      ledger = noted(ledger, target);
+    // The user stops the job; "continue" picks the ledger back up.
+    const stopped = frozen({ ...ledger, end: { state: "cancelled" as const } });
+    assert.isTrue(resumesOnContinue(stopped));
+    const { end: _end, ...resumed } = stopped;
+    assert.deepEqual(papersAlreadyWritten(resumed, notesOn("item:1")), {
+      written: ["item:1"],
+      left: [],
+      parts: [SUMMARY, METHODS],
+    });
+    // Paper 2 still owes its methods note, and paper 3 both of its notes.
+    assert.deepEqual(papersAlreadyWritten(resumed, batchOver(...SCOPE)), {
+      written: ["item:1"],
+      left: ["item:2", "item:3"],
+      parts: [SUMMARY, METHODS],
+    });
   });
 });
