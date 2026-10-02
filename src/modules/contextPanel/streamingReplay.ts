@@ -404,6 +404,12 @@ export async function exerciseStreamingReplay(
       );
     }
     result.manualScrollDelta = box.scrollTop - scrollTop;
+    // Thinking repaints are coalesced (up to 120 ms behind the last delta),
+    // so let the pending repaint land before the text is read back.
+    await new Promise<void>((resolve) => win.setTimeout(resolve, 160));
+    await new Promise<void>((resolve) =>
+      win.requestAnimationFrame(() => resolve()),
+    );
     const displayed = Array.from(
       box.querySelectorAll(".llm-agent-reasoning-text"),
     )

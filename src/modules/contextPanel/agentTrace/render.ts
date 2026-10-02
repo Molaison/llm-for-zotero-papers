@@ -107,11 +107,22 @@ import { getAgentRuntime } from "../../../agent";
 import { projectStageEvents } from "./stageProjection";
 import { resolveAgentToolPresentation } from "./toolPresentation";
 import {
-  appendAgentTraceText,
   compactAgentTraceEvents,
+  createAgentTraceCompactor,
   getReasoningTraceKey,
   normalizeInlineTextForDedupe,
+  appendAgentTraceText,
+  type AgentTraceCompactor,
 } from "./traceReducer";
+import {
+  applyAgentTraceEventToScan,
+  createAgentTraceEventScan,
+  readPendingConfirmation,
+  readTraceDisplayLabels,
+  readTracePlanPhase,
+  scanAgentTraceEvents,
+  type AgentTraceEventScan,
+} from "./traceEventScan";
 
 type AgentTraceSummaryKind = "plan" | "tool" | "ok" | "skip" | "done";
 
@@ -246,11 +257,9 @@ export function formatAgentActivityDuration(durationMs: number): string {
 function resolveAgentActivityDurationMs(
   message: Message,
   userMessage: Message | null | undefined,
-  events: AgentRunEventRecord[],
+  eventTimes: { first: number; last: number },
 ): number {
-  const eventTimes = events
-    .map((event) => Number(event.createdAt))
-    .filter((value) => Number.isFinite(value) && value > 0);
+  const firstEventAt = eventTimes.first;
   const waitingStartedAt = Number(message.waitingAnimationStartedAt);
   const userStartedAt = Number(userMessage?.timestamp);
   const messageTimestamp = Number(message.timestamp);
@@ -258,7 +267,7 @@ function resolveAgentActivityDurationMs(
     (Number.isFinite(waitingStartedAt) && waitingStartedAt > 0
       ? waitingStartedAt
       : 0) ||
-    (eventTimes.length ? Math.min(...eventTimes) : 0) ||
+    (firstEventAt > 0 ? firstEventAt : 0) ||
     (Number.isFinite(userStartedAt) && userStartedAt > 0 ? userStartedAt : 0) ||
     (Number.isFinite(messageTimestamp) && messageTimestamp > 0
       ? messageTimestamp
@@ -270,7 +279,7 @@ function resolveAgentActivityDurationMs(
         Number.isFinite(messageTimestamp) && messageTimestamp > 0
           ? messageTimestamp
           : 0,
-        ...eventTimes,
+        eventTimes.last > 0 ? eventTimes.last : 0,
       );
   return Math.max(0, end - start);
 }
@@ -281,12 +290,12 @@ function appendAgentActivityDisclosure(params: {
   list: HTMLElement;
   message: Message;
   userMessage?: Message | null;
-  events: AgentRunEventRecord[];
+  scan: AgentTraceEventScan;
   forceOpen?: boolean;
 }): void {
-  const { doc, wrap, list, message, userMessage, events } = params;
+  const { doc, wrap, list, message, userMessage, scan } = params;
   const working = message.streaming === true;
-  const planPhase = resolveTracePlanPhase(events);
+  const planPhase = scan.planPhase;
   const previous = agentActivityExpandedCache.get(message);
   const state = working
     ? !previous || !previous.wasWorking
@@ -308,11 +317,10 @@ function appendAgentActivityDisclosure(params: {
   const summary =
     details.querySelector?.("summary") || doc.createElement("summary");
   summary.className = "llm-agent-activity-summary";
-  const durationMs = resolveAgentActivityDurationMs(
-    message,
-    userMessage,
-    events,
-  );
+  const durationMs = resolveAgentActivityDurationMs(message, userMessage, {
+    first: scan.minCreatedAt,
+    last: scan.maxCreatedAt,
+  });
   const view = traceViews.get(wrap)!;
   if (working) {
     let label = summary.querySelector(".llm-agent-activity-label");
@@ -393,20 +401,8 @@ function resolveTracePlanPhase(
   events: readonly AgentRunEventRecord[],
 ): "planning" | "executing" | null {
   for (let index = events.length - 1; index >= 0; index -= 1) {
-    const payload = events[index]?.payload;
-    const planEvent = readStoredPlanEvent(payload);
-    if (planEvent?.type === "plan_execution_updated") return "executing";
-    if (
-      planEvent?.type === "plan_ready" ||
-      planEvent?.type === "plan_updated"
-    ) {
-      return "planning";
-    }
-    if (payload?.type === "status") {
-      const text = payload.text.trim().toLowerCase();
-      if (text.startsWith("executing the approved plan")) return "executing";
-      if (text.startsWith("planning the request")) return "planning";
-    }
+    const phase = readTracePlanPhase(events[index]?.payload);
+    if (phase) return phase;
   }
   return null;
 }
@@ -457,27 +453,6 @@ function getMessageSelectedTexts(message: Message): string[] {
 
 function normalizePaperContexts(paperContexts: unknown): PaperContextRef[] {
   return normalizePaperContextRefs(paperContexts, { sanitizeText });
-}
-
-function getPendingConfirmation(
-  events: AgentRunEventRecord[],
-): { requestId: string; action: AgentPendingAction } | null {
-  const pending = new Map<string, AgentPendingAction>();
-  for (const entry of events) {
-    if (entry.payload.type === "confirmation_required") {
-      pending.set(entry.payload.requestId, entry.payload.action);
-      continue;
-    }
-    if (entry.payload.type === "confirmation_resolved") {
-      pending.delete(entry.payload.requestId);
-    }
-  }
-  const last = Array.from(pending.entries()).pop();
-  if (!last) return null;
-  return {
-    requestId: last[0],
-    action: last[1],
-  };
 }
 
 function isAgentTraceRecord(value: unknown): value is Record<string, unknown> {
@@ -4199,12 +4174,12 @@ function replaceInlineTextDedupeKey(
   if (nextKey) visibleInlineText.add(nextKey);
 }
 
+/** `chunk` is already sanitized: the caller remembers it per payload. */
 function appendInterleavedInlineText(
   items: AgentTraceDisplayItem[],
-  rawText: string,
+  chunk: string,
   visibleInlineText: Set<string>,
 ): void {
-  const chunk = sanitizeText(rawText || "");
   if (!chunk) return;
 
   const lastItem = items[items.length - 1];
@@ -4252,7 +4227,7 @@ function appendInterleavedInlineText(
   items.push({ type: "inline_text", text });
 }
 
-function getFinalTraceText(events: AgentRunEventRecord[]): string {
+function getFinalTraceText(events: readonly AgentRunEventRecord[]): string {
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const entry = events[index];
     if (entry?.payload.type === "final") {
@@ -4434,6 +4409,163 @@ function appendReasoningTraceItem(
   });
 }
 
+type TraceToolCallPayload = Extract<
+  AgentRunEventRecord["payload"],
+  { type: "tool_call" }
+>;
+type TraceToolResultPayload = Extract<
+  AgentRunEventRecord["payload"],
+  { type: "tool_result" }
+>;
+
+/**
+ * How often the trace read a tool result's payload, for tests only.
+ *
+ * A result can be megabytes of paper text and is read on every refresh of a
+ * live run; each payload must be read once and remembered.
+ */
+const agentTraceProjectionCounters = {
+  toolResultTraceInfo: 0,
+  toolResultCards: 0,
+  toolCallDetails: 0,
+  /** Live refreshes that patched the last thinking block alone. */
+  liveReasoningPatches: 0,
+  /** Live refreshes that walked the folded trace. */
+  liveWalks: 0,
+  /** Live states started over from the first event. */
+  liveResets: 0,
+};
+
+export function readAgentTraceProjectionCountersForTests(): Readonly<
+  typeof agentTraceProjectionCounters
+> {
+  return { ...agentTraceProjectionCounters };
+}
+
+export function resetAgentTraceProjectionCountersForTests(): void {
+  for (const key of Object.keys(agentTraceProjectionCounters))
+    agentTraceProjectionCounters[
+      key as keyof typeof agentTraceProjectionCounters
+    ] = 0;
+}
+
+/*
+ * What the trace reads from one event payload, remembered by that payload.
+ * Stored events are never rewritten in place (a changed event is a new
+ * record), so a payload's projection holds for as long as the payload does,
+ * and a refresh reads each result once however often it repaints.
+ */
+const toolResultTraceInfoMemo = new WeakMap<
+  TraceToolResultPayload,
+  ToolResultTraceInfo | null
+>();
+const toolResultCardsMemo = new WeakMap<
+  TraceToolResultPayload,
+  {
+    build: Parameters<typeof selectToolResultTraceCards>[1];
+    cards: AgentToolResultCard[];
+  }
+>();
+type TraceToolCallProjection = {
+  result: TraceToolResultPayload | undefined;
+  presentation: ReturnType<typeof resolveAgentToolPresentation>;
+  resultInfo: ToolResultTraceInfo | null;
+  details: AgentTraceDetail[];
+  summary: string | null;
+};
+const toolCallProjectionMemo = new WeakMap<
+  TraceToolCallPayload,
+  TraceToolCallProjection
+>();
+/** Shared details arrays, so a row's signature need not serialize them. */
+const memoizedTraceDetailIds = new WeakMap<AgentTraceDetail[], number>();
+let nextMemoizedTraceDetailId = 0;
+const sanitizedMessageDeltaMemo = new WeakMap<object, string>();
+
+function projectToolResultTraceInfo(
+  result: TraceToolResultPayload | undefined,
+): ToolResultTraceInfo | null {
+  if (!result) return null;
+  const known = toolResultTraceInfoMemo.get(result);
+  if (known !== undefined) return known;
+  agentTraceProjectionCounters.toolResultTraceInfo += 1;
+  const info = buildToolResultTraceInfo(result);
+  toolResultTraceInfoMemo.set(result, info);
+  return info;
+}
+
+function projectToolResultCards(
+  payload: TraceToolResultPayload,
+  build: Parameters<typeof selectToolResultTraceCards>[1],
+): AgentToolResultCard[] {
+  const known = toolResultCardsMemo.get(payload);
+  if (known && known.build === build) return known.cards.slice();
+  agentTraceProjectionCounters.toolResultCards += 1;
+  const cards = selectToolResultTraceCards(payload, build);
+  toolResultCardsMemo.set(payload, { build, cards });
+  return cards.slice();
+}
+
+/** The parts of a call row read from its arguments and its result. */
+function projectToolCall(
+  payload: TraceToolCallPayload,
+  result: TraceToolResultPayload | undefined,
+): TraceToolCallProjection {
+  const presentation = resolveAgentToolPresentation(payload.name);
+  const known = toolCallProjectionMemo.get(payload);
+  if (known && known.result === result && known.presentation === presentation)
+    return known;
+  agentTraceProjectionCounters.toolCallDetails += 1;
+  const resultInfo = projectToolResultTraceInfo(result);
+  let presentationDetails: AgentTraceDetail[] = [];
+  if (result) {
+    try {
+      presentationDetails =
+        presentation?.buildTraceDetails?.({
+          args: payload.args,
+          content: result.content,
+        }) ?? [];
+    } catch {
+      presentationDetails = [];
+    }
+  }
+  const details = dedupeAgentTraceDetails(
+    presentationDetails.length
+      ? presentationDetails
+      : [
+          ...buildAgentTraceArgsDetails(payload.name, payload.args),
+          ...(resultInfo?.details || []),
+        ],
+  );
+  memoizedTraceDetailIds.set(details, (nextMemoizedTraceDetailId += 1));
+  let summary: string | null = null;
+  if (result?.ok && presentation?.buildTraceSummary) {
+    try {
+      summary =
+        presentation.buildTraceSummary({
+          args: payload.args,
+          content: result.content,
+        }) || null;
+    } catch {
+      // Keep the regular call summary when display-only formatting fails.
+      summary = null;
+    }
+  }
+  const projection = { result, presentation, resultInfo, details, summary };
+  toolCallProjectionMemo.set(payload, projection);
+  return projection;
+}
+
+function sanitizeMessageDeltaText(
+  payload: Extract<AgentRunEventRecord["payload"], { type: "message_delta" }>,
+): string {
+  const known = sanitizedMessageDeltaMemo.get(payload);
+  if (known !== undefined) return known;
+  const text = sanitizeText(payload.text || "");
+  sanitizedMessageDeltaMemo.set(payload, text);
+  return text;
+}
+
 function appendLegacyAgentTraceEvent(
   ctx: AgentTraceAdapterContext,
   entry: AgentRunEventRecord,
@@ -4475,49 +4607,15 @@ function appendLegacyAgentTraceEvent(
     case "tool_call": {
       if (isToolHiddenFromTrace(entry.payload.name)) return true;
       const resultEvent = ctx.toolResultsByCallId.get(entry.payload.callId);
-      const resultInfo = buildToolResultTraceInfo(resultEvent);
-      let presentationDetails: AgentTraceDetail[] = [];
-      if (resultEvent) {
-        try {
-          presentationDetails =
-            resolveAgentToolPresentation(
-              entry.payload.name,
-            )?.buildTraceDetails?.({
-              args: entry.payload.args,
-              content: resultEvent.content,
-            }) ?? [];
-        } catch {
-          presentationDetails = [];
-        }
-      }
-      const details = presentationDetails.length
-        ? presentationDetails
-        : [
-            ...buildAgentTraceArgsDetails(
-              entry.payload.name,
-              entry.payload.args,
-            ),
-            ...(resultInfo?.details || []),
-          ];
-      const presentation = resolveAgentToolPresentation(entry.payload.name);
+      const call = projectToolCall(entry.payload, resultEvent);
       let row = summarizeAgentTraceToolCall(
         entry.payload.name,
         entry.payload.args,
         entry.payload.toolLabel,
         ctx.requestSummary,
-        resultInfo || undefined,
+        call.resultInfo || undefined,
       );
-      if (resultEvent?.ok && presentation?.buildTraceSummary) {
-        try {
-          const summary = presentation.buildTraceSummary({
-            args: entry.payload.args,
-            content: resultEvent.content,
-          });
-          if (summary) row = { ...row, text: summary };
-        } catch {
-          // Keep the regular call summary when display-only formatting fails.
-        }
-      }
+      if (call.summary) row = { ...row, text: call.summary };
       ctx.items.push({
         type: "action",
         row,
@@ -4527,7 +4625,7 @@ function appendLegacyAgentTraceEvent(
           entry.payload.args,
           ctx.userMessage,
         ),
-        details: dedupeAgentTraceDetails(details),
+        details: call.details,
         detailKey: `tool-call:${entry.payload.callId}`,
       });
       ctx.fallbackReasoningStep += 1;
@@ -4611,7 +4709,7 @@ function appendLegacyAgentTraceEvent(
             },
           });
         }
-        const cards = selectToolResultTraceCards(
+        const cards = projectToolResultCards(
           entry.payload,
           resolveAgentToolPresentation(entry.payload.name)?.buildResultCards,
         );
@@ -4641,7 +4739,7 @@ function appendLegacyAgentTraceEvent(
     case "message_delta":
       appendInterleavedInlineText(
         ctx.items,
-        entry.payload.text || "",
+        sanitizeMessageDeltaText(entry.payload),
         ctx.visibleInlineText,
       );
       return true;
@@ -4878,129 +4976,260 @@ function appendSharedAgentTraceEvent(
  * is not, so a result is read for it whenever it carries one. A run that
  * never resolved any has none, and identities stay as they are.
  */
-function readPaperDisplayLabels(value: unknown): unknown {
-  return isAgentTraceRecord(value) ? value.displayLabels : undefined;
-}
-
 function researchDisplayLabels(
   events: readonly AgentRunEventRecord[],
 ): Map<string, string> | undefined {
   for (let index = events.length - 1; index >= 0; index--) {
-    const event = events[index].payload;
-    const values =
-      event.type === "provider_event" &&
-      event.providerType === "paper_display_labels" &&
-      event.payload?.version === 1
-        ? event.payload.displayLabels
-        : event.type === "tool_result" && event.ok
-          ? readPaperDisplayLabels(event.content)
-          : undefined;
-    if (values && typeof values === "object")
-      return new Map(
-        Object.entries(values).filter(
-          (entry): entry is [string, string] => typeof entry[1] === "string",
-        ),
-      );
+    const labels = readTraceDisplayLabels(events[index].payload);
+    if (labels) return labels;
   }
   return undefined;
 }
 
-type TraceProjection = ReturnType<typeof buildAgentTraceDisplayItemsCanonical>;
-const streamingProjections = new WeakMap<
-  Message,
-  {
-    events: AgentRunEventRecord[];
-    count: number;
-    last: AgentRunEventRecord | undefined;
-    text: string;
-    user: Message | null | undefined;
-    projection: TraceProjection;
-    labels?: Map<string, string>;
-    tail?: Extract<AgentRunEventRecord["payload"], { type: "reasoning" }>;
-  }
->();
+type TraceProjection = {
+  items: AgentTraceDisplayItem[];
+  isInterleaved: boolean;
+  inlineTextReplacesAssistantText: boolean;
+};
 
-/** Reuse the canonical projection; append the active compacted reasoning group. */
+type ReasoningTraceItem = Extract<AgentTraceDisplayItem, { type: "reasoning" }>;
+
+/**
+ * What a live run's projection keeps between refreshes.
+ *
+ * The run's events are folded once each: into the compacted list the
+ * projection walks and into the whole-run facts (plan phase, pending
+ * confirmation, final answer, paper labels) the renderer reads. A refresh
+ * folds only what arrived since the last one.
+ */
+type LiveTraceState = {
+  runId: string | undefined;
+  events: AgentRunEventRecord[];
+  /** The records folded so far, to notice one replaced in place. */
+  folded: AgentRunEventRecord[];
+  compactor: AgentTraceCompactor;
+  scan: AgentTraceEventScan;
+  /** Events arrived since `cached` was projected. */
+  changed: boolean;
+  /** ... and every one of them only lengthened the last reasoning entry. */
+  onlyTailReasoning: boolean;
+  cached?: {
+    projection: TraceProjection;
+    user: Message | null | undefined;
+    hasText: boolean;
+    providerLabel: Message["modelProviderLabel"];
+    runMode: Message["runMode"];
+    /** The shown item the last compacted entry produced, when reasoning. */
+    tailReasoning?: ReasoningTraceItem;
+  };
+};
+
+/**
+ * One live run per streaming message. A message that stops streaming drops
+ * its state on its next projection, and a message that is discarded takes
+ * its state with it.
+ */
+const liveTraces = new WeakMap<Message, LiveTraceState>();
+
+function createLiveTraceState(
+  events: AgentRunEventRecord[],
+  runId: string | undefined,
+): LiveTraceState {
+  return {
+    runId,
+    events,
+    folded: [],
+    compactor: createAgentTraceCompactor(),
+    scan: createAgentTraceEventScan(),
+    changed: true,
+    onlyTailReasoning: false,
+  };
+}
+
+/** Whether every folded record is still where it was folded from. */
+function foldedRecordsUnchanged(
+  folded: readonly AgentRunEventRecord[],
+  events: readonly AgentRunEventRecord[],
+): boolean {
+  if (events.length < folded.length) return false;
+  for (let index = folded.length - 1; index >= 0; index -= 1) {
+    if (folded[index] !== events[index]) return false;
+  }
+  return true;
+}
+
+/**
+ * Fold the events that arrived since the last refresh.
+ *
+ * An event list that was replaced, shortened, or had a record rewritten in
+ * place cannot be folded forward, so its state starts over from the first
+ * event, once.
+ */
+function advanceLiveTrace(
+  events: AgentRunEventRecord[],
+  message: Message,
+): LiveTraceState {
+  let state = liveTraces.get(message);
+  if (
+    !state ||
+    state.events !== events ||
+    state.runId !== message.agentRunId ||
+    !foldedRecordsUnchanged(state.folded, events)
+  ) {
+    state = createLiveTraceState(events, message.agentRunId);
+    liveTraces.set(message, state);
+    agentTraceProjectionCounters.liveResets += 1;
+  }
+  for (let index = state.folded.length; index < events.length; index += 1) {
+    const entry = events[index];
+    state.folded.push(entry);
+    const change = state.compactor.push(entry);
+    applyAgentTraceEventToScan(state.scan, entry);
+    state.changed = true;
+    if (entry.payload.type !== "reasoning" || change !== "merged_tail")
+      state.onlyTailReasoning = false;
+  }
+  return state;
+}
+
+/**
+ * Whether the run's events are already the stage-annotated log the
+ * projection reads: it reports its own stages, or holds nothing a stage could
+ * be reconstructed from (see `projectStageEvents`).
+ */
+function liveTraceReadsOwnEvents(scan: AgentTraceEventScan): boolean {
+  return scan.hasAgentStage || !scan.hasStageSource;
+}
+
+/**
+ * The whole-run facts the renderer reads, folded once per event for a live
+ * run and in one pass for a finished one.
+ */
+function readAgentTraceEventScan(
+  events: AgentRunEventRecord[],
+  message: Message,
+): AgentTraceEventScan {
+  if (!message.streaming) return scanAgentTraceEvents(events);
+  return advanceLiveTrace(events, message).scan;
+}
+
+/**
+ * The display items for a run.
+ *
+ * A finished run is projected from scratch. A live run folds only the events
+ * that arrived since its last refresh and walks the compacted trace, whose
+ * every tool payload was read once and remembered; a refresh that only
+ * lengthened the last thinking block patches that block alone.
+ */
 export function buildAgentTraceDisplayItems(
   events: AgentRunEventRecord[],
   userMessage?: Message | null,
   assistantMessage?: Message | null,
 ): TraceProjection {
-  const cached = assistantMessage && streamingProjections.get(assistantMessage);
-  if (
-    assistantMessage?.streaming &&
+  if (!assistantMessage?.streaming) {
+    if (assistantMessage) liveTraces.delete(assistantMessage);
+    return buildAgentTraceDisplayItemsCanonical(
+      events,
+      userMessage,
+      assistantMessage,
+    );
+  }
+  const state = advanceLiveTrace(events, assistantMessage);
+  const hasText = Boolean(assistantMessage.text?.trim());
+  const cached = state.cached;
+  const ownEvents = liveTraceReadsOwnEvents(state.scan);
+  const sameInputs =
     cached &&
-    cached.events === events &&
-    cached.count <= events.length &&
-    events[cached.count - 1] === cached.last &&
-    cached.text === assistantMessage.text &&
-    cached.user === userMessage
+    cached.user === userMessage &&
+    cached.hasText === hasText &&
+    cached.providerLabel === assistantMessage.modelProviderLabel &&
+    cached.runMode === assistantMessage.runMode;
+  if (cached && sameInputs && !state.changed) return cached.projection;
+  if (
+    cached?.tailReasoning &&
+    sameInputs &&
+    ownEvents &&
+    state.onlyTailReasoning
   ) {
-    const added = events.slice(cached.count);
-    if (!added.length) return cached.projection;
-    const tail = cached.tail;
-    const lastItem =
-      cached.projection.items[cached.projection.items.length - 1];
-    if (
-      tail &&
-      lastItem?.type === "reasoning" &&
-      added.every(
-        (entry) =>
-          entry.payload.type === "reasoning" &&
-          getReasoningTraceKey(entry.payload) === getReasoningTraceKey(tail),
-      )
-    ) {
-      for (const entry of added) {
-        const next = entry.payload as typeof tail;
-        tail.summary = appendAgentTraceText(tail.summary, next.summary);
-        tail.details = appendAgentTraceText(tail.details, next.details);
-        tail.stepLabel = next.stepLabel || tail.stepLabel;
-      }
-      if (readAgentTraceText(tail.stepLabel))
-        lastItem.label = readAgentTraceText(tail.stepLabel)!;
-      lastItem.summary =
+    const entries = state.compactor.entries;
+    const tail = entries[entries.length - 1]?.payload;
+    if (tail?.type === "reasoning") {
+      const item = cached.tailReasoning;
+      const stepLabel = readAgentTraceText(tail.stepLabel);
+      if (stepLabel) item.label = stepLabel;
+      const text =
         readAgentTraceText(tail.details) ||
         readAgentTraceText(tail.summary) ||
         undefined;
-      if (cached.labels && lastItem.summary)
-        lastItem.summary = projectPaperReferences(
-          lastItem.summary,
-          cached.labels,
-        );
-      cached.count = events.length;
-      cached.last = events[events.length - 1];
+      item.summary =
+        text && state.scan.labels
+          ? projectPaperReferences(text, state.scan.labels)
+          : text;
+      state.changed = false;
+      state.onlyTailReasoning = true;
+      agentTraceProjectionCounters.liveReasoningPatches += 1;
       return cached.projection;
     }
   }
-  const projection = buildAgentTraceDisplayItemsCanonical(
-    events,
+  agentTraceProjectionCounters.liveWalks += 1;
+  // A live run that neither reports stages nor is free of tool work has its
+  // stages reconstructed from the whole list, which only the canonical
+  // reducer does; its tool payloads are still read once each.
+  const { projection, tailReasoning } = ownEvents
+    ? projectAgentTrace(
+        {
+          compactedEvents: state.compactor.entries,
+          labels: state.scan.labels,
+          planPhase: state.scan.planPhase,
+          finalText: state.scan.finalText,
+        },
+        userMessage,
+        assistantMessage,
+      )
+    : {
+        projection: buildAgentTraceDisplayItemsCanonical(
+          events,
+          userMessage,
+          assistantMessage,
+        ),
+        tailReasoning: undefined,
+      };
+  state.cached = {
+    projection,
+    user: userMessage,
+    hasText,
+    providerLabel: assistantMessage.modelProviderLabel,
+    runMode: assistantMessage.runMode,
+    tailReasoning,
+  };
+  state.changed = false;
+  state.onlyTailReasoning = true;
+  return projection;
+}
+
+/**
+ * The display items for a run, projected from its events alone. History
+ * replay and every finished run read this; a live run's incremental
+ * projection must equal it after every event.
+ */
+export function buildAgentTraceDisplayItemsCanonical(
+  events: AgentRunEventRecord[],
+  userMessage?: Message | null,
+  assistantMessage?: Message | null,
+): TraceProjection {
+  // A trace recorded before the runtime emitted stage events is reconstructed
+  // once, here, so everything below reads one kind of event log.
+  const compactedEvents = compactAgentTraceEvents(projectStageEvents(events));
+  return projectAgentTrace(
+    {
+      compactedEvents,
+      labels: researchDisplayLabels(events),
+      planPhase: resolveTracePlanPhase(compactedEvents),
+      finalText: getFinalTraceText(compactedEvents),
+    },
     userMessage,
     assistantMessage,
-  );
-  if (assistantMessage?.streaming) {
-    const compacted = compactAgentTraceEvents(events);
-    const tail = compacted[compacted.length - 1]?.payload;
-    const lastItem = projection.items[projection.items.length - 1];
-    const labels = researchDisplayLabels(events);
-    const canAppend =
-      tail?.type === "reasoning" &&
-      lastItem?.type === "reasoning" &&
-      (Boolean(labels) ||
-        lastItem.summary ===
-          (readAgentTraceText(tail.details) ||
-            readAgentTraceText(tail.summary)));
-    streamingProjections.set(assistantMessage, {
-      events,
-      count: events.length,
-      last: events[events.length - 1],
-      text: assistantMessage.text,
-      user: userMessage,
-      projection,
-      tail: canAppend ? { ...tail } : undefined,
-      labels,
-    });
-  } else if (assistantMessage) streamingProjections.delete(assistantMessage);
-  return projection;
+  ).projection;
 }
 
 /**
@@ -5272,22 +5501,27 @@ function projectPaperReferencesOntoTraceItems(
   });
 }
 
-function buildAgentTraceDisplayItemsCanonical(
-  events: AgentRunEventRecord[],
+/**
+ * Walk a compacted, stage-annotated trace into display items.
+ *
+ * The whole-run facts come in with it, read from the run's own events, so a
+ * live run passes the ones it folded and a replay the ones it scanned.
+ */
+function projectAgentTrace(
+  input: {
+    compactedEvents: readonly AgentRunEventRecord[];
+    labels: Map<string, string> | undefined;
+    planPhase: "planning" | "executing" | null;
+    finalText: string;
+  },
   userMessage: Message | null | undefined,
   assistantMessage?: Message | null,
-): {
-  items: AgentTraceDisplayItem[];
-  isInterleaved: boolean;
-  inlineTextReplacesAssistantText: boolean;
-} {
+): { projection: TraceProjection; tailReasoning?: ReasoningTraceItem } {
+  const { compactedEvents, labels, planPhase, finalText } = input;
   const items: AgentTraceDisplayItem[] = [];
   const isCodexTrace = assistantMessage?.modelProviderLabel === "Codex";
   const isAgentTrace = assistantMessage?.runMode === "agent";
   const preserveRolledBackText = isCodexTrace || isAgentTrace;
-  // A trace recorded before the runtime emitted stage events is reconstructed
-  // once, here, so everything below reads one kind of event log.
-  const compactedEvents = compactAgentTraceEvents(projectStageEvents(events));
   const toolResultsByCallId = new Map<
     string,
     Extract<AgentRunEventRecord["payload"], { type: "tool_result" }>
@@ -5299,7 +5533,6 @@ function buildAgentTraceDisplayItemsCanonical(
   }
   const requestChips = buildAgentTraceRequestChips(userMessage);
   const requestSummary = buildAgentTraceRequestSummary(userMessage);
-  const planPhase = resolveTracePlanPhase(compactedEvents);
   const adapterContext: AgentTraceAdapterContext = {
     items,
     isCodexTrace,
@@ -5354,6 +5587,8 @@ function buildAgentTraceDisplayItemsCanonical(
   });
 
   const stageGrouper = createTraceStageGrouper(items);
+  /** The reasoning item the last entry opened, for a live run to extend. */
+  let tailReasoningKey: string | undefined;
   for (let index = 0; index < compactedEvents.length; index += 1) {
     const entry = compactedEvents[index];
     if (entry.payload.type === "agent_stage") {
@@ -5365,6 +5600,14 @@ function buildAgentTraceDisplayItemsCanonical(
       appendCodexAgentTraceEvent(adapterContext, entry) ||
       appendLegacyAgentTraceEvent(adapterContext, entry) ||
       appendSharedAgentTraceEvent(adapterContext, entry);
+    if (index === compactedEvents.length - 1) {
+      const opened = items[itemCountBeforeEvent];
+      tailReasoningKey =
+        items.length === itemCountBeforeEvent + 1 &&
+        opened?.type === "reasoning"
+          ? opened.key
+          : undefined;
+    }
     if (
       handled &&
       !NON_INTERLEAVING_TRACE_EVENT_TYPES.has(entry.payload.type) &&
@@ -5390,7 +5633,6 @@ function buildAgentTraceDisplayItemsCanonical(
   );
   if (actionSummary) items.push({ type: "card_list", cards: [actionSummary] });
 
-  const finalText = getFinalTraceText(compactedEvents);
   const isInterleaved = items.some(
     (item) =>
       item.type === "inline_text" &&
@@ -5420,14 +5662,22 @@ function buildAgentTraceDisplayItemsCanonical(
     !finalText &&
     (!hasTerminalInlineText || !hasCanonicalAssistantText);
 
-  const labels = researchDisplayLabels(events);
   const presentedItems = labels
     ? projectPaperReferencesOntoTraceItems(displayItems, labels)
     : displayItems;
+  const lastShown = presentedItems[presentedItems.length - 1];
   return {
-    items: presentedItems,
-    isInterleaved,
-    inlineTextReplacesAssistantText,
+    projection: {
+      items: presentedItems,
+      isInterleaved,
+      inlineTextReplacesAssistantText,
+    },
+    tailReasoning:
+      tailReasoningKey !== undefined &&
+      lastShown?.type === "reasoning" &&
+      lastShown.key === tailReasoningKey
+        ? lastShown
+        : undefined,
   };
 }
 
@@ -5663,17 +5913,9 @@ type PlanProjection = {
   ledger?: StoredPlanExecution;
 };
 
-function getPlanProjection(
-  events: AgentRunEventRecord[],
-): PlanProjection | null {
-  let artifact: StoredPlanArtifact | undefined;
-  let ledger: StoredPlanExecution | undefined;
-  for (const record of events) {
-    const event = readStoredPlanEvent(record.payload);
-    if (event?.type === "plan_execution_updated") ledger = event.ledger;
-    else if (event?.type === "plan_ready" || event?.type === "plan_updated")
-      artifact = event.artifact;
-  }
+function readPlanProjection(scan: AgentTraceEventScan): PlanProjection | null {
+  const artifact = scan.planArtifact;
+  const ledger = scan.planLedger;
   return artifact || ledger ? { artifact, ledger } : null;
 }
 
@@ -5857,15 +6099,6 @@ function renderPlanContainer(params: {
     root.appendChild(scope);
   }
   return root;
-}
-
-function getPlanDocumentId(events: AgentRunEventRecord[]): string | null {
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const event = events[index].payload;
-    if (event.type === "material_finalized")
-      return event.materialRef.documentId;
-  }
-  return null;
 }
 
 function createDocumentActionButton(params: {
@@ -6176,7 +6409,12 @@ function renderPlanDocumentCard(params: {
   return root;
 }
 
-type TraceItemView = { signature: string; node: HTMLElement };
+type TraceItemView = {
+  signature: string;
+  node: HTMLElement;
+  /** A thinking block's text node host, found once when it is built. */
+  reasoningText?: HTMLElement | null;
+};
 type TraceView = {
   activityClock?: { startedAt: number; paint: () => void; stop: () => void };
   discovery?: { key: string; node: HTMLElement };
@@ -6211,17 +6449,41 @@ export function disposeAgentTrace(root: HTMLElement): void {
   traceViews.delete(root);
 }
 
+/**
+ * The text each thinking block last committed to its DOM, so a refresh never
+ * reads a growing block back out of the document to diff it.
+ */
+const committedReasoningText = new WeakMap<HTMLElement, string>();
+
 function updateReasoningText(target: HTMLElement, next: string): void {
-  const text = target.firstChild;
-  const previous = target.textContent || "";
+  const previous =
+    committedReasoningText.get(target) ?? target.textContent ?? "";
   if (previous === next) return;
+  const text = target.firstChild;
   if (
     text?.nodeType === 3 &&
     target.childNodes.length === 1 &&
+    next.length > previous.length &&
     next.startsWith(previous)
   ) {
     (text as Text).appendData(next.slice(previous.length));
   } else target.textContent = next;
+  committedReasoningText.set(target, next);
+}
+
+/**
+ * A row's signature: the item itself, except where the projection shares a
+ * remembered value. A shared details array stands in by identity, so a call
+ * row holding a megabyte result preview is not reserialized every refresh.
+ */
+function traceItemSignature(item: AgentTraceDisplayItem): string {
+  return JSON.stringify(item, (key, value) => {
+    if (key === "details" && Array.isArray(value)) {
+      const id = memoizedTraceDetailIds.get(value);
+      if (id !== undefined) return `#details:${id}`;
+    }
+    return value;
+  });
 }
 
 export function renderAgentTrace({
@@ -6309,7 +6571,7 @@ export function renderAgentTrace({
       list,
       message,
       userMessage,
-      events,
+      scan: createAgentTraceEventScan(),
       // Loading a saved trace must not override the reader's disclosure state.
       // A live run already opens by default through message.streaming.
     });
@@ -6317,11 +6579,12 @@ export function renderAgentTrace({
   }
   const { items: processItems, inlineTextReplacesAssistantText } =
     buildAgentTraceDisplayItems(events, userMessage, message);
-  const tracePlanPhase = resolveTracePlanPhase(events);
+  const scan = readAgentTraceEventScan(events, message);
+  const tracePlanPhase = scan.planPhase;
   if (inlineTextReplacesAssistantText) {
     onInterleavedText?.();
   }
-  const pending = getPendingConfirmation(events);
+  const pending = readPendingConfirmation(scan);
   if (!textOnly) {
     wrap.className = "llm-agent-activity";
     delete wrap.dataset.llmAssistantTurnReplacement;
@@ -6347,9 +6610,7 @@ export function renderAgentTrace({
     view.items.clear();
     return wrap;
   }
-  const hasFinalResponse = events.some(
-    (entry) => entry.payload.type === "final",
-  );
+  const hasFinalResponse = scan.hasFinal;
   const nextViews = new Map<string, TraceItemView>();
   // Stage groups nest their rows, so placement walks one container at a time
   // and recurses into a stage's body with the same retained-view cache.
@@ -6361,10 +6622,14 @@ export function renderAgentTrace({
     let cursor: ChildNode | null = container.firstChild;
     let currentKey = "";
     let currentSignature = "";
-    const place = (node: HTMLElement) => {
+    const place = (node: HTMLElement, reasoningText?: HTMLElement | null) => {
       if (node !== cursor) container.insertBefore(node, cursor);
       cursor = node.nextSibling;
-      nextViews.set(currentKey, { signature: currentSignature, node });
+      nextViews.set(currentKey, {
+        signature: currentSignature,
+        node,
+        ...(reasoningText ? { reasoningText } : {}),
+      });
     };
     for (const [itemIndex, itemEntry] of itemsToRender.entries()) {
       currentKey =
@@ -6400,14 +6665,34 @@ export function renderAgentTrace({
           renderTraceItemsInto(body, itemEntry.children, `${currentKey}/`);
         continue;
       }
-      currentSignature = JSON.stringify(itemEntry);
+      if (itemEntry.type === "reasoning") {
+        // A thinking block only ever grows while it streams: its text is
+        // appended in place rather than reserialized into a signature.
+        currentSignature = `reasoning:${itemEntry.key}`;
+        const old = view.items.get(currentKey);
+        const target = old?.reasoningText;
+        if (old && target) {
+          updateReasoningText(
+            target,
+            itemEntry.summary || itemEntry.details || "",
+          );
+          const label = old.node.querySelector("summary");
+          if (label && label.textContent !== itemEntry.label)
+            label.textContent = itemEntry.label;
+          place(old.node, target);
+          continue;
+        }
+      } else currentSignature = traceItemSignature(itemEntry);
       if (
         itemEntry.type === "inline_text" ||
         (itemEntry.type === "message" && itemEntry.markdown)
       )
         currentSignature += `:${view.formattingVersion || 0}`;
       const old = view.items.get(currentKey);
-      if (old?.signature === currentSignature) {
+      if (
+        old?.signature === currentSignature &&
+        itemEntry.type !== "reasoning"
+      ) {
         place(old.node);
         continue;
       }
@@ -6420,22 +6705,6 @@ export function renderAgentTrace({
         );
         place(old.node);
         continue;
-      }
-      if (old && itemEntry.type === "reasoning") {
-        const target = old.node.querySelector<HTMLElement>(
-          ".llm-agent-reasoning-text",
-        );
-        if (target) {
-          updateReasoningText(
-            target,
-            itemEntry.summary || itemEntry.details || "",
-          );
-          const label = old.node.querySelector("summary");
-          if (label && label.textContent !== itemEntry.label)
-            label.textContent = itemEntry.label;
-          place(old.node);
-          continue;
-        }
       }
       if (itemEntry.type === "inline_text") {
         const inlineEl = doc.createElement("div");
@@ -6544,12 +6813,15 @@ export function renderAgentTrace({
 
         // Show only summary — details from most models duplicate the summary
         const reasoningText = itemEntry.summary || itemEntry.details;
+        let reasoningTextNode: HTMLDivElement | null = null;
         if (reasoningText) {
           const summaryBlock = doc.createElement("div") as HTMLDivElement;
           summaryBlock.className = "llm-agent-reasoning-block";
           const text = doc.createElement("div") as HTMLDivElement;
           text.className = "llm-agent-reasoning-text";
           text.textContent = reasoningText;
+          committedReasoningText.set(text, reasoningText);
+          reasoningTextNode = text;
           summaryBlock.appendChild(text);
           bodyWrap.appendChild(summaryBlock);
         }
@@ -6557,7 +6829,7 @@ export function renderAgentTrace({
         // Details section removed — most models duplicate summary in details
 
         details.appendChild(bodyWrap);
-        place(details);
+        place(details, reasoningTextNode);
         continue;
       }
 
@@ -6641,7 +6913,7 @@ export function renderAgentTrace({
   if (textOnly) {
     if (
       view.document ||
-      (view.plan && isPlanningAnswer(getPlanProjection(events)))
+      (view.plan && isPlanningAnswer(readPlanProjection(scan)))
     )
       onInterleavedText?.();
     return wrap;
@@ -6665,7 +6937,7 @@ export function renderAgentTrace({
     list,
     message,
     userMessage,
-    events,
+    scan,
     forceOpen: Boolean(pending),
   });
 
@@ -6728,7 +7000,7 @@ export function renderAgentTrace({
         : renderSavedNoteCard(doc, card),
     );
 
-  const planProjection = getPlanProjection(events);
+  const planProjection = readPlanProjection(scan);
   if (!planProjection && view.plan) {
     disposePlanCard(view.plan.node);
     view.plan = undefined;
@@ -6740,7 +7012,7 @@ export function renderAgentTrace({
     if (isPlanningAnswer(planProjection)) onInterleavedText?.();
     const planSignature = JSON.stringify([
       planProjection,
-      [...(researchDisplayLabels(events) || [])],
+      [...(scan.labels || [])],
     ]);
     if (view.plan?.signature !== planSignature) {
       if (view.plan) disposePlanCard(view.plan.node);
@@ -6779,7 +7051,7 @@ export function renderAgentTrace({
   }
 
   const planDocumentId =
-    message.documentId || message.planDocumentId || getPlanDocumentId(events);
+    message.documentId || message.planDocumentId || scan.planDocumentId;
   const savedNotePrimary =
     hasSavedNote &&
     savedNoteIsPrimaryOutcome(
@@ -6862,7 +7134,10 @@ export function renderAgentTrace({
     wrap.appendChild(divider);
   }
 
-  const discovery = getDiscoveryCardProjection(events);
+  // Only a run that asked for a discovery review can show its card.
+  const discovery = scan.hasDiscovery
+    ? getDiscoveryCardProjection(events)
+    : undefined;
   if (discovery && message.streaming === false) discovery.phase = "closed";
   if (discovery) {
     const identity = discovery.pending.action.discovery!;

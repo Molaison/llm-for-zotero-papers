@@ -50,6 +50,10 @@ import {
   createBlockStreamCoalescer,
   type BlockStreamFlushReason,
 } from "../blockStreamCoalescer";
+import {
+  createReasoningRefreshCoalescer,
+  type ReasoningRefreshCoalescer,
+} from "../agentTrace/reasoningRefreshCoalescer";
 
 function buildPendingAgentTraceEvents(body?: Element): AgentRunEventRecord[] {
   const now = Date.now();
@@ -259,6 +263,12 @@ type AgentTurnEventContext = {
   onContextCompacted?: () => void;
   messageDeltaCoalescer: { pushText: (text: string) => void };
   flushMessageDeltas: (reason: BlockStreamFlushReason) => void;
+  /**
+   * Batches thinking repaints. The turn owns it so every way the turn ends
+   * can flush or cancel what is waiting; a caller without one gets a
+   * handler-local coalescer.
+   */
+  reasoningRefreshes?: ReasoningRefreshCoalescer;
   queueRefresh: () => void;
   refreshAssistant: () => void;
   refreshChatSafely: () => void;
@@ -296,6 +306,11 @@ export function createAgentTurnEventHandler(
     pushTraceEvent,
     scheduleQueueDrain,
   } = ctx;
+  // Thinking streams in deltas far faster than a repaint is worth: the
+  // message records each one, and the trace repaints for them in batches.
+  const reasoningRefreshes =
+    ctx.reasoningRefreshes ??
+    createReasoningRefreshCoalescer({ onFlush: () => queueRefresh() });
   // Task progress follows the run: working from its start, the paper ledger
   // as reads land, answering at the first answer text, ✓ at final.
   let taskRunBegun = false;
@@ -317,6 +332,8 @@ export function createAgentTurnEventHandler(
     if (event.type !== "message_delta") {
       flushMessageDeltas(event.type === "final" ? "final" : "event");
     }
+    // Waiting thinking is painted before whatever the run reports next.
+    if (event.type !== "reasoning") reasoningRefreshes.flushNow();
     switch (event.type) {
       case "provider_event":
         applyResolvedClaudeEffortDisplay(body, event);
@@ -481,7 +498,7 @@ export function createAgentTurnEventHandler(
             event.details,
           );
         }
-        queueRefresh();
+        reasoningRefreshes.push(`${event.summary || ""}${event.details || ""}`);
         return;
       }
       case "fallback":
@@ -751,6 +768,8 @@ async function handleAgentTurnFailure(ctx: {
     flushNow: (reason: BlockStreamFlushReason) => void;
     cancel: () => void;
   };
+  /** Waiting thinking repaints, dropped with the stream they belong to. */
+  reasoningRefreshes?: Pick<ReasoningRefreshCoalescer, "cancel">;
   refreshChatSafely: () => void;
   setStatusSafely: (text: string, kind: StatusKind) => void;
   markCancelled: () => Promise<void>;
@@ -777,6 +796,7 @@ async function handleAgentTurnFailure(ctx: {
     thisRequestId,
     assistantMessage,
     messageDeltaCoalescer,
+    reasoningRefreshes,
     refreshChatSafely,
     setStatusSafely,
     markCancelled,
@@ -807,6 +827,7 @@ async function handleAgentTurnFailure(ctx: {
   const finalText =
     assistantMessage.streaming === false ? assistantMessage.text : "";
   messageDeltaCoalescer.cancel();
+  reasoningRefreshes?.cancel();
   // A delivery error after the final event does not make the answer partial.
   const outcome = finalText
     ? { text: finalText, interrupted: false }
@@ -1659,8 +1680,14 @@ export async function sendAgentTurn(
       queueRefresh();
     },
   });
+  const reasoningRefreshes = createReasoningRefreshCoalescer({
+    onFlush: () => queueRefresh(),
+  });
   const flushMessageDeltas = (reason: BlockStreamFlushReason) => {
     messageDeltaCoalescer.flushNow(reason);
+    // A final or a cancel ends the stream: waiting thinking is painted now,
+    // never by a timer after the turn has been finalized.
+    reasoningRefreshes.flushNow();
   };
   const scheduleQueueDrain = () =>
     deps.scheduleQueuedInputDrain(body, {
@@ -1916,6 +1943,7 @@ export async function sendAgentTurn(
         },
         messageDeltaCoalescer,
         flushMessageDeltas,
+        reasoningRefreshes,
         queueRefresh,
         refreshAssistant: () => refreshAssistantMessageSafely(assistantMessage),
         refreshChatSafely,
@@ -1925,6 +1953,9 @@ export async function sendAgentTurn(
       }),
     });
 
+    // A run can end without a final event; nothing it streamed may repaint
+    // after the outcome below finalizes the message.
+    reasoningRefreshes.flushNow();
     await finalizeAgentTurnOutcome({
       deps,
       item,
@@ -1948,6 +1979,7 @@ export async function sendAgentTurn(
       thisRequestId,
       assistantMessage,
       messageDeltaCoalescer,
+      reasoningRefreshes,
       refreshChatSafely,
       setStatusSafely,
       markCancelled,
@@ -2206,8 +2238,14 @@ export async function retryAgentTurn(
       queueRefresh();
     },
   });
+  const reasoningRefreshes = createReasoningRefreshCoalescer({
+    onFlush: () => queueRefresh(),
+  });
   const flushMessageDeltas = (reason: BlockStreamFlushReason) => {
     messageDeltaCoalescer.flushNow(reason);
+    // A final or a cancel ends the stream: waiting thinking is painted now,
+    // never by a timer after the turn has been finalized.
+    reasoningRefreshes.flushNow();
   };
   const scheduleQueueDrain = () =>
     deps.scheduleQueuedInputDrain(body, {
@@ -2458,6 +2496,7 @@ export async function retryAgentTurn(
         compactStyle: "keep-assistant",
         messageDeltaCoalescer,
         flushMessageDeltas,
+        reasoningRefreshes,
         queueRefresh,
         refreshAssistant: () => refreshAssistantMessageSafely(assistantMessage),
         refreshChatSafely,
@@ -2467,6 +2506,9 @@ export async function retryAgentTurn(
       }),
     });
 
+    // A run can end without a final event; nothing it streamed may repaint
+    // after the outcome below finalizes the message.
+    reasoningRefreshes.flushNow();
     await finalizeAgentTurnOutcome({
       deps,
       item,
@@ -2490,6 +2532,7 @@ export async function retryAgentTurn(
       thisRequestId,
       assistantMessage,
       messageDeltaCoalescer,
+      reasoningRefreshes,
       refreshChatSafely,
       setStatusSafely,
       markCancelled,

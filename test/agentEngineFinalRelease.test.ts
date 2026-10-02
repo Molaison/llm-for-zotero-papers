@@ -2232,3 +2232,76 @@ describe("agent engine final UI release", function () {
     });
   });
 });
+
+describe("agent engine reasoning repaints at run end", function () {
+  const scenarios: Array<{
+    name: string;
+    end: "throw" | "complete" | "cancel";
+  }> = [
+    { name: "a runtime error", end: "throw" },
+    { name: "a run that completes without a final event", end: "complete" },
+    { name: "a cancelled run", end: "cancel" },
+  ];
+  for (const scenario of scenarios) {
+    it(`never repaints waiting thinking after ${scenario.name} has ended the turn`, async function () {
+      const conversationKey = 9100 + scenarios.indexOf(scenario);
+      let cancelled = 0;
+      const runtime = {
+        getCapabilities: () => ({
+          streaming: true,
+          toolCalls: true,
+          multimodal: false,
+        }),
+        runTurn: async (params: any) => {
+          await params.onStart?.(`run-reasoning-${scenario.end}`);
+          // A few short deltas: far below the size flush, so only the
+          // coalescer's timer would ever paint them.
+          for (const summary of ["Weighing ", "the ", "evidence"])
+            await params.onEvent?.({ type: "reasoning", round: 1, summary });
+          if (scenario.end === "cancel") {
+            cancelled = 77;
+            throw Object.assign(new Error("aborted"), { name: "AbortError" });
+          }
+          if (scenario.end === "throw") throw new Error("Provider failed");
+          return {
+            kind: "completed",
+            runId: `run-reasoning-${scenario.end}`,
+            text: "Done.",
+            usedFallback: false,
+          } as AgentRuntimeOutcome;
+        },
+      } as unknown as AgentRuntime;
+      const deps = createDeps({
+        runtime,
+        pendingWrites: [],
+        idleRestores: [],
+        statuses: [],
+      });
+      deps.cancelledRequestId = () => cancelled;
+      let refreshes = 0;
+      deps.createPanelUpdateHelpers = () => ({
+        refreshChatSafely: () => undefined,
+        refreshAssistantMessageSafely: () => {
+          refreshes += 1;
+        },
+        setStatusSafely: () => undefined,
+      });
+      deps.chatHistory.set(conversationKey, []);
+      await sendAgentTurn(
+        {
+          body: {} as Element,
+          item: fakeItem(conversationKey),
+          question: "Weigh the evidence.",
+        },
+        deps,
+      );
+      const atEnd = refreshes;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      assert.equal(
+        refreshes,
+        atEnd,
+        "no repaint arrives after the turn has ended",
+      );
+    });
+  }
+});
