@@ -229,6 +229,18 @@ const TARGET_KINDS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * Whether `value` is a target in a form receipts and reads name: a bare
+ * Zotero id (`12`) or a kind and id (`item:12`, `collection:3`, …). A paper
+ * named any other way ("Smith 2020", a DOI) names nothing the host tracks.
+ */
+export function isOutcomeTargetId(value: string): boolean {
+  const trimmed = String(value).trim();
+  if (BARE_ID.test(trimmed)) return true;
+  const kind = /^([a-z][a-z-]*):\S/.exec(trimmed)?.[1];
+  return Boolean(kind && TARGET_KINDS.has(kind));
+}
+
+/**
  * A part's targets in the forms receipts and reads name. A bare id is an
  * item's (`item:<id>`), except under zotero.collections, whose writes name
  * items (filing papers) and folders (renaming one) alike: there it stays
@@ -949,10 +961,14 @@ function isPendingArtifact(task: Task): boolean {
  *
  * A call that names a part binds only to it: an open artifact part is
  * covered; a settled artifact part takes the material as a revision of what
- * it already delivered, its counts unchanged; any other part takes nothing.
- * A call that names no existing part binds to the first pending artifact part
- * whose description names the content's kind, else to the first pending
- * artifact part. Undefined when nothing takes it.
+ * it already delivered; any other part takes nothing. A call that names no
+ * existing part binds to the first pending artifact part whose description
+ * names the content's kind; else, as a revision, to an artifact part that
+ * already holds a document and whose description names the kind (the
+ * ledger keeps no document kind, so a part's description stands for the
+ * kind it delivers); else to the first pending artifact part. A revision of
+ * a delivered document is never another part's delivery. Undefined when
+ * nothing takes it.
  */
 function artifactPartFor(
   checkpoint: ExecutionCheckpoint,
@@ -982,15 +998,25 @@ function artifactPartFor(
         (task) => isPendingArtifact(task) && pattern.test(task.description),
       )
     : -1;
-  const index =
-    byKind >= 0 ? byKind : checkpoint.tasks.findIndex(isPendingArtifact);
+  if (byKind >= 0) return { index: byKind, revision: false };
+  const delivered = pattern
+    ? checkpoint.tasks.findIndex(
+        (task) =>
+          task.effect === "artifact" &&
+          task.materialRefs.length > 0 &&
+          pattern.test(task.description),
+      )
+    : -1;
+  if (delivered >= 0) return { index: delivered, revision: true };
+  const index = checkpoint.tasks.findIndex(isPendingArtifact);
   return index >= 0 ? { index, revision: false } : undefined;
 }
 
 /**
  * Complete an artifact part from content citing `cited`. With `cited`
  * unknown the part completes whole. Otherwise each of its targets the content
- * cites is done, and each other target is excepted as not covered.
+ * cites is done, and each other target is excepted as not covered. A paper
+ * done stays done, so a revision only adds the papers it covers.
  */
 function coverTargets(
   task: Task,
@@ -1005,12 +1031,13 @@ function coverTargets(
   );
   const done = new Set(doneTargets);
   const exceptions = exceptTargets(
-    task.exceptions || [],
+    withoutDone(task.exceptions || [], doneTargets),
     targets.filter((target) => !done.has(target)),
     OUTCOME_REASONS.notCovered,
   );
+  const { exceptions: _previous, ...rest } = completed(task);
   return {
-    ...completed(task),
+    ...rest,
     doneTargets,
     ...(exceptions.length ? { exceptions } : {}),
     updatedAt: now,
@@ -1035,9 +1062,12 @@ function applyMaterial(
   const { documentId, documentVersion, contentHash } = evidence.materialRef;
   return mapTasks(checkpoint, now, (task, index) => {
     if (index !== chosen.index) return undefined;
-    const next = chosen.revision
-      ? { ...task, updatedAt: now }
-      : coverTargets(task, evidence.citedTargets, now);
+    // A revision re-covers its part from what it cites; with what it cites
+    // unknown, it leaves the counts as they were.
+    const next =
+      chosen.revision && !evidence.citedTargets
+        ? { ...task, updatedAt: now }
+        : coverTargets(task, evidence.citedTargets, now);
     return {
       ...next,
       materialRefs: [
@@ -1317,8 +1347,15 @@ const DELIVERY_CLAIMS: readonly RegExp[] = [
   /\bsee\s+(the\s+)?(document|review|answer|above)\b/i,
 ];
 
-/** Parts whose delivery is content: a document or the answer. */
-const CONTENT_EFFECTS: ReadonlySet<string> = new Set(["artifact", "answer"]);
+/**
+ * Parts whose delivery the host proves, which a skip cannot claim: content
+ * (a document or the answer) and the host's own digests.
+ */
+const CONTENT_EFFECTS: ReadonlySet<string> = new Set([
+  "artifact",
+  "answer",
+  "digest",
+]);
 
 /**
  * Apply skipped, blocked or cancelled marks. `ignored` lists marks on parts

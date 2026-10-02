@@ -886,7 +886,7 @@ describe("task_update ordinary declarations", function () {
           assert.equal(ledgerOf(ctx).tasks[0].effect, "digest");
         });
 
-        it("refuses a new effect for a part that already has evidence", function () {
+        it("refuses a new effect for a part that already has evidence, suggesting a new taskId", function () {
           const progressed = first();
           const withEvidence = {
             ...progressed,
@@ -905,8 +905,51 @@ describe("task_update ordinary declarations", function () {
                 scope,
               ),
             ToolInputRejection,
-            /immutable/,
+            /new taskId/,
           );
+        });
+
+        it("refuses to turn a read part with reads into a digest part, naming a new taskId to use", function () {
+          const read = applyOrdinaryTaskUpdates(
+            createEmptyExecutionCheckpoint(executionContext, 10),
+            input([
+              {
+                taskId: "papers",
+                description: "Read each paper",
+                expectedEffect: "read",
+                scope: true,
+              },
+            ]),
+            20,
+            scope,
+          ).checkpoint;
+          const progressed = applyOutcomeEvidence(
+            read,
+            { kind: "read", targets: ["item:5"], observationIds: ["obs-1"] },
+            25,
+          ).checkpoint;
+          let message = "";
+          try {
+            applyOrdinaryTaskUpdates(
+              progressed,
+              input([
+                {
+                  taskId: "papers",
+                  description: "Summarize each paper",
+                  expectedEffect: "digest",
+                  scope: true,
+                },
+              ]),
+              30,
+              scope,
+            );
+          } catch (error) {
+            assert.instanceOf(error, ToolInputRejection);
+            message = (error as Error).message;
+          }
+          assert.include(message, "new taskId");
+          assert.include(message, "papers-digest");
+          assert.include(message, "read part");
         });
 
         it("allows digest to artifact before any paper is digested", function () {
@@ -935,6 +978,37 @@ describe("task_update ordinary declarations", function () {
           assert.deepEqual(artifact.digestParts, []);
           assert.deepEqual(artifact.changed, ["summaries"]);
         });
+      });
+
+      it("refuses targetIds that are not Zotero ids, naming them", async function () {
+        const error = await rejectionOf(
+          call(context(), {
+            tasks: [
+              {
+                ...summaries,
+                targetIds: ["5", "Smith 2020", "item:6", "the drift paper"],
+              },
+            ],
+          }),
+        );
+        assert.instanceOf(error, ToolInputRejection);
+        assert.include(error.message, '"Smith 2020"');
+        assert.include(error.message, '"the drift paper"');
+        assert.notInclude(error.message, '"5"');
+        assert.lengthOf(published, 0);
+        // A write part may still name what is not yet in the library.
+        const write = await call(context(), {
+          tasks: [
+            {
+              taskId: "import",
+              description: "Import the papers into the new collection",
+              expectedEffect: "mutation",
+              expectedCapability: "zotero.import",
+              targetIds: ["new collection"],
+            },
+          ],
+        });
+        assert.equal(write.parts[0].status, "pending");
       });
 
       it("a digest part that names a write capability is a write and runs no digest", function () {

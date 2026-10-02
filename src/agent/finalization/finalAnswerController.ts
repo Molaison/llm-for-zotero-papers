@@ -147,13 +147,17 @@ export class AgentFinalAnswerController {
 
   /**
    * The correction that sends an ordinary turn back to the parts the model
-   * declared and has not finished. It is given again only after new
-   * evidence moved the ledger since the last one.
+   * declared and has not finished: reads, writes and digests, which only
+   * tools deliver. A pending artifact part is not one of them: the answer
+   * itself delivers it (`applyAnswer`), as it does an answer part. It is
+   * given again only after new evidence moved the ledger since the last one.
    */
   private openOutcomeCorrection(canCorrect: boolean): string | undefined {
     if (!canCorrect) return undefined;
     const checkpoint = this.request.executionCheckpoint;
-    const open = openDeclaredOutcomes(checkpoint);
+    const open = openDeclaredOutcomes(checkpoint).filter(
+      (task) => task.effect !== "artifact",
+    );
     if (!open.length) return undefined;
     const signature = outcomeProgressSignature(checkpoint);
     if (signature === this.outcomeCorrectionSignature) return undefined;

@@ -817,10 +817,11 @@ export class AgentRuntime {
       /**
        * The papers an answer cites (`item:<id>`), from the citations this
        * turn's tools delivered that the answer uses. Undefined when that
-       * cannot be told: citation collection failed, or the answer cites only
-       * ids no tool delivered, or (for a document, whose citations may be
-       * structured rather than tokens in its text) nothing resolves. An
-       * empty list means a prose answer that cites nothing.
+       * cannot be told: citation collection failed, the answer carries no
+       * citation markup at all (prose written from host digests, say), or
+       * (for a document, whose citations may be structured rather than
+       * tokens in its text) nothing resolves. An empty list means citation
+       * markup that resolves to no paper.
        */
       const answerCitedTargets = (
         text: string,
@@ -863,9 +864,11 @@ export class AgentRuntime {
           ),
         ];
         if (targets.length) return targets;
-        if (options.document || cited.length || referenced.size)
-          return undefined;
-        return [];
+        // A document's citations may be structured, not tokens in its text.
+        if (options.document) return undefined;
+        // Markup that resolves to no item cites none of the papers; prose
+        // with no markup at all says nothing about which it covers.
+        return cited.length || referenced.size ? [] : undefined;
       };
       const writer = createRunEventWriter({
         persist: (rows) =>

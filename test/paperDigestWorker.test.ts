@@ -24,6 +24,8 @@ const LLM = {
 };
 const TEXT =
   "# Introduction\nDrift is slow. Learning is fast.\n\n[chunk 3]\n## Methods\nWe recorded 40 cells over 10 days.\n\n## Discussion\nRepresentational drift did not impair decoding.";
+/** A paper long enough to summarize: TEXT and an appendix. */
+const PAPER = `${TEXT}\n\n## Appendix\n${"The appendix restates the recording protocol in detail. ".repeat(30)}`;
 
 const good = (summary = "A fine summary.") =>
   JSON.stringify({
@@ -58,8 +60,8 @@ function source(itemId: number): PaperDigestSource {
     itemId,
     contextItemId: itemId + 100,
     backend: "mineru",
-    text: TEXT,
-    totalCharacters: TEXT.length,
+    text: PAPER,
+    totalCharacters: PAPER.length,
   };
 }
 
@@ -71,6 +73,8 @@ function job(overrides: Partial<Parameters<typeof runPaperDigestJob>[0]>) {
     instruction: "Summarize each selected paper",
     readText: async (itemId: number) => source(itemId),
     llm: { ...LLM, llmCall: async () => complete(good()) },
+    // No real pause between a failed call and its retry.
+    wait: async () => undefined,
     inputCapTokens: 128_000,
     cache: memoryCache(),
     now: () => 1_700_000_000_000,
@@ -88,7 +92,9 @@ describe("paperDigestWorker", function () {
     assert.equal(digestTimeoutMs(100_000), 240_000);
     assert.equal(digestInputCapChars(128_000), 120_000);
     assert.equal(digestInputCapChars(32_000), 80_000);
-    assert.equal(digestInputCapChars(8_000), 20_000);
+    // A small window still gets 8,000 characters, never 20,000.
+    assert.equal(digestInputCapChars(8_000), 8_000);
+    assert.equal(digestInputCapChars(15_000), 12_000);
   });
 
   it("keeps quotes that match after whitespace normalization, labels them with the nearest heading and chunk, drops the rest", function () {
@@ -272,7 +278,7 @@ describe("paperDigestWorker", function () {
     assert.equal(digests[0].producedAt, 1_700_000_000_000);
     assert.deepEqual(digests[0].source, {
       backend: "mineru",
-      characters: TEXT.length,
+      characters: PAPER.length,
       complete: true,
     });
   });
@@ -312,10 +318,12 @@ describe("paperDigestWorker", function () {
     assert.equal(params.cache.entries.size, 1);
   });
 
-  it("retries once on timeout, then fails with the timeout reason", async function () {
+  it("retries once on timeout, after a 2 s wait, then fails with the timeout reason", async function () {
     let attempts = 0;
+    const waits: number[] = [];
     const { params, failures } = job({
       targets: ["item:1"],
+      wait: async (ms: number) => void waits.push(ms),
       llm: {
         ...LLM,
         llmCall: async () => {
@@ -326,6 +334,7 @@ describe("paperDigestWorker", function () {
     });
     const result = await runPaperDigestJob(params);
     assert.equal(attempts, 2);
+    assert.deepEqual(waits, [2_000], "one wait, before the retry");
     assert.equal(failures[0].reason, "The summary call timed out");
     assert.include(failures[0].detail || "", "timed out");
     assert.deepEqual(result.failures, failures);
@@ -349,6 +358,130 @@ describe("paperDigestWorker", function () {
     assert.equal(attempts, 2);
     assert.lengthOf(failures, 0);
     assert.lengthOf(digests, 1);
+  });
+
+  it("waits 5 s before retrying a rate-limited call", async function () {
+    let attempts = 0;
+    const waits: number[] = [];
+    const { params, failures, digests } = job({
+      targets: ["item:1"],
+      wait: async (ms: number) => void waits.push(ms),
+      llm: {
+        ...LLM,
+        llmCall: async () => {
+          attempts += 1;
+          if (attempts === 1)
+            throw Object.assign(
+              new Error("429 Too Many Requests: rate limit"),
+              {
+                status: 429,
+              },
+            );
+          return complete(good());
+        },
+      },
+    });
+    await runPaperDigestJob(params);
+    assert.equal(attempts, 2);
+    assert.deepEqual(waits, [5_000]);
+    assert.lengthOf(failures, 0);
+    assert.lengthOf(digests, 1);
+  });
+
+  it("Stop during the wait before a retry leaves the paper pending without the retry", async function () {
+    const signal = {
+      aborted: false,
+      addEventListener() {},
+      removeEventListener() {},
+    } as unknown as AbortSignal;
+    let attempts = 0;
+    const { params, failures, digests } = job({
+      targets: ["item:1"],
+      signal,
+      wait: async () => {
+        (signal as { aborted: boolean }).aborted = true;
+      },
+      llm: {
+        ...LLM,
+        llmCall: async () => {
+          attempts += 1;
+          throw new Error("socket hang up");
+        },
+      },
+    });
+    const result = await runPaperDigestJob(params);
+    assert.equal(attempts, 1);
+    assert.lengthOf(failures, 0);
+    assert.lengthOf(digests, 0);
+    assert.deepEqual(result.pending, ["item:1"]);
+  });
+
+  it("a model with no safe reasoning setting fails every paper with that reason, not as unconfigured", async function () {
+    let called = 0;
+    const { params, failures } = job({
+      concurrency: 1,
+      llm: {
+        model: "gpt-5.4",
+        apiBase: "https://api.openai.com/v1",
+        apiKey: "test-key",
+        providerProtocol: "openai_chat_compat",
+        profileOverride: {
+          forModel: "gpt-5.4",
+          limits: { outputTokens: 300 },
+        },
+        llmCall: async () => {
+          called += 1;
+          return complete(good());
+        },
+      },
+    });
+    await runPaperDigestJob(params);
+    assert.equal(called, 0);
+    assert.deepEqual(
+      failures.map((f) => f.reason),
+      Array(3).fill("The summary model has no safe reasoning setting"),
+    );
+    assert.equal(
+      DIGEST_FAILURE_REASONS.noSafeReasoning,
+      "The summary model has no safe reasoning setting",
+    );
+    assert.notEqual(
+      DIGEST_FAILURE_REASONS.noSafeReasoning,
+      DIGEST_FAILURE_REASONS.notConfigured,
+    );
+  });
+
+  it("a paper with under 1,500 characters of text fails as too little text, calls no model and caches nothing", async function () {
+    let called = 0;
+    const thin = "# Abstract\nCells drift. ".repeat(20);
+    const { params, failures, digests } = job({
+      targets: ["item:1", "item:2"],
+      readText: async (itemId) =>
+        itemId === 1
+          ? { ...source(1), text: thin, totalCharacters: thin.length }
+          : source(itemId),
+      llm: {
+        ...LLM,
+        llmCall: async () => {
+          called += 1;
+          return complete(good());
+        },
+      },
+    });
+    await runPaperDigestJob(params);
+    assert.equal(called, 1, "only the paper with enough text");
+    assert.deepEqual(failures, [
+      { target: "item:1", itemId: 1, reason: "Too little text to summarize" },
+    ]);
+    assert.equal(
+      DIGEST_FAILURE_REASONS.thinText,
+      "Too little text to summarize",
+    );
+    assert.deepEqual(
+      digests.map((d) => d.itemId),
+      [2],
+    );
+    assert.equal(params.cache.entries.size, 1);
   });
 
   it("a transport failure that persists fails with the transport reason", async function () {
@@ -719,6 +852,85 @@ describe("paperDigestWorker", function () {
     assert.include(text, "Missing paper");
     assert.include(text, "No readable text");
     assert.isBelow(text.indexOf("Drift paper"), text.indexOf("Missing paper"));
+    assert.include(text, "text: complete");
+  });
+
+  it("says per paper whether its text was complete or an excerpt", function () {
+    const base: HostPaperDigest = {
+      itemId: 1,
+      contextItemId: 101,
+      title: "Drift paper",
+      summary: "A fine summary.",
+      contributions: [],
+      methods: "",
+      limitations: "",
+      evidence: [],
+      source: { backend: "pdf", characters: 48_000, complete: false },
+      model: "m",
+      producedAt: 0,
+      cacheKey: "k",
+    };
+    const text = renderHostPaperDigests(
+      [
+        base,
+        {
+          ...base,
+          itemId: 2,
+          title: "Whole paper",
+          source: { backend: "mineru", characters: 9_000, complete: true },
+        },
+      ],
+      [],
+    );
+    const [first, second] = text.split("\n\n");
+    assert.include(first, "text: excerpt, 48000 characters");
+    assert.notInclude(first, "text: complete");
+    assert.include(second, "text: complete");
+  });
+
+  it("renders more than twelve digests compactly: title, citation source, the first 400 characters of the summary, and the handle", function () {
+    const long = `${"Drift is slow and steady. ".repeat(30)}END-OF-SUMMARY`;
+    const digests: HostPaperDigest[] = Array.from({ length: 13 }, (_, i) => ({
+      itemId: i + 1,
+      contextItemId: i + 101,
+      title: `Paper ${i + 1}`,
+      summary: long,
+      contributions: ["A contribution that only the full digest carries."],
+      methods: "Methods only the full digest carries.",
+      limitations: "Not stated",
+      evidence: [
+        { section: "Methods", quote: "A quote only the full digest carries." },
+      ],
+      source: { backend: "mineru", characters: 30_000, complete: true },
+      model: "m",
+      producedAt: 0,
+      cacheKey: `k${i}`,
+    }));
+    const text = renderHostPaperDigests(
+      digests,
+      [],
+      undefined,
+      (itemId) => ({
+        libraryID: 1,
+        itemKey: `KEY${itemId}`,
+        evidenceRefs: [`ref${itemId}`],
+      }),
+      (itemId) => `trh_${itemId}`,
+    );
+    for (let i = 1; i <= 13; i += 1) {
+      assert.include(text, `### Paper ${i} (item:${i})`);
+      assert.include(text, `KEY${i}`);
+      assert.include(text, `ref${i}`);
+      assert.include(text, `trh_${i}`);
+    }
+    assert.include(text, long.slice(0, 400));
+    assert.notInclude(text, "END-OF-SUMMARY");
+    assert.notInclude(text, "only the full digest carries");
+    assert.match(text, /full digest/i);
+    // Twelve or fewer render whole.
+    const whole = renderHostPaperDigests(digests.slice(0, 12), []);
+    assert.include(whole, "END-OF-SUMMARY");
+    assert.include(whole, "A contribution that only the full digest carries.");
   });
 });
 

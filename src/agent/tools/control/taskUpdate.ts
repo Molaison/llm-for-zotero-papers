@@ -25,6 +25,7 @@ import {
 } from "../../digests/digestJobHost";
 import {
   declareOutcomes,
+  isOutcomeTargetId,
   markOutcomes,
   type OutcomeDeclaration,
   type OutcomeModelMark,
@@ -98,12 +99,35 @@ const EXPECTED_EFFECT_REQUIRED =
   "Give each new task an expectedEffect: read, artifact, mutation, reasoning, or digest (one host-made summary per paper).";
 const DIGEST_NEEDS_PAPERS =
   "A digest part names the papers it digests: targetIds, or scope:true for the whole Paper scope.";
+/** The most papers one digest part may name. */
+export const DIGEST_MAX_PAPERS_PER_PART = 200;
+function digestTooLarge(count: number): string {
+  return `A digest part over ${count} papers is too large (at most ${DIGEST_MAX_PAPERS_PER_PART}). Narrow the scope to a collection, a tag, or explicit targetIds, or ask the user to confirm the whole set and then declare it as several digest parts of at most ${DIGEST_MAX_PAPERS_PER_PART} papers each.`;
+}
+/** The note for targetIds that name no Zotero item. */
+function notIdsNote(values: readonly string[]): string {
+  return `targetIds take Zotero ids (12 or item:12), and these are not ids: ${values
+    .map((value) => JSON.stringify(value))
+    .join(
+      ", ",
+    )}. Find the papers' ids with library_search, or use scope:true for the whole Paper scope.`;
+}
+/** The note for a new effect on a part that already holds evidence. */
+function effectFixedNote(
+  local: string,
+  prior: OutcomeEffect,
+  requested: OutcomeEffect,
+): string {
+  const name = (effect: OutcomeEffect) =>
+    effect === "answer" ? "reasoning" : effect;
+  return `Task ${local} already has progress as a ${name(prior)} part, so it cannot become a ${name(requested)} part. Declare the ${name(requested)} part under a new taskId, such as "${local}-${name(requested)}".`;
+}
 const HOST_MARKS_DONE =
   "Nothing changed: the host marks parts done from the tools' results, so progress needs no task_update call. Continue the work, or answer when it is done.";
 /** The note for skips refused because nothing was delivered for their parts. */
 function skipRefusedNote(ids: readonly string[]): string {
   const list = ids.join(", ");
-  return `Skip refused for ${list}: nothing was delivered for ${ids.length === 1 ? "it" : "them"} in this run (no document, note, or read evidence is bound to it). Produce it with the tools, or list it under blocked with the concrete obstacle.`;
+  return `Skip refused for ${list}: nothing was delivered for ${ids.length === 1 ? "it" : "them"} in this run (no document, note, or read evidence is bound to it). Produce it with the tools, or, if it truly cannot be done, list it under blocked with the concrete obstacle.`;
 }
 const NO_SCOPE_PAPERS =
   "This turn states no paper scope to cover; name the part's papers in targetIds.";
@@ -293,8 +317,15 @@ function declaredTargets(
   };
 }
 
-/** A digest part the host is asked to run, and the papers to digest now. */
-export type DigestPartRun = { taskId: string; targets: string[] };
+/**
+ * A digest part the host is asked to run, and the papers to digest now;
+ * `retried` are those the part holds as failed, with the reason it holds.
+ */
+export type DigestPartRun = {
+  taskId: string;
+  targets: string[];
+  retried?: Array<{ target: string; reason: string }>;
+};
 
 /**
  * The papers a repeated digest declaration asks for: its targetIds, as the
@@ -416,9 +447,24 @@ export function applyOrdinaryTaskUpdates(
         effectiveEffect !== undefined &&
         effectiveEffect !== (prior.effect || "answer");
       if (newEffect && !redeclarable(prior)) {
-        throw new Error(
-          `Existing task ${taskId} has immutable presentation: it already has progress, so its effect cannot change; declare a new part instead`,
+        throw new ToolInputRejection(
+          effectFixedNote(
+            request.taskId,
+            prior.effect || "answer",
+            effectiveEffect,
+          ),
         );
+      }
+      // Papers are named by id; a write part may also name what is not in
+      // the library yet ("new collection"), which tracks its capability.
+      if (
+        request.targetIds?.length &&
+        (effectiveEffect || prior?.effect) !== "mutation"
+      ) {
+        const notIds = request.targetIds.filter(
+          (value) => !isOutcomeTargetId(value),
+        );
+        if (notIds.length) throw new ToolInputRejection(notIdsNote(notIds));
       }
       if (!prior || newEffect) {
         const effect = requestedEffect;
@@ -433,6 +479,11 @@ export function applyOrdinaryTaskUpdates(
         if (prior) redeclared.set(taskId, prior);
         if (effect === "digest" && !targets?.length)
           throw new ToolInputRejection(DIGEST_NEEDS_PAPERS);
+        if (
+          effectiveEffect === "digest" &&
+          (targets?.length || 0) > DIGEST_MAX_PAPERS_PER_PART
+        )
+          throw new ToolInputRejection(digestTooLarge(targets!.length));
         if (effect === "digest") digestRuns.push({ taskId });
         declarations.push({
           taskId,
@@ -487,7 +538,14 @@ export function applyOrdinaryTaskUpdates(
       // mutation, runs no digest.
       if (task?.effect !== "digest" || marked.has(taskId)) return [];
       const targets = digestRetryTargets(task, targetIds);
-      return targets.length ? [{ taskId, targets }] : [];
+      if (!targets.length) return [];
+      const retried = targets.flatMap((target) => {
+        const held = task.exceptions?.find((entry) =>
+          entry.targets.includes(target),
+        );
+        return held ? [{ target, reason: held.reason }] : [];
+      });
+      return [{ taskId, targets, ...(retried.length ? { retried } : {}) }];
     });
     const local = (taskId: string) =>
       taskId.startsWith(prefix) ? taskId.slice(prefix.length) : taskId;

@@ -1305,6 +1305,9 @@ const zhCN: Record<string, string> = {
   "The summary call timed out": "生成总结超时",
   "The summary call failed": "生成总结失败",
   "No model is configured for summaries": "未配置用于生成总结的模型",
+  "The summary model has no safe reasoning setting":
+    "生成总结的模型没有可安全使用的推理设置",
+  "Too little text to summarize": "文本太少，无法生成总结",
   "Not a paper": "不是论文",
   "The paper text could not be read": "无法读取论文正文",
   "The summary could not be prepared": "无法准备总结",

@@ -20,7 +20,9 @@ import type {
  * artifact from, or writes a note or an annotation on is read, sized by the
  * page share. Metadata depth: a paper the job only files, tags or edits is
  * decided from its title, authors and abstract. A paper both kinds name is
- * read: the reading part sets its price and its page's message.
+ * read: the reading part sets its price and its page's message. A paper a
+ * digest part has done was read by the host already: no part reads it
+ * again, and a note on it is written from its digest.
  *
  * In estimated prompt tokens:
  * - B, the input budget left after the answer's output reserve;
@@ -152,9 +154,12 @@ export type LongJob = Readonly<{
   /**
    * Its papers whose text an open part still needs: a read part that has not
    * done them, an artifact written from them, a note or an annotation still
-   * to be written on them. The rest it only changes otherwise.
+   * to be written on them, unless the host has digested them. The rest it
+   * only changes otherwise, or writes from their digests.
    */
   reading: ReadonlySet<string>;
+  /** Its papers a digest part has done: the host read them already. */
+  digested: ReadonlySet<string>;
   /** Whether any of its parts is still pending. */
   open: boolean;
 }>;
@@ -224,17 +229,30 @@ function needsText(task: Task): boolean {
   );
 }
 
+/** Papers a digest part has done: the host read and summarized them. */
+function digestedPapers(
+  checkpoint: ExecutionCheckpoint | undefined,
+): Set<string> {
+  return new Set(
+    (checkpoint?.tasks || []).flatMap((task) =>
+      task.effect === "digest" ? task.doneTargets || [] : [],
+    ),
+  );
+}
+
 /**
  * The papers whose text the ledger's open parts still need: those a pending
  * read part has not done, an artifact is written from, or a note or an
  * annotation is still to be written on. A paper the open parts only change
- * otherwise (file, tag, edit its record) needs none. An artifact part is no
- * job part (nothing ticks its papers one by one), but a paper it names is
- * read for it all the same.
+ * otherwise (file, tag, edit its record) needs none, and neither does a
+ * paper the host has digested: its digest is what a note or an artifact is
+ * written from. An artifact part is no job part (nothing ticks its papers
+ * one by one), but a paper it names is read for it all the same.
  */
 function papersToRead(
   checkpoint: ExecutionCheckpoint | undefined,
 ): Set<string> {
+  const digested = digestedPapers(checkpoint);
   return new Set(
     (checkpoint?.tasks || []).flatMap((task) => {
       if (
@@ -244,7 +262,9 @@ function papersToRead(
       )
         return [];
       const accounted = accountedTargets(task);
-      return paperTargets(task).filter((target) => !accounted.has(target));
+      return paperTargets(task).filter(
+        (target) => !accounted.has(target) && !digested.has(target),
+      );
     }),
   );
 }
@@ -281,12 +301,14 @@ export function readLongJob(
     ),
   );
   const toRead = papersToRead(checkpoint);
+  const digested = digestedPapers(checkpoint);
   return {
     partIds: parts.map((task) => task.taskId),
     targets,
     settled,
     notDone: targets.filter((target) => !settled.has(target)),
     reading: new Set(targets.filter((target) => toRead.has(target))),
+    digested: new Set(targets.filter((target) => digested.has(target))),
     open: naming.some((part) => part.pending),
   };
 }
@@ -735,7 +757,9 @@ function quotedList(values: readonly string[]): string {
  * papers are named for follow; a reading part sets the depth of a mixed job.
  * Metadata depth: a page of papers the job only files, tags or edits asks
  * for the changes themselves, decided from each paper's title, authors and
- * abstract; reading their text would cost what the job never needs.
+ * abstract; reading their text would cost what the job never needs. Digest
+ * depth: a page of papers the host has digested asks for the changes from
+ * each paper's digest, and never for a read.
  */
 function pageInstruction(
   page: LongJobPage,
@@ -762,6 +786,12 @@ function pageInstruction(
       next,
     ].join(" ");
   if (!changes.length) return `Work through these papers now. ${next}`;
+  if (page.targets.some((target) => job?.digested.has(target)))
+    return [
+      `Make ${noun} ${quotedList(changes)} for these papers now, from the host's digest of each paper: the task_update result that returned it, or context_read source:'tool_result' with the paper's digest handle.`,
+      "The host has already summarized these papers, so do not open their text again.",
+      `One write call can take every paper of this page. ${next}`,
+    ].join(" ");
   return [
     `Make ${noun} ${quotedList(changes)} for these papers now.`,
     "Decide each paper from its metadata (title, authors, abstract): library_search with include:['abstract'] lists them, with the scope's filter, paged with limit and offset.",

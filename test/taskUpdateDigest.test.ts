@@ -16,8 +16,10 @@ import {
 } from "../src/agent/tools/control/taskUpdate";
 import {
   PAPER_DIGEST_HANDLE_TOOL,
+  createDigestReadObservation,
   createZoteroPaperDigestSources,
 } from "../src/agent/digests/digestJobHost";
+import type { HostPaperDigest } from "../src/agent/digests/paperDigestWorker";
 import type { MaterialRef } from "../src/agent/documents/materialRef";
 import type { TaskPaperLedgerDelta } from "../src/agent/context/taskPaperLedger";
 import {
@@ -56,8 +58,8 @@ const CAPABILITIES: AgentModelCapabilities = {
   multimodal: false,
 };
 
-const TEXT =
-  "# Introduction\nPlace cells drift slowly across days.\n\n## Methods\nWe recorded forty cells over ten days.";
+/** A paper long enough to summarize (the host refuses under 1,500 characters). */
+const TEXT = `# Introduction\nPlace cells drift slowly across days.\n\n## Methods\nWe recorded forty cells over ten days.\n\n## Appendix\n${"The appendix restates the recording protocol in detail. ".repeat(30)}`;
 
 const reply = (summary: string) => ({
   text: JSON.stringify({
@@ -479,7 +481,7 @@ describe("task_update runs a declared digest part", function () {
         libraryID: 1,
         itemId,
         contextItemId: itemId + 1000,
-        title: `Long paper ${itemId}`,
+        title: `Long paper ${itemId} ${"on representational drift ".repeat(20)}`,
       };
     try {
       const harness = createHarness(
@@ -493,6 +495,215 @@ describe("task_update runs a declared digest part", function () {
       assert.match(String(result.toolResultHandle), /^trh_/);
     } finally {
       for (const itemId of itemIds) delete PAPERS[itemId];
+    }
+  });
+
+  /** Papers `from`, `from + 1`, … each resolvable, removed after `run`. */
+  async function withPapers(
+    count: number,
+    from: number,
+    run: (itemIds: number[]) => Promise<void>,
+  ) {
+    const itemIds = Array.from({ length: count }, (_, index) => from + index);
+    for (const itemId of itemIds)
+      PAPERS[itemId] = {
+        libraryID: 1,
+        itemId,
+        contextItemId: itemId + 1000,
+        title: `Paper ${itemId}`,
+      };
+    try {
+      await run(itemIds);
+    } finally {
+      for (const itemId of itemIds) delete PAPERS[itemId];
+    }
+  }
+
+  it("digests at most 30 papers in one call; the rest are pending until the part is declared again", async function () {
+    await withPapers(31, 300, async (itemIds) => {
+      const asked: string[] = [];
+      const harness = createHarness(
+        scriptedDigests(async (chat) => {
+          asked.push(/Title: (Paper \d+)/.exec(chat.prompt)?.[1] || "?");
+          return reply("Cells drift slowly.");
+        }),
+        itemIds,
+      );
+      const first = await runCall(harness, "call-batch-1", {
+        tasks: [SUMMARIZE],
+      });
+      const answer = first.toolResult.content as Record<string, any>;
+      assert.lengthOf(asked, 30);
+      assert.notInclude(asked, "Paper 330");
+      assert.deepEqual(answer.digestPending, ["item:330"]);
+      assert.deepEqual(answer.parts[0], {
+        taskId: "summaries",
+        status: "pending",
+        done: 30,
+        total: 31,
+        scope: true,
+      });
+      assert.include(answer.digestNote, "30 papers");
+      assert.include(answer.digestNote, "same taskId and no description");
+
+      asked.length = 0;
+      const second = await runCall(harness, "call-batch-2", {
+        tasks: [{ taskId: "summaries" }],
+      });
+      const next = second.toolResult.content as Record<string, any>;
+      assert.deepEqual(asked, ["Paper 330"]);
+      assert.include(next.parts[0], { status: "completed", done: 31 });
+      assert.isUndefined(next.digestPending);
+      assert.isUndefined(next.digestNote);
+    });
+  });
+
+  it("refuses a digest part over more than 200 papers and asks to narrow the scope", async function () {
+    const itemIds = Array.from({ length: 201 }, (_, index) => 1_000 + index);
+    let calls = 0;
+    const harness = createHarness(
+      scriptedDigests(async () => {
+        calls += 1;
+        return reply("x");
+      }),
+      itemIds,
+    );
+    const outcome = await runCall(harness, "call-huge", {
+      tasks: [SUMMARIZE],
+    });
+    assert.isFalse(outcome.toolResult.ok);
+    const text = JSON.stringify(outcome.toolResult.content);
+    assert.include(text, "201 papers");
+    assert.match(text, /narrow the scope/i);
+    assert.include(text, "confirm");
+    assert.equal(calls, 0);
+    assert.lengthOf(harness.published, 0, "nothing is declared");
+  });
+
+  it("renders more than twelve digests compactly, each naming its handle for the full digest", async function () {
+    await withPapers(13, 400, async (itemIds) => {
+      const long = `${"Drift is slow and steady across days. ".repeat(20)}END-OF-SUMMARY`;
+      const harness = createHarness(
+        scriptedDigests(async () => reply(long)),
+        itemIds,
+      );
+      const outcome = await runCall(harness, "call-13", {
+        tasks: [SUMMARIZE],
+      });
+      const answer = outcome.toolResult.content as Record<string, any>;
+      assert.lengthOf(answer.digestHandles, 13);
+      for (const itemId of itemIds) {
+        assert.include(answer.digests, `### Paper ${itemId} (item:${itemId})`);
+        const handle = answer.digestHandles.find(
+          (entry: { itemId: number }) => entry.itemId === itemId,
+        ).handle;
+        assert.include(answer.digests, handle);
+      }
+      assert.include(answer.digests, long.slice(0, 400));
+      assert.notInclude(answer.digests, "END-OF-SUMMARY");
+      assert.notInclude(answer.digests, "Contributions:");
+      // The stored digest is whole.
+      const stored = harness.handles.find(
+        (record) => record.toolName === PAPER_DIGEST_HANDLE_TOOL,
+      );
+      assert.include(JSON.stringify(stored?.content), "END-OF-SUMMARY");
+    });
+  });
+
+  it("runs a failed paper again on at most two re-declarations, then keeps its failure final and says so", async function () {
+    let reads7 = 0;
+    const digests = scriptedDigests(async () => reply("Cells drift slowly."));
+    const readText = digests.readText;
+    const harness = createHarness(
+      {
+        ...digests,
+        readText: async (paper, maxChars) => {
+          if (paper.itemId === 7) reads7 += 1;
+          return readText(paper, maxChars);
+        },
+      },
+      [5, 7],
+    );
+    await runCall(harness, "call-0", { tasks: [SUMMARIZE] });
+    assert.equal(reads7, 1);
+    for (const [index, id] of ["call-1", "call-2"].entries()) {
+      const again = await runCall(harness, id, {
+        tasks: [{ taskId: "summaries" }],
+      });
+      const answer = again.toolResult.content as Record<string, any>;
+      assert.equal(reads7, index + 2, `re-declaration ${index + 1} runs it`);
+      assert.isUndefined(answer.digestNote);
+    }
+    const last = await runCall(harness, "call-3", {
+      tasks: [{ taskId: "summaries", targetIds: ["7"] }],
+    });
+    const answer = last.toolResult.content as Record<string, any>;
+    assert.equal(reads7, 3, "a third re-declaration does not run it again");
+    assert.deepEqual(answer.digestFailures, [
+      { itemId: 7, title: "Drift C", reason: "No readable text", final: true },
+    ]);
+    assert.include(answer.digestNote, "final");
+    assert.include(answer.digestNote, "Drift C");
+    const part = harness.request.executionCheckpoint!.tasks[0];
+    assert.deepEqual(part.exceptions, [
+      { targets: ["item:7"], reason: "No readable text" },
+    ]);
+  });
+
+  it("issues a body-depth read for a long or complete digest and an abstract-depth one for a short excerpt", async function () {
+    const zotero = (globalThis as unknown as { Zotero: any }).Zotero;
+    const originalItems = zotero.Items;
+    zotero.Items = {
+      ...(originalItems || {}),
+      get: (id: number) => ({ id, key: `KEY${id}`, libraryID: 1 }),
+    };
+    try {
+      const digest = (source: HostPaperDigest["source"]): HostPaperDigest => ({
+        itemId: 5,
+        contextItemId: 105,
+        summary: "s",
+        contributions: [],
+        methods: "",
+        limitations: "",
+        evidence: [],
+        source,
+        model: "m",
+        producedAt: 0,
+        cacheKey: "k",
+      });
+      const capabilities = async (source: HostPaperDigest["source"]) =>
+        (
+          await createDigestReadObservation({
+            callId: "c",
+            digest: digest(source),
+          })
+        )?.capabilities;
+      assert.deepEqual(
+        await capabilities({
+          backend: "mineru",
+          characters: 3_000,
+          complete: true,
+        }),
+        ["body"],
+      );
+      assert.deepEqual(
+        await capabilities({
+          backend: "pdf",
+          characters: 5_000,
+          complete: false,
+        }),
+        ["body"],
+      );
+      assert.deepEqual(
+        await capabilities({
+          backend: "pdf",
+          characters: 4_999,
+          complete: false,
+        }),
+        ["abstract"],
+      );
+    } finally {
+      zotero.Items = originalItems;
     }
   });
 

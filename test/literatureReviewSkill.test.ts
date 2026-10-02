@@ -80,8 +80,14 @@ describe("literature-review skill", function () {
     );
     assert.include(
       text,
-      "never re-read a digested paper in overview or full mode",
+      "never re-read a paper whose digest succeeded in overview or full mode",
     );
+    // A paper the host could not digest twice is read, not left unread.
+    assert.include(
+      text,
+      "a paper whose digest failed twice may be read with an overview `paper_read` instead",
+    );
+    assert.notInclude(text, "a paper that still fails is named as not read");
     assert.include(text, "same `taskId` and no description");
   });
 

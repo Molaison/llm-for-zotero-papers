@@ -4,8 +4,9 @@
  * One bounded utility-model call per paper turns the text the host already
  * read into a structured digest (summary, contributions, methods, limitations,
  * verified evidence). The job runs a small pool over the targets in scope
- * order, retries transient failures once, never caches a failure, and honors
- * Stop by leaving unfinished targets pending.
+ * order, retries transient failures once after a short wait, never caches a
+ * failure, and honors Stop by leaving unfinished targets pending. A paper
+ * with too little text to summarize fails without a model call.
  *
  * Everything here is pure except `callUtilityLLM`; reading, caching and
  * publishing are injected so the module stays testable and Gecko-safe (no
@@ -94,6 +95,11 @@ export type PaperDigestJobParams = {
   now?: () => number;
   onDigest: (digest: HostPaperDigest, target: string) => Promise<void>;
   onFailure: (failure: PaperDigestFailure) => Promise<void>;
+  /**
+   * Waits `ms` before a retry, ending early on Stop. Test seam; defaults to
+   * the window's (or the global) setTimeout.
+   */
+  wait?: (ms: number, signal?: AbortSignal) => Promise<void>;
 };
 
 export type PaperDigestJobResult = {
@@ -122,13 +128,25 @@ export const DIGEST_FAILURE_REASONS = Object.freeze({
   timeout: "The summary call timed out",
   transport: "The summary call failed",
   notConfigured: "No model is configured for summaries",
+  noSafeReasoning: "The summary model has no safe reasoning setting",
+  thinText: "Too little text to summarize",
   notAPaper: "Not a paper",
   readFailed: "The paper text could not be read",
   internal: "The summary could not be prepared",
 });
 
 const DEFAULT_CONCURRENCY = 4;
-const DIGEST_MIN_INPUT_CHARS = 20_000;
+const DIGEST_MIN_INPUT_CHARS = 8_000;
+/** Less text than this is an abstract or a stub: nothing to summarize. */
+export const DIGEST_MIN_SOURCE_CHARS = 1_500;
+/** The pause before the one retry of a timed-out or failed call. */
+export const DIGEST_RETRY_WAIT_MS = 2_000;
+/** The pause before retrying a call the provider rate-limited. */
+export const DIGEST_RATE_LIMIT_WAIT_MS = 5_000;
+/** Above this many digests, a result renders each compactly. */
+export const DIGEST_COMPACT_RENDER_ABOVE = 12;
+/** The summary characters a compact rendering keeps. */
+export const DIGEST_COMPACT_SUMMARY_CHARS = 400;
 const DIGEST_TIMEOUT_BASE_MS = 60_000;
 const DIGEST_TIMEOUT_PER_1K_TOKENS_MS = 3_000;
 const MAX_QUOTE_CHARS = 200;
@@ -384,26 +402,58 @@ export type HostPaperDigestCitationSource = {
   evidenceRefs: readonly string[];
 };
 
+/** How much of the paper's text the digest summarized. */
+function textCoverage(source: HostPaperDigest["source"]): string {
+  return source.complete
+    ? "text: complete"
+    : `text: excerpt, ${source.characters} characters`;
+}
+
+/**
+ * The digests as the model reads them, in order, then the failures. Up to
+ * twelve render whole; more render compactly, each as its title, citation
+ * source, text coverage, the first 400 characters of its summary and the
+ * handle its full digest is stored under, so the result stays bounded.
+ */
 export function renderHostPaperDigests(
   digests: readonly HostPaperDigest[],
   failures: readonly PaperDigestFailure[],
   titleOf?: (itemId: number) => string | undefined,
   sourceOf?: (itemId: number) => HostPaperDigestCitationSource | undefined,
+  handleOf?: (itemId: number) => string | undefined,
 ): string {
   const label = (itemId: number, title?: string) =>
     normalizeWhitespace(title || titleOf?.(itemId) || "") || `Item ${itemId}`;
+  const compact = digests.length > DIGEST_COMPACT_RENDER_ABOVE;
   const blocks = digests.map((digest) => {
     const source = sourceOf?.(digest.itemId);
+    const heading = `### ${label(digest.itemId, digest.title)} (item:${digest.itemId})${
+      source
+        ? ` — cite source ${JSON.stringify({
+            libraryID: source.libraryID,
+            itemKey: source.itemKey,
+            evidenceRefs: source.evidenceRefs,
+          })}`
+        : ""
+    }`;
+    if (compact) {
+      const handle = handleOf?.(digest.itemId);
+      const summary =
+        digest.summary.length > DIGEST_COMPACT_SUMMARY_CHARS
+          ? `${digest.summary.slice(0, DIGEST_COMPACT_SUMMARY_CHARS)}…`
+          : digest.summary;
+      return [
+        heading,
+        textCoverage(digest.source),
+        `Summary: ${summary}`,
+        handle
+          ? `Full digest: context_read source:'tool_result' handle:'${handle}'`
+          : "Full digest: not stored; declare the part again for this paper to see it whole.",
+      ].join("\n");
+    }
     const lines = [
-      `### ${label(digest.itemId, digest.title)} (item:${digest.itemId})${
-        source
-          ? ` — cite source ${JSON.stringify({
-              libraryID: source.libraryID,
-              itemKey: source.itemKey,
-              evidenceRefs: source.evidenceRefs,
-            })}`
-          : ""
-      }`,
+      heading,
+      textCoverage(digest.source),
       `Summary: ${digest.summary}`,
     ];
     if (digest.contributions.length) {
@@ -464,6 +514,45 @@ function describeError(error: unknown): string {
   return message.length > 300 ? `${message.slice(0, 300)}…` : message;
 }
 
+/** Whether a failed call was the provider's rate limit (HTTP 429). */
+function isRateLimited(result: { status?: number; detail?: string }): boolean {
+  return (
+    result.status === 429 ||
+    /\b429\b|rate[ -]?limit|too many requests/i.test(result.detail || "")
+  );
+}
+
+type TimerHost = {
+  setTimeout: (callback: () => void, ms: number) => unknown;
+  clearTimeout: (handle: never) => void;
+};
+
+/**
+ * The default retry wait: the main window's timer when there is one (Gecko
+ * chrome code), else the global one. Stop ends the wait at once.
+ */
+function waitWithTimer(ms: number, signal?: AbortSignal): Promise<void> {
+  const scope = globalThis as unknown as TimerHost & {
+    window?: Partial<TimerHost>;
+  };
+  const host: TimerHost =
+    typeof scope.window?.setTimeout === "function"
+      ? (scope.window as TimerHost)
+      : scope;
+  return new Promise<void>((resolve) => {
+    if (signal?.aborted) return resolve();
+    const onAbort = () => {
+      host.clearTimeout(handle as never);
+      resolve();
+    };
+    const handle = host.setTimeout(() => {
+      signal?.removeEventListener?.("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener?.("abort", onAbort, { once: true });
+  });
+}
+
 type CallReply =
   | { ok: true; text: string }
   | { ok: false; reason: string; detail?: string; fatal?: boolean }
@@ -505,11 +594,21 @@ export async function runPaperDigestJob(
     failure: { target, itemId, reason, ...(detail ? { detail } : {}) },
   });
 
-  /** Up to `attempts` calls; only timeout/transport are retried. */
+  const wait = params.wait || waitWithTimer;
+
+  /**
+   * Up to `attempts` calls; only timeout/transport are retried, after a 2 s
+   * wait (5 s when the provider rate-limited the call).
+   */
   const call = async (prompt: string, attempts: number): Promise<CallReply> => {
     let lastFailure: CallReply = null;
+    let pause = 0;
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       if (isAborted()) return null;
+      if (pause) {
+        await wait(pause, params.signal);
+        if (isAborted()) return null;
+      }
       const result = await callUtilityLLM({
         prompt,
         model: params.llm.model,
@@ -535,6 +634,9 @@ export async function runPaperDigestJob(
               : DIGEST_FAILURE_REASONS.transport,
           detail: result.detail,
         };
+        pause = isRateLimited(result)
+          ? DIGEST_RATE_LIMIT_WAIT_MS
+          : DIGEST_RETRY_WAIT_MS;
         continue;
       }
       if (
@@ -543,7 +645,10 @@ export async function runPaperDigestJob(
       ) {
         return {
           ok: false,
-          reason: DIGEST_FAILURE_REASONS.notConfigured,
+          reason:
+            result.reason === "budget_unavailable"
+              ? DIGEST_FAILURE_REASONS.noSafeReasoning
+              : DIGEST_FAILURE_REASONS.notConfigured,
           detail: result.detail,
           fatal: true,
         };
@@ -596,6 +701,9 @@ export async function runPaperDigestJob(
     }
     if (!source || !source.text.trim()) {
       return failure(target, itemId, DIGEST_FAILURE_REASONS.noText);
+    }
+    if (source.text.trim().length < DIGEST_MIN_SOURCE_CHARS) {
+      return failure(target, itemId, DIGEST_FAILURE_REASONS.thinText);
     }
     const cacheKey = digestCacheKey({
       contextItemId: source.contextItemId,

@@ -23,8 +23,9 @@ A review is an argument about a body of work, not a catalog of it: a faithful ac
    For four papers or fewer without a per-paper request, declare a read part (`expectedEffect:'read'`) instead and read them with `paper_read`.
    The host marks each part done from the tools' results.
 3. **Read.** With a digest part, write from the digests the host returned: each has the paper's summary, contributions, methods, limitations and verified quotes with section labels, and a handle for `context_read source:'tool_result'` when you need the full record.
-   Use `paper_read({ mode:'targeted', query:'...' })` only to verify a decisive cross-paper claim or an apparent contradiction; never re-read a digested paper in overview or full mode.
-   If the host reports digest failures, declare the part again once with `targetIds` of the failed papers only; a paper that still fails is named as not read.
+   Use `paper_read({ mode:'targeted', query:'...' })` only to verify a decisive cross-paper claim or an apparent contradiction; never re-read a paper whose digest succeeded in overview or full mode.
+   If the host reports digest failures, declare the part again once with `targetIds` of the failed papers only.
+   Then a paper whose digest failed twice may be read with an overview `paper_read` instead; name it as not read only if that read fails too.
    If the part is still open after a Stop and the user says continue, call `task_update` again with the same `taskId` and no description to finish the remaining papers.
    Without a digest part, read the scope's papers with `paper_read`, passing them as `targets` and grouping related papers in one call.
    The host fits each paper's text to the remaining context, and each result reports which papers came back complete, sampled, abstract only, or metadata only.

@@ -11,8 +11,15 @@
  * store, where context_read reads them by handle; failures never are.
  *
  * Each completed digest is also a host-verified read of its paper: the host
- * issues one read observation for it (body depth, read mode `digest`), so a
- * document may cite a digested paper the model never read itself.
+ * issues one read observation for it (read mode `digest`), so a document may
+ * cite a digested paper the model never read itself. Its depth is the text
+ * the digest read: body for the whole text or an excerpt of 5,000 characters
+ * or more, abstract below that.
+ *
+ * Bounds. One `task_update` call digests at most 30 papers; the rest stay
+ * pending and the part is declared again to continue. A paper whose digest
+ * failed runs again on at most two re-declarations in a run; after that its
+ * failure is final.
  */
 import { DEFAULT_INPUT_TOKEN_CAP } from "../../utils/llmDefaults";
 import type { UtilityLLMParams } from "../../utils/utilityLLM";
@@ -55,6 +62,21 @@ export const PAPER_DIGEST_HANDLE_TOOL = "paper_digest";
 /** Parallel model calls per digest part. */
 const DIGEST_CONCURRENCY = 4;
 
+/** The most papers one `task_update` call digests; the rest stay pending. */
+export const DIGEST_MAX_PAPERS_PER_CALL = 30;
+
+/** Re-declarations that run a failed paper again before its failure is final. */
+export const DIGEST_MAX_FAILURE_RETRIES = 2;
+
+/** A digest of the whole text, or of at least this much, reads the body. */
+export const DIGEST_BODY_DEPTH_CHARS = 5_000;
+
+/**
+ * Per run (its request), per part and paper: the re-declarations that ran a
+ * failed paper again. A new run, as after "continue", starts at none.
+ */
+const failureRetries = new WeakMap<object, Map<string, number>>();
+
 /** The text a digest reads for one resolved paper, already cut. */
 export type DigestPaperText = Pick<
   PaperDigestSource,
@@ -84,8 +106,16 @@ export type DigestJobHostDeps = {
   createCache?: (context: AgentToolContext) => HostPaperDigestCache;
 };
 
-/** One digest part to run now, and the papers to digest. */
-export type DigestPartRequest = { taskId: string; targets: string[] };
+/**
+ * One digest part to run now, and the papers to digest. `retried` are those
+ * of them the part already holds as failed, with the reason it holds: this
+ * run is a retry for them.
+ */
+export type DigestPartRequest = {
+  taskId: string;
+  targets: string[];
+  retried?: ReadonlyArray<{ target: string; reason: string }>;
+};
 
 /** What a digest run adds to the `task_update` result. */
 export type DigestRunResult = {
@@ -102,9 +132,20 @@ export type DigestRunResult = {
   }>;
   /** The citable source of each digest, as a read tool's result names it. */
   documentEvidenceRefs?: DigestEvidenceRef[];
-  digestFailures?: Array<{ itemId: number; title?: string; reason: string }>;
-  /** Targets Stop left undone; declare the part again to continue them. */
+  /** `final`: not run again; the paper failed on every allowed retry. */
+  digestFailures?: Array<{
+    itemId: number;
+    title?: string;
+    reason: string;
+    final?: true;
+  }>;
+  /**
+   * Targets Stop, or the per-call bound, left undone; declare the part again
+   * to continue them.
+   */
   digestPending?: string[];
+  /** What the model must know to go on: a batch left, or final failures. */
+  digestNote?: string;
 };
 
 /** One digest's evidence ref, in the shape a read tool's result carries. */
@@ -157,8 +198,10 @@ function digestPaperIdentity(digest: HostPaperDigest): {
 
 /**
  * The read observation the host issues for one completed digest: the paper's
- * text was read whole or in part by the host (body depth), under a call id
- * of its own per paper. Null when the paper has no Zotero identity.
+ * text was read whole or in part by the host, under a call id of its own per
+ * paper. Its depth is body when the digest read the whole text or at least
+ * 5,000 characters, else abstract. Null when the paper has no Zotero
+ * identity.
  */
 export async function createDigestReadObservation(params: {
   callId: string;
@@ -196,7 +239,12 @@ export async function createDigestReadObservation(params: {
     inputDigest,
     resultDigest,
     ...identity,
-    capabilities: ["body"] as TrustedReadObservation["capabilities"],
+    capabilities: [
+      digest.source.complete ||
+      digest.source.characters >= DIGEST_BODY_DEPTH_CHARS
+        ? "body"
+        : "abstract",
+    ] as TrustedReadObservation["capabilities"],
     readMode: "digest",
   };
   return {
@@ -466,11 +514,48 @@ export async function runDigestParts(params: {
   const digests: HostPaperDigest[] = [];
   const failures: PaperDigestFailure[] = [];
   const pending: string[] = [];
-  for (const part of params.parts) {
+  /** Failures not run again: their retries are spent. */
+  const finalFailures: PaperDigestFailure[] = [];
+  /** Targets the per-call bound left for the next declaration. */
+  let deferred = 0;
+  let room = DIGEST_MAX_PAPERS_PER_CALL;
+  let retries = failureRetries.get(request);
+  if (!retries) {
+    retries = new Map();
+    failureRetries.set(request, retries);
+  }
+  for (const requested of params.parts) {
+    // Failed papers whose retries are spent stay failed, reason unchanged.
+    const retried = new Map(
+      (requested.retried || []).map((entry) => [entry.target, entry.reason]),
+    );
+    const runnable = requested.targets.filter((target) => {
+      if (!retried.has(target)) return true;
+      const used = retries.get(`${requested.taskId}\u0000${target}`) || 0;
+      if (used < DIGEST_MAX_FAILURE_RETRIES) return true;
+      const itemId = Number(/^item:(\d+)$/.exec(target)?.[1]) || 0;
+      finalFailures.push({
+        target,
+        itemId,
+        reason: retried.get(target)!,
+      });
+      return false;
+    });
     if (signal?.aborted) {
-      pending.push(...part.targets);
+      pending.push(...runnable);
       continue;
     }
+    const batch = runnable.slice(0, Math.max(0, room));
+    pending.push(...runnable.slice(batch.length));
+    deferred += runnable.length - batch.length;
+    room -= batch.length;
+    if (!batch.length) continue;
+    for (const target of batch) {
+      if (!retried.has(target)) continue;
+      const key = `${requested.taskId}\u0000${target}`;
+      retries.set(key, (retries.get(key) || 0) + 1);
+    }
+    const part = { ...requested, targets: batch };
     const local = params.localTaskId(part.taskId);
     const base = context.toolCallId || `${context.runId || "run"}:${local}`;
     // One call id per part, so two parts over one paper both apply.
@@ -541,6 +626,7 @@ export async function runDigestParts(params: {
   }
 
   const handles: NonNullable<DigestRunResult["digestHandles"]> = [];
+  const handleByItem = new Map<number, string>();
   const evidenceRefs: DigestEvidenceRef[] = [];
   for (const digest of digests) {
     let handle: string | undefined;
@@ -563,6 +649,7 @@ export async function runDigestParts(params: {
           ? { attachmentItemKey: observation.attachmentItemKey }
           : {}),
       });
+    if (handle) handleByItem.set(digest.itemId, handle);
     if (handle || ref)
       handles.push({
         itemId: digest.itemId,
@@ -570,31 +657,54 @@ export async function runDigestParts(params: {
         ...(ref ? { evidenceRefs: [ref] } : {}),
       });
   }
+  const allFailures = [...failures, ...finalFailures];
+  const final = new Set(finalFailures);
+  const notes: string[] = [];
+  if (deferred)
+    notes.push(
+      `This call digested ${DIGEST_MAX_PAPERS_PER_CALL} papers, the most one call digests; ${deferred} ${
+        deferred === 1 ? "paper is" : "papers are"
+      } left (digestPending). Call task_update again with the same taskId and no description to digest the next batch.`,
+    );
+  if (finalFailures.length)
+    notes.push(
+      `Not run again: ${finalFailures
+        .map(
+          (failure) =>
+            `${titleOf(failure.itemId) || `Item ${failure.itemId}`} (${failure.target})`,
+        )
+        .join(", ")}. ${
+        finalFailures.length === 1 ? "Its digest" : "Their digests"
+      } already failed after ${DIGEST_MAX_FAILURE_RETRIES} retries, so the failure is final with the reason given. Read such a paper with paper_read mode:'overview' if the work needs it, or name it as not summarized.`,
+    );
   return {
-    ...(digests.length || failures.length
+    ...(digests.length || allFailures.length
       ? {
           digests: renderHostPaperDigests(
             digests,
-            failures,
+            allFailures,
             titleOf,
             citationSourceOf,
+            (itemId) => handleByItem.get(itemId),
           ),
         }
       : {}),
     ...(handles.length ? { digestHandles: handles } : {}),
     ...(evidenceRefs.length ? { documentEvidenceRefs: evidenceRefs } : {}),
-    ...(failures.length
+    ...(allFailures.length
       ? {
-          digestFailures: failures.map((failure) => {
+          digestFailures: allFailures.map((failure) => {
             const title = titleOf(failure.itemId);
             return {
               itemId: failure.itemId,
               ...(title ? { title } : {}),
               reason: failure.reason,
+              ...(final.has(failure) ? { final: true as const } : {}),
             };
           }),
         }
       : {}),
     ...(pending.length ? { digestPending: pending } : {}),
+    ...(notes.length ? { digestNote: notes.join(" ") } : {}),
   };
 }

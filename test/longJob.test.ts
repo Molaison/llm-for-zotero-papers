@@ -1131,6 +1131,98 @@ describe("long job", function () {
       );
     });
 
+    it("reads no paper a digest part has done: a note on each digested paper is written from its digest", function () {
+      const NOTE_ALL = "Save a summary note on each paper";
+      let ledger = declareOutcomes(
+        createEmptyExecutionCheckpoint(executionContext, 1),
+        [
+          {
+            taskId: "summaries",
+            description: "Summarize each paper",
+            effect: "digest",
+            targets: items(40),
+            scope: true,
+          },
+          {
+            taskId: "notes",
+            description: NOTE_ALL,
+            effect: "mutation",
+            capability: "zotero.notes",
+            targets: items(40),
+            scope: true,
+          },
+        ],
+        2,
+      );
+      ledger = applyOutcomeEvidence(
+        ledger,
+        {
+          kind: "digest",
+          taskId: ledger.tasks[0].taskId,
+          done: items(40),
+          failed: [],
+        },
+        3,
+      ).checkpoint;
+      assert.equal(ledger.tasks[0].status, "completed");
+      const job = readLongJob(ledger);
+      assert.exists(job);
+      assert.equal(job!.reading.size, 0, "the host already read every paper");
+      // Priced at their records, so the notes fit one pass.
+      assert.isNull(
+        libraryPager().check({
+          checkpoint: ledger,
+          promptTokens: 40_000,
+          budgetTokens: 100_000,
+        }),
+      );
+      // Paged on a small window, the page asks for the notes from the digests.
+      const text = renderLongJobMessage({
+        checkpoint: ledger,
+        partIds: job!.partIds,
+        results: "",
+        next: page(items(9)),
+        titleOf: () => undefined,
+        noTextReason: OUTCOME_REASONS.noText,
+      });
+      assert.notInclude(text, "paper_read");
+      assert.include(
+        text,
+        `Make the change “${NOTE_ALL}” for these papers now`,
+      );
+      assert.include(text, "digest");
+      // A paper whose digest failed is still read for its note.
+      const failed = applyOutcomeEvidence(
+        declareOutcomes(
+          createEmptyExecutionCheckpoint(executionContext, 1),
+          [
+            {
+              taskId: "summaries",
+              description: "Summarize each paper",
+              effect: "digest",
+              targets: items(3),
+            },
+            {
+              taskId: "notes",
+              description: NOTE_ALL,
+              effect: "mutation",
+              capability: "zotero.notes",
+              targets: items(3),
+            },
+          ],
+          2,
+        ),
+        {
+          kind: "digest",
+          taskId: "execution-7:task:summaries",
+          done: ["item:1", "item:2"],
+          failed: [{ target: "item:3", reason: "No readable text" }],
+        },
+        3,
+      ).checkpoint;
+      assert.deepEqual([...readLongJob(failed)!.reading], ["item:3"]);
+    });
+
     it("measures a page of changes from its own calls", function () {
       const pager = libraryPager();
       let ledger = moveLedger(items(60));

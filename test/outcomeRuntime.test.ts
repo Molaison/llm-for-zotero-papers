@@ -595,7 +595,7 @@ describe("outcome ledger in runtime turns", function () {
     );
   });
 
-  it("a skip claiming delivery is refused and the part stays open, so the final answer is corrected once", async function () {
+  it("a skip claiming delivery is refused and the part stays open; the answer that follows delivers it, with no correction", async function () {
     const REVIEW = "Write the literature review";
     const turn = await runTurn({
       conversationKey,
@@ -622,20 +622,20 @@ describe("outcome ledger in runtime turns", function () {
             ],
           },
         }),
-        finalStep("The review is above."),
         finalStep("# Review\n\nThe papers agree on drift."),
       ],
     });
 
     assert.equal(turn.outcome?.kind, "completed");
-    assert.equal(turn.requests, 4);
+    assert.equal(turn.requests, 3, "the answer can deliver the review itself");
+    const refusal = promptText(turn.prompts[2]);
     assert.include(
-      promptText(turn.prompts[2]),
+      refusal,
       "Skip refused for review: nothing was delivered for it in this run",
     );
     assert.include(
-      promptText(turn.prompts[3]),
-      `Before answering, finish the parts of this request you declared that are still open: “${REVIEW}”.`,
+      refusal,
+      "Produce it with the tools, or, if it truly cannot be done, list it under blocked with the concrete obstacle.",
     );
     const ledger = settled(turn);
     assert.deepEqual(ledger.end, { state: "completed" });
@@ -3534,8 +3534,7 @@ describe("a digest part in runtime turns", function () {
   let environment: DirectJourneyEnvironment;
   let conversationKey = 996_000;
   const SUMMARIZE = "Summarize each selected paper";
-  const TEXT =
-    "# Introduction\nPlace cells drift slowly across days.\n\n## Methods\nWe recorded forty cells over ten days.";
+  const TEXT = `# Introduction\nPlace cells drift slowly across days.\n\n## Methods\nWe recorded forty cells over ten days.\n\n## Appendix\n${"The appendix restates the recording protocol in detail. ".repeat(30)}`;
 
   beforeEach(async function () {
     environment = await installDirectJourneyEnvironment();
@@ -3633,5 +3632,43 @@ describe("a digest part in runtime turns", function () {
       { targets: ["item:103"], reason: "No readable text" },
     ]);
     assert.deepEqual(ledger.end, { state: "completed_with_exceptions" });
+  });
+
+  it("a prose review over the digests, with no citation markup, completes the review part whole, with no correction", async function () {
+    const REVIEW = "Write the literature review";
+    const turn = await runTurn({
+      conversationKey,
+      userText: "Summarize all papers for me and write a literature review",
+      scope: { wholeLibrary: true, itemIds: [101, 102, 103], withText: 2 },
+      steps: [
+        stepOf(
+          declare("declare-digest", [
+            {
+              taskId: "summaries",
+              description: SUMMARIZE,
+              expectedEffect: "digest",
+              scope: true,
+            },
+            {
+              taskId: "review",
+              description: REVIEW,
+              expectedEffect: "artifact",
+              scope: true,
+            },
+          ]),
+        ),
+        finalStep(
+          "## Literature review\n\nPaper 101 and Paper 102 agree that drift is slow.",
+        ),
+      ],
+    });
+
+    assert.equal(turn.outcome?.kind, "completed", String(turn.error || ""));
+    assert.equal(turn.requests, 2, "no correction for the review part");
+    const ledger = settled(turn);
+    const review = outcome(ledger, "review");
+    assert.equal(review.status, "completed");
+    assert.notProperty(review, "exceptions", "not 0 of 3 covered");
+    assert.equal(outcome(ledger, "summaries").status, "completed");
   });
 });
