@@ -367,9 +367,21 @@ export function applyTaskPaperUpdate(
 ): void {
   const record = writable(conversationKey);
   if (!record || !delta) return;
-  const turn = turnFor(record, runId || delta.runId) ?? record.turnIndex;
+  const run = runId || delta.runId;
+  const turn = turnFor(record, run) ?? record.turnIndex;
+  // The current run is the newest; a late delta of an earlier run of the
+  // same question never takes the question's reads back.
+  const newerRunIds =
+    record.runId &&
+    record.runId !== run &&
+    turnFor(record, record.runId) === turn
+      ? [record.runId]
+      : [];
   const before = Object.keys(record.ledger.appliedCalls).length;
-  applyTaskPaperLedgerDelta(record.ledger, delta, turn || undefined);
+  applyTaskPaperLedgerDelta(record.ledger, delta, turn || undefined, {
+    runId: run,
+    newerRunIds,
+  });
   if (Object.keys(record.ledger.appliedCalls).length !== before) {
     changed(record);
   }
@@ -865,14 +877,34 @@ export function hydrateTaskProgress(
   const record = writable(conversationKey);
   if (!record) return false;
   const before = hydrationSignature(record);
-  for (const run of history.runs) {
+  const historyRunIds = new Set(history.runs.map((run) => run.runId));
+  for (const [position, run] of history.runs.entries()) {
     if (!run.runId || !(run.turn > 0)) continue;
     if (record.turnByRunId[run.runId] === undefined) {
       record.turnByRunId[run.runId] = run.turn;
     }
     const turn = record.turnByRunId[run.runId];
+    // Later runs of the same question, in history or live in this session,
+    // keep their reads over this run's.
+    const newerRunIds = history.runs
+      .slice(position + 1)
+      .filter(
+        (later) =>
+          later.runId &&
+          (record.turnByRunId[later.runId] ?? later.turn) === turn,
+      )
+      .map((later) => later.runId);
+    if (
+      record.runId &&
+      !historyRunIds.has(record.runId) &&
+      record.turnByRunId[record.runId] === turn
+    )
+      newerRunIds.push(record.runId);
     for (const delta of run.deltas) {
-      applyTaskPaperLedgerDelta(record.ledger, delta, turn);
+      applyTaskPaperLedgerDelta(record.ledger, delta, turn, {
+        runId: run.runId,
+        newerRunIds,
+      });
     }
     if (!run.live && run.quoteCitations) {
       applyFinalCitations(

@@ -678,6 +678,149 @@ describe("task progress view", function () {
     );
   });
 
+  it("counts distinct passages, and strips inline heading marks from a snippet", function () {
+    const entry: TaskPaperLedgerEntry = {
+      key: "1:1",
+      libraryID: 1,
+      itemId: 1,
+      contextItemIds: [],
+      text: "unknown",
+      state: "read",
+      latestTurn: 2,
+      turns: {
+        1: {
+          state: "read",
+          readState: "read",
+          reads: ["a", "b"].map((snippet) => ({
+            key: "1:1",
+            callId: "c1",
+            toolName: "paper_read",
+            granularity: "passage" as const,
+            snippet,
+          })),
+          droppedReads: 0,
+          citations: [],
+          droppedCitations: 0,
+        },
+        2: {
+          state: "read",
+          readState: "read",
+          reads: ["a", "b", "c"].map((snippet) => ({
+            key: "1:1",
+            callId: "c2",
+            toolName: "paper_read",
+            granularity: "passage" as const,
+            snippet,
+          })),
+          droppedReads: 0,
+          citations: [],
+          droppedCitations: 0,
+        },
+      },
+    };
+    assert.equal(
+      formatTaskPaperTail({
+        key: "1:1",
+        index: 1,
+        libraryID: 1,
+        itemId: 1,
+        title: "Paper",
+        creator: "",
+        year: "",
+        folders: [],
+        tags: [],
+        scopeText: "unknown",
+        inScope: true,
+        entry,
+        state: "read",
+        turnState: "read",
+      }),
+      "3 passages",
+    );
+    assert.equal(
+      cleanTaskPaperSnippet(
+        "Grid cells Jane Doe1 ## Abstract Grid cells in the entorhinal cortex",
+      ),
+      "Grid cells Jane Doe1 Abstract Grid cells in the entorhinal cortex",
+    );
+    assert.equal(
+      cleanTaskPaperSnippet("C# code and #1 rank"),
+      "C# code and #1 rank",
+    );
+  });
+
+  it("numbers the listed rows after metadata-only rows fold away", function () {
+    seedScope(3);
+    const harness = track(mount());
+    beginTaskRun(KEY, { runId: "run-a" });
+    applyTaskPaperUpdate(
+      KEY,
+      {
+        version: 1,
+        callId: "overview",
+        runId: "run-a",
+        toolName: "paper_read",
+        papers: [
+          {
+            key: "1:2",
+            libraryID: 1,
+            itemId: 2,
+            text: "none",
+            state: "matched",
+          },
+        ],
+        reads: [
+          {
+            key: "1:2",
+            callId: "overview",
+            toolName: "paper_read",
+            granularity: "metadata",
+            method: "overview",
+          },
+        ],
+      },
+      "run-a",
+    );
+    harness.runTimers();
+    harness.row.dispatchFakeEvent("click");
+    const rows = harness
+      .items()
+      .map((item) => [
+        item.findByClass("llm-task-paper-index")!.textContent,
+        item.findByClass("llm-task-paper-title")!.textContent,
+      ]);
+    assert.deepEqual(rows, [
+      ["1", "Paper 1"],
+      ["2", "Paper 3"],
+    ]);
+  });
+
+  it("lists every section a document cites a paper in", function () {
+    seedScope(3);
+    const harness = track(mount());
+    beginTaskRun(KEY, { runId: "run-a" });
+    applyTaskDocumentCitations(KEY, "run-a", [
+      {
+        citationId: "d1",
+        libraryID: 1,
+        itemKey: "PAPER002",
+        itemId: 2,
+        sectionLabel: "Introduction",
+        sectionLabels: ["Introduction", "Discussion"],
+      },
+    ]);
+    harness.row.dispatchFakeEvent("click");
+    const paper = harness.items()[1];
+    paper.findByClass("llm-task-paper-summary")!.dispatchFakeEvent("click");
+    const details = paper.findByClass("llm-task-paper-details")!;
+    assert.deepEqual(
+      details
+        .findAllByClass("llm-task-paper-citation")
+        .map((link) => link.textContent),
+      ["↳ Introduction", "↳ Discussion"],
+    );
+  });
+
   it("folds papers paper_read found no text for into the count, not the list", function () {
     seedScope(13);
     const harness = track(mount());

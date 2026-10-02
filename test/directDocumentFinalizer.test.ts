@@ -719,6 +719,78 @@ describe("DirectDocumentFinalizer", function () {
       );
     });
 
+    for (const [name, markdown] of [
+      [
+        "a quoted literal in prose",
+        'The authors state "First sentence." [[quote:Q1]] [[cite:C1]]',
+      ],
+      [
+        "a curly-quoted literal in prose",
+        "The authors state “First sentence.” [[quote:Q1]] [[cite:C1]]",
+      ],
+      [
+        "a quoted literal in a blockquote",
+        '> "First sentence." [[quote:Q1]]\n\n[[cite:C1]]',
+      ],
+      [
+        "a literal paragraph followed by its token",
+        "First sentence.\n\n[[quote:Q1]] [[cite:C1]]",
+      ],
+      [
+        "a corner-bracketed literal paragraph with its token",
+        "「First sentence.」 [[quote:Q1]] [[cite:C1]]",
+      ],
+    ] as const) {
+      it(`shows the downgraded wording once for ${name}`, async function () {
+        const result = await downgrade(`downgraded-literal-${name}`, markdown);
+        const visible = result.document.visibleMarkdown;
+        assert.equal(occurrences(visible, "First sentence."), 1, visible);
+        assert.notMatch(visible, /["“”「」]First sentence/);
+        assert.notMatch(visible, /^\s*>/m);
+        // A citation the draft put in its own paragraph stays there.
+        assert.match(visible, /First sentence\.\s*\[/);
+        assert.equal(occurrences(visible, "(Author, 2024)"), 1);
+        assert.deepEqual(clusterIds(result), ["C1"]);
+      });
+    }
+
+    for (const [name, markdown] of [
+      ["corner brackets", "作者指出「[[quote:Q1]]」[[cite:C1]]"],
+      ["white corner brackets", "作者指出『[[quote:Q1]]』[[cite:C1]]"],
+      ["guillemets with spaces", "They note « [[quote:Q1]] » [[cite:C1]]"],
+      ["spaced curly quotes", "They note “ [[quote:Q1]] ” [[cite:C1]]"],
+    ] as const) {
+      it(`removes ${name} around a downgraded quote token`, async function () {
+        const result = await downgrade(`downgraded-marks-${name}`, markdown);
+        const visible = result.document.visibleMarkdown;
+        assert.include(visible, "First sentence.");
+        assert.notMatch(visible, /[「」『』«»“”]/);
+        assert.equal(occurrences(visible, "(Author, 2024)"), 1);
+      });
+    }
+
+    it("keeps prose spacing around a downgraded token with no marks", async function () {
+      const result = await downgrade(
+        "downgraded-plain-spacing",
+        "They note [[quote:Q1]] and “more” here [[cite:C1]].",
+      );
+      assert.include(
+        result.document.visibleMarkdown,
+        "They note First sentence. [",
+      );
+      assert.include(result.document.visibleMarkdown, "and “more” here");
+    });
+
+    it("rejects a downgraded quote token inside an HTML blockquote", async function () {
+      await expectRejected(
+        downgrade(
+          "downgraded-html-blockquote",
+          "<blockquote>[[quote:Q1]]</blockquote> [[cite:C1]]",
+        ),
+        /Quote Q1 could not be verified and sits inside a blockquote/,
+      );
+    });
+
     it("rejects a malformed citation token instead of dropping its clusters", async function () {
       await expectRejected(
         finalizer.finalize({

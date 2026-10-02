@@ -10,13 +10,24 @@ import { getAllOpenReaders } from "../../services/pdf/zoteroReaderTabs";
 import { verifyCompleteQuoteInLivePdf } from "../../services/pdf/readerTextBridge";
 const QUOTE_TOKEN = /\[\[quote:([A-Za-z0-9._:-]+)\]\]/g;
 const CITE_TOKEN = /\[\[cite:([A-Za-z0-9._:-]+)\]\]/g;
+/** Opening and closing quotation marks: straight, curly, CJK corner brackets, guillemets. */
+const OPEN_MARKS = "\"'\u201c\u2018\u300c\u300e\u00ab";
+const CLOSE_MARKS = "\"'\u201d\u2019\u300d\u300f\u00bb";
 /**
- * A quote token with the quotation marks around it (double, single, straight
- * or curly), sentence punctuation inside or outside the closing mark, and the
- * citation tokens the draft placed right after it.
+ * A quote token with the quotation marks around it (a space may separate a
+ * mark from the token), sentence punctuation inside or outside the closing
+ * mark, and the citation tokens the draft placed right after it.
  */
-const DOWNGRADE_TOKEN =
-  /(["'\u201c\u2018]?)\[\[quote:([A-Za-z0-9._:-]+)\]\]([.,;:!?]*)(["'\u201d\u2019]?)([.,;:!?]*)((?:\s*\[\[cite:[A-Za-z0-9._:-]+\]\])*)/g;
+const DOWNGRADE_TOKEN = new RegExp(
+  `(?:([${OPEN_MARKS}])([ \\t\\u00a0]*))?\\[\\[quote:([A-Za-z0-9._:-]+)\\]\\]([.,;:!?]*)(?:([ \\t\\u00a0]*)([${CLOSE_MARKS}]))?([.,;:!?]*)((?:\\s*\\[\\[cite:[A-Za-z0-9._:-]+\\]\\])*)`,
+  "g",
+);
+/** Quotation marks around a literal, removed before it is compared with a quote. */
+const ENCLOSING_MARKS = new RegExp(
+  `^[${OPEN_MARKS}]\\s*([\\s\\S]*?)\\s*[${CLOSE_MARKS}]([.,;:!?]*)$`,
+);
+/** A raw HTML blockquote, which the Markdown blockquote pass does not see. */
+const HTML_BLOCKQUOTE = /<blockquote\b[^>]*>([\s\S]*?)<\/blockquote\s*>/gi;
 /** A line that opens a blockquote, possibly inside a list item. */
 const BLOCKQUOTE_LINE = /^[ \t]*(?:(?:[-*+]|\d+[.)])[ \t]+)*>/;
 /** Anything shaped like a quote token, to catch ones the strict form misses. */
@@ -262,6 +273,13 @@ export async function resolveVerifiedQuotes(params: {
     const result = changed
       ? tokens.map((token) => token.raw).join("")
       : markdown;
+    // Raw HTML is not a Markdown blockquote, so it cannot be unquoted.
+    for (const html of result.matchAll(HTML_BLOCKQUOTE)) {
+      for (const match of html[1].matchAll(QUOTE_TOKEN)) {
+        if (downgradedById.has(match[1]))
+          throw notQuotation(match[1], "inside a blockquote");
+      }
+    }
     // Shapes the block pass cannot reach, such as a blockquote in a list.
     for (const line of result.split(/\r?\n/)) {
       if (!BLOCKQUOTE_LINE.test(line)) continue;
@@ -277,15 +295,30 @@ export async function resolveVerifiedQuotes(params: {
       DOWNGRADE_TOKEN,
       (
         match: string,
-        open: string,
+        open: string | undefined,
+        openSpace: string | undefined,
         quoteId: string,
         innerPunctuation: string,
-        close: string,
+        closeSpace: string | undefined,
+        close: string | undefined,
         outerPunctuation: string,
         followingCites: string,
       ) => {
         const quote = downgradedById.get(quoteId);
         if (!quote) return match;
+        // A lone mark a space away belongs to the surrounding prose.
+        let prefix = "";
+        let suffix = "";
+        if (open && !close && openSpace) {
+          prefix = `${open}${openSpace}`;
+          open = "";
+        }
+        if (close && !open && closeSpace) {
+          suffix = `${closeSpace}${close}${outerPunctuation}${followingCites}`;
+          close = "";
+          outerPunctuation = "";
+          followingCites = "";
+        }
         // Enclosing marks are removed; a lone mark means the quotation's
         // extent is unclear, so the draft has to say what it meant.
         if (Boolean(open) !== Boolean(close))
@@ -299,9 +332,28 @@ export async function resolveVerifiedQuotes(params: {
           },
         );
         const citation = citedHere ? "" : ` [[cite:${citationFor(quote)}]]`;
-        return `${quote.text}${citation}${followingCites}${innerPunctuation}${outerPunctuation}`;
+        return `${prefix}${quote.text}${citation}${followingCites}${innerPunctuation}${outerPunctuation}${suffix}`;
       },
     );
+  // A draft can quote the wording in its prose and then attach the quote
+  // token. A downgraded token becomes that wording, so the quoted copy
+  // before it goes, or the reader sees it twice.
+  const dropQuotedCopies = (markdown: string) => {
+    let output = "";
+    let last = 0;
+    for (const match of markdown.matchAll(QUOTE_TOKEN)) {
+      const quote = downgradedById.get(match[1]);
+      const head = markdown.slice(last, match.index);
+      last = match.index! + match[0].length;
+      const copy = quote ? quotedCopyBefore(output + head, quote.text) : null;
+      if (!copy) {
+        output += head + match[0];
+        continue;
+      }
+      output = `${copy.before}${match[0]}${copy.punctuation}`;
+    }
+    return output + markdown.slice(last);
+  };
   const quotesById = new Map(
     verifiedQuotes.map((quote) => [quote.quoteId, quote]),
   );
@@ -310,10 +362,10 @@ export async function resolveVerifiedQuotes(params: {
   // copies become independently certified display blocks.
   const blocks = new Marked().lexer(params.markdown);
   let reboundManualQuote = false;
-  const normalizeLiteral = (text: string) => text.replace(/\s+/g, " ").trim();
   for (let index = 0; index < blocks.length; index += 1) {
     const block = blocks[index];
-    if (block.type !== "blockquote") continue;
+    // A literal paragraph is the same copy as a literal blockquote.
+    if (block.type !== "blockquote" && block.type !== "paragraph") continue;
     const inlineAnchor = block.text.match(
       /\s*\[\[quote:([A-Za-z0-9._:-]+)\]\](?:\s*(\[\[cite:[A-Za-z0-9._:-]+\]\]))?(?:\s*\([^()\n]*\b\d{4}[a-z]?\))?\s*$/,
     );
@@ -335,8 +387,7 @@ export async function resolveVerifiedQuotes(params: {
     const literal = inlineAnchor
       ? block.text.slice(0, inlineAnchor.index)
       : block.text;
-    if (!quote || normalizeLiteral(literal) !== normalizeLiteral(quote.text))
-      continue;
+    if (!quote || !sameWording(literal, quote.text)) continue;
     // A downgraded quote replaces the literal block with its cited prose, so
     // the unverified wording is neither a blockquote nor shown twice.
     block.raw = downgradedById.has(quote.quoteId)
@@ -351,9 +402,11 @@ export async function resolveVerifiedQuotes(params: {
   }
   return {
     markdown: downgradeTokens(
-      reboundManualQuote
-        ? blocks.map((block) => block.raw).join("")
-        : params.markdown,
+      dropQuotedCopies(
+        reboundManualQuote
+          ? blocks.map((block) => block.raw).join("")
+          : params.markdown,
+      ),
     ).replace(QUOTE_TOKEN, (_token, quoteId: string) =>
       quotesById
         .get(quoteId)!
@@ -365,4 +418,52 @@ export async function resolveVerifiedQuotes(params: {
     addedCitations,
     repairs,
   };
+}
+
+const normalizeLiteral = (text: string) => text.replace(/\s+/g, " ").trim();
+const TRAILING_PUNCTUATION = /[.,;:!?]+$/;
+
+/**
+ * Whether a draft's literal is the quote's wording, once quotation marks
+ * around it are removed. Sentence punctuation may sit inside or outside the
+ * closing mark.
+ */
+function sameWording(literal: string, quoteText: string): boolean {
+  const wording = normalizeLiteral(quoteText);
+  const plain = normalizeLiteral(literal);
+  if (plain === wording) return true;
+  const enclosed = ENCLOSING_MARKS.exec(plain);
+  if (!enclosed) return false;
+  const inner = normalizeLiteral(enclosed[1]);
+  return inner === wording || `${inner}${enclosed[2]}` === wording;
+}
+
+/**
+ * The quoted copy of `quoteText` that `text` ends with, if any: the text
+ * before its opening mark, and the punctuation after its closing mark that
+ * the quote's own wording does not already end with.
+ */
+function quotedCopyBefore(
+  text: string,
+  quoteText: string,
+): { before: string; punctuation: string } | null {
+  const wording = normalizeLiteral(quoteText);
+  if (!wording) return null;
+  const trimmed = text.replace(/[ \t]+$/, "");
+  const punctuation = /[.,;:!?]*$/.exec(trimmed)![0];
+  const closed = trimmed.slice(0, trimmed.length - punctuation.length);
+  if (!closed || !CLOSE_MARKS.includes(closed[closed.length - 1])) return null;
+  const inside = closed.slice(0, -1);
+  // The copy holds the wording, so its opening mark is at most this far back.
+  const earliest = Math.max(0, inside.length - quoteText.length * 2 - 8);
+  for (let start = inside.length - 1; start >= earliest; start -= 1) {
+    if (!OPEN_MARKS.includes(inside[start])) continue;
+    const copy = normalizeLiteral(inside.slice(start + 1));
+    if (copy !== wording && `${copy}${punctuation}` !== wording) continue;
+    return {
+      before: inside.slice(0, start),
+      punctuation: TRAILING_PUNCTUATION.test(wording) ? "" : punctuation,
+    };
+  }
+  return null;
 }

@@ -440,11 +440,14 @@ export function formatTaskPaperPassageLabel(
   return label;
 }
 
-/** A snippet as prose: no chunk markers, no Markdown heading marks, no TeX, one line. */
+/**
+ * A snippet as prose: no chunk markers, no Markdown heading marks (also one a
+ * collapsed snippet carries mid-line), no TeX, one line.
+ */
 export function cleanTaskPaperSnippet(snippet: string): string {
   return snippet
     .replace(/\[chunk \d+[^\]]*\]\s*/g, "")
-    .replace(/(^|\n)\s*#{1,6}\s+/g, "$1")
+    .replace(/(^|\s)#{1,6}[ \t]+/g, "$1")
     .replace(/\$\$[\s\S]*?\$\$|\$[^$\n]*\$/g, " ")
     .replace(/\s+/g, " ")
     .trim();
@@ -544,9 +547,12 @@ export function formatTaskPaperTail(row: TaskProgressPaperRow): string {
   }
   const citations = turns.flatMap((entry) => entry.citations);
   // The digest's summary is the host's words, not a passage of the paper.
-  const passages = reads.filter(
-    (read) => read.snippet && read.granularity !== "digest",
-  ).length;
+  // The same passage read again (another question, a retry) counts once.
+  const passages = new Set(
+    reads
+      .filter((read) => read.snippet && read.granularity !== "digest")
+      .map((read) => read.snippet),
+  ).size;
   const passageCount = () =>
     passages === 1
       ? t("1 passage")
@@ -600,13 +606,20 @@ export function isMetadataOnlyRow(
   );
 }
 
-/** The rows the drawer lists: every row but the metadata-only ones. */
+/**
+ * The rows the drawer lists: every row but the metadata-only ones, numbered
+ * in the order they list.
+ */
 export function listedTaskProgressPaperRows(
   record: TaskProgressRecord | null,
   rows: TaskProgressPaperRow[] = buildTaskProgressPaperRows(record),
 ): TaskProgressPaperRow[] {
   const turn = summaryTurn(record);
-  return rows.filter((row) => !isMetadataOnlyRow(row, turn));
+  return rows
+    .filter((row) => !isMetadataOnlyRow(row, turn))
+    .map((row, index) =>
+      row.index === index + 1 ? row : { ...row, index: index + 1 },
+    );
 }
 
 const STATE_LABELS: Record<TaskPaperState, string> = {
@@ -1528,9 +1541,14 @@ export function mountTaskProgressView(params: {
       }
       for (const citation of turnRecord.citations) {
         if (citation.source === "document") {
-          const section = (citation.sectionLabel || "").trim();
-          if (!documentSections.includes(section))
-            documentSections.push(section);
+          const sections = citation.sectionLabels?.length
+            ? citation.sectionLabels
+            : [citation.sectionLabel || ""];
+          for (const label of sections) {
+            const section = label.trim();
+            if (!documentSections.includes(section))
+              documentSections.push(section);
+          }
           continue;
         }
         citations.push({

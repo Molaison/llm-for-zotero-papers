@@ -357,6 +357,87 @@ describe("taskPaperLedger", function () {
       assert.equal(firstBodyParagraph(""), "");
     });
 
+    const GRID_TEXT =
+      "[chunk 0]\n# Grid cells and spatial memory\n\nJane Doe1, John Smith2\n\n1 Department of Neuroscience, University of Example\n\n## Abstract\n\nGrid cells in the entorhinal cortex provide a metric for space. Here we show that human participants rely on grid-like codes during navigation in virtual reality across many sessions.";
+    const GRID_ABSTRACT =
+      "Grid cells in the entorhinal cortex provide a metric for space. Here we show that human participants rely on grid-like codes during navigation in virtual reality across many sessions.";
+
+    it("takes every whole-text read's snippet from the first body paragraph", function () {
+      const sampled = derive(
+        "paper_read",
+        { mode: "overview" },
+        {
+          mode: "overview",
+          results: [
+            {
+              backend: "mineru",
+              text: GRID_TEXT,
+              coverage: "capacity_sampled",
+              paperContext: { itemId: 10, contextItemId: 20, title: "Grid" },
+            },
+          ],
+        },
+      );
+      assert.equal(readsFor(sampled, "1:10")[0].granularity, "passage");
+      assert.equal(readsFor(sampled, "1:10")[0].snippet, GRID_ABSTRACT);
+      const attachment = derive(
+        "read_attachment",
+        { target: { itemId: 10 } },
+        { itemId: 10, title: "Grid", textContent: GRID_TEXT },
+      );
+      assert.equal(readsFor(attachment, "1:10")[0].snippet, GRID_ABSTRACT);
+      const attachmentRows = derive(
+        "read_attachment",
+        {},
+        { results: [{ itemId: 10, title: "Grid", content: GRID_TEXT }] },
+      );
+      assert.equal(readsFor(attachmentRows, "1:10")[0].snippet, GRID_ABSTRACT);
+      const library = derive(
+        "library_read",
+        {},
+        { results: [{ itemId: 10, title: "Grid", content: GRID_TEXT }] },
+      );
+      assert.equal(readsFor(library, "1:10")[0].snippet, GRID_ABSTRACT);
+    });
+
+    it("takes a Chinese abstract with a few Latin words and numbers over the title", function () {
+      const abstract =
+        "摘要：本研究使用 fMRI 和 EEG 技术记录了 32 名受试者在空间导航任务中的海马体活动，并利用深度学习模型解码其位置信息。结果表明模型解码准确率显著高于基线。";
+      assert.equal(
+        firstBodyParagraph(
+          `[chunk 0]\n# 基于深度学习的海马体神经元活动解码研究\n\n张三¹, 李四², 王五¹\n\n1. 北京大学生命科学学院，北京 100871；2. 中国科学院神经科学研究所，上海 200031\n\n${abstract}\n\n关键词：海马体；深度学习`,
+        ),
+        abstract,
+      );
+    });
+
+    it("skips an author list or an affiliation that ends with a period", function () {
+      assert.equal(
+        firstBodyParagraph(
+          "# Title of the paper on something\n\nJ. Doe, A. Smith, B. Jones, C. Wang, D. Lee, E. Kim, F. Park, G. Chen.\n\nAbstract. We studied how grid cells keep their phase over many days.",
+        ),
+        "Abstract. We studied how grid cells keep their phase over many days.",
+      );
+      assert.equal(
+        firstBodyParagraph(
+          "# Title of the paper on something\n\nJ. Doe, A. Smith and B. Jones.\n\nWe report that grid cells keep their phase across many days of recording in freely moving rats.",
+        ),
+        "We report that grid cells keep their phase across many days of recording in freely moving rats.",
+      );
+      assert.equal(
+        firstBodyParagraph(
+          "# Title\n\nJane Doe and John Smith\n\nDepartment of Psychology, Stanford University, Stanford, CA 94305, USA.\n\nWe report that the hippocampus encodes time in a population code across many days of recording.",
+        ),
+        "We report that the hippocampus encodes time in a population code across many days of recording.",
+      );
+      assert.equal(
+        firstBodyParagraph(
+          "# Title\n\nJane Doe and John Smith\n\nCorrespondence should be sent to the first author at jane@example.org.\n\nWe report that the hippocampus encodes time in a population code across many days of recording.",
+        ),
+        "We report that the hippocampus encodes time in a population code across many days of recording.",
+      );
+    });
+
     it("maps paper_read targeted passages to sections, passages and pages", function () {
       const paperContext = { itemId: 10, contextItemId: 20, title: "A" };
       const delta = derive(

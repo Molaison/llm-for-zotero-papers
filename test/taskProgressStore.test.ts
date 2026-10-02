@@ -27,6 +27,7 @@ import {
   setTaskOutcomes,
 } from "../src/modules/contextPanel/taskProgress/store";
 import {
+  digestLedgerDelta,
   ledgerDelta,
   outcomeCheckpoint,
   outcomeTask,
@@ -256,6 +257,86 @@ describe("task progress store", function () {
     assert.equal(
       JSON.stringify(replayed.ledger.papers["1:2"].turns[1].citations),
       JSON.stringify(JSON.parse(papers)["1:2"].turns[1].citations),
+    );
+  });
+
+  it("replaces a paper's reads for a question when the question re-runs under a new run", function () {
+    const evidence = (run: string) =>
+      Array.from({ length: 6 }, (_, index) => ({
+        section: "Results",
+        quote: `Quote ${index} from ${run} that is long enough.`,
+      }));
+    const digest = (run: string) =>
+      digestLedgerDelta("tu", 10, {
+        runId: run,
+        summary: `Summary from ${run}.`,
+        evidence: evidence(run),
+      });
+    beginTaskRun(7, { runId: "run-a", turnIndex: 1 });
+    applyTaskPaperUpdate(7, digest("run-a"), "run-a");
+    completeTaskRun(7, { runId: "run-a" });
+    beginTaskRun(7, { runId: "run-b", turnIndex: 1 });
+    applyTaskPaperUpdate(7, digest("run-b"), "run-b");
+    const turn = getTaskProgress(7)!.ledger.papers["1:10"].turns[1];
+    const snippets = turn.reads.map((read) => read.snippet || "");
+    assert.include(snippets, "Summary from run-b.");
+    assert.notInclude(snippets, "Summary from run-a.");
+    assert.isFalse(
+      snippets.some((snippet) => snippet.includes("run-a")),
+      "the earlier run's reads are gone",
+    );
+    assert.equal(turn.reads.length, 7);
+    assert.equal(turn.droppedReads, 0);
+    // A late delta of the earlier run does not take the question back.
+    applyTaskPaperUpdate(
+      7,
+      digestLedgerDelta("late", 10, {
+        runId: "run-a",
+        summary: "Late from run-a.",
+      }),
+      "run-a",
+    );
+    assert.notInclude(
+      getTaskProgress(7)!.ledger.papers["1:10"].turns[1].reads.map(
+        (read) => read.snippet,
+      ),
+      "Late from run-a.",
+    );
+    const live = JSON.stringify(
+      getTaskProgress(7)!.ledger.papers["1:10"].turns[1].reads,
+    );
+    // Replaying both runs of the question from history keeps the later one.
+    clearTaskProgress(7);
+    hydrateTaskProgress(7, {
+      runs: [
+        { runId: "run-a", turn: 1, deltas: [digest("run-a")] },
+        { runId: "run-b", turn: 1, deltas: [digest("run-b")] },
+      ],
+      latestTurn: 1,
+      settled: "completed",
+      planSeen: false,
+      checklist: null,
+      libraryID: 1,
+    });
+    assert.equal(
+      JSON.stringify(getTaskProgress(7)!.ledger.papers["1:10"].turns[1].reads),
+      live,
+    );
+    // History that arrives after the session already ran the retry keeps it.
+    clearTaskProgress(7);
+    beginTaskRun(7, { runId: "run-b", turnIndex: 1 });
+    applyTaskPaperUpdate(7, digest("run-b"), "run-b");
+    hydrateTaskProgress(7, {
+      runs: [{ runId: "run-a", turn: 1, deltas: [digest("run-a")] }],
+      latestTurn: 1,
+      settled: null,
+      planSeen: false,
+      checklist: null,
+      libraryID: 1,
+    });
+    assert.equal(
+      JSON.stringify(getTaskProgress(7)!.ledger.papers["1:10"].turns[1].reads),
+      live,
     );
   });
 

@@ -98,6 +98,8 @@ export type TaskPaperCitation = {
   quote?: string;
   label?: string;
   sectionLabel?: string;
+  /** Every document section the citation is used in, when more than one. */
+  sectionLabels?: string[];
   pageLabel?: string;
   /**
    * "document" for a source a `submit_document` call cited; absent (or
@@ -114,6 +116,8 @@ export type TaskPaperDocumentCitation = {
   itemId?: number;
   /** The document heading the citation first appears under. */
   sectionLabel?: string;
+  /** Every heading it appears under, in order, when more than one. */
+  sectionLabels?: string[];
   /** The paper's record, for a paper no read recorded. */
   title?: string;
   firstCreator?: string;
@@ -162,6 +166,14 @@ export type TaskPaperTurnRecord = {
   droppedCitations: number;
   /** Document citations beyond the per-turn cap. */
   droppedDocumentCitations?: number;
+  /**
+   * The run whose reads `reads` holds. A re-run of the question (another
+   * run id) replaces them, as its document's sources replace the earlier
+   * run's.
+   */
+  readsRunId?: string;
+  /** Runs whose reads a later run of the question replaced. */
+  supersededRunIds?: string[];
 };
 
 export type TaskPaperLedgerEntry = {
@@ -196,6 +208,8 @@ export type TaskPaperLedger = {
 
 export const TASK_PAPER_MAX_READS_PER_TURN = 12;
 export const TASK_PAPER_MAX_CITATIONS_PER_TURN = 8;
+/** Document sections one document citation lists. */
+export const TASK_PAPER_MAX_DOCUMENT_SECTIONS = 8;
 export const TASK_PAPER_MAX_PAPERS = 5000;
 export const TASK_PAPER_SNIPPET_MAX_CHARS = 280;
 /**
@@ -375,13 +389,56 @@ const CHUNK_MARKER_LINE = /^\s*\[chunk \d+[^\]]*\]\s*$/i;
 const PASSAGE_MARKER_LINE = /^\s*\[passage [^\]]+\]\s*$/i;
 const HEADING_LINE = /^\s*#{1,6}\s+/;
 const FRONT_MATTER =
-  /\b(University|Institute|Department|Laboratory|Hospital|Correspondence|e-?mail)\b|@/i;
+  /\b(University|Institute|Department|Laboratory|Hospital|Correspondence|e-?mail)\b|@|大学|学院|研究所|研究院|研究中心|医院|实验室|通讯作者|通信作者|电子邮件|邮箱/i;
+/** Contact lines (a lead label or an e-mail address) are front matter however they end. */
+const CONTACT =
+  /^\W*(Correspondence|Corresponding author|E-?mail)\b|[\w.+-]+@[\w-]+\.[\w.-]+|通讯作者|通信作者|电子邮件|邮箱/i;
+/** "J. Doe", "A.-B. Smith", "J. R. R. Tolkien": an initials-and-surname name. */
+const INITIALS_NAME = /(?:^|[\s,;])(?:[A-Z]\.[\s-]?){1,3}[A-Z][\p{L}'-]+/gu;
+/** Han, Hiragana and Katakana characters: one word each, unspaced. */
+const UNSPACED_CHAR =
+  /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/gu;
 const BODY_PARAGRAPH_MIN_WORDS = 25;
 const SENTENCE_PARAGRAPH_MIN_WORDS = 8;
 /** Prose without spaces between words (Chinese, Japanese) is long by length. */
 const UNSPACED_PROSE_MIN_CHARS = 60;
 const SENTENCE_END = /[.!?。！？]["'')\]」』）]?$/u;
 const FRONT_MATTER_PARAGRAPHS = 5;
+
+/**
+ * A paragraph's length in words. Unspaced characters count by length:
+ * `UNSPACED_PROSE_MIN_CHARS` of them weigh as much as
+ * `BODY_PARAGRAPH_MIN_WORDS` spaced words, so mixed text adds up.
+ */
+function proseWords(prose: string): number {
+  const unspaced = (prose.match(UNSPACED_CHAR) || []).length;
+  const spaced = prose
+    .replace(UNSPACED_CHAR, " ")
+    .split(/\s+/)
+    .filter((word) => /[\p{L}\p{N}]/u.test(word)).length;
+  return (
+    spaced + (unspaced * BODY_PARAGRAPH_MIN_WORDS) / UNSPACED_PROSE_MIN_CHARS
+  );
+}
+
+/**
+ * An author list, an affiliation or a contact line. These open a paper and
+ * often end with a period; an abstract that names a university does not read
+ * as a comma-separated list.
+ */
+function isFrontMatter(prose: string, words: number, endsSentence: boolean) {
+  if (CONTACT.test(prose)) return true;
+  const commas = (prose.match(/[,，、;；]/g) || []).length;
+  if (!endsSentence) return FRONT_MATTER.test(prose) || commas > 6;
+  // A list: a comma for every few words.
+  const listLike = commas >= 2 && words <= 4 * (commas + 1);
+  if (!listLike) return false;
+  return (
+    FRONT_MATTER.test(prose) ||
+    commas > 6 ||
+    (prose.match(INITIALS_NAME) || []).length >= 2
+  );
+}
 
 /**
  * First prose paragraph after the title block: no chunk markers, no heading
@@ -418,12 +475,7 @@ export function firstBodyParagraph(text: string): string {
       paragraph.filter((line) => !HEADING_LINE.test(line)).join(" "),
     );
     if (!prose) continue;
-    const spaced = prose.split(" ").length;
-    // Unspaced scripts read as one "word" per run: count them by length.
-    const words =
-      spaced < 3 && prose.length >= UNSPACED_PROSE_MIN_CHARS
-        ? BODY_PARAGRAPH_MIN_WORDS
-        : spaced;
+    const words = proseWords(prose);
     const endsSentence = SENTENCE_END.test(prose);
     // Prose: a long paragraph, or a shorter one that ends a sentence (a
     // title, an author list or a running head ends in neither).
@@ -432,13 +484,13 @@ export function firstBodyParagraph(text: string): string {
       !(endsSentence && words >= SENTENCE_PARAGRAPH_MIN_WORDS)
     )
       continue;
-    // Affiliations and author lists do not end a sentence; an abstract that
-    // names a university does.
-    if (index < FRONT_MATTER_PARAGRAPHS && !endsSentence) {
-      if (FRONT_MATTER.test(prose)) continue;
-      const commas = (prose.match(/,/g) || []).length;
-      if (commas > 6) continue;
-    }
+    // Affiliations and author lists open the paper, with or without a
+    // closing period.
+    if (
+      index < FRONT_MATTER_PARAGRAPHS &&
+      isFrontMatter(prose, words, endsSentence)
+    )
+      continue;
     return prose;
   }
   return fallback;
@@ -716,7 +768,9 @@ function libraryReadSeeds(result: unknown): Seed[] {
               ? "passage"
               : "full",
             method: "library_read",
-            snippet: firstText(value, ["content", "text", "body", "fullText"]),
+            snippet: firstBodyParagraph(
+              firstText(value, ["content", "text", "body", "fullText"]),
+            ),
           }),
         },
       ];
@@ -789,9 +843,8 @@ function paperReadOverviewSeed(row: Row, ref: PaperRef): Seed | null {
     read: readSeed({
       granularity: complete ? "full" : "passage",
       method: "overview",
-      snippet: complete
-        ? firstBodyParagraph(firstText(row, ["text", "content", "body"]))
-        : firstText(row, ["text", "content", "body"]),
+      // An overview starts at the paper's front, sampled or not.
+      snippet: firstBodyParagraph(firstText(row, ["text", "content", "body"])),
     }),
   };
 }
@@ -1025,7 +1078,7 @@ function readAttachmentSeeds(input: unknown, result: unknown): Seed[] {
               read: readSeed({
                 granularity: "full",
                 method: "attachment",
-                snippet: body,
+                snippet: firstBodyParagraph(body),
               }),
             },
           ]
@@ -1044,7 +1097,7 @@ function readAttachmentSeeds(input: unknown, result: unknown): Seed[] {
         granularity: "full",
         method: "attachment",
         label: text(output.attachmentTitle) || text(output.title),
-        snippet: body,
+        snippet: firstBodyParagraph(body),
       }),
     },
   ];
@@ -1468,16 +1521,24 @@ function appliedCallKey(delta: TaskPaperLedgerDelta): string {
  * Idempotent by `runId:callId`: a replayed delta changes nothing. States
  * only ever rise. `turnIndex` overrides the delta's own turn, for a store
  * that numbers turns from the conversation rather than from the event.
+ *
+ * A paper's reads for a question belong to one run: reads from another run
+ * of the same question replace them, unless that run is one `options.newerRunIds`
+ * names as later (history replayed after the session ran the retry) or one
+ * already replaced. `options.runId`, when given, names the run over the
+ * delta's own.
  */
 export function applyTaskPaperLedgerDelta(
   ledger: TaskPaperLedger,
   delta: TaskPaperLedgerDelta,
   turnIndex?: number,
+  options: { runId?: string; newerRunIds?: readonly string[] } = {},
 ): TaskPaperLedger {
   const callKey = appliedCallKey(delta);
   if (ledger.appliedCalls[callKey]) return ledger;
   ledger.appliedCalls[callKey] = true;
   const turn = turnIndex ?? delta.turnIndex ?? 0;
+  const runId = options.runId || delta.runId || undefined;
   for (const paper of delta.papers) {
     const entry = ensureEntry(ledger, paper);
     if (!entry) continue;
@@ -1502,6 +1563,7 @@ export function applyTaskPaperLedgerDelta(
     const entry = ledger.papers[read.key];
     if (!entry) continue;
     const record = turnOf(entry, turn);
+    if (runId && !takesReadsFrom(record, runId, options.newerRunIds)) continue;
     if (record.reads.length >= TASK_PAPER_MAX_READS_PER_TURN) {
       record.droppedReads += 1;
       continue;
@@ -1509,6 +1571,31 @@ export function applyTaskPaperLedgerDelta(
     record.reads.push({ ...read, turnIndex: turn });
   }
   return ledger;
+}
+
+/**
+ * Whether `record` takes a read from run `runId`: its own run's, or a newer
+ * run's, which first clears the earlier run's reads.
+ */
+function takesReadsFrom(
+  record: TaskPaperTurnRecord,
+  runId: string,
+  newerRunIds: readonly string[] = [],
+): boolean {
+  if (record.supersededRunIds?.includes(runId)) return false;
+  const held = record.readsRunId;
+  if (held === runId) return true;
+  if (held && newerRunIds.includes(held)) {
+    (record.supersededRunIds ||= []).push(runId);
+    return false;
+  }
+  if (held) {
+    (record.supersededRunIds ||= []).push(held);
+    record.reads = [];
+    record.droppedReads = 0;
+  }
+  record.readsRunId = runId;
+  return true;
 }
 
 function isDocumentCitation(citation: TaskPaperCitation): boolean {
@@ -1654,6 +1741,14 @@ export function applyDocumentCitations(
     };
     const sectionLabel = clipTaskPaperText(citation.sectionLabel, 120);
     if (sectionLabel) cited.sectionLabel = sectionLabel;
+    const sectionLabels = [
+      ...new Set(
+        (Array.isArray(citation.sectionLabels) ? citation.sectionLabels : [])
+          .map((label) => clipTaskPaperText(label, 120))
+          .filter((label): label is string => Boolean(label)),
+      ),
+    ].slice(0, TASK_PAPER_MAX_DOCUMENT_SECTIONS);
+    if (sectionLabels.length > 1) cited.sectionLabels = sectionLabels;
     turn.citations.push(cited);
   }
   settleEntryStates(touched);

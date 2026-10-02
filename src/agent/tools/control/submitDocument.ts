@@ -19,42 +19,105 @@ import type { TaskPaperDocumentCitation } from "../../context/taskPaperLedger";
 import { neverSelected } from "../guidance";
 import { fail, ok, validateObject } from "../shared";
 
-const CITE_TOKEN = /\[\[cite:([A-Za-z0-9._:-]+)\]\]/g;
+/** A citation or quote token. */
+const TOKEN = /\[\[(cite|quote):([^\]]+)\]\]/g;
 const HEADING = /^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$/;
+const FENCE = /^\s{0,3}(`{3,}|~{3,})/;
+/** The underline of a setext heading: `=` for H1, `-` for H2. */
+const SETEXT_UNDERLINE = /^\s{0,3}(=+|-+)\s*$/;
+
+type TokenUse = { kind: "cite" | "quote"; id: string; section: string };
 
 /**
- * The heading each citation first appears under, by citation id. A heading
- * that only repeats the document's title names no section; a citation before
- * any other heading has none.
+ * Every citation and quote token outside code fences, in order, with the
+ * heading it sits under. A heading that only repeats the document's title
+ * names no section; a token before any other heading has none.
+ */
+function tokenUses(markdown: string, title = ""): TokenUse[] {
+  const uses: TokenUse[] = [];
+  const ownTitle = title.trim().toLowerCase();
+  let section = "";
+  let fence = "";
+  let titled = false;
+  const lines = String(markdown || "").split(/\r?\n/);
+  const enterHeading = (text: string, level1: boolean) => {
+    // The document's first H1 is its title, as is any heading repeating it.
+    const firstH1 = !titled && level1;
+    if (firstH1) titled = true;
+    section = firstH1 || text.toLowerCase() === ownTitle ? "" : text;
+  };
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const marker = FENCE.exec(line)?.[1];
+    if (fence) {
+      // Only a fence of the opening kind, at least as long, closes it.
+      if (
+        marker &&
+        marker[0] === fence[0] &&
+        marker.length >= fence.length &&
+        !line.trim().slice(marker.length).trim()
+      )
+        fence = "";
+      continue;
+    }
+    if (marker) {
+      fence = marker;
+      continue;
+    }
+    const heading = HEADING.exec(line);
+    if (heading) {
+      enterHeading(heading[1].trim(), /^\s{0,3}#\s/.test(line));
+      continue;
+    }
+    // A setext heading: one line of text, then its underline.
+    const underline = SETEXT_UNDERLINE.exec(lines[index + 1] || "");
+    if (
+      underline &&
+      line.trim() &&
+      !/^\s{0,3}(>|[-*+]\s|\d+[.)]\s)/.test(line) &&
+      !SETEXT_UNDERLINE.test(line) &&
+      !(index > 0 && lines[index - 1].trim())
+    ) {
+      enterHeading(line.trim(), underline[1][0] === "=");
+      index += 1;
+      continue;
+    }
+    // Comma-joined citation ids count each; the host splits those tokens.
+    for (const match of line.matchAll(TOKEN)) {
+      if (match[1] === "quote") {
+        uses.push({ kind: "quote", id: match[2], section });
+        continue;
+      }
+      for (const id of match[2].split(",")) {
+        if (id.trim()) uses.push({ kind: "cite", id: id.trim(), section });
+      }
+    }
+  }
+  return uses;
+}
+
+function addSection(
+  labels: Map<string, string[]>,
+  id: string,
+  section: string,
+): void {
+  const held = labels.get(id) || [];
+  if (section && !held.includes(section)) held.push(section);
+  if (held.length) labels.set(id, held);
+}
+
+/**
+ * Every heading each citation appears under, in order, by citation id.
+ * A heading that only repeats the document's title names no section; a
+ * citation used only before any other heading has none.
  */
 export function citationSectionLabels(
   markdown: string,
   title = "",
-): Map<string, string> {
-  const labels = new Map<string, string>();
-  const seen = new Set<string>();
-  const ownTitle = title.trim().toLowerCase();
-  let section = "";
-  let fenced = false;
-  let titled = false;
-  for (const line of String(markdown || "").split(/\r?\n/)) {
-    if (/^\s{0,3}(```|~~~)/.test(line)) fenced = !fenced;
-    if (fenced) continue;
-    const heading = HEADING.exec(line);
-    if (heading) {
-      const text = heading[1].trim();
-      // The document's first H1 is its title, as is any heading repeating it.
-      const firstH1 = !titled && /^\s{0,3}#\s/.test(line);
-      if (firstH1) titled = true;
-      section = firstH1 || text.toLowerCase() === ownTitle ? "" : text;
-      continue;
-    }
-    for (const match of line.matchAll(CITE_TOKEN)) {
-      const id = match[1];
-      if (seen.has(id)) continue;
-      seen.add(id);
-      if (section) labels.set(id, section);
-    }
+): Map<string, string[]> {
+  const labels = new Map<string, string[]>();
+  for (const use of tokenUses(markdown, title)) {
+    if (use.kind === "cite") addSection(labels, use.id, use.section);
   }
   return labels;
 }
@@ -68,40 +131,110 @@ export type CitedSourceItem = {
   year?: string;
 };
 
+type QuoteSource = Pick<
+  SubmitPlanDocumentInput["quotes"][number],
+  "quoteId" | "libraryID" | "itemKey"
+>;
+
 /**
- * The sources a submitted document cites, one entry per source of every
- * cluster its Markdown uses, for the Task progress rows.
+ * The sources a finalized document cites, one entry per source of every
+ * cluster it uses, for the Task progress rows.
+ *
+ * `clusters` are the finalized document's: the ones its tokens use after the
+ * host's repairs, including a citation a downgraded quote added or reused.
+ * `markdown` is the submitted draft, which places each token: a downgraded
+ * quote counts where its token sat, under the cluster that now cites it. A
+ * paper only a verified quote cites counts too, under the quote's id.
  */
 export function documentCitedSources(params: {
   markdown: string;
   title?: string;
   clusters: readonly PlanCitationCluster[];
+  quotes?: readonly QuoteSource[];
+  verifiedQuotes?: readonly QuoteSource[];
   itemOf?: (libraryID: number, itemKey: string) => CitedSourceItem | undefined;
 }): TaskPaperDocumentCitation[] {
-  const used = new Set(
-    [...String(params.markdown || "").matchAll(CITE_TOKEN)].map(
-      (match) => match[1],
-    ),
+  const uses = tokenUses(params.markdown, params.title);
+  const labels = new Map<string, string[]>();
+  const used = new Set<string>();
+  const cites = (cluster: PlanCitationCluster, quote: QuoteSource) =>
+    cluster.sources.some(
+      (source) =>
+        source.libraryID === quote.libraryID &&
+        source.itemKey === quote.itemKey,
+    );
+  const quotesById = new Map(
+    (params.quotes || []).map((quote) => [quote.quoteId, quote]),
   );
-  const labels = citationSectionLabels(params.markdown, params.title);
+  const verified = new Map(
+    (params.verifiedQuotes || []).map((quote) => [quote.quoteId, quote]),
+  );
+  const verifiedUses: TokenUse[] = [];
+  for (const use of uses) {
+    if (use.kind === "cite") {
+      used.add(use.id);
+      addSection(labels, use.id, use.section);
+      continue;
+    }
+    if (verified.has(use.id)) {
+      verifiedUses.push(use);
+      continue;
+    }
+    // A downgraded quote is cited by the citation the host added for it,
+    // else the one it reused: the paper's own, single-source first.
+    const quote = quotesById.get(use.id);
+    if (!quote) continue;
+    const cluster =
+      params.clusters.find(
+        (candidate) => candidate.citationId === `cite-${use.id}`,
+      ) ||
+      params.clusters.find(
+        (candidate) =>
+          candidate.sources.length === 1 && cites(candidate, quote),
+      ) ||
+      params.clusters.find((candidate) => cites(candidate, quote));
+    if (!cluster) continue;
+    used.add(cluster.citationId);
+    addSection(labels, cluster.citationId, use.section);
+  }
   const out: TaskPaperDocumentCitation[] = [];
+  const entryFor = (
+    citationId: string,
+    source: { libraryID: number; itemKey: string },
+    sections: readonly string[],
+  ) => {
+    const entry: TaskPaperDocumentCitation = {
+      citationId,
+      libraryID: source.libraryID,
+      itemKey: source.itemKey,
+    };
+    const item = params.itemOf?.(source.libraryID, source.itemKey);
+    if (item?.itemId) entry.itemId = item.itemId;
+    if (item?.title) entry.title = item.title;
+    if (item?.firstCreator) entry.firstCreator = item.firstCreator;
+    if (item?.year) entry.year = item.year;
+    if (sections.length) entry.sectionLabel = sections[0];
+    if (sections.length > 1) entry.sectionLabels = [...sections];
+    return entry;
+  };
+  const cited = new Set<string>();
   for (const cluster of params.clusters) {
     if (!used.has(cluster.citationId)) continue;
-    const sectionLabel = labels.get(cluster.citationId);
+    const sections = labels.get(cluster.citationId) || [];
     for (const source of cluster.sources) {
-      const entry: TaskPaperDocumentCitation = {
-        citationId: cluster.citationId,
-        libraryID: source.libraryID,
-        itemKey: source.itemKey,
-      };
-      const item = params.itemOf?.(source.libraryID, source.itemKey);
-      if (item?.itemId) entry.itemId = item.itemId;
-      if (item?.title) entry.title = item.title;
-      if (item?.firstCreator) entry.firstCreator = item.firstCreator;
-      if (item?.year) entry.year = item.year;
-      if (sectionLabel) entry.sectionLabel = sectionLabel;
-      out.push(entry);
+      cited.add(`${source.libraryID}:${source.itemKey}`);
+      out.push(entryFor(cluster.citationId, source, sections));
     }
+  }
+  const quoteSections = new Map<string, string[]>();
+  for (const use of verifiedUses)
+    addSection(quoteSections, use.id, use.section);
+  for (const use of verifiedUses) {
+    const quote = verified.get(use.id)!;
+    const paper = `${quote.libraryID}:${quote.itemKey}`;
+    if (cited.has(paper)) continue;
+    cited.add(paper);
+    out.push(entryFor(quote.quoteId, quote, quoteSections.get(use.id) || []));
   }
   return out;
 }
@@ -672,10 +805,14 @@ export function createSubmitDocumentTool(
         materialKind:
           document.version === 2 ? document.documentKind : undefined,
         materialTitle: document.title,
+        // The finalized clusters, which include the citations the host's
+        // repairs added; the draft only places the tokens.
         materialCitedSources: documentCitedSources({
           markdown: input.markdown,
           title: document.title,
           clusters: document.citationBundle.clusters,
+          quotes: input.quotes,
+          verifiedQuotes: document.verifiedQuotes,
           itemOf: zoteroCitedSourceItem,
         }),
       };
