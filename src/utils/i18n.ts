@@ -417,8 +417,8 @@ const zhCN: Record<string, string> = {
     "所有外部写入（包括创建新笔记）在执行前都会显示以供审核。读取操作无需审核。",
   "Reads, ordinary writes and recoverable changes run automatically. Other actions receive model review; confirmation is requested only for unclear intent, excessive risk, or unavailable review.":
     "读取、常规写入和可恢复更改会自动执行。其他操作由模型审核；仅在意图不明确、风险过高或审核不可用时请求确认。",
-  "The Original Agent acts without permission prompts or approval-model calls, including ambiguous or dangerous actions. Requested review workflows and execution integrity remain enforced. Claude Code, Codex, and external MCP callers keep their own permission controls.":
-    "原生 Agent 执行操作时不会请求权限确认或调用审批模型，包括有歧义或危险的操作。用户要求的审核流程和执行完整性仍然有效。Claude Code、Codex 和外部 MCP 调用方保留各自的权限控制。",
+  "The Original Agent acts without permission prompts or approval-model calls, including ambiguous or dangerous actions. Requested review workflows, execution integrity and the paper selection card for discovered papers remain enforced. Claude Code, Codex, and external MCP callers keep their own permission controls.":
+    "原生 Agent 执行操作时不会请求权限确认或调用审批模型，包括有歧义或危险的操作。用户要求的审核流程、执行完整性及所发现论文的选择卡片仍然有效。Claude Code、Codex 和外部 MCP 调用方保留各自的权限控制。",
   "This setting controls every Original Agent action, including Zotero changes, local files, commands, scripts, and network tools. Claude Code and Codex keep their own independent native permission profiles. Reversible Original Agent changes are recorded and can be reverted from Agent history.":
     "此设置控制原生 Agent 的所有操作，包括 Zotero 更改、本地文件、命令、脚本和网络工具。Claude Code 和 Codex 保留各自独立的原生权限配置。原生 Agent 的可撤销更改会被记录，并可从 Agent 历史记录中撤销。",
   "Tavily Web Search": "Tavily 网页搜索",

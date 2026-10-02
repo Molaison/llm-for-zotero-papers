@@ -13,11 +13,15 @@ import {
   resolveLiteratureDiscoveryReview,
 } from "../../services/literatureDiscovery";
 import type { ZoteroGateway } from "../../services/zoteroGateway";
-import type { AgentToolDefinition, ToolSpec } from "../../types";
+import type {
+  AgentToolContext,
+  AgentToolDefinition,
+  ToolSpec,
+} from "../../types";
 import { fail, normalizePositiveInt, ok, validateObject } from "../shared";
 
-/** Exported so a caller-visibility check can ask about this tool by spec. */
-export const LITERATURE_REVIEW_SPEC: ToolSpec = {
+/** A caller-visibility check asks about this tool by spec. */
+const LITERATURE_REVIEW_SPEC: ToolSpec = {
   name: "literature_review",
   description: "Show the selection card for ranked saved candidates.",
   executionClass: "read",
@@ -91,6 +95,16 @@ export const LITERATURE_REVIEW_SPEC: ToolSpec = {
     },
   },
 };
+
+/**
+ * Whether this caller can show the paper selection card. MCP never offers
+ * literature_review, so its clients present candidates themselves.
+ */
+export function canShowLiteratureReview(context: AgentToolContext): boolean {
+  return (
+    !context.isToolVisible || context.isToolVisible(LITERATURE_REVIEW_SPEC)
+  );
+}
 
 export function createLiteratureReviewTool(
   gateway: ZoteroGateway,

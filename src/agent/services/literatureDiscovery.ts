@@ -50,6 +50,11 @@ export type LiteratureDiscoverySession = {
   candidateSetIds: string[];
   papers: Record<string, unknown>[];
   selectedIds: string[];
+  /**
+   * The papers the user chose with the card's Import: the only candidates of
+   * this discovery an import may take.
+   */
+  approvedIds?: string[];
   targetCollectionId?: number;
   destinationLabel?: string;
   shortfallReason?: string;
@@ -99,8 +104,10 @@ function assertActive(context: AgentToolContext): void {
   }
 }
 
-function sessionSeed(context: AgentToolContext): AgentToolResultHandleRecord {
-  assertActive(context);
+/** The turn's discovery record as first stored; null without a turn to own one. */
+function discoverySeed(
+  context: AgentToolContext,
+): AgentToolResultHandleRecord | null {
   const content: LiteratureDiscoverySession = {
     kind: "literature_discovery",
     runId: context.runId,
@@ -116,10 +123,15 @@ function sessionSeed(context: AgentToolContext): AgentToolResultHandleRecord {
   return createAgentToolResultHandleRecord({
     conversationKey: context.request.conversationKey,
     toolName: "literature_review",
-    toolCallId: context.runId!,
+    toolCallId: context.runId || "",
     resourceSignature: context.resourceSignature,
     content,
-  })!;
+  });
+}
+
+function sessionSeed(context: AgentToolContext): AgentToolResultHandleRecord {
+  assertActive(context);
+  return discoverySeed(context)!;
 }
 
 /** One turn-scoped record in the existing result store owns all discovery state. */
@@ -216,6 +228,80 @@ export function literaturePaperIdentities(
   return keys;
 }
 
+/** The keys a library_import identifier, a DOI or arXiv id in any form, names. */
+function importIdentities(identifier: string): string[] {
+  return [
+    ...literaturePaperIdentities({ doi: identifier }),
+    ...literaturePaperIdentities({ arxivId: identifier }),
+  ];
+}
+
+/**
+ * The keys a saved candidate can be imported by: its identities, and the
+ * arXiv id of an arXiv open-access link, which the card itself imports by.
+ */
+function candidateIdentities(paper: unknown): string[] {
+  if (!paper || typeof paper !== "object") return [];
+  const record = paper as Record<string, unknown>;
+  return [
+    ...literaturePaperIdentities(record),
+    ...literaturePaperIdentities({ arxivId: record.openAccessUrl }),
+  ];
+}
+
+/**
+ * Why a library_import of these identifiers must not run: this turn opened
+ * a paper discovery, and they name candidates it saved or showed that the
+ * user did not choose with the card's Import. Discovered papers reach Zotero
+ * only through the paper selection card, in every permission mode, so the
+ * refusal sends the model to the card. Null when no discovery of this turn
+ * holds them.
+ */
+export async function discoveryImportRefusal(
+  identifiers: readonly string[],
+  context: AgentToolContext,
+): Promise<string | null> {
+  const seed = discoverySeed(context);
+  if (!seed) return null;
+  const record = await getAgentToolResultHandle({
+    conversationKey: seed.conversationKey,
+    handle: seed.handle,
+  });
+  const session = record?.content as LiteratureDiscoverySession | undefined;
+  if (!record || session?.kind !== "literature_discovery") return null;
+  const candidates = new Set(session.papers.flatMap(candidateIdentities));
+  for (const handle of session.candidateSetIds) {
+    const saved = await getAgentToolResultHandle({
+      conversationKey: record.conversationKey,
+      handle,
+    });
+    const set = saved?.content as LiteratureCandidateSet | undefined;
+    if (set?.kind !== "literature_candidates" || !Array.isArray(set.results))
+      continue;
+    for (const key of set.results.flatMap(candidateIdentities))
+      candidates.add(key);
+  }
+  const approved = new Set(
+    session.papers
+      .filter((paper) =>
+        (session.approvedIds || []).includes(String(paper.discoveryPaperId)),
+      )
+      .flatMap(candidateIdentities),
+  );
+  const unchosen = identifiers.filter((identifier) => {
+    const keys = importIdentities(identifier);
+    return (
+      keys.some((key) => candidates.has(key)) &&
+      !keys.some((key) => approved.has(key))
+    );
+  });
+  if (!unchosen.length) return null;
+  const named = `${unchosen.join(", ")} ${unchosen.length === 1 ? "is a paper" : "are papers"} this turn's discovery found`;
+  return session.phase === "closed"
+    ? `Nothing was imported: ${named}, and the user did not choose ${unchosen.length === 1 ? "it" : "them"} on its paper selection card. Discovered papers are imported only after the user selects them there.`
+    : `Nothing was imported: ${named}, and discovered papers are imported only after the user selects them on the paper selection card. Call literature_review with sessionId '${record.handle}', revision ${session.revision} and ranked candidateSetId/candidateIndex selections to show them, so the user can choose.`;
+}
+
 export function discoveryContent(record: AgentToolResultHandleRecord) {
   const session = record.content as LiteratureDiscoverySession;
   return {
@@ -285,7 +371,7 @@ export async function identifyLiteratureCandidates(
       ? {
           sessionId: discovery.record.handle,
           revision: discovery.session.revision,
-          nextStep: discoveryInstruction(discovery.record, routeImports),
+          nextStep: discoveryInstruction(discovery.record),
         }
       : routeImports
         ? { nextStep: CANDIDATE_ROUTE }
@@ -294,25 +380,21 @@ export async function identifyLiteratureCandidates(
 }
 
 /**
- * Unclassified turns (chat, fresh plan executions) cannot tell discovery from
- * an explicit import. The search result is read when the model picks its next
- * tool, so for callers that can open the card it states the import branch
- * first. Every other caller gets the card-only text unchanged.
+ * A workflow:'answer' search opens no discovery, so its result routes by the
+ * user's request, read when the model picks its next tool: for callers that
+ * can open the card, the explicit-import branch first. A workflow:'review'
+ * search opened a discovery, whose candidates import only through the card
+ * (discoveryImportRefusal), so its next step offers the card alone.
  */
 const IMPORT_ROUTE =
   "If the user asked to import or add papers to Zotero without asking to choose them first, skip the selection card: rank these candidates, skip papers already in the library, then call library_import with the DOI or arXiv identifiers of exactly the number the user requested and the requested destination (targetCollectionId; create the collection first only when the user named a new one).";
 const CANDIDATE_ROUTE = `${IMPORT_ROUTE} If they only asked to find or recommend papers, call literature_review with the number they asked for as count (five when unspecified) and that many ranked candidateSetId/candidateIndex selections. Otherwise answer from these results.`;
 
-function discoveryInstruction(
-  record: AgentToolResultHandleRecord,
-  offerImport = false,
-): string {
+function discoveryInstruction(record: AgentToolResultHandleRecord): string {
   const s = record.content as LiteratureDiscoverySession;
   const select = `titles and abstracts and select ${s.request.batchSize} ${s.papers.length ? "additional " : ""}genuinely relevant papers in ranked order${s.papers.length ? "" : " (pass the number the user asked for as count when it differs)"}. Respect the user's topic and these constraints: ${JSON.stringify(s.request)}. Assess unused saved candidates first; search further if needed. To expand a provider list, increase its retrieval limit rather than repeating the same bounded request.`;
   const review = `literature_review with sessionId '${record.handle}', revision ${s.revision}, NEW candidateSetId/candidateIndex selections and evidence-based relevance reasons. Do not repeat displayed papers or dump the raw pool. If fewer qualify, explain shortfallReason; use outcome 'no_more' when no further relevant matches were found, or 'search_failed' for a retrieval failure. Empty selections with an explanation are allowed.`;
-  return offerImport
-    ? `${IMPORT_ROUTE} Otherwise the user only wants discovery: assess ${select} Then call ${review} Discovery never imports and never finishes with prose instead of the card.`
-    : `Assess ${select} Call ${review} Never import during discovery or finish with prose instead of the card.`;
+  return `Assess ${select} Call ${review} Never import during discovery or finish with prose instead of the card.`;
 }
 
 export async function prepareLiteratureDiscoveryReview(
@@ -452,6 +534,12 @@ export async function resolveLiteratureDiscoveryReview(
     session.outcome = "complete";
   } else {
     session.phase = "closed";
+    // Import is the user's choice; only the papers checked with it may be
+    // imported. A selection the card did not send approves nothing.
+    if (actionId === "import")
+      session.approvedIds = Array.isArray(selectedIds)
+        ? [...session.selectedIds]
+        : [];
   }
   await save(record, context);
   return {

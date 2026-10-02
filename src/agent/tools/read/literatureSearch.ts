@@ -10,7 +10,7 @@ import {
   MAX_DISCOVERY_COUNT,
   parseDiscoveryCount,
 } from "../../services/literatureDiscovery";
-import { LITERATURE_REVIEW_SPEC } from "./reviewLiterature";
+import { canShowLiteratureReview } from "./reviewLiterature";
 import type { ZoteroGateway } from "../../services/zoteroGateway";
 import { readOnlyInvocationPlan } from "../../authorization/invocationPlan";
 import { neverSelected } from "../guidance";
@@ -181,7 +181,7 @@ export function createLiteratureSearchTool(
     spec: {
       name: "literature_search",
       description:
-        "Search scholarly sources and save candidates for ranking. For discovery or recommendations, call literature_review to show the selection card; discovery never imports silently. An explicit import request uses library_import directly; metadata review uses workflow:'review', mode:'metadata'.",
+        "Search scholarly sources and save candidates to rank. For discovery or recommendations, call literature_review to show the selection card; discovery never imports silently. Explicit imports use workflow:'answer', then library_import; metadata review uses workflow:'review', mode:'metadata'.",
       inputSchema: {
         type: "object",
         required: ["mode"],
@@ -387,13 +387,11 @@ export function createLiteratureSearchTool(
       if (input.mode === "metadata") return content;
       // Route explicit imports only where the caller can open the card (MCP
       // never offers literature_review).
-      const routeImports =
-        !context.isToolVisible || context.isToolVisible(LITERATURE_REVIEW_SPEC);
       return identifyLiteratureCandidates(
         content,
         context,
         input.workflow === "review",
-        routeImports,
+        canShowLiteratureReview(context),
         input.count,
       );
     },

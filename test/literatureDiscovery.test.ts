@@ -253,22 +253,79 @@ describe("ranked literature discovery workflow", function () {
     assert.equal(second.kind, "fail");
   });
 
-  it("accepts an unclassified search that ended in importing its candidates", async function () {
-    // The search result offered the import branch; completion must honor it
-    // instead of demanding the selection card after the papers were imported.
+  it("does not close a discovery with a direct import of its candidates", async function () {
+    // Only the selection card closes a discovery. The host refuses such an
+    // import before it runs; were one recorded, it still would not count.
     const context = makeContext();
     const content = await search(context);
     const controller = new AgentFinalAnswerController(context.request);
-    const verdict = await controller.evaluate({
+    const toolExecutionRecords = [
+      { name: "literature_search", ok: true, content },
+      {
+        name: "library_import",
+        ok: true,
+        input: validatedImportInput(["https://doi.org/10.1000/CANDIDATE-2"]),
+        content: { succeeded: 1 },
+      },
+    ];
+    const first = await controller.evaluate({
       candidateText: "Imported three papers into the new collection.",
+      canCorrect: true,
+      toolExecutionRecords,
+    });
+    assert.equal(first.kind, "correct");
+    if (first.kind === "correct")
+      assert.include(first.correction, "literature_review");
+    const second = await controller.evaluate({
+      candidateText: "Imported three papers into the new collection.",
+      canCorrect: true,
+      toolExecutionRecords,
+    });
+    assert.equal(second.kind, "fail");
+  });
+
+  it("accepts an explicit import: an answer-workflow search, then library_import", async function () {
+    // "Find and import three papers" opens no discovery, so it completes
+    // without a card.
+    const context = makeContext();
+    context.request.userText =
+      "Find and import three papers on population coding.";
+    const content = await answerSearch(context);
+    assert.isFalse(content.reviewRequired);
+    const controller = new AgentFinalAnswerController(context.request);
+    const verdict = await controller.evaluate({
+      candidateText: "Imported three papers.",
       canCorrect: true,
       toolExecutionRecords: [
         { name: "literature_search", ok: true, content },
         {
           name: "library_import",
           ok: true,
-          input: validatedImportInput(["https://doi.org/10.1000/CANDIDATE-2"]),
-          content: { succeeded: 1 },
+          input: validatedImportInput([
+            "10.1000/candidate-2",
+            "10.1000/candidate-5",
+            "10.1000/candidate-7",
+          ]),
+          content: { succeeded: 3 },
+        },
+      ],
+    });
+    assert.equal(verdict.kind, "accept");
+  });
+
+  it("closes a discovery when its selection card is shown", async function () {
+    const context = makeContext();
+    const content = await search(context);
+    const controller = new AgentFinalAnswerController(context.request);
+    const verdict = await controller.evaluate({
+      candidateText: "Choose the papers to import on the card.",
+      canCorrect: true,
+      toolExecutionRecords: [
+        { name: "literature_search", ok: true, content },
+        {
+          name: "literature_review",
+          ok: true,
+          content: { reviewRequired: true, discoveryPhase: "review" },
         },
       ],
     });
@@ -318,69 +375,13 @@ describe("ranked literature discovery workflow", function () {
   }
 
   // arXiv-provider results carry only an abs URL; other providers carry a
-  // DataCite 10.48550 DOI. Imports name the same paper by arXiv id or DOI.
-  describe("matching imports to saved candidates by normalized identity", function () {
+  // DataCite 10.48550 DOI. Recognizing an import of a discovery's candidates
+  // by these identities is covered in discoveryImportSelection.test.ts.
+  describe("paper identity across providers", function () {
     const arxivCandidate = {
       title: "Arxiv Paper",
       sourceUrl: "http://arxiv.org/abs/2301.00001v1",
     };
-    async function verdictFor(
-      candidates: Record<string, unknown>[],
-      identifiers: string[],
-    ) {
-      const context = makeContext();
-      const controller = new AgentFinalAnswerController(context.request);
-      const verdict = await controller.evaluate({
-        candidateText: "Imported the paper.",
-        canCorrect: true,
-        toolExecutionRecords: [
-          {
-            name: "literature_search",
-            ok: true,
-            content: { reviewRequired: true, results: candidates },
-          },
-          {
-            name: "library_import",
-            ok: true,
-            input: { kind: "identifiers", identifiers },
-          },
-        ],
-      });
-      return verdict.kind;
-    }
-    for (const [label, candidate, identifier] of [
-      ["an arXiv abs URL by arxiv: id", arxivCandidate, "arxiv:2301.00001"],
-      [
-        "an arXiv abs URL by versioned arXiv: id",
-        arxivCandidate,
-        "arXiv:2301.00001v1",
-      ],
-      [
-        "a DOI by a DOI:-prefixed uppercase DOI",
-        { doi: "10.1000/abc" },
-        "DOI: 10.1000/ABC",
-      ],
-      [
-        "a DOI by a doi:-prefixed DOI",
-        { doi: "https://doi.org/10.1000/abc" },
-        "doi:10.1000/abc",
-      ],
-      [
-        "a 10.48550 arXiv DOI by arXiv id",
-        { doi: "10.48550/arXiv.2301.00001" },
-        "2301.00001",
-      ],
-    ] as const) {
-      it(`closes discovery after importing ${label}`, async function () {
-        assert.equal(await verdictFor([candidate], [identifier]), "accept");
-      });
-    }
-    it("does not close discovery after importing a different arXiv id", async function () {
-      assert.equal(
-        await verdictFor([arxivCandidate], ["arxiv:2301.00002"]),
-        "correct",
-      );
-    });
     it("dedupes versions of one arXiv paper and keeps distinct ids apart", function () {
       const shares = (a: Record<string, unknown>, b: Record<string, unknown>) =>
         literaturePaperIdentities(a).some((key) =>
@@ -662,27 +663,37 @@ describe("ranked literature discovery workflow", function () {
     );
   });
 
-  it("routes an explicit import to library_import in the search result's next step", async function () {
-    // Chat turns carry no classified intent, so a workflow:'review' search
-    // opens a discovery session even when the user asked to import. The
-    // result's nextStep is read when the model picks its next tool, so it
-    // must state both branches instead of only the selection card.
+  it("names the workflow an explicit import takes in the model-visible description", function () {
+    // A workflow:'review' search opens a discovery whose papers import only
+    // through the card, so an explicit import must know to take 'answer'.
+    // The long-form guidance is never selected in chat; the description is
+    // what the model reads.
+    const description = createLiteratureSearchTool(gateway as never).spec
+      .description;
+    assert.include(
+      description,
+      "Explicit imports use workflow:'answer', then library_import",
+    );
+    assert.include(
+      description,
+      "call literature_review to show the selection card",
+    );
+  });
+
+  it("offers a discovery only the selection card in its next step", async function () {
+    // A workflow:'review' search opened a discovery: the host refuses a
+    // direct import of its candidates, so the next step offers no import
+    // branch, only the card.
     const content = await search();
     const nextStep = String(content.nextStep);
-    const importAt = nextStep.indexOf("library_import");
-    const reviewAt = nextStep.indexOf("call literature_review");
-    assert.isAtLeast(importAt, 0, nextStep);
-    assert.isAtLeast(reviewAt, 0, nextStep);
-    assert.isBelow(importAt, reviewAt, nextStep);
-    assert.match(
+    assert.notInclude(nextStep, "library_import", nextStep);
+    assert.notMatch(nextStep, /skip the selection card/, nextStep);
+    assert.include(nextStep, "Call literature_review with sessionId");
+    assert.include(nextStep, content.sessionId);
+    assert.include(
       nextStep,
-      /If the user asked to import or add papers to Zotero without asking to choose them first/,
+      "Never import during discovery or finish with prose instead of the card",
     );
-    assert.match(nextStep, /targetCollectionId/);
-    assert.match(nextStep, /already in the library/);
-    assert.match(nextStep, /only when the user named a new one/);
-    assert.match(nextStep, /Otherwise/);
-    assert.notInclude(nextStep, "Never import during discovery or finish");
   });
 
   it("routes an unclassified answer-workflow search by the user's request", async function () {

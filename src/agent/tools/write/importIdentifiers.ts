@@ -7,8 +7,11 @@ import {
   type ImportIdentifiersOperation,
 } from "../../services/libraryMutationService";
 import { describeLibraryMutationInput } from "../../contracts/actionContract";
+import { discoveryImportRefusal } from "../../services/literatureDiscovery";
 import type { ZoteroGateway } from "../../services/zoteroGateway";
 import type { AgentWriteToolDefinition } from "../../types";
+import { ToolInputRejection } from "../execution/failure";
+import { canShowLiteratureReview } from "../read/reviewLiterature";
 import {
   fail,
   normalizePositiveInt,
@@ -203,8 +206,20 @@ export function createImportIdentifiersTool(
       });
     },
 
-    planInvocation: (input, context) =>
-      planLibraryMutations(mutationService, [input.operation], context),
+    async planInvocation(input, context) {
+      // Papers a discovery found reach Zotero only through its selection
+      // card. Planning runs before review and policy, so the refusal holds in
+      // Safe, Auto and YOLO alike; the card's own Import passes because the
+      // user chose those papers.
+      if (canShowLiteratureReview(context)) {
+        const refusal = await discoveryImportRefusal(
+          input.operation.identifiers,
+          context,
+        );
+        if (refusal) throw new ToolInputRejection(refusal);
+      }
+      return planLibraryMutations(mutationService, [input.operation], context);
+    },
 
     async execute(input, context) {
       return executeAndRecordUndo(

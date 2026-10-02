@@ -46,7 +46,7 @@ const ORIGINAL_OPTIONS: Record<OriginalAgentPermissionMode, PermissionOption> =
       fullLabel: "Yolo",
       compactLabel: "yolo",
       description:
-        "The Original Agent acts without permission prompts or approval-model calls, including ambiguous or dangerous actions. Requested review workflows and execution integrity remain enforced. Claude Code, Codex, and external MCP callers keep their own permission controls.",
+        "The Original Agent acts without permission prompts or approval-model calls, including ambiguous or dangerous actions. Requested review workflows, execution integrity and the paper selection card for discovered papers remain enforced. Claude Code, Codex, and external MCP callers keep their own permission controls.",
       available: true,
     },
   };

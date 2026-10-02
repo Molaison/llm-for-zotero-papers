@@ -619,16 +619,14 @@ describe("provider permission modes", function () {
     assert.include(byKey["original:yolo"], "without permission prompts");
     assert.include(byKey["original:yolo"], "ambiguous or dangerous actions");
     assert.include(byKey["original:yolo"], "Claude Code, Codex");
+    // The host refuses importing a discovery's papers around the selection
+    // card in every mode, so the copy names it with the other rails.
     assert.include(
       byKey["original:yolo"],
-      "Requested review workflows and execution integrity remain enforced",
+      "Requested review workflows, execution integrity and the paper selection card for discovered papers remain enforced",
     );
-    // Nothing enforces these any more, so the copy must not promise them.
-    for (const unenforced of [
-      "Explicit restrictions",
-      "required paper selection",
-    ])
-      assert.notInclude(byKey["original:yolo"], unenforced);
+    // Nothing enforces this any more, so the copy must not promise it.
+    assert.notInclude(byKey["original:yolo"], "Explicit restrictions");
     assert.notInclude(byKey["original:yolo"], "require review");
     assert.notInclude(byKey["original:yolo"], "Only explicit prohibitions");
   });
