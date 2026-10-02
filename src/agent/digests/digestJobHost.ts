@@ -9,6 +9,10 @@
  * and one paper-row update built by the ledger's own digest builders.
  * Complete digests are cached in the conversation's tool-result handle
  * store, where context_read reads them by handle; failures never are.
+ *
+ * Each completed digest is also a host-verified read of its paper: the host
+ * issues one read observation for it (body depth, read mode `digest`), so a
+ * document may cite a digested paper the model never read itself.
  */
 import { DEFAULT_INPUT_TOKEN_CAP } from "../../utils/llmDefaults";
 import type { UtilityLLMParams } from "../../utils/utilityLLM";
@@ -19,6 +23,11 @@ import {
   type TaskPaperDigestPaper,
 } from "../context/taskPaperLedger";
 import { getTurnPapers } from "../context/requestTurnPaperScope";
+import { shortEvidenceRef } from "../context/evidenceRefTokens";
+import type { TrustedReadObservation } from "../context/readObservationTypes";
+import { joinReadObservations } from "../context/taskPaperLedgerRecorder";
+import { canonicalJson } from "../services/libraryMutation/canonicalJson";
+import { sha256Text } from "../store/journalRecoveryBlobStore";
 import { applyOutcomeEvidence } from "../loop/outcomes";
 import type { PdfService } from "../services/pdfService";
 import type { ZoteroGateway } from "../services/zoteroGateway";
@@ -34,6 +43,7 @@ import {
   renderHostPaperDigests,
   runPaperDigestJob,
   type HostPaperDigest,
+  type HostPaperDigestCitationSource,
   type PaperDigestCache,
   type PaperDigestFailure,
   type PaperDigestSource,
@@ -81,12 +91,119 @@ export type DigestPartRequest = { taskId: string; targets: string[] };
 export type DigestRunResult = {
   /** Rendered digests, one block per paper in scope order, then failures. */
   digests?: string;
-  /** The handle context_read reads each digest by. */
-  digestHandles?: Array<{ itemId: number; handle: string }>;
+  /**
+   * Per digest: the handle context_read reads it by, and the evidence refs a
+   * document cites it with.
+   */
+  digestHandles?: Array<{
+    itemId: number;
+    handle?: string;
+    evidenceRefs?: string[];
+  }>;
+  /** The citable source of each digest, as a read tool's result names it. */
+  documentEvidenceRefs?: DigestEvidenceRef[];
   digestFailures?: Array<{ itemId: number; title?: string; reason: string }>;
   /** Targets Stop left undone; declare the part again to continue them. */
   digestPending?: string[];
 };
+
+/** One digest's evidence ref, in the shape a read tool's result carries. */
+export type DigestEvidenceRef = {
+  evidenceRef: string;
+  libraryID: number;
+  itemKey: string;
+  capabilities: TrustedReadObservation["capabilities"];
+  attachmentItemKey?: string;
+};
+
+type ZoteroItemLike = {
+  id?: unknown;
+  key?: unknown;
+  libraryID?: unknown;
+  parentID?: unknown;
+  isAttachment?: () => boolean;
+};
+
+/** The paper's Zotero identity, as a read observation names it. */
+function digestPaperIdentity(digest: HostPaperDigest): {
+  libraryID: number;
+  itemKey: string;
+  attachmentItemKey?: string;
+} | null {
+  const items = (
+    globalThis as typeof globalThis & {
+      Zotero?: { Items?: { get?: (id: number) => ZoteroItemLike | null } };
+    }
+  ).Zotero?.Items;
+  if (!items?.get) return null;
+  const item = items.get(digest.itemId);
+  const itemKey = typeof item?.key === "string" ? item.key.trim() : "";
+  const libraryID = Number(item?.libraryID);
+  if (!itemKey || !Number.isInteger(libraryID) || libraryID <= 0) return null;
+  const attachment =
+    digest.contextItemId && digest.contextItemId !== digest.itemId
+      ? items.get(digest.contextItemId)
+      : null;
+  const attachmentItemKey =
+    typeof attachment?.key === "string" && attachment.key.trim()
+      ? attachment.key.trim()
+      : undefined;
+  return {
+    libraryID,
+    itemKey,
+    ...(attachmentItemKey ? { attachmentItemKey } : {}),
+  };
+}
+
+/**
+ * The read observation the host issues for one completed digest: the paper's
+ * text was read whole or in part by the host (body depth), under a call id
+ * of its own per paper. Null when the paper has no Zotero identity.
+ */
+export async function createDigestReadObservation(params: {
+  callId: string;
+  digest: HostPaperDigest;
+}): Promise<TrustedReadObservation | null> {
+  const identity = digestPaperIdentity(params.digest);
+  if (!identity) return null;
+  const { digest } = params;
+  const inputDigest = `sha256:${await sha256Text(
+    canonicalJson({
+      target: `item:${digest.itemId}`,
+      cacheKey: digest.cacheKey,
+    }),
+  )}`;
+  const resultDigest = `sha256:${await sha256Text(
+    canonicalJson({
+      summary: digest.summary,
+      evidence: digest.evidence,
+      source: digest.source,
+    }),
+  )}`;
+  const callDigest = `sha256:${await sha256Text(
+    canonicalJson({
+      toolName: "task_update",
+      callId: `${params.callId}:digest:${digest.itemId}`,
+      inputDigest,
+    }),
+  )}`;
+  const unsigned = {
+    version: 1 as const,
+    observationId: `${callDigest}:1`,
+    issuer: "zotero_host" as const,
+    toolName: "task_update",
+    callDigest,
+    inputDigest,
+    resultDigest,
+    ...identity,
+    capabilities: ["body"] as TrustedReadObservation["capabilities"],
+    readMode: "digest",
+  };
+  return {
+    ...unsigned,
+    certificateDigest: `sha256:${await sha256Text(canonicalJson(unsigned))}`,
+  };
+}
 
 type DigestCacheContent = {
   cacheKey: string;
@@ -316,6 +433,36 @@ export async function runDigestParts(params: {
         ).checkpoint,
     );
 
+  /** itemId → the observation issued for the paper's digest this call. */
+  const observations = new Map<number, TrustedReadObservation>();
+  const issueObservation = async (callId: string, digest: HostPaperDigest) => {
+    try {
+      const observation = await createDigestReadObservation({
+        callId,
+        digest,
+      });
+      if (!observation) return [];
+      observations.set(digest.itemId, observation);
+      context.recordReadObservations?.([observation]);
+      return [observation];
+    } catch {
+      // The digest stands; it is only not citable as a host-verified read.
+      return [];
+    }
+  };
+  const citationSourceOf = (
+    itemId: number,
+  ): HostPaperDigestCitationSource | undefined => {
+    const observation = observations.get(itemId);
+    return observation
+      ? {
+          libraryID: observation.libraryID,
+          itemKey: observation.itemKey,
+          evidenceRefs: [shortEvidenceRef(observation.observationId)],
+        }
+      : undefined;
+  };
+
   const digests: HostPaperDigest[] = [];
   const failures: PaperDigestFailure[] = [];
   const pending: string[] = [];
@@ -355,17 +502,19 @@ export async function runDigestParts(params: {
       cache,
       onDigest: async (digest, target) => {
         await recordEvidence(part.taskId, [target], []);
+        const issued = await issueObservation(callId, digest);
         const paper = ledgerPaper(digest.itemId);
         if (!paper) return;
-        await context.publishPaperLedgerDelta?.(
-          buildDigestLedgerDelta({
-            runId: context.runId,
-            callId,
-            toolName: "task_update",
-            digest,
-            paper,
-          }),
-        );
+        const delta = buildDigestLedgerDelta({
+          runId: context.runId,
+          callId,
+          toolName: "task_update",
+          digest,
+          paper,
+        });
+        // The paper's row names the observation a document cites it by.
+        if (issued.length) joinReadObservations(delta, issued);
+        await context.publishPaperLedgerDelta?.(delta);
       },
       onFailure: async (failure) => {
         await recordEvidence(
@@ -391,20 +540,49 @@ export async function runDigestParts(params: {
     pending.push(...result.pending);
   }
 
-  const handles: Array<{ itemId: number; handle: string }> = [];
+  const handles: NonNullable<DigestRunResult["digestHandles"]> = [];
+  const evidenceRefs: DigestEvidenceRef[] = [];
   for (const digest of digests) {
+    let handle: string | undefined;
     try {
-      const handle = await cache.handleOf(digest);
-      if (handle) handles.push({ itemId: digest.itemId, handle });
+      handle = await cache.handleOf(digest);
     } catch {
       // The digest stays in the result; only its handle is missing.
     }
+    const observation = observations.get(digest.itemId);
+    const ref = observation
+      ? shortEvidenceRef(observation.observationId)
+      : undefined;
+    if (observation && ref)
+      evidenceRefs.push({
+        evidenceRef: ref,
+        libraryID: observation.libraryID,
+        itemKey: observation.itemKey,
+        capabilities: observation.capabilities,
+        ...(observation.attachmentItemKey
+          ? { attachmentItemKey: observation.attachmentItemKey }
+          : {}),
+      });
+    if (handle || ref)
+      handles.push({
+        itemId: digest.itemId,
+        ...(handle ? { handle } : {}),
+        ...(ref ? { evidenceRefs: [ref] } : {}),
+      });
   }
   return {
     ...(digests.length || failures.length
-      ? { digests: renderHostPaperDigests(digests, failures, titleOf) }
+      ? {
+          digests: renderHostPaperDigests(
+            digests,
+            failures,
+            titleOf,
+            citationSourceOf,
+          ),
+        }
       : {}),
     ...(handles.length ? { digestHandles: handles } : {}),
+    ...(evidenceRefs.length ? { documentEvidenceRefs: evidenceRefs } : {}),
     ...(failures.length
       ? {
           digestFailures: failures.map((failure) => {

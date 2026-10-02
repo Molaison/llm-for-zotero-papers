@@ -842,6 +842,9 @@ describe("primitive agent tools", function () {
       "Ground final content claims in library_retrieve snippets or paper_read results.",
     );
     assert.include(resourceText, "plan a batch workflow");
+    // The host digests every paper; the model no longer writes digests itself.
+    assert.include(resourceText, "declare a digest part with task_update");
+    assert.notInclude(resourceText, "create compact per-paper digests");
     assert.include(userText, "User request:\nCompare the papers");
   });
 

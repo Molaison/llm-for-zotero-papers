@@ -34,7 +34,13 @@ import type {
 } from "../src/agent/types";
 import type { PaperContextRef } from "../src/shared/types";
 import type { ChatParams } from "../src/utils/llmClient";
-import { installMockDb } from "./helpers/agentRuntimeMockDb";
+import {
+  installAgentStoreSqlite,
+  installMockDb,
+} from "./helpers/agentRuntimeMockDb";
+import { createSubmitDocumentTool } from "../src/agent/tools/control/submitDocument";
+import { initPlanDocumentStore } from "../src/agent/documents/store";
+import type { ZoteroGateway } from "../src/agent/services/zoteroGateway";
 import { createTestActionContractService } from "./helpers/actionContractService";
 
 /**
@@ -101,10 +107,12 @@ let conversationKey = 975_000;
 function createHarness(
   digestDeps: TaskUpdateToolDeps["digests"],
   itemIds: number[] = [5, 6, 7],
+  register?: (registry: AgentToolRegistry) => void,
 ): Harness {
   conversationKey += 1;
   const registry = new AgentToolRegistry(createTestActionContractService());
   registry.register(createTaskUpdateTool({ digests: digestDeps }));
+  register?.(registry);
   const events: AgentEvent[] = [];
   const published: ExecutionCheckpoint[] = [];
   const handles: AgentToolResultHandleRecord[] = [];
@@ -534,5 +542,143 @@ describe("Zotero paper sources for a digest", function () {
     assert.equal(paper?.mineruCacheDir, "/cache/105");
     assert.equal(paper?.contextItemId, 105);
     assert.isNull(await sources.resolvePaper(request, 404));
+  });
+});
+
+describe("a digested paper as document evidence", function () {
+  let restore: () => void;
+
+  beforeEach(async function () {
+    const restoreDb = installMockDb();
+    const restoreDocuments = installAgentStoreSqlite();
+    clearAgentToolResultHandleStore();
+    const zotero = (globalThis as unknown as { Zotero: any }).Zotero;
+    const items = new Map<number, Record<string, unknown>>([
+      [5, { id: 5, key: "PAPER005", libraryID: 1 }],
+      [
+        105,
+        {
+          id: 105,
+          key: "PDF00105",
+          libraryID: 1,
+          parentID: 5,
+          isAttachment: () => true,
+        },
+      ],
+    ]);
+    const originalItems = zotero.Items;
+    const originalLibraries = zotero.Libraries;
+    zotero.Libraries = { userLibraryID: 1, get: () => undefined };
+    zotero.Items = {
+      ...(originalItems || {}),
+      get: (id: number) => items.get(id) || null,
+      getByLibraryAndKey: (libraryID: number, key: string) =>
+        libraryID === 1 && key === "PAPER005"
+          ? {
+              id: 5,
+              key: "PAPER005",
+              libraryID: 1,
+              isNote: () => false,
+              getField: (field: string) => (field === "title" ? "Drift A" : ""),
+            }
+          : false,
+    };
+    await initPlanDocumentStore();
+    restore = () => {
+      zotero.Items = originalItems;
+      zotero.Libraries = originalLibraries;
+      clearAgentToolResultHandleStore();
+      restoreDocuments();
+      restoreDb();
+    };
+  });
+
+  afterEach(function () {
+    restore();
+  });
+
+  it("lets a literature review cite a paper the host digested and the model never read", async function () {
+    const harness = createHarness(
+      scriptedDigests(async () => reply("Cells drift slowly.")),
+      [5],
+      (registry) =>
+        registry.register(
+          createSubmitDocumentTool({
+            formatStructuredCitations: (params: {
+              clusters: Array<{ citationId: string }>;
+            }) => ({
+              styleId: "apa",
+              styleTitle: "APA",
+              locale: "en-US",
+              clusters: params.clusters.map((cluster) => ({
+                citationId: cluster.citationId,
+                text: "(Ziv, 2021)",
+                html: "(Ziv, 2021)",
+              })),
+              bibliographyEntries: [
+                { itemId: 5, text: "Ziv. (2021). Drift A.", html: "Ziv." },
+              ],
+            }),
+          } as unknown as ZoteroGateway),
+        ),
+    );
+    const digested = await runCall(harness, "call-digest", {
+      tasks: [SUMMARIZE],
+    });
+    const answer = digested.toolResult.content as Record<string, any>;
+    const [entry] = answer.digestHandles as Array<{
+      itemId: number;
+      evidenceRefs: string[];
+    }>;
+    assert.equal(entry.itemId, 5);
+    assert.lengthOf(entry.evidenceRefs, 1);
+    const ref = entry.evidenceRefs[0];
+    assert.match(ref, /^[0-9a-f]{12}:\d+$/);
+    // The model reads the ref and the paper's key beside the summary.
+    assert.include(answer.digests, ref);
+    assert.include(answer.digests, "PAPER005");
+    assert.deepEqual(
+      (answer.documentEvidenceRefs as Array<Record<string, unknown>>).map(
+        (row) => [row.evidenceRef, row.libraryID, row.itemKey],
+      ),
+      [[ref, 1, "PAPER005"]],
+    );
+
+    const execution = createToolExecution(harness.deps);
+    const submitted = await execution.executeToolWorkflow(
+      {
+        id: "call-submit",
+        name: "submit_document",
+        arguments: {
+          documentKind: "literature_review",
+          integrityPolicy: "research_grounded",
+          title: "Representational drift",
+          markdown:
+            "# Representational drift\n\nCells drift slowly. [[cite:C1]]\n\n## Scope and limitations\n\nOne paper.",
+          citations: [
+            {
+              citationId: "C1",
+              sources: [
+                { libraryID: 1, itemKey: "PAPER005", evidenceRefs: [ref] },
+              ],
+            },
+          ],
+          quotes: [],
+          assets: [],
+          groundingReviewed: "passed",
+          groundingIssues: [],
+        },
+      },
+      2,
+      { modelCallId: "call-submit" },
+    );
+    const errors = harness.events.filter(
+      (event) => event.type === "tool_error",
+    );
+    assert.isEmpty(errors, JSON.stringify(errors));
+    assert.isTrue(
+      submitted.toolResult.ok,
+      JSON.stringify(submitted.toolResult.content),
+    );
   });
 });

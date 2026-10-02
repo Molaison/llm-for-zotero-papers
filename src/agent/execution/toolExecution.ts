@@ -7,6 +7,7 @@ import type {
   buildAgentResourceContextPlan,
 } from "../context/resourceContextPlan";
 import type { MaterialRef } from "../documents/materialRef";
+import type { TrustedReadObservation } from "../context/readObservationTypes";
 import {
   buildArtifactFollowupMessage,
   filterFollowupMessageForCapabilities,
@@ -405,6 +406,23 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
     return record.handle;
   };
 
+  /** Adds observations to the turn's citable reads, one per id. */
+  const mergeReadObservations = (
+    observations: readonly TrustedReadObservation[],
+  ): void => {
+    if (!observations.length) return;
+    const merged = new Map(
+      (deps.request.documentReadObservations || []).map((entry) => [
+        entry.observationId,
+        entry,
+      ]),
+    );
+    for (const observation of observations) {
+      merged.set(observation.observationId, observation);
+    }
+    deps.request.documentReadObservations = [...merged.values()];
+  };
+
   /**
    * Stores records a tool made itself (a host digest per paper) under trh_
    * handles that context_read pages, kept for the turn's own recovery like
@@ -730,6 +748,7 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
           publishPaperLedgerDelta: (delta) =>
             deps.emit(buildPaperLedgerUpdateEvent(delta)),
           persistToolResultHandles: storeToolHandles,
+          recordReadObservations: mergeReadObservations,
           requestActionReview: async (action) =>
             (await deps.requestActionResolution(action)).resolution,
           resolvePreparedAction: (prepared) =>
@@ -827,16 +846,7 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
         (observation) => observation.observationId,
       );
       if (observations.length) {
-        const merged = new Map(
-          (deps.request.documentReadObservations || []).map((entry) => [
-            entry.observationId,
-            entry,
-          ]),
-        );
-        for (const observation of observations) {
-          merged.set(observation.observationId, observation);
-        }
-        deps.request.documentReadObservations = [...merged.values()];
+        mergeReadObservations(observations);
         // The model cites the short ref; the document finalizer expands it.
         executedCall.documentEvidenceRefs = observations.map((observation) => ({
           evidenceRef: shortEvidenceRef(observation.observationId),

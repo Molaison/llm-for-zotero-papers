@@ -1359,6 +1359,14 @@ export type AgentToolContext = {
   persistToolResultHandles?: (
     records: import("./store/toolResultHandles").AgentToolResultHandleRecord[],
   ) => Promise<void>;
+  /**
+   * Register read observations the host issued while the tool ran (a host
+   * digest per paper), so a submitted document may cite them as a read
+   * tool's observations.
+   */
+  recordReadObservations?: (
+    observations: readonly import("./context/readObservationTypes").TrustedReadObservation[],
+  ) => void;
 };
 
 export type AgentToolInputValidation<T> =

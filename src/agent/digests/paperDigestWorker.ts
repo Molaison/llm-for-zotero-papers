@@ -374,16 +374,36 @@ export function digestCacheKey(params: {
   )}:${params.model}`;
 }
 
+/**
+ * The citation source a digested paper may be cited by: the paper's key and
+ * the evidence refs the host issued for its digest.
+ */
+export type HostPaperDigestCitationSource = {
+  libraryID: number;
+  itemKey: string;
+  evidenceRefs: readonly string[];
+};
+
 export function renderHostPaperDigests(
   digests: readonly HostPaperDigest[],
   failures: readonly PaperDigestFailure[],
   titleOf?: (itemId: number) => string | undefined,
+  sourceOf?: (itemId: number) => HostPaperDigestCitationSource | undefined,
 ): string {
   const label = (itemId: number, title?: string) =>
     normalizeWhitespace(title || titleOf?.(itemId) || "") || `Item ${itemId}`;
   const blocks = digests.map((digest) => {
+    const source = sourceOf?.(digest.itemId);
     const lines = [
-      `### ${label(digest.itemId, digest.title)} (item:${digest.itemId})`,
+      `### ${label(digest.itemId, digest.title)} (item:${digest.itemId})${
+        source
+          ? ` — cite source ${JSON.stringify({
+              libraryID: source.libraryID,
+              itemKey: source.itemKey,
+              evidenceRefs: source.evidenceRefs,
+            })}`
+          : ""
+      }`,
       `Summary: ${digest.summary}`,
     ];
     if (digest.contributions.length) {
