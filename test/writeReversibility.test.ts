@@ -1,5 +1,4 @@
 import { ActionContractService } from "../src/agent/contracts/actionContract";
-import { actionFixture, actionContractFixture } from "./helpers/semanticIntent";
 import { assert } from "chai";
 import { normalizeOriginalAgentPermissionMode } from "../src/shared/originalAgentPermissionMode";
 import { setOriginalAgentPermissionMode } from "../src/agent/originalAgentPermissionMode";
@@ -19,10 +18,19 @@ describe("invocation-plan confirmation policy", function () {
   const context = {
     request: {
       conversationKey: 1,
-      actionContract: actionContractFixture("settings_update"),
-      classifiedIntent: actionFixture("settings_update"),
       libraryID: 1,
       userText: "update the requested setting and write the result",
+      // An ordinary agent turn: the in-plugin agent owns permission.
+      executionContext: {
+        version: 1,
+        executionId: "reversibility-run",
+        conversationKey: 1,
+        conversationGeneration: 0,
+        chatLibraryID: 1,
+        permissionOwner: "original_agent",
+        workspaceSnapshot: { selectedPapers: [], selectedCollections: [] },
+        configuredAccess: { libraryIDs: [1], outputDirectories: [] },
+      },
     },
     item: null,
     currentAnswerText: "",

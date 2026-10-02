@@ -7,7 +7,6 @@ import {
 } from "../src/agent/store/transcriptStore";
 import type { AgentModelMessage, AgentModelStep } from "../src/agent/types";
 import { installMockDb } from "./helpers/agentRuntimeMockDb";
-import { classifiedFixture } from "./helpers/semanticIntent";
 
 describe("conversation content retention", function () {
   beforeEach(function () {
@@ -48,7 +47,6 @@ describe("conversation content retention", function () {
             model,
             userText,
             libraryID: 1,
-            classifiedIntent: classifiedFixture(),
           },
         });
       try {

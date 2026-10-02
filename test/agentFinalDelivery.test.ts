@@ -6,7 +6,6 @@ import {
   readAgentConversationAnswer,
 } from "../src/agent/store/transcriptStore";
 import { installMockDb } from "./helpers/agentRuntimeMockDb";
-import { classifiedFixture } from "./helpers/semanticIntent";
 
 describe("agent final outcome delivery", function () {
   it("stores the final answer and completed run before invoking a fallible UI observer", async function () {
@@ -44,7 +43,6 @@ describe("agent final outcome delivery", function () {
             libraryID: 1,
             model: "gpt-5.4",
             userText: "Explain the topic.",
-            classifiedIntent: classifiedFixture(),
           },
           onStart: (id) => {
             runId = id;

@@ -30,6 +30,8 @@ import type {
   ActionRiskSignal,
 } from "./authorization/types";
 import type { MaterialRef } from "./documents/materialRef";
+import type { TaskPaperLedgerDelta } from "./context/taskPaperLedger";
+import type { TaskPaperScopeSet } from "./context/taskPaperScopeListing";
 import type {
   ResolvedTurnSelectedTextAnchor,
   ResolvedTurnSelectedTextContext,
@@ -38,61 +40,29 @@ import type {
   TurnPaperScopeWarning,
 } from "./context/turnPaperScope";
 import type {
-  AgentActionContract,
   AgentActionEvidence,
-  AgentActionIntent,
   AgentActionOperation,
-  AgentActionProgressLedger,
   AgentActionReceipt,
   AgentToolActionDescriptor,
 } from "./contracts/types";
 import type { AgentActionVerification } from "./contracts/actionVerificationLabels";
-import type {
-  PlanEvent,
-  PlanEffectSpecification,
-  PlanRuntimeContext,
-  TrustedReadObservation,
-} from "./plans/types";
-import type { ResolvedPlanMaterialBinding } from "./plans/effectAuthorization";
+import type { TrustedReadObservation } from "./context/readObservationTypes";
 import type { SkillRoutingReceipt } from "./skills/routingTypes";
 import type { LoadedSkillRecord } from "./skills/loadingTypes";
 import type {
   ExecutionCheckpoint,
-  ExecutionEvidenceInventory,
+  ExecutionCheckpointDelta,
   MaterialOutcomeEntry,
 } from "./execution/types";
 
 export type {
-  ApprovedPlanGrant,
-  ExecutionTask,
-  ExecutionTaskKind,
-  ExecutionTaskStatus,
-  PlanArtifact,
-  PlanArtifactStatus,
-  PlanEvent,
-  PlanExecutionLedger,
-  PlanExecutionStatus,
-  PlanProvider,
-  PlanRuntimeContext,
-  PlanStep,
-  PlanStepEffect,
-  TaskEvidence,
-  TaskEvidenceKind,
-  TaskTransitionRequest,
-} from "./plans/types";
-
-export type {
   AgentActionCapability,
-  AgentActionContract,
   AgentActionEvidence,
   AgentExternalMutationEvidence,
   AgentLibraryMutationEvidence,
   AgentPostImageState,
-  AgentActionIntent,
-  AgentActionObligation,
   AgentActionOperation,
   AgentActionParameters,
-  AgentActionProgressLedger,
   AgentActionProofDomain,
   AgentActionProposal,
   AgentActionReceipt,
@@ -101,9 +71,9 @@ export type {
 
 export type {
   ExecutionCheckpoint,
+  ExecutionCheckpointDelta,
   ExecutionCheckpointTask,
-  ExecutionCheckpointTaskUpdate,
-  ExecutionEvidenceInventory,
+  ExecutionTaskStatus,
   MaterialOutcomeEntry,
   MaterialOutcomeLedger,
   MaterialOutcomeStatus,
@@ -438,12 +408,6 @@ type ToolSpecBase = {
    */
   exposure?: "model" | "internal";
   /**
-   * Advanced tools remain model-visible when exposure is "model", but get
-   * stricter policy/trace treatment because they can touch local files,
-   * shell commands, or direct Zotero scripts.
-   */
-  tier?: "normal" | "advanced";
-  /**
    * Advertise the tool only to the in-plugin Agent runtime. External bridges,
    * MCP, and public tool catalogs must not expose it.
    */
@@ -472,10 +436,14 @@ export type ToolSpec = ToolSpecBase &
   );
 
 export type AgentEvent =
-  | PlanEvent
   | {
       type: "execution_checkpoint";
       checkpoint: ExecutionCheckpoint;
+    }
+  | {
+      /** A change to the run's ledger since its previous ledger event. */
+      type: "execution_checkpoint_delta";
+      delta: ExecutionCheckpointDelta;
     }
   | {
       type: "provider_event";
@@ -502,8 +470,6 @@ export type AgentEvent =
       /** The tool's own presentation label, resolved when the call was made. */
       toolLabel?: string;
       workCategory?: AgentWorkCategory;
-      executionId?: string;
-      taskId?: string;
     }
   | {
       type: "tool_result";
@@ -518,8 +484,6 @@ export type AgentEvent =
       actionReceipts: AgentActionReceipt[];
       content: unknown;
       artifacts?: AgentToolArtifact[];
-      executionId?: string;
-      taskId?: string;
     }
   | {
       type: "tool_error";
@@ -551,6 +515,13 @@ export type AgentEvent =
       text: string;
       status?: "running" | "completed";
       kind?: "assistant_message";
+      /**
+       * Codex's own checklist (see `taskProgress/codexPlan.ts`), on the one
+       * event with the item id
+       * `codex-plan-checklist`: shown in the Task progress Steps block, never
+       * as a trace row.
+       */
+      steps?: Array<{ content: string; status?: string }>;
     }
   | {
       type: "codex_tool_activity";
@@ -627,6 +598,21 @@ export type AgentEvent =
        * undifferentiated stage instead of several invented ones.
        */
       undifferentiated?: boolean;
+    }
+  | {
+      /**
+       * What one successful read tool call read from each paper, for the
+       * Task progress view.
+       *
+       * Host-emitted immediately after the call's `tool_result`, by the one
+       * recorder that sits beside read attestation, and persisted and
+       * redacted like every other run event, so a conversation's ledger can
+       * be rebuilt from its trace. A connected runtime (Codex, Claude Code)
+       * gets the same event from the MCP activity's `paperLedgerDelta`.
+       */
+      type: "paper_ledger_update";
+      callId?: string;
+      delta: TaskPaperLedgerDelta;
     }
   | {
       type: "material_finalized";
@@ -860,27 +846,6 @@ export type ExhaustiveReadBackend =
   | "unavailable";
 
 /**
- * Legacy classifier-era intent retained for deterministic decoding of stored
- * Plans and checkpoints. Fresh ordinary turns leave this absent.
- */
-export type ClassifiedTurnIntent = {
-  retrievalIntent: "enumerate" | "verify" | "summarize" | "none";
-  deliverableIntent?: "chat" | "document" | "unspecified";
-  documentKind?: import("./documents/types").DocumentSpec["kind"];
-  paperTargetIntent?: "active" | "added" | "all_visible" | "unspecified";
-  externalSearchIntent?: "none" | "web" | "literature" | "both";
-  wantedSections: Array<"methods" | "results" | "limitations">;
-  queryLanguage?: string;
-  writeDisposition?: "none" | "required" | "uncertain";
-  actionInterpretationSource?:
-    | "semantic"
-    | "classifier"
-    | "deterministic_fallback";
-  semantic?: import("./model/semanticDecisions").SemanticIntent;
-  actionIntents: AgentActionIntent[];
-};
-
-/**
  * Host-created facts for one main-agent execution.
  *
  * This deliberately contains no predicted operations or model-authored
@@ -893,7 +858,7 @@ export type AgentExecutionContext = Readonly<{
   conversationKey: number;
   conversationGeneration: number;
   chatLibraryID?: number;
-  permissionOwner: "original_agent" | "approved_plan" | "external_runtime";
+  permissionOwner: "original_agent" | "external_runtime";
   workspaceSnapshot: Readonly<{
     activePaper?: Readonly<{
       libraryID: number;
@@ -935,11 +900,6 @@ export type AgentExecutionContext = Readonly<{
     /** Explicit host-process execution capability, independent of file roots. */
     hostCommandExecution?: boolean;
   }>;
-  approvedPlanBinding?: Readonly<{
-    planId: string;
-    revision: number;
-    approvedDigest: string;
-  }>;
 }>;
 
 export type AgentRuntimeRequestInput = AgentRequest & {
@@ -960,23 +920,16 @@ export type AgentRuntimeRequestInput = AgentRequest & {
   materialOutcomes?: readonly MaterialOutcomeEntry[];
   /** Exact skill instructions loaded or forced by the host for this workflow. */
   loadedSkillRecords?: LoadedSkillRecord[];
-  /** Legacy stored-artifact compatibility; absent on fresh ordinary turns. */
-  classifiedIntent?: ClassifiedTurnIntent;
-  /** Legacy or approved-Plan obligations; absent on fresh ordinary turns. */
-  actionContract?: AgentActionContract;
-  /** Mutable completion state kept separate from the immutable contract. */
-  actionProgress?: AgentActionProgressLedger;
-  actionPreparation?: import("./contracts/actionPreparation").ActionPreparation;
+  /** Cheap chat-path keyword signal for tool-guidance matching only; never grants authority. */
+  userTextSignals?: {
+    mentionsDuplicates: boolean;
+    mentionsTrash: boolean;
+    mentionsAttachment: boolean;
+    mentionsImport: boolean;
+  };
   clarificationHistory?: Array<{ question: string; answer: string }>;
-
-  /** One-shot Plan collaboration state owned by the durable plan store. */
-  /** Host-loaded prior workflow evidence; never inferred from conversation prose. */
-  workflowCheckpoint?: import("./contracts/workflowCheckpoint").ActionContractCheckpoint;
-  planContext?: PlanRuntimeContext;
   /** Validated per-turn skill routing identity; never provider-authored authority. */
   skillRoutingReceipt?: SkillRoutingReceipt;
-  /** Host-resolved visible outcome contract for this Agent turn. */
-  documentOutcomePolicy?: import("./documents/types").DocumentOutcomePolicy;
   /** Host-issued read attestations available to a direct document finalizer. */
   documentReadObservations?: readonly TrustedReadObservation[];
   /** Host-observed tool artifacts eligible for direct document embedding. */
@@ -985,6 +938,8 @@ export type AgentRuntimeRequestInput = AgentRequest & {
   runtimeContextBudget?: Readonly<{
     contextWindowTokens: number;
     usedContextTokens: number;
+    /** While a long job's page is open: each page paper's share of it. */
+    maxTokensPerPaper?: number;
   }>;
   item?: Zotero.Item | null;
   history?: ChatMessage[];
@@ -1029,6 +984,17 @@ export type ResolvedAgentRuntimeRequest = Omit<
   resolvedSelectedTextAnchors?: readonly ResolvedTurnSelectedTextAnchor[];
   localDocuments?: readonly TurnLocalDocument[];
   turnPaperScopeWarnings?: readonly TurnPaperScopeWarning[];
+  /**
+   * Every paper the turn's scope covers, resolved by the host at turn start:
+   * the turn context states it, and a part declared over the scope freezes
+   * these papers. Runtime-set only.
+   */
+  turnScopePapers?: TaskPaperScopeSet;
+  /**
+   * Tool guidance instructions the model has already received this turn: the
+   * rendered prompt's guidance plus any load_skill returned. Runtime-set only.
+   */
+  deliveredToolGuidance?: string[];
 };
 
 /** Canonical request consumed after the one-way runtime boundary. */
@@ -1128,17 +1094,6 @@ export type AgentToolArtifact =
  */
 export type AgentToolEffect = "applied" | "partial" | "none";
 
-/**
- * A tool can request a clean provider continuation after it has durably
- * reduced large transient inputs into compact application-owned state.
- * The instruction must contain everything needed to continue without replaying
- * the discarded raw payload.
- */
-export type AgentToolContinuationCheckpoint = Readonly<{
-  reason: string;
-  instruction: string;
-}>;
-
 export type AgentToolResult = {
   callId: string;
   name: string;
@@ -1151,7 +1106,6 @@ export type AgentToolResult = {
   actionReceipts: AgentActionReceipt[];
   content: unknown;
   artifacts?: AgentToolArtifact[];
-  continuationCheckpoint?: AgentToolContinuationCheckpoint;
   /**
    * Durable material this call finalized. The host announces it as a run
    * event, so later turns recover it without re-reading tool payloads.
@@ -1165,8 +1119,6 @@ export type AgentToolResult = {
    * into a single turn-level `materialRef`.
    */
   batchItems?: AgentBatchItemOutcome[];
-  /** The research job this call advanced, as the tool's result declared it. */
-  researchJobId?: string;
 };
 
 /**
@@ -1241,19 +1193,10 @@ export type AgentToolExecutionOutput<TResult = unknown> =
       artifacts?: AgentToolArtifact[];
       effect?: AgentToolEffect;
       actionEvidence?: AgentActionEvidence[];
-      continuationCheckpoint?: AgentToolContinuationCheckpoint;
       materialRef?: MaterialRef;
       materialKind?: string;
       materialTitle?: string;
       batchItems?: AgentBatchItemOutcome[];
-      /**
-       * The research job this call advanced.
-       *
-       * A research tool's own answer to "which investigation moved", so a
-       * bridge that wants to show the reader its progress reads a fact the
-       * result stated instead of recognising the tool by name.
-       */
-      researchJobId?: string;
     };
 
 /** Explicit execution contract for tools whose validated operation can write. */
@@ -1290,6 +1233,12 @@ export type AgentToolContext = {
   readCurrentTurnActions?: () => import("./authorization/types").ActionReviewInput["currentTurnActions"];
   /** Announce instructions loaded during the current run through its durable trace. */
   publishSkillActivation?: (id: string) => Promise<void>;
+  /**
+   * Whether a tool is offered to the calling client. MCP sets it from the
+   * active profile so load_skill never returns guidance for a hidden tool;
+   * absent means every tool offered on the request.
+   */
+  isToolVisible?: (spec: ToolSpec) => boolean;
   /** Host-injected Auto reviewer, shared by normal and nested operation assessment. */
   reviewAction?: import("./authorization/types").ActionReviewer;
   /** Host-owned authority; never decoded from model or MCP tool arguments. */
@@ -1327,8 +1276,7 @@ export type AgentToolContext = {
     | "external_runtime"
     | "auto_policy"
     | "yolo"
-    | "yolo_judgment"
-    | "plan_approval";
+    | "yolo_judgment";
   signal?: AbortSignal;
   /**
    * Internal consent witness used only when journal initialization failed.
@@ -1368,26 +1316,14 @@ export type AgentToolContext = {
     name: string,
     args: unknown,
   ) => Promise<AgentToolResult>;
-  /** Persist the current contract ledger at a durable composite checkpoint. */
-  checkpointActionProgress?: () => Promise<void>;
-  /** Publish a normalized, durable plan/task projection event. */
-  publishPlanEvent?: (event: PlanEvent) => Promise<void>;
-  /** Persist one complete ordinary-work checkpoint through the run trace. */
-  publishExecutionCheckpoint?: (
-    checkpoint: ExecutionCheckpoint,
-  ) => Promise<void>;
-  /** Resolve host-known evidence that ordinary task progress may reference. */
-  loadExecutionEvidence?: () => Promise<ExecutionEvidenceInventory>;
-  /** Host-owned v5 Plan scope resolved from the approved artifact and ledger. */
-  loadApprovedPlanEffectContext?: () => Promise<
-    | Readonly<{
-        specification: PlanEffectSpecification;
-        activeEffectIds: readonly string[];
-        resolvedMaterials: readonly ResolvedPlanMaterialBinding[];
-        resolvedTargetBindings: Readonly<Record<string, readonly string[]>>;
-      }>
-    | undefined
-  >;
+  /**
+   * Apply one change to the turn's ordinary-work checkpoint through the
+   * runtime, its only writer, which publishes it when it changed. Resolves to
+   * the checkpoint after the change.
+   */
+  updateExecutionCheckpoint?: (
+    apply: (checkpoint: ExecutionCheckpoint) => ExecutionCheckpoint,
+  ) => Promise<ExecutionCheckpoint>;
 };
 
 export type AgentToolInputValidation<T> =
@@ -1656,6 +1592,17 @@ export type AgentInvocationPlan = {
   reason: string;
 };
 
+/**
+ * What the model reads of a successful result when the whole is more than
+ * the question needs. `stored` (the whole result when absent) must list the
+ * rows `content` shows first in each row array it shares with it, so paging
+ * a row path from offset = rows shown reads exactly what was left out.
+ */
+export type AgentToolModelView = {
+  content: Record<string, unknown>;
+  stored?: Record<string, unknown>;
+};
+
 export type AgentToolDefinition<TInput = unknown, TResult = unknown> = {
   spec: ToolSpec;
   isAvailable?: (request: AgentRuntimeRequest) => boolean;
@@ -1712,6 +1659,20 @@ export type AgentToolDefinition<TInput = unknown, TResult = unknown> = {
     result: AgentToolResult,
     context: AgentToolContext,
   ) => Promise<AgentModelMessage | null>;
+  /**
+   * The view of a successful result the model reads. The UI, the paper
+   * ledger and citations keep the whole result. The host stores the view's
+   * `stored` result, with every evidence ref, under a trh_ handle that
+   * context_read pages, and sends `content` with the handle and the evidence
+   * refs of the rows it keeps; `omitted.documentEvidenceRefs` counts the
+   * rest. With no handle to hold the rest, the whole result is sent. Null
+   * sends the whole result.
+   */
+  buildModelView?: (
+    input: TInput,
+    result: TResult,
+    context: AgentToolContext,
+  ) => AgentToolModelView | null;
   /**
    * Allows a host-owned terminal artifact to become the application-visible
    * answer without fabricating a provider assistant message. The exact
@@ -1779,8 +1740,6 @@ export type PreparedToolExecutionResult = {
 };
 
 export type PreparedToolExecutionOptions = {
-  /** The host checkpoints each subset; the frozen contract still requires full final coverage. */
-  checkpointedWorkflow?: boolean;
   inheritedApproval?: AgentInheritedApproval;
   forceConfirmation?: boolean;
   /**

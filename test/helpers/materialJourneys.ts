@@ -1,11 +1,10 @@
 import { assert } from "chai";
 import { AgentRuntime } from "../../src/agent/runtime";
 import { AgentToolRegistry } from "../../src/agent/tools/registry";
-import { createRenamedTool } from "../../src/agent/tools/facade";
-import { createSubmitDocumentTool } from "../../src/agent/tools/plan/submitPlanDocument";
-import { createEditCurrentNoteTool } from "../../src/agent/tools/write/editCurrentNote";
-import { createWriteNotesBatchTool } from "../../src/agent/tools/write/writeNotesBatch";
-import { createUndoLastActionTool } from "../../src/agent/tools/write/undoLastAction";
+import { createSubmitDocumentTool } from "../../src/agent/tools/control/submitDocument";
+import { createNoteWriteTool } from "../../src/agent/tools/write/noteWrite";
+import { createNoteWriteBatchTool } from "../../src/agent/tools/write/noteWriteBatch";
+import { createUndoTool } from "../../src/agent/tools/write/undo";
 import { initPlanDocumentStore } from "../../src/agent/documents/store";
 import { clearAgentTranscriptStore } from "../../src/agent/store/transcriptStore";
 import { initAgentChangeJournal } from "../../src/agent/store/changeJournal";
@@ -182,7 +181,13 @@ export async function runJourneyTurn(params: {
   conversationKey: number;
   userText: string;
   sourceMessageTimestamp: number;
-  steps: AgentModelStep[];
+  /**
+   * A step may be computed from the messages the model was given, for a script
+   * that names an identity the host minted earlier in the same turn.
+   */
+  steps: Array<
+    AgentModelStep | ((messages: AgentModelMessage[]) => AgentModelStep)
+  >;
   approve?: boolean;
 }): Promise<JourneyTurn> {
   const events: AgentEvent[] = [];
@@ -207,7 +212,7 @@ export async function runJourneyTurn(params: {
           throw new Error(
             `The journey script ends at ${params.steps.length} steps; the model was asked to generate a step ${index}.`,
           );
-        return step;
+        return typeof step === "function" ? step(stepParams.messages) : step;
       },
     }),
   });
@@ -309,7 +314,7 @@ export function installDirectJourneyLibrary(): DirectJourneyLibrary {
   };
 }
 
-function createDirectJourneyRegistry(): AgentToolRegistry {
+export function createDirectJourneyRegistry(): AgentToolRegistry {
   const noteGateway = {
     getItem: (itemId: number) => (globalThis.Zotero as any).Items.get(itemId),
     getCollectionSummary: () => null,
@@ -320,15 +325,7 @@ function createDirectJourneyRegistry(): AgentToolRegistry {
     ),
   );
   registry.register(createSubmitDocumentTool(submitDocumentGateway));
-  registry.register(
-    createRenamedTool({
-      tool: createEditCurrentNoteTool(noteGateway),
-      name: "note_write",
-      label: "Write Note",
-      description:
-        "Create, append to, or edit one Zotero note and verify native post-state.",
-    }),
-  );
+  registry.register(createNoteWriteTool(noteGateway));
   return registry;
 }
 
@@ -591,7 +588,7 @@ function batchJourneyGateway(library: BatchJourneyLibrary): ZoteroGateway {
   } as unknown as ZoteroGateway;
 }
 
-function createBatchJourneyRegistry(
+export function createBatchJourneyRegistry(
   library: BatchJourneyLibrary,
 ): AgentToolRegistry {
   const gateway = batchJourneyGateway(library);
@@ -600,16 +597,8 @@ function createBatchJourneyRegistry(
       (itemId) => (globalThis.Zotero as any).Items.get(itemId) || null,
     ),
   );
-  registry.register(
-    createRenamedTool({
-      tool: createWriteNotesBatchTool(gateway),
-      name: "note_write_batch",
-      label: "Write Notes",
-      description:
-        "Write a note onto each of many items in one checkpointed batch operation.",
-    }),
-  );
-  registry.register(createUndoLastActionTool(gateway));
+  registry.register(createNoteWriteBatchTool(gateway));
+  registry.register(createUndoTool(gateway));
   return registry;
 }
 
@@ -681,7 +670,7 @@ export function beginBatchMaterialJourney(
     },
     async undoThem() {
       return runTurn("Undo that", [
-        toolCallStep("undo-1", "undo_last_action", {}),
+        toolCallStep("undo-1", "undo", {}),
         finalStep("I removed all three notes."),
       ]);
     },

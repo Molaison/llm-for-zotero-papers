@@ -1,19 +1,19 @@
 import { assert } from "chai";
+import { createPaperReadTool } from "../src/agent/tools/read/paperRead";
 import {
   buildAgentInitialMessages,
   buildAgentPromptInstructionInventory,
   composeAgentModelInput,
   renderAgentPromptEnvelope,
 } from "../src/agent/model/messageBuilder";
-import type { PlanExecutionLedger } from "../src/agent/plans/types";
-import { COVERAGE_DISCLOSURE_REQUIREMENT } from "../src/agent/documents/draftValidation";
+import { buildZoteroEnvironmentManifest } from "../src/codexAppServer/nativeClient";
+import { AGENT_ACTION_CONTRACT } from "../src/shared/instructionContracts";
 import type { AgentModelMessage } from "../src/agent/types";
 import { resolvedAgentRequest } from "./helpers/resolvedAgentRequest";
 import {
   clearAgentMemory,
   recordAgentTurn,
 } from "../src/agent/store/conversationMemory";
-import { classifiedFixture, semanticFixture } from "./helpers/semanticIntent";
 
 function messageText(message: AgentModelMessage): string {
   if (typeof message.content === "string") return message.content;
@@ -281,318 +281,6 @@ describe("agent prompt envelope", function () {
       );
     });
   });
-
-  it("tells the model that host-verifiable research and document tasks advance without task_update", async function () {
-    const ledger: PlanExecutionLedger = {
-      version: 1,
-      executionId: "execution-host-owned",
-      planId: "plan-host-owned",
-      revision: 1,
-      planDigest: "sha256:host-owned",
-      conversationKey: 705,
-      attempt: 1,
-      provider: "original",
-      grant: {
-        version: 1,
-        planId: "plan-host-owned",
-        revision: 1,
-        planDigest: "sha256:host-owned",
-        conversationKey: 705,
-        conversationGeneration: 1,
-        approvedAt: 1,
-      },
-      status: "running",
-      activeTaskId: "read",
-      tasks: [
-        {
-          version: 2,
-          taskId: "read",
-          executionId: "execution-host-owned",
-          planStepId: "s1",
-          kind: "required_step",
-          content: "Read every paper",
-          activeForm: "Reading every paper",
-          acceptanceCriteria: [],
-          expectedEffect: "read",
-          completionRequirements: [
-            {
-              requirementId: "read:verified",
-              kind: "verified_read",
-              criterionIds: [],
-              contractDigest: "sha256:host-owned",
-            },
-          ],
-          obligationIds: [],
-          status: "in_progress",
-          attemptCount: 1,
-          evidenceIds: [],
-          failureReasons: [],
-          createdAt: 1,
-          updatedAt: 1,
-        },
-        {
-          version: 2,
-          taskId: "document",
-          executionId: "execution-host-owned",
-          planStepId: "s2",
-          kind: "required_step",
-          content: "Publish the review",
-          activeForm: "Publishing the review",
-          acceptanceCriteria: [],
-          expectedEffect: "artifact",
-          completionRequirements: [
-            {
-              requirementId: "document:integrity",
-              kind: "document_integrity",
-              criterionIds: [],
-              contractDigest: "sha256:host-owned",
-            },
-            {
-              requirementId: "document:published",
-              kind: "document_published",
-              criterionIds: [],
-              contractDigest: "sha256:host-owned",
-            },
-          ],
-          obligationIds: [],
-          status: "pending",
-          attemptCount: 0,
-          evidenceIds: [],
-          failureReasons: [],
-          createdAt: 1,
-          updatedAt: 1,
-        },
-      ],
-      createdAt: 1,
-      updatedAt: 1,
-    };
-    const request = resolvedAgentRequest({
-      conversationKey: 705,
-      mode: "agent",
-      userText: "Execute the approved review",
-      model: "test-model",
-      planContext: {
-        phase: "executing",
-        planId: ledger.planId,
-        revision: ledger.revision,
-        executionId: ledger.executionId,
-        approvedDigest: ledger.planDigest,
-        provider: "original",
-      },
-      metadata: { planExecutionLedger: ledger },
-    });
-
-    const messages = await buildAgentInitialMessages(request, [], []);
-    const prompt = messages.map(messageText).join("\n");
-    assert.include(prompt, "Do not call task_update for these tasks");
-    assert.include(
-      prompt,
-      "verified reads, mutation receipts, and finalized material",
-    );
-    assert.notInclude(
-      prompt,
-      "After evidence exists, call task_update with only the task",
-    );
-  });
-
-  it("keeps host-owned execution identities out of the final answer", async function () {
-    const ledger: PlanExecutionLedger = {
-      version: 1,
-      executionId: "execution-secret",
-      planId: "plan-secret",
-      revision: 1,
-      planDigest: "sha256:secret",
-      conversationKey: 703,
-      attempt: 1,
-      provider: "original",
-      grant: {
-        version: 1,
-        planId: "plan-secret",
-        revision: 1,
-        planDigest: "sha256:secret",
-        conversationKey: 703,
-        conversationGeneration: 1,
-        approvedAt: 1,
-      },
-      status: "running",
-      tasks: [],
-      createdAt: 1,
-      updatedAt: 1,
-    };
-    const request = resolvedAgentRequest({
-      conversationKey: 703,
-      mode: "agent",
-      userText: "Execute the approved plan",
-      model: "test-model",
-      planContext: {
-        phase: "executing",
-        planId: ledger.planId,
-        revision: ledger.revision,
-        executionId: ledger.executionId,
-        approvedDigest: ledger.planDigest,
-        provider: "original",
-      },
-      metadata: { planExecutionLedger: ledger },
-    });
-
-    const messages = await buildAgentInitialMessages(request, [], []);
-    const prompt = messages.map(messageText).join("\n");
-    assert.include(
-      prompt,
-      "Your final answer should answer the original request naturally",
-    );
-    assert.include(prompt, "Do not expose plan IDs");
-    assert.include(prompt, "the host renders progress separately");
-  });
-
-  it("exposes the exact approved document contract during execution", async function () {
-    const ledger: PlanExecutionLedger = {
-      version: 1,
-      executionId: "execution-document",
-      planId: "plan-document",
-      revision: 1,
-      planDigest: "sha256:document",
-      conversationKey: 704,
-      attempt: 1,
-      provider: "original",
-      grant: {
-        version: 1,
-        planId: "plan-document",
-        revision: 1,
-        planDigest: "sha256:document",
-        conversationKey: 704,
-        conversationGeneration: 1,
-        approvedAt: 1,
-      },
-      status: "running",
-      tasks: [],
-      createdAt: 1,
-      updatedAt: 1,
-    };
-    const request = resolvedAgentRequest({
-      conversationKey: 704,
-      mode: "agent",
-      userText: "Execute the approved plan",
-      model: "test-model",
-      planContext: {
-        phase: "executing",
-        planId: ledger.planId,
-        revision: ledger.revision,
-        executionId: ledger.executionId,
-        approvedDigest: ledger.planDigest,
-        provider: "original",
-      },
-      metadata: {
-        planExecutionLedger: ledger,
-        approvedPlanContract: {
-          deliverable: {
-            kind: "document",
-            spec: {
-              kind: "literature_review",
-              title: "Exact approved review title",
-              requiredSections: ["Findings", "Scope and limitations"],
-              requiresReferences: true,
-              requiresCoverageSection: true,
-              allowFigures: false,
-              citationStyle: {
-                styleId: "apa",
-                styleTitle: "APA",
-                locale: "en-US",
-              },
-            },
-          },
-        },
-      },
-    });
-    const messages = await buildAgentInitialMessages(request, [], []);
-    const prompt = messages.map(messageText).join("\n");
-    assert.include(prompt, "Exact title: Exact approved review title");
-    assert.include(
-      prompt,
-      "Required sections: Findings; Scope and limitations",
-    );
-    assert.include(prompt, "submit_document.title must match");
-    assert.include(prompt, COVERAGE_DISCLOSURE_REQUIREMENT);
-    assert.notInclude(prompt, "Coverage section required");
-  });
-
-  it("lets the approved investigation own reading guidance instead of the chat turn rule", async function () {
-    const ledger: PlanExecutionLedger = {
-      version: 1,
-      executionId: "execution-investigation",
-      planId: "plan-investigation",
-      revision: 1,
-      planDigest: "sha256:investigation",
-      conversationKey: 706,
-      attempt: 1,
-      provider: "original",
-      grant: {
-        version: 1,
-        planId: "plan-investigation",
-        revision: 1,
-        planDigest: "sha256:investigation",
-        conversationKey: 706,
-        conversationGeneration: 1,
-        approvedAt: 1,
-      },
-      status: "running",
-      tasks: [],
-      createdAt: 1,
-      updatedAt: 1,
-    };
-    const request = resolvedAgentRequest({
-      conversationKey: 706,
-      mode: "agent",
-      userText: "Execute the approved plan",
-      model: "test-model",
-      planContext: {
-        phase: "executing",
-        planId: ledger.planId,
-        revision: ledger.revision,
-        executionId: ledger.executionId,
-        approvedDigest: ledger.planDigest,
-        provider: "original",
-      },
-      classifiedIntent: classifiedFixture({
-        semantic: semanticFixture({
-          reading: { source: "document_text", coverage: "targeted" },
-        }),
-      }),
-      metadata: {
-        planExecutionLedger: ledger,
-        approvedPlanContract: {
-          deliverable: { kind: "answer" },
-          investigation: {
-            question: "How is belief updating modeled?",
-            subquestions: [],
-            criteria: [],
-            reviewMode: "narrative",
-            readingStrategy: "adaptive",
-            scopeAmendmentPolicy: "fixed",
-            scope: { libraryID: 1, kind: "items", itemKeys: ["AAAA1111"] },
-            requiredEvidenceDepth: "body",
-            estimatedDeepReadPapers: 0,
-            approvedLargeCorpus: false,
-          },
-        },
-      },
-    });
-    const messages = await buildAgentInitialMessages(request, [], []);
-    const prompt = messages.map(messageText).join("\n");
-    assert.notInclude(prompt, "TURN RULE");
-    assert.notInclude(prompt, "The shared reading intent requires");
-    assert.include(
-      prompt,
-      "Reading guidance (owned by the approved investigation)",
-    );
-    assert.include(
-      prompt,
-      "narrative review, adaptive reading, body evidence depth",
-    );
-    assert.include(prompt, "paper_read mode 'overview'");
-    assert.include(prompt, "No per-turn read budget applies");
-  });
-
   it("distinguishes omitted transcript history from an explicit empty override", async function () {
     const request = resolvedAgentRequest({
       conversationKey: 701,
@@ -730,16 +418,6 @@ describe("agent prompt envelope", function () {
         conversationKey: 9,
         mode: "agent",
         userText: "tidy this folder",
-        classifiedIntent: classifiedFixture(),
-        actionContract: {
-          version: 4,
-          id: "contract:mode",
-          writeDisposition: "none",
-          interpretationSource: "semantic",
-          intent: classifiedFixture(),
-          obligations: [],
-          ...(assumptions ? { assumptions } : {}),
-        },
       });
       const rendered = await renderAgentPromptEnvelope(request, [], []);
       return [
@@ -758,12 +436,18 @@ describe("agent prompt envelope", function () {
         "The host does not run an approval model or ask for permission",
       );
       // The guidance must not read as unlimited authority: the rails that
-      // still block in yolo belong in the same sentence.
-      assert.include(yolo, "chat-only memory");
+      // still block in yolo belong in the same sentence, and only those.
       assert.include(
         yolo,
-        "importing discovered papers without the user's selection",
+        "Requested review workflows, database integrity and the paper selection card for discovered papers remain binding",
       );
+      for (const unenforced of [
+        "Explicit user restrictions",
+        "protected targets",
+        "Plan integrity",
+        "chat-only memory",
+      ])
+        assert.notInclude(yolo, unenforced);
       assert.notInclude(yolo, "Interpretation assumptions");
       const auto = await promptText("auto");
       assert.include(auto, "Permission mode: auto");
@@ -825,11 +509,6 @@ describe("agent prompt envelope evidence sufficiency", function () {
             ],
           }
         : {}),
-      classifiedIntent: classifiedFixture({
-        semantic: semanticFixture({
-          reading: { source: "document_text", coverage: "targeted" },
-        }),
-      }),
     });
   }
 
@@ -847,8 +526,47 @@ describe("agent prompt envelope evidence sufficiency", function () {
     }
   });
 
-  it("keeps retrieval choices advisory in the stable persona", async function () {
-    const messages = await buildAgentInitialMessages(request(false), [], []);
+  it("delivers paper_read guidance in a library chat with nothing selected", async function () {
+    const paperRead = createPaperReadTool(
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+    );
+    const messages = await buildAgentInitialMessages(
+      resolvedAgentRequest({
+        conversationKey: 4103,
+        mode: "agent",
+        conversationKind: "global",
+        libraryID: 1,
+        userText: "What does the Smith 2020 paper report?",
+        model: "test-model",
+      }),
+      [paperRead],
+      [],
+    );
+    const prompt = messages.map(messageText).join("\n");
+    assert.include(prompt, paperRead.guidance!.instruction);
+    assert.include(prompt, "recommendations are advisory");
+  });
+
+  it("keeps retrieval recommendations advisory in paper-scoped paper_read guidance", async function () {
+    const paperRead = createPaperReadTool(
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+    );
+    const withoutTool = await buildAgentInitialMessages(request(false), [], []);
+    assert.notInclude(
+      withoutTool.map(messageText).join("\n"),
+      "recommendations are advisory",
+    );
+    const messages = await buildAgentInitialMessages(
+      request(false),
+      [paperRead],
+      [],
+    );
     const prompt = messages.map(messageText).join("\n");
     assert.include(prompt, "recommendations are advisory");
     assert.include(prompt, "freely retrieve missing methods, results");
@@ -856,5 +574,154 @@ describe("agent prompt envelope evidence sufficiency", function () {
       prompt,
       "when unchanged, do not repeat the read and retrieve again only for a specifically named missing dimension",
     );
+  });
+});
+
+describe("agent prompt envelope direct workflow", function () {
+  const RECEIPT_CONFIRMS =
+    "A write result with a verified receipt already confirms the change; do not re-read the target to confirm it.";
+
+  /** The Original Agent's "## Direct agent workflow" system block. */
+  async function directWorkflowBlock(): Promise<string> {
+    const rendered = await renderAgentPromptEnvelope(
+      resolvedAgentRequest({
+        conversationKey: 912_101,
+        mode: "agent",
+        model: "test-model",
+        userText: "Summarize this paper and save it as a note",
+      }),
+      [],
+      [],
+    );
+    const block = rendered.inventory.fixedPrompt
+      .split("\n\n")
+      .find((section) => section.startsWith("## Direct agent workflow"));
+    assert.exists(block, "the Original Agent prompt has a direct workflow");
+    return block!;
+  }
+
+  it("tells the model a verified write receipt already confirms the change", async function () {
+    assert.include(await directWorkflowBlock(), RECEIPT_CONFIRMS);
+  });
+
+  it("asks a turn to declare the parts of a compound request", async function () {
+    const DECLARE_PARTS =
+      "When a request asks for more than one outcome, such as summarizing a paper and saving it as a note, declare each part with task_update in your first step, together with that step's first tool calls. The host marks each part done from the tools' results; never mark one done yourself.";
+    assert.include(await directWorkflowBlock(), DECLARE_PARTS);
+  });
+
+  it("keeps the receipt sentence out of the Codex client's instructions", function () {
+    const codexManifest = buildZoteroEnvironmentManifest({
+      scope: { kind: "global", libraryID: 1, conversationKey: 1 } as never,
+      mcpEnabled: true,
+      mcpReady: true,
+    });
+    assert.include(codexManifest, AGENT_ACTION_CONTRACT);
+    assert.notInclude(codexManifest, RECEIPT_CONFIRMS);
+  });
+});
+
+describe("agent prompt envelope paper scope", function () {
+  const papers = (count: number) =>
+    Array.from({ length: count }, (_, index) => index + 1);
+
+  async function rendered(
+    input: Record<string, unknown>,
+    turnScopePapers?: {
+      wholeLibrary: boolean;
+      itemIds: number[];
+      withText: number;
+    },
+  ) {
+    const request = resolvedAgentRequest({
+      conversationKey: 913_101,
+      mode: "agent",
+      model: "test-model",
+      userText: "Read every paper in the folder",
+      libraryID: 1,
+      ...input,
+    });
+    if (turnScopePapers) request.turnScopePapers = turnScopePapers;
+    const envelope = (await renderAgentPromptEnvelope(request, [], []))
+      .envelope;
+    return {
+      turn: messageText(envelope.turnMessage as AgentModelMessage),
+      system: envelope.systemMessages
+        .map((message) => messageText(message as AgentModelMessage))
+        .join("\n"),
+    };
+  }
+
+  function scopeLines(text: string): string[] {
+    return text.split("\n").filter((line) => line.startsWith("Paper scope:"));
+  }
+
+  it("states a folder's papers and how many have full text, in one line of the turn context", async function () {
+    const { turn, system } = await rendered(
+      {
+        selectedCollectionContexts: [
+          { collectionId: 5, name: "Drift", libraryID: 1 },
+        ],
+      },
+      { wholeLibrary: false, itemIds: papers(212), withText: 180 },
+    );
+    assert.deepEqual(scopeLines(turn), [
+      "Paper scope: Drift — 212 papers, 180 with full text",
+    ]);
+    const context = turn.slice(turn.indexOf("Zotero context for this turn:"));
+    assert.include(
+      context,
+      "\nCollection 1: ",
+      "the line sits in the turn's resource context",
+    );
+    assert.isEmpty(
+      scopeLines(system),
+      "counts change as the library does, so they stay out of the cached prefix",
+    );
+  });
+
+  it("says the whole library, with its count, when nothing is attached", async function () {
+    const { turn } = await rendered(
+      {},
+      { wholeLibrary: true, itemIds: papers(2431), withText: 1900 },
+    );
+    assert.deepEqual(scopeLines(turn), [
+      "Paper scope: whole library — 2431 papers, 1900 with full text",
+    ]);
+  });
+
+  it("names folders, tags and listed papers, and stays one line whatever a name holds", async function () {
+    const { turn } = await rendered(
+      {
+        selectedPaperContexts: [
+          {
+            itemId: 7,
+            contextItemId: 70,
+            title: "Paper seven",
+            libraryID: 1,
+          },
+        ],
+        selectedCollectionContexts: [
+          { collectionId: 5, name: "Drift\n  Rodents", libraryID: 1 },
+        ],
+        selectedTagContexts: [
+          { name: "place cells", libraryID: 1 },
+          { name: "Untagged", libraryID: 1, scope: "untagged" },
+        ],
+      },
+      { wholeLibrary: false, itemIds: [7], withText: 0 },
+    );
+    assert.deepEqual(scopeLines(turn), [
+      "Paper scope: Drift Rodents + #place cells + Untagged + listed papers — 1 paper, 0 with full text",
+    ]);
+  });
+
+  it("states no scope the host could not resolve", async function () {
+    const { turn } = await rendered({
+      selectedCollectionContexts: [
+        { collectionId: 5, name: "Drift", libraryID: 1 },
+      ],
+    });
+    assert.isEmpty(scopeLines(turn));
   });
 });

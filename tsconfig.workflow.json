@@ -1,0 +1,8 @@
+{
+  "//": "Type-checks the live workflow suite (test-workflows/) and the adaptive-loop live suite (test-live-loop/). A separate, non-composite project because the workflow tests import unit-test helpers from test/, which a composite project would have to enumerate file by file.",
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "composite": false
+  },
+  "include": ["src", "typings", "test-workflows", "test-live-loop"]
+}

@@ -1,21 +1,26 @@
 import { assert } from "chai";
-import type { AgentRunEventRecord } from "../src/agent/types";
 import type { WorkflowTestApi } from "../src/modules/contextPanel/workflowTestTypes";
-import { createDocumentPlan } from "../test/helpers/documentPlan";
-import { PlanDocumentFinalizer } from "../src/agent/documents/planFinalization";
+import { DirectDocumentFinalizer } from "../src/agent/documents/directFinalization";
 import type { ZoteroGateway } from "../src/agent/services/zoteroGateway";
+import type { AgentRuntimeRequest } from "../src/agent/types";
 
 describe("workflow: Plan trace presentation", function () {
   this.timeout(30000);
 
   it("replaces a pending publication card in place when delivery commits", async function () {
-    const plan = await createDocumentPlan(Date.now());
-    const { document } = await new PlanDocumentFinalizer(
+    const conversationKey = Date.now();
+    const { document } = await new DirectDocumentFinalizer(
       {} as ZoteroGateway,
     ).finalize({
-      executionId: plan.executionId,
-      activeTaskId: plan.activeTaskId!,
+      request: {
+        conversationKey,
+        mode: "agent",
+        userText: "Write the guide",
+      } as unknown as AgentRuntimeRequest,
+      runId: `publication-trace-${conversationKey}`,
       input: {
+        documentKind: "guide",
+        integrityPolicy: "authored",
         title: "Guide",
         markdown:
           "# Guide\n\n" +
@@ -49,7 +54,7 @@ describe("workflow: Plan trace presentation", function () {
       };
       await waitFor(() => trace.textContent!.includes("Publishing document…"));
       const card = trace.querySelector(".llm-plan-document-card");
-      await deliver(plan.conversationKey);
+      await deliver(conversationKey);
       await waitFor(() =>
         Boolean(trace.querySelector(".llm-plan-document-action-expand")),
       );
@@ -115,7 +120,7 @@ describe("workflow: Plan trace presentation", function () {
               type: "codex_tool_activity",
               itemId: "research",
               phase: "completed",
-              toolName: "research_update",
+              toolName: "inspect_records",
               args: { operation: "next_work", view: "full" },
             },
           },
@@ -149,7 +154,7 @@ describe("workflow: Plan trace presentation", function () {
           "--fill-primary",
           `rgb(${foreground}, ${foreground}, ${foreground})`,
         );
-        const style = doc.defaultView!.getComputedStyle(card);
+        const style = doc.defaultView!.getComputedStyle(card)!;
         const canvas = doc.createElement("canvas");
         canvas.width = canvas.height = 1;
         const context = canvas.getContext("2d")!;
@@ -174,143 +179,190 @@ describe("workflow: Plan trace presentation", function () {
     }
   });
 
-  it("hides continuation bookkeeping and keeps the Resume label centered inside a properly sized button", async function () {
+  it("reopens an old plan read-only: its steps, how it ended, and no control", async function () {
     const api = (Zotero as any).LLMForZotero.api
       .workflowTest as WorkflowTestApi;
     const fixture = await api.createPaperWithPdfFixture({
-      title: "Plan trace presentation fixture",
-      pages: ["Disposable trace presentation fixture."],
+      title: "Old plan fixture",
+      pages: ["Disposable old plan fixture."],
     });
     try {
       const panel = await api.renderPanelForItem(fixture.parentItemId);
       const doc = Zotero.getMainWindow().document;
-      const events: AgentRunEventRecord[] = [
-        {
-          runId: "presentation",
-          seq: 1,
-          eventType: "status",
-          createdAt: 1,
-          payload: {
-            type: "status",
-            text: "Continuing agent (segment 2, 6/32)",
+      const stamp = Date.now();
+      const planRun = `old-plan-${stamp}`;
+      const executionRun = `old-plan-execution-${stamp}`;
+      const step = (id: string, content: string) => ({
+        planStepId: id,
+        content,
+        activeForm: content,
+        acceptanceCriteria: [],
+        expectedEffect: "reasoning",
+      });
+      const task = (index: number, status: string, content: string) => ({
+        version: 2,
+        taskId: `${executionRun}:task-${index}`,
+        executionId: executionRun,
+        planStepId: `step-${index}`,
+        kind: "required_step",
+        content,
+        activeForm: content,
+        acceptanceCriteria: [],
+        expectedEffect: "reasoning",
+        obligationIds: [],
+        status,
+        attemptCount: 1,
+        evidenceIds: [],
+        failureReasons: [],
+        createdAt: 1,
+        updatedAt: 1,
+      });
+      await api.seedTaskProgressConversation({
+        panelId: panel.panelId,
+        turns: [
+          {
+            runId: planRun,
+            user: { text: "/plan Compare the two drift papers" },
+            answer: "The plan is ready for review.",
+            events: [
+              {
+                type: "status",
+                text: "Continuing agent (segment 2, 6/32)",
+              },
+              {
+                type: "plan_ready",
+                artifact: {
+                  version: 1,
+                  planId: planRun,
+                  revision: 1,
+                  digest: "sha256:old-plan",
+                  provider: "original",
+                  conversationKey: 1,
+                  status: "awaiting_approval",
+                  explanation: "Compare how the two cohorts drift.",
+                  steps: [
+                    step("step-1", "Read both papers"),
+                    step("step-2", "Write the comparison"),
+                  ],
+                  createdAt: 1,
+                  updatedAt: 1,
+                },
+              },
+              { type: "final", text: "The plan is ready for review." },
+            ] as never,
           },
-        },
-        {
-          runId: "presentation",
-          seq: 2,
-          eventType: "status",
-          createdAt: 2,
-          payload: {
-            type: "status",
-            text: "Checkpointed agent segment 2; continuing",
+          {
+            runId: executionRun,
+            user: { text: "Approved plan" },
+            answer: "I read both papers before the run stopped.",
+            events: [
+              {
+                type: "status",
+                text: "Checkpointed agent segment 2; continuing",
+              },
+              {
+                type: "plan_execution_updated",
+                ledger: {
+                  version: 2,
+                  executionId: executionRun,
+                  planId: planRun,
+                  revision: 1,
+                  planDigest: "sha256:old-plan",
+                  conversationKey: 1,
+                  attempt: 1,
+                  provider: "original",
+                  status: "interrupted",
+                  tasks: [
+                    task(1, "completed", "Read both papers"),
+                    task(2, "interrupted", "Write the comparison"),
+                  ],
+                  createdAt: 1,
+                  updatedAt: 2,
+                },
+              },
+              {
+                type: "final",
+                text: "I read both papers before the run stopped.",
+              },
+            ] as never,
           },
-        },
-        {
-          runId: "presentation",
-          seq: 3,
-          eventType: "plan_execution_updated",
-          createdAt: 3,
-          payload: {
-            type: "plan_execution_updated",
-            ledger: {
-              executionId: "presentation",
-              status: "interrupted",
-              tasks: [],
-            } as any,
-          },
-        },
-      ];
-      await api.seedPanelStoredTurn(
-        panel.panelId,
-        "Execute the approved plan",
-        "",
-        {
-          runMode: "agent",
-          pendingAgentTraceEvents: events,
-        },
-      );
+        ],
+      });
+      await api.reopenTaskProgressConversation({ panelId: panel.panelId });
       const messages = doc.querySelector<HTMLElement>(
         `[data-workflow-panel-id="${panel.panelId}"] .llm-messages`,
       )!;
-      assert.notInclude(messages.textContent || "", "Continuing agent");
-      assert.notInclude(messages.textContent || "", "Checkpointed agent");
-      const card = messages.querySelector<HTMLElement>(
-        ".llm-plan-recovery-card",
-      )!;
-      assert.exists(card, "the latest interrupted execution offers recovery");
-      const button = card.querySelector("button")!;
-      const label = button.querySelector(".llm-plan-action-label-full")!;
-      const root = doc.querySelector<HTMLElement>(
-        `[data-workflow-panel-id="${panel.panelId}"] .llm-panel`,
-      )!;
-      const oldScale = root.style.getPropertyValue("--llm-font-scale");
-      try {
-        for (const [width, scale] of [
-          [280, 1.5],
-          [390, 1],
-          [520, 1],
-        ]) {
-          card.style.width = `${width}px`;
-          root.style.setProperty("--llm-font-scale", `${scale}`);
-          await Zotero.Promise.delay(50);
-          const action = button.getBoundingClientRect();
-          const copy = label.getBoundingClientRect();
-          assert.closeTo(
-            copy.left + copy.width / 2,
-            action.left + action.width / 2,
-            1,
-            `label horizontally centered inside the button at ${width}px`,
-          );
-          assert.closeTo(
-            copy.top + copy.height / 2,
-            action.top + action.height / 2 - 1,
-            1,
-            `label vertically centered with the existing Plan optical offset at ${width}px`,
-          );
-          const style = doc.defaultView!.getComputedStyle(button);
-          assert.closeTo(
-            parseFloat(style.fontSize),
-            11 * scale,
-            0.1,
-            "the font scale changes the rendered button label size",
-          );
-          assert.equal(style.borderRadius, "7px");
-          assert.equal(style.appearance, "none");
-          assert.isAtLeast(
-            action.height,
-            copy.height + 8,
-            `label retains vertical button padding: ${JSON.stringify({
-              height: style.height,
-              minHeight: style.minHeight,
-              maxHeight: style.maxHeight,
-              padding: style.padding,
-              lineHeight: style.lineHeight,
-              boxSizing: style.boxSizing,
-            })}`,
-          );
-          assert.isAtLeast(
-            action.width,
-            copy.width + 20,
-            "label retains horizontal button padding",
-          );
-          assert.equal(
-            doc.defaultView!.getComputedStyle(button).alignItems,
-            "center",
-          );
-          assert.equal(
-            doc.defaultView!.getComputedStyle(button).justifyContent,
-            "center",
-          );
-          assert.isAtMost(
-            card.scrollWidth,
-            card.clientWidth + 1,
-            `no clipped recovery content at ${width}px`,
-          );
-        }
-      } finally {
-        if (oldScale) root.style.setProperty("--llm-font-scale", oldScale);
-        else root.style.removeProperty("--llm-font-scale");
+      const cards = () =>
+        Array.from(
+          messages.querySelectorAll<HTMLElement>(
+            ".llm-plan-container:not(.llm-plan-document-card)",
+          ),
+        ) as HTMLElement[];
+      const deadline = Date.now() + 15000;
+      while (cards().length < 2 && Date.now() < deadline)
+        await Zotero.Promise.delay(40);
+      const [proposal, execution] = cards();
+      assert.exists(proposal, "the planning turn shows its plan");
+      assert.exists(execution, "the execution turn shows how the plan ended");
+      const status = (card: HTMLElement) =>
+        card.querySelector(".llm-plan-status")?.textContent;
+      assert.equal(status(proposal), "Proposed");
+      const proposed =
+        proposal.querySelector(".llm-plan-markdown")?.textContent || "";
+      assert.include(proposed, "Read both papers");
+      assert.include(proposed, "Write the comparison");
+      assert.equal(status(execution), "Interrupted");
+      assert.deepEqual(
+        (
+          Array.from(
+            execution.querySelectorAll(".llm-plan-task-label"),
+          ) as HTMLElement[]
+        ).map((label) => label.textContent),
+        ["Read both papers", "Write the comparison"],
+      );
+      for (const card of [proposal, execution]) {
+        assert.lengthOf(
+          card.querySelectorAll(
+            "button:not(:disabled), textarea, input:not(:disabled)",
+          ),
+          0,
+          "no plan control is offered",
+        );
       }
+      assert.notExists(messages.querySelector(".llm-plan-recovery-card"));
+      const text = messages.textContent || "";
+      assert.notInclude(text, "Resume");
+      assert.notInclude(text, "Continuing agent");
+      assert.notInclude(text, "Checkpointed agent");
+      assert.include(text, "I read both papers before the run stopped.");
+      // A screenshot of both cards, for a reviewer (in the data directory).
+      execution.scrollIntoView({ block: "end" });
+      await Zotero.Promise.delay(200);
+      const rect = messages.getBoundingClientRect();
+      const win = doc.defaultView as any;
+      const canvas = doc.createElementNS(
+        "http://www.w3.org/1999/xhtml",
+        "canvas",
+      ) as HTMLCanvasElement;
+      const scale = win.devicePixelRatio || 1;
+      canvas.width = Math.ceil(rect.width) * scale;
+      canvas.height = Math.ceil(rect.height) * scale;
+      const context = canvas.getContext("2d") as any;
+      context.scale(scale, scale);
+      context.drawWindow(
+        win,
+        rect.left,
+        rect.top,
+        Math.ceil(rect.width),
+        Math.ceil(rect.height),
+        "#ffffff",
+      );
+      const binary = win.atob(canvas.toDataURL("image/png").split(",")[1]);
+      await win.IOUtils.write(
+        `${Zotero.DataDirectory.dir}/old-plan-cards.png`,
+        Uint8Array.from(binary, (char: string) => char.charCodeAt(0)),
+      );
+      await api.clickPanelDelete(panel.panelId);
     } finally {
       await api.reset();
       await api.cleanupFixture(fixture);

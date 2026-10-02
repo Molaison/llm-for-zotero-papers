@@ -24,11 +24,11 @@ import {
   updateJournalAction,
 } from "../../store/changeJournal";
 import type {
-  AgentActionParameters,
   AgentJournalActionScope,
   AgentJournalStepOutcome,
   AgentToolDefinition,
 } from "../../types";
+import { neverSelected } from "../guidance";
 import type { AgentToolRegistry } from "../registry";
 import { fail, normalizePositiveInt, ok, validateObject } from "../shared";
 
@@ -72,89 +72,6 @@ const DURABLE_BATCH_JOBS = new Set([
   "organize_unfiled",
   "audit_library",
 ]);
-
-function operationForBatchJob(job: string) {
-  return job === "auto_tag"
-    ? ("apply_tags" as const)
-    : job === "organize_unfiled"
-      ? ("move_to_collection" as const)
-      : job === "audit_library"
-        ? ("update_metadata" as const)
-        : null;
-}
-
-function unresolvedCollectionContractTargets(
-  job: string,
-  context: import("../../types").AgentToolContext,
-  durableRemainingItemIds?: number[],
-  proposalParameters?: AgentActionParameters,
-): number[] | null {
-  const operation = operationForBatchJob(job);
-  if (!operation) return null;
-  const obligations =
-    context.request.actionContract?.obligations.filter(
-      (entry) =>
-        entry.operation === operation &&
-        entry.proofDomain === "zotero_state" &&
-        entry.scopeRole !== "destination" &&
-        entry.targetBoundary?.kind === "collection" &&
-        entry.targetBoundary.libraryID === context.request.libraryID &&
-        Object.entries(entry.parameters || {}).every(([key, expected]) => {
-          if (expected === undefined) return true;
-          const actual =
-            proposalParameters?.[key as keyof AgentActionParameters];
-          return Array.isArray(expected)
-            ? Array.isArray(actual) &&
-                expected.length === actual.length &&
-                [...expected].every((value) => actual.includes(value as never))
-            : actual === expected;
-        }) &&
-        !(
-          entry.constraints?.collectionMode === "move" &&
-          proposalParameters?.sourceCollectionId === undefined
-        ),
-    ) || [];
-  if (!obligations.length) return null;
-  const unresolved = obligations.flatMap((obligation) => {
-    const progress = context.request.actionProgress?.obligations.find(
-      (entry) => entry.obligationId === obligation.id,
-    );
-    if (
-      progress?.status === "fulfilled" ||
-      progress?.status === "already_satisfied" ||
-      progress?.status === "cancelled"
-    ) {
-      return [];
-    }
-    if (progress) {
-      return progress.unresolvedTargetIds
-        .map((target) => Number(target.match(/^item:(\d+)$/)?.[1]))
-        .filter((itemId) => Number.isInteger(itemId) && itemId > 0);
-    }
-    return obligation.targetBoundary?.frozenTargetIds || [];
-  });
-  const union = [...new Set(unresolved)].sort((left, right) => left - right);
-  if (!durableRemainingItemIds) return union;
-  const durableRemaining = new Set(durableRemainingItemIds);
-  return union.filter((itemId) => durableRemaining.has(itemId));
-}
-
-function bindFrozenTargets(
-  jobArgs: Record<string, unknown>,
-  frozenItemIds: number[],
-): Record<string, unknown> {
-  const {
-    scope: _scope,
-    collectionId: _collectionId,
-    collectionIds: _collectionIds,
-    itemIds: _itemIds,
-    tagNames: _tagNames,
-    tagScopes: _tagScopes,
-    _batchItemIds: _previousBatchItemIds,
-    ...retained
-  } = jobArgs;
-  return { ...retained, _batchItemIds: frozenItemIds };
-}
 
 /**
  * Runs and resumes durable library-wide jobs.
@@ -210,14 +127,7 @@ export function createLibraryBatchTool(deps: {
     },
 
     guidance: {
-      matches: (request) =>
-        Boolean(
-          request.classifiedIntent?.actionIntents.some((intent) =>
-            ["apply_tags", "update_metadata", "move_to_collection"].includes(
-              intent.operation,
-            ),
-          ),
-        ),
+      matches: neverSelected,
       instruction:
         "For delegated auto-tagging, metadata enrichment/audit, organizing unfiled papers, or related-paper discovery, call library_batch with the matching built-in job (auto_tag, complete_metadata, audit_library, organize_unfiled, discover_related). This reuses the slash action preparation algorithms and actual editable proposal cards. Do not invent another proposal workflow. The host decides whether each prepared page needs review. Clear Auto work runs directly; Safe and requested review show the actual per-paper changes. For literal requested values use library_update directly.",
     },
@@ -352,30 +262,10 @@ export function createLibraryBatchTool(deps: {
           storedInteraction = undefined;
         }
       }
-      const interaction =
-        prepared.resumed &&
-        context.request.classifiedIntent?.semantic?.continuation !== "revise"
-          ? storedInteraction
-          : captureBatchInteraction(context.request);
-      const durableRemainingItemIds = prepared.resumed
-        ? normalizeItemIds(prepared.jobArgs._batchItemIds) || []
-        : undefined;
-      const contractTargets = unresolvedCollectionContractTargets(
-        prepared.job,
-        context,
-        durableRemainingItemIds,
-        normalizePositiveInt(prepared.jobArgs.targetCollectionId)
-          ? {
-              destinationCollectionId: normalizePositiveInt(
-                prepared.jobArgs.targetCollectionId,
-              ),
-            }
-          : undefined,
-      );
-      if (contractTargets !== null) {
-        prepared.jobArgs = bindFrozenTargets(prepared.jobArgs, contractTargets);
-        if (!prepared.resumed) prepared.totalCount = contractTargets.length;
-      }
+      const interaction = prepared.resumed
+        ? storedInteraction
+        : captureBatchInteraction(context.request);
+
       const action = deps.actionRegistry.getAction(prepared.job);
       if (!action) {
         await store.finishBatchJob({
@@ -486,7 +376,6 @@ export function createLibraryBatchTool(deps: {
           totalCount,
           now: now(),
         });
-        await context.checkpointActionProgress?.();
         checkpointSeen = true;
         lastCursor = cursor;
         lastAppliedCount = appliedCount;

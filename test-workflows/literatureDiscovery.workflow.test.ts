@@ -1,12 +1,26 @@
 import "./hostSurfaceBootstrap";
-import {
-  classifiedFixture,
-  semanticFixture,
-} from "../test/helpers/semanticIntent";
 import { assert } from "chai";
-import { createSearchLiteratureOnlineTool } from "../src/agent/tools/read/searchLiteratureOnline";
+import { buildActionCallDigest } from "../src/agent/authorization/proposal";
+import { ActionContractService } from "../src/agent/contracts/actionContract";
+import { createAgentExecutionContext } from "../src/agent/execution/context";
+import {
+  getOriginalAgentPermissionMode,
+  setOriginalAgentPermissionMode,
+} from "../src/agent/originalAgentPermissionMode";
+import { ZoteroGateway } from "../src/agent/services/zoteroGateway";
+import { initAgentChangeJournal } from "../src/agent/store/changeJournal";
+import { createDelegatingTool } from "../src/agent/tools/facade";
+import { createLiteratureSearchTool } from "../src/agent/tools/read/literatureSearch";
 import { createLiteratureReviewTool } from "../src/agent/tools/read/reviewLiterature";
-import type { AgentToolContext, AgentToolResult } from "../src/agent/types";
+import { AgentToolRegistry } from "../src/agent/tools/registry";
+import { fail, ok } from "../src/agent/tools/shared";
+import { createImportIdentifiersTool } from "../src/agent/tools/write/importIdentifiers";
+import type {
+  AgentToolContext,
+  AgentToolResult,
+  PreparedToolExecution,
+  PreparedToolExecutionOptions,
+} from "../src/agent/types";
 import type { WorkflowTestApi } from "../src/modules/contextPanel/workflowTestTypes";
 import { resolvedAgentRequest } from "../test/helpers/resolvedAgentRequest";
 
@@ -31,13 +45,6 @@ describe("workflow: expandable ranked discovery", function () {
           mode: "agent",
           userText:
             "Find three relevant papers and let me review before importing",
-          classifiedIntent: classifiedFixture({
-            externalSearchIntent: "literature",
-            semantic: semanticFixture({
-              literature: "select_then_import",
-              requestedCount: 3,
-            }),
-          }),
         }),
         runId: `discovery-workflow-${fixture.parentItemId}`,
         resourceSignature: `paper-${fixture.parentItemId}`,
@@ -59,13 +66,13 @@ describe("workflow: expandable ranked discovery", function () {
             publication_year: 2024,
           })),
         }),
-      })) as typeof fetch;
+      })) as unknown as typeof fetch;
       const gateway = {
         resolveMetadataItem: () => null,
         getEditableArticleMetadata: () => null,
         getCollectionSummary: () => null,
       };
-      const search = createSearchLiteratureOnlineTool(gateway as never);
+      const search = createLiteratureSearchTool(gateway as never);
       const searchInput = search.validate({
         mode: "search",
         query: "discovery fixture",
@@ -82,6 +89,8 @@ describe("workflow: expandable ranked discovery", function () {
       for (let batch = 0; batch < 3; batch++) {
         const parsed = review.validate({
           ...continuation,
+          // The model passes the number the user asked for.
+          ...(batch === 0 ? { count: 3 } : {}),
           selections: [1, 2, 3].map((i) => ({
             candidateSetId: candidates.candidateSetId,
             candidateIndex: batch * 3 + i,
@@ -114,7 +123,7 @@ describe("workflow: expandable ranked discovery", function () {
           card.querySelectorAll<HTMLInputElement>(
             ".llm-search-results-list input[type=checkbox]",
           ),
-        );
+        ) as HTMLInputElement[];
         assert.lengthOf(rows, (batch + 1) * 3);
         if (batch === 0) rows[0].click();
         else
@@ -160,6 +169,298 @@ describe("workflow: expandable ranked discovery", function () {
       await api.cleanupFixture(fixture);
     }
   });
+  it("refuses a discovery's direct import in every mode, then its card imports only the user's choice, while an explicit import runs directly", async function () {
+    const native = Zotero as any;
+    const api = native.LLMForZotero.api.workflowTest as WorkflowTestApi;
+    const fixture = await api.createPaperWithPdfFixture({
+      title: "Discovery import fixture",
+      pages: ["Disposable discovery import fixture."],
+    });
+    const libraryID = Zotero.Items.get(fixture.parentItemId).libraryID;
+    const stamp = Date.now();
+    const doi = (index: number) => `10.1000/discovery-import-${stamp}-${index}`;
+    const originalFetch = globalThis.fetch;
+    const originalSearch = native.Translate.Search;
+    const originalMode = getOriginalAgentPermissionMode();
+    const translated: string[] = [];
+    const importedItems = async () =>
+      (await Zotero.Items.getAll(libraryID)).filter((item: Zotero.Item) =>
+        String(item.getField("DOI") || "").startsWith(
+          `10.1000/discovery-import-${stamp}-`,
+        ),
+      );
+    try {
+      await initAgentChangeJournal();
+      globalThis.fetch = (async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          results: Array.from({ length: 12 }, (_, i) => ({
+            id: `https://openalex.org/W${stamp}${i + 1}`,
+            display_name: `Discovery import candidate ${i + 1}`,
+            doi: `https://doi.org/${doi(i + 1)}`,
+            publication_year: 2024,
+          })),
+        }),
+      })) as unknown as typeof fetch;
+      // Only the network translator is substituted; Zotero's own ItemSaver
+      // saves what the import resolves.
+      native.Translate.Search = class {
+        private identifier: Record<string, string> = {};
+        setIdentifier(identifier: Record<string, string>) {
+          this.identifier = identifier;
+        }
+        async getTranslators() {
+          return [{}];
+        }
+        setTranslator() {}
+        async translate() {
+          const DOI = this.identifier.DOI;
+          translated.push(DOI);
+          return [
+            {
+              itemType: "journalArticle",
+              title: `Imported ${DOI}`,
+              DOI,
+              attachments: [],
+            },
+          ];
+        }
+      };
+      // The production tools; the built-in registry module reaches skill
+      // markdown, which workflow bundles cannot load, so library_import's
+      // identifier route is composed the way that module composes it.
+      const gateway = new ZoteroGateway();
+      const registry = new AgentToolRegistry(
+        new ActionContractService(gateway),
+      );
+      registry.register(createLiteratureSearchTool(gateway));
+      registry.register(createLiteratureReviewTool(gateway));
+      const importIdentifiers = createImportIdentifiersTool(gateway);
+      registry.register(
+        createDelegatingTool({
+          name: "library_import",
+          label: "Import to Library",
+          description: "Add items to Zotero by identifier.",
+          executionClass: "external_effect",
+          workCategory: "zotero_action",
+          inputSchema: {
+            type: "object",
+            required: ["kind"],
+            properties: { kind: { type: "string", enum: ["identifiers"] } },
+          },
+          delegates: [importIdentifiers],
+          chooseDelegate(args) {
+            const { kind, ...delegateArgs } = (args || {}) as Record<
+              string,
+              unknown
+            >;
+            return kind === "identifiers"
+              ? ok({ tool: importIdentifiers, args: delegateArgs })
+              : fail("kind must be identifiers");
+          },
+        }),
+      );
+      const turn = (runId: string, userText: string): AgentToolContext => {
+        const request = resolvedAgentRequest({
+          conversationKey: fixture.parentItemId,
+          activeItemId: fixture.parentItemId,
+          libraryID,
+          mode: "agent",
+          userText,
+        });
+        request.executionContext = createAgentExecutionContext(request, runId);
+        return {
+          request,
+          runId,
+          resourceSignature: `paper-${fixture.parentItemId}`,
+          item: Zotero.Items.get(fixture.parentItemId),
+          currentAnswerText: "",
+          modelName: "workflow",
+        };
+      };
+      let calls = 0;
+      const prepare = (
+        context: AgentToolContext,
+        name: string,
+        args: Record<string, unknown>,
+        options: PreparedToolExecutionOptions = { callerKind: "model" },
+      ): Promise<PreparedToolExecution> =>
+        registry.prepareExecution(
+          { id: `${name}-${++calls}`, name, arguments: args },
+          context,
+          options,
+        );
+      const run = async (
+        context: AgentToolContext,
+        name: string,
+        args: Record<string, unknown>,
+        options?: PreparedToolExecutionOptions,
+      ): Promise<AgentToolResult> => {
+        let prepared = await prepare(context, name, args, options);
+        if (prepared.kind === "confirmation")
+          prepared = await prepared.execute({ approved: true });
+        if (prepared.kind !== "result")
+          throw new Error(`${name} never reached a result`);
+        return prepared.execution.result;
+      };
+
+      // A request that only asks to find papers opens a discovery.
+      const discovery = turn(
+        `discovery-import-${stamp}`,
+        "Find three papers relevant to this paper for me.",
+      );
+      const search = await run(discovery, "literature_search", {
+        mode: "search",
+        workflow: "review",
+        query: "discovery import fixture",
+        limit: 12,
+      });
+      const found = search.content as {
+        candidateSetId: string;
+        sessionId: string;
+        revision: number;
+      };
+      assert.isString(found.sessionId, JSON.stringify(search.content));
+
+      // Importing its candidates directly is refused before anything runs,
+      // in Safe, Auto and YOLO alike.
+      for (const mode of ["safe", "auto", "yolo"] as const) {
+        setOriginalAgentPermissionMode(mode);
+        const refused = await prepare(discovery, "library_import", {
+          kind: "identifiers",
+          identifiers: [doi(2), doi(5)],
+          libraryID,
+        });
+        assert.equal(refused.kind, "result", `${mode}: no confirmation card`);
+        if (refused.kind !== "result") continue;
+        const result = refused.execution.result;
+        assert.isTrue(
+          result.inputRejected,
+          `${mode}: ${JSON.stringify(result)}`,
+        );
+        assert.include(
+          String((result.content as { error?: unknown }).error),
+          `literature_review with sessionId '${found.sessionId}'`,
+        );
+      }
+      assert.deepEqual(translated, [], "no refused identifier was resolved");
+      assert.lengthOf(await importedItems(), 0);
+
+      // The model shows the card instead, and the user chooses.
+      setOriginalAgentPermissionMode("auto");
+      const reviewArgs = {
+        sessionId: found.sessionId,
+        revision: found.revision,
+        count: 3,
+        selections: [3, 1, 4].map((candidateIndex) => ({
+          candidateSetId: found.candidateSetId,
+          candidateIndex,
+          reason: "Shares the measured population coding method.",
+        })),
+      };
+      const reviewed = await run(discovery, "literature_review", reviewArgs);
+      assert.isTrue(reviewed.ok, JSON.stringify(reviewed.content));
+      const review = registry.getTool("literature_review")!;
+      const parsed = review.validate(reviewArgs);
+      if (!parsed.ok) throw new Error(parsed.error);
+      const action = (await review.createResultReviewAction!(
+        parsed.value,
+        reviewed,
+        discovery,
+      ))!;
+      const panel = await api.renderPanelForItem(fixture.parentItemId);
+      const requestId = `discovery-import-card-${stamp}`;
+      const waiting = api.renderPendingActionForPanel(panel.panelId, {
+        requestId,
+        action,
+      });
+      const card = Zotero.getMainWindow().document.querySelector<HTMLElement>(
+        `[data-request-id="${requestId}"]`,
+      )!;
+      assert.exists(card, "the paper selection card appears");
+      const rows = Array.from(
+        card.querySelectorAll<HTMLInputElement>(
+          ".llm-search-results-list input[type=checkbox]",
+        ),
+      ) as HTMLInputElement[];
+      assert.lengthOf(rows, 3);
+      assert.isTrue(rows.every((row) => row.checked));
+      rows[1].click();
+      const importButton = card.querySelector<HTMLButtonElement>(
+        '[data-action-id="import"]',
+      )!;
+      assert.equal(importButton.textContent, "Import 2 papers");
+      importButton.click();
+      const resolution = await waiting;
+      assert.equal(resolution.actionId, "import");
+      const outcome = await review.resolveResultReview!(
+        parsed.value,
+        reviewed,
+        resolution,
+        discovery,
+      );
+      if (outcome.kind !== "invoke_tool")
+        throw new Error("The card's Import did not invoke library_import");
+      // The runtime runs the card's import under the approval it mints for
+      // that exact call.
+      const imported = await run(
+        discovery,
+        outcome.call.name,
+        outcome.call.arguments as Record<string, unknown>,
+        {
+          callerKind: "action",
+          inheritedApproval: {
+            ...outcome.call.inheritedApproval!,
+            approvedCallDigest: buildActionCallDigest(
+              outcome.call.name,
+              outcome.call.arguments,
+            ),
+          },
+        },
+      );
+      assert.isTrue(imported.ok, JSON.stringify(imported.content));
+      assert.deepEqual(translated, [doi(3), doi(4)]);
+      assert.sameMembers(
+        (await importedItems()).map((item: Zotero.Item) =>
+          String(item.getField("DOI")),
+        ),
+        [doi(3), doi(4)],
+        "only the papers the user kept checked are in the library",
+      );
+
+      // "Find and import" opens no discovery: its import runs directly.
+      const explicit = turn(
+        `explicit-import-${stamp}`,
+        "Find and import two papers relevant to this paper.",
+      );
+      const answer = await run(explicit, "literature_search", {
+        mode: "search",
+        workflow: "answer",
+        query: "discovery import fixture",
+        limit: 12,
+      });
+      assert.isFalse(
+        (answer.content as { reviewRequired?: boolean }).reviewRequired,
+      );
+      const direct = await run(explicit, "library_import", {
+        kind: "identifiers",
+        identifiers: [doi(7), doi(9)],
+        libraryID,
+      });
+      assert.notOk(direct.inputRejected, JSON.stringify(direct.content));
+      assert.isTrue(direct.ok, JSON.stringify(direct.content));
+      assert.deepEqual(translated, [doi(3), doi(4), doi(7), doi(9)]);
+    } finally {
+      globalThis.fetch = originalFetch;
+      native.Translate.Search = originalSearch;
+      setOriginalAgentPermissionMode(originalMode);
+      for (const item of await importedItems()) await item.eraseTx();
+      await api.reset();
+      await api.cleanupFixture(fixture);
+    }
+  });
+
   it("runs the empty slash shortcut and structured custom limit with three tabs and preserved selections on Load more", async function () {
     const addonApi = (Zotero as any).LLMForZotero.api;
     const api = addonApi.workflowTest as WorkflowTestApi;
@@ -170,7 +471,7 @@ describe("workflow: expandable ranked discovery", function () {
       title: "Discovery command fixture",
       pages: ["Disposable discovery command fixture."],
     });
-    const search = agent.getToolDefinition("search_literature_online")!;
+    const search = agent.getToolDefinition("literature_search")!;
     assert.exists(search);
     const searches: Array<{ mode: string; limit: number }> = [];
     agent.registerTool({
@@ -257,9 +558,11 @@ describe("workflow: expandable ranked discovery", function () {
         ]);
         assert.isTrue(searches.every((entry) => entry.limit === limit));
         assert.deepEqual(
-          Array.from(card.querySelectorAll(".llm-search-mode-tab")).map(
-            (tab) => tab.textContent,
-          ),
+          (
+            Array.from(
+              card.querySelectorAll(".llm-search-mode-tab"),
+            ) as Element[]
+          ).map((tab) => tab.textContent),
           ["Recommendations", "References", "Citations"],
         );
         const rows = () =>
@@ -267,7 +570,7 @@ describe("workflow: expandable ranked discovery", function () {
             card.querySelectorAll<HTMLInputElement>(
               ".llm-search-results-list input[type=checkbox]",
             ),
-          );
+          ) as HTMLInputElement[];
         assert.lengthOf(rows(), limit);
         assert.isTrue(rows().every((row) => row.checked));
         rows()[0].click();
@@ -302,7 +605,7 @@ describe("workflow: expandable ranked discovery", function () {
             expanded.querySelectorAll<HTMLInputElement>(
               ".llm-search-results-list input[type=checkbox]",
             ),
-          );
+          ) as HTMLInputElement[];
         assert.lengthOf(expandedRows(), limit + 20);
         assert.isTrue(expandedRows()[0].checked);
         assert.isTrue(

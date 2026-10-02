@@ -102,6 +102,30 @@ describe("footer provider quota", function () {
     assert.equal(button.style.display, "none");
   });
 
+  it("leaves an unchanged value untouched on a repeated sync", async function () {
+    const button = fakeButton();
+    let textWrites = 0;
+    let text = "";
+    Object.defineProperty(button, "textContent", {
+      get: () => text,
+      set: (value: string) => {
+        textWrites += 1;
+        text = value;
+      },
+    });
+    const control = attachFooterQuotaControl({
+      button,
+      getTarget: () => ({ kind: "deepseek", apiKey: "a" }),
+      read: async () => snapshot(5),
+    });
+    await control.sync();
+    await control.sync();
+    await control.sync();
+    assert.equal(button.textContent, "$5.00");
+    assert.equal(textWrites, 1);
+    control.dispose();
+  });
+
   it("removes the old value when a refresh is unavailable", async function () {
     const button = fakeButton();
     let available = true;

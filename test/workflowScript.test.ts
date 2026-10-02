@@ -5,12 +5,6 @@ import { resolvedAgentRequest } from "./helpers/resolvedAgentRequest";
 
 const specs = [
   {
-    name: "collection_update",
-    description: "Manage collections",
-    inputSchema: { type: "object" },
-    executionClass: "external_effect" as const,
-  },
-  {
     name: "library_update",
     description: "Update papers",
     inputSchema: { type: "object" },
@@ -35,7 +29,7 @@ describe("registered-operation scripting", function () {
     const validated = tool.validate({
       description: "Create a collection and file papers",
       script:
-        'const folder = await env.invoke("collection_update", {action:"create",name:"Destination"}); for (const id of [42,43]) { const result = await env.invoke("library_update", {kind:"collections",action:"add",itemIds:[id],targetCollectionId:folder.content.collectionId}); if (!result.ok) return result; } return folder.content.collectionId;',
+        'const folder = await env.invoke("library_update", {kind:"collection",action:"create",name:"Destination"}); for (const id of [42,43]) { const result = await env.invoke("library_update", {kind:"collections",action:"add",itemIds:[id],targetCollectionId:folder.content.collectionId}); if (!result.ok) return result; } return folder.content.collectionId;',
     });
     assert.isTrue(validated.ok);
     if (!validated.ok) return;
@@ -68,6 +62,10 @@ describe("registered-operation scripting", function () {
       JSON.stringify(result.content),
     );
     assert.lengthOf(calls, 3);
+    assert.deepEqual(calls[0], {
+      name: "library_update",
+      args: { kind: "collection", action: "create", name: "Destination" },
+    });
     assert.deepEqual(calls[1].args.itemIds, [42]);
     assert.equal(calls[2].args.targetCollectionId, 91);
     assert.lengthOf(result.content.operations, 3);

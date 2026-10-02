@@ -6,7 +6,7 @@ import {
 import type { FormattedCitationBundle } from "../src/agent/documents/types";
 import { renderMarkdownForNote } from "../src/utils/markdown";
 import type { ZoteroGateway } from "../src/agent/services/zoteroGateway";
-import type { ResearchEvidenceRecord } from "../src/agent/research/types";
+import type { ResearchEvidenceRecord } from "../src/agent/documents/coverageTypes";
 
 describe("plan document citation serialization", function () {
   const priorZotero = (globalThis as { Zotero?: unknown }).Zotero;

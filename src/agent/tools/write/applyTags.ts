@@ -95,12 +95,6 @@ export function createApplyTagsTool(
       workCategory: "zotero_action",
     },
 
-    guidance: {
-      matches: () => true,
-      instruction:
-        "For library write operations, the confirmation card is the deliverable — call the tool directly instead of stopping with a prose summary.",
-    },
-
     presentation: {
       label: "Apply Tags",
       summaries: {

@@ -13,7 +13,6 @@ import type {
   AgentToolResult,
 } from "../src/agent/types";
 import type { WorkflowTestApi } from "../src/modules/contextPanel/workflowTestTypes";
-import { semanticContractFixture } from "../test/helpers/semanticIntent";
 
 describe("workflow: completed native note change", function () {
   this.timeout(60000);
@@ -45,24 +44,6 @@ describe("workflow: completed native note change", function () {
         note: Zotero.Item,
         text: string,
       ): Promise<AgentToolResult> {
-        const contract = semanticContractFixture({
-          version: 3,
-          id: `native-edit-${note.id}-${text}`,
-          writeDisposition: "required",
-          interpretationSource: "semantic",
-          obligations: [
-            {
-              id: "edit",
-              operation: "note_edit",
-              capability: "zotero.notes",
-              proofDomain: "zotero_state",
-              coverage: "one",
-              targetKind: "items",
-              reviewPreference: "default",
-              parameters: { targetNoteId: note.id, noteMode: "edit" },
-            },
-          ],
-        });
         const execution = await registry.prepareExecution(
           {
             id: `edit-${note.id}`,
@@ -80,8 +61,23 @@ describe("workflow: completed native note change", function () {
               libraryID: note.libraryID,
               userText: `Edit this note: ${text}`,
               actionEntryPoint: "conversation",
-              actionContract: contract,
-              actionProgress: contracts.createProgress(contract),
+              // An ordinary agent turn: the in-plugin agent owns permission.
+              executionContext: {
+                version: 1,
+                executionId: `edit-${note.id}`,
+                conversationKey: notes[0].id,
+                conversationGeneration: 0,
+                chatLibraryID: note.libraryID,
+                permissionOwner: "original_agent",
+                workspaceSnapshot: {
+                  selectedPapers: [],
+                  selectedCollections: [],
+                },
+                configuredAccess: {
+                  libraryIDs: [note.libraryID],
+                  outputDirectories: [],
+                },
+              },
             },
             item: note,
             currentAnswerText: "",
@@ -99,7 +95,7 @@ describe("workflow: completed native note change", function () {
           execution.execution.result.ok,
           JSON.stringify(execution.execution.result.content),
         );
-        await note.reload(undefined, true);
+        await note.reload(undefined as never, true);
         return execution.execution.result;
       }
       const result = await edit(notes[0], "Verified replacement.");
@@ -129,11 +125,13 @@ describe("workflow: completed native note change", function () {
       // under no paper is one object, so the row draws one chip: the note. A
       // second chip carrying the same title would be a paper that never existed.
       assert.deepEqual(
-        [
-          ...node.querySelectorAll<HTMLElement>(
-            ".llm-agent-action-summary-item .llm-selected-context",
-          ),
-        ].map((chip) =>
+        (
+          [
+            ...node.querySelectorAll<HTMLElement>(
+              ".llm-agent-action-summary-item .llm-selected-context",
+            ),
+          ] as HTMLElement[]
+        ).map((chip) =>
           chip.classList.contains("llm-note-context-chip")
             ? "note"
             : chip.className,
@@ -185,9 +183,9 @@ describe("workflow: completed native note change", function () {
         1,
         "the replacement is drawn as an added line",
       );
-      const undo = [...node.querySelectorAll("button")].find(
-        (button) => button.textContent === "Undo",
-      )!;
+      const undo = (
+        [...node.querySelectorAll("button")] as HTMLButtonElement[]
+      ).find((button) => button.textContent === "Undo")!;
       assert.exists(undo);
       undo.click();
       for (
@@ -202,8 +200,8 @@ describe("workflow: completed native note change", function () {
         "Undone",
         node.textContent || "",
       );
-      await notes[0].reload(undefined, true);
-      await notes[1].reload(undefined, true);
+      await notes[0].reload(undefined as never, true);
+      await notes[1].reload(undefined as never, true);
       assert.include(notes[0].getNote(), "Original paragraph.");
       assert.notInclude(notes[0].getNote(), "Verified replacement.");
       assert.include(notes[1].getNote(), "A later unrelated action.");
@@ -232,7 +230,7 @@ describe("workflow: completed native note change", function () {
       } catch (error) {
         conflict = String(error);
       }
-      await notes[0].reload(undefined, true);
+      await notes[0].reload(undefined as never, true);
       assert.equal(
         notes[0].getNote(),
         concurrentHtml,

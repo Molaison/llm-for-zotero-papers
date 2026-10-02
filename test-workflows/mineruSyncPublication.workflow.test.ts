@@ -15,6 +15,20 @@ import {
 } from "../src/services/mineru/sync";
 
 describe("workflow: MinerU sync during cache publication", function () {
+  // The library index restores synced caches in the background through the
+  // plugin's own copy of the cache module, whose write lock this bundle's
+  // writes do not share. Pause it so only this test writes the cache.
+  const indexPref = "extensions.zotero.llmforzotero.libraryTextIndexEnabled";
+  let oldIndex: unknown;
+  before(function () {
+    oldIndex = Zotero.Prefs.get(indexPref, true);
+    Zotero.Prefs.set(indexPref, false, true);
+  });
+  after(function () {
+    if (oldIndex === undefined) Zotero.Prefs.clear(indexPref, true);
+    else Zotero.Prefs.set(indexPref, oldIndex as boolean, true);
+  });
+
   it("preserves a fresh parse during restore/repair and recovers an interrupted write through native storage", async function () {
     const io = (globalThis as any).IOUtils;
     const source = PathUtils.join(

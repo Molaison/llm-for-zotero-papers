@@ -12,7 +12,6 @@ export type ReadStopPolicy = {
 };
 
 export type ReadStopRecommendation =
-  | "continue_plan"
   | "answer_now"
   | "answer_or_self_check"
   | "name_a_specific_missing_dimension"

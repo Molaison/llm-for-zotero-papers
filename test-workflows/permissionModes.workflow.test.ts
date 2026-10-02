@@ -27,7 +27,7 @@ async function withPrefs<T>(
   for (const [key, value] of Object.entries(prefs)) {
     const fullKey = `${PREF_PREFIX}.${key}`;
     previous.set(fullKey, Zotero.Prefs.get(fullKey, true));
-    Zotero.Prefs.set(fullKey, value, true);
+    Zotero.Prefs.set(fullKey, value as string | number | boolean, true);
   }
   try {
     return await task();
@@ -36,7 +36,7 @@ async function withPrefs<T>(
       if (value === undefined) {
         Zotero.Prefs.clear?.(fullKey, true);
       } else {
-        Zotero.Prefs.set(fullKey, value, true);
+        Zotero.Prefs.set(fullKey, value as string | number | boolean, true);
       }
     }
   }

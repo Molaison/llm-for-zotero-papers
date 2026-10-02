@@ -54,7 +54,6 @@ export function patchSkillFrontmatter(
   let sawVersion = false;
   let sawContexts = false;
   let sawActivation = false;
-  let sawSupersedes = false;
   let changed = false;
   const shippedContexts = shipped.contexts.join(",");
   const normalizedShippedContexts = normalizeContextsValue(shippedContexts);
@@ -95,10 +94,6 @@ export function patchSkillFrontmatter(
       sawActivation = true;
       return line;
     }
-    if (/^supersedes:/.test(trimmed)) {
-      sawSupersedes = true;
-      return line;
-    }
     return line;
   });
   if (shouldPatchVersionedMetadata && !sawVersion) {
@@ -115,14 +110,6 @@ export function patchSkillFrontmatter(
     shipped.activation !== "auto"
   ) {
     patchedFm.push(`activation: ${shipped.activation}`);
-    changed = true;
-  }
-  if (
-    shouldPatchVersionedMetadata &&
-    !sawSupersedes &&
-    shipped.supersedes.length
-  ) {
-    patchedFm.push(`supersedes: ${shipped.supersedes.join(",")}`);
     changed = true;
   }
   if (

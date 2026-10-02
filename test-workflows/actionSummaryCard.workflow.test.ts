@@ -1,4 +1,5 @@
 import "./hostSurfaceBootstrap";
+import { resolvedAgentRequest } from "../test/helpers/resolvedAgentRequest";
 import { assert } from "chai";
 import { initAgentChangeJournal } from "../src/agent/store/changeJournal";
 import { AgentToolRegistry } from "../src/agent/tools/registry";
@@ -182,7 +183,7 @@ describe("workflow: one action card for a mixed turn", function () {
         assert.equal(title.textContent, "What this turn did");
         assert.equal(icon.getAttribute("aria-hidden"), "true");
         assert.include(
-          win.getComputedStyle(icon).maskImage,
+          win.getComputedStyle(icon)!.maskImage,
           "action-turn-summary.svg",
         );
         assert.isAbove(icon.getBoundingClientRect().width, 0);
@@ -206,9 +207,9 @@ describe("workflow: one action card for a mixed turn", function () {
           for (const scale of ["1", "1.3"]) {
             panel.style.setProperty("--llm-font-scale", scale);
             const answerSize = parseFloat(
-              win.getComputedStyle(answer).fontSize,
+              win.getComputedStyle(answer)!.fontSize,
             );
-            const cardSize = parseFloat(win.getComputedStyle(card).fontSize);
+            const cardSize = parseFloat(win.getComputedStyle(card)!.fontSize);
             assert.isBelow(
               cardSize,
               answerSize,
@@ -219,11 +220,13 @@ describe("workflow: one action card for a mixed turn", function () {
               answerSize * 0.85,
               "compact text remains readable",
             );
-            for (const label of card.querySelectorAll<HTMLElement>(
-              ".llm-plan-title, .llm-plan-status, .llm-agent-action-verb-word-inline, .llm-agent-process-chip-label, .llm-paper-context-chip-text, .llm-tag-chip-title",
-            )) {
+            for (const label of Array.from(
+              card.querySelectorAll<HTMLElement>(
+                ".llm-plan-title, .llm-plan-status, .llm-agent-action-verb-word-inline, .llm-agent-process-chip-label, .llm-paper-context-chip-text, .llm-tag-chip-title",
+              ),
+            ) as HTMLElement[]) {
               assert.equal(
-                win.getComputedStyle(label).fontSize,
+                win.getComputedStyle(label)!.fontSize,
                 `${cardSize}px`,
                 `${label.className} matches the compact card at scale ${scale}`,
               );
@@ -249,11 +252,11 @@ describe("workflow: one action card for a mixed turn", function () {
         assert.equal(pre.querySelector("code")!.textContent, command);
         assert.isNull(pre.querySelector("script"));
         assert.isAbove(pre.getBoundingClientRect().height, 0);
-        assert.equal(win.getComputedStyle(pre).whiteSpace, "pre");
-        assert.equal(win.getComputedStyle(pre).borderTopWidth, "1px");
+        assert.equal(win.getComputedStyle(pre)!.whiteSpace, "pre");
+        assert.equal(win.getComputedStyle(pre)!.borderTopWidth, "1px");
         assert.equal(
-          win.getComputedStyle(pre.querySelector("code")!).fontSize,
-          win.getComputedStyle(card).fontSize,
+          win.getComputedStyle(pre.querySelector("code")!)!.fontSize,
+          win.getComputedStyle(card)!.fontSize,
         );
         const expandedHeight = row.getBoundingClientRect().height;
         row.querySelector("summary")!.click();
@@ -307,7 +310,7 @@ describe("workflow: one action card for a mixed turn", function () {
         assert.exists(toggle);
         assert.equal(toggle.getAttribute("aria-controls"), list.id);
         assert.isTrue(list.hidden);
-        assert.equal(win.getComputedStyle(list).display, "none");
+        assert.equal(win.getComputedStyle(list)!.display, "none");
         const collapsedHeight = card.getBoundingClientRect().height;
         assert.isBelow(
           collapsedHeight,
@@ -343,7 +346,7 @@ describe("workflow: one action card for a mixed turn", function () {
     parent.setField("title", `Mixed turn paper ${stamp}`);
     await parent.saveTx();
     const collection = new Zotero.Collection();
-    collection.libraryID = libraryID;
+    (collection as { libraryID: number }).libraryID = libraryID;
     collection.name = `Mixed turn collection ${stamp}`;
     await collection.saveTx();
     let root: HTMLElement | null = null;
@@ -358,7 +361,7 @@ describe("workflow: one action card for a mixed turn", function () {
       for (const name of ["note_write", "library_update"])
         registry.register(api.agent.getToolDefinition(name));
       const context: AgentToolContext = {
-        request: {
+        request: resolvedAgentRequest({
           conversationKey: parent.id,
           mode: "agent",
           userText: "Note this paper, tag it, and file it",
@@ -377,7 +380,7 @@ describe("workflow: one action card for a mixed turn", function () {
               outputDirectories: [],
             },
           },
-        },
+        }),
         item: parent,
         modelName: "workflow",
         currentAnswerText: "",
@@ -428,10 +431,10 @@ describe("workflow: one action card for a mixed turn", function () {
         itemIds: [parent.id],
         tags: [tag],
       });
-      await parent.reload(undefined, true);
+      await parent.reload(undefined as never, true);
       assert.lengthOf(parent.getNotes(), 1, "the turn wrote one child note");
       const note = Zotero.Items.get(parent.getNotes()[0]);
-      await note.reload(undefined, true);
+      await note.reload(undefined as never, true);
       assert.include(
         parent.getTags().map((entry) => entry.tag),
         tag,
@@ -473,7 +476,7 @@ describe("workflow: one action card for a mixed turn", function () {
         "a folded row reads nothing back from disk",
       );
       assert.include(
-        [...card.querySelectorAll(".llm-note-context-chip")].map(
+        ([...card.querySelectorAll(".llm-note-context-chip")] as Element[]).map(
           (chip) => chip.textContent,
         ),
         note.getNoteTitle(),
@@ -483,11 +486,13 @@ describe("workflow: one action card for a mixed turn", function () {
       // receipt targets the same paper, so both land on one row: the paper
       // once, then the note it wrote and the tag it applied.
       assert.deepEqual(
-        [
-          ...row.querySelectorAll<HTMLElement>(
-            ".llm-agent-action-summary-item .llm-selected-context",
-          ),
-        ].map((chip) =>
+        (
+          [
+            ...row.querySelectorAll<HTMLElement>(
+              ".llm-agent-action-summary-item .llm-selected-context",
+            ),
+          ] as HTMLElement[]
+        ).map((chip) =>
           chip.classList.contains("llm-paper-context-chip")
             ? "paper"
             : chip.classList.contains("llm-note-context-chip")
@@ -498,9 +503,11 @@ describe("workflow: one action card for a mixed turn", function () {
         ),
         ["paper", "note", "tag"],
       );
-      const tagTitle = [
-        ...card.querySelectorAll<HTMLElement>(".llm-tag-chip-title"),
-      ].find((chip) => chip.textContent === tag)!;
+      const tagTitle = (
+        [
+          ...card.querySelectorAll<HTMLElement>(".llm-tag-chip-title"),
+        ] as HTMLElement[]
+      ).find((chip) => chip.textContent === tag)!;
       assert.exists(tagTitle, "the row names the tag it applied");
       // A chip is a link only where this window can take the reader. The tag's
       // destination is Zotero's own tag selector, which exists only while the
@@ -526,7 +533,7 @@ describe("workflow: one action card for a mixed turn", function () {
       );
       assert.include(preview.textContent, "What the turn wrote down.");
 
-      root.remove();
+      root!.remove();
       root = null;
       const moveResult = await call("library_update", {
         kind: "collections",
@@ -534,7 +541,7 @@ describe("workflow: one action card for a mixed turn", function () {
         itemIds: [parent.id],
         targetCollectionId: collection.id,
       });
-      await parent.reload(undefined, true);
+      await parent.reload(undefined as never, true);
       assert.include(
         parent.getCollections(),
         collection.id,
@@ -609,7 +616,8 @@ describe("workflow: one action card for a mixed turn", function () {
       await collection.eraseTx();
       try {
         const tagID = Zotero.Tags.getID(tag);
-        if (tagID) await Zotero.Tags.removeFromLibrary(libraryID, tagID);
+        if (tagID)
+          await (Zotero.Tags as any).removeFromLibrary(libraryID, tagID);
       } catch {
         /* Leave no fixture tag behind, but never fail the run over one. */
       }

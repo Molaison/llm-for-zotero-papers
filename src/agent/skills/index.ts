@@ -19,11 +19,11 @@ import type { SkillRoutingRequest } from "./contextEligibility";
 import libraryAnalysisRaw from "./library-analysis.md";
 import comparePapersRaw from "./compare-papers.md";
 import analyzeFiguresRaw from "./analyze-figures.md";
-import simplePaperQaRaw from "./simple-paper-qa.md";
 import evidenceBasedQaRaw from "./evidence-based-qa.md";
 import writeNoteRaw from "./write-note.md";
 import literatureReviewRaw from "./literature-review.md";
 import importCitedReferenceRaw from "./import-cited-reference.md";
+import reorganizeLibraryRaw from "./reorganize-library.md";
 import { resolveSkillRouting } from "./routing";
 
 export { getSkillRoutingDiagnostics, parseSkill } from "./skillLoader";
@@ -48,9 +48,7 @@ export {
   prependNativeSkillMention,
 } from "./routing";
 export type {
-  PlanSkillRoutingReceipt,
   SkillRequestedScope,
-  SkillRouterResponseV1,
   SkillRoutingReceipt,
   ValidatedSkillActivation,
 } from "./routingTypes";
@@ -68,8 +66,6 @@ export type {
   LoadedSkillRecord,
   SkillInventoryEntry,
 } from "./progressiveLoading";
-export { resolvePinnedPlanSkills } from "./planBindings";
-export type { PlanSkillBindingResolution } from "./planBindings";
 
 /**
  * Built-in skill files bundled at compile time.
@@ -79,11 +75,11 @@ export const BUILTIN_SKILL_FILES: Record<string, string> = {
   "library-analysis.md": libraryAnalysisRaw,
   "compare-papers.md": comparePapersRaw,
   "analyze-figures.md": analyzeFiguresRaw,
-  "simple-paper-qa.md": simplePaperQaRaw,
   "evidence-based-qa.md": evidenceBasedQaRaw,
   "write-note.md": writeNoteRaw,
   "literature-review.md": literatureReviewRaw,
   "import-cited-reference.md": importCitedReferenceRaw,
+  "reorganize-library.md": reorganizeLibraryRaw,
 };
 
 /** Set of filenames that are built-in (shipped with the plugin). */
@@ -115,12 +111,12 @@ export function getBuiltinSkillInstructionById(
 }
 
 /**
- * Resolves explicit choices with semantic skill-only selections or stored Plan bindings.
- * The main model can load additional guidance through `load_skill` during a turn.
+ * Resolves explicit choices with stored Plan bindings. No model call selects
+ * skills; the main model loads other guidance through `load_skill`.
  *
  * Sources of activation, unioned:
  *   1. `forcedSkillIds` — explicit user selection from the slash menu.
- *   2. Automatic or stored skill IDs passed in via `classifiedIds`.
+ *   2. Stored Plan skill IDs passed in via `classifiedIds`.
  */
 export function getMatchedSkillIds(
   request: SkillRoutingRequest &

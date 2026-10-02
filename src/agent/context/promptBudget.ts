@@ -22,6 +22,7 @@ import {
 } from "../../utils/outputTokenPolicy";
 import { normalizeProviderProtocol } from "../../utils/providerProtocol";
 import { durableTranscriptMessages } from "./transcriptCompactor";
+import { isCatalogToolName, isPaperEvidenceToolName } from "./toolNames";
 
 const HISTORY_CHECKPOINT_MAX_TOKENS = 1_200;
 const TOOL_HANDLE_MAX_TOKENS = 768;
@@ -244,21 +245,13 @@ function existingToolResultHandle(content: unknown): string | undefined {
     : undefined;
 }
 
+// Stored history that carries a retired tool name gets generic compaction.
 function isLibrarySearchTool(toolName: string): boolean {
-  const normalized = toolName.trim().toLowerCase();
-  return normalized === "query_library" || normalized === "library_search";
+  return isCatalogToolName(toolName.trim().toLowerCase());
 }
 
 function isEvidenceTool(toolName: string): boolean {
-  const normalized = toolName.trim().toLowerCase();
-  return (
-    normalized === "library_retrieve" ||
-    normalized === "paper_read" ||
-    normalized === "read_paper" ||
-    normalized === "search_paper" ||
-    normalized === "read_attachment" ||
-    normalized === "view_pdf_pages"
-  );
+  return isPaperEvidenceToolName(toolName.trim().toLowerCase());
 }
 
 function simpleDigest(value: unknown): string {
@@ -318,7 +311,7 @@ function attachToolResultHandle<T>(params: {
         ? existingHandle
         : params.handleRecord.handle,
     toolResultHandleNotice:
-      "Use tool_result_read with this handle to retrieve omitted rows, snippets, or sections from the exact stored tool result if needed.",
+      "Call context_read source:'tool_result' with this handle to retrieve omitted rows, snippets, or sections from the exact stored tool result if needed.",
   };
   if (params.content && typeof params.content === "object") {
     return {
@@ -813,7 +806,7 @@ function buildToolResultHandle(params: {
     ),
     toolResultHandle: compactScalar(content.toolResultHandle),
     notice:
-      "Older tool output was cleared under context pressure. If this message includes toolResultHandle, call tool_result_read to retrieve omitted sections from the exact stored result.",
+      "Older tool output was cleared under context pressure. If this message includes toolResultHandle, call context_read source:'tool_result' with this handle to retrieve omitted sections from the exact stored result.",
   };
 }
 

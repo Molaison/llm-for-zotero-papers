@@ -7,7 +7,6 @@ This folder implements the reader/library side-panel chat experience.
 - `index.ts`: registration entrypoint (panel section, style injection, reader popup selection tracking).
 - `dedicatedChatPane.ts`: mutually exclusive chat/details presentation in the native right pane, with a native lifecycle recheck when returning to a retained reader tab.
 - `sidebarLayout.ts`: persisted Independent/Stacked presentation choice and live native section updates.
-- `dockedPanelTitle.ts`: the plugin title row and native close control above the classic chat toolbar.
 - `buildUI.ts`: static panel DOM construction.
 - `setupHandlers.ts`: runtime orchestration and event wiring across panel features.
 - `chat.ts`: conversation load/render/send/retry/edit and streaming orchestration.
@@ -56,4 +55,7 @@ The native workflow regression covers full-height geometry, returning to item de
 
 Customization offers Independent and Stacked (default) layouts without rebuilding the mounted chat.
 Stacked restores native section headers, collapse controls, and the classic chat toolbar.
+Independent's header has two rows: the centered Paper chat | Library chat toggle above the actions row.
+Stacked's header is one row, with the mode chip in place of the runtime divider; on hover or keyboard focus it drops down into a Paper chat | Library chat switch (`sidebarModeSwitch.ts`) whose picks take the toggle's switch path.
+Every header builds both controls and CSS picks one from `data-llm-sidebar-layout`, so a live layout change swaps them.
 With no library item selected, its rail icon opens the existing full-height starter page; selecting an item restores the chosen stacked layout.

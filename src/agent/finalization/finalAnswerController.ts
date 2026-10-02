@@ -1,23 +1,16 @@
 import type {
   AgentActionReceipt,
-  AgentModelMessage,
   AgentRuntimeRequest,
   AgentToolEffect,
 } from "../types";
-import type {
-  ActionContractRunSession,
-  RejectedActionContractFinalDecision,
-} from "../contracts/actionContractRunSession";
-import {
-  findLibraryRetrieveShallowSignal,
-  isEvidenceSeekingTurn,
-  transcriptShowsEvidenceReads,
-} from "../model/libraryAnswerGuard";
 import {
   assessWebAttribution,
   type WebAttributionAssessment,
 } from "../../webAccess/attribution";
-import type { PlanExecutionRunSession } from "../plans/runSession";
+import {
+  openDeclaredOutcomes,
+  outcomeProgressSignature,
+} from "../loop/outcomes";
 
 export type AgentFinalAnswerToolRecord = {
   name: string;
@@ -25,13 +18,9 @@ export type AgentFinalAnswerToolRecord = {
   mutability?: "read" | "write";
   effect?: AgentToolEffect;
   actionReceipts?: readonly AgentActionReceipt[];
+  input?: unknown;
   content?: unknown;
 };
-
-export type AgentFinalActionSession = Pick<
-  ActionContractRunSession,
-  "evaluateFinal"
->;
 
 export type AgentFinalAnswerDecision =
   | {
@@ -42,22 +31,11 @@ export type AgentFinalAnswerDecision =
       kind: "correct";
       correction: string;
       assistantContent?: string;
-      actionContractRejection?: Extract<
-        RejectedActionContractFinalDecision,
-        { kind: "correct" }
-      >;
     }
   | {
       kind: "fail";
       userMessage: string;
-      actionContractRejection?: Extract<
-        RejectedActionContractFinalDecision,
-        { kind: "fail" }
-      >;
     };
-
-const LIBRARY_EVIDENCE_CORRECTION =
-  "Correction for this turn: the question targets the selected collection/tag scope and needs library evidence. Call `library_retrieve` scoped to the selected collections/tags now (intent:'summarize' for synthesis or theme questions, 'enumerate' for which-papers questions; depth:'evidence'), then answer from the returned evidence. Include the coverage line (papers planned / body evidence read / metadata-only) in the final answer; if coverage is partial, name what is missing instead of generalizing.";
 
 /**
  * Applies every runtime-owned final-answer gate through one typed decision.
@@ -66,52 +44,18 @@ const LIBRARY_EVIDENCE_CORRECTION =
  * final response.
  */
 export class AgentFinalAnswerController {
-  private shallowLibraryCorrectionUsed = false;
   private webAttributionCorrectionUsed = false;
-  private documentCorrectionUsed = false;
   private readonly literatureReviewCorrections = new Set<string>();
+  /** The ledger's progress when the last outcome correction was given. */
+  private outcomeCorrectionSignature?: string;
 
-  constructor(
-    private readonly request: AgentRuntimeRequest,
-    private readonly actionContractSession: AgentFinalActionSession,
-    private readonly transcriptMessages: readonly AgentModelMessage[],
-    private readonly planSession?: Pick<
-      PlanExecutionRunSession,
-      "evaluateFinal"
-    >,
-  ) {}
+  constructor(private readonly request: AgentRuntimeRequest) {}
 
   async evaluate(params: {
     candidateText: string;
     canCorrect: boolean;
     toolExecutionRecords: readonly AgentFinalAnswerToolRecord[];
   }): Promise<AgentFinalAnswerDecision> {
-    // Action contracts remain a compatibility boundary for approved legacy
-    // Plans. Fresh direct turns are checked at each concrete invocation and
-    // have no predicted obligations to evaluate here.
-    if (
-      this.request.actionContract &&
-      this.request.planContext?.phase !== "planning"
-    ) {
-      const actionDecision = await this.actionContractSession.evaluateFinal({
-        canCorrect: params.canCorrect,
-      });
-      if (actionDecision.kind !== "accept") {
-        if (actionDecision.kind === "correct") {
-          return {
-            kind: "correct",
-            correction: actionDecision.correction,
-            actionContractRejection: actionDecision,
-          };
-        }
-        return {
-          kind: "fail",
-          userMessage: actionDecision.failure,
-          actionContractRejection: actionDecision,
-        };
-      }
-    }
-
     const unverifiableWrite = params.toolExecutionRecords.find(
       (record) =>
         record.ok &&
@@ -131,51 +75,16 @@ export class AgentFinalAnswerController {
       };
     }
 
-    const planDecision = await this.planSession?.evaluateFinal({
-      canCorrect: params.canCorrect,
-      successfulToolResultCount: params.toolExecutionRecords.filter(
-        (record) => record.ok,
-      ).length,
-    });
-    if (planDecision && planDecision.kind !== "accept") {
-      return planDecision.kind === "correct"
-        ? { kind: "correct", correction: planDecision.correction }
-        : { kind: "fail", userMessage: planDecision.failure };
-    }
-
-    if (
-      this.request.documentOutcomePolicy?.required &&
-      !params.toolExecutionRecords.some(
-        (record) =>
-          (record.name === "submit_document" ||
-            record.name === "submit_plan_document") &&
-          record.ok,
-      )
-    ) {
-      const failure =
-        "The requested document was not finalized, so ordinary answer text cannot be accepted as the completed outcome.";
-      if (params.canCorrect && !this.documentCorrectionUsed) {
-        this.documentCorrectionUsed = true;
-        return {
-          kind: "correct",
-          correction: `${failure} Complete the document and call submit_document now.`,
-        };
-      }
-      return { kind: "fail", userMessage: failure };
-    }
-
-    if (this.shouldCorrectShallowLibraryAnswer(params)) {
-      this.shallowLibraryCorrectionUsed = true;
-      return {
-        kind: "correct",
-        correction: LIBRARY_EVIDENCE_CORRECTION,
-      };
+    const outcomeCorrection = this.openOutcomeCorrection(params.canCorrect);
+    if (outcomeCorrection) {
+      return { kind: "correct", correction: outcomeCorrection };
     }
 
     const lastDiscovery = params.toolExecutionRecords.findLastIndex(
       (record) =>
         record.ok &&
         (record.name === "literature_search" ||
+          // Retired name, still present in stored tool history.
           record.name === "search_literature_online" ||
           (record.name === "literature_review" &&
             (record.content as { discoveryPhase?: string } | undefined)
@@ -185,6 +94,10 @@ export class AgentFinalAnswerController {
             ?.reviewRequired,
         ),
     );
+    // Only the selection card closes a discovery: the host refuses a direct
+    // import of its candidates before it runs (discoveryImportRefusal). An
+    // explicit import searches with workflow:'answer', opens no discovery and
+    // needs no card.
     if (
       lastDiscovery >= 0 &&
       !params.toolExecutionRecords
@@ -232,27 +145,20 @@ export class AgentFinalAnswerController {
     };
   }
 
-  private shouldCorrectShallowLibraryAnswer(params: {
-    canCorrect: boolean;
-    toolExecutionRecords: readonly AgentFinalAnswerToolRecord[];
-  }): boolean {
-    if (!params.canCorrect || this.shallowLibraryCorrectionUsed) return false;
-    const libraryScoped = Boolean(
-      this.request.turnPaperScope.collections.length ||
-      this.request.turnPaperScope.tags.length,
-    );
-    if (!libraryScoped || !isEvidenceSeekingTurn(this.request)) return false;
-    if (transcriptShowsEvidenceReads(this.transcriptMessages)) return false;
-
-    const shallowSignal = findLibraryRetrieveShallowSignal(
-      params.toolExecutionRecords,
-    );
-    const classifiedRetrieval = this.request.classifiedIntent?.retrievalIntent;
-    return (
-      !shallowSignal.ranRetrieveFamily ||
-      (shallowSignal.lastRetrieveShallow &&
-        (classifiedRetrieval === "summarize" ||
-          classifiedRetrieval === "verify"))
-    );
+  /**
+   * The correction that sends an ordinary turn back to the parts the model
+   * declared and has not finished. It is given again only after new
+   * evidence moved the ledger since the last one.
+   */
+  private openOutcomeCorrection(canCorrect: boolean): string | undefined {
+    if (!canCorrect) return undefined;
+    const checkpoint = this.request.executionCheckpoint;
+    const open = openDeclaredOutcomes(checkpoint);
+    if (!open.length) return undefined;
+    const signature = outcomeProgressSignature(checkpoint);
+    if (signature === this.outcomeCorrectionSignature) return undefined;
+    this.outcomeCorrectionSignature = signature;
+    const parts = open.map((task) => `“${task.description}”`).join("; ");
+    return `Before answering, finish the parts of this request you declared that are still open: ${parts}. Do them now with the tools. If one cannot be done, list it under task_update's skipped or blocked with the reason, then answer.`;
   }
 }

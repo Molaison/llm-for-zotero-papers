@@ -1,19 +1,35 @@
 import { callLLM, callLLMStream } from "../../utils/llmClient";
 import { appLogger } from "../../core/logging";
 import { resolveRetrievalQueryPlan } from "../../services/retrieval/retrievalQueryPlan";
+import { getRecentRetrievalTimings } from "../../services/retrieval/retrievalTiming";
+import type { ZoteroGateway } from "../../agent/services/zoteroGateway";
 import { createAgentModelAdapter } from "../../agent/model/factory";
 import { resolveAgentRuntimeRequest } from "../../agent/context/resolvedAgentRequest";
 import { createProviderRequestScope } from "../../utils/providerTransport";
 import { waitForElementGeometrySettled } from "./workflowLayout";
 import { getChatScrollSnapshot } from "./chatScrollSnapshots";
-import {
-  exerciseNativePlanReview,
-  exerciseNativeQuestionReview,
-} from "./nativePlanReviewReplay";
+import { exerciseNativeQuestionReview } from "./nativePlanReviewReplay";
 import { exercisePlanHistoryReplay } from "./planHistoryReplay";
 import { deliverPendingPlanDocumentMessage } from "../../agent/documents/publication";
-import { exerciseStreamingReplay } from "./streamingReplay";
+import {
+  exerciseStreamingReplay,
+  startTaskProgressReplay,
+} from "./streamingReplay";
+import {
+  flushTaskProgressPanels,
+  listMountedTaskProgressPanelsForTests,
+} from "./taskProgress/panel";
+import { clearAllTaskProgress, getTaskProgress } from "./taskProgress/store";
+import { resetTaskProgressDrawerHeight } from "./taskProgress/view";
 import { createCodexStreamingScrollReplay } from "./codexStreamingScrollReplay";
+import {
+  readTaskProgressComposerContexts,
+  reopenTaskProgressConversation,
+  seedTaskProgressConversation,
+  setTaskProgressComposerContexts,
+  startCodexTaskProgressReplay,
+  startTaskProgressAction,
+} from "./taskProgressReplay";
 import {
   createChatTurnPromptProbes,
   exerciseChatRenderingLifecycle,
@@ -24,6 +40,11 @@ import {
   exerciseChatModeStreamingTurn,
 } from "./chatMemoryReplay";
 import { exerciseAgentDeliveryReplay } from "./agentDeliveryReplay";
+import {
+  exerciseLongJobBatchStop,
+  exerciseLongJobNoteResume,
+  exerciseLongJobReplay,
+} from "./longJobReplay";
 import { buildUI } from "./buildUI";
 import { getAgentRuntime } from "../../agent";
 import { normalizeExecutionOutput } from "../../agent/tools/execution/results";
@@ -33,12 +54,6 @@ import {
   disposeAgentTrace,
 } from "./agentTrace/render";
 import { disposeSetupHandlers, setupHandlers } from "./setupHandlers";
-import { PLAN_APPROVED_EVENT } from "./planModeState";
-import {
-  buildQueuedFollowUpThreadKey,
-  getQueuedFollowUps,
-  setQueuedFollowUps,
-} from "./queuedFollowUps";
 import {
   activeConversationModeByLibrary,
   activeContextPanels,
@@ -185,32 +200,7 @@ import {
   getConversationWriteGeneration,
   bumpConversationWriteGeneration,
 } from "../../shared/conversationWriteFence";
-import {
-  loadLatestPlanDocumentForExecution,
-  loadPlanDocumentOutbox,
-} from "../../agent/documents/store";
-import { planExecutionCoordinator } from "../../agent/plans/coordinator";
-import {
-  loadPlanArtifact,
-  loadPlanExecutionLedger,
-} from "../../agent/plans/store";
-import {
-  buildResearchFlightReport,
-  renderResearchFlightReport,
-  type FlightRun,
-} from "../../agent/research/flightReport";
-import {
-  listPaperFindings,
-  listResearchCorpusItems,
-  listResearchEdges,
-  listResearchOpenQuestions,
-  listThemeFindings,
-  loadResearchJobForExecution,
-} from "../../agent/research/store";
-import {
-  getAgentRunTrace,
-  listAgentRunsForConversation,
-} from "../../agent/store/traceStore";
+import { loadPlanDocumentOutbox } from "../../agent/documents/store";
 import {
   activeClaudeConversationModeByLibrary,
   activeClaudeGlobalConversationByLibrary,
@@ -908,7 +898,7 @@ function getPanel(panelId: string): PanelRecord {
 
 async function createPaperWithPdfFixture(input: {
   title: string;
-  pdfTitle: string;
+  pdfTitle?: string;
   pages?: string[];
 }): Promise<WorkflowTestFixture> {
   assertWorkflowTestEnabled();
@@ -921,7 +911,10 @@ async function createPaperWithPdfFixture(input: {
   if (!Number.isFinite(parentItemId) || parentItemId <= 0) {
     throw new Error("Failed to save workflow test parent item");
   }
-  const tempPdfPath = await writeTempPdf(input.pdfTitle, input.pages);
+  const tempPdfPath = await writeTempPdf(
+    input.pdfTitle ?? input.title,
+    input.pages,
+  );
   const attachment = await Zotero.Attachments.importFromFile({
     file: tempPdfPath,
     parentItemID: parentItemId,
@@ -1062,12 +1055,6 @@ async function exerciseBackgroundAgentPublication(input: {
           mode: "agent",
           libraryID: paperA.libraryID,
           userText: "Publish a background document.",
-          documentOutcomePolicy: {
-            required: true,
-            documentKind: "custom",
-            integrityPolicy: "authored",
-            trigger: "document_intent",
-          },
         },
         runId: `background-publication-${paperA.key}-${timestamp}`,
         item: paperA,
@@ -1124,6 +1111,10 @@ async function renderStartupPanelForItem(
 
 function clearWorkflowConversationRuntimeState(): void {
   chatHistory.clear();
+  // Task progress records derive from the history cleared here; a record an
+  // earlier case left "running" would otherwise hold one of the store's six
+  // slots into every later case.
+  clearAllTaskProgress();
   selectedRuntimeModeCache.clear();
   loadedConversationKeys.clear();
   activeConversationModeByLibrary.clear();
@@ -1687,7 +1678,13 @@ async function togglePanelConversationMode(
   assertWorkflowTestEnabled();
   const panel = getPanel(panelId);
   const before = await getDiagnostics(panelId);
-  dispatchWorkflowClick(panel.body, "#llm-mode-chip", "Chat mode button");
+  dispatchWorkflowClick(
+    panel.body,
+    before.conversationKind === "global"
+      ? "#llm-paper-chat-tab"
+      : "#llm-library-chat-tab",
+    "Chat mode tab",
+  );
   return waitForPanelConversationChange({
     panelId,
     previousConversationKind: before.conversationKind,
@@ -1729,170 +1726,6 @@ async function exerciseDuplicatePanelSetup(
     turnNavigatorCountAfter: panel.body.querySelectorAll(".llm-turn-navigator")
       .length,
   };
-}
-
-async function approvePlanForExecution(input: {
-  planId: string;
-  revision: number;
-  expectedDigest?: string;
-}) {
-  assertWorkflowTestEnabled();
-  const artifact = await loadPlanArtifact(input.planId, input.revision);
-  if (!artifact) throw new Error("Plan revision not found");
-  const ledger = await planExecutionCoordinator.approve({
-    planId: input.planId,
-    revision: input.revision,
-    expectedDigest: input.expectedDigest || artifact.digest,
-    conversationGeneration: getConversationWriteGeneration(
-      artifact.conversationKey,
-    ),
-    actionContract: artifact.actionContract,
-  });
-  return {
-    executionId: ledger.executionId,
-    planDigest: ledger.planDigest,
-    activeTaskId: ledger.activeTaskId,
-    provider: ledger.provider,
-  };
-}
-
-async function researchFlightReport(input: { executionId: string }) {
-  assertWorkflowTestEnabled();
-  const job = await loadResearchJobForExecution(input.executionId);
-  if (!job) throw new Error("No research job for this execution");
-  const ledger = await loadPlanExecutionLedger(input.executionId);
-  const artifact = ledger
-    ? await loadPlanArtifact(ledger.planId, ledger.revision)
-    : null;
-  const [corpus, findings, edges, questions, themes, document] =
-    await Promise.all([
-      listResearchCorpusItems({ researchJobId: job.researchJobId }),
-      listPaperFindings(job.researchJobId),
-      listResearchEdges(job.researchJobId),
-      listResearchOpenQuestions(job.researchJobId),
-      listThemeFindings(job.researchJobId, job.scopeLineageDigest),
-      loadLatestPlanDocumentForExecution(input.executionId),
-    ]);
-  const runs: FlightRun[] = [];
-  if (ledger) {
-    for (const run of await listAgentRunsForConversation(
-      ledger.conversationKey,
-    )) {
-      if (run.createdAt < job.createdAt - 5 * 60_000) continue;
-      const trace = await getAgentRunTrace(run.runId);
-      const events = trace.events.map((event) => ({
-        type: event.eventType,
-        createdAt: event.createdAt,
-        payload: event.payload as unknown as Record<string, unknown>,
-      }));
-      if (
-        !events.some(
-          (event) =>
-            event.type === "tool_call" &&
-            String(event.payload.executionId || "") === input.executionId,
-        )
-      )
-        continue;
-      runs.push({
-        runId: run.runId,
-        status: run.status,
-        createdAt: run.createdAt,
-        completedAt: run.completedAt ?? undefined,
-        events,
-      });
-    }
-  }
-  const report = buildResearchFlightReport({
-    job,
-    corpus,
-    findings,
-    edges,
-    questions,
-    themes,
-    subquestions: artifact?.contract?.investigation?.subquestions || [],
-    ...(document
-      ? {
-          document: {
-            visibleMarkdown: document.visibleMarkdown,
-            clusters: document.citationBundle.clusters.map((cluster) => ({
-              citationId: cluster.citationId,
-              sources: cluster.sources,
-            })),
-          },
-        }
-      : {}),
-    ...(runs.length ? { runs } : {}),
-  });
-  return { report, rendered: renderResearchFlightReport(report) };
-}
-
-async function exerciseRebuiltPanelPlanApproval(panelId: string) {
-  assertWorkflowTestEnabled();
-  const panel = getPanel(panelId);
-  const item = activeContextPanels.get(panel.body)?.() || panel.item;
-  const conversationKey = getConversationKey(item);
-  const threadKey = buildQueuedFollowUpThreadKey({
-    conversationKey,
-    conversationSystem: "upstream",
-  });
-  for (let index = 0; index < 2; index++) {
-    disposeSetupHandlers(panel.body);
-    buildUI(panel.body, item);
-    setupHandlers(panel.body, item);
-  }
-  let sends = 0;
-  let release!: () => void;
-  const heldSend = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  const settledBefore = getWorkflowTestSendSettledSequence();
-  setWorkflowTestSendInterceptor(async (opts) => {
-    lastSend = opts;
-    sends++;
-    await heldSend;
-    return false;
-  });
-  const dispatch = () => {
-    const EventCtor = panel.body.ownerDocument.defaultView!.CustomEvent;
-    panel.body.querySelector("#llm-main")!.dispatchEvent(
-      new EventCtor(PLAN_APPROVED_EVENT, {
-        bubbles: true,
-        detail: { planId: "workflow-single-approval" },
-      }),
-    );
-  };
-  try {
-    dispatch();
-    const deadline = Date.now() + 10000;
-    while (!sends && Date.now() < deadline) await Zotero.Promise.delay(25);
-    if (!sends)
-      throw new Error("Plan approval never reached the send boundary");
-    const queuedAfterApproval = getQueuedFollowUps(threadKey).length;
-    const sendsAfterApproval = sends;
-    setQueuedFollowUps(threadKey, []);
-    release();
-    while (
-      getWorkflowTestSendSettledSequence() <= settledBefore &&
-      Date.now() < deadline
-    )
-      await Zotero.Promise.delay(25);
-    if (getWorkflowTestSendSettledSequence() <= settledBefore)
-      throw new Error("The intercepted approval send did not settle");
-    disposeSetupHandlers(panel.body);
-    dispatch();
-    await Zotero.Promise.delay(100);
-    return {
-      sendsAfterApproval,
-      queuedAfterApproval,
-      sendsAfterDispose: sends,
-    };
-  } finally {
-    setQueuedFollowUps(threadKey, []);
-    release();
-    setWorkflowTestSendInterceptor((opts) => {
-      lastSend = opts;
-    });
-  }
 }
 
 async function exercisePanelDraftStateRefresh(
@@ -2183,8 +2016,14 @@ async function measurePanelRuntimeGeometry(
   const runtimeControls = panel.body.querySelector(
     ".llm-panel-runtime-system-controls",
   ) as HTMLElement | null;
-  const modeChip = panel.body.querySelector(
-    ".llm-mode-chip",
+  const modeRow = panel.body.querySelector(
+    ".llm-header-toggle-row",
+  ) as HTMLElement | null;
+  const modeTabs = panel.body.querySelector(
+    ".llm-header-mode-tabs",
+  ) as HTMLElement | null;
+  const historyToggle = panel.body.querySelector(
+    "#llm-history-toggle",
   ) as HTMLElement | null;
   const headerActions = panel.body.querySelector(
     ".llm-header-actions",
@@ -2196,7 +2035,9 @@ async function measurePanelRuntimeGeometry(
     !panelRoot ||
     !header ||
     !runtimeControls ||
-    !modeChip ||
+    !modeRow ||
+    !modeTabs ||
+    !historyToggle ||
     !headerActions ||
     !clearButton
   ) {
@@ -2214,7 +2055,8 @@ async function measurePanelRuntimeGeometry(
     const runtimeButtonWidths = getVisibleRuntimeButtonRects(
       runtimeControls,
     ).map((rect) => rect.width);
-    const modeChipRect = modeChip.getBoundingClientRect();
+    const modeTabsRect = modeTabs.getBoundingClientRect();
+    const modeRowRect = modeRow.getBoundingClientRect();
     const actionsRect = headerActions.getBoundingClientRect();
     const clearButtonRect = clearButton.getBoundingClientRect();
     const clearButtonStyle =
@@ -2224,9 +2066,10 @@ async function measurePanelRuntimeGeometry(
       fontScale: input.fontScale,
       runtimeWidth: runtimeRect.width,
       runtimeButtonWidths,
+      // Row 2 leads with new chat and history, then the runtime systems.
       runtimeIntersectsLeadingContent: rectsIntersect(
         runtimeRect,
-        modeChipRect,
+        historyToggle.getBoundingClientRect(),
       ),
       runtimeIntersectsTrailingContent: rectsIntersect(
         runtimeRect,
@@ -2244,7 +2087,11 @@ async function measurePanelRuntimeGeometry(
       deleteButtonIconOnly:
         clearButtonRect.width <= 28.5 &&
         Number.parseFloat(clearButtonStyle?.fontSize || "") === 0,
-      centeredContentOffset: 0,
+      centeredContentOffset: Math.abs(
+        modeTabsRect.left +
+          modeTabsRect.width / 2 -
+          (modeRowRect.left + modeRowRect.width / 2),
+      ),
     };
   } finally {
     panel.body.style.width = previousWidth;
@@ -3285,7 +3132,7 @@ async function waitForStandaloneReady(): Promise<Document> {
     const doc = win?.document;
     const root = doc?.getElementById("llmforzotero-standalone-chat-root");
     const paperTab = doc?.querySelector(
-      ".llm-standalone-tab[data-tab='paper']",
+      ".llm-standalone-tab-row .llm-standalone-tab[data-tab='paper']",
     );
     const panelRoot = doc?.querySelector(".llm-standalone-content #llm-main");
     if (doc && root && paperTab && panelRoot) {
@@ -3300,13 +3147,13 @@ function readStandaloneDiagnostics(): WorkflowTestStandaloneDiagnostics {
   const win = getStandaloneWindowForTest();
   const doc = win?.document || null;
   const activeTab = doc?.querySelector(
-    ".llm-standalone-tab.active",
+    ".llm-standalone-tab-row .llm-standalone-tab.active",
   ) as HTMLElement | null;
   const paperTab = doc?.querySelector(
-    ".llm-standalone-tab[data-tab='paper']",
+    ".llm-standalone-tab-row .llm-standalone-tab[data-tab='paper']",
   ) as HTMLElement | null;
   const openTab = doc?.querySelector(
-    ".llm-standalone-tab[data-tab='open']",
+    ".llm-standalone-tab-row .llm-standalone-tab[data-tab='open']",
   ) as HTMLElement | null;
   const contentArea = doc?.querySelector(
     ".llm-standalone-content",
@@ -3579,7 +3426,7 @@ async function clickStandaloneTab(
   assertWorkflowTestEnabled();
   const doc = await waitForStandaloneReady();
   const button = doc.querySelector(
-    `.llm-standalone-tab[data-tab='${tab}']`,
+    `.llm-standalone-tab-row .llm-standalone-tab[data-tab='${tab}']`,
   ) as HTMLButtonElement | null;
   if (!button) throw new Error(`Standalone ${tab} tab was not rendered`);
   button.click();
@@ -3735,7 +3582,7 @@ async function measureStandaloneRuntimeGeometry(input: {
     ".llm-standalone-runtime-system-controls",
   ) as HTMLElement | null;
   const tabGroup = doc.querySelector(
-    ".llm-standalone-tab-group",
+    ".llm-standalone-tab-row .llm-standalone-tab-group",
   ) as HTMLElement | null;
   if (!root || !tabRow || !runtimeControls || !tabGroup) {
     throw new Error("Standalone runtime geometry targets were not rendered");
@@ -4918,6 +4765,8 @@ async function reset(): Promise<void> {
   });
   forcePendingTurnFinalizeFailuresForTests(0);
   forceWebChatSessionAnchorFailuresForTests(0);
+  // The dragged drawer height lives for the session; a case starts without it.
+  resetTaskProgressDrawerHeight();
 }
 
 function disposeWorkflowPanels(): void {
@@ -5444,12 +5293,167 @@ async function cleanupFixture(
   }
 }
 
+/**
+ * The panel a Task progress replay runs in: a synthetic panel by id, or the
+ * visible native panel of the sidebar or the standalone window.
+ */
+async function resolveTaskProgressPanel(input: {
+  panelId?: string;
+  surface?: "embedded" | "standalone";
+}): Promise<{ body: HTMLElement; item: Zotero.Item }> {
+  assertWorkflowTestEnabled();
+  if (input.panelId) {
+    const panel = getPanel(input.panelId);
+    const item = activeContextPanels.get(panel.body)?.() || panel.item;
+    await ensureConversationLoaded(item);
+    return { body: panel.body, item };
+  }
+  const win =
+    input.surface === "standalone"
+      ? getStandaloneWindowForTest()
+      : Zotero.getMainWindow();
+  const doc = win?.document;
+  const host =
+    input.surface === "standalone"
+      ? doc?.querySelector(".llm-standalone-content")
+      : doc &&
+        (getReaderContextPanelForTab(
+          doc,
+          (win as Window & { Zotero_Tabs?: { selectedID?: string } })
+            ?.Zotero_Tabs?.selectedID,
+        ) ||
+          doc.getElementById("zotero-item-details"));
+  const root = host?.querySelector<HTMLElement>("#llm-main");
+  const body = root?.parentElement;
+  const item = body && activeContextPanels.get(body)?.();
+  if (!root?.isConnected || !body || !item) {
+    throw new Error("Task progress replay requires a mounted chat panel");
+  }
+  await ensureConversationLoaded(item);
+  return { body, item };
+}
+
 export function installWorkflowTestHarness(targetAddon: {
-  api: { workflowTest?: WorkflowTestApi };
+  api: {
+    workflowTest?: WorkflowTestApi;
+    agent?: { getZoteroGateway(): ZoteroGateway };
+  };
 }): void {
   if (__env__ !== "test" && __env__ !== "development") return;
   targetAddon.api.workflowTest = {
     planRetrievalQuery: resolveRetrievalQueryPlan,
+    async libraryRetrieveBench(input) {
+      const { LibraryRetrieveService } =
+        await import("../../agent/services/libraryRetrieveService");
+      const { PdfService } = await import("../../agent/services/pdfService");
+      const agentApi = targetAddon.api.agent;
+      if (!agentApi) throw new Error("Agent subsystem is not installed");
+      const service = new LibraryRetrieveService(
+        agentApi.getZoteroGateway(),
+        new PdfService(),
+      );
+      const startedAt = Date.now();
+      const result = await service.retrieve({
+        query: input.query,
+        depth: input.depth || "evidence",
+        intent: input.intent,
+        scope: input.collectionIds?.length
+          ? {
+              libraryID: Zotero.Libraries.userLibraryID,
+              collectionIds: input.collectionIds,
+            }
+          : { libraryID: Zotero.Libraries.userLibraryID },
+        // No model, apiBase or apiKey: the planner falls back to the literal
+        // query, so the numbers measure retrieval, not an LLM.
+      });
+      const elapsedMs = Date.now() - startedAt;
+      const [timing] = getRecentRetrievalTimings(1);
+      return {
+        elapsedMs,
+        timing: timing || null,
+        paperItemIds: result.paperMatches.map((match) => Number(match.itemId)),
+        snippetItemIds: result.snippets.map((snippet) =>
+          Number(snippet.itemId),
+        ),
+        snippetTexts: result.snippets.map((snippet) => snippet.snippet),
+        snippetCount: result.snippets.length,
+        warnings: result.warnings,
+        queryCoverage: result.resourcePool.queryCoverage,
+      };
+    },
+    getRecentRetrievalTimings: (limit) => getRecentRetrievalTimings(limit),
+    libraryTextIndexStatus: async () => {
+      const { libraryTextIndexScheduler } =
+        await import("../../services/libraryTextIndex");
+      return libraryTextIndexScheduler.getStatus(
+        Zotero.Libraries.userLibraryID,
+      );
+    },
+    setLibraryTextIndexUserIdle: async (idle) => {
+      const { setUserIdleForTests } =
+        await import("../../services/libraryTextIndex/userIdle");
+      const { libraryTextIndexScheduler } =
+        await import("../../services/libraryTextIndex");
+      setUserIdleForTests(idle);
+      libraryTextIndexScheduler.onUserIdleChange(idle !== false);
+    },
+    waitForLibraryTextIndexIdle: async (timeoutMs) => {
+      // The scaffold's tester is never "user idle"; force it so prefetch drains.
+      const { setUserIdleForTests } =
+        await import("../../services/libraryTextIndex/userIdle");
+      const { libraryTextIndexScheduler } =
+        await import("../../services/libraryTextIndex");
+      setUserIdleForTests(true);
+      libraryTextIndexScheduler.onUserIdleChange(true);
+      return libraryTextIndexScheduler.waitForIdle(timeoutMs);
+    },
+    libraryTextIndexCoverage: async (attachmentIds) => {
+      const { getLibraryTextIndexStore } =
+        await import("../../services/libraryTextIndex/store");
+      const store = await getLibraryTextIndexStore();
+      if (!store) throw new Error("library text index store unavailable");
+      const coverage = await store.getCoverage(attachmentIds);
+      return {
+        indexed: [...coverage.indexed],
+        missing: coverage.missing,
+        failed: coverage.failed,
+      };
+    },
+    forgetLibraryTextIndexDocuments: async (attachmentIds) => {
+      const { getLibraryTextIndexStore } =
+        await import("../../services/libraryTextIndex/store");
+      const store = await getLibraryTextIndexStore();
+      if (!store) throw new Error("library text index store unavailable");
+      await store.removeFromQueue(attachmentIds);
+      await store.deleteDocuments(attachmentIds);
+    },
+    reconcileLibraryTextIndex: async () => {
+      const { libraryTextIndexScheduler } =
+        await import("../../services/libraryTextIndex");
+      return libraryTextIndexScheduler.reconcile(
+        Zotero.Libraries.userLibraryID,
+      );
+    },
+    loadPaperContextForTest: async (attachmentId) => {
+      const { pdfTextCache } =
+        await import("../../services/paperContent/contextCache");
+      const { ensurePDFTextCached } =
+        await import("../../services/paperContent/pdfContext");
+      const item = Zotero.Items.get(attachmentId);
+      if (!item) throw new Error(`No attachment ${attachmentId}`);
+      // A fresh load, as when a question first reads this paper.
+      pdfTextCache.delete(attachmentId);
+      await ensurePDFTextCached(item);
+    },
+    async clearPaperTextCacheForBench() {
+      const { pdfTextCache, pdfTextLoadingTasks } =
+        await import("../../services/paperContent/contextCache");
+      const { invalidateRetrievalCandidates } =
+        await import("../../services/retrieval/cacheInvalidation");
+      pdfTextCache.clear();
+      pdfTextLoadingTasks.clear();
+      invalidateRetrievalCandidates();
+    },
     async checkProviderConversationTransport(input) {
       const params = {
         ...input,
@@ -5587,10 +5591,6 @@ export function installWorkflowTestHarness(targetAddon: {
     renderPanelForItem,
     refreshActiveConversationPanels,
     exerciseBackgroundAgentPublication,
-    exerciseNativePlanReview: () => {
-      assertWorkflowTestEnabled();
-      return exerciseNativePlanReview();
-    },
     exerciseNativeQuestionReview: (panelId: string) => {
       assertWorkflowTestEnabled();
       const panel = getPanel(panelId);
@@ -5671,18 +5671,102 @@ export function installWorkflowTestHarness(targetAddon: {
       await ensureConversationLoaded(item);
       return exerciseStreamingReplay({ body, item }, input);
     },
+    startTaskProgressReplay: async (input) => {
+      const panel = await resolveTaskProgressPanel(input);
+      return startTaskProgressReplay(panel, input);
+    },
+    startTaskProgressAction: async (input) => {
+      const panel = await resolveTaskProgressPanel(input);
+      return startTaskProgressAction(panel, input);
+    },
+    startCodexTaskProgressReplay: async (input) => {
+      const panel = await resolveTaskProgressPanel(input);
+      return startCodexTaskProgressReplay(panel, input);
+    },
+    seedTaskProgressConversation: async (input) => {
+      const panel = await resolveTaskProgressPanel(input);
+      return seedTaskProgressConversation(panel, input.turns);
+    },
+    reopenTaskProgressConversation: async (input) => {
+      const panel = await resolveTaskProgressPanel(input);
+      await reopenTaskProgressConversation(panel);
+    },
+    setTaskProgressComposerContexts: async (input) => {
+      const panel = await resolveTaskProgressPanel(input);
+      await setTaskProgressComposerContexts(panel, input);
+    },
+    readTaskProgressComposerContexts: async (input) => {
+      const panel = await resolveTaskProgressPanel(input);
+      return readTaskProgressComposerContexts(panel);
+    },
+    flushTaskProgress: () => {
+      assertWorkflowTestEnabled();
+      flushTaskProgressPanels();
+    },
+    listTaskProgressPanels: () => {
+      assertWorkflowTestEnabled();
+      return listMountedTaskProgressPanelsForTests();
+    },
+    getTaskProgressSnapshot: (conversationKey) => {
+      assertWorkflowTestEnabled();
+      const record = getTaskProgress(conversationKey);
+      if (!record) return null;
+      return {
+        runState: record.runState,
+        turnIndex: record.turnIndex,
+        label: record.scope?.label || "",
+        scopeKeys:
+          record.scope?.listing?.entries.map((entry) => entry.key) || [],
+        listingLoaded: Boolean(record.scope?.listing),
+        planSeen: record.planSeen,
+        hydrated: record.hydrated,
+        checklist: record.checklist
+          ? {
+              source: record.checklist.source,
+              title: record.checklist.title,
+              steps: record.checklist.steps.map((step) => ({ ...step })),
+              outcome: record.checklist.outcome,
+              detail: record.checklist.detail,
+              end: record.checklist.end,
+            }
+          : null,
+        paperStates: Object.fromEntries(
+          Object.values(record.ledger.papers).map((entry) => [
+            entry.key,
+            entry.state,
+          ]),
+        ),
+      };
+    },
     exerciseAgentDeliveryReplay: (input) =>
       exerciseAgentDeliveryReplay(
         getPanel(input.panelId),
         input.failFinalRefresh,
       ),
+    exerciseLongJobReplay: (input) =>
+      exerciseLongJobReplay(getPanel(input.panelId), {
+        collection: input.collection,
+        papers: input.papers,
+        inputTokenCap: input.inputTokenCap,
+      }),
+    exerciseLongJobNoteResume: (input) =>
+      exerciseLongJobNoteResume(getPanel(input.panelId), {
+        collection: input.collection,
+        papers: input.papers,
+        inputTokenCap: input.inputTokenCap,
+        stopAfterNotes: input.stopAfterNotes,
+      }),
+    exerciseLongJobBatchStop: (input) =>
+      exerciseLongJobBatchStop(getPanel(input.panelId), {
+        collection: input.collection,
+        papers: input.papers,
+        inputTokenCap: input.inputTokenCap,
+        stopAfterNotes: input.stopAfterNotes,
+      }),
     renderStartupPanelForItem,
     startNewPanelConversation,
     togglePanelConversationMode,
     exerciseDuplicatePanelSetup,
-    exerciseRebuiltPanelPlanApproval,
-    approvePlanForExecution,
-    researchFlightReport,
     exercisePanelDraftStateRefresh,
     selectPanelModelEntry,
     exerciseWebChatPdfToggleWorkflow,
@@ -5736,21 +5820,6 @@ export function installWorkflowTestHarness(targetAddon: {
           timestamp: Date.now() - 1,
         },
         events: [
-          ...(options?.actionContract
-            ? [
-                {
-                  runId: "workflow-tool-result",
-                  seq: 0,
-                  eventType: "provider_event" as const,
-                  createdAt: Date.now(),
-                  payload: {
-                    type: "provider_event" as const,
-                    providerType: "agent_action_contract",
-                    payload: { contract: options.actionContract },
-                  },
-                },
-              ]
-            : []),
           ...[...(options?.priorResults || []), result].map((entry, index) => ({
             runId: "workflow-tool-result",
             seq: index + 1,

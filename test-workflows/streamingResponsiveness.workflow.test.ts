@@ -80,13 +80,10 @@ describe("workflow: streaming responsiveness", function () {
         );
         assert.isTrue(result.composerPreserved);
         assert.isTrue(
-          result.resumeVisibilityCorrect,
-          "resume is visible only when interrupted",
+          result.stepsVisibleWhileRunning,
+          "the run's steps show in the Task progress drawer while it works",
         );
-        assert.isTrue(
-          result.singleExecutionProgress,
-          "historical resumed turns cannot recreate task progress",
-        );
+        assert.equal(result.floatingCapsuleNodes, 0, "no floating capsule");
       } finally {
         await api.reset();
         await api.cleanupFixture(fixture);

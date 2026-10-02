@@ -91,7 +91,6 @@ describe("direct Agent ownership boundary", function () {
   });
   it("does not infer executable Plan effects from native provider step prose", function () {
     for (const path of [
-      "src/agent/plans/coordinator.ts",
       "src/agent/externalBackendBridge.ts",
       "src/modules/contextPanel/chat.ts",
     ]) {
@@ -109,9 +108,6 @@ describe("direct Agent ownership boundary", function () {
     for (const path of [
       "src/agent/authorization/policy.ts",
       "src/agent/contracts/actionContract.ts",
-      "src/agent/model/requestClassifier.ts",
-      "src/agent/documents/outcomePolicy.ts",
-      "src/agent/skills/noteIntent.ts",
     ]) {
       const offenders: string[] = [];
       const visit = (node: ts.Node) => {

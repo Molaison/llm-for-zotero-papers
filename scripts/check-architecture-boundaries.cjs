@@ -160,6 +160,53 @@ function validateFacades(facades) {
 validateFacades(FACADES);
 
 /**
+ * Exports only their named owners may take.
+ *
+ * A facade seals a directory; this seals single exports of a module that many
+ * files import for other reasons. `finishAgentRun` ends an agent run, and the
+ * Original Agent loop names the stop rule of every run it ends from one place,
+ * so a run ended anywhere else would stop for a reason nothing records. The
+ * module that defines an export may always use it.
+ */
+const SEALED_EXPORTS = [
+  {
+    name: "run-termination",
+    module: "src/agent/store/traceStore.ts",
+    exports: ["finishAgentRun"],
+    importers: [
+      // The Original Agent loop, through its one terminateRun path.
+      "src/agent/runtime.ts",
+      // Codex and Claude Code bridge runs finish their own runs.
+      "src/agent/externalBackendBridge.ts",
+    ],
+  },
+];
+
+/**
+ * Reject a sealed-export entry that cannot describe a real boundary: one that
+ * seals nothing, or an export two entries both claim to own. Returns the
+ * table so it can wrap a declaration.
+ */
+function validateSealedExports(entries) {
+  const claimed = new Set();
+  for (const entry of entries) {
+    if (!entry.exports.length) {
+      throw new Error(`Sealed entry "${entry.name}" seals no export.`);
+    }
+    for (const name of entry.exports) {
+      const key = `${entry.module}#${name}`;
+      if (claimed.has(key)) {
+        throw new Error(`${key} is sealed by more than one entry.`);
+      }
+      claimed.add(key);
+    }
+  }
+  return entries;
+}
+
+validateSealedExports(SEALED_EXPORTS);
+
+/**
  * Exact upward runtime imports present when the layer rule was introduced.
  * Every entry is a migration obligation, not a directory exemption: an entry
  * that no longer matches a real edge is reported as stale so the list shrinks
@@ -193,7 +240,7 @@ const MIGRATION_OBLIGATIONS = [
   // The Zotero change dispatcher writes straight into the agent change journal.
   "runtime:src/services/zoteroChangeDispatcher.ts -> src/agent/store/changeJournal.ts",
   // Library-chat read strategy reads the agent research policy.
-  "runtime:src/shared/libraryChatReadStrategy.ts -> src/agent/research/policy.ts",
+  "runtime:src/shared/libraryChatReadStrategy.ts -> src/agent/context/researchPolicy.ts",
   // src/utils holds application code (chat store, LLM client, provider probes)
   // that belongs above the services layer.
   "runtime:src/utils/attachmentRefStore.ts -> src/services/attachmentStorage.ts",
@@ -462,9 +509,104 @@ function findFacadeViolations(edges, facades) {
   return violations;
 }
 
+/** `src/x.ts -> src/y.ts#name`, or `#*` when the module is taken whole. */
+function formatSealedExportViolation(violation) {
+  return `${violation.from} -> ${violation.module}#${violation.export}`;
+}
+
+/**
+ * Every file outside an entry's owners that takes one of its sealed exports:
+ * by name (aliased, re-exported, type-only, or read off a namespace), or by
+ * taking the whole module -- `import * as`, `export *`, `import()` or
+ * `require` -- which hands the export to code this check never reads.
+ */
+function findSealedExportViolations(root, edges, sealedExports) {
+  const fileSet = new Set(walkSourceFiles(path.join(root, "src")));
+  const aliases = loadAliases(root);
+  const violations = [];
+  for (const entry of sealedExports) {
+    const sealed = new Set(entry.exports);
+    const candidates = new Set(
+      edges
+        .filter(
+          (edge) =>
+            edge.to === entry.module &&
+            edge.from !== entry.module &&
+            !entry.importers.includes(edge.from),
+        )
+        .map((edge) => edge.from),
+    );
+    for (const from of candidates) {
+      const file = path.join(root, from);
+      const source = ts.createSourceFile(
+        file,
+        fs.readFileSync(file, "utf8"),
+        ts.ScriptTarget.Latest,
+        true,
+      );
+      const isModule = (specifier) => {
+        if (!specifier || !ts.isStringLiteralLike(specifier)) return false;
+        const resolved = resolveImport(
+          root,
+          file,
+          specifier.text,
+          fileSet,
+          aliases,
+        );
+        return (
+          Boolean(resolved) &&
+          slash(path.relative(root, resolved)) === entry.module
+        );
+      };
+      const taken = new Set();
+      const visit = (node) => {
+        if (ts.isIdentifier(node) && sealed.has(node.text))
+          taken.add(node.text);
+        const bindings = ts.isImportDeclaration(node)
+          ? node.importClause?.namedBindings
+          : undefined;
+        if (
+          (bindings &&
+            ts.isNamespaceImport(bindings) &&
+            isModule(node.moduleSpecifier)) ||
+          (ts.isExportDeclaration(node) &&
+            (!node.exportClause || ts.isNamespaceExport(node.exportClause)) &&
+            isModule(node.moduleSpecifier)) ||
+          (ts.isCallExpression(node) &&
+            node.arguments.length === 1 &&
+            (node.expression.kind === ts.SyntaxKind.ImportKeyword ||
+              (ts.isIdentifier(node.expression) &&
+                node.expression.text === "require")) &&
+            isModule(node.arguments[0]))
+        ) {
+          taken.add("*");
+        }
+        ts.forEachChild(node, visit);
+      };
+      visit(source);
+      for (const name of [...taken].sort()) {
+        violations.push({
+          from,
+          module: entry.module,
+          export: name,
+          sealed: entry.name,
+        });
+      }
+    }
+  }
+  return violations.sort((left, right) =>
+    formatSealedExportViolation(left).localeCompare(
+      formatSealedExportViolation(right),
+    ),
+  );
+}
+
 function checkArchitectureBoundaries(root = process.cwd(), options = {}) {
   const obligationValues = options.obligations || MIGRATION_OBLIGATIONS;
   const facades = validateFacades(options.facades || FACADES);
+  const sealedExports = validateSealedExports(
+    options.sealedExports || SEALED_EXPORTS,
+  );
   const edges = collectImportEdges(root);
   const upward = [];
   for (const edge of edges) {
@@ -482,8 +624,14 @@ function checkArchitectureBoundaries(root = process.cwd(), options = {}) {
   return {
     layers: LAYERS,
     facades,
+    sealedExports,
     unclassifiedDirectories: findUnclassifiedDirectories(root),
     facadeViolations: findFacadeViolations(edges, facades),
+    sealedExportViolations: findSealedExportViolations(
+      root,
+      edges,
+      sealedExports,
+    ),
     upwardRuntimeEdges,
     upwardTypeWarnings,
     unexpectedUpwardEdges: upwardRuntimeEdges.filter(
@@ -517,7 +665,8 @@ if (require.main === module) {
     result.unclassifiedDirectories.length ||
     result.unexpectedUpwardEdges.length ||
     result.staleObligations.length ||
-    result.facadeViolations.length;
+    result.facadeViolations.length ||
+    result.sealedExportViolations.length;
   if (failed) {
     if (result.unclassifiedDirectories.length) {
       console.error(
@@ -540,14 +689,29 @@ if (require.main === module) {
         console.error(`- ${describeBoundary(violation)} [${violation.facade}]`);
       }
     }
+    if (result.sealedExportViolations.length) {
+      console.error(
+        "Sealed exports taken outside their owners (go through an owner instead):",
+      );
+      for (const violation of result.sealedExportViolations) {
+        console.error(
+          `- ${formatSealedExportViolation(violation)} [${violation.sealed}]`,
+        );
+      }
+    }
     process.exit(1);
   }
   const order = LAYERS.map((layer) => layer.name).join(" < ");
+  const sealedExportCount = SEALED_EXPORTS.reduce(
+    (count, entry) => count + entry.exports.length,
+    0,
+  );
   console.log(
     `Architecture-boundary check passed (${order} < composition root; ` +
       `${result.upwardRuntimeEdges.length} migration obligations remain, ` +
       `${result.upwardTypeWarnings.length} type-only warnings, ` +
-      `${FACADES.length} facade(s) sealed).`,
+      `${FACADES.length} facade(s) sealed, ` +
+      `${sealedExportCount} export(s) sealed).`,
   );
 }
 
@@ -555,9 +719,12 @@ module.exports = {
   FACADES,
   LAYERS,
   MIGRATION_OBLIGATIONS,
+  SEALED_EXPORTS,
   checkArchitectureBoundaries,
   collectImportEdges,
   formatBoundary,
+  formatSealedExportViolation,
   validateFacades,
   validateLayers,
+  validateSealedExports,
 };

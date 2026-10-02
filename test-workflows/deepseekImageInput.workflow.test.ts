@@ -68,7 +68,11 @@ describe("workflow: DeepSeek figure input defaults", function () {
     await api.reset();
     try {
       for (const [key, value] of Object.entries(settings))
-        Zotero.Prefs.set(prefix + key, value, true);
+        Zotero.Prefs.set(
+          prefix + key,
+          value as string | number | boolean,
+          true,
+        );
       fixture = await api.createPaperWithPdfFixture({
         title: "DeepSeek figure input",
         pdfTitle: "Figure fixture",
@@ -100,7 +104,7 @@ describe("workflow: DeepSeek figure input defaults", function () {
         );
         assert.equal(
           getModelEntryById(`deepseek-workflow-${scenario.id}`)?.advanced
-            .inputMode,
+            ?.inputMode,
           scenario.inputMode,
           "the saved model retains its input mode",
         );

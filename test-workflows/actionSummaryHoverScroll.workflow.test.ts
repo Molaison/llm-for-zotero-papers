@@ -83,7 +83,7 @@ describe("workflow: action summary object hover scroll", function () {
 
     // Leave less room than the old 14 px hover glyph added. Production flex
     // wrapping then moves the second chip to a new line with the old CSS.
-    const gap = Number.parseFloat(win.getComputedStyle(targets).columnGap);
+    const gap = Number.parseFloat(win.getComputedStyle(targets)!.columnGap);
     targets.style.width = `${Math.ceil(first.getBoundingClientRect().width + second.getBoundingClientRect().width + gap + 5)}px`;
     await settle();
     assert.closeTo(
@@ -126,7 +126,7 @@ describe("workflow: action summary object hover scroll", function () {
       // Gecko inspector API so this exercises the actual production rule.
       inspector.addPseudoClassLock(first, ":hover");
       await settle();
-      assert.equal(win.getComputedStyle(icon).opacity, "1");
+      assert.equal(win.getComputedStyle(icon)!.opacity, "1");
       assert.closeTo(
         targets.getBoundingClientRect().height,
         before.rowHeight,
@@ -139,7 +139,7 @@ describe("workflow: action summary object hover scroll", function () {
       assert.equal(getChatScrollSnapshot(key, box)?.mode, "followBottom");
       inspector.removePseudoClassLock(first, ":hover");
       await settle();
-      assert.equal(win.getComputedStyle(icon).opacity, "0");
+      assert.equal(win.getComputedStyle(icon)!.opacity, "0");
       assert.closeTo(box.scrollTop, before.top, 1);
       assert.closeTo(offset(readingLine), before.readingOffset, 1);
     }

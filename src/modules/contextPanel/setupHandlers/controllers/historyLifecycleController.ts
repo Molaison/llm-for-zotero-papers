@@ -187,6 +187,12 @@ import {
 } from "../../conversationRenameEligibility";
 import { primeHistoryNavigationMode } from "../../historyNavigationModeSync";
 import {
+  resolveSidebarChatModeTabAction,
+  resolveSidebarChatModeToggleState,
+  type SidebarChatModeTab,
+} from "../../sidebarChatModeToggle";
+import { installSidebarModeSwitch } from "../../sidebarModeSwitch";
+import {
   canCommitPanelConversation,
   capturePanelOperationLease,
   isPanelHostCompatibleWithPaper,
@@ -274,7 +280,10 @@ export type HistoryLifecycleControllerDeps = {
   historyUndoText: HTMLElement | null;
   historyUndoBtn: HTMLButtonElement | null;
   topToast: HTMLElement | null;
-  modeChipBtn: HTMLButtonElement | null;
+  paperChatTabBtn: HTMLButtonElement | null;
+  libraryChatTabBtn: HTMLButtonElement | null;
+  /** The Stacked layout's mode chip; it picks through the tabs' path. */
+  modeSwitch: HTMLElement | null;
   getItem: () => Zotero.Item | null;
   setItem: (item: Zotero.Item | null) => boolean | void;
   getBasePaperItem: () => Zotero.Item | null;
@@ -452,7 +461,9 @@ export function createHistoryLifecycleController(
     historyUndoText,
     historyUndoBtn,
     topToast,
-    modeChipBtn,
+    paperChatTabBtn,
+    libraryChatTabBtn,
+    modeSwitch,
   } = deps;
   const getConversationSystem = deps.getConversationSystem;
   const isClaudeConversationSystem = deps.isClaudeConversationSystem;
@@ -4267,48 +4278,117 @@ export function createHistoryLifecycleController(
   renderPendingDeletionToast();
   void pendingDeletionStore.sweepExpired("panel-init");
 
-  // --- Mode chip handler ---
-  if (modeChipBtn) {
-    modeChipBtn.addEventListener("click", (e: Event) => {
-      e.preventDefault();
-      e.stopPropagation();
-      if (isNoteSession() || isWebChatMode()) return;
-      if (isGlobalMode()) {
-        void switchPaperConversation();
+  // --- Paper chat | Library chat toggle ---
+  // A tab click navigates exactly like picking a conversation in the history
+  // menu: prime the target mode, switch, and roll the priming back on failure.
+  const resolveRememberedGlobalConversationKey = (libraryID: number): number =>
+    isClaudeConversationSystem()
+      ? resolveRememberedClaudeConversationKey({
+          libraryID,
+          kind: "global",
+        }) ||
+        getLastUsedClaudeGlobalConversationKey(libraryID) ||
+        0
+      : isCodexConversationSystem()
+        ? activeCodexGlobalConversationByLibrary.get(
+            buildCodexLibraryStateKey(libraryID),
+          ) ||
+          getLastUsedCodexGlobalConversationKey(libraryID) ||
+          0
+        : (() => {
+            const lockedKey = getLockedGlobalConversationKey(libraryID);
+            if (lockedKey !== null) return lockedKey;
+            const activeKey = Number(
+              activeGlobalConversationByLibrary.get(libraryID) ||
+                getLastUsedUpstreamGlobalConversationKey(libraryID) ||
+                0,
+            );
+            if (!isUpstreamGlobalConversationKey(activeKey)) return 0;
+            return activeKey === GLOBAL_CONVERSATION_KEY_BASE
+              ? buildDefaultUpstreamGlobalConversationKey(libraryID)
+              : Math.floor(activeKey);
+          })();
+
+  const switchSidebarChatMode = async (
+    requested: SidebarChatModeTab,
+  ): Promise<void> => {
+    if (!item) return;
+    const paperItem =
+      requested === "paper" ? resolveCurrentPaperBaseItem() : null;
+    const action = resolveSidebarChatModeTabAction({
+      requested,
+      state: resolveSidebarChatModeToggleState({
+        isGlobalMode: isGlobalMode(),
+        isNoteSession: isNoteSession(),
+        isWebChat: isWebChatMode(),
+      }),
+      hasPaper: Boolean(paperItem),
+    });
+    if (action === "noop") return;
+    if (action === "no-paper") {
+      if (status) {
+        setStatus(status, t("Open a paper to start a paper chat"), "error");
+      }
+      return;
+    }
+    const libraryID = getCurrentLibraryID();
+    if (action === "switch-library") {
+      const targetGlobalKey = resolveRememberedGlobalConversationKey(libraryID);
+      if (targetGlobalKey <= 0) {
+        await createAndSwitchGlobalConversation();
         return;
       }
-      const libraryID = getCurrentLibraryID();
-      const targetGlobalKey = isClaudeConversationSystem()
-        ? resolveRememberedClaudeConversationKey({
-            libraryID,
-            kind: "global",
-          }) ||
-          getLastUsedClaudeGlobalConversationKey(libraryID) ||
-          0
-        : isCodexConversationSystem()
-          ? activeCodexGlobalConversationByLibrary.get(
-              buildCodexLibraryStateKey(libraryID),
-            ) ||
-            getLastUsedCodexGlobalConversationKey(libraryID) ||
-            0
-          : (() => {
-              const lockedKey = getLockedGlobalConversationKey(libraryID);
-              if (lockedKey !== null) return lockedKey;
-              const activeKey = Number(
-                activeGlobalConversationByLibrary.get(libraryID) ||
-                  getLastUsedUpstreamGlobalConversationKey(libraryID) ||
-                  0,
-              );
-              if (!isUpstreamGlobalConversationKey(activeKey)) return 0;
-              return activeKey === GLOBAL_CONVERSATION_KEY_BASE
-                ? buildDefaultUpstreamGlobalConversationKey(libraryID)
-                : Math.floor(activeKey);
-            })();
-      if (targetGlobalKey > 0) {
-        void switchGlobalConversation(targetGlobalKey);
-      } else {
-        void createAndSwitchGlobalConversation();
+      const targetModeSnapshot = primeHistoryNavigationMode({
+        system: getConversationSystem(),
+        libraryID,
+        mode: "global",
+        conversationKey: targetGlobalKey,
+      });
+      let loaded = false;
+      try {
+        loaded = await switchGlobalConversation(targetGlobalKey);
+      } finally {
+        if (!loaded) targetModeSnapshot.restore();
       }
+      return;
+    }
+    const targetModeSnapshot = primeHistoryNavigationMode({
+      system: getConversationSystem(),
+      libraryID: normalizeHistoryPaperItemID(paperItem?.libraryID) || libraryID,
+      mode: "paper",
+      paperItemID: paperItem?.id,
+    });
+    let loaded = false;
+    try {
+      loaded = await switchPaperConversation(undefined, { paperItem });
+      if (!loaded && status) {
+        setStatus(status, t("Could not load this conversation"), "error");
+      }
+    } finally {
+      if (!loaded) targetModeSnapshot.restore();
+    }
+  };
+
+  for (const tabButton of [paperChatTabBtn, libraryChatTabBtn]) {
+    if (!tabButton) continue;
+    const requested: SidebarChatModeTab =
+      tabButton === libraryChatTabBtn ? "library" : "paper";
+    tabButton.addEventListener("click", (e: Event) => {
+      e.preventDefault();
+      e.stopPropagation();
+      void switchSidebarChatMode(requested).catch((err) => {
+        appLogger.warn("LLM: sidebar chat mode switch failed", err);
+      });
+    });
+  }
+
+  // The Stacked layout's mode chip: its hover switch picks a mode, and the
+  // pick takes exactly the tabs' path.
+  if (modeSwitch) {
+    installSidebarModeSwitch(modeSwitch, (requested) => {
+      void switchSidebarChatMode(requested).catch((err) => {
+        appLogger.warn("LLM: sidebar chat mode switch failed", err);
+      });
     });
   }
 

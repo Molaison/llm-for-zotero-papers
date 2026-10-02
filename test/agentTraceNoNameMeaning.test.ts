@@ -275,17 +275,22 @@ const PREVIOUSLY_HIDDEN_PLAN_TOOL_NAMES = [
 ] as const;
 
 /**
- * Every tool the built registry keeps out of the trace.
- *
- * `prepare_plan_execution` is the native-Codex form of `update_plan` and is
- * built by spreading it, so it inherits the flag. It was not in the deleted
- * name list -- that list simply predated the tool -- and hiding it is the
- * same decision for the same reason: it stages a plan the plan card shows.
+ * The plan and research tools retired with plan mode: no longer registered
+ * at all.
  */
-const EXPECTED_HIDDEN_TOOL_NAMES = [
-  ...PREVIOUSLY_HIDDEN_PLAN_TOOL_NAMES,
-  "prepare_plan_execution",
-].sort();
+const RETIRED_PLAN_TOOL_NAMES: readonly string[] = [
+  "amend_plan",
+  "approve_research_expansion",
+  "approve_research_mutation",
+  "research_update",
+  "submit_plan_document",
+  "update_plan",
+];
+
+/** Every tool the built registry keeps out of the trace. */
+const EXPECTED_HIDDEN_TOOL_NAMES = PREVIOUSLY_HIDDEN_PLAN_TOOL_NAMES.filter(
+  (name) => !RETIRED_PLAN_TOOL_NAMES.includes(name),
+).sort();
 
 describe("the trace's hidden tools are declared by the registry", function () {
   const registry = createBuiltInToolRegistry({
@@ -301,9 +306,10 @@ describe("the trace's hidden tools are declared by the registry", function () {
     .sort();
 
   it("builds the registry the running plugin builds", function () {
+    // 27 once plan mode's own tools and its research tools were retired.
     assert.isAbove(
       definitions.length,
-      40,
+      25,
       "the production factory registered almost nothing; the assertions below would pass vacuously",
     );
   });
@@ -311,6 +317,10 @@ describe("the trace's hidden tools are declared by the registry", function () {
   it("hides every tool the deleted name list hid", function () {
     for (const name of PREVIOUSLY_HIDDEN_PLAN_TOOL_NAMES) {
       const tool = definitions.find((entry) => entry.spec.name === name);
+      if (RETIRED_PLAN_TOOL_NAMES.includes(name)) {
+        assert.isUndefined(tool, `${name} was retired with plan mode`);
+        continue;
+      }
       assert.isDefined(tool, `${name} is not registered any more`);
       assert.isTrue(
         tool?.presentation?.hiddenInTrace,

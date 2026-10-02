@@ -38,17 +38,7 @@ export function resolveSkillRouting(
     if (!skill || forcedIds.has(id)) return false;
     return isSkillContextEligible(skill, request);
   });
-  const automaticSet = new Set(automatic);
-  for (const skill of skills) {
-    if (!automaticSet.has(skill.id)) continue;
-    for (const supersededId of skill.supersedes || []) {
-      if (!forcedIds.has(supersededId)) automaticSet.delete(supersededId);
-    }
-  }
-  const automaticSkillIds = automatic
-    .filter((id) => automaticSet.has(id))
-    .slice(0, 3)
-    .map((id) => id);
+  const automaticSkillIds = automatic.slice(0, 3);
 
   return {
     matchedSkillIds: [...explicitSkillIds, ...automaticSkillIds],

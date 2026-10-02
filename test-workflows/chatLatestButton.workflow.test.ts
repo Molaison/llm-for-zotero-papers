@@ -143,9 +143,9 @@ describe("workflow: latest message button and streaming scroll", function () {
     );
     const dots = button.querySelector<HTMLElement>(".llm-chat-latest-dots")!;
     const arrow = button.querySelector<HTMLElement>(".llm-chat-latest-arrow")!;
-    assert.equal(win.getComputedStyle(dots).display, "flex");
-    assert.equal(win.getComputedStyle(arrow).display, "none");
-    assert.equal(win.getComputedStyle(button).position, "absolute");
+    assert.equal(win.getComputedStyle(dots)!.display, "flex");
+    assert.equal(win.getComputedStyle(arrow)!.display, "none");
+    assert.equal(win.getComputedStyle(button)!.position, "absolute");
     const buttonRect = button.getBoundingClientRect();
     const shellRect = shell.getBoundingClientRect();
     assert.isAbove(buttonRect.width, 0);
@@ -176,8 +176,8 @@ describe("workflow: latest message button and streaming scroll", function () {
     assert.isFalse(button.hidden);
     assert.equal(button.dataset.pending, "false");
     assert.equal(button.title, t("Jump to latest message"));
-    assert.equal(win.getComputedStyle(dots).display, "none");
-    assert.notEqual(win.getComputedStyle(arrow).display, "none");
+    assert.equal(win.getComputedStyle(dots)!.display, "none");
+    assert.notEqual(win.getComputedStyle(arrow)!.display, "none");
     assert.closeTo(offset(reading), readingOffset, 1);
 
     button.click();

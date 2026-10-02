@@ -1,8 +1,3 @@
-import {
-  classifiedFixture,
-  semanticFixture,
-  actionContractFixture,
-} from "./helpers/semanticIntent";
 import { assert } from "chai";
 import { createBuiltInToolRegistry } from "../src/agent/tools";
 import {
@@ -13,6 +8,8 @@ import {
   setUserSkills,
 } from "../src/agent/skills";
 import { AgentToolRegistry } from "../src/agent/tools/registry";
+import { createAttachmentUpdateTool } from "../src/agent/tools/write/attachmentUpdate";
+import { createCollectionUpdateTool } from "../src/agent/tools/write/collectionUpdate";
 import {
   createPaperReadTool as createResolvedPaperReadTool,
   resolveMetadataOverviewTitleForTests,
@@ -85,7 +82,6 @@ describe("semantic tool surface", function () {
 
   const baseContext: AgentToolContext = {
     request: {
-      classifiedIntent: classifiedFixture(),
       conversationKey: 77,
       mode: "agent",
       userText: "summarize this paper",
@@ -148,7 +144,6 @@ describe("semantic tool surface", function () {
     fields: Partial<import("../src/agent/types").AgentRuntimeRequestInput>,
   ) {
     return resolveAgentRuntimeRequest({
-      classifiedIntent: classifiedFixture(),
       conversationKey: 1,
       mode: "agent",
       userText: "",
@@ -231,7 +226,7 @@ describe("semantic tool surface", function () {
     });
     registry.register({
       spec: {
-        name: "query_library",
+        name: "internal_search_delegate",
         description: "Internal legacy delegate",
         inputSchema: { type: "object" },
         executionClass: "read",
@@ -252,7 +247,7 @@ describe("semantic tool surface", function () {
         .map((tool) => tool.name),
       ["library_search"],
     );
-    assert.exists(registry.getTool("query_library"));
+    assert.exists(registry.getTool("internal_search_delegate"));
   });
 
   it("exposes the direct-agent built-in surface and hides legacy primitive names", function () {
@@ -262,9 +257,7 @@ describe("semantic tool surface", function () {
 
     assert.deepEqual(names, [
       "annotate_pdf",
-      "attachment_update",
-      "collection_update",
-      "conversation_read",
+      "context_read",
       "file_io",
       "library_cite",
       "library_delete",
@@ -280,12 +273,11 @@ describe("semantic tool surface", function () {
       "note_write",
       "note_write_batch",
       "paper_read",
+      "read_attachment",
       "request_user_input",
-      "revert_changes",
       "run_command",
-      "saved_search_update",
       "submit_document",
-      "undo_last_action",
+      "undo",
       "workflow_script",
       "zotero_script",
     ]);
@@ -301,32 +293,58 @@ describe("semantic tool surface", function () {
       "answer",
       "review",
     ]);
-    for (const legacyName of [
-      "query_library",
+    // Retired into the facades: no longer registered at all. The write
+    // delegates live on only inside library_update, library_import, and
+    // library_delete; collection, attachment, and saved-search updates are
+    // library_update kinds; the single and multi-revert undos are one `undo`;
+    // tool-result and conversation reads are one `context_read`.
+    for (const retiredName of [
       "read_paper",
       "search_paper",
       "view_pdf_pages",
+      "query_library",
+      "read_library",
       "search_literature_online",
       "edit_current_note",
-      "import_identifiers",
+      "write_notes_batch",
+      "apply_tags",
+      "set_item_tags",
+      "tag_update",
+      "move_to_collection",
       "update_metadata",
+      "reparent_items",
+      "relate_items",
+      "manage_collections",
+      "manage_attachments",
+      "import_identifiers",
+      "import_local_files",
+      "create_items",
+      "trash_items",
+      "restore_from_trash",
+      "merge_items",
+      "collection_update",
+      "attachment_update",
+      "saved_search_update",
+      "undo_last_action",
+      "revert_changes",
+      "tool_result_read",
+      "conversation_read",
     ]) {
-      assert.notInclude(names, legacyName);
-      assert.exists(
-        registry.getTool(legacyName),
-        `${legacyName} remains internally callable`,
-      );
+      assert.notInclude(names, retiredName);
+      assert.notExists(registry.getTool(retiredName), `${retiredName} retired`);
     }
+    // read_attachment is model-visible and keeps its approval gate.
+    assert.isFunction(registry.getTool("read_attachment")?.createPendingAction);
     assert.exists(registry.getTool("web_search"));
     assert.exists(registry.getTool("web_read"));
     assert.notInclude(names, "web_search");
     assert.notInclude(names, "web_read");
+    // Filesystem, shell and script tools are ordinary model-visible tools; no
+    // tier label distinguishes them.
     for (const name of ["file_io", "run_command", "zotero_script"]) {
-      assert.equal(
-        tools.find((tool) => tool.name === name)?.tier,
-        "advanced",
-        `${name} should be advanced`,
-      );
+      const tool = tools.find((entry) => entry.name === name);
+      assert.exists(tool, `${name} should be model-visible`);
+      assert.notProperty(tool, "tier");
     }
   });
 
@@ -390,8 +408,53 @@ describe("semantic tool surface", function () {
     ]);
   });
 
-  it("exposes batch metadata operations in the update_metadata schema", function () {
-    assert.containsAllKeys(schemaProperties("update_metadata"), [
+  it("the collection and attachment delegates keep their own names and labels in cards", async function () {
+    const collections = createCollectionUpdateTool({
+      getCollectionSummary: () => null,
+    } as never);
+    assert.equal(collections.spec.name, "collection_update");
+    assert.equal(collections.presentation?.label, "Update Collections");
+    const collectionInput = collections.validate({
+      action: "create",
+      name: "Audit",
+    });
+    assert.isTrue(collectionInput.ok);
+    if (!collectionInput.ok) return;
+    const collectionCard = await collections.createPendingAction!(
+      collectionInput.value,
+      baseContext,
+    );
+    assert.equal(collectionCard.toolName, "collection_update");
+
+    const attachments = createAttachmentUpdateTool({
+      getAttachmentInfo: () => ({ title: "paper.pdf" }),
+    } as never);
+    assert.equal(attachments.spec.name, "attachment_update");
+    assert.equal(attachments.presentation?.label, "Update Attachments");
+    const attachmentInput = attachments.validate({
+      action: "rename",
+      attachmentId: 5,
+      newName: "renamed.pdf",
+    });
+    assert.isTrue(attachmentInput.ok);
+    if (!attachmentInput.ok) return;
+    const attachmentCard = await attachments.createPendingAction!(
+      attachmentInput.value,
+      baseContext,
+    );
+    assert.equal(attachmentCard.toolName, "attachment_update");
+    // Delegate guidance never reaches the model; library_update carries it.
+    assert.notExists(attachments.guidance);
+    const libraryUpdate =
+      createTestBuiltInRegistry().getTool("library_update")!;
+    assert.include(
+      libraryUpdate.guidance?.instruction || "",
+      "Use kind:'attachment' to delete, rename, or re-link",
+    );
+  });
+
+  it("exposes batch metadata operations in the library_update schema", function () {
+    assert.containsAllKeys(schemaProperties("library_update"), [
       "metadata",
       "operations",
       "paperContext",
@@ -572,7 +635,6 @@ describe("semantic tool surface", function () {
     );
 
     const request = resolvedAgentRequest({
-      classifiedIntent: classifiedFixture(),
       ...baseContext.request,
       userText: "Use the actual PDF/full text to explain the method.",
       conversationKind: "paper",
@@ -1582,69 +1644,6 @@ describe("semantic tool surface", function () {
       }
     }
   });
-
-  it("paper_read visual redirects generic MinerU table requests to text inspection", async function () {
-    const paperContext = {
-      itemId: 11,
-      contextItemId: 22,
-      title: "MinerU Table Paper",
-      firstCreator: "Miller",
-      year: "2025",
-      mineruCacheDir: "/tmp/mineru-paper",
-    };
-    let prepareCalls = 0;
-    const tool = createPaperReadTool(
-      {} as never,
-      {} as never,
-      {
-        preparePagesForModel: async () => {
-          prepareCalls += 1;
-          return {
-            target: { source: "library", title: "Should Not Render" },
-            pages: [],
-            artifacts: [],
-            pageTexts: {},
-          };
-        },
-      } as never,
-      {
-        listPaperContexts: () => [paperContext],
-        resolvePaperContextTarget: () => paperContext,
-      } as never,
-    );
-    const validated = tool.validate({
-      mode: "visual",
-      query: "Explain Table 1",
-    });
-    assert.equal(validated.ok, true);
-    if (!validated.ok) return;
-
-    const output = (await tool.execute(validated.value, {
-      ...baseContext,
-      request: {
-        ...baseContext.request,
-        userText: "Explain Table 1",
-        classifiedIntent: classifiedFixture({
-          semantic: semanticFixture({
-            figures: {
-              kind: "tables",
-              labels: ["Table 1"],
-              includeSupplementary: false,
-            },
-          }),
-        }),
-        selectedPaperContexts: [paperContext],
-      },
-    })) as Record<string, unknown>;
-
-    assert.equal(prepareCalls, 0);
-    assert.equal(output.status, "use_text_mode");
-    assert.equal(output.backend, "mineru");
-    assert.include(String(output.guidance || ""), "mode:'targeted'");
-    assert.notInclude(String(output.guidance || ""), "mode:'figures'");
-    assert.notProperty(output, "artifacts");
-  });
-
   it("paper_read visual still renders explicit PDF pages for MinerU papers", async function () {
     const paperContext = {
       itemId: 11,
@@ -2104,7 +2103,7 @@ describe("semantic tool surface", function () {
       assert.exists(tool);
       const validated = tool!.validate({
         mode: "figures",
-        query: "Explain Figure 2",
+        query: "Explain Figure 1",
       });
       assert.equal(validated.ok, true);
       if (!validated.ok) return;
@@ -2114,15 +2113,6 @@ describe("semantic tool surface", function () {
         request: resolvedAgentRequest({
           ...baseContext.request,
           userText: "Explain Figure 1",
-          classifiedIntent: classifiedFixture({
-            semantic: semanticFixture({
-              figures: {
-                labels: ["Figure 1"],
-                kind: "figures",
-                includeSupplementary: false,
-              },
-            }),
-          }),
           conversationKind: "paper",
           activeItemId: paperContext.itemId,
           selectedPaperContexts: [paperContext],
@@ -2436,11 +2426,6 @@ describe("semantic tool surface", function () {
         ...baseContext.request,
         userText: "Read the complete text.",
         activeItemId: paperContext.itemId,
-        classifiedIntent: classifiedFixture({
-          semantic: semanticFixture({
-            reading: { source: "document_text", coverage: "exhaustive" },
-          }),
-        }),
       },
     })) as {
       results?: Array<{ quoteAnchors?: string[] }>;
@@ -2638,11 +2623,6 @@ describe("semantic tool surface", function () {
         ...baseContext.request,
         userText: "Read the complete text.",
         activeItemId: paperContext.itemId,
-        classifiedIntent: classifiedFixture({
-          semantic: semanticFixture({
-            reading: { source: "document_text", coverage: "exhaustive" },
-          }),
-        }),
       },
     })) as {
       mode: string;
@@ -2773,11 +2753,6 @@ describe("semantic tool surface", function () {
           ...baseContext.request,
           userText: "Read the complete text.",
           activeItemId: paperContext.itemId,
-          classifiedIntent: classifiedFixture({
-            semantic: semanticFixture({
-              reading: { source: "document_text", coverage: "exhaustive" },
-            }),
-          }),
           conversationKind: "paper",
           authMode: "codex_app_server",
           model: "gpt-5.5",
@@ -2815,7 +2790,7 @@ describe("semantic tool surface", function () {
     }
   });
 
-  it("paper_read full resolves active, ordinal, and all-selected targets", async function () {
+  it("paper_read full resolves the active paper or explicit targets", async function () {
     const firstPaper = {
       itemId: 61,
       contextItemId: 62,
@@ -2877,85 +2852,46 @@ describe("semantic tool surface", function () {
     assert.equal(validated.ok, true);
     if (!validated.ok) return;
 
-    const conflicting = tool.validate({
-      mode: "full",
-      target: {
-        itemId: activePaper.itemId,
-        contextItemId: activePaper.contextItemId,
-      },
-      query: "Read the complete paper.",
-    });
-    assert.equal(conflicting.ok, true);
-    if (!conflicting.ok) return;
+    // With neither a target nor an active paper there is nothing to read:
+    // selected papers in a library chat are not an implicit read set.
     try {
-      await tool.execute(conflicting.value, {
+      await tool.execute(validated.value, {
         ...baseContext,
         request: {
           ...baseContext.request,
-          conversationKind: "paper",
-          activeItemId: activePaper.itemId,
-          selectedPaperContexts: [activePaper, firstPaper],
-          userText: "Read the complete first selected paper.",
-          classifiedIntent: classifiedFixture({
-            semantic: semanticFixture({
-              reading: { source: "document_text", coverage: "exhaustive" },
-            }),
-          }),
-          actionContract: {
-            ...actionContractFixture("read_full"),
-            obligations: [
-              {
-                ...actionContractFixture("read_full").obligations[0],
-                targetSelectors: [{ kind: "item_id", value: 61 }],
-              },
-            ],
-          },
+          conversationKind: "global",
+          selectedPaperContexts: [firstPaper, activePaper],
+          userText: "Read the complete paper.",
         },
       });
-      assert.fail("Expected a conflicting model-supplied target to fail");
+      assert.fail("Expected an unresolved full-read target to fail");
     } catch (error) {
       assert.match(
         error instanceof Error ? error.message : String(error),
-        /target conflicts with the user's requested paper scope/,
+        /full-read target is unresolved/,
       );
     }
     assert.deepEqual(prepared, []);
 
-    try {
-      await tool.execute(conflicting.value, {
-        ...baseContext,
-        request: {
-          ...baseContext.request,
-          conversationKind: "paper",
-          activeItemId: activePaper.itemId,
-          selectedPaperContexts: [activePaper, firstPaper],
-          userText: "Rather than read the full paper, summarize the abstract.",
-        },
-      });
-      assert.fail("Expected a negated full-read request to fail");
-    } catch (error) {
-      assert.match(
-        error instanceof Error ? error.message : String(error),
-        /requires compatible legacy turn intent or an approved full-read contract/,
-      );
-    }
-    assert.deepEqual(prepared, []);
-
-    const activeOutput = await tool.execute(validated.value, {
+    const paperRequest = (userText: string, activeItemId?: number) => ({
       ...baseContext,
       request: {
         ...baseContext.request,
-        conversationKind: "paper",
-        activeItemId: activePaper.itemId,
+        conversationKind: "paper" as const,
+        ...(activeItemId ? { activeItemId } : {}),
         selectedPaperContexts: [firstPaper, activePaper],
-        userText: "Read the complete paper before answering.",
-        classifiedIntent: classifiedFixture({
-          semantic: semanticFixture({
-            reading: { source: "document_text", coverage: "exhaustive" },
-          }),
-        }),
+        userText,
       },
     });
+
+    // With no target the main agent reads the active paper.
+    const activeOutput = await tool.execute(
+      validated.value,
+      paperRequest(
+        "Read the complete paper before answering.",
+        activePaper.itemId,
+      ),
+    );
     assert.deepEqual(prepared, [activePaper.title]);
     assert.include(
       tool.presentation!.summaries!.onSuccess!({
@@ -2964,50 +2900,40 @@ describe("semantic tool surface", function () {
       "(Active Selected Paper, n.d.)",
     );
 
+    // An explicit target defines the read set, even when it is not active.
     prepared.length = 0;
-    await tool.execute(validated.value, {
-      ...baseContext,
-      request: {
-        ...baseContext.request,
-        conversationKind: "paper",
-        activeItemId: activePaper.itemId,
-        selectedPaperContexts: [activePaper, firstPaper],
-        userText: "Read the complete first selected paper.",
-        classifiedIntent: classifiedFixture({
-          semantic: semanticFixture({
-            reading: { source: "document_text", coverage: "exhaustive" },
-          }),
-        }),
-        actionContract: {
-          ...actionContractFixture("read_full"),
-          obligations: [
-            {
-              ...actionContractFixture("read_full").obligations[0],
-              targetSelectors: [{ kind: "item_id", value: 61 }],
-            },
-          ],
-        },
+    const first = tool.validate({
+      mode: "full",
+      target: {
+        itemId: firstPaper.itemId,
+        contextItemId: firstPaper.contextItemId,
       },
     });
+    assert.equal(first.ok, true);
+    if (!first.ok) return;
+    await tool.execute(
+      first.value,
+      paperRequest(
+        "Read the complete first selected paper.",
+        activePaper.itemId,
+      ),
+    );
     assert.deepEqual(prepared, [firstPaper.title]);
 
     prepared.length = 0;
-    const allSelectedOutput = (await tool.execute(validated.value, {
-      ...baseContext,
-      request: {
-        ...baseContext.request,
-        conversationKind: "paper",
-        activeItemId: activePaper.itemId,
-        selectedPaperContexts: [firstPaper, activePaper],
-        userText: "Read all selected papers in full.",
-        classifiedIntent: classifiedFixture({
-          paperTargetIntent: "all_visible",
-          semantic: semanticFixture({
-            reading: { source: "document_text", coverage: "exhaustive" },
-          }),
-        }),
-      },
-    })) as {
+    const allSelected = tool.validate({
+      mode: "full",
+      targets: [firstPaper, activePaper].map(({ itemId, contextItemId }) => ({
+        itemId,
+        contextItemId,
+      })),
+    });
+    assert.equal(allSelected.ok, true);
+    if (!allSelected.ok) return;
+    const allSelectedOutput = (await tool.execute(
+      allSelected.value,
+      paperRequest("Read all selected papers in full.", activePaper.itemId),
+    )) as {
       coverageReceipt: { paperCount: number };
       papers: Array<{ displayLabel: string }>;
     };
@@ -3382,20 +3308,19 @@ describe("semantic tool surface", function () {
     );
   });
 
-  it("matches simple-paper-qa for understand-this-paper typo requests", function () {
-    setUserSkills([parseSkill(BUILTIN_SKILL_FILES["simple-paper-qa.md"])]);
+  it("matches evidence-based-qa for understand-this-paper typo requests", function () {
+    setUserSkills([parseSkill(BUILTIN_SKILL_FILES["evidence-based-qa.md"])]);
     assert.include(
       getMatchedSkillIds(
         resolvedSkillRequest({
-          classifiedIntent: classifiedFixture(),
           userText: "can you help me understand this ppaer",
           selectedPaperContexts: [
             { itemId: 1, contextItemId: 2, title: "Paper" },
           ],
         }),
-        ["simple-paper-qa"],
+        ["evidence-based-qa"],
       ),
-      "simple-paper-qa",
+      "evidence-based-qa",
     );
   });
 
@@ -3405,7 +3330,6 @@ describe("semantic tool surface", function () {
     assert.include(
       getMatchedSkillIds(
         resolvedSkillRequest({
-          classifiedIntent: classifiedFixture(),
           userText: "compare the methods of all papers in this folder",
           selectedCollectionContexts: [
             { collectionId: 4, name: "Computational_Psychiatry", libraryID: 1 },
@@ -3424,7 +3348,6 @@ describe("semantic tool surface", function () {
       getSkillContextEligibility(
         skill,
         resolvedSkillRequest({
-          classifiedIntent: classifiedFixture(),
           userText: "",
           selectedCollectionContexts: [
             { collectionId: 4, name: "Computational_Psychiatry", libraryID: 1 },
@@ -3441,7 +3364,6 @@ describe("semantic tool surface", function () {
     assert.include(
       getMatchedSkillIds(
         resolvedSkillRequest({
-          classifiedIntent: classifiedFixture(),
           userText: "find evidence in these papers for this claim",
           selectedCollectionContexts: [
             { collectionId: 4, name: "Computational_Psychiatry", libraryID: 1 },
@@ -3460,7 +3382,6 @@ describe("semantic tool surface", function () {
       getSkillContextEligibility(
         skill,
         resolvedSkillRequest({
-          classifiedIntent: classifiedFixture(),
           userText: "",
           selectedCollectionContexts: [
             { collectionId: 4, name: "Computational_Psychiatry", libraryID: 1 },
@@ -3481,7 +3402,6 @@ describe("semantic tool surface", function () {
       getSkillContextEligibility(
         evidenceSkill,
         resolvedSkillRequest({
-          classifiedIntent: classifiedFixture(),
           userText: "",
         }),
       ).eligible,
@@ -3491,7 +3411,6 @@ describe("semantic tool surface", function () {
       getSkillContextEligibility(
         compareSkill,
         resolvedSkillRequest({
-          classifiedIntent: classifiedFixture(),
           userText: "",
         }),
       ).eligible,

@@ -1,6 +1,7 @@
 import { resolveAgentToolPresentationLabel } from "../toolPresentation";
 import { createJournalId } from "../store/changeJournal";
 import { createAbortController } from "../../utils/apiHelpers";
+import { normalizeExcludedItemIds } from "../../services/context/normalizers";
 /**
  * MCP (Model Context Protocol) server for the llm-for-zotero plugin.
  *
@@ -60,15 +61,19 @@ import {
   type McpToolDefinition,
   type McpToolsListResult,
 } from "./protocol";
-import { PlanExecutionRunSession } from "../plans/runSession";
 import type { ZoteroMcpToolActivityEvent } from "./activityTypes";
 export type { ZoteroMcpToolActivityEvent } from "./activityTypes";
-import { extractVerifiedReadSources } from "../plans/readEvidence";
+import { extractVerifiedReadSources } from "../context/readEvidence";
 import type {
   TrustedReadObservation,
   VerifiedReadSource,
-} from "../plans/types";
-import { createTrustedReadObservations } from "../plans/readObservation";
+} from "../context/readObservationTypes";
+import { attestAndRecordRead } from "../context/taskPaperLedgerRecorder";
+import type { TaskPaperLedgerDelta } from "../context/taskPaperLedger";
+import {
+  isRawPdfRetrievalTool,
+  RETIRED_TOOL_HINTS,
+} from "../context/toolNames";
 import { resolveActiveLibraryID } from "../../utils/zoteroLibraryScope";
 import { resolveAgentToolCallWorkCategory } from "../workCategory";
 import { getNotesDirectoryConfig } from "../../utils/notesDirectoryConfig";
@@ -93,28 +98,16 @@ export const ZOTERO_MCP_SAFE_READ_TOOL_NAMES = [
 ] as const;
 export const ZOTERO_MCP_PLAN_TOOL_NAMES = [
   "request_user_input",
-  "update_plan",
-  "prepare_plan_execution",
-  "amend_plan",
   "task_update",
-  "research_update",
-  "approve_research_expansion",
-  "approve_research_mutation",
   "submit_document",
 ] as const;
 export const ZOTERO_MCP_WRITE_TOOL_NAMES = [
-  "amend_plan",
-  "approve_research_expansion",
-  "approve_research_mutation",
   "library_update",
-  "collection_update",
   "note_write",
   "library_import",
   "library_delete",
-  "attachment_update",
   "zotero_script",
-  "undo_last_action",
-  "revert_changes",
+  "undo",
   "annotate_pdf",
   "file_io",
   "run_command",
@@ -137,17 +130,38 @@ export const ZOTERO_MCP_EXCLUDED_TOOL_NAMES: Record<string, string> = {
   // paged result contract ({done, nextOffset, remaining}) lands.
   library_batch:
     "library_batch runs unattended with no progress channel over MCP; use the in-plugin agent or the slash-command surface.",
-  // Deliberately absent and gated on a metadata flag the MCP path never
-  // sets, so advertising it would offer a permanently unavailable tool.
-  tool_result_read:
-    "tool_result_read is gated on an in-plugin metadata flag that the MCP path does not set.",
+  // Both sources are in-plugin conversation state: the transcript and the
+  // turn-scoped tool-result handles. A standalone MCP client shares neither,
+  // and handle reads are gated on a metadata flag the MCP path never sets.
+  context_read:
+    "context_read reads the in-plugin conversation transcript and its stored tool-result handles; an external MCP client has neither, and handle reads are gated on an in-plugin metadata flag the MCP path does not set.",
 };
 const CURATED_READ_TOOL_NAMES = new Set<string>([
   ...ZOTERO_MCP_SAFE_READ_TOOL_NAMES,
   ...ZOTERO_MCP_PLAN_TOOL_NAMES,
 ]);
 const CURATED_PLAN_TOOL_NAMES = new Set<string>(ZOTERO_MCP_PLAN_TOOL_NAMES);
+/**
+ * Tools whose turn guidance is the single owner of a rule an external agent
+ * also needs. The in-plugin agent receives it only on matching turns; an MCP
+ * catalog is static, so it carries the guidance on the tool description.
+ */
+const MCP_GUIDANCE_TOOL_NAMES = new Set<string>([
+  ...ZOTERO_MCP_PLAN_TOOL_NAMES,
+  "paper_read",
+  "library_retrieve",
+]);
 const CURATED_WRITE_TOOL_NAMES = new Set<string>(ZOTERO_MCP_WRITE_TOOL_NAMES);
+/**
+ * MCP-only descriptions for tools whose in-plugin description routes through
+ * a tool the MCP catalog excludes (see ZOTERO_MCP_EXCLUDED_TOOL_NAMES).
+ */
+const MCP_TOOL_DESCRIPTION_OVERRIDES: ReadonlyMap<string, string> = new Map([
+  [
+    "literature_search",
+    "Search scholarly sources; results come back to the client directly. The literature_review selection card is not available over MCP, so present discovery candidates yourself; discovery never imports silently. An explicit import request uses library_import directly; metadata review uses workflow:'review', mode:'metadata'.",
+  ],
+]);
 const READ_ONLY_TOOL_ANNOTATIONS = {
   readOnlyHint: true,
   openWorldHint: false,
@@ -180,15 +194,6 @@ const MCP_READ_DEDUPE_TOOL_NAMES = new Set([
   "library_retrieve",
   "paper_read",
 ]);
-const RAW_PDF_RETRIEVAL_TOOL_NAMES = new Set([
-  "paper_read",
-  "read_paper",
-  "search_paper",
-  "view_pdf_pages",
-  "read_attachment",
-  "library_read",
-  "library_retrieve",
-]);
 const RAW_PDF_HIDDEN_NATIVE_TOOL_NAMES = new Set([
   "run_command",
   "file_io",
@@ -201,7 +206,6 @@ type ZoteroMcpScopeMetadata = {
   requestInteraction?: (
     action: import("../types").AgentPendingAction,
   ) => Promise<import("../types").AgentConfirmationResolution>;
-  actionProgress?: AgentRuntimeRequest["actionProgress"];
   clarificationHistory?: AgentRuntimeRequest["clarificationHistory"];
   runtimeAuthority?: "claude" | "codex";
   /** Host lifecycle signal; never supplied by MCP tool arguments. */
@@ -228,12 +232,8 @@ type ZoteroMcpScopeMetadata = {
   model?: string;
   codexPath?: string;
   reasoning?: ReasoningConfig;
-  planContext?: AgentRuntimeRequest["planContext"];
   /** Host-created execution facts; never accepted from MCP tool arguments. */
   executionContext?: AgentRuntimeRequest["executionContext"];
-  actionContract?: AgentRuntimeRequest["actionContract"];
-  actionPreparation?: AgentRuntimeRequest["actionPreparation"];
-  documentOutcomePolicy?: AgentRuntimeRequest["documentOutcomePolicy"];
   documentReadObservations?: AgentRuntimeRequest["documentReadObservations"];
   documentArtifactObservations?: AgentRuntimeRequest["documentArtifactObservations"];
   exhaustiveReadBackend?: Extract<
@@ -624,7 +624,13 @@ function normalizeCollectionContexts(
     const key = `${libraryID}:${collectionId}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push({ collectionId, libraryID, name });
+    const excludedItemIds = normalizeExcludedItemIds(value?.excludedItemIds);
+    out.push({
+      collectionId,
+      libraryID,
+      name,
+      ...(excludedItemIds ? { excludedItemIds } : {}),
+    });
   }
   return out.length ? out : undefined;
 }
@@ -658,12 +664,14 @@ function normalizeTagContexts(
       : `${libraryID}:tag:${normalizedName || name.toLowerCase()}`;
     if (seen.has(key)) continue;
     seen.add(key);
+    const excludedItemIds = normalizeExcludedItemIds(value?.excludedItemIds);
     out.push({
       name,
       libraryID,
       normalizedName: normalizedName || undefined,
       scope,
       includeAutomatic: includeAutomatic || undefined,
+      ...(excludedItemIds ? { excludedItemIds } : {}),
     });
   }
   return out.length ? out : undefined;
@@ -786,17 +794,12 @@ function normalizeActiveScope(
     codexPath: normalizeText(scope.codexPath, 4096),
     reasoning: normalizeReasoningConfig(scope.reasoning),
     signal: scope.signal,
-    planContext: scope.planContext,
     executionContext: scope.executionContext
       ? { ...scope.executionContext, permissionOwner: "external_runtime" }
       : undefined,
     requestInteraction: scope.requestInteraction,
     publishHostEvent: scope.publishHostEvent,
-    actionProgress: scope.actionProgress,
     clarificationHistory: scope.clarificationHistory,
-    actionContract: scope.actionContract,
-    actionPreparation: scope.actionPreparation,
-    documentOutcomePolicy: scope.documentOutcomePolicy,
     documentReadObservations: scope.documentReadObservations
       ? cloneTrustedReadObservations(scope.documentReadObservations)
       : undefined,
@@ -1174,7 +1177,7 @@ function shouldBlockRawPdfRetrieval(params: {
   rawArgs: unknown;
   scope: ZoteroMcpActiveScope | null;
 }): boolean {
-  if (!RAW_PDF_RETRIEVAL_TOOL_NAMES.has(params.toolName)) return false;
+  if (!isRawPdfRetrievalTool(params.toolName)) return false;
   const rawPdfs = getMcpScopePapers(params.scope, ["raw_pdf"]);
   if (!rawPdfs.length) return false;
   const isLibraryAttachmentEnumeration =
@@ -1370,26 +1373,10 @@ function isMcpToolVisibleInScope(
   if (!isMcpExposedTool(tool)) return false;
   if (tool.name === "request_user_input")
     return Boolean(scope?.requestInteraction);
-  if (CURATED_PLAN_TOOL_NAMES.has(tool.name)) {
-    if (tool.name === "submit_document") {
-      return true;
-    }
-    const phase = scope?.planContext?.phase;
-    if (tool.name === "update_plan")
-      return phase === "planning" && !scope?.planContext?.nativePlanning;
-    if (tool.name === "prepare_plan_execution")
-      return (
-        phase === "planning" && Boolean(scope?.planContext?.nativePlanning)
-      );
-    // Codex app-server binds an MCP catalog to the native thread. A thread
-    // created in Plan mode is resumed for approved execution, and a server
-    // reload does not reliably add newly visible tools to that bound catalog.
-    // Advertise the guarded execution tools up front for native planning;
-    // their validators still reject every call until approval changes the
-    // host-owned phase to `executing`.
-    if (phase === "planning" && scope?.planContext?.nativePlanning) return true;
-    if (phase !== "executing") return false;
-  }
+  // Of the control tools only submit_document serves an external turn:
+  // task_update tracks the in-plugin Agent's own parts.
+  if (CURATED_PLAN_TOOL_NAMES.has(tool.name))
+    return tool.name === "submit_document";
   if (!hasRawPdfScope(scope)) return true;
   return getZoteroMcpDirectPdfToolNames().includes(tool.name);
 }
@@ -1419,14 +1406,14 @@ function handleToolsList(
         description: decorateMcpToolDescription(
           name,
           [
-            description,
-            CURATED_PLAN_TOOL_NAMES.has(name)
+            MCP_TOOL_DESCRIPTION_OVERRIDES.get(name) ?? description,
+            MCP_GUIDANCE_TOOL_NAMES.has(name)
               ? toolRegistry.getTool(name)?.guidance?.instruction
               : undefined,
             describeMcpHostAccess(name),
             // Codex code-mode discovery renders deeply nested input types as
             // `unknown`. Keep the complete contract discoverable there too;
-            // otherwise native Plan has to guess evidence and scope shapes.
+            // otherwise the agent has to guess evidence and scope shapes.
             CURATED_PLAN_TOOL_NAMES.has(name)
               ? `Complete input JSON Schema (including nested fields): ${JSON.stringify(schema)}`
               : undefined,
@@ -1562,7 +1549,7 @@ function decorateMcpToolDescription(
     description,
     scopeGuidance,
     writeGuidance,
-    toolName === "undo_last_action" || toolName === "revert_changes"
+    toolName === "undo"
       ? "Standalone clients must supply explicit actionId/actionIds from write receipts; there is no shared external conversation history for relative undo."
       : "",
   ]
@@ -1734,8 +1721,8 @@ function buildMcpToolActivityEvent(params: {
   workCategory?: import("../types").AgentWorkCategory;
   verifiedReadSources?: VerifiedReadSource[];
   readObservations?: readonly TrustedReadObservation[];
+  paperLedgerDelta?: TaskPaperLedgerDelta;
   mutability?: "read" | "write";
-  researchJobId?: string;
   scope: ZoteroMcpActiveScope | null;
   libraryID: number;
 }): ZoteroMcpToolActivityEvent {
@@ -1754,10 +1741,12 @@ function buildMcpToolActivityEvent(params: {
     actionReceipts: params.actionReceipts,
     workCategory: params.workCategory,
     mutability: params.mutability,
-    researchJobId: params.researchJobId,
     quoteCitations: params.quoteCitations,
     verifiedReadSources: params.verifiedReadSources,
     readObservations: params.readObservations,
+    ...(params.paperLedgerDelta
+      ? { paperLedgerDelta: params.paperLedgerDelta }
+      : {}),
     profileSignature: params.scope?.profileSignature,
     conversationKey: params.scope?.conversationKey,
     libraryID: params.libraryID || undefined,
@@ -1824,16 +1813,8 @@ function createToolContext(
         ? ("codex_responses" as const)
         : undefined,
     reasoning: scope?.reasoning,
-    planContext: scope?.planContext,
     executionContext: scope?.executionContext,
-    actionProgress: scope?.actionProgress,
     clarificationHistory: scope?.clarificationHistory,
-    actionContract: scope?.actionContract,
-    // Legacy approved plans can still expose their frozen intent through the
-    // contract reader. Fresh ordinary MCP turns have no classified intent.
-    classifiedIntent: scope?.actionContract?.intent,
-    actionPreparation: scope?.actionPreparation,
-    documentOutcomePolicy: scope?.documentOutcomePolicy,
     documentReadObservations: scope?.documentReadObservations,
     documentArtifactObservations: scope?.documentArtifactObservations,
     exhaustiveReadBackend,
@@ -1951,15 +1932,6 @@ function createToolContext(
       },
       hostCommandExecution: true,
     },
-    ...(request.planContext?.phase === "executing"
-      ? {
-          approvedPlanBinding: {
-            planId: request.planContext.planId,
-            revision: request.planContext.revision,
-            approvedDigest: request.planContext.approvedDigest,
-          },
-        }
-      : {}),
   };
   const priorAccess = request.executionContext.configuredAccess;
   request.executionContext = {
@@ -2015,6 +1987,7 @@ function createToolContext(
       kind: "external_runtime",
       standalone: !scope?.runtimeAuthority,
     },
+    isToolVisible: (spec) => isMcpToolVisibleInScope(spec, scope),
     signal: scope?.signal,
     runId,
     item,
@@ -2023,35 +1996,6 @@ function createToolContext(
     modelProviderLabel:
       exhaustiveReadBackend === "codex_responses" ? "Codex" : "External MCP",
   };
-}
-
-async function restorePlanExecutionContext(
-  context: AgentToolContext,
-  toolRegistry: AgentToolRegistry,
-): Promise<void> {
-  const plan = context.request.planContext;
-  if (plan?.phase !== "executing") return;
-  const session = new PlanExecutionRunSession(
-    context.request,
-    async () => undefined,
-  );
-  const initialized = await session.initialize();
-  if (initialized.kind === "failed") throw new Error(initialized.userMessage);
-  context.loadApprovedPlanEffectContext = async () => {
-    const specification = session.approvedEffectSpecification();
-    if (!specification) return undefined;
-    return {
-      specification,
-      activeEffectIds: session.activeWorkflowEffectIds() || [],
-      resolvedMaterials: await session.resolvedWorkflowMaterials(),
-      resolvedTargetBindings: await session.resolvedWorkflowTargetBindings(),
-    };
-  };
-  if (context.request.actionContract && !context.request.actionProgress) {
-    context.request.actionProgress = toolRegistry.createActionProgress(
-      context.request.actionContract,
-    );
-  }
 }
 
 function formatToolResult(
@@ -2066,9 +2010,6 @@ function formatToolResult(
           {
             ok: result.ok,
             result: result.content,
-            ...(result.continuationCheckpoint
-              ? { continuationCheckpoint: result.continuationCheckpoint }
-              : {}),
             effect: result.effect,
             ...(result.actionReceipts.length
               ? { actionReceipts: result.actionReceipts }
@@ -2090,11 +2031,7 @@ function rememberDocumentReadObservations(
 ): void {
   if (!observations.length) return;
   const scope = resolveScopedMcpScope(headers);
-  if (
-    !scope ||
-    (!scope.documentOutcomePolicy?.required && !scope.runtimeAuthority)
-  )
-    return;
+  if (!scope?.runtimeAuthority) return;
   const merged = new Map(
     (scope.documentReadObservations || []).map((entry) => [
       entry.observationId,
@@ -2115,11 +2052,7 @@ function rememberDocumentArtifacts(
 ): void {
   if (!artifacts.length) return;
   const scope = resolveScopedMcpScope(headers);
-  if (
-    !scope ||
-    (!scope.documentOutcomePolicy?.required && !scope.runtimeAuthority)
-  )
-    return;
+  if (!scope?.runtimeAuthority) return;
   const merged = new Map(
     (scope.documentArtifactObservations || []).map((artifact) => [
       artifact.storedPath,
@@ -2246,7 +2179,7 @@ async function handleToolsCall(
     actionReceipts?: AgentActionReceipt[];
     verifiedReadSources?: VerifiedReadSource[];
     readObservations?: readonly TrustedReadObservation[];
-    researchJobId?: string;
+    paperLedgerDelta?: TaskPaperLedgerDelta | null;
   }) => {
     emitZoteroMcpToolActivity(
       buildMcpToolActivityEvent({
@@ -2262,7 +2195,7 @@ async function handleToolsCall(
         workCategory,
         verifiedReadSources: result.verifiedReadSources,
         readObservations: result.readObservations,
-        researchJobId: result.researchJobId,
+        paperLedgerDelta: result.paperLedgerDelta || undefined,
         mutability:
           tool?.spec.executionClass === "external_effect" ? "write" : "read",
         quoteCitations: result.quoteCitations,
@@ -2273,14 +2206,18 @@ async function handleToolsCall(
   };
 
   if (!tool || !isMcpExposedTool(tool.spec)) {
-    completeActivity({ ok: false, error: "Tool unavailable in native mode" });
+    const replacement = Object.prototype.hasOwnProperty.call(
+      RETIRED_TOOL_HINTS,
+      name,
+    )
+      ? RETIRED_TOOL_HINTS[name]
+      : undefined;
+    const text = replacement
+      ? `Unknown tool: ${name}. This tool was renamed; call ${replacement} instead.`
+      : `Zotero MCP tool ${name} is not available through the Zotero MCP server.`;
+    completeActivity({ ok: false, error: text });
     return {
-      content: [
-        {
-          type: "text",
-          text: `Zotero MCP tool is not available in Codex native mode: ${name}`,
-        },
-      ],
+      content: [{ type: "text", text }],
       isError: true,
     };
   }
@@ -2384,43 +2321,6 @@ async function handleToolsCall(
       callScope,
       deps.zoteroGateway,
     );
-    toolContext.publishPlanEvent = scope?.publishHostEvent;
-    toolContext.checkpointActionProgress = async () => {
-      const request = toolContext.request;
-      if (!scope?.publishHostEvent)
-        throw new Error(
-          "The provider turn cannot persist its execution authority.",
-        );
-      if (
-        request.actionContract &&
-        request.actionProgress?.contractId !== request.actionContract.id
-      )
-        request.actionProgress = deps.toolRegistry.createActionProgress(
-          request.actionContract,
-        );
-      if (scope) {
-        scope.actionContract = request.actionContract;
-        scope.actionPreparation = request.actionPreparation;
-        scope.actionProgress = request.actionProgress;
-        scope.clarificationHistory = request.clarificationHistory;
-        if (request.actionPreparation)
-          await scope.publishHostEvent?.({
-            type: "provider_event",
-            providerType: "agent_action_preparation",
-            payload: request.actionPreparation,
-          });
-        if (request.actionContract && request.actionProgress)
-          await scope.publishHostEvent?.({
-            type: "provider_event",
-            providerType: "agent_action_contract",
-            payload: {
-              contract: request.actionContract,
-              progress: request.actionProgress,
-            },
-          });
-      }
-    };
-    await restorePlanExecutionContext(toolContext, deps.toolRegistry);
     let prepared = await deps.toolRegistry.prepareExecution(
       {
         id: `mcp-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
@@ -2464,22 +2364,24 @@ async function handleToolsCall(
             execution: await prepared.deny(resolution.data),
           };
     }
-    if (scope) {
-      scope.actionContract = toolContext.request.actionContract;
-      scope.actionPreparation = toolContext.request.actionPreparation;
-      scope.actionProgress = toolContext.request.actionProgress;
+    if (scope)
       scope.clarificationHistory = toolContext.request.clarificationHistory;
-    }
     let result = formatToolResult(prepared.execution);
-    const readObservations =
+    // One attestation site, one recorder: the read's trusted observations and
+    // its Task progress delta come from the same call. Without a
+    // conversation there is nothing to record the delta in.
+    const { observations: readObservations, paperLedgerDelta } =
       tool.spec.executionClass === "read" && !result.isError
-        ? await createTrustedReadObservations({
+        ? await attestAndRecordRead({
             toolName: name,
             callId: prepared.execution.result.callId,
             input: prepared.execution.input,
             result: prepared.execution.result.content,
+            conversationKey: scopeConversationKey,
+            libraryID: callScope.libraryID,
+            runId: scope?.runId,
           })
-        : [];
+        : { observations: [], paperLedgerDelta: null };
     rememberDocumentReadObservations(headers, readObservations);
     rememberDocumentArtifacts(
       headers,
@@ -2494,7 +2396,6 @@ async function handleToolsCall(
       ),
       artifacts: prepared.execution.result.artifacts,
       actionReceipts: prepared.execution.result.actionReceipts,
-      researchJobId: prepared.execution.result.researchJobId,
       verifiedReadSources: readObservations.map(
         ({
           libraryID,
@@ -2511,6 +2412,7 @@ async function handleToolsCall(
         }),
       ),
       readObservations,
+      paperLedgerDelta,
     });
     clearMcpReadDedupeCacheAfterToolResult(tool.spec, result);
     rememberMcpReadResult(readDedupeKey, result, readObservations);

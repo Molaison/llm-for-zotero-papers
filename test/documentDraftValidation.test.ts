@@ -23,7 +23,7 @@ describe("document draft validation", function () {
     });
 
     assert.deepEqual(issues, [
-      "Direct quotations must use internal [[quote:Q1]] tokens and host-verifiable quote mappings",
+      'Direct quotations must use internal [[quote:Q1]] tokens and host-verifiable quote mappings. Paraphrase or map: "An unmapped quotation is not publishable."',
     ]);
   });
 
@@ -35,8 +35,8 @@ describe("document draft validation", function () {
     });
 
     assert.deepEqual(issues, [
-      "Document is missing required sections: methods, scope and limitations",
-      "Direct quotations must use internal [[quote:Q1]] tokens and host-verifiable quote mappings",
+      "Document is missing required sections: methods, scope and limitations. Add each as a heading with that wording.",
+      'Direct quotations must use internal [[quote:Q1]] tokens and host-verifiable quote mappings. Paraphrase or map: "Unmapped source language."',
     ]);
   });
 
@@ -92,7 +92,7 @@ describe("document draft validation", function () {
         'The authors conclude that "the overshoot is a general consequence of optic-flow path integration".',
       ),
       [
-        "Direct quotations must use internal [[quote:Q1]] tokens and host-verifiable quote mappings",
+        'Direct quotations must use internal [[quote:Q1]] tokens and host-verifiable quote mappings. Paraphrase or map: "the overshoot is a general consequence of optic-flow path in…"',
       ],
       "a quoted run of prose is a quotation",
     );
@@ -101,7 +101,7 @@ describe("document draft validation", function () {
         "They write that \u201cmacaques undershoot at every distance tested\u201d.",
       ),
       [
-        "Direct quotations must use internal [[quote:Q1]] tokens and host-verifiable quote mappings",
+        'Direct quotations must use internal [[quote:Q1]] tokens and host-verifiable quote mappings. Paraphrase or map: "macaques undershoot at every distance tested"',
       ],
       "curly quotes count too",
     );

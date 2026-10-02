@@ -17,6 +17,15 @@ export type MalformedToolArgumentsDiagnostic = {
   rawLength: number;
 };
 
+/**
+ * Registered tool names use letters, digits, `_` and `-` only. An unknown
+ * name with any other character is provider markup that leaked into a tool
+ * call (a DeepSeek DSML fragment was seen), not a tool the model asked for.
+ */
+export function isMalformedToolName(name: string): boolean {
+  return !/^[A-Za-z0-9_-]{1,64}$/.test(name);
+}
+
 export function isContentLikeToolArgumentKey(key: string): boolean {
   const normalized = key
     .trim()

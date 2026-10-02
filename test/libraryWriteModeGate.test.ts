@@ -5,7 +5,6 @@ import { initAgentChangeJournal } from "../src/agent/store/changeJournal";
 import { AgentToolRegistry } from "../src/agent/tools/registry";
 import type { AgentToolContext } from "../src/agent/types";
 import { ChangeJournalTestDb } from "./helpers/changeJournalTestDb";
-import { actionContractFixture, actionFixture } from "./helpers/semanticIntent";
 
 /**
  * The mode is enforced at `prepareExecution` — the one point the in-plugin
@@ -37,11 +36,20 @@ describe("Original Agent permission gate", function () {
   const context: AgentToolContext = {
     request: {
       conversationKey: 1,
-      actionContract: actionContractFixture("settings_update"),
-      classifiedIntent: actionFixture("settings_update"),
       mode: "agent",
       userText: "run the library batch",
       libraryID: 1,
+      // An ordinary agent turn: the in-plugin agent owns permission.
+      executionContext: {
+        version: 1,
+        executionId: "mode-gate-run",
+        conversationKey: 1,
+        conversationGeneration: 0,
+        chatLibraryID: 1,
+        permissionOwner: "original_agent",
+        workspaceSnapshot: { selectedPapers: [], selectedCollections: [] },
+        configuredAccess: { libraryIDs: [1], outputDirectories: [] },
+      },
     },
     item: null,
     currentAnswerText: "",

@@ -379,8 +379,6 @@ export type SendQuestionOptions = {
   webchatExpectedChatUrl?: string;
   webchatExpectedChatId?: string;
   skipAutoCompact?: boolean;
-  /** One-shot planning or approved-plan execution context. */
-  planContext?: import("../../agent/plans/types").PlanRuntimeContext;
 };
 
 export type EditRetryOptions = {

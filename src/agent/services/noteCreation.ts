@@ -43,8 +43,7 @@ const pending = new Map<string, Promise<unknown>>();
 
 /** Reserve native identity before creation, including before any asset finalization. */
 export async function executeNoteCreation(params: Creation) {
-  const scope =
-    params.context.request.actionContract?.id || params.context.runId;
+  const scope = params.context.runId;
   const identity =
     params.logicalActionId ||
     (await sha256Text(

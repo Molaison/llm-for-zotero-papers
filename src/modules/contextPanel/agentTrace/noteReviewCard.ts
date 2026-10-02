@@ -16,6 +16,8 @@ type DiffField = Extract<AgentPendingField, { type: "diff_preview" }>;
 export function getNoteReviewContent(
   action: AgentPendingAction,
 ): ContentField | undefined {
+  // edit_current_note is the retired name; review cards persisted in stored
+  // history still carry it.
   if (
     action.mode !== "review" ||
     !["note_write", "edit_current_note"].includes(action.toolName)

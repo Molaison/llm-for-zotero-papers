@@ -1,4 +1,7 @@
 import type { AgentToolDefinition } from "../../types";
+import { buildLibraryRetrieveModelView } from "../../services/libraryRetrieveModelView";
+import { modelViewRoomTokens } from "./modelViewRoom";
+import { matchesLibraryLevelTurn } from "./librarySearch";
 import {
   LIBRARY_RETRIEVE_DEFAULT_BUDGETS,
   LIBRARY_RETRIEVE_HARD_CAPS,
@@ -17,6 +20,12 @@ import {
   validateObject,
 } from "../shared";
 import { readOnlyInvocationPlan } from "../../authorization/invocationPlan";
+import {
+  EVIDENCE_SECTION_KINDS,
+  type EvidenceSectionKind,
+} from "../../../shared/libraryChatEvidencePolicy";
+
+const VALID_SECTION = new Set<string>(EVIDENCE_SECTION_KINDS);
 
 const VALID_DEPTH = new Set<LibraryRetrieveDepth>([
   "pool",
@@ -62,6 +71,32 @@ function normalizeStringArray(value: unknown): string[] | undefined {
     .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
     .filter(Boolean);
   return entries.length ? Array.from(new Set(entries)) : undefined;
+}
+
+function sectionKind(entry: unknown): EvidenceSectionKind | undefined {
+  const kind = typeof entry === "string" ? entry.trim().toLowerCase() : "";
+  return VALID_SECTION.has(kind) ? (kind as EvidenceSectionKind) : undefined;
+}
+
+/** Absent sections are none; anything else must be a list of section kinds. */
+function parseSections(
+  value: unknown,
+): { sections?: EvidenceSectionKind[] } | { error: string } {
+  if (value === undefined || value === null) return {};
+  const kinds = EVIDENCE_SECTION_KINDS.join(", ");
+  if (!Array.isArray(value)) {
+    return {
+      error: `library_retrieve sections must be an array of section kinds: ${kinds}.`,
+    };
+  }
+  const unknown = value.filter((entry) => !sectionKind(entry));
+  if (unknown.length) {
+    return {
+      error: `library_retrieve sections: unknown section kind ${unknown.map((entry) => JSON.stringify(entry)).join(", ")}; the section kinds are ${kinds}.`,
+    };
+  }
+  const sections = [...new Set(value.map((entry) => sectionKind(entry)!))];
+  return sections.length ? { sections } : {};
 }
 
 function normalizeTagScopes(
@@ -122,9 +157,11 @@ export function normalizeLibraryRetrieveArgs(
   if (!validateObject<Record<string, unknown>>(args)) return null;
   const query = typeof args.query === "string" ? args.query.trim() : "";
   if (!query) return null;
+  const sections = parseSections(args.sections);
   const input: LibraryRetrieveInput = {
     query,
     queryVariants: normalizeStringArray(args.queryVariants),
+    sections: "sections" in sections ? sections.sections : undefined,
     scope: normalizeScope(args.scope),
     intent: normalizeIntent(args.intent),
     depth: normalizeDepth(args.depth),
@@ -158,9 +195,46 @@ export function normalizeLibraryRetrieveArgs(
   return input;
 }
 
+/** The single owner of library-evidence routing and coverage rules. */
+export const LIBRARY_RETRIEVE_GUIDANCE: NonNullable<
+  AgentToolDefinition["guidance"]
+> = {
+  matches: matchesLibraryLevelTurn,
+  instruction: [
+    "Use library_search for catalog discovery, library_read for structured item state, library_retrieve for evidence search and synthesis across a collection or library, and paper_read for close reading known papers.",
+    "For library_retrieve, preserve the returned coverage boundary and use paperMatches as the paper ledger. Query variants improve recall but are not evidence. Do not turn sampled, metadata-only, abstract-only, partial, or unreadable coverage into exhaustive claims.",
+    `When the user asks about particular parts of papers, in any language, pass library_retrieve sections from: ${EVIDENCE_SECTION_KINDS.join(", ")}.`,
+    "For bounded collection or tag synthesis, require body evidence when readable papers are available (coverage papersBodyRead > 0), or answer by naming what is missing. Do not silently substitute titles or abstracts for requested paper-level synthesis.",
+    "If a references or bibliography section follows library_retrieve, either include all planned papers, or label the list as body-evidence references and separately identify metadata or abstract-only papers from the coverage frontier.",
+  ].join("\n"),
+};
+
+/**
+ * Result-time coverage rule. Paper chat renders no library_retrieve turn
+ * guidance, so a result whose coverage is not complete says it itself.
+ */
+export const LIBRARY_RETRIEVE_COVERAGE_GUIDANCE =
+  "This coverage is not complete: do not present sampled, metadata-only, abstract-only, or partial coverage as exhaustive; name what was not read.";
+
+function hasIncompleteCoverage(result: LibraryRetrieveResult): boolean {
+  const contract = result.answerContract;
+  const receipt = result.coverageReceipt;
+  if (!contract || !receipt) return false;
+  return (
+    contract.metadataCoverage !== "complete" ||
+    contract.indexedTextCoverage !== "complete" ||
+    contract.snippetCoverage === "sampled" ||
+    receipt.papersMetadataOnly > 0 ||
+    receipt.papersBodyRead < receipt.papersPlanned
+  );
+}
+
 export function createLibraryRetrieveTool(
   libraryRetrieveService: LibraryRetrieveService,
-): AgentToolDefinition<LibraryRetrieveInput, LibraryRetrieveResult> {
+): AgentToolDefinition<
+  LibraryRetrieveInput,
+  LibraryRetrieveResult & { guidance?: string }
+> {
   return {
     spec: {
       name: "library_retrieve",
@@ -210,6 +284,13 @@ export function createLibraryRetrieveTool(
             items: { type: "string" },
             description:
               "Optional bounded search probes such as translations, acronyms, notation variants, or technical equivalents. Variants improve recall but are not evidence by themselves.",
+          },
+          // The section kinds are listed in the turn guidance, not as an enum:
+          // the ordinary tool payload has no room for one.
+          sections: {
+            type: "array",
+            items: { type: "string" },
+            description: `Optional paper sections the user asked about, in any language: ${EVIDENCE_SECTION_KINDS.join(", ")}. Snippet ranking prefers evidence from them.`,
           },
           intent: {
             type: "string",
@@ -265,6 +346,13 @@ export function createLibraryRetrieveTool(
       workCategory: "retrieval",
       exposure: "model",
     },
+    guidance: LIBRARY_RETRIEVE_GUIDANCE,
+    buildModelView: (input, result, context) =>
+      buildLibraryRetrieveModelView({
+        input,
+        result,
+        roomTokens: modelViewRoomTokens(context.request),
+      }),
     presentation: {
       label: "Retrieve Library",
       summaries: {
@@ -335,6 +423,12 @@ export function createLibraryRetrieveTool(
       },
     },
     validate(args) {
+      const sections = parseSections(
+        validateObject<Record<string, unknown>>(args)
+          ? args.sections
+          : undefined,
+      );
+      if ("error" in sections) return fail(sections.error);
       const input = normalizeLibraryRetrieveArgs(args);
       if (!input) {
         return fail("query is required for library_retrieve");
@@ -348,7 +442,7 @@ export function createLibraryRetrieveTool(
           "Library retrieval reads indexed Zotero records without changing them.",
       }),
     async execute(input, context) {
-      return libraryRetrieveService.retrieve({
+      const result = await libraryRetrieveService.retrieve({
         ...input,
         request: context.request,
         item: context.item,
@@ -360,6 +454,10 @@ export function createLibraryRetrieveTool(
         profileOverride: context.request.advanced?.profileOverride,
         signal: context.signal,
       });
+      // Leading field, so a truncated preview of a large result keeps it.
+      return hasIncompleteCoverage(result)
+        ? { guidance: LIBRARY_RETRIEVE_COVERAGE_GUIDANCE, ...result }
+        : result;
     },
   };
 }

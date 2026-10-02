@@ -32,15 +32,6 @@ function buildToolContext(
         ...ctx.toolContext.request,
         actionEntryPoint:
           ctx.requestContext?.actionEntryPoint || "conversation",
-        actionContract:
-          ctx.requestContext?.actionContract ||
-          ctx.toolContext.request.actionContract,
-        actionProgress:
-          ctx.requestContext?.actionProgress ||
-          ctx.toolContext.request.actionProgress,
-        classifiedIntent:
-          ctx.requestContext?.classifiedIntent ||
-          ctx.toolContext.request.classifiedIntent,
       },
       signal: ctx.signal || ctx.toolContext.signal,
       journalActionScope:
@@ -57,7 +48,6 @@ function buildToolContext(
       conversationKey: ctx.conversationKey ?? 0,
       mode: "agent",
       actionEntryPoint: ctx.requestContext?.actionEntryPoint || "action_ui",
-      classifiedIntent: ctx.requestContext?.classifiedIntent,
       userText: stepDescription,
       libraryID: ctx.libraryID,
       activeItemId: ctx.requestContext?.activeItemId,
@@ -66,8 +56,6 @@ function buildToolContext(
       selectedCollectionContexts:
         ctx.requestContext?.selectedCollectionContexts,
       selectedTagContexts: ctx.requestContext?.selectedTagContexts,
-      actionContract: ctx.requestContext?.actionContract,
-      actionProgress: ctx.requestContext?.actionProgress,
     }),
     runId: ctx.runId,
     item: syntheticItem,
@@ -91,7 +79,7 @@ function buildToolContext(
  *
  * NOTE: This function only handles `prepareExecution` (validation + confirmation).
  * It does NOT run the runtime's result-review loop (createResultReviewAction /
- * resolveResultReview). This means tools like search_literature_online will
+ * resolveResultReview). This means tools like literature_search will
  * return raw results without triggering per-item review cards — which is the
  * desired behavior for batch actions that gather data in a loop and present
  * one consolidated confirmation at the end.
@@ -123,7 +111,6 @@ export async function callTool(
         toolContext.nestedExecutionOptions?.executeWithLock ||
         ((task) =>
           withConversationWriteLock(toolContext.request.conversationKey, task)),
-      checkpointedWorkflow: Boolean(ctx.journalActionScope),
       inheritedApproval,
       // Native action pages are an explicit review workflow. Preserve that
       // workflow even when the operation is fully reversible and the global
@@ -141,6 +128,10 @@ export async function callTool(
   if (ctx.resolvePreparedAction)
     return deliver((await ctx.resolvePreparedAction(prepared)).result);
 
+  // The inherited fence is the conversation's lifecycle only; a card
+  // resolved after Stop is denied, as the turn's own cards are.
+  const conversationAllowed =
+    toolContext.nestedExecutionOptions?.isExecutionAllowed;
   return deliver(
     (
       await resolvePreparedActionReview(
@@ -149,7 +140,9 @@ export async function callTool(
           ctx.onProgress({ type: "confirmation_required", requestId, action });
           return ctx.requestConfirmation(requestId, action);
         },
-        toolContext.nestedExecutionOptions?.isExecutionAllowed,
+        conversationAllowed
+          ? () => !toolContext.signal?.aborted && conversationAllowed()
+          : undefined,
       )
     ).result,
   );

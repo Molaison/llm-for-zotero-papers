@@ -99,6 +99,16 @@ export const restoreCollectionState = (state: MutationStateView) => ({
   ],
 });
 
+/** Item ids as a reason names them: "item 8", "items 8 and 9", "items 8, 9 and 12". */
+export function describeItemIds(itemIds: readonly number[]): string {
+  const ids = itemIds.map(String);
+  const list =
+    ids.length > 1
+      ? `${ids.slice(0, -1).join(", ")} and ${ids[ids.length - 1]}`
+      : ids.join("");
+  return `${ids.length === 1 ? "item" : "items"} ${list}`;
+}
+
 export const sameMembers = <T>(
   left: readonly T[],
   right: readonly T[],

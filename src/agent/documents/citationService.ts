@@ -1,6 +1,6 @@
 import type { ZoteroGateway } from "../services/zoteroGateway";
-import type { ResearchEvidenceRecord } from "../research/types";
-import type { ResearchScopeSnapshotItem } from "../research/types";
+import type { ResearchEvidenceRecord } from "./coverageTypes";
+import type { ResearchScopeSnapshotItem } from "./coverageTypes";
 import type {
   DocumentSpec,
   FormattedCitationBundle,

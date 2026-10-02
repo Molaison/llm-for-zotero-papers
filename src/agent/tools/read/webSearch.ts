@@ -1,5 +1,4 @@
 import type {
-  AgentRuntimeRequest,
   AgentToolDefinition,
   AgentToolInputValidation,
   AgentTraceDetail,
@@ -13,6 +12,7 @@ import type {
 import { registerWebSearchSources } from "../../../webAccess/runSources";
 import { normalizePublicWebUrl } from "../../../webAccess/tavilyClient";
 import { readOnlyInvocationPlan } from "../../authorization/invocationPlan";
+import { neverSelected } from "../guidance";
 import { fail, ok, validateObject } from "../shared";
 import {
   createConfiguredWebAccessProvider,
@@ -36,13 +36,6 @@ export type WebSearchInput = {
 export type WebSearchToolResult = WebSearchResponse & {
   citation: ReturnType<typeof webCitationInstruction>;
 };
-
-export function matchesWebSearchGuidance(
-  request: Pick<AgentRuntimeRequest, "classifiedIntent">,
-): boolean {
-  const intent = request.classifiedIntent?.externalSearchIntent;
-  return intent === "web" || intent === "both";
-}
 
 function normalizeTopic(value: unknown): WebSearchTopic {
   return value === "news" || value === "finance" ? value : "general";
@@ -240,7 +233,7 @@ export function createWebSearchTool(
     },
     isAvailable: isWebAccessToolAvailable,
     guidance: {
-      matches: matchesWebSearchGuidance,
+      matches: neverSelected,
       instruction:
         "Use web_search when the request needs current or general public evidence. A mixed request may also use literature_search for distinct scholarly evidence. Preserve the user's language by default, explicitly choose basic or advanced from the current retrieval need, and use web_read when search snippets are insufficient. Every final-answer paragraph that uses web results must end with the exact hidden source marker described in the tool result, using only returned sourceId values. Do not add a references footer.",
     },

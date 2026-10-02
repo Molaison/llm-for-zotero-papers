@@ -1,4 +1,3 @@
-import type { PlanExecutionLedger } from "../../agent/plans/types";
 import type {
   Message,
   ReasoningProviderKind,
@@ -22,6 +21,7 @@ import {
 } from "../../services/paperContent/contextCache";
 import { TTLMap } from "../../utils/ttlMap";
 import { clearMermaidSvgCache } from "./mermaidSvgCache";
+import { clearAllTaskProgress, clearTaskProgress } from "./taskProgress/store";
 import type { ConversationForkLink } from "../../shared/conversationForkLinks";
 import type { WebSourceAnchor } from "../../webAccess/types";
 export {
@@ -154,58 +154,6 @@ export function resetWebChatConversationSessionState(
   webChatForceNewChatConversationKeys.delete(key);
 }
 
-export type LivePlanExecution = Readonly<{
-  requestId: number;
-  runId: string;
-  ledger: PlanExecutionLedger;
-}>;
-const livePlanExecutions = new Map<number, LivePlanExecution>();
-
-/** Only live engine events may bind progress to the request that owns execution. */
-export function recordLivePlanExecution(
-  conversationKey: number,
-  requestId: number,
-  runId: string,
-  ledger: PlanExecutionLedger,
-): void {
-  if (
-    !isRequestOwner(conversationKey, requestId) ||
-    !runId ||
-    ledger.conversationKey !== conversationKey
-  )
-    return;
-  const previous = livePlanExecutions.get(conversationKey);
-  if (
-    previous &&
-    (previous.requestId !== requestId ||
-      previous.runId !== runId ||
-      previous.ledger.executionId !== ledger.executionId ||
-      previous.ledger.updatedAt > ledger.updatedAt ||
-      [
-        "completed",
-        "completed_with_exceptions",
-        "failed",
-        "cancelled",
-        "superseded",
-      ].includes(previous.ledger.status))
-  )
-    return;
-  livePlanExecutions.set(conversationKey, { requestId, runId, ledger });
-}
-
-export function getLivePlanExecution(
-  conversationKey: number,
-): LivePlanExecution | null {
-  const binding = livePlanExecutions.get(conversationKey);
-  return binding &&
-    isRequestOwner(conversationKey, binding.requestId) &&
-    !getAbortController(conversationKey)?.signal.aborted &&
-    getCancelledRequestId(conversationKey) < binding.requestId &&
-    ["pending", "running"].includes(binding.ledger.status)
-    ? binding
-    : null;
-}
-
 export function getPendingRequestId(conversationKey: number): number {
   return pendingRequestIds.get(conversationKey) || 0;
 }
@@ -257,7 +205,6 @@ export function finishRequest(
   const key = normalizeConversationKey(conversationKey);
   if (!key || pendingRequestIds.get(key) !== requestId) return false;
   pendingRequestIds.delete(key);
-  livePlanExecutions.delete(key);
   abortControllers.delete(key);
   notifyRequestActivityChanged(key, true);
   return true;
@@ -277,7 +224,6 @@ export function transferRequest(
   if (pendingRequestIds.has(toKey)) return false;
   const abortController = abortControllers.get(fromKey) || null;
   pendingRequestIds.delete(fromKey);
-  livePlanExecutions.delete(fromKey);
   abortControllers.delete(fromKey);
   pendingRequestIds.set(toKey, requestId);
   if (abortController) abortControllers.set(toKey, abortController);
@@ -301,10 +247,7 @@ export function setPendingRequestId(
   }
   if (id <= 0) {
     pendingRequestIds.delete(conversationKey);
-    livePlanExecutions.delete(conversationKey);
   } else {
-    if (pendingRequestIds.get(conversationKey) !== id)
-      livePlanExecutions.delete(conversationKey);
     pendingRequestIds.set(conversationKey, id);
   }
   notifyRequestActivityChanged(conversationKey, wasPending);
@@ -375,6 +318,9 @@ export function clearConversationOwnedRuntimeState(
   bumpConversationWriteGeneration(key);
 
   chatHistory.delete(key);
+  // The Task progress record goes with the conversation; a conversation
+  // shown again rebuilds it from what it persisted.
+  clearTaskProgress(key);
   conversationForkLinks.delete(key);
   loadedConversationKeys.delete(key);
   loadingConversationTasks.delete(key);
@@ -671,6 +617,7 @@ export function setInlineEditSavedDraft(text: string): void {
  */
 export function clearAllState(): void {
   chatHistory.clear();
+  clearAllTaskProgress();
   conversationForkLinks.clear();
   loadedConversationKeys.clear();
   loadingConversationTasks.clear();
@@ -714,7 +661,6 @@ export function clearAllState(): void {
   pendingRequestIds.clear();
   for (const key of pendingKeys) notifyRequestActivityChanged(key, true);
   requestActivityListeners.clear();
-  livePlanExecutions.clear();
   cancelledRequestIds.clear();
   abortControllers.clear();
   autoLockedGlobalConversationKeys.clear();

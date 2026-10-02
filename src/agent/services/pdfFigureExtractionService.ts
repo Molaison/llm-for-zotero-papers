@@ -22,8 +22,7 @@ import { joinLocalPath } from "../../utils/localPath";
 import type { PaperReadFigureExtractionResult } from "../tools/read/paperRead";
 import type { PdfTarget } from "../tools/read/pdfToolUtils";
 import type { AgentToolArtifact, AgentToolContext } from "../types";
-import type { PdfPageService } from "./pdfPageService";
-import type { SemanticDecisions } from "../model/semanticDecisions";
+import type { PdfFigureSelection, PdfPageService } from "./pdfPageService";
 import { sha256Bytes } from "../store/journalRecoveryBlobStore";
 import type { PlanDocumentAsset } from "../documents/types";
 
@@ -40,9 +39,14 @@ type FigureExtractionInput = {
 type FigureExtractionParams = {
   input: FigureExtractionInput;
   /** Host-owned selectors; free-text tool queries cannot change them. */
-  selection?: SemanticDecisions["figures"];
+  selection?: PdfFigureSelection;
   context: AgentToolContext;
   paperContexts: NonNullable<PdfTarget["paperContext"]>[];
+  /**
+   * Host-only. Plain chat sends figure crops as images and never publishes a
+   * document, so it skips the source-PDF hash that document assets need.
+   */
+  documentAssets?: false;
 };
 
 type FigureCropPageService = PdfPageService & {
@@ -52,7 +56,7 @@ type FigureCropPageService = PdfPageService & {
     figureCacheDir: string;
     mineruCacheDir?: string;
     query: string;
-    selection: NonNullable<SemanticDecisions["figures"]>;
+    selection: PdfFigureSelection;
     pages?: number[];
     dpi?: number;
   }) => Promise<
@@ -67,15 +71,15 @@ type FigureCropPageService = PdfPageService & {
 };
 
 /**
- * Ordinary Agent and MCP calls use the same concrete read selectors.
- * Frozen Plan selections are resolved by the caller before this fallback.
- * Queries remain supported for existing clients; no preliminary classifier
- * is required to read a figure.
+ * Ordinary Agent and MCP calls use the same concrete read selectors. A
+ * host-owned selection (normal chat's figure references) is used instead
+ * when the caller supplies one. Queries remain supported for existing
+ * clients; no preliminary classifier is required to read a figure.
  */
 function resolveDirectFigureSelection(
   input: FigureExtractionInput,
   context: AgentToolContext,
-): SemanticDecisions["figures"] | undefined {
+): PdfFigureSelection | undefined {
   if (input.figureLabels) {
     return {
       labels: input.figureLabels,
@@ -295,7 +299,7 @@ function labelAllowedForAllQuery(
 }
 
 function buildCachedFigureRequest(
-  selection: NonNullable<SemanticDecisions["figures"]>,
+  selection: PdfFigureSelection,
   pages: number[] | undefined,
 ): CachedFigureRequest {
   const requestedLabels = new Set<string>();
@@ -398,7 +402,7 @@ function selectCachedFiguresForRequest(params: {
   expectedFigures: ExpectedPdfFigure[];
   missingFigures: ExpectedPdfFigure[];
   manifest: MineruManifest | null;
-  selection: NonNullable<SemanticDecisions["figures"]>;
+  selection: PdfFigureSelection;
   includeSupplementary?: boolean;
   pages?: number[];
 }): {
@@ -453,7 +457,7 @@ async function readVerifiedCachedFigures(params: {
   manifestHash: string;
   pdfFingerprint: string;
   paperContext: NonNullable<PdfTarget["paperContext"]>;
-  selection: NonNullable<SemanticDecisions["figures"]>;
+  selection: PdfFigureSelection;
   includeSupplementary?: boolean;
   pages?: number[];
 }): Promise<{
@@ -544,7 +548,6 @@ export class PdfFigureExtractionService {
   ): Promise<PaperReadFigureExtractionResult> {
     const selection =
       params.selection ||
-      params.context.request.classifiedIntent?.semantic?.figures ||
       resolveDirectFigureSelection(params.input, params.context);
     const query = params.input.query || selection?.labels.join(", ") || "";
     if (!selection)
@@ -552,6 +555,8 @@ export class PdfFigureExtractionService {
         mode: "figures",
         status: "no_figures",
         query,
+        guidance:
+          "No figure was selected, so no extraction ran. Call paper_read mode:'figures' again with figureLabels (for example ['Figure 1'], or [] for all figures).",
         figures: [],
         artifacts: [],
         warnings: [
@@ -570,6 +575,28 @@ export class PdfFigureExtractionService {
     const warnings: string[] = [];
     const expectedFigures: ExpectedPdfFigure[] = [];
     const missingFigures: ExpectedPdfFigure[] = [];
+    // A document asset names its source PDF by content, so each attachment's
+    // PDF is read and hashed once in this call; nothing outlives the call.
+    const sourcePdfDigests = new Map<number, Promise<string>>();
+    const sourcePdfDigest = (attachmentId: number): Promise<string> => {
+      let digest = sourcePdfDigests.get(attachmentId);
+      if (!digest) {
+        digest = (async () => {
+          const sourcePath =
+            await Zotero.Items.get(attachmentId)?.getFilePathAsync();
+          if (!sourcePath)
+            throw new Error("The figure source PDF is unavailable");
+          const io = (
+            globalThis as unknown as {
+              IOUtils: { read: (path: string) => Promise<Uint8Array> };
+            }
+          ).IOUtils;
+          return `sha256:${await sha256Bytes(await io.read(sourcePath))}`;
+        })();
+        sourcePdfDigests.set(attachmentId, digest);
+      }
+      return digest;
+    };
 
     for (const paperContext of params.paperContexts) {
       const attachmentId = Math.floor(Number(paperContext.contextItemId || 0));
@@ -589,31 +616,31 @@ export class PdfFigureExtractionService {
         : null;
       const manifestHash = buildPdfFigureCropManifestHash(manifest);
       const pdfFingerprint = buildPdfFigureCropPdfFingerprint(paperContext);
+      // Every figure carries the asset a submitted document needs. When the
+      // asset cannot be described, the figure stays readable without one.
       const recordFigures = async (rows: ExtractedPdfFigure[]) => {
         let sourceFingerprint = pdfFingerprint;
-        const needsDocumentAssets =
-          params.context.request.documentOutcomePolicy?.required ||
-          params.context.authorization?.kind === "external_runtime";
-        if (needsDocumentAssets && rows.length) {
-          const attachment = Zotero.Items.get(attachmentId);
-          const sourcePath = await attachment?.getFilePathAsync();
-          if (!sourcePath)
-            throw new Error("The figure source PDF is unavailable");
-          const io = (
-            globalThis as unknown as {
-              IOUtils: { read: (path: string) => Promise<Uint8Array> };
+        let documentAssets: PlanDocumentAsset[] = [];
+        if (rows.length && params.documentAssets !== false) {
+          try {
+            const digest = await sourcePdfDigest(attachmentId);
+            for (const figure of rows) {
+              documentAssets.push(
+                await describeDocumentFigure(figure, paperContext, digest),
+              );
             }
-          ).IOUtils;
-          sourceFingerprint = `sha256:${await sha256Bytes(await io.read(sourcePath))}`;
+            sourceFingerprint = digest;
+          } catch (error) {
+            documentAssets = [];
+            warnings.push(
+              `Figures from ${paperContext.title || "this paper"} have no documentAsset, so submit_document cannot include them: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+          }
         }
-        for (const figure of rows) {
-          const documentAsset = needsDocumentAssets
-            ? await describeDocumentFigure(
-                figure,
-                paperContext,
-                sourceFingerprint,
-              )
-            : undefined;
+        for (const [index, figure] of rows.entries()) {
+          const documentAsset = documentAssets[index];
           figures.push({
             ...figure,
             paperContext,

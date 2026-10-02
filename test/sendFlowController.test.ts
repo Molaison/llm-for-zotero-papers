@@ -30,6 +30,11 @@ import type { LocalDocumentResource } from "../src/shared/types";
 import { resolvePromptText as resolveProductionPromptText } from "../src/modules/contextPanel/textUtils";
 import { createPaperPortalItem } from "../src/modules/contextPanel/portalScope";
 import { buildTurnPaperScope } from "../src/agent/context/turnPaperScope";
+import {
+  installPlanStoreZotero,
+  saveStoredPlanExecution,
+  storedPlanExecution,
+} from "./helpers/planStoreDb";
 
 describe("sendFlowController", function () {
   const item = { id: 101 } as unknown as Zotero.Item;
@@ -3147,6 +3152,48 @@ describe("sendFlowController", function () {
     assert.equal(owner, 0);
     assert.deepEqual(queued, ["queued follow-up", "later follow-up"]);
     assert.equal(inputBox.value, "draft typed while waiting");
+  });
+
+  it("sends every message as an ordinary turn while a stored plan waits, a continue included", async function () {
+    const stored = storedPlanExecution("interrupted", item.id);
+    const restoreZotero = await installPlanStoreZotero({
+      Prefs: { get: () => undefined },
+      Items: { get: () => null },
+    });
+    try {
+      await saveStoredPlanExecution(stored);
+      const sends: Array<{ planContext: unknown; displayQuestion: unknown }> =
+        [];
+      const { controller, inputBox } = createBaseDeps({
+        isAgentMode: () => true,
+        getSelectedTextContextEntries: () => [],
+        sendQuestion: async (opts: any) => {
+          opts.onProviderDispatch?.();
+          sends.push({
+            planContext: opts.planContext,
+            displayQuestion: opts.displayQuestion,
+          });
+        },
+      });
+
+      inputBox.value = "What is the sample size of this study?";
+      await controller.doSend();
+      inputBox.value = "Continue.";
+      await controller.doSend();
+
+      assert.lengthOf(sends, 2);
+      assert.deepEqual(
+        sends.map((send) => send.planContext),
+        [undefined, undefined],
+        "plan mode is retired: no send carries a plan context",
+      );
+      assert.deepEqual(
+        sends.map((send) => send.displayQuestion),
+        ["What is the sample size of this study?", "Continue."],
+      );
+    } finally {
+      restoreZotero();
+    }
   });
 
   it("restores the captured draft when preparation fails", async function () {

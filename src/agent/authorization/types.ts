@@ -36,12 +36,9 @@ export type ActionConstraint = Readonly<
 >;
 
 export type ActionRiskSignal =
-  | "ambiguous_target"
   | "scope_expansion"
   | "exclusive_replacement"
-  | "sensitive_egress"
   | "broad_delete"
-  | "protected_target"
   | "privilege_escalation"
   | "package_system_modification"
   | "download_to_shell"
@@ -80,8 +77,7 @@ export type AuthorizationDecision =
         | "external_runtime"
         | "auto_policy"
         | "yolo"
-        | "yolo_judgment"
-        | "plan_approval";
+        | "yolo_judgment";
     }
   | { kind: "confirm"; reason: string }
   | { kind: "block"; reason: string };
@@ -134,13 +130,6 @@ export type OriginalAuthorizationContext = {
   /** Resolved by the host from the entry point and concrete proposal. */
   interaction?: ActionInteraction;
   mode: OriginalAgentPermissionMode;
-  constraints?: readonly ActionConstraint[];
-  /** Legacy capture accepted by stored research flows; direct policy ignores it. */
-  semantic?: import("../model/semanticDecisions").SemanticIntent;
   /** Host-created turn facts; never accepted from model tool arguments. */
   executionContext?: import("../types").AgentExecutionContext;
-  /** Legacy compatibility input. Direct-agent policy does not use this as authority. */
-  hasMatchingActionIntent?: boolean;
-  /** Host-verified approved-plan scope; never supplied by model tool input. */
-  hasApprovedPlanAuthority?: boolean;
 };

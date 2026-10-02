@@ -1,7 +1,7 @@
 ---
 id: write-note
 description: Create, save, or edit a Zotero note or Markdown note, including requested figures or an existing answer. Use only when the user explicitly requests a note.
-version: 16
+version: 18
 contexts: any
 activation: auto
 ---
@@ -17,7 +17,7 @@ Resolve an ambiguous target or operation before writing.
 ### Choose the content
 
 - To save an existing answer unchanged, use `note_write` with its `sourceMessageId` and destination.
-  Use `conversation_read` only to recover the source identity or exact text; do not regenerate or reformat it.
+  Use `context_read` with `source: "conversation"` only to recover the source identity or exact text; do not regenerate or reformat it.
 - For a narrowly scoped note, such as selected figures with captions or a requested paragraph, keep that scope.
   Do not expand it into a reading-note template or add scientific interpretation that was not requested.
 - For new or revised reading notes, reuse supplied evidence and read further only as needed.
@@ -56,11 +56,8 @@ End newly composed notes with `---` followed by `Written by LLM-for-Zotero.` (or
 
 ### Figures
 
-Use `paper_read` in `figures` mode for verified crops and embed its returned paths as Markdown `file://` image links.
+Follow the analyze-figures skill for obtaining crops; embed the returned crop paths as Markdown `file://` image links.
 The note tool imports and verifies those images.
-Do not use MinerU source images, invent paths, or copy assets through shell commands.
-If no verified crop is available, switch to text-only mode and disclose that explanations rely on captions and surrounding text.
-Text-only models can embed verified crops but cannot infer visual details; user-supplied images remain usable.
 
 ### Save or export
 

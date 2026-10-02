@@ -3,10 +3,8 @@ import {
   createNativeLifecycleTestProcess,
   installDirectPathTestPrefs,
 } from "./helpers/codexNativeLifecycle";
-import { classifiedFixture } from "./helpers/semanticIntent";
 import { buildCodexNativeSkillRequest } from "../src/codexAppServer/nativeSkills";
 import type { AgentRuntimeRequest } from "../src/agent/types";
-import { semanticContractFixture } from "./helpers/semanticIntent";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -95,18 +93,15 @@ function createDirectPdfSelection(params: {
 }
 
 describe("Codex app-server native client", function () {
-  it("uses native Plan settings with read-only permissions and explicitly restores Default", async function () {
+  it("sends an ordinary turn with no Zotero plan context", async function () {
     const requests: Array<{ method: string; params: Record<string, any> }> = [];
     const proc = createNativeLifecycleTestProcess({
-      newThreadIds: ["planning-thread", "ordinary-thread"],
+      newThreadIds: ["ordinary-thread"],
       requests,
       permissionProfilesResult: {
-        data: [
-          { id: ":read-only", description: "Read only" },
-          { id: ":danger-full-access", description: "Full access" },
-        ],
+        data: [{ id: ":danger-full-access", description: "Full access" }],
       },
-      deltaForTurn: () => "A response without a finalized plan",
+      deltaForTurn: () => "An ordinary answer",
     });
     const restorePrefs = installDirectPathTestPrefs(
       "off",
@@ -116,61 +111,31 @@ describe("Codex app-server native client", function () {
     (globalThis as any).Zotero.DB = { queryAsync: async () => [] };
     const originalSpawn = CodexAppServerProcess.spawn;
     CodexAppServerProcess.spawn = async () => proc;
-    const processKey = "native-plan-transition";
-    const base = {
-      scope: {
-        conversationKey: 6_000_000_899,
-        libraryID: 1,
-        kind: "global" as const,
-      },
-      model: "gpt-5.6",
-      reasoning: { effort: "high" } as any,
-      messages: [{ role: "user" as const, content: "Plan an explanation" }],
-      processKey,
-      hooks: {
-        loadProviderSessionId: async () => undefined,
-        persistProviderSessionId: async () => {},
-      },
-    };
+    const processKey = "native-ordinary-no-plan";
     try {
-      let planningError: unknown;
-      try {
-        await runCodexAppServerNativeTurn({
-          ...base,
-          planContext: {
-            phase: "planning",
-            planId: "plan-transition",
-            revision: 1,
-            provider: "codex",
-          },
-        });
-      } catch (error) {
-        planningError = error;
-      }
-      assert.match(
-        String(planningError),
-        /did not finish a native plan proposal/,
-      );
-      await runCodexAppServerNativeTurn(base);
-      const turns = requests.filter(
+      await runCodexAppServerNativeTurn({
+        scope: {
+          conversationKey: 6_000_000_898,
+          libraryID: 1,
+          kind: "global" as const,
+        },
+        model: "gpt-5.6",
+        messages: [{ role: "user" as const, content: "Explain drift" }],
+        processKey,
+        hooks: {
+          loadProviderSessionId: async () => undefined,
+          persistProviderSessionId: async () => {},
+        },
+      });
+      const [turn] = requests.filter(
         (request) => request.method === "turn/start",
       );
-      assert.equal(turns[0].params.collaborationMode.mode, "plan");
-      assert.equal(turns[1].params.collaborationMode.mode, "default");
-      assert.equal(
-        turns[0].params.collaborationMode.settings.developer_instructions,
-        null,
+      assert.exists(turn);
+      assert.equal(turn.params.collaborationMode.mode, "default");
+      assert.isUndefined(
+        turn.params.additionalContext?.zotero_plan,
+        "plan mode is retired: an ordinary turn names no plan, not even to say none is active",
       );
-      assert.equal(
-        turns[0].params.collaborationMode.settings.reasoning_effort,
-        "high",
-      );
-      const starts = requests.filter(
-        (request) => request.method === "thread/start",
-      );
-      assert.equal(starts[0].params.permissions, ":read-only");
-      assert.equal(starts[0].params.approvalPolicy, "never");
-      assert.equal(starts[1].params.permissions, ":danger-full-access");
     } finally {
       destroyCachedCodexAppServerProcess(processKey, proc);
       CodexAppServerProcess.spawn = originalSpawn;
@@ -178,110 +143,6 @@ describe("Codex app-server native client", function () {
       restorePrefs();
     }
   });
-  it("cancels planning from a native question and denies native effect escalation", async function () {
-    const requests: Array<{ method: string; params: Record<string, any> }> = [];
-    let finishTurn: (() => void) | undefined;
-    const responses: Array<Record<string, any>> = [];
-    const proc = createNativeLifecycleTestProcess({
-      newThreadIds: ["question-thread"],
-      requests,
-      permissionProfilesResult: {
-        data: [{ id: ":read-only", description: "Read only" }],
-      },
-      onServerResponse: (response) => {
-        responses.push(response);
-        if (response.id === "question-request") finishTurn?.();
-      },
-      onTurn: ({ threadId, turnId, emit }) => {
-        finishTurn = () =>
-          emit({
-            method: "turn/completed",
-            params: { threadId, turn: { id: turnId, status: "interrupted" } },
-          });
-        emit({
-          id: "write-request",
-          method: "item/fileChange/requestApproval",
-          params: { threadId, turnId, itemId: "write" },
-        });
-        emit({
-          id: "question-request",
-          method: "item/tool/requestUserInput",
-          params: {
-            threadId,
-            turnId,
-            itemId: "question",
-            questions: [
-              {
-                id: "q",
-                header: "Scope",
-                question: "Which scope?",
-                options: [{ label: "Current paper" }, { label: "Collection" }],
-              },
-            ],
-          },
-        });
-      },
-    });
-    const restorePrefs = installDirectPathTestPrefs();
-    const originalDB = (globalThis as any).Zotero.DB;
-    (globalThis as any).Zotero.DB = { queryAsync: async () => [] };
-    const originalSpawn = CodexAppServerProcess.spawn;
-    CodexAppServerProcess.spawn = async () => proc;
-    const shown: string[] = [];
-    let error: unknown;
-    try {
-      try {
-        await runCodexAppServerNativeTurn({
-          scope: {
-            conversationKey: 6_000_000_898,
-            libraryID: 1,
-            kind: "global",
-          },
-          model: "gpt-5.6",
-          processKey: "native-question-cancel",
-          messages: [{ role: "user", content: "Plan an explanation" }],
-          planContext: {
-            phase: "planning",
-            planId: "question-plan",
-            revision: 1,
-            provider: "codex",
-          },
-          hooks: {
-            loadProviderSessionId: async () => undefined,
-            persistProviderSessionId: async () => {},
-          },
-          onApprovalRequest: async (request) => {
-            shown.push(request.method);
-            return { answers: {} };
-          },
-        });
-      } catch (caught) {
-        error = caught;
-      }
-      assert.equal((error as Error).name, "AbortError");
-      assert.deepEqual(shown, ["item/tool/requestUserInput"]);
-      assert.deepEqual(
-        responses.find((response) => response.id === "write-request")?.result,
-        { decision: "decline" },
-      );
-      assert.equal(
-        requests.filter((request) => request.method === "turn/interrupt")
-          .length,
-        1,
-      );
-      assert.equal(
-        responses.filter((response) => response.id === "question-request")
-          .length,
-        1,
-      );
-    } finally {
-      destroyCachedCodexAppServerProcess("native-question-cancel", proc);
-      CodexAppServerProcess.spawn = originalSpawn;
-      (globalThis as any).Zotero.DB = originalDB;
-      restorePrefs();
-    }
-  });
-
   it("does not lose a completed MCP evidence persistence failure before provider finalization", async function () {
     const restorePrefs = installDirectPathTestPrefs();
     const originalSpawn = CodexAppServerProcess.spawn;
@@ -559,88 +420,6 @@ describe("Codex app-server native client", function () {
       }
     });
   }
-
-  it("rejects a provider's filing-completed narrative without host-verified effects", async function () {
-    const persisted: any[] = [];
-    let finished: unknown;
-    const requests: Array<{ method: string; params: Record<string, any> }> = [];
-    const proc = createNativeLifecycleTestProcess({
-      newThreadIds: ["unverified-native-thread"],
-      requests,
-      deltaForTurn: () => "Done, the paper was filed.",
-    });
-    const originalSpawn = CodexAppServerProcess.spawn;
-    const restorePrefs = installDirectPathTestPrefs();
-    const processKey = "direct-native-completion";
-    CodexAppServerProcess.spawn = async () => proc;
-    try {
-      const result = await runCodexAppServerNativeTurn({
-        eventJournal: {
-          runId: "host-native-run",
-          append: async (event) => {
-            persisted.push(event);
-          },
-          finish: async (status, text) => {
-            finished = { status, text };
-          },
-        },
-        scope: {
-          conversationKey: 6_000_000_190,
-          libraryID: 1,
-          kind: "global",
-          title: "File a paper",
-        },
-        model: "gpt-5.6",
-        messages: [{ role: "user", content: "File this paper in Bayesian" }],
-        processKey,
-        actionPreparation: { state: "ready", issues: [] },
-        actionContract: semanticContractFixture({
-          id: "native-filing-contract",
-          writeDisposition: "required",
-          obligations: [
-            {
-              id: "filing",
-              operation: "move_to_collection",
-              capability: "zotero.collections",
-              proofDomain: "zotero_state",
-              coverage: "one",
-              targetKind: "papers",
-              parameters: { destinationCollectionId: 5 },
-            },
-          ],
-        }),
-        hooks: {
-          loadProviderSessionId: async () => null,
-          persistProviderSession: async () => {},
-        },
-      });
-      assert.include(result.text, "could not verify");
-      assert.notInclude(result.text, "Done, the paper was filed");
-      assert.isString(result.verificationFailure);
-      assert.equal(result.agentRunId, "host-native-run");
-      assert.isFalse(
-        persisted.some(
-          (event) => event.providerType === "agent_semantic_intent",
-        ),
-      );
-      assert.isTrue(
-        persisted.some(
-          (event) => event.providerType === "provider_run_binding",
-        ),
-      );
-      assert.equal((finished as any)?.status, "failed");
-
-      assert.lengthOf(
-        requests.filter((request) => request.method === "turn/start"),
-        2,
-      );
-    } finally {
-      CodexAppServerProcess.spawn = originalSpawn;
-      destroyCachedCodexAppServerProcess(processKey, proc);
-      restorePrefs();
-    }
-  });
-
   it("renders exact original PDF paths and identities in selection order", function () {
     const first = createDirectPdfSelection({
       itemId: 10,
@@ -992,7 +771,7 @@ describe("Codex app-server native client", function () {
   });
 
   it("keeps automatic skill routing off on a PDF turn without an explicit skill", async function () {
-    setUserSkills([parseSkill(BUILTIN_SKILL_FILES["simple-paper-qa.md"])]);
+    setUserSkills([parseSkill(BUILTIN_SKILL_FILES["evidence-based-qa.md"])]);
     const processKey = "native-direct-pdf-no-automatic-skill";
     const requests: Array<{
       method: string;
@@ -1068,7 +847,7 @@ describe("Codex app-server native client", function () {
   it("activates only an explicitly selected skill on a PDF turn", async function () {
     setUserSkills([
       parseSkill(BUILTIN_SKILL_FILES["write-note.md"]),
-      parseSkill(BUILTIN_SKILL_FILES["simple-paper-qa.md"]),
+      parseSkill(BUILTIN_SKILL_FILES["evidence-based-qa.md"]),
     ]);
     const processKey = "native-direct-pdf-explicit-skill";
     const requests: Array<{
@@ -1083,7 +862,7 @@ describe("Codex app-server native client", function () {
       process.platform === "darwin"
         ? writeNoteSkillPath.replace(/^\/tmp\//, "/private/tmp/")
         : writeNoteSkillPath;
-    const simplePaperQaSkillPath = `${expectedCwd}/.agents/skills/simple-paper-qa/SKILL.md`;
+    const evidenceSkillPath = `${expectedCwd}/.agents/skills/evidence-based-qa/SKILL.md`;
     const proc = createNativeLifecycleTestProcess({
       newThreadIds: ["thread-pdf-explicit-skill"],
       requests,
@@ -1104,8 +883,8 @@ describe("Codex app-server native client", function () {
                 enabled: true,
               },
               {
-                name: "simple-paper-qa",
-                path: simplePaperQaSkillPath,
+                name: "evidence-based-qa",
+                path: evidenceSkillPath,
                 enabled: true,
               },
             ],
@@ -1185,7 +964,7 @@ describe("Codex app-server native client", function () {
     });
     assert.isFalse(
       turnInput.some(
-        (input) => input.type === "skill" && input.name === "simple-paper-qa",
+        (input) => input.type === "skill" && input.name === "evidence-based-qa",
       ),
     );
     assert.deepEqual(activatedSkills, ["write-note"]);
@@ -2454,38 +2233,6 @@ describe("Codex app-server native client", function () {
     assert.notInclude(manifest, "page N");
     assert.notInclude(manifest, "use shell creatively");
   });
-
-  it("keeps effects disabled while native Codex is preparing a plan", function () {
-    const manifest = buildZoteroEnvironmentManifest({
-      scope: {
-        profileSignature: "profile-plan-test",
-        conversationKey: 1,
-        libraryID: 1,
-        kind: "paper",
-        paperItemID: 42,
-        activeItemId: 42,
-        activeContextItemId: 43,
-        paperTitle: "Native Paper",
-      },
-      mcpEnabled: true,
-      mcpReady: true,
-      planContext: {
-        phase: "planning",
-        planId: "plan-1",
-        revision: 1,
-      },
-    });
-
-    assert.include(
-      manifest,
-      "Semantic action authority is unavailable. Do not execute effects.",
-    );
-    assert.notInclude(
-      manifest,
-      "The connected Codex runtime owns ordinary invocation approval",
-    );
-  });
-
   it("replaces ordinary paper retrieval guidance for raw PDF turns", function () {
     const manifest = buildZoteroEnvironmentManifest({
       scope: {
@@ -3115,7 +2862,7 @@ describe("Codex app-server native client", function () {
 
   it("submits explicit skill selections as structured native Codex skill inputs", async function () {
     setUserSkills([
-      parseSkill(BUILTIN_SKILL_FILES["simple-paper-qa.md"]),
+      parseSkill(BUILTIN_SKILL_FILES["analyze-figures.md"]),
       parseSkill(BUILTIN_SKILL_FILES["evidence-based-qa.md"]),
     ]);
     const processKey = "native-auto-skill-input-test";
@@ -3269,7 +3016,7 @@ describe("Codex app-server native client", function () {
     const turnStartText = JSON.stringify(turnStartParams);
     assert.include(turnStartText, "what method did they use in this paper");
     assert.notInclude(turnStartText, "$evidence-based-qa");
-    assert.notInclude(turnStartText, "$simple-paper-qa");
+    assert.notInclude(turnStartText, "$analyze-figures");
     assert.notInclude(
       JSON.stringify(threadStartParams),
       "LLM-for-Zotero skills active for this turn",
@@ -3783,9 +3530,9 @@ describe("Codex app-server native client", function () {
       scope,
       event: {
         ...baseEvent,
-        toolName: "read_paper",
+        toolName: "paper_read",
         toolLabel: "Read Paper",
-        arguments: {},
+        arguments: { mode: "targeted", query: "method" },
         ok: true,
       },
     });
@@ -3795,11 +3542,25 @@ describe("Codex app-server native client", function () {
       event: {
         ...baseEvent,
         requestId: "read-2",
-        toolName: "read_paper",
+        toolName: "paper_read",
         toolLabel: "Read Paper",
-        arguments: {},
+        arguments: { mode: "targeted", query: "method" },
         ok: true,
         timestamp: 1100,
+      },
+    });
+    // MCP never exposes a retired primitive, so a retired name is not a read.
+    recordCodexNativeReadActivity({
+      threadId: "thread-ledger",
+      scope,
+      event: {
+        ...baseEvent,
+        requestId: "retired-read",
+        toolName: "view_pdf_pages",
+        toolLabel: "Retired View",
+        arguments: { pages: [3] },
+        ok: true,
+        timestamp: 1150,
       },
     });
     recordCodexNativeReadActivity({
@@ -3858,7 +3619,10 @@ describe("Codex app-server native client", function () {
     assert.include(block, "Already inspected in this Codex thread");
     assert.include(block, "Ledger Paper");
     assert.include(block, "Read Paper");
+    assert.include(block, "mode=targeted");
+    assert.include(block, 'query="method"');
     assert.include(block, "2x");
+    assert.notInclude(block, "Retired View");
     assert.include(block, "Read MinerU full.md");
     assert.include(block, "offset=25");
     assert.notInclude(block, "failed search");

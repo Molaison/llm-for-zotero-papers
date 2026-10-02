@@ -1,9 +1,7 @@
 import { assert } from "chai";
-import { createEditCurrentNoteTool } from "../src/agent/tools/write/editCurrentNote";
+import { createNoteWriteTool } from "../src/agent/tools/write/noteWrite";
 import { buildAgentInitialMessages } from "../src/agent/model/messageBuilder";
-import { parseSemanticDecisions } from "../src/agent/model/semanticDecisions";
 import { resolvedAgentRequest } from "./helpers/resolvedAgentRequest";
-import { actionFixture, semanticFixture } from "./helpers/semanticIntent";
 
 const before =
   "<h2>Methodology</h2><ul><li>First method.</li><li>Second method.</li><li>Third method.</li></ul><p>Keep this.</p>";
@@ -11,7 +9,7 @@ function fixture(
   html = before,
   selected = "First method.\nSecond method.\nThird method.",
 ) {
-  const tool = createEditCurrentNoteTool({
+  const tool = createNoteWriteTool({
     getActiveNoteSnapshot: () => ({
       noteId: 55,
       libraryID: 1,
@@ -75,21 +73,7 @@ describe("selected note replacement contract", function () {
   });
   it("never tells a supplied-prose note edit to read paper evidence", async function () {
     const { request } = fixture();
-    const semantic = semanticFixture({
-      reading: { source: "provided_context", coverage: "targeted" } as never,
-    });
-    assert.isNotNull(parseSemanticDecisions({ decisions: semantic }));
-    const messages = await buildAgentInitialMessages(
-      {
-        ...request,
-        classifiedIntent: {
-          ...actionFixture("note_edit", { targetNoteId: 55 }),
-          semantic,
-        },
-      },
-      [],
-      [],
-    );
+    const messages = await buildAgentInitialMessages({ ...request }, [], []);
     const text = JSON.stringify(messages);
     assert.notInclude(text, "Use paper_read mode");
     assert.notInclude(text, "TURN RULE");
@@ -224,12 +208,6 @@ describe("native selection structure and boundaries", function () {
         execute: async () => ({}),
       } as never);
     const { request } = fixture();
-    request.classifiedIntent = {
-      ...actionFixture("note_edit", { targetNoteId: 55 }),
-      semantic: semanticFixture({
-        reading: { source: "provided_context", coverage: "targeted" } as never,
-      }),
-    };
     assert.deepEqual(
       registry.listToolsForRequest(request).map((t) => t.name),
       [
@@ -245,94 +223,11 @@ describe("native selection structure and boundaries", function () {
 });
 
 describe("verified selection edit completion", function () {
-  it("finishes from the native receipt without a second model round, but keeps requested explanation, compound work and unverified results open", async function () {
-    const { tool, context, request } = fixture();
-    request.classifiedIntent = {
-      ...actionFixture("note_edit", { targetNoteId: 55 }),
-      semantic: semanticFixture({
-        reading: { source: "provided_context", coverage: "targeted" },
-        responseIntent: "receipt",
-      } as never),
-    };
-    request.actionContract = {
-      id: "contract",
-      version: 4,
-      writeDisposition: "required",
-      interpretationSource: "semantic",
-      obligations: [
-        {
-          id: "edit",
-          operation: "note_edit",
-          coverage: "one",
-          targetKind: "items",
-          parameters: { targetNoteId: 55 },
-          targetBoundary: {
-            kind: "selection",
-            libraryID: 1,
-            frozenTargetIds: [55],
-            scopeDigest: "bound",
-          },
-        },
-      ],
-    };
-    const result = {
-      ok: true,
-      content: {
-        actionId: "change",
-        status: "updated",
-        noteVerification: { noteId: 55, matches: true },
-        noteChange: {
-          title: "Note",
-          note: { itemId: 55, key: "NOTE55", libraryID: 1 },
-          state: "applied",
-          before: { checksum: "before" },
-          after: { checksum: "after" },
-          description: "The note was updated and verified in Zotero.",
-        },
-      },
-      actionReceipts: [
-        {
-          obligationId: "edit",
-          operation: "note_edit",
-          verification: "verified",
-          status: "applied",
-          appliedTargets: ["item:55"],
-          alreadySatisfiedTargets: [],
-          rejectedTargets: [],
-        },
-      ],
-    } as never;
-    const input = tool.validate({
-      mode: "edit",
-      selection: { index: 1, replacement: "New." },
-    });
-    if (!input.ok) return assert.fail(input.error);
-    assert.isFunction(tool.resolveTerminalResult);
-    const terminal = await tool.resolveTerminalResult!(
-      input.value,
-      result,
-      context,
-    );
-    assert.include(terminal?.finalText, "verified");
-    assert.equal(terminal?.providerTranscript, "tool_only");
-    const semantic = request.classifiedIntent.semantic as any;
-    semantic.responseIntent = "answer";
-    assert.isNull(
-      await tool.resolveTerminalResult!(input.value, result, context),
-    );
-    semantic.responseIntent = "receipt";
-    (result as any).actionReceipts[0].verification = "execution_only";
-    assert.isNull(
-      await tool.resolveTerminalResult!(input.value, result, context),
-    );
-    (result as any).actionReceipts[0].verification = "verified";
-    request.actionContract.obligations.push({
-      ...request.actionContract.obligations[0],
-      id: "second",
-    });
-    assert.isNull(
-      await tool.resolveTerminalResult!(input.value, result, context),
-    );
+  it("returns a verified note edit to the model instead of ending the turn from its receipt", function () {
+    // The receipt-only shortcut needed a classifier-produced semantic intent
+    // outside a Plan; no current producer creates that combination.
+    const { tool } = fixture();
+    assert.isUndefined(tool.resolveTerminalResult);
   });
 });
 
@@ -420,56 +315,6 @@ describe("table structure boundaries", function () {
         "<table><tbody><tr><td><p>Combined.</p></td><td></td><td></td><td><p>Keep.</p></td></tr></tbody></table>",
       ),
       after!,
-    );
-  });
-});
-
-import { resolveNoteEditModelRequest } from "../src/agent/model/noteEditingPolicy";
-import { buildReasoningPayload } from "../src/utils/llmClient";
-
-describe("faithful rewrite generation policy", function () {
-  it("uses the provider's supported non-thinking mode for a faithful transformation without changing saved settings", function () {
-    const { request } = fixture();
-    request.model = "deepseek-v4-flash";
-    request.apiBase = "https://api.deepseek.com";
-    request.providerProtocol = "openai_chat_compat";
-    request.reasoning = { provider: "deepseek", level: "high" };
-    request.classifiedIntent = {
-      ...actionFixture("note_edit", { targetNoteId: 55 }),
-      semantic: semanticFixture({
-        reading: { source: "provided_context", coverage: "targeted" },
-        generationMode: "transform",
-        responseIntent: "receipt",
-      } as never),
-    };
-    const generation = resolveNoteEditModelRequest(request);
-    assert.deepEqual(
-      buildReasoningPayload(
-        generation.reasoning,
-        false,
-        request.model,
-        request.apiBase,
-        request.providerProtocol,
-      ).extra,
-      { thinking: { type: "disabled" } },
-    );
-    assert.deepEqual(request.reasoning, {
-      provider: "deepseek",
-      level: "high",
-    });
-    assert.strictEqual(generation.actionContract, request.actionContract);
-    (request.classifiedIntent.semantic as any).generationMode = "reason";
-    assert.strictEqual(
-      resolveNoteEditModelRequest(request),
-      request,
-      "substantive reasoning keeps the configured mode",
-    );
-    (request.classifiedIntent.semantic as any).generationMode = "transform";
-    request.classifiedIntent.semantic!.reading.source = "document_text";
-    assert.strictEqual(
-      resolveNoteEditModelRequest(request),
-      request,
-      "source-based work keeps the configured mode",
     );
   });
 });

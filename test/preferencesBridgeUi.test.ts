@@ -62,7 +62,7 @@ describe("bridge settings UI behavior", function () {
       )!;
       assert.equal(
         t(yolo.description),
-        "原生 Agent 执行操作时不会请求权限确认或调用审批模型，包括有歧义或危险的操作。明确限制、用户要求的审核流程、执行完整性及必要的论文选择仍然有效。Claude Code、Codex 和外部 MCP 调用方保留各自的权限控制。",
+        "原生 Agent 执行操作时不会请求权限确认或调用审批模型，包括有歧义或危险的操作。用户要求的审核流程、执行完整性及所发现论文的选择卡片仍然有效。Claude Code、Codex 和外部 MCP 调用方保留各自的权限控制。",
       );
     } finally {
       if (previousZotero) {

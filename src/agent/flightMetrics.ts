@@ -3,12 +3,10 @@ import type { AgentEvent } from "./types";
 /**
  * What one agent flight cost, read off the run's own event stream.
  *
- * This is the deterministic counterpart of
- * `src/agent/research/flightReport.ts`'s `summarizeFlightRuns`: a pure
- * function over an `AgentEvent[]`, with the two quantities that leave no event
- * behind passed in as extras. It exists so a scripted journey in the unit
- * suite can be measured the same way twice and the numbers pinned against
- * drift.
+ * A pure function over an `AgentEvent[]`, with the two quantities that leave
+ * no event behind passed in as extras. It exists so a scripted journey in the
+ * unit suite can be measured the same way twice and the numbers pinned
+ * against drift.
  *
  * Every count comes from a declared contract -- the `stage` a call announced,
  * the `written` flag a durable batch row carries, the facts a receipt proved.

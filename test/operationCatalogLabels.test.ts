@@ -2,6 +2,7 @@ import { assert } from "chai";
 import {
   OPERATION_CATALOG,
   OPERATION_LABELS,
+  operationAuthorityIsConsistent,
   operationLabel,
 } from "../src/agent/contracts/operationCatalog";
 
@@ -30,5 +31,32 @@ describe("operation catalog labels", function () {
   it("spells out an operation the catalog no longer knows", function () {
     assert.equal(operationLabel("retire_shelf"), "Retire shelf");
     assert.equal(operationLabel(""), "Action");
+  });
+});
+
+// Moved from test/planResearchArchitectureV3.test.ts with the research engine.
+describe("operation catalog authority", function () {
+  it("defines one exhaustive capability and proof domain for every operation", function () {
+    for (const [operation, authority] of Object.entries(OPERATION_CATALOG)) {
+      assert.isTrue(
+        operationAuthorityIsConsistent({
+          operation,
+          capability: authority.capability,
+          proofDomain: authority.proofDomain,
+        }),
+        operation,
+      );
+      assert.isFalse(
+        operationAuthorityIsConsistent({
+          operation,
+          capability: authority.capability,
+          proofDomain:
+            authority.proofDomain === "execution"
+              ? "zotero_state"
+              : "execution",
+        }),
+        operation,
+      );
+    }
   });
 });

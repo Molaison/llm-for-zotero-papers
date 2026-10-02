@@ -479,7 +479,7 @@ export class CollectionCapability {
    * to top level.
    *
    * The matrix declared collection update and reparent allowed and nothing
-   * implemented them, so `collection_update` could only create and delete --
+   * implemented them, so the collection tool could only create and delete --
    * a typo in a folder name meant deleting it and rebuilding it, losing the
    * id every filed item referenced.
    */

@@ -101,6 +101,55 @@ describe("RetrievalService", function () {
     assert.isAbove(results[0].score, results[1].score);
   });
 
+  it("names a passage's section with the section enclosing it", async function () {
+    const paper: PaperContextRef = {
+      itemId: 1,
+      contextItemId: 11,
+      title: "Drift paper",
+    };
+    const passage: PaperContextCandidate = {
+      paperKey: "1:11",
+      itemId: 1,
+      contextItemId: 11,
+      title: "Drift paper",
+      chunkIndex: 6,
+      chunkText: "Traces were deconvolved before decoding.",
+      sectionLabel: "Data analysis",
+      enclosingSection: "Materials and methods",
+      chunkKind: "body",
+      estimatedTokens: 8,
+      bm25Score: 1,
+      embeddingScore: 0,
+      hybridScore: 1,
+      evidenceScore: 1,
+    };
+    const retrieval = new RetrievalService(
+      {
+        ensurePaperContext: async () =>
+          ({
+            title: "Drift paper",
+            chunks: [],
+            chunkMeta: [],
+            chunkStats: [],
+            docFreq: {},
+            avgChunkLength: 0,
+            fullLength: 0,
+          }) as PdfContext,
+      } as any,
+      async () => [passage],
+    );
+    const results = await retrieval.retrieveEvidence({
+      papers: [paper],
+      question: "How were the traces analysed?",
+      topK: 1,
+      perPaperTopK: 1,
+    });
+    assert.equal(
+      results[0].sectionLabel,
+      "Materials and methods › Data analysis",
+    );
+  });
+
   it("passes query variants through the shared paper retrieval query plan", async function () {
     const paper: PaperContextRef = {
       itemId: 2,

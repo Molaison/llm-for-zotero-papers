@@ -552,11 +552,7 @@ describe("local raw PDF path redaction", function () {
       }),
       ...redactor.process({
         type: "status",
-        text: rawPath.slice(0, split),
-      }),
-      ...redactor.process({
-        type: "status",
-        text: rawPath.slice(split),
+        text: `Reading ${rawPath}`,
       }),
       ...redactor.process({
         type: "message_rollback",
@@ -582,7 +578,106 @@ describe("local raw PDF path redaction", function () {
     assert.include(serialized, '"type":"message_rollback"');
   });
 
-  it("preserves ordinary provider payload suffixes held by stream lookahead", function () {
+  it("redacts each status and provider event on its own, holding nothing for the next one", function () {
+    let conversationKey = 7140;
+    for (const rawPath of [
+      "/Users/Alice/Papers/Selected.pdf",
+      "T:\\Papers\\Selected.pdf",
+      "D:\\Papers\\Selected.pdf",
+    ]) {
+      remember(conversationKey, [documentAt(rawPath)]);
+      const redactor = new AgentEventLocalDocumentStreamRedactor(
+        conversationKey,
+      );
+      const statuses = [
+        "Running agent",
+        "Reading the pdf",
+        "Saving the file",
+        "Checked the draft",
+        "Done",
+      ];
+      const payload = { rule: "final_answer", status: "completed", id: "3f" };
+      const events = [
+        ...statuses.flatMap((text) =>
+          redactor.process({ type: "status", text }),
+        ),
+        ...redactor.process({
+          type: "provider_event",
+          providerType: "agent_run_stop",
+          payload,
+        }),
+        ...redactor.flush(),
+      ];
+
+      assert.deepEqual(
+        events.map((event) =>
+          event.type === "status" ? event.text : event.type,
+        ),
+        [...statuses, "provider_event"],
+        rawPath,
+      );
+      assert.deepEqual(
+        events.find((event) => event.type === "provider_event")?.payload,
+        payload,
+        rawPath,
+      );
+      conversationKey += 1;
+    }
+  });
+
+  it("releases ordinary words that stream lookahead held at a delta boundary", function () {
+    let conversationKey = 7145;
+    for (const rawPath of [
+      "/Users/Alice/Papers/Selected.pdf",
+      "T:\\Papers\\Selected.pdf",
+    ]) {
+      remember(conversationKey, [documentAt(rawPath)]);
+      const redactor = new AgentEventLocalDocumentStreamRedactor(
+        conversationKey,
+      );
+      const deltas = [
+        "I saved it to the file",
+        " you named. The best",
+        " test is the pdf",
+        " itself.",
+      ];
+      const summaries = ["Check the pdf", " first, then the draft", "."];
+      const events = [
+        ...deltas.flatMap((text) =>
+          redactor.process({ type: "message_delta", text }),
+        ),
+        ...summaries.flatMap((summary) =>
+          redactor.process({
+            type: "reasoning",
+            round: 1,
+            stepId: "reasoning-1",
+            summary,
+          }),
+        ),
+        ...redactor.flush(),
+      ];
+
+      assert.equal(
+        events
+          .map((event) => (event.type === "message_delta" ? event.text : ""))
+          .join(""),
+        deltas.join(""),
+        rawPath,
+      );
+      assert.equal(
+        events
+          .map((event) =>
+            event.type === "reasoning" ? event.summary || "" : "",
+          )
+          .join(""),
+        summaries.join(""),
+        rawPath,
+      );
+      conversationKey += 1;
+    }
+  });
+
+  it("preserves ordinary provider payload text", function () {
     const conversationKey = 7118;
     remember(conversationKey, [
       documentAt("/Users/Alice Doe/Private Papers/Selected.pdf"),

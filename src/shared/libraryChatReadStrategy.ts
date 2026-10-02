@@ -1,4 +1,4 @@
-import { resolveResearchPolicy } from "../agent/research/policy";
+import { resolveResearchPolicy } from "../agent/context/researchPolicy";
 
 export type LibraryChatReadStrategy =
   | "catalog"

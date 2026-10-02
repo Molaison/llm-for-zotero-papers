@@ -9,9 +9,8 @@ import {
 } from "../src/agent/reviewCards";
 import { AgentRuntime } from "../src/agent/runtime";
 import { initAgentChangeJournal } from "../src/agent/store/changeJournal";
-import { createRenamedTool } from "../src/agent/tools/facade";
 import { createLiteratureReviewTool } from "../src/agent/tools/read/reviewLiterature";
-import { createSearchLiteratureOnlineTool } from "../src/agent/tools/read/searchLiteratureOnline";
+import { createLiteratureSearchTool } from "../src/agent/tools/read/literatureSearch";
 import { AgentToolRegistry } from "../src/agent/tools/registry";
 import type {
   AgentEvent,
@@ -422,7 +421,7 @@ describe("AgentRuntime HITL review workflow", function () {
                 name: "Test collection",
               }),
             };
-            const search = createSearchLiteratureOnlineTool(gateway as never);
+            const search = createLiteratureSearchTool(gateway as never);
             const executeSearch = search.execute;
             search.execute = async (input, context) => {
               const result = (await executeSearch(input, context)) as any;
@@ -430,13 +429,7 @@ describe("AgentRuntime HITL review workflow", function () {
               sessionId = result.sessionId;
               return result;
             };
-            registry.register(
-              createRenamedTool({
-                tool: search,
-                name: "literature_search",
-                label: "Search",
-              }),
-            );
+            registry.register(search);
             registry.register(createLiteratureReviewTool(gateway as never));
             registry.register(
               createStubFacadeTool(

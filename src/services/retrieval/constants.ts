@@ -9,3 +9,9 @@ export const RETRIEVAL_MIN_OTHER_PAPER_CHUNKS = 1;
 export const PAPER_FOLLOWUP_RETRIEVAL_MIN_CHUNKS = 2;
 export const PAPER_FOLLOWUP_RETRIEVAL_MAX_CHUNKS = 5;
 export const COLLECTION_RETRIEVAL_MIN_SCORE_FALLBACK_PAPERS = 10;
+// Owned by the LLM client layer (utils may not import services); re-exported
+// here so retrieval and index code read every retrieval constant from one place.
+export {
+  EMBEDDING_BATCH_TIMEOUT_MS,
+  EMBEDDING_REQUEST_TIMEOUT_MS,
+} from "../../utils/llmDefaults";

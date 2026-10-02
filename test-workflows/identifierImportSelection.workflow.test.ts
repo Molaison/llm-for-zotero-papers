@@ -14,7 +14,8 @@ describe("workflow: identifier import preserves conversation selection", functio
       pages: ["The conversation must stay attached to this paper."],
     });
     const collection = new Zotero.Collection();
-    collection.libraryID = Zotero.Libraries.userLibraryID;
+    (collection as { libraryID: number }).libraryID =
+      Zotero.Libraries.userLibraryID;
     collection.name = `Import selection ${Date.now()}`;
     await collection.saveTx({ skipSelect: true });
     const Search = native.Translate.Search;

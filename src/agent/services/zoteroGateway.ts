@@ -630,6 +630,8 @@ export class ZoteroGateway {
     itemIds?: number[];
     collectionIds?: number[];
     tagContexts?: TagContextRef[];
+    /** Papers the user removed from the task: never part of the scope. */
+    excludedItemIds?: readonly number[];
   }): Promise<{
     itemIds: number[];
     tagItemIds: number[];
@@ -638,6 +640,7 @@ export class ZoteroGateway {
     summedScopeCount: number;
   }> {
     const snapshot = await libraryIndexService.getSnapshot(params.libraryID);
+    const excluded = new Set(params.excludedItemIds || []);
     const union = new Set<number>();
     const tagItemIds = new Set<number>();
     let summedScopeCount = 0;
@@ -648,6 +651,7 @@ export class ZoteroGateway {
         // Retrieval is bibliographic: standalone notes/files remain available
         // to library_search but are not paper resources.
         if (!item || item.kind !== "regular" || item.deleted) continue;
+        if (excluded.has(id)) continue;
         union.add(id);
         count += 1;
       }

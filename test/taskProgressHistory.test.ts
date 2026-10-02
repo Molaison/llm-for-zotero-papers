@@ -1,0 +1,543 @@
+/**
+ * Rebuilding a conversation's Task progress from what it persisted: the
+ * `paper_ledger_update` events of every run, the citations each answer kept,
+ * whether a plan or a Codex plan ran, and the question numbering. Never for
+ * a conversation that is being deleted or is retired.
+ */
+import { assert } from "chai";
+import type { AgentRunEventRecord } from "../src/agent/types";
+import { executionCheckpointEvent } from "../src/agent/execution/checkpointEvents";
+import { rememberConversationKeyRetired } from "../src/shared/conversationKeyLedger";
+import {
+  bumpConversationWriteGeneration,
+  freezeConversationWrites,
+  unfreezeConversationWrites,
+} from "../src/shared/conversationWriteFence";
+import {
+  chatHistory,
+  loadedConversationKeys,
+} from "../src/modules/contextPanel/state";
+import {
+  TASK_PROGRESS_HISTORY_EVENT_TYPES,
+  buildTaskProgressHistory,
+  ensureTaskProgressHydrated,
+  setTaskProgressHistoryLoaderForTests,
+  waitForTaskProgressHydrationForTests,
+} from "../src/modules/contextPanel/taskProgress/history";
+import {
+  clearAllTaskProgress,
+  clearTaskProgress,
+  displayedTaskRunState,
+  getTaskProgress,
+} from "../src/modules/contextPanel/taskProgress/store";
+import type { Message } from "../src/modules/contextPanel/types";
+import {
+  ledgerDelta,
+  outcomeCheckpoint,
+  outcomeTask,
+  quoteCitation,
+} from "./helpers/taskProgressFixtures";
+
+function record(
+  runId: string,
+  seq: number,
+  payload: AgentRunEventRecord["payload"],
+): AgentRunEventRecord {
+  return { runId, seq, eventType: payload.type, payload, createdAt: seq };
+}
+
+function conversation(): Message[] {
+  return [
+    { role: "user", text: "Which papers measure drift?", timestamp: 1 },
+    {
+      role: "assistant",
+      text: "Two do.",
+      timestamp: 2,
+      runMode: "agent",
+      agentRunId: "run-1",
+      quoteCitations: [quoteCitation("q1", 2)],
+    },
+    { role: "user", text: "Compare their methods", timestamp: 3 },
+    {
+      role: "assistant",
+      text: "Codex compared them.",
+      timestamp: 4,
+      runMode: "agent",
+      agentRunId: "run-2",
+    },
+  ];
+}
+
+const EVENTS: AgentRunEventRecord[] = [
+  record("run-1", 1, {
+    type: "paper_ledger_update",
+    callId: "c1",
+    delta: ledgerDelta(
+      "c1",
+      [
+        [1, "read", "Drift grows with time."],
+        [2, "read", "Drift scales with experience."],
+        [3, "matched"],
+      ],
+      "run-1",
+    ),
+  }),
+  record("run-2", 1, {
+    type: "paper_ledger_update",
+    callId: "m1",
+    delta: ledgerDelta("m1", [[3, "read", "Methods differ."]], "run-2"),
+  }),
+  record("run-2", 2, {
+    type: "codex_progress",
+    itemId: "codex-plan-checklist",
+    text: "✓ Inspect\n• Compare",
+    steps: [
+      { content: "Inspect", status: "completed" },
+      { content: "Compare", status: "in_progress" },
+    ],
+  }),
+];
+
+describe("task progress history rebuild", function () {
+  const KEY = 640021;
+  let loads: string[][] = [];
+
+  beforeEach(function () {
+    loads = [];
+    setTaskProgressHistoryLoaderForTests(async (runIds) => {
+      loads.push([...runIds]);
+      return EVENTS.filter((event) => runIds.includes(event.runId));
+    });
+    chatHistory.set(KEY, conversation());
+    loadedConversationKeys.add(KEY);
+  });
+
+  afterEach(function () {
+    setTaskProgressHistoryLoaderForTests();
+    chatHistory.delete(KEY);
+    loadedConversationKeys.delete(KEY);
+    unfreezeConversationWrites(KEY);
+    clearAllTaskProgress();
+  });
+
+  it("builds runs by question, keeps the latest Codex plan, and settles", function () {
+    const byRun = new Map<string, AgentRunEventRecord[]>();
+    for (const event of EVENTS) {
+      byRun.set(event.runId, [...(byRun.get(event.runId) || []), event]);
+    }
+    const history = buildTaskProgressHistory(conversation(), byRun, 1);
+    assert.deepEqual(
+      history.runs.map((run) => [run.runId, run.turn, run.deltas.length]),
+      [
+        ["run-1", 1, 1],
+        ["run-2", 2, 1],
+      ],
+    );
+    assert.equal(history.latestTurn, 2);
+    assert.equal(history.settled, "completed");
+    assert.isTrue(history.planSeen, "a Codex plan counts as a plan");
+    assert.deepEqual(history.checklist?.steps, [
+      { label: "Inspect", status: "completed" },
+      { label: "Compare", status: "in_progress" },
+    ]);
+    const cancelled = conversation();
+    cancelled[3].text = "[Cancelled]";
+    assert.equal(
+      buildTaskProgressHistory(cancelled, byRun, 1).settled,
+      "cancelled",
+    );
+    const failed = conversation();
+    failed[3].text = "Error: offline";
+    assert.equal(buildTaskProgressHistory(failed, byRun, 1).settled, "failed");
+    const waiting = conversation().slice(0, 3);
+    assert.isNull(buildTaskProgressHistory(waiting, byRun, 1).settled);
+  });
+
+  it("restores counts, states and steps after a restart (store cleared)", async function () {
+    ensureTaskProgressHydrated(KEY, 1);
+    await waitForTaskProgressHydrationForTests(KEY);
+    const record = getTaskProgress(KEY)!;
+    assert.isTrue(record.hydrated);
+    assert.equal(record.runState, "completed");
+    assert.equal(record.turnIndex, 2, "the latest question");
+    assert.equal(record.ledger.papers["1:1"].state, "read");
+    assert.equal(record.ledger.papers["1:2"].state, "cited");
+    assert.equal(record.ledger.papers["1:3"].state, "read");
+    assert.equal(record.ledger.papers["1:3"].turns[1].state, "matched");
+    assert.equal(record.ledger.papers["1:3"].turns[2].state, "read");
+    assert.isTrue(record.planSeen);
+    assert.equal(record.checklist?.source, "codex");
+    assert.deepEqual(loads, [["run-1", "run-2"]]);
+    // Hydrated once: a later sync reads nothing again.
+    ensureTaskProgressHydrated(KEY, 1);
+    await waitForTaskProgressHydrationForTests(KEY);
+    assert.lengthOf(loads, 1);
+    // A restart empties the store; the next sync rebuilds it.
+    clearTaskProgress(KEY);
+    ensureTaskProgressHydrated(KEY, 1);
+    await waitForTaskProgressHydrationForTests(KEY);
+    assert.lengthOf(loads, 2);
+    assert.equal(getTaskProgress(KEY)!.ledger.papers["1:2"].state, "cited");
+  });
+
+  it("waits for the conversation's history to load", async function () {
+    loadedConversationKeys.delete(KEY);
+    ensureTaskProgressHydrated(KEY, 1);
+    await waitForTaskProgressHydrationForTests(KEY);
+    assert.isNull(getTaskProgress(KEY));
+    assert.lengthOf(loads, 0);
+  });
+
+  it("never rebuilds a conversation being deleted", async function () {
+    freezeConversationWrites(KEY);
+    ensureTaskProgressHydrated(KEY, 1);
+    await waitForTaskProgressHydrationForTests(KEY);
+    assert.isNull(getTaskProgress(KEY), "frozen: nothing is rebuilt");
+    assert.lengthOf(loads, 0);
+  });
+
+  it("drops a rebuild the conversation was deleted under", async function () {
+    let release: () => void = () => undefined;
+    setTaskProgressHistoryLoaderForTests(async (runIds) => {
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return EVENTS.filter((event) => runIds.includes(event.runId));
+    });
+    ensureTaskProgressHydrated(KEY, 1);
+    // Deletion lands while the events load: generation bump + store clear.
+    bumpConversationWriteGeneration(KEY);
+    clearTaskProgress(KEY);
+    release();
+    await waitForTaskProgressHydrationForTests(KEY);
+    assert.isNull(getTaskProgress(KEY));
+  });
+
+  it("never rebuilds a retired conversation key", async function () {
+    const zotero = globalThis as { Zotero?: unknown };
+    const previous = zotero.Zotero;
+    zotero.Zotero = { DB: {} };
+    try {
+      rememberConversationKeyRetired(KEY);
+      ensureTaskProgressHydrated(KEY, 1);
+      await waitForTaskProgressHydrationForTests(KEY);
+      assert.isNull(getTaskProgress(KEY));
+      assert.lengthOf(loads, 0);
+    } finally {
+      zotero.Zotero = previous;
+    }
+  });
+});
+
+describe("task progress history rebuild of outcome ledgers", function () {
+  const KEY = 640077;
+  const live = outcomeCheckpoint([
+    outcomeTask("save", { description: "Save the summary as a note" }),
+  ]);
+  const settledLedger = outcomeCheckpoint(
+    [
+      outcomeTask("save", {
+        description: "Save the summary as a note",
+        status: "completed",
+      }),
+      outcomeTask("host-receipt-tags", {
+        description: "Added tags",
+        origin: "host",
+        status: "completed",
+        targets: ["item:3", "item:4"],
+        doneTargets: ["item:3"],
+        exceptions: [
+          { targets: ["item:4"], reason: "In a group library you cannot edit" },
+        ],
+      }),
+    ],
+    "completed_with_exceptions",
+    5,
+  );
+
+  function stored(): Message[] {
+    return [
+      { role: "user", text: "Tag them and save a summary", timestamp: 1 },
+      {
+        role: "assistant",
+        text: "Done, with one exception.",
+        timestamp: 2,
+        runMode: "agent",
+        agentRunId: "run-outcomes",
+      },
+    ];
+  }
+
+  const events = [
+    record("run-outcomes", 1, {
+      type: "execution_checkpoint",
+      checkpoint: live,
+    }),
+    record("run-outcomes", 2, {
+      type: "execution_checkpoint",
+      checkpoint: settledLedger,
+    }),
+  ];
+
+  afterEach(function () {
+    setTaskProgressHistoryLoaderForTests();
+    chatHistory.delete(KEY);
+    loadedConversationKeys.delete(KEY);
+    clearAllTaskProgress();
+  });
+
+  it("reads outcome ledgers from the stored events", function () {
+    assert.include(
+      TASK_PROGRESS_HISTORY_EVENT_TYPES as readonly string[],
+      "execution_checkpoint",
+    );
+  });
+
+  it("rebuilds the latest run's outcome steps and end state after a restart", async function () {
+    const history = buildTaskProgressHistory(
+      stored(),
+      new Map([["run-outcomes", events]]),
+      1,
+    );
+    assert.equal(history.checklist?.source, "outcomes");
+    assert.equal(history.checklist?.end, "completed_with_exceptions");
+    assert.deepEqual(
+      history.checklist?.steps.map((step) => [step.label, step.status]),
+      [
+        ["Save the summary as a note", "completed"],
+        ["Added tags", "completed"],
+      ],
+      "the latest checkpoint wins",
+    );
+    assert.isTrue(history.planSeen);
+
+    setTaskProgressHistoryLoaderForTests(async () => events);
+    chatHistory.set(KEY, stored());
+    loadedConversationKeys.add(KEY);
+    ensureTaskProgressHydrated(KEY, 1);
+    await waitForTaskProgressHydrationForTests(KEY);
+    const record = getTaskProgress(KEY)!;
+    assert.equal(record.runState, "completed");
+    assert.equal(record.checklist?.source, "outcomes");
+    assert.isTrue(record.planSeen);
+    assert.equal(displayedTaskRunState(record), "completed_with_exceptions");
+  });
+
+  it("folds a run's whole ledger and the deltas after it", function () {
+    const folded = [
+      record("run-outcomes", 1, executionCheckpointEvent(undefined, live)),
+      record("run-outcomes", 2, executionCheckpointEvent(live, settledLedger)),
+    ];
+    assert.equal(folded[1].payload.type, "execution_checkpoint_delta");
+    assert.include(
+      TASK_PROGRESS_HISTORY_EVENT_TYPES as readonly string[],
+      "execution_checkpoint_delta",
+    );
+    const history = buildTaskProgressHistory(
+      stored(),
+      new Map([["run-outcomes", folded]]),
+      1,
+    );
+    assert.equal(history.checklist?.end, "completed_with_exceptions");
+    assert.deepEqual(
+      history.checklist?.steps.map((step) => [
+        step.label,
+        step.status,
+        step.outcome?.doneTargets,
+      ]),
+      [
+        ["Save the summary as a note", "completed", 0],
+        ["Added tags", "completed", 1],
+      ],
+    );
+    assert.isTrue(history.planSeen);
+  });
+
+  it("keeps an ending with no outcome off the steps, and an earlier run's outcomes to the row", async function () {
+    const endOnly = [
+      record("run-outcomes", 1, {
+        type: "execution_checkpoint",
+        checkpoint: outcomeCheckpoint([], "blocked"),
+      }),
+    ];
+    const history = buildTaskProgressHistory(
+      stored(),
+      new Map([["run-outcomes", endOnly]]),
+      1,
+    );
+    assert.isFalse(history.planSeen);
+    assert.deepEqual(history.checklist?.steps, []);
+    assert.equal(history.checklist?.end, "blocked");
+    setTaskProgressHistoryLoaderForTests(async () => endOnly);
+    chatHistory.set(KEY, stored());
+    loadedConversationKeys.add(KEY);
+    ensureTaskProgressHydrated(KEY, 1);
+    await waitForTaskProgressHydrationForTests(KEY);
+    const hydrated = getTaskProgress(KEY)!;
+    assert.isFalse(hydrated.planSeen);
+    assert.equal(displayedTaskRunState(hydrated), "blocked");
+
+    const later: Message[] = [
+      ...stored(),
+      { role: "user", text: "What is drift?", timestamp: 3 },
+      {
+        role: "assistant",
+        text: "Drift is…",
+        timestamp: 4,
+        runMode: "agent",
+        agentRunId: "run-plain",
+      },
+    ];
+    const next = buildTaskProgressHistory(
+      later,
+      new Map([["run-outcomes", events]]),
+      1,
+    );
+    assert.isTrue(next.planSeen, "an earlier run's outcomes keep the row");
+    assert.isNull(next.checklist, "the latest run had no outcomes");
+  });
+
+  it("replays a stream-interrupted answer as interrupted", function () {
+    const messages = stored();
+    messages[1].interrupted = true;
+    assert.equal(
+      buildTaskProgressHistory(messages, new Map(), 1).settled,
+      "interrupted",
+    );
+    messages[1].interrupted = false;
+    messages[1].text = "Error: offline";
+    assert.equal(
+      buildTaskProgressHistory(messages, new Map(), 1).settled,
+      "failed",
+    );
+  });
+});
+
+describe("task progress history rebuild of an old plan conversation", function () {
+  const KEY = 640093;
+  const step = (index: number, status: string) => ({
+    version: 2,
+    taskId: `execution-old:task-${index}`,
+    executionId: "execution-old",
+    planStepId: `step-${index}`,
+    kind: "required_step",
+    content: `Step ${index}`,
+    activeForm: `Doing step ${index}`,
+    acceptanceCriteria: [],
+    expectedEffect: "reasoning",
+    obligationIds: [],
+    status,
+    attemptCount: 1,
+    evidenceIds: [],
+    failureReasons: [],
+    createdAt: 1,
+    updatedAt: 2,
+  });
+  const artifact = {
+    version: 2,
+    planId: "plan-old",
+    revision: 1,
+    conversationKey: KEY,
+    provider: "original",
+    status: "approved",
+    explanation: "Read the papers, then compare them.",
+    steps: [
+      { id: "step-1", content: "Step 1", status: "pending" },
+      { id: "step-2", content: "Step 2", status: "pending" },
+    ],
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  const ledger = {
+    version: 2,
+    executionId: "execution-old",
+    planId: "plan-old",
+    revision: 1,
+    planDigest: "sha256:plan",
+    conversationKey: KEY,
+    attempt: 1,
+    provider: "original",
+    status: "running",
+    activeTaskId: "execution-old:task-2",
+    tasks: [step(1, "completed"), step(2, "in_progress")],
+    createdAt: 1,
+    updatedAt: 2,
+  };
+  // Stored before plan mode was removed: the types no longer name them.
+  const planEvent = (seq: number, payload: Record<string, unknown>) =>
+    record(
+      "run-plan",
+      seq,
+      payload as unknown as AgentRunEventRecord["payload"],
+    );
+  const events = [
+    planEvent(1, { type: "plan_updated", artifact }),
+    planEvent(2, { type: "plan_ready", artifact }),
+    planEvent(3, { type: "plan_execution_updated", ledger }),
+    planEvent(4, {
+      type: "plan_research_progress",
+      progress: { stage: "reading", papers: 3 },
+    }),
+    planEvent(5, {
+      type: "plan_scope_amended",
+      amendmentId: "amendment-1",
+      executionId: "execution-old",
+      mode: "safe",
+      rationale: "One more paper",
+      previousItemCount: 2,
+      newItemCount: 3,
+      authority: "user",
+    }),
+    record("run-plan", 6, {
+      type: "paper_ledger_update",
+      callId: "p1",
+      delta: ledgerDelta("p1", [[1, "read", "Read in the plan."]], "run-plan"),
+    }),
+  ];
+
+  function stored(): Message[] {
+    return [
+      { role: "user", text: "Compare the three papers", timestamp: 1 },
+      {
+        role: "assistant",
+        text: "Compared.",
+        timestamp: 2,
+        runMode: "agent",
+        agentRunId: "run-plan",
+      },
+    ];
+  }
+
+  afterEach(function () {
+    setTaskProgressHistoryLoaderForTests();
+    chatHistory.delete(KEY);
+    loadedConversationKeys.delete(KEY);
+    clearAllTaskProgress();
+  });
+
+  it("rebuilds without steps, keeps its row, and never throws on plan events", async function () {
+    const history = buildTaskProgressHistory(
+      stored(),
+      new Map([["run-plan", events]]),
+      1,
+    );
+    assert.deepEqual(
+      history.runs.map((run) => [run.runId, run.turn, run.deltas.length]),
+      [["run-plan", 1, 1]],
+    );
+    assert.isTrue(history.planSeen, "a plan that ran keeps the row");
+    assert.isNull(history.checklist, "a plan is no Task progress steps source");
+
+    setTaskProgressHistoryLoaderForTests(async () => events);
+    chatHistory.set(KEY, stored());
+    loadedConversationKeys.add(KEY);
+    ensureTaskProgressHydrated(KEY, 1);
+    await waitForTaskProgressHydrationForTests(KEY);
+    const rebuilt = getTaskProgress(KEY)!;
+    assert.isTrue(rebuilt.hydrated, "the rebuild ran to the end");
+    assert.equal(rebuilt.runState, "completed");
+    assert.equal(rebuilt.ledger.papers["1:1"].state, "read");
+    assert.isNull(rebuilt.checklist);
+    assert.isTrue(rebuilt.planSeen);
+  });
+});

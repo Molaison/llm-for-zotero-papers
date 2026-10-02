@@ -45,8 +45,11 @@ export type WebChatFeature = {
    * applies its WebChat UI, so the extension sidebar filters correctly.
    */
   primeColdStartTarget: () => void;
-  /** Begin polling the relay and paint the result onto the mode-chip dot. */
-  startConnectionCheck: (dot: HTMLElement) => void;
+  /**
+   * Begin polling the relay and paint the result onto the mode controls'
+   * dots: the Independent tab's and the Stacked chip's share one poll.
+   */
+  startConnectionCheck: (...dots: Array<HTMLElement | null>) => void;
   /** Stop the poll if one is running. */
   stopConnectionCheck: () => void;
   /** Abort any in-flight preload and take a fresh token for a new one. */
@@ -92,16 +95,21 @@ export function createWebChatFeature(deps: WebChatFeatureDeps): WebChatFeature {
     preloadAbort = null;
   };
 
-  const startConnectionCheck = (dot: HTMLElement) => {
+  const startConnectionCheck = (...dots: Array<HTMLElement | null>) => {
     stopConnectionCheck();
+    const paint = (className: string) => {
+      for (const dot of dots) if (dot) dot.className = className;
+    };
     const check = async () => {
       try {
         const alive = await probeRelayConnection();
-        dot.className = alive
-          ? "llm-webchat-dot llm-webchat-dot-connected"
-          : "llm-webchat-dot llm-webchat-dot-disconnected";
+        paint(
+          alive
+            ? "llm-webchat-dot llm-webchat-dot-connected"
+            : "llm-webchat-dot llm-webchat-dot-disconnected",
+        );
       } catch {
-        dot.className = "llm-webchat-dot llm-webchat-dot-disconnected";
+        paint("llm-webchat-dot llm-webchat-dot-disconnected");
       }
     };
     void check(); // immediate first check

@@ -345,6 +345,19 @@ export function normalizePaperContextRefs(
   return out;
 }
 
+/** Positive, distinct item ids, or undefined when there are none. */
+export function normalizeExcludedItemIds(value: unknown): number[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const ids = [
+    ...new Set(
+      value
+        .map((entry) => normalizePositiveInt(entry))
+        .filter((id): id is number => Boolean(id)),
+    ),
+  ];
+  return ids.length ? ids : undefined;
+}
+
 export function normalizeCollectionContextRefs(
   value: unknown,
   options?: {
@@ -364,10 +377,12 @@ export function normalizeCollectionContextRefs(
     const name =
       normalizeText(typed.name, sanitize) || `Collection ${collectionId}`;
     seen.add(collectionId);
+    const excludedItemIds = normalizeExcludedItemIds(typed.excludedItemIds);
     out.push({
       collectionId,
       name,
       libraryID,
+      ...(excludedItemIds ? { excludedItemIds } : {}),
     });
   }
   return out;
@@ -404,12 +419,14 @@ export function normalizeTagContextRefs(
       : `${libraryID}:tag:${normalizedName}`;
     if (seen.has(key)) continue;
     seen.add(key);
+    const excludedItemIds = normalizeExcludedItemIds(typed.excludedItemIds);
     out.push({
       name,
       libraryID,
       normalizedName: scope ? undefined : normalizedName,
       scope,
       includeAutomatic,
+      ...(excludedItemIds ? { excludedItemIds } : {}),
     });
   }
   return out;

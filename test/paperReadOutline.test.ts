@@ -4,7 +4,6 @@ import { RetrievalService } from "../src/agent/services/retrievalService";
 import { isPaperEvidenceFrontierEligible } from "../src/agent/context/paperEvidenceFrontier";
 import type { AgentToolContext, AgentToolDefinition } from "../src/agent/types";
 import type { PdfContext } from "../src/services/paperContent/types";
-import { classifiedFixture } from "./helpers/semanticIntent";
 import {
   buildFixturePdfContext,
   restoreTestGlobals,
@@ -75,7 +74,6 @@ const paper = {
 function toolContext(): AgentToolContext {
   return {
     request: {
-      classifiedIntent: classifiedFixture(),
       conversationKey: 77,
       mode: "agent",
       conversationKind: "paper",

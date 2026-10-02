@@ -1,16 +1,22 @@
-import {
-  actionFixture,
-  classifiedFixture,
-  semanticFixture,
-} from "./helpers/semanticIntent";
 import { assert } from "chai";
 import { readdirSync, readFileSync, statSync } from "fs";
 import { join, relative } from "path";
 import { createBuiltInToolRegistry } from "../src/agent/tools";
+import { RETIRED_TOOL_HINTS } from "../src/agent/context/toolNames";
+import { computeUserTextSignals } from "../src/agent/runtime";
 import { AGENT_PERSONA_INSTRUCTIONS } from "../src/agent/model/agentPersona";
 import { DEFAULT_SYSTEM_PROMPT } from "../src/utils/llmDefaults";
 
 const root = process.cwd();
+
+function stubRegistry() {
+  return createBuiltInToolRegistry({
+    zoteroGateway: {} as never,
+    pdfService: {} as never,
+    pdfPageService: {} as never,
+    retrievalService: {} as never,
+  });
+}
 
 function collectFiles(
   dir: string,
@@ -55,12 +61,7 @@ function readSourceFiles(): Array<{ path: string; content: string }> {
 
 describe("tool guidance contracts", function () {
   it("resolves collection identities without treating search results as authority", function () {
-    const registry = createBuiltInToolRegistry({
-      zoteroGateway: {} as never,
-      pdfService: {} as never,
-      pdfPageService: {} as never,
-      retrievalService: {} as never,
-    });
+    const registry = stubRegistry();
     const guidance = registry
       .listToolDefinitions()
       .find((tool) => tool.spec.name === "library_search")!.guidance!
@@ -80,7 +81,8 @@ describe("tool guidance contracts", function () {
   });
 
   it("keeps library retrieve reference lists aligned with coverage wording", function () {
-    const prompt = AGENT_PERSONA_INSTRUCTIONS.join("\n");
+    const prompt =
+      stubRegistry().getTool("library_retrieve")!.guidance!.instruction;
 
     assert.include(
       prompt,
@@ -146,6 +148,36 @@ describe("tool guidance contracts", function () {
       pattern: /cache directory also contains an images\/ folder/,
     },
   ];
+
+  it("shows the model that it declares ordinary parts and the host marks them done", function () {
+    const taskUpdate = stubRegistry()
+      .listTools()
+      .find((tool) => tool.name === "task_update");
+    assert.equal(
+      taskUpdate?.description,
+      "Declare a compound request's parts for the host to track: expectedCapability such as zotero.notes for a write; targetIds, or scope:true for the whole Paper scope. The host marks parts done; list one that cannot be done under skipped or blocked, with the reason.",
+    );
+  });
+
+  it("describes current behavior, not retired contracts, in tool text", function () {
+    // Turns carry no action contract, obligations or prepared source
+    // boundary; tool text that names them describes a removed mechanism.
+    const retired = /\bobligations?\b|\bcontract'?s?\b|frozen workflow/i;
+    const failures: string[] = [];
+    const visit = (owner: string, value: unknown) => {
+      if (typeof value === "string") {
+        if (retired.test(value)) failures.push(`${owner}: ${value}`);
+      } else if (value && typeof value === "object") {
+        for (const entry of Object.values(value)) visit(owner, entry);
+      }
+    };
+    for (const tool of stubRegistry().listToolDefinitions()) {
+      visit(tool.spec.name, tool.spec.description);
+      visit(tool.spec.name, tool.spec.inputSchema);
+      visit(tool.spec.name, tool.guidance?.instruction);
+    }
+    assert.deepEqual(failures, []);
+  });
 
   it("does not contain stale pseudo-call examples in shipped guidance", function () {
     const failures: string[] = [];
@@ -238,8 +270,10 @@ describe("tool guidance contracts", function () {
     if (typeof agentPersona !== "string" || typeof fileIoTool !== "string") {
       return;
     }
+    const paperReadGuidance =
+      stubRegistry().getTool("paper_read")!.guidance!.instruction;
     assert.include(
-      agentPersona,
+      paperReadGuidance,
       "Use supplied paper text directly when it supports the answer",
     );
     assert.include(
@@ -248,7 +282,10 @@ describe("tool guidance contracts", function () {
     );
     assert.notInclude(agentPersona, "mineruCacheDir}/manifest.json");
     assert.notInclude(agentPersona, "mineruCacheDir}/full.md");
-    assert.include(agentPersona, "figures for extracted figure crops");
+    assert.include(
+      paperReadGuidance,
+      "mode:'figures' for extracted figure crops",
+    );
   });
 
   it("requires extracted PDF crop inspection and note embedding", function () {
@@ -263,9 +300,7 @@ describe("tool guidance contracts", function () {
     const messageBuilder = byPath.get("src/agent/model/messageBuilder.ts");
     const paperRead = byPath.get("src/agent/tools/read/paperRead.ts");
     const noteTools = byPath.get("src/agent/tools/index.ts");
-    const currentNoteTool = byPath.get(
-      "src/agent/tools/write/editCurrentNote.ts",
-    );
+    const currentNoteTool = byPath.get("src/agent/tools/write/noteWrite.ts");
 
     for (const content of [
       analyzeFigures,
@@ -280,33 +315,37 @@ describe("tool guidance contracts", function () {
     }
 
     assert.include(analyzeFigures!, "call `paper_read` in `figures` mode");
-    assert.include(messageBuilder!, "precise PDF crops");
+    assert.include(analyzeFigures!, "`figure_crops` metadata");
+    assert.include(analyzeFigures!, "switch to text-only mode");
+    assert.include(
+      analyzeFigures!,
+      "do not read or embed MinerU source image paths",
+    );
     assert.include(paperRead!, "mode:'figures'");
     assert.include(writeNote!, "host-issued figure assets");
+    assert.include(
+      writeNote!,
+      "Follow the analyze-figures skill for obtaining crops",
+    );
+    assert.notInclude(writeNote!, "figure_crops");
     assert.notInclude(noteTools!, "returns no_figures");
     assert.notInclude(agentPersona!, "figure_crops");
-    assert.include(writeNote!, "switch to text-only mode");
+    // The figure turn rule and its text-only branch were removed; the rules
+    // live only in the analyze-figures skill.
+    assert.notInclude(messageBuilder!, "figure_crops");
+    assert.notInclude(messageBuilder!, "Available MinerU cache directories");
     assert.include(analyzeFigures!, "preserve the textual evidence");
     assert.include(
       analyzeFigures!,
       "User-provided images remain separate evidence inputs",
     );
-    assert.include(
-      messageBuilder!,
-      "user-provided image inputs are unaffected",
-    );
-    assert.include(currentNoteTool!, "Do not embed MinerU source image paths");
   });
 
   it("does not expose hidden legacy call targets in model-visible guidance", function () {
-    const registry = createBuiltInToolRegistry({
-      zoteroGateway: {} as never,
-      pdfService: {} as never,
-      pdfPageService: {} as never,
-      retrievalService: {} as never,
-    });
-    const hiddenCallTarget =
-      /\b(edit_current_note|search_literature_online|manage_attachments|import_local_files|update_metadata)\b/;
+    const registry = stubRegistry();
+    const hiddenCallTarget = new RegExp(
+      `\\b(${Object.keys(RETIRED_TOOL_HINTS).join("|")})\\b`,
+    );
     const failures = registry
       .listToolDefinitions()
       .filter((tool) => tool.spec.exposure !== "internal")
@@ -319,13 +358,8 @@ describe("tool guidance contracts", function () {
     assert.deepEqual(failures, []);
   });
 
-  it("injects note-write tool guidance only for note intent or the matched note skill", function () {
-    const registry = createBuiltInToolRegistry({
-      zoteroGateway: {} as never,
-      pdfService: {} as never,
-      pdfPageService: {} as never,
-      retrievalService: {} as never,
-    });
+  it("injects note-write tool guidance only for the matched note skill", function () {
+    const registry = stubRegistry();
     const noteWrite = registry
       .listToolDefinitions()
       .find((tool) => tool.spec.name === "note_write");
@@ -342,15 +376,158 @@ describe("tool guidance contracts", function () {
         matchedSkillIds: ["write-note"],
       }),
     );
+  });
+
+  it("library_search guidance is delivered when the turn has a library or collection scope", function () {
+    const registry = stubRegistry();
+    const tool = registry.getTool("library_search")!;
+    const scope = (overrides: Record<string, unknown>) =>
+      ({
+        conversationKey: 1,
+        mode: "agent",
+        turnPaperScope: {
+          libraryID: 1,
+          conversationKind: "paper",
+          papers: [{ itemId: 1 }],
+          collections: [],
+          tags: [],
+          selectedPassagePaperRefs: [],
+          ...overrides,
+        },
+      }) as any;
     assert.isTrue(
-      noteWrite!.guidance!.matches({
-        ...baseRequest,
-        userText: "Create a Zotero note about this paper.",
-        classifiedIntent: actionFixture("note_create"),
+      tool.guidance!.matches(
+        scope({ collections: [{ collectionId: 7, name: "Memory" }] }),
+        { matchedSkillIds: [] },
+      ),
+    );
+    assert.isTrue(
+      tool.guidance!.matches(scope({ tags: [{ name: "to-read" }] }), {
+        matchedSkillIds: [],
       }),
+    );
+    assert.isTrue(
+      tool.guidance!.matches(scope({ papers: [] }), { matchedSkillIds: [] }),
+    );
+    assert.isTrue(
+      tool.guidance!.matches(scope({ conversationKind: "global" }), {
+        matchedSkillIds: [],
+      }),
+    );
+    assert.isFalse(tool.guidance!.matches(scope({}), { matchedSkillIds: [] }));
+  });
+
+  it("delivers library write guidance in chat from user-text signals", function () {
+    const registry = stubRegistry();
+    const guidanceFor = (name: string) => registry.getTool(name)!.guidance!;
+    const noSignals = {
+      mentionsDuplicates: false,
+      mentionsTrash: false,
+      mentionsAttachment: false,
+      mentionsImport: false,
+    };
+    const chat = (signals: Partial<typeof noSignals>) =>
+      ({
+        conversationKey: 1,
+        mode: "agent",
+        userTextSignals: { ...noSignals, ...signals },
+      }) as any;
+    const ctx = { matchedSkillIds: [] };
+
+    assert.isTrue(
+      guidanceFor("library_delete").matches(
+        chat({ mentionsDuplicates: true }),
+        ctx,
+      ),
+    );
+    assert.isTrue(
+      guidanceFor("library_delete").matches(chat({ mentionsTrash: true }), ctx),
+    );
+    assert.isFalse(guidanceFor("library_delete").matches(chat({}), ctx));
+    assert.isTrue(
+      guidanceFor("library_import").matches(
+        chat({ mentionsImport: true }),
+        ctx,
+      ),
+    );
+    assert.isFalse(guidanceFor("library_import").matches(chat({}), ctx));
+    // Discovery-versus-import rules ride the literature_search description;
+    // its long-form guidance has no chat signal.
+    assert.isFalse(
+      guidanceFor("literature_search").matches(
+        chat({ mentionsImport: true }),
+        ctx,
+      ),
+    );
+    // library_update carries the attachment guidance; the attachment signal
+    // is the only chat signal that reaches it.
+    assert.isTrue(
+      guidanceFor("library_update").matches(
+        chat({ mentionsAttachment: true }),
+        ctx,
+      ),
+    );
+    assert.isFalse(guidanceFor("library_update").matches(chat({}), ctx));
+    assert.isFalse(
+      guidanceFor("library_update").matches(
+        chat({
+          mentionsDuplicates: true,
+          mentionsTrash: true,
+          mentionsImport: true,
+        }),
+        ctx,
+      ),
     );
   });
 
+  it("computes chat user-text signals for library write guidance", function () {
+    assert.deepEqual(
+      computeUserTextSignals("Merge the duplicates in this folder"),
+      {
+        mentionsDuplicates: true,
+        mentionsTrash: false,
+        mentionsAttachment: false,
+        mentionsImport: false,
+      },
+    );
+    assert.isTrue(computeUserTextSignals("把回收站里的论文恢复").mentionsTrash);
+    assert.isTrue(
+      computeUserTextSignals("Rename the PDF attachment").mentionsAttachment,
+    );
+    assert.isTrue(
+      computeUserTextSignals("add this paper to my library").mentionsImport,
+    );
+    assert.isTrue(
+      computeUserTextSignals("merge these duplicates").mentionsDuplicates,
+    );
+    assert.isTrue(
+      computeUserTextSignals("restore it from the trash").mentionsTrash,
+    );
+    assert.isTrue(computeUserTextSignals("import ref 5").mentionsImport);
+    assert.isTrue(
+      computeUserTextSignals("rename the attachment").mentionsAttachment,
+    );
+    const none = {
+      mentionsDuplicates: false,
+      mentionsTrash: false,
+      mentionsAttachment: false,
+      mentionsImport: false,
+    };
+    for (const prose of [
+      "Explain the main result.",
+      "What is the importance of this finding?",
+      "This is an important paper",
+      "Emergent properties of the network",
+    ]) {
+      assert.deepEqual(computeUserTextSignals(prose), none, prose);
+    }
+    // 恢复 is kept as a zh-CN restore term, so recovery prose still sets
+    // mentionsTrash; every other signal stays off.
+    assert.deepEqual(computeUserTextSignals("恢复正常后的神经元活动"), {
+      ...none,
+      mentionsTrash: true,
+    });
+  });
   it("keeps library_search examples explicit about entity and mode", function () {
     const failures: string[] = [];
     const callPattern = /library_search\(([^)]*)\)/g;
@@ -367,13 +544,79 @@ describe("tool guidance contracts", function () {
 });
 
 describe("persona reading strategy contract", function () {
-  it("keeps the collection-scope evidence floor and drops the global answer-immediately rule", function () {
+  it("keeps the collection-scope evidence floor in library_retrieve guidance and drops the global answer-immediately rule", function () {
     const persona = AGENT_PERSONA_INSTRUCTIONS.join("\n");
+    const retrieve =
+      stubRegistry().getTool("library_retrieve")!.guidance!.instruction;
 
-    assert.include(persona, "For bounded collection or tag synthesis");
-    assert.include(persona, "papersBodyRead > 0");
-    assert.include(persona, "naming what is missing");
+    assert.include(retrieve, "For bounded collection or tag synthesis");
+    assert.include(retrieve, "papersBodyRead > 0");
+    assert.include(retrieve, "naming what is missing");
+    assert.notInclude(persona, "papersBodyRead");
     assert.notInclude(persona, "If yes, answer immediately.");
+    assert.include(
+      persona,
+      "Tool descriptions and guidance are the source of truth for how to read papers and search the library.",
+    );
+  });
+
+  it("delivers paper-reading guidance in library chats and whenever a paper, passage, collection, or tag is in scope", function () {
+    const registry = stubRegistry();
+    const paperRead = registry.getTool("paper_read")!.guidance!;
+    const retrieve = registry.getTool("library_retrieve")!.guidance!;
+    const scope = (overrides: Record<string, unknown>) =>
+      ({
+        conversationKey: 1,
+        mode: "agent",
+        turnPaperScope: {
+          libraryID: 1,
+          conversationKind: "global",
+          papers: [],
+          collections: [],
+          tags: [],
+          selectedPassagePaperRefs: [],
+          ...overrides,
+        },
+      }) as any;
+    const ctx = { matchedSkillIds: [] };
+    const paper = { paper: { itemId: 1, contextItemId: 2 } };
+    // A library (global) chat can reach paper_read with explicit targets, so
+    // the reading rules ride along even when nothing is selected.
+    assert.isTrue(paperRead.matches(scope({}), ctx));
+    // Without a turn scope, or in a paper conversation with nothing in scope,
+    // paper_read has no reachable paper.
+    assert.isFalse(paperRead.matches({ conversationKey: 1 } as any, ctx));
+    const inPaperChat = (overrides: Record<string, unknown>) =>
+      scope({ conversationKind: "paper", ...overrides });
+    assert.isFalse(paperRead.matches(inPaperChat({}), ctx));
+    assert.isTrue(paperRead.matches(inPaperChat({ papers: [paper] }), ctx));
+    assert.isTrue(
+      paperRead.matches(
+        inPaperChat({ selectedPassagePaperRefs: [paper] }),
+        ctx,
+      ),
+    );
+    assert.isTrue(
+      paperRead.matches(
+        inPaperChat({ collections: [{ collectionId: 3 }] }),
+        ctx,
+      ),
+    );
+    assert.isTrue(
+      paperRead.matches(inPaperChat({ tags: [{ name: "x" }] }), ctx),
+    );
+    // Library evidence rules follow library-level turns, including a
+    // zero-context library chat, and stay out of a single-paper chat.
+    assert.isTrue(retrieve.matches(scope({}), ctx));
+    assert.isTrue(
+      retrieve.matches(scope({ collections: [{ collectionId: 3 }] }), ctx),
+    );
+    assert.isFalse(
+      retrieve.matches(
+        scope({ conversationKind: "paper", papers: [paper] }),
+        ctx,
+      ),
+    );
   });
 
   it("organizes the persona into titled sections", function () {

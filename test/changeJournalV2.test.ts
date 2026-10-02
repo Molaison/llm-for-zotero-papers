@@ -21,8 +21,7 @@ import {
   updateJournalAction,
   updateJournalStep,
 } from "../src/agent/store/changeJournal";
-import { createUndoLastActionTool } from "../src/agent/tools/write/undoLastAction";
-import { createRevertChangesTool } from "../src/agent/tools/write/revertChanges";
+import { createUndoTool } from "../src/agent/tools/write/undo";
 import { createRunCommandTool } from "../src/agent/tools/write/runCommand";
 import { createFileIOTool } from "../src/agent/tools/write/fileIO";
 import { createZoteroScriptTool } from "../src/agent/tools/write/zoteroScript";
@@ -60,8 +59,8 @@ describe("durable change journal v2", function () {
       authorization: { kind: "external_runtime", standalone: true },
     } as AgentToolContext;
     for (const [tool, args] of [
-      [createUndoLastActionTool({} as never), {}],
-      [createRevertChangesTool({} as never), { count: 1, dryRun: false }],
+      [createUndoTool({} as never), {}],
+      [createUndoTool({} as never), { count: 1, dryRun: false }],
     ] as const) {
       let failure: unknown;
       try {
@@ -77,7 +76,7 @@ describe("durable change journal v2", function () {
     await prepareAction({ id: "chosen", createdAt: 1 });
     await prepareAction({ id: "neighbor", createdAt: 2 });
     await install(db);
-    const tool = createRevertChangesTool({} as never);
+    const tool = createUndoTool({} as never);
     const validated = tool.validate({ actionIds: ["chosen"], dryRun: false });
     assert.isTrue(validated.ok);
     if (!validated.ok) return;
@@ -111,7 +110,7 @@ describe("durable change journal v2", function () {
   it("orders explicit recovery by journal insertion when timestamps tie", async function () {
     await prepareAction({ id: "z-older", createdAt: 10 });
     await prepareAction({ id: "a-newer", createdAt: 10 });
-    const tool = createRevertChangesTool({} as never);
+    const tool = createUndoTool({} as never);
     const input = tool.validate({ actionIds: ["z-older", "a-newer"] });
     if (!input.ok) throw new Error(input.error);
     const plan = await tool.planInvocation!(input.value, context);
@@ -541,7 +540,7 @@ describe("durable change journal v2", function () {
         value = input.existed ? input.value : undefined;
       },
     } as never;
-    const tool = createUndoLastActionTool(gateway);
+    const tool = createUndoTool(gateway);
 
     const execution = await tool.execute!({}, context);
     const result = execution.content as {
@@ -1615,7 +1614,7 @@ describe("durable change journal v2", function () {
     });
     const removed: number[] = [];
     let collections = [9];
-    const tool = createUndoLastActionTool({
+    const tool = createUndoTool({
       getItem: (itemId: number) => ({
         id: itemId,
         parentID: false,
@@ -1671,7 +1670,7 @@ describe("durable change journal v2", function () {
       reversibility: "none",
       description: "Read-mode script",
     });
-    const tool = createUndoLastActionTool({} as never);
+    const tool = createUndoTool({} as never);
 
     assert.equal(
       (await tool.planInvocation?.({}, context))?.impact,
@@ -1700,7 +1699,7 @@ describe("durable change journal v2", function () {
         ],
       },
     });
-    const tool = createUndoLastActionTool({} as never);
+    const tool = createUndoTool({} as never);
     const undoInput: { actionId?: string } = {};
     await tool.createPendingAction?.(undoInput, context);
     const confirmed = tool.applyConfirmation?.(
@@ -1757,7 +1756,7 @@ describe("durable change journal v2", function () {
       },
     });
     let collections = [9];
-    const tool = createUndoLastActionTool({
+    const tool = createUndoTool({
       getItem: (itemId: number) => ({
         id: itemId,
         parentID: false,
@@ -1800,13 +1799,15 @@ describe("durable change journal v2", function () {
         items: [{ itemId: 4, exists: false }],
       },
     });
-    const undoPlan = await createUndoLastActionTool(
-      {} as never,
-    ).planInvocation?.({}, context);
-    const revertPlan = await createRevertChangesTool(
-      {} as never,
-    ).planInvocation?.({ count: 1, dryRun: false }, context);
-    const revertTool = createRevertChangesTool({} as never);
+    const undoPlan = await createUndoTool({} as never).planInvocation?.(
+      {},
+      context,
+    );
+    const revertPlan = await createUndoTool({} as never).planInvocation?.(
+      { count: 1, dryRun: false },
+      context,
+    );
+    const revertTool = createUndoTool({} as never);
     const dryRunPlan = await revertTool.planInvocation?.(
       { count: 1, dryRun: true },
       context,

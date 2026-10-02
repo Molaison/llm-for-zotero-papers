@@ -650,6 +650,19 @@ function redactTextWithVariants(
   return redacted;
 }
 
+/**
+ * Whether a fragment already names a private location. Shorter fragments,
+ * such as "file" or a bare drive letter, are ordinary words until more of a
+ * path follows them.
+ */
+function isCrediblePathPrefix(candidate: string): boolean {
+  if (/^[A-Za-z]:[\\/]+./u.test(candidate)) return true;
+  // A UNC host is already private even when a stream stops before the share.
+  if (/^(?:\\\\|\/\/)[^\\/]+/u.test(candidate)) return true;
+  if (/^file:[\\/]+[^\\/]+/iu.test(candidate)) return true;
+  return /^\/[^/]+\/.+/u.test(candidate);
+}
+
 function redactTerminalTextWithVariants(
   value: string,
   variants: readonly SensitiveReplacementVariant[],
@@ -663,13 +676,6 @@ function redactTerminalTextWithVariants(
     0,
     value.length - maxVariantLength - 256,
   );
-  const isCrediblePathPrefix = (candidate: string): boolean => {
-    if (/^[A-Za-z]:[\\/]+./u.test(candidate)) return true;
-    // A UNC host is already private even when a stream stops before the share.
-    if (/^(?:\\\\|\/\/)[^\\/]+/u.test(candidate)) return true;
-    if (/^file:[\\/]+[^\\/]+/iu.test(candidate)) return true;
-    return /^\/[^/]+\/.+/u.test(candidate);
-  };
   for (let index = firstCandidateIndex; index < value.length; index += 1) {
     const suffix = value.slice(index);
     if (!isCrediblePathPrefix(suffix)) continue;
@@ -967,10 +973,17 @@ export class LocalDocumentPathStreamRedactor {
     if (holdStart < 0) {
       this.pendingByChannel.delete(channel);
       const redacted = this.redactText(combined);
-      if (!previousPending || redacted !== combined) return redacted;
-      // A held sensitive prefix diverged before completing a full path. Never
-      // release those already-held bytes; replace them and stream the new
-      // suffix independently so it can itself begin another sensitive path.
+      if (
+        !previousPending ||
+        redacted !== combined ||
+        !isCrediblePathPrefix(previousPending.text)
+      ) {
+        return redacted;
+      }
+      // A held prefix that already names a private location diverged before
+      // completing a full path. Never release those held bytes; replace them
+      // and stream the new suffix independently so it can itself begin
+      // another sensitive path.
       return `${previousPending.replacement}${this.push(channel, chunk)}`;
     }
     this.pendingByChannel.set(channel, {
@@ -1001,26 +1014,6 @@ export class LocalDocumentPathStreamRedactor {
 }
 
 type AgentEventFactory = (text: string) => AgentEvent;
-
-type ProviderPayloadPathSegment = string | number;
-
-function buildProviderPayloadFragment(
-  path: readonly ProviderPayloadPathSegment[],
-  text: string,
-): Record<string, unknown> {
-  let value: unknown = text;
-  for (let index = path.length - 1; index >= 0; index -= 1) {
-    const segment = path[index];
-    if (typeof segment === "number") {
-      const array: unknown[] = [];
-      array[segment] = value;
-      value = array;
-    } else {
-      value = { [segment]: value };
-    }
-  }
-  return value as Record<string, unknown>;
-}
 
 export class AgentEventLocalDocumentStreamRedactor {
   private readonly streams: LocalDocumentPathStreamRedactor;
@@ -1061,16 +1054,6 @@ export class AgentEventLocalDocumentStreamRedactor {
           text: this.streams.redactTerminalText(event.text),
         },
       ];
-    }
-    if (event.type === "status") {
-      const channel = "status";
-      const safeEvent = this.streams.redactTerminalValue(event);
-      this.pendingEventFactories.set(channel, (text) => ({
-        ...safeEvent,
-        text,
-      }));
-      const text = this.streams.push(channel, event.text);
-      return text ? [{ ...safeEvent, text }] : [];
     }
     if (event.type === "message_delta") {
       const channel = "message_delta";
@@ -1117,42 +1100,9 @@ export class AgentEventLocalDocumentStreamRedactor {
       const text = this.streams.push(channel, event.text);
       return text ? [{ ...safeEvent, text }] : [];
     }
-    if (event.type === "provider_event" && event.payload) {
-      const safeEvent = this.streams.redactTerminalValue(event);
-      const streamPayload = (
-        value: unknown,
-        path: readonly ProviderPayloadPathSegment[],
-      ): unknown => {
-        if (typeof value === "string") {
-          const channel = `provider:${event.providerType || "unknown"}:${JSON.stringify(path)}`;
-          this.pendingEventFactories.set(channel, (text) => ({
-            ...safeEvent,
-            payload: buildProviderPayloadFragment(path, text),
-          }));
-          return this.streams.push(channel, value);
-        }
-        if (Array.isArray(value)) {
-          return value.map((entry, index) =>
-            streamPayload(entry, [...path, index]),
-          );
-        }
-        if (!value || typeof value !== "object") return value;
-        return Object.fromEntries(
-          Object.entries(value as Record<string, unknown>).map(
-            ([key, entry]) => {
-              const safeKey = this.streams.redactTerminalText(key);
-              return [safeKey, streamPayload(entry, [...path, safeKey])];
-            },
-          ),
-        );
-      };
-      return [
-        {
-          ...safeEvent,
-          payload: streamPayload(event.payload, []) as Record<string, unknown>,
-        },
-      ];
-    }
+    // Every other event, including status lines and provider payloads, is a
+    // whole record rather than a fragment of a longer text, so it is redacted
+    // on its own and nothing is held for the next event.
     return [this.streams.redactTerminalValue(event)];
   }
 

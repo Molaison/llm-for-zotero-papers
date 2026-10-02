@@ -124,12 +124,10 @@ describe("workflow: independently verify saved quote anchors", function () {
         [JSON.stringify(citations), conversationKey],
       );
       const readStored = async () =>
-        (
-          await Zotero.DB.queryAsync(
-            "SELECT text, quote_citations_json FROM llm_for_zotero_chat_messages WHERE conversation_key = ? AND role = 'assistant' ORDER BY id",
-            [conversationKey],
-          )
-        ).map((row: { text: string; quote_citations_json: string }) => ({
+        (await Zotero.DB.queryAsync(
+          "SELECT text, quote_citations_json FROM llm_for_zotero_chat_messages WHERE conversation_key = ? AND role = 'assistant' ORDER BY id",
+          [conversationKey],
+        ))!.map((row) => ({
           text: row.text,
           quoteCitations: row.quote_citations_json,
         }));
@@ -142,7 +140,7 @@ describe("workflow: independently verify saved quote anchors", function () {
         const readCards = () =>
           Array.from(
             win.document.querySelectorAll<HTMLElement>(".llm-quote-card"),
-          );
+          ) as HTMLElement[];
         const deadline = Date.now() + 30000;
         while (Date.now() < deadline) {
           const cards = readCards();

@@ -1,7 +1,7 @@
 ---
 id: compare-papers
 description: Compare selected papers or collection papers by theme, methodology, or findings
-version: 8
+version: 9
 contexts: paper-set,library-corpus
 activation: auto
 ---
@@ -15,7 +15,6 @@ Connect agreements and disagreements to their evidence and limitations rather th
 Reuse supplied paper text and the selected-paper evidence ledger.
 Read further only for a missing comparison dimension or an important uncertainty, batching explicit paper `targets` when useful.
 For a collection or library corpus, use scoped `library_retrieve` and its paper ledger before close-reading identified papers.
-The active-reader paper is not an implicit substitute for that corpus.
 
 A concise comparison still needs evidence at the requested depth.
 Preserve the coverage frontier, identify papers or dimensions that remain unsupported, and distinguish body evidence from metadata or abstracts.

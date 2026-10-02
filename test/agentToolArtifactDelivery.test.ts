@@ -114,7 +114,7 @@ describe("Agent tool artifact delivery", function () {
     const result = buildAdapterToolCallResult({
       toolResult: {
         callId: "call-1",
-        name: "tool_result_read",
+        name: "context_read",
         ok: true,
         content,
       },

@@ -1,6 +1,3 @@
-import { resolveNoteEditModelRequest } from "./model/noteEditingPolicy";
-import { buildPaperDisplayLabels } from "../shared/paperDisplayLabels";
-import { listScopeSnapshotItems } from "./research/store";
 import { ensureModelCapabilities } from "../modelCapabilities";
 import { reanchorQuoteCitationsToClaims } from "../services/quotes/claimAnchoring";
 import type { QuoteCitation } from "../shared/types";
@@ -10,7 +7,6 @@ import {
   isConversationWriteGenerationCurrent,
   withConversationWriteLock,
 } from "../shared/conversationWriteFence";
-import { getNotesDirectoryConfig } from "../utils/notesDirectoryConfig";
 import { createTurnUsageRecorder } from "../utils/usageTurnRecorder";
 import type { UsageEventRuntime } from "../utils/usageStore";
 import { classifyConversationKey } from "../shared/conversationKeySpace";
@@ -29,14 +25,18 @@ import { PaperEvidenceFrontier } from "./context/paperEvidenceFrontier";
 import { preparePaperPromptContext } from "./context/paperPromptContext";
 import { PassageCitationCollector } from "./context/passageCitationCollector";
 import {
+  buildPaperDigest,
+  collectPaperEvidence,
+  readStoredPaperDigests,
+  renderPaperDigests,
+  type PaperDigest,
+} from "./context/paperDigests";
+import {
   AgentPromptBudgetError,
   enforceAgentPromptBudget,
   resolveAgentPromptBudgetLimits,
 } from "./context/promptBudget";
-import {
-  getTurnPapersWithRoles,
-  isSinglePaperConversation,
-} from "./context/requestTurnPaperScope";
+import { getTurnPapersWithRoles } from "./context/requestTurnPaperScope";
 import {
   resolveAgentRuntimeRequest,
   type AgentRequestPaperContextResolver,
@@ -48,6 +48,10 @@ import {
   type AgentPendingReadActivity,
 } from "./context/resourceContextPlan";
 import {
+  statesTurnPaperScope,
+  type TaskPaperScopeSet,
+} from "./context/taskPaperScopeListing";
+import {
   buildAgentSemanticCheckpoint,
   buildPortableAgentTranscript,
   buildConversationReferenceMessage,
@@ -56,37 +60,50 @@ import {
   compactAgentTranscript,
 } from "./context/transcriptCompactor";
 import { AgentRunContinuationSession } from "./continuation/runContinuationSession";
-import {
-  ActionContractRunSession,
-  readLatestActionContractCheckpoint,
-  type ActionContractCheckpoint,
-} from "./contracts/actionContractRunSession";
-import { loadWorkflowCheckpoint } from "./contracts/workflowCheckpoint";
-import { resolveDocumentOutcomePolicy } from "./documents/outcomePolicy";
+import { ActionContractRunSession } from "./contracts/actionContractRunSession";
 import type { MaterialRef } from "./documents/materialRef";
-import {
-  loadWorkflowMaterial,
-  materialRefFromDocument,
-} from "./documents/workflowMaterial";
 import { AgentFinalAnswerController } from "./finalization/finalAnswerController";
+import type { RunStopRule } from "./loop/stopRules";
+import { namedItemTargets, toolFailureReason } from "./loop/paperFailures";
+import {
+  LongJobPager,
+  priorPaperTokens,
+  readLongJob,
+  renderLongJobMessage,
+  renderLongJobRecord,
+  settledTargetCount,
+} from "./loop/longJob";
+import {
+  applyOutcomeEvidence,
+  declaresReadPart,
+  decideRunEnd,
+  OUTCOME_REASONS,
+  reconcileJournaledReceipts,
+  resumesOnContinue,
+  settleOutcomes,
+  type OutcomeEvidence,
+} from "./loop/outcomes";
+import { estimateContextMessagesTokens } from "../utils/modelInputCap";
+import { isExplicitContinueCommand } from "./continuation/continueCommand";
 import type { AgentModelAdapter } from "./model/adapter";
 import { resolveCapabilitiesContentInputs } from "./model/contentCapabilities";
 import { buildAnswerContinuationInstruction } from "./model/completion";
-import { MAX_ANSWER_CONTINUATIONS, resolveAgentLimits } from "./model/limits";
+import {
+  addsNewAnswerText,
+  answerContinuationCeiling,
+  resolveAgentLimits,
+} from "./model/limits";
+import { resolveOutputReserve } from "../utils/outputTokenPolicy";
 import {
   buildAgentPromptInstructionInventory,
   composeAgentModelInput,
   normalizeHistoryMessages,
   renderAgentPromptEnvelope,
 } from "./model/messageBuilder";
-import { resolvePlanSkillRoutingReceipt } from "./model/semanticSkillRouting";
 import {
   buildAdapterToolCallResult,
   type ToolWorkflowOutcome,
 } from "./model/toolArtifactDelivery";
-import { PlanExecutionRunSession } from "./plans/runSession";
-import { loadPlanArtifact } from "./plans/store";
-import type { PlanEvent } from "./plans/types";
 import {
   acquireLocalDocumentPathLease,
   AgentEventLocalDocumentStreamRedactor,
@@ -101,8 +118,10 @@ import {
 import { listJournalActions } from "./store/changeJournal";
 import { recordAgentTurn } from "./store/conversationMemory";
 import {
+  createAgentToolResultHandleRecord,
   hasAgentToolResultHandles,
   hydrateAgentToolResultHandles,
+  listAgentToolResultHandles,
   upsertAgentToolResultHandles,
   type AgentToolResultHandleRecord,
 } from "./store/toolResultHandles";
@@ -121,13 +140,21 @@ import {
   loadAgentTranscriptSegment,
   loadLatestAgentTranscriptSegment,
   replaceAgentTranscriptSegment,
+  replaceAgentTranscriptSegmentIfUnchanged,
+  type AgentTranscriptSegment,
   type AgentTranscriptWriteResult,
 } from "./store/transcriptStore";
 import { resolveAgentToolCallWorkCategory } from "./workCategory";
 import { AgentToolRegistry } from "./tools/registry";
-import { latestExecutionCheckpoint } from "./execution/checkpoint";
+import {
+  createEmptyExecutionCheckpoint,
+  latestExecutionCheckpoint,
+} from "./execution/checkpoint";
+import { executionCheckpointEvent } from "./execution/checkpointEvents";
+import type { ExecutionCheckpoint, RunEndState } from "./execution/types";
 import { createAgentExecutionContext } from "./execution/context";
 import { loadMaterialOutcomesForConversation } from "./execution/materialOutcomes";
+import { journaledNoteReceipts } from "./execution/journalReceipts";
 import {
   createToolExecution,
   type ToolExecutionRecord,
@@ -142,12 +169,9 @@ import {
 } from "./execution/transcriptRecovery";
 import {
   buildToolProgressFingerprint,
-  filterTransientRecoveryTool,
   isUserDeniedToolResult,
-  readToolError,
   setToolResultReadAvailability,
 } from "./execution/toolResultLifecycle";
-import type { PreparedActionCall } from "./tools/workflowSteps";
 import type {
   AgentAssistantMessage,
   AgentConfirmationResolution,
@@ -155,26 +179,36 @@ import type {
   AgentModelMessage,
   AgentModelStep,
   AgentPendingAction,
+  AgentRunEventRecord,
+  AgentRunStatus,
   AgentRuntimeOutcome,
   AgentRuntimeRequest,
   AgentRuntimeRequestInput,
   AgentToolContext,
   AgentToolMessage,
-  AgentToolResult,
   AgentUserMessage,
   ResolvedAgentRuntimeRequest,
 } from "./types";
-import { buildAgentStageEvent } from "./stageEvents";
-import { selectAutomaticSkills } from "./model/automaticSkillSelection";
 
 type AgentRuntimeDeps = {
   registry: AgentToolRegistry;
   adapterFactory: (request: ResolvedAgentRuntimeRequest) => AgentModelAdapter;
   paperContextResolver?: AgentRequestPaperContextResolver;
   now?: () => number;
-  skillSelector?: typeof selectAutomaticSkills;
   /** Overridable so a failing re-anchoring can be exercised in tests. */
   reanchorCitations?: typeof reanchorQuoteCitationsToClaims;
+  /**
+   * Every paper of a turn's scope, from the library index. Without it a turn
+   * states no scope and no part can be declared over it.
+   */
+  resolveTurnScopePapers?: (
+    request: AgentRuntimeRequest,
+  ) => Promise<TaskPaperScopeSet | undefined>;
+  /**
+   * How long a turn waits for its conversation's stopped run to settle;
+   * {@link STOPPED_RUN_WAIT_MS} unless a test exercises the bound.
+   */
+  stoppedRunWaitMs?: number;
 };
 
 /**
@@ -202,27 +236,88 @@ function createConfirmationRequestId(): string {
 }
 
 /**
- * What a plan event says about the planning stage.
- *
- * A revision still being drafted opens the stage and a reviewable plan closes
- * it. Every other plan event reports work inside a stage rather than a
- * transition of one: an execution ledger advancing would otherwise close a
- * stage nothing had opened, once per task.
+ * End states a run records even when it has no outcome: each one says the
+ * run stopped short of a plain ending, which the run row alone cannot tell.
  */
-const PLANNING_STAGE_STATUS_BY_PLAN_EVENT: Readonly<
-  Partial<Record<PlanEvent["type"], "started" | "completed">>
-> = {
-  plan_updated: "started",
-  plan_ready: "completed",
-};
+const END_STATES_RECORDED_WITHOUT_OUTCOMES: ReadonlySet<RunEndState> =
+  new Set<RunEndState>(["blocked", "interrupted", "completed_with_exceptions"]);
+
+/**
+ * How long a turn waits for its conversation's stopped run to settle.
+ * Stop is checked before a tool starts, so a tool running when it landed
+ * runs to its end, and the run settles after it. The tools that read the
+ * signal (web reads, retrieval, full-text reads, commands) end at once; the
+ * rest end within their own limits: a script's default deadline is 30 s, a
+ * literature search request 15 s, a note batch stops after its note in
+ * flight, and Zotero's own reads and writes take seconds. A minute covers
+ * them with room, and is about as long as a user watches a waiting status.
+ * A tool that runs longer (a script given its 120 s maximum, a large
+ * import) is not waited for: the turn goes on as it did before it waited.
+ */
+const STOPPED_RUN_WAIT_MS = 60_000;
+
+/**
+ * The latest turn this process started in each conversation, until it
+ * settles: the promise resolves once the turn has written everything it
+ * writes (the ledger's end, the run row, the transcript). A turn waits for
+ * the one before it (`latestSettledRun`), so turns started one after
+ * another settle in that order.
+ */
+const unsettledTurns = new Map<number, Promise<void>>();
+
+/** Whether `settling` resolves within `ms`. */
+function settlesWithin(settling: Promise<void>, ms: number): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    const timer = setTimeout(() => resolve(false), ms);
+    void settling.then(() => {
+      clearTimeout(timer);
+      resolve(true);
+    });
+  });
+}
+
+/**
+ * The conversation's latest run, once the turn before this one has
+ * settled. Stop releases the composer at once, while the run it stopped
+ * finishes the tool in flight and only then records its page and settles
+ * its ledger: read before that, the run is still running, so "continue"
+ * finds nothing to resume and starts the job over, and the two turns
+ * overwrite each other's transcript. So while the latest run is running and
+ * the turn before this one has not settled, this one waits for it, up to
+ * `waitMs`, and reads the latest run again. A run left running by a crash
+ * has no turn of this process behind it: it is the interrupted run the turn
+ * recovers.
+ */
+async function latestSettledRun(params: {
+  conversationKey: number;
+  /** The turn this process started before this one, until it settles. */
+  priorTurn: Promise<void> | undefined;
+  waitMs: number;
+  /** Says what the turn waits for; an observer failing on it is ignored. */
+  announce: () => void | Promise<void>;
+}): Promise<Awaited<ReturnType<typeof getLatestAgentRunForConversation>>> {
+  const latest = await getLatestAgentRunForConversation(params.conversationKey);
+  if (latest?.status !== "running" || !params.priorTurn) return latest;
+  try {
+    await params.announce();
+  } catch (error) {
+    logRuntimeWarning(
+      "LLM Agent: announcing the wait for a stopped run failed",
+      error,
+    );
+  }
+  if (!(await settlesWithin(params.priorTurn, params.waitMs))) return latest;
+  return getLatestAgentRunForConversation(params.conversationKey);
+}
 
 export class AgentRuntime {
   private readonly registry: AgentToolRegistry;
   private readonly adapterFactory: AgentRuntimeDeps["adapterFactory"];
   private readonly paperContextResolver?: AgentRequestPaperContextResolver;
   private readonly now: () => number;
-  private readonly skillSelector: typeof selectAutomaticSkills;
   private readonly reanchorCitations: typeof reanchorQuoteCitationsToClaims;
+  private readonly resolveTurnScopePapers?: AgentRuntimeDeps["resolveTurnScopePapers"];
+  private readonly stoppedRunWaitMs: number;
   private readonly pendingConfirmations = new Map<
     string,
     PendingConfirmation
@@ -233,9 +328,10 @@ export class AgentRuntime {
     this.adapterFactory = deps.adapterFactory;
     this.paperContextResolver = deps.paperContextResolver;
     this.now = deps.now || (() => Date.now());
-    this.skillSelector = deps.skillSelector || selectAutomaticSkills;
     this.reanchorCitations =
       deps.reanchorCitations || reanchorQuoteCitationsToClaims;
+    this.resolveTurnScopePapers = deps.resolveTurnScopePapers;
+    this.stoppedRunWaitMs = deps.stoppedRunWaitMs ?? STOPPED_RUN_WAIT_MS;
   }
 
   listTools() {
@@ -271,32 +367,10 @@ export class AgentRuntime {
         : resolveAgentRuntimeRequest(requestInput, {
             resolvePaperContext: this.paperContextResolver,
           });
-    request.workflowCheckpoint = await loadWorkflowCheckpoint(
-      request.conversationKey,
-    );
     request.conversationGeneration ??= getConversationWriteGeneration(
       request.conversationKey,
     );
-    if (request.planContext?.phase === "executing") {
-      const plan = request.planContext;
-      const artifact = await loadPlanArtifact(plan.planId, plan.revision);
-      if (
-        !artifact ||
-        artifact.digest !== plan.approvedDigest ||
-        artifact.status !== "approved"
-      )
-        throw new Error(
-          "The approved plan is unavailable or changed. No action was authorized.",
-        );
-      request.actionContract = artifact.actionContract;
-      request.classifiedIntent = artifact.actionContract?.intent;
-    } else {
-      request.actionContract = undefined;
-      request.actionProgress = undefined;
-      request.actionPreparation = undefined;
-      request.classifiedIntent = undefined;
-      request.skillRoutingReceipt = undefined;
-    }
+    request.skillRoutingReceipt = undefined;
     if (options.signal?.aborted)
       throw new Error("Agent preparation was cancelled.");
     request.executionContext ||= createAgentExecutionContext(
@@ -359,6 +433,29 @@ export class AgentRuntime {
 
   async getRunTrace(runId: string) {
     return getAgentRunTrace(runId);
+  }
+
+  /**
+   * The turn's scope, when it is worth stating (not a one-paper chat), or
+   * none when it cannot be resolved: never fails a turn.
+   */
+  private async turnScopePapers(
+    request: AgentRuntimeRequest,
+  ): Promise<TaskPaperScopeSet | undefined> {
+    if (
+      !this.resolveTurnScopePapers ||
+      !statesTurnPaperScope(request.turnPaperScope)
+    )
+      return undefined;
+    try {
+      return await this.resolveTurnScopePapers(request);
+    } catch (error) {
+      logRuntimeWarning(
+        "LLM Agent: resolving the turn's paper scope failed",
+        error,
+      );
+      return undefined;
+    }
   }
 
   async runTurn(params: {
@@ -440,17 +537,156 @@ export class AgentRuntime {
       request.localDocuments?.map((entry) => entry.resource),
     );
     let webSourceRunId: string | undefined;
-    let runTerminalized = false;
+    // Set as the run starts to end: a run ends once, so an ending that fails
+    // partway (its run row's write throwing) is not followed by a second.
+    let runTerminating = false;
     let redactRunTerminalText = (value: string) => value;
-    let planSession: PlanExecutionRunSession | undefined;
+    // The run's event stream, once it is open. An ending before then has no
+    // stream to record its stop rule in.
+    let emitRunEvent: ((event: AgentEvent) => Promise<void>) | undefined;
+    // Records the results of a long job's unfinished page, once the turn has
+    // a job to record; a Stop or an error calls it before the run ends.
+    let recordUnfinishedPage: (() => Promise<void>) | undefined;
+    // The turn's outcome ledger has one writer. task_update and the evidence
+    // recorder both apply their change here, one change at a time, and each
+    // change that moves the ledger is published once.
+    let executionCheckpointWrites: Promise<unknown> = Promise.resolve();
+    // The ledger the run's events last published. A change is published as
+    // a delta from it; the first change, and the one after a publication
+    // that failed, is published whole.
+    let publishedCheckpoint: ExecutionCheckpoint | undefined;
+    // The turn's reads, so a read part declared after them still takes them.
+    const turnReads: OutcomeEvidence[] = [];
+    const updateExecutionCheckpoint = (
+      apply: (checkpoint: ExecutionCheckpoint) => ExecutionCheckpoint,
+    ): Promise<ExecutionCheckpoint> => {
+      const write = executionCheckpointWrites.then(async () => {
+        const current =
+          request.executionCheckpoint ||
+          createEmptyExecutionCheckpoint(request.executionContext!, this.now());
+        let next = apply(current);
+        if (next !== current && declaresReadPart(current, next)) {
+          for (const read of turnReads)
+            next = applyOutcomeEvidence(next, read, this.now()).checkpoint;
+        }
+        if (next !== current) {
+          request.executionCheckpoint = next;
+          if (emitRunEvent) {
+            const event = executionCheckpointEvent(publishedCheckpoint, next);
+            publishedCheckpoint = undefined;
+            await emitRunEvent(event);
+            publishedCheckpoint = next;
+          }
+        }
+        return next;
+      });
+      executionCheckpointWrites = write.catch(() => undefined);
+      return write;
+    };
+    /**
+     * Publishes the ledger as it stands, whole, unless the run's events carry
+     * it already: through the one writer, after any change queued before.
+     */
+    const publishExecutionCheckpoint = (): Promise<void> => {
+      const write = executionCheckpointWrites.then(async () => {
+        const current = request.executionCheckpoint;
+        if (!current || !emitRunEvent || publishedCheckpoint === current)
+          return;
+        publishedCheckpoint = undefined;
+        await emitRunEvent(executionCheckpointEvent(undefined, current));
+        publishedCheckpoint = current;
+      });
+      executionCheckpointWrites = write.catch(() => undefined);
+      return write;
+    };
+    // Outcome evidence and the end state belong to ordinary turns.
+    const recordsOutcomes = () =>
+      request.executionContext?.permissionOwner === "original_agent";
+    const recordOutcomeEvidence = async (
+      evidence: OutcomeEvidence,
+    ): Promise<void> => {
+      if (evidence.kind === "read") turnReads.push(evidence);
+      try {
+        await updateExecutionCheckpoint(
+          (checkpoint) =>
+            applyOutcomeEvidence(checkpoint, evidence, this.now()).checkpoint,
+        );
+      } catch (error) {
+        logRuntimeWarning(
+          "LLM Agent: recording outcome evidence failed",
+          error,
+        );
+      }
+    };
+    /**
+     * The one path inside runTurn that finishes a run. The ledger is settled
+     * with the run's end state, then the rule that ended it is recorded, so
+     * every ending can be told apart afterwards; then the run's terminal
+     * status and text are written.
+     */
+    const terminateRun = async (
+      status: Exclude<AgentRunStatus, "running">,
+      finalText: string | undefined,
+      stopRule: RunStopRule,
+    ): Promise<void> => {
+      runTerminating = true;
+      if (recordsOutcomes()) {
+        try {
+          const end = decideRunEnd(request.executionCheckpoint, {
+            status,
+            stopRule,
+          });
+          if (
+            request.executionCheckpoint?.tasks.length ||
+            END_STATES_RECORDED_WITHOUT_OUTCOMES.has(end)
+          ) {
+            await updateExecutionCheckpoint((checkpoint) =>
+              settleOutcomes(checkpoint, end, this.now()),
+            );
+          }
+        } catch (error) {
+          // Like the stop rule below, the end state is a record of the
+          // ending: failing to write it must not change the ending.
+          logRuntimeWarning(
+            "LLM Agent: settling the outcome ledger failed",
+            error,
+          );
+        }
+      }
+      try {
+        await emitRunEvent?.({
+          type: "provider_event",
+          providerType: "agent_run_stop",
+          payload: { rule: stopRule, status },
+        });
+      } catch (error) {
+        // The record is diagnostic: an observer failing on it must not change
+        // how the run ends.
+        logRuntimeWarning("LLM Agent: recording the stop rule failed", error);
+      }
+      await persistIfLive(() => finishAgentRun(runId, status, finalText));
+    };
+    // A turn started while the one before it in this conversation is still
+    // settling waits for it (`latestSettledRun`); the next waits for this.
+    const priorTurn = unsettledTurns.get(request.conversationKey);
+    let settled = () => {};
+    const settling = new Promise<void>((resolve) => {
+      settled = resolve;
+    });
+    unsettledTurns.set(request.conversationKey, settling);
     try {
-      const latestPriorRun = await getLatestAgentRunForConversation(
-        request.conversationKey,
-      );
-      request.workflowCheckpoint = await loadWorkflowCheckpoint(
-        request.conversationKey,
-        latestPriorRun,
-      );
+      const latestPriorRun = await latestSettledRun({
+        conversationKey: request.conversationKey,
+        priorTurn,
+        waitMs: this.stoppedRunWaitMs,
+        announce: () =>
+          writeAllowed()
+            ? params.onEvent?.({
+                type: "status",
+                text: "Waiting for the stopped run to finish",
+              })
+            : undefined,
+      });
       const interruptedPriorRun =
         latestPriorRun?.status === "failed" &&
         latestPriorRun.finalText === INTERRUPTED_AGENT_RUN_MARKER
@@ -525,34 +761,8 @@ export class AgentRuntime {
           if (writeAllowed()) await params.onEvent?.(redactedEvent);
         }
       };
-      /**
-       * Plan events and the planning stage they move, in one place.
-       *
-       * Both the plan session and every plan tool publish through this, so
-       * the stage can never be stamped on one path and missed on the other.
-       */
-      const emitPlanEvent = async (event: PlanEvent) => {
-        const status = PLANNING_STAGE_STATUS_BY_PLAN_EVENT[event.type];
-        if (status)
-          await emit(buildAgentStageEvent({ stage: "planning", status }));
-        await emit(event);
-      };
-      if (request.workflowCheckpoint)
-        await emit({
-          type: "provider_event",
-          providerType: "agent_workflow_predecessor",
-          payload: request.workflowCheckpoint,
-        });
-      const actionContractSession = new ActionContractRunSession({
-        request,
-        contracts: this.registry,
-        emit,
-      });
-      const activePlanSession = new PlanExecutionRunSession(
-        request,
-        emitPlanEvent,
-      );
-      planSession = activePlanSession;
+      emitRunEvent = emit;
+      const actionContractSession = new ActionContractRunSession();
 
       const context: AgentToolContext = {
         request,
@@ -571,24 +781,9 @@ export class AgentRuntime {
               input,
               content,
             })),
-        checkpointActionProgress: () => actionContractSession.checkpoint(),
-        publishPlanEvent: emitPlanEvent,
         publishSkillActivation: (id) =>
           emit({ type: "status", text: `Skill activated: ${id}` }),
-        publishExecutionCheckpoint: (checkpoint) =>
-          emit({ type: "execution_checkpoint", checkpoint }),
-        loadApprovedPlanEffectContext: async () => {
-          const specification = activePlanSession.approvedEffectSpecification();
-          if (!specification) return undefined;
-          return {
-            specification,
-            activeEffectIds: activePlanSession.activeWorkflowEffectIds() || [],
-            resolvedMaterials:
-              await activePlanSession.resolvedWorkflowMaterials(),
-            resolvedTargetBindings:
-              await activePlanSession.resolvedWorkflowTargetBindings(),
-          };
-        },
+        updateExecutionCheckpoint,
       };
       const toolsUsedThisTurn: string[] = [];
       const toolExecutionRecords: ToolExecutionRecord[] = [];
@@ -598,117 +793,39 @@ export class AgentRuntime {
         request.conversationKey,
       );
       setToolResultReadAvailability(request, false);
-      // Approved Plans retain their frozen skill binding. Ordinary turns select
-      // guidance before the main model; skill routing never predicts actions.
-      let turnIntent: {
-        skillIds: string[];
-        classifiedIntent: AgentRuntimeRequest["classifiedIntent"] | null;
-        degraded: boolean;
-        routingReceipt?: AgentRuntimeRequest["skillRoutingReceipt"];
-      };
-      let approvedPlanArtifact: Awaited<ReturnType<typeof loadPlanArtifact>> =
-        null;
-      if (request.planContext?.phase === "executing") {
-        approvedPlanArtifact = await loadPlanArtifact(
-          request.planContext.planId,
-          request.planContext.revision,
-        );
-        const reused = await resolvePlanSkillRoutingReceipt(
-          approvedPlanArtifact?.skillRoutingReceipt,
-          getAllSkills(),
-        );
-        if (reused.changedExplicitSkillIds.length) {
-          throw new Error(
-            `Explicit plan skill changed after approval (${reused.changedExplicitSkillIds.join(", ")}); revise and approve the plan again`,
-          );
-        }
-        if (reused.changedAutomaticSkillIds.length) {
-          await emit({
-            type: "provider_event",
-            providerType: "plan_skill_routing",
-            payload: {
-              status: "changed_automatic_skills_omitted",
-              skillIds: reused.changedAutomaticSkillIds,
-            },
-          });
-        }
-        turnIntent = {
-          skillIds: reused.skillIds,
-          classifiedIntent:
-            approvedPlanArtifact?.actionContract?.intent || null,
-          degraded: false,
-        };
-      } else {
-        request.actionContract = undefined;
-        request.actionProgress = undefined;
-        request.actionPreparation = undefined;
-        request.classifiedIntent = undefined;
-        request.skillRoutingReceipt = undefined;
-        const started = this.now();
-        const selected =
-          adapter.supportsTools(request) && !isSinglePaperConversation(request)
-            ? await this.skillSelector(request, getAllSkills(), params.signal)
-            : { skillIds: [], status: "selected" as const };
-        if (adapter.supportsTools(request))
-          await emit({
-            type: "provider_event",
-            providerType: "agent_skill_selection",
-            payload: { ...selected, elapsedMs: this.now() - started },
-          });
-        turnIntent = {
-          skillIds: selected.skillIds,
-          classifiedIntent: null,
-          degraded: false,
-        };
-      }
-      request.classifiedIntent = turnIntent.classifiedIntent || undefined;
-      request.skillRoutingReceipt = turnIntent.routingReceipt;
-      const matchedSkills = getMatchedSkillIds(request, turnIntent.skillIds);
-      if (request.planContext?.phase !== "executing") {
-        const forcedSkillIds = new Set(request.forcedSkillIds || []);
-        request.loadedSkillRecords = (
-          await Promise.all(
-            getAllSkills()
-              .filter((skill) => matchedSkills.includes(skill.id))
-              .map(async (skill) => ({
-                ...(
-                  await loadSkill(
-                    skill,
-                    getBuiltinSkillInstructionById(skill.id),
-                  )
-                ).loadedSkill,
-                source: forcedSkillIds.has(skill.id)
-                  ? ("forced" as const)
-                  : ("loaded" as const),
-              })),
-          )
-        ).sort((left, right) => left.id.localeCompare(right.id));
-      }
-      const plannedSpec =
-        approvedPlanArtifact?.contract?.deliverable.kind === "document"
-          ? approvedPlanArtifact.contract.deliverable.spec
-          : undefined;
-      request.documentOutcomePolicy = resolveDocumentOutcomePolicy({
-        request,
-        plannedDocumentKind: plannedSpec?.kind,
-        plannedResearch: Boolean(approvedPlanArtifact?.contract?.investigation),
-      });
+      // A turn carries only explicitly forced skills; the model loads any
+      // other guidance from the installed inventory with load_skill, so no
+      // request precedes it.
+      request.userTextSignals = computeUserTextSignals(request.userText);
+      request.skillRoutingReceipt = undefined;
+      const matchedSkills = getMatchedSkillIds(request, []);
+      const forcedSkillIds = new Set(request.forcedSkillIds || []);
+      request.loadedSkillRecords = (
+        await Promise.all(
+          getAllSkills()
+            .filter((skill) => matchedSkills.includes(skill.id))
+            .map(async (skill) => ({
+              ...(
+                await loadSkill(skill, getBuiltinSkillInstructionById(skill.id))
+              ).loadedSkill,
+              source: forcedSkillIds.has(skill.id)
+                ? ("forced" as const)
+                : ("loaded" as const),
+            })),
+        )
+      ).sort((left, right) => left.id.localeCompare(right.id));
       if (!adapter.supportsTools(request)) {
-        if (request.documentOutcomePolicy.required) {
-          const failure =
-            "The requested document cannot be produced because this model does not support Agent tools. Choose a tool-capable model and retry.";
-          await persistIfLive(() => finishAgentRun(runId, "failed", failure));
-          runTerminalized = true;
-          throw new Error(failure);
-        }
         const reason =
           "Agent tools unavailable for this model; used direct response instead.";
         await emit({
           type: "fallback",
           reason,
         });
-        await persistIfLive(() => finishAgentRun(runId, "completed"));
-        runTerminalized = true;
+        await terminateRun(
+          "completed",
+          undefined,
+          "tools_unsupported_fallback",
+        );
         return {
           kind: "fallback",
           runId,
@@ -718,14 +835,14 @@ export class AgentRuntime {
       }
       const toolDefinitions =
         this.registry.listToolDefinitionsForRequest(request);
-      const toolSpecs = filterTransientRecoveryTool(
-        this.registry.listToolsForRequest(request),
-      );
       await hydrateAgentEvidenceCache(request.conversationKey);
       await hydrateAgentCoverageLedger({
         conversationKey: request.conversationKey,
         request,
       });
+      // Resolved once per turn: the turn context states this scope, and a
+      // part declared over it freezes exactly these papers.
+      request.turnScopePapers = await this.turnScopePapers(request);
       const resourceContextPlan = buildAgentResourceContextPlan(request);
       resourceContextPlan.paperContext = await preparePaperPromptContext(
         request,
@@ -736,9 +853,7 @@ export class AgentRuntime {
       });
       context.resourceSignature = resourceContextPlan.resourceSignature;
       request.contextCache = resourceContextPlan.contextCache;
-      const paperEvidenceFrontier = new PaperEvidenceFrontier({
-        planExecuting: request.planContext?.phase === "executing",
-      });
+      const paperEvidenceFrontier = new PaperEvidenceFrontier();
       const preservedTurnHandleRecords: AgentToolResultHandleRecord[] = [];
       const transcriptCompatibilityKey = PORTABLE_TRANSCRIPT_KEY;
       let transcriptSegment = await loadAgentTranscriptSegment({
@@ -812,7 +927,9 @@ export class AgentRuntime {
         request.conversationKey,
       );
       let recoveryMessage: AgentModelMessage | null = null;
-      let interruptedActionCheckpoint: ActionContractCheckpoint | null = null;
+      let interruptedTraceEvents: readonly AgentRunEventRecord[] | undefined;
+      // The run whose ledger this turn resumes, if it resumes one.
+      let resumedFromRunId: string | undefined;
       if (interruptedPriorRun) {
         const [actions, latestTranscriptSegment, interruptedTrace] =
           await Promise.all([
@@ -823,14 +940,16 @@ export class AgentRuntime {
             loadLatestAgentTranscriptSegment(request.conversationKey),
             getAgentRunTrace(interruptedPriorRun.runId),
           ]);
-        interruptedActionCheckpoint = readLatestActionContractCheckpoint(
-          interruptedTrace.events.map((event) => event.payload),
-        );
+        interruptedTraceEvents = interruptedTrace.events;
         const ordinaryCheckpoint = latestExecutionCheckpoint(
           interruptedTrace.events,
         );
+        // A run left running when Zotero closed never settled its ledger, so
+        // it is restored as it stood. A ledger its run settled comes back
+        // only through a continue command, below.
         if (
           ordinaryCheckpoint &&
+          !ordinaryCheckpoint.end &&
           request.executionContext?.permissionOwner === "original_agent" &&
           ordinaryCheckpoint.conversationKey === request.conversationKey &&
           ordinaryCheckpoint.conversationGeneration ===
@@ -841,6 +960,7 @@ export class AgentRuntime {
             ...request.executionContext,
             executionId: ordinaryCheckpoint.executionId,
           };
+          resumedFromRunId = interruptedPriorRun.runId;
         }
         const compatibilityMatches =
           latestTranscriptSegment?.compatibilityKey ===
@@ -858,12 +978,76 @@ export class AgentRuntime {
           ? [...transcriptMessagesForPrompt, recoveryMessage]
           : [recoveryMessage];
       }
-      // An interrupted run already carries this block inside its one-time
-      // recovery note. Every other turn gets it as a prompt-only host
-      // message: the ledger is recomputed from run events at every turn
+      // An interrupted ledger, or one the user stopped with a part still open,
+      // resumes only when the whole message asks to continue; any other
+      // message starts with no ledger.
+      if (
+        !request.executionCheckpoint &&
+        latestPriorRun &&
+        recordsOutcomes() &&
+        isExplicitContinueCommand(request.userText)
+      ) {
+        const priorEvents =
+          interruptedTraceEvents ??
+          (await getAgentRunTrace(latestPriorRun.runId)).events;
+        const interruptedLedger = latestExecutionCheckpoint(priorEvents);
+        if (
+          interruptedLedger &&
+          resumesOnContinue(interruptedLedger) &&
+          interruptedLedger.conversationKey === request.conversationKey &&
+          interruptedLedger.conversationGeneration ===
+            request.executionContext?.conversationGeneration
+        ) {
+          const { end, ...ledger } = interruptedLedger;
+          request.executionCheckpoint = ledger;
+          request.executionContext = {
+            ...request.executionContext!,
+            executionId: ledger.executionId,
+          };
+          resumedFromRunId = latestPriorRun.runId;
+        }
+      }
+      // The run a resumed ledger comes from may have written notes whose
+      // receipts never reached it: Stop or an error ended the run while a
+      // write was running, or Zotero quit mid-batch. The change journal holds
+      // every one, so the ledger takes those it lacks before the turn goes
+      // on, each once.
+      if (resumedFromRunId && request.executionCheckpoint) {
+        try {
+          const journaled = await journaledNoteReceipts({
+            runId: resumedFromRunId,
+            conversationKey: request.conversationKey,
+          });
+          if (journaled.length)
+            await updateExecutionCheckpoint(
+              (checkpoint) =>
+                reconcileJournaledReceipts(checkpoint, journaled, this.now())
+                  .checkpoint,
+            );
+        } catch (error) {
+          logRuntimeWarning(
+            "LLM Agent: reconciling the resumed ledger with the change journal failed",
+            error,
+          );
+        }
+        // The resumed ledger is this run's from its start, and published
+        // whole now: a run that ends before it changes the ledger (Zotero
+        // quits again, say) still leaves it for the next "continue".
+        try {
+          await publishExecutionCheckpoint();
+        } catch (error) {
+          logRuntimeWarning(
+            "LLM Agent: publishing the resumed ledger failed",
+            error,
+          );
+        }
+      }
+      // An interrupted run already carries the material and batch block inside
+      // its one-time recovery note. Every other turn gets it as a prompt-only
+      // host message: the ledger is recomputed from run events at every turn
       // start, so persisting the block would only stack identical -- and,
       // once the material is saved, stale -- copies in the transcript.
-      const materialRecoveryMessage = recoveryMessage
+      const turnStartRecoveryMessage = recoveryMessage
         ? null
         : buildTurnStartRecoveryMessage({
             materialOutcomes: request.materialOutcomes,
@@ -883,7 +1067,7 @@ export class AgentRuntime {
             ? [conversationReferenceMessage]
             : []),
           ...(retainedActionMessage ? [retainedActionMessage] : []),
-          ...(materialRecoveryMessage ? [materialRecoveryMessage] : []),
+          ...(turnStartRecoveryMessage ? [turnStartRecoveryMessage] : []),
         ];
       };
 
@@ -925,8 +1109,7 @@ export class AgentRuntime {
           await emit({ type: "context_compacted", automatic: false });
         }
         await emit({ type: "final", text });
-        await persistIfLive(() => finishAgentRun(runId, "completed", text));
-        runTerminalized = true;
+        await terminateRun("completed", text, "manual_compaction");
         return {
           kind: "completed",
           runId,
@@ -972,60 +1155,6 @@ export class AgentRuntime {
         }
       }
 
-      const requiresFileNoteWrite = Boolean(
-        request.classifiedIntent?.actionIntents?.some(
-          (intent) => intent.operation === "file_write",
-        ),
-      );
-      const planInitialization = await activePlanSession.initialize();
-      if (planInitialization.kind === "failed") {
-        const text = planInitialization.userMessage;
-        await emit({ type: "final", text });
-        await persistIfLive(() => finishAgentRun(runId, "failed", text));
-        runTerminalized = true;
-        return {
-          kind: "completed",
-          runId,
-          text,
-          usedFallback: false,
-        };
-      }
-      const actionContractInitialization =
-        await actionContractSession.initialize({
-          checkpoint: interruptedActionCheckpoint,
-        });
-      if (actionContractInitialization.kind === "failed") {
-        const text = actionContractInitialization.userMessage;
-        await emit({ type: "final", text });
-        await persistIfLive(() => finishAgentRun(runId, "failed", text));
-        runTerminalized = true;
-        return {
-          kind: "completed",
-          runId,
-          text,
-          usedFallback: false,
-        };
-      }
-      if (request.planContext?.phase === "planning") {
-        await emit({
-          type: "status",
-          text: "Planning the request and reviewing context",
-        });
-      } else if (request.planContext?.phase === "executing") {
-        await emit({
-          type: "status",
-          text: "Executing the approved plan",
-        });
-      }
-      const noteWritePolicy = requiresFileNoteWrite
-        ? getNotesDirectoryConfig()
-        : null;
-      if (noteWritePolicy) {
-        request.metadata = {
-          ...(request.metadata || {}),
-          fileNoteWritePolicy: noteWritePolicy,
-        };
-      }
       await emit({
         type: "provider_event",
         providerType: "agent_context_envelope",
@@ -1041,31 +1170,9 @@ export class AgentRuntime {
           screenshotCount: request.screenshots?.length || 0,
         },
       });
-      const displaySnapshot =
-        approvedPlanArtifact?.contract?.investigation?.scopeSnapshot;
-      if (displaySnapshot) {
-        const papers = await listScopeSnapshotItems(displaySnapshot.snapshotId);
-        const displayLabels = Object.fromEntries(
-          buildPaperDisplayLabels(
-            papers.map((paper) => ({
-              ...paper,
-              identity: `${paper.libraryID}:${paper.itemKey}`,
-            })),
-          ),
-        );
-        request.metadata = {
-          ...request.metadata,
-          paperDisplayLabels: displayLabels,
-        };
-        await emit({
-          type: "provider_event",
-          providerType: "paper_display_labels",
-          payload: { version: 1, displayLabels },
-        });
-      }
       const captureInstructionInventory =
         request.metadata?.instructionHarnessInventory === true;
-      let renderedPrompt = await renderAgentPromptEnvelope(
+      const renderedPrompt = await renderAgentPromptEnvelope(
         request,
         toolDefinitions,
         matchedSkills,
@@ -1074,6 +1181,9 @@ export class AgentRuntime {
           contentInputs: resolveCapabilitiesContentInputs(adapterCapabilities),
         },
       );
+      request.deliveredToolGuidance = [
+        ...renderedPrompt.inventory.toolGuidanceInstructions,
+      ];
       const initialTranscriptMessages = promptTranscriptMessages();
       const messages = composeAgentModelInput(renderedPrompt.envelope, {
         transcriptMessages: initialTranscriptMessages,
@@ -1154,6 +1264,18 @@ export class AgentRuntime {
         }
       }
       const newTranscriptMessages: AgentModelMessage[] = [];
+      /**
+       * Writes the run's transcript. Stop releases the conversation at once,
+       * and a turn queued behind it may write the transcript while this run
+       * still finishes a call: once stopped, the run writes only over the
+       * transcript as it last saw it, never over what that turn wrote.
+       */
+      const writeTranscriptSegment = (next: AgentTranscriptSegment) =>
+        persistIfLive(() =>
+          params.signal?.aborted
+            ? replaceAgentTranscriptSegmentIfUnchanged(transcriptSegment, next)
+            : replaceAgentTranscriptSegment(next),
+        );
       let latestProviderReplayTokens = 0;
       const commitSemanticCheckpoint = async (params: {
         sourceMessages: AgentModelMessage[];
@@ -1190,9 +1312,7 @@ export class AgentRuntime {
           ...transcriptSegment,
           compactedAt: this.now(),
         };
-        const writeResult = await persistIfLive(() =>
-          replaceAgentTranscriptSegment(nextSegment),
-        );
+        const writeResult = await writeTranscriptSegment(nextSegment);
         if (
           writeAllowed() &&
           (writeResult === "persisted" || writeResult === "memory_only")
@@ -1232,9 +1352,7 @@ export class AgentRuntime {
           messages: portable.messages,
         };
         const committed = {
-          writeResult: await persistIfLive(() =>
-            replaceAgentTranscriptSegment(nextSegment),
-          ),
+          writeResult: await writeTranscriptSegment(nextSegment),
         };
         if (
           committed.writeResult === "persisted" ||
@@ -1253,6 +1371,50 @@ export class AgentRuntime {
         newTranscriptMessages.splice(0, newTranscriptMessages.length);
         return committed.writeResult;
       };
+      // A long job (loop/longJob.ts): when the papers a turn's parts name do
+      // not fit one pass, the host pages them.
+      const scopePaper = (target: string) =>
+        request.turnScopePapers?.papers?.[Number(target.replace(/^item:/, ""))];
+      const longJob = new LongJobPager((target) =>
+        priorPaperTokens(scopePaper(target)?.text),
+      );
+      const longJobDigests = new Map<string, PaperDigest>();
+      // A job "continue" picked back up: the per-paper results its earlier
+      // turns recorded carry forward, so its last step still sees every
+      // paper. They are read where each batch was stored, by the job, not
+      // from the transcript, whose copy of a batch is the model's view and
+      // may be gone. Such a digest is re-cut to this turn's share at its
+      // first page, and recorded again only with new evidence.
+      const carriedDigests = new Set<string>();
+      if (recordsOutcomes() && readLongJob(request.executionCheckpoint)) {
+        const batches = await listAgentToolResultHandles({
+          conversationKey: request.conversationKey,
+          toolName: "long_job_results",
+        });
+        for (const record of batches) {
+          const content = record.content as
+            | { executionId?: unknown; digests?: unknown }
+            | undefined;
+          if (content?.executionId !== request.executionCheckpoint?.executionId)
+            continue;
+          for (const digest of readStoredPaperDigests(content?.digests)) {
+            longJobDigests.set(`item:${digest.itemId}`, digest);
+            carriedDigests.add(`item:${digest.itemId}`);
+          }
+        }
+      }
+      // The message that carries every digest and the next page. Every
+      // restart sends it again, so no restart loses the job's results.
+      let longJobMessage: AgentUserMessage | null = null;
+      // While a page is open: each page paper's share, which caps a read.
+      let longJobReadShare = 0;
+      // How many of the turn's reads the pager has seen, so each round
+      // tells it only the papers its own read calls carried.
+      let longJobReadsSeen = 0;
+      // Papers the host gave up on in the round the pager checks next.
+      let longJobGaveUp: string[] = [];
+      // How many batches of per-paper results the transcript holds.
+      let longJobRecords = 0;
       const restartFromSemanticCheckpoint = async (params: {
         sourceMessages: AgentModelMessage[];
         handleRecords?: AgentToolResultHandleRecord[];
@@ -1279,6 +1441,7 @@ export class AgentRuntime {
               ...[
                 conversationReferenceMessage,
                 buildRetainedActionMessage(transcriptSegment.messages),
+                longJobMessage,
               ].filter((message): message is AgentUserMessage =>
                 Boolean(message),
               ),
@@ -1289,6 +1452,15 @@ export class AgentRuntime {
         newTranscriptMessages.splice(0, newTranscriptMessages.length);
         latestProviderReplayTokens = 0;
         adapter.resetState?.();
+        // Every restart drops the prompt a long job's page measures its
+        // papers' cost from: the pager measures again from this one. A page's
+        // end restarts here too, and its next page then starts a measurement
+        // of its own.
+        if (recordsOutcomes())
+          longJob.restarted({
+            checkpoint: request.executionCheckpoint,
+            promptTokens: estimateContextMessagesTokens(messages),
+          });
       };
 
       for (const skillId of matchedSkills) {
@@ -1299,17 +1471,10 @@ export class AgentRuntime {
       // Rejected input never ran, so it is a repair opportunity, not a failing
       // tool. It gets its own, more forgiving cap.
       let consecutiveInputRejectionRounds = 0;
-      const extendedRunLimits =
-        request.planContext?.phase === "executing" ||
-        request.metadata?.hostRecordedBatchJob === true;
+      const extendedRunLimits = request.metadata?.hostRecordedBatchJob === true;
       const { maxRounds, maxToolCallsPerRound } =
         resolveAgentLimits(extendedRunLimits);
-      const finalAnswerController = new AgentFinalAnswerController(
-        request,
-        actionContractSession,
-        transcriptMessagesForPrompt,
-        activePlanSession,
-      );
+      const finalAnswerController = new AgentFinalAnswerController(request);
       let toolCallOverflowCorrectionUsed = false;
       const shouldFlushStreamBuffer = (value: string): boolean => {
         if (!value) return false;
@@ -1324,7 +1489,8 @@ export class AgentRuntime {
       const finalizedMaterialRefs = new Map<string, MaterialRef>();
       const completeRun = async (
         finalText: string,
-        status: "completed" | "failed" = "completed",
+        status: "completed" | "failed",
+        stopRule: RunStopRule,
         options: {
           emitFinalEvent?: boolean;
           webAttribution?: WebAttributionAssessment;
@@ -1340,12 +1506,6 @@ export class AgentRuntime {
         }
         const redactedFinalText =
           turnPathRedactor.redactTerminalText(finalText);
-        if (status === "failed") {
-          await activePlanSession.interrupt(
-            redactedFinalText ||
-              "The agent run ended before the plan completed",
-          );
-        }
         const finalMaterialRef = options.documentId
           ? finalizedMaterialRefs.get(options.documentId)
           : undefined;
@@ -1389,10 +1549,7 @@ export class AgentRuntime {
             );
           }
         }
-        await persistIfLive(() =>
-          finishAgentRun(runId, status, redactedFinalText),
-        );
-        runTerminalized = true;
+        await terminateRun(status, redactedFinalText, stopRule);
         // The tools' citations name the sentence the retrieval picked, not the
         // sentence the answer went on to make. Re-anchor them to the claim that
         // cites them, so a chip opens the line the reader is looking at.
@@ -1481,7 +1638,9 @@ export class AgentRuntime {
             currentAnswerText = finalText;
           }
         }
-        return await completeRun(finalText, "completed", { webAttribution });
+        return await completeRun(finalText, "completed", "final_answer", {
+          webAttribution,
+        });
       };
       const providerTerminalOutcomes: ToolWorkflowOutcome[] = [];
       const runModelStep = async (
@@ -1489,14 +1648,18 @@ export class AgentRuntime {
         statusText: string,
       ): Promise<{ step: AgentModelStep; stepStreamedText: string }> => {
         if (params.signal?.aborted) {
-          await persistIfLive(() =>
-            finishAgentRun(
-              runId,
-              "cancelled",
-              turnPathRedactor.redactTerminalText(currentAnswerText),
+          await recordUnfinishedPage?.().catch((error) =>
+            logRuntimeWarning(
+              "LLM Agent: recording a stopped page's results failed",
+              error,
             ),
           );
-          runTerminalized = true;
+          // The run is finished here, so the catch below no longer does it.
+          await terminateRun(
+            "cancelled",
+            turnPathRedactor.redactTerminalText(currentAnswerText),
+            "cancelled_before_step",
+          );
           throw new Error("Aborted");
         }
         await emit({
@@ -1586,6 +1749,9 @@ export class AgentRuntime {
         request.runtimeContextBudget = {
           contextWindowTokens: stepContextWindow,
           usedContextTokens: stepContextTokens,
+          ...(longJobReadShare > 0
+            ? { maxTokensPerPaper: longJobReadShare }
+            : {}),
         };
         if (stepContextTokens > 0 && stepContextWindow > 0) {
           await emit({
@@ -1603,7 +1769,7 @@ export class AgentRuntime {
         // usage row even if this round never finishes.
         usageRecorder.markDispatched();
         const step = await adapter.runStep({
-          request: resolveNoteEditModelRequest(request),
+          request,
           messages: modelInput.messages,
           continuationMessages: modelInput.continuationMessages,
           tools: stepToolSpecs,
@@ -1818,9 +1984,7 @@ export class AgentRuntime {
       };
       // Tool execution is its own collaborator, built once per turn with the
       // state its three functions used to reach through this method's
-      // closure. The prepared-action summaries it appends to are read by the
-      // finalization path below, so they stay declared here.
-      const workflowSummaries: string[] = [];
+      // closure.
       const toolExecution = createToolExecution({
         registry: this.registry,
         now: this.now,
@@ -1832,7 +1996,6 @@ export class AgentRuntime {
         writeAllowed,
         adapterCapabilities,
         actionContractSession,
-        activePlanSession,
         paperEvidenceFrontier,
         resourceContextPlan,
         persistToolResultHandles,
@@ -1842,7 +2005,6 @@ export class AgentRuntime {
         preservedTurnHandleRecords,
         toolExecutionRecords,
         toolsUsedThisTurn,
-        workflowSummaries,
         getCurrentAnswerText: () => currentAnswerText,
         setFinalizedMaterial: (material) => {
           finalizedMaterial = material;
@@ -1850,70 +2012,10 @@ export class AgentRuntime {
         setToolResultReadAvailable: (available) => {
           toolResultReadAvailable = available;
         },
+        recordOutcomeEvidence: recordsOutcomes()
+          ? recordOutcomeEvidence
+          : undefined,
       });
-      // A prepared effect already has its native identities and arguments. It
-      // uses the same permission, journal and receipt path as any model call.
-      let referencesClarified = false;
-      if (request.actionPreparation?.state === "needs_input") {
-        const clarification = await toolExecution.executeToolWorkflow(
-          {
-            id: `preparation:${runId}`,
-            name: "request_user_input",
-            arguments: {
-              questions: [
-                {
-                  id: "reference",
-                  question: request.actionPreparation.issues.join("\n"),
-                  options:
-                    request.actionPreparation.sourceSelection?.candidates.map(
-                      (candidate) => ({
-                        id: `source:${candidate.id}`,
-                        label: candidate.path,
-                        description:
-                          "Remove this membership and preserve every other membership.",
-                      }),
-                    ) || [],
-                },
-              ],
-            },
-          },
-          0,
-          { suppressModelDelivery: true },
-        );
-        if (!clarification.toolResult.ok)
-          return await completeRun(
-            readToolError(clarification.toolResult) ||
-              "The requested action is still awaiting your input.",
-            "failed",
-          );
-        if (
-          (
-            request.actionPreparation as import("./contracts/actionPreparation").ActionPreparation
-          ).state !== "ready"
-        )
-          return await completeRun(
-            request.actionPreparation.issues.join("\n") ||
-              "The requested references remain unresolved.",
-            "failed",
-          );
-        referencesClarified = true;
-      }
-      if (request.actionProgress?.materialOutputs?.length) {
-        const retained = await loadWorkflowMaterial(request);
-        if (retained) {
-          finalizedMaterial = {
-            documentId: retained.documentId,
-            finalText: retained.visibleMarkdown,
-          };
-          // Material re-adopted from an earlier run must reach the terminal
-          // event with the same identity it was finalized under, not as a
-          // bare document id.
-          finalizedMaterialRefs.set(
-            retained.documentId,
-            materialRefFromDocument(retained),
-          );
-        }
-      }
       let operationSequence = 0;
       context.invokeRegisteredOperation = async (name, args) => {
         const tool = this.registry.getTool(name);
@@ -1932,108 +2034,10 @@ export class AgentRuntime {
             arguments: args,
           },
           0,
-          { suppressModelDelivery: true, checkpointedWorkflow: true },
+          { suppressModelDelivery: true },
         );
-        await actionContractSession.checkpoint();
         return outcome.toolResult;
       };
-      const advanceHostWorkflow =
-        async (): Promise<AgentRuntimeOutcome | null> => {
-          while (true) {
-            const next = await this.registry.getNextWorkflowStep(
-              request,
-              activePlanSession.activeWorkflowObligationIds(),
-            );
-            if (next.kind === "blocked")
-              return await completeRun(next.reason, "failed");
-            if (next.kind === "model") return null;
-            if (next.kind === "complete") {
-              if (!workflowSummaries.length) return null;
-              const intent = request.classifiedIntent;
-              const canReport =
-                Boolean(finalizedMaterial) ||
-                (intent?.retrievalIntent === "none" &&
-                  intent.externalSearchIntent === "none" &&
-                  intent.deliverableIntent === "chat");
-              if (!canReport) return null;
-              const decision = await actionContractSession.evaluateFinal({
-                canCorrect: false,
-              });
-              if (decision.kind !== "accept")
-                return await completeRun(
-                  decision.kind === "fail"
-                    ? decision.failure
-                    : decision.correction,
-                  "failed",
-                );
-              const planDecision = await activePlanSession.evaluateFinal({
-                canCorrect: false,
-              });
-              if (planDecision.kind !== "accept") return null;
-              const text =
-                workflowSummaries.join("\n\n") ||
-                actionContractSession.receiptStatus() ||
-                "The requested actions are verified complete.";
-              newTranscriptMessages.push({
-                role: "assistant",
-                content: finalizedMaterial?.finalText || text,
-              });
-              return await completeRun(text);
-            }
-            const prepared = next.prepared;
-            await emit({
-              type: "status",
-              text: "Applying the next resolved action",
-            });
-            const result = await toolExecution.executeToolWorkflow(
-              prepared.call,
-              0,
-              {
-                suppressModelDelivery: true,
-                preparedAction: prepared,
-              },
-            );
-            if (result.failed)
-              return await completeRun(
-                result.finalText || "The action failed.",
-                "failed",
-              );
-            const message: AgentUserMessage = {
-              role: "user",
-              content: JSON.stringify({
-                type: "host_workflow_progress",
-                instruction:
-                  "This is verified host execution evidence. Continue only unfinished work within the frozen request; do not repeat these completed actions.",
-                summary: prepared.summary,
-                actionReceipts: result.toolResult.actionReceipts,
-                progress: request.actionProgress,
-                planProgress: activePlanSession.workflowProgress(),
-              }),
-            };
-            continuationSession.appendHostMessage(message);
-            newTranscriptMessages.push(message);
-            await persistTranscriptCheckpoint({ requireAccepted: true });
-          }
-        };
-      if (referencesClarified) {
-        // The first model call must see the resolved authority, not the
-        // pre-clarification prompt that correctly prohibited effects.
-        renderedPrompt = await renderAgentPromptEnvelope(
-          request,
-          toolDefinitions,
-          matchedSkills,
-          resourceContextPlan,
-          {
-            contentInputs:
-              resolveCapabilitiesContentInputs(adapterCapabilities),
-          },
-        );
-        continuationSession.restartWithMessages(
-          composeAgentModelInput(renderedPrompt.envelope, {
-            transcriptMessages: promptTranscriptMessages(),
-          }),
-        );
-      }
       const rollbackCommittedStreamedText = async (
         stepStreamedText: string,
       ): Promise<void> => {
@@ -2051,6 +2055,9 @@ export class AgentRuntime {
       // A final answer the provider cut off at its output limit stays on
       // screen and in the transcript; the model is asked for the remainder.
       let answerContinuations = 0;
+      // How many times a cut-off answer may continue: as many full-size
+      // answers as the input budget holds beside the prompt it started from.
+      let answerContinuationLimit: number | undefined;
       let keptAnswerVisibleText = "";
       let keptAnswerModelText = "";
       const rollbackKeptAnswer = async (): Promise<void> => {
@@ -2071,45 +2078,380 @@ export class AgentRuntime {
           text,
         });
       };
+      /** Handles to the tool results in `source`, by call, and their records. */
+      const toolResultHandlesOf = (source: readonly AgentModelMessage[]) => {
+        const handles = new Map<string, string>();
+        const records: AgentToolResultHandleRecord[] = [];
+        for (const message of source) {
+          if (message.role !== "tool") continue;
+          let content: unknown = message.content;
+          try {
+            content = JSON.parse(message.content);
+          } catch {
+            // A result that is not JSON is stored as written.
+          }
+          const record = createAgentToolResultHandleRecord({
+            conversationKey: request.conversationKey,
+            toolName: message.name,
+            toolCallId: message.tool_call_id,
+            resourceSignature: resourceContextPlan.resourceSignature,
+            content,
+            createdAt: this.now(),
+          });
+          if (!record) continue;
+          handles.set(message.tool_call_id, record.handle);
+          records.push(record);
+        }
+        return { handles, records };
+      };
+      // The papers this turn's records hold, and the share the last page's
+      // digests were cut to.
+      const recordedPapers = new Set<string>();
+      let lastDigestShare = 0;
+      /**
+       * One batch of per-paper results as the transcript keeps it, under a
+       * handle that holds the digests themselves and the job they belong to,
+       * so a job "continue" picks back up carries them forward.
+       */
+      const recordLongJobResults = async (
+        digests: readonly PaperDigest[],
+      ): Promise<AgentUserMessage> => {
+        longJobRecords += 1;
+        const recordText = renderLongJobRecord(
+          longJobRecords,
+          renderPaperDigests(digests),
+        );
+        const record = createAgentToolResultHandleRecord({
+          conversationKey: request.conversationKey,
+          toolName: "long_job_results",
+          toolCallId: `${runId}:results-${longJobRecords}`,
+          resourceSignature: resourceContextPlan.resourceSignature,
+          content: {
+            itemIds: digests.map((digest) => digest.itemId),
+            results: recordText,
+            executionId: request.executionCheckpoint?.executionId,
+            digests,
+          },
+          createdAt: this.now(),
+        });
+        if (record) await persistToolResultHandles([record]);
+        for (const digest of digests)
+          recordedPapers.add(`item:${digest.itemId}`);
+        return {
+          role: "user",
+          retainedTool: {
+            name: "long_job_results",
+            callId: `${runId}:results-${longJobRecords}`,
+            ...(record ? { handle: record.handle } : {}),
+            category: "retrieval",
+          },
+          content: recordText,
+        };
+      };
+      /**
+       * Stop, or an error, ends a long job wherever it stands, often inside a
+       * page. The papers that page had read keep their results: recorded as
+       * a page's are, under a handle "continue" finds by the job, and
+       * straight into the stored transcript (the turn's own unfinished
+       * messages are not kept), unless a turn queued behind Stop wrote it
+       * first.
+       */
+      recordUnfinishedPage = async (): Promise<void> => {
+        if (!recordsOutcomes()) return;
+        const papers = new Set(
+          (request.executionCheckpoint?.tasks || []).flatMap((task) =>
+            task.origin === "model"
+              ? (task.targets || []).filter((target) =>
+                  target.startsWith("item:"),
+                )
+              : [],
+          ),
+        );
+        if (!papers.size) return;
+        const evidence = collectPaperEvidence(messages);
+        const itemOf = (target: string) => Number(target.replace(/^item:/, ""));
+        const unrecorded = [...papers].filter(
+          (target) =>
+            evidence.has(itemOf(target)) &&
+            !recordedPapers.has(target) &&
+            !carriedDigests.has(target),
+        );
+        if (!unrecorded.length) return;
+        const share = Math.max(
+          1,
+          lastDigestShare ||
+            Math.floor(providerReplaySoftLimit / (2 * papers.size)),
+        );
+        const { handles, records } = toolResultHandlesOf(messages);
+        await persistToolResultHandles(records);
+        const digests = unrecorded.map((target) => {
+          const found = evidence.get(itemOf(target))!;
+          return buildPaperDigest(
+            itemOf(target),
+            { ...found, title: found.title || scopePaper(target)?.title },
+            found.calls.flatMap((call) => {
+              const handle = handles.get(call.callId);
+              return handle ? [handle] : [];
+            }),
+            share,
+          );
+        });
+        const portable = buildPortableAgentTranscript({
+          messages: [
+            ...transcriptSegment.messages,
+            await recordLongJobResults(digests),
+          ],
+          conversationKey: request.conversationKey,
+          resourceSignature: resourceContextPlan.resourceSignature,
+        });
+        await persistToolResultHandles(portable.handleRecords);
+        const next = { ...transcriptSegment, messages: portable.messages };
+        // The digests are stored above whatever this write does: a turn
+        // queued behind Stop that wrote the transcript first keeps its
+        // messages, and "continue" still finds the results by the job.
+        const written = await writeTranscriptSegment(next);
+        if (written === "persisted" || written === "memory_only")
+          transcriptSegment = next;
+      };
+      /**
+       * After a tool round: page the turn's long job. When a page ends, the
+       * reads of the job's papers become per-paper digests (each within its
+       * share of the input budget, with handles to the full results), the
+       * provider session restarts from a checkpoint that carries every digest
+       * and the next page, and the page's digests are persisted with the
+       * transcript, so they outlive the turn.
+       */
+      const advanceLongJob = async (): Promise<void> => {
+        if (!recordsOutcomes()) return;
+        const budgetTokens = providerReplaySoftLimit;
+        const roundReads = turnReads
+          .slice(longJobReadsSeen)
+          .flatMap((read) =>
+            read.kind === "read"
+              ? [
+                  ...read.targets,
+                  ...(read.shallow || []),
+                  ...(read.noText || []),
+                ]
+              : [],
+          );
+        longJobReadsSeen = turnReads.length;
+        const boundary = longJob.check({
+          checkpoint: request.executionCheckpoint,
+          promptTokens: estimateContextMessagesTokens(messages),
+          budgetTokens,
+          requests: round,
+          reads: roundReads,
+          gaveUp: longJobGaveUp,
+        });
+        longJobGaveUp = [];
+        if (!boundary) return;
+        const job = readLongJob(request.executionCheckpoint, longJob.following);
+        if (!job) return;
+        // Every job paper whose reads are in this prompt, and every settled
+        // one without a digest yet (a paper with no text).
+        const evidence = collectPaperEvidence(messages);
+        const itemOf = (target: string) => Number(target.replace(/^item:/, ""));
+        const toDigest = job.targets.filter(
+          (target) =>
+            evidence.has(itemOf(target)) || boundary.digest.includes(target),
+        );
+        const digested: PaperDigest[] = [];
+        let digestShare = 0;
+        if (toDigest.length) {
+          // Handles to the results the restart drops, for the checkpoint and
+          // for each digest.
+          const { handles, records: handleRecords } =
+            toolResultHandlesOf(messages);
+          // Restart first, without the job's message, so the digests share
+          // and the next page is planned from the prompt the page will
+          // start from, not from the checkpoint's budget.
+          longJobMessage = null;
+          await restartFromSemanticCheckpoint({
+            sourceMessages: messages,
+            handleRecords,
+          });
+          // The job's results take at most half of what the restarted
+          // prompt leaves, so every page keeps the other half to read in.
+          digestShare = longJob.digestShare(job, {
+            promptTokens: estimateContextMessagesTokens(messages),
+            budgetTokens,
+          });
+          lastDigestShare = digestShare;
+          for (const target of toDigest) {
+            const found = evidence.get(itemOf(target));
+            const earlier = longJobDigests.get(target);
+            const excerpts = [
+              ...(earlier?.excerpts || []),
+              ...(found?.excerpts || []).filter(
+                (excerpt) =>
+                  !earlier?.excerpts.some(
+                    (known) =>
+                      known.text === excerpt.text &&
+                      known.section === excerpt.section,
+                  ),
+              ),
+            ];
+            const digest = buildPaperDigest(
+              itemOf(target),
+              {
+                title:
+                  found?.title || earlier?.title || scopePaper(target)?.title,
+                excerpts,
+                noText:
+                  Boolean(found?.noText || earlier?.noText) && !excerpts.length,
+                calls: found?.calls || [],
+              },
+              [
+                ...new Set([
+                  ...(earlier?.handles || []),
+                  ...(found?.calls || []).flatMap((call) => {
+                    const handle = handles.get(call.callId);
+                    return handle ? [handle] : [];
+                  }),
+                ]),
+              ],
+              digestShare,
+            );
+            longJobDigests.set(target, digest);
+            // A carried paper is in the transcript already: recorded again
+            // only when this turn read it.
+            if (found || !carriedDigests.has(target)) digested.push(digest);
+          }
+        }
+        const results = renderPaperDigests(
+          job.targets.flatMap((target) => {
+            const digest = longJobDigests.get(target);
+            return digest ? [digest] : [];
+          }),
+        );
+        const render = (
+          next: Parameters<typeof renderLongJobMessage>[0]["next"],
+        ) =>
+          renderLongJobMessage({
+            checkpoint: request.executionCheckpoint,
+            partIds: longJob.following,
+            results,
+            next,
+            titleOf: (target) =>
+              scopePaper(target)?.title || longJobDigests.get(target)?.title,
+            noTextReason: OUTCOME_REASONS.noText,
+          });
+        // The page starts from the prompt as it stands plus the job's message.
+        const next = longJob.plan({
+          checkpoint: request.executionCheckpoint,
+          promptTokens: estimateContextMessagesTokens([
+            ...messages,
+            { role: "user", content: render({ complete: true }) },
+          ]),
+          budgetTokens,
+          requests: round,
+        });
+        longJobReadShare = "complete" in next ? 0 : next.readShare;
+        longJobMessage = {
+          role: "user",
+          transient: true,
+          content: render(next),
+        };
+        await emit({
+          type: "provider_event",
+          providerType: "agent_long_job_page",
+          payload:
+            "complete" in next
+              ? {
+                  complete: true,
+                  papers: job.targets.length,
+                  digested: digested.length,
+                }
+              : {
+                  page: next.number,
+                  papers: next.targets.length,
+                  left: next.left,
+                  costPerPaper: next.costPerPaper,
+                  measured: next.measured,
+                  room: next.room,
+                  budgetTokens: next.budgetTokens,
+                  promptTokens: next.promptTokens,
+                  fitBound: next.fitBound,
+                  costBound: next.costBound,
+                  papersPerRequest: next.papersPerRequest,
+                  requestsPerPage: next.requestsPerPage,
+                  readsPerPage: next.readsPerPage,
+                  digested: digested.length,
+                  digestShare,
+                  readShare: next.readShare,
+                },
+        });
+        continuationSession.appendHostMessage(longJobMessage);
+        if (!digested.length) return;
+        // The page's per-paper results outlive the turn: Stop, a restart of
+        // Zotero and "continue" find them in the transcript, and a handle
+        // keeps them readable once older history is compacted.
+        newTranscriptMessages.push(await recordLongJobResults(digested));
+        await persistTranscriptCheckpoint();
+      };
       let round = 0;
       let segment = 1;
       let streamRecoveryUsed = false;
       const seenProgressFingerprints = new Set<string>();
+      // What the status says each round: the round, or the long job's page
+      // and its progress. Segments are progress checks, not a cap.
+      const roundStatus = (): string => {
+        const page = recordsOutcomes()
+          ? longJob.openPage(request.executionCheckpoint)
+          : null;
+        return page
+          ? `Continuing agent (page ${page.number} · ${page.settled} of ${page.total})`
+          : `Continuing agent (round ${round})`;
+      };
+      // Papers a tool failed on, each failure counted by its reason; after
+      // the same failure twice the host gives up on the paper.
+      const paperFailures = new Map<string, number>();
+      // Papers given up on since the last one done, and how many in a row
+      // stop the job: a page's worth (the page the run began in, or before
+      // paging the papers left), and more than one.
+      let failedInARow = 0;
+      let failedInARowLimit = 0;
       while (true) {
         const segmentRecordStart = toolExecutionRecords.length;
+        const settledAtSegmentStart = settledTargetCount(
+          request.executionCheckpoint,
+        );
         for (
           let segmentRound = 1;
           segmentRound <= maxRounds;
           segmentRound += 1
         ) {
-          const hostOutcome =
-            approvedPlanArtifact && approvedPlanArtifact.version <= 4
-              ? await advanceHostWorkflow()
-              : null;
-          if (hostOutcome) return hostOutcome;
           round += 1;
           let stepResult: { step: AgentModelStep; stepStreamedText: string };
           try {
             stepResult = await runModelStep(
               round,
-              round === 1
-                ? "Running agent"
-                : segment === 1
-                  ? `Continuing agent (${segmentRound}/${maxRounds})`
-                  : `Continuing agent (segment ${segment}, ${segmentRound}/${maxRounds})`,
+              round === 1 ? "Running agent" : roundStatus(),
             );
           } catch (err) {
             if (err instanceof AgentPromptBudgetError) {
-              return await completeRun(err.message, "failed");
+              return await completeRun(
+                err.message,
+                "failed",
+                "prompt_budget_exceeded",
+              );
             }
             throw err;
           }
           const { step, stepStreamedText } = stepResult;
           const terminalOutcome = providerTerminalOutcomes.shift();
           if (terminalOutcome) {
+            if (
+              !terminalOutcome.failed &&
+              terminalOutcome.documentId &&
+              recordsOutcomes()
+            )
+              await recordOutcomeEvidence({ kind: "answer" });
             return await completeRun(
               terminalOutcome.finalText || currentAnswerText,
               terminalOutcome.failed ? "failed" : "completed",
+              "provider_terminal_outcome",
               { documentId: terminalOutcome.documentId },
             );
           }
@@ -2121,6 +2463,24 @@ export class AgentRuntime {
             ) {
               // The model was writing its answer, not a tool call: keep what
               // it wrote visible and ask only for the remainder.
+              const addsText = addsNewAnswerText(
+                truncatedAnswerText,
+                keptAnswerModelText,
+              );
+              answerContinuationLimit ??= answerContinuationCeiling({
+                budgetTokens: providerReplaySoftLimit,
+                promptTokens: estimateContextMessagesTokens(messages),
+                outputTokens: resolveOutputReserve(
+                  request.advanced?.outputTokenLimit,
+                  request.model || "",
+                  {
+                    apiBase: request.apiBase,
+                    protocol: request.providerProtocol,
+                    authMode: request.authMode,
+                    profileOverride: request.advanced?.profileOverride,
+                  },
+                ),
+              });
               if (stepStreamedText) {
                 keptAnswerVisibleText += stepStreamedText;
               } else {
@@ -2137,7 +2497,8 @@ export class AgentRuntime {
                   content: truncatedAnswerText,
                 };
               if (
-                answerContinuations >= MAX_ANSWER_CONTINUATIONS ||
+                !addsText ||
+                answerContinuations >= answerContinuationLimit ||
                 segmentRound >= maxRounds
               ) {
                 newTranscriptMessages.push(truncatedAssistantMessage);
@@ -2149,6 +2510,7 @@ export class AgentRuntime {
                 return await completeRun(
                   `${turnPathRedactor.redactTerminalText(keptAnswerModelText)}${note}`,
                   "completed",
+                  "answer_continuation_limit",
                 );
               }
               answerContinuations += 1;
@@ -2184,6 +2546,7 @@ export class AgentRuntime {
                 return await completeRun(
                   "The response stream failed again after one automatic retry. Durable Plan progress was preserved; continue when the connection is available.",
                   "failed",
+                  "stream_interrupted_again",
                 );
               }
               streamRecoveryUsed = true;
@@ -2213,7 +2576,11 @@ export class AgentRuntime {
                     : customLimit?.mode === "custom"
                       ? `The custom per-response output limit (${customLimit.tokens} tokens) repeatedly prevented the model from completing the required structured step. Raise the limit in Advanced settings, then continue; durable Plan progress was preserved.`
                       : "The provider repeatedly reached its output limit before completing the required structured step. Durable Plan progress was preserved; continue the plan to resume from the pending work unit.";
-              return await completeRun(exhaustionMessage, "failed");
+              return await completeRun(
+                exhaustionMessage,
+                "failed",
+                "incomplete_step_limit",
+              );
             }
             const assistantMessage: AgentAssistantMessage =
               step.assistantMessage || {
@@ -2274,28 +2641,20 @@ export class AgentRuntime {
                   assistantMessage: assistantCorrectionMessage,
                   correctionMessage: userCorrectionMessage,
                 });
-                await persistTranscriptCheckpoint({
-                  requireAccepted: Boolean(
-                    finalDecision.actionContractRejection,
-                  ),
-                });
-                if (finalDecision.actionContractRejection) {
-                  actionContractSession.commitRejectedFinal(
-                    finalDecision.actionContractRejection,
-                  );
-                }
+                await persistTranscriptCheckpoint();
                 continue;
               }
-              if (finalDecision.actionContractRejection) {
-                actionContractSession.commitRejectedFinal(
-                  finalDecision.actionContractRejection,
-                );
-              }
-              return await completeRun(finalDecision.userMessage, "failed");
+              return await completeRun(
+                finalDecision.userMessage,
+                "failed",
+                "final_gate_rejected",
+              );
             }
             const answerPrefix = keptAnswerVisibleText;
             keptAnswerVisibleText = "";
             keptAnswerModelText = "";
+            if (recordsOutcomes())
+              await recordOutcomeEvidence({ kind: "answer" });
             return await emitFinalStep(
               step,
               `${answerPrefix}${stepStreamedText}`,
@@ -2311,18 +2670,31 @@ export class AgentRuntime {
           await rollbackCommittedStreamedText(stepStreamedText);
           await rollbackKeptAnswer();
 
-          if (step.calls.length > maxToolCallsPerRound) {
-            const overflowMessage = `The model returned ${step.calls.length} tool calls in one step, exceeding the safe limit of ${maxToolCallsPerRound}. None of those calls were executed.`;
+          // Item-scoped work may read a page's open papers in one step; an
+          // ordinary step keeps the ordinary limit.
+          const stepToolCallLimit = recordsOutcomes()
+            ? longJob.stepLimit(
+                {
+                  checkpoint: request.executionCheckpoint,
+                  promptTokens: estimateContextMessagesTokens(messages),
+                  budgetTokens: providerReplaySoftLimit,
+                },
+                maxToolCallsPerRound,
+              )
+            : maxToolCallsPerRound;
+          if (step.calls.length > stepToolCallLimit) {
+            const overflowMessage = `The model returned ${step.calls.length} tool calls in one step, exceeding the safe limit of ${stepToolCallLimit}. None of those calls were executed.`;
             if (toolCallOverflowCorrectionUsed || segmentRound >= maxRounds) {
               return await completeRun(
                 `${overflowMessage} Please narrow the request and try again.`,
                 "failed",
+                "tool_call_overflow",
               );
             }
             toolCallOverflowCorrectionUsed = true;
             await restartFromSemanticCheckpoint({
               sourceMessages: messages,
-              retryInstruction: `${overflowMessage} Retry with a complete new step containing at most ${maxToolCallsPerRound} tool calls. Do not assume that any result exists for the rejected calls.`,
+              retryInstruction: `${overflowMessage} Retry with a complete new step containing at most ${stepToolCallLimit} tool calls. Do not assume that any result exists for the rejected calls.`,
             });
             await emit({
               type: "provider_event",
@@ -2330,7 +2702,7 @@ export class AgentRuntime {
               payload: {
                 action: "checkpoint_and_retry",
                 returnedToolCalls: step.calls.length,
-                maxToolCallsPerRound,
+                maxToolCallsPerRound: stepToolCallLimit,
               },
             });
             continue;
@@ -2344,9 +2716,6 @@ export class AgentRuntime {
           newTranscriptMessages.push(assistantToolMessage);
           const roundToolMessages: AgentToolMessage[] = [];
           const roundFollowupMessages: AgentModelMessage[] = [];
-          let continuationCheckpoint:
-            | NonNullable<AgentToolResult["continuationCheckpoint"]>
-            | undefined;
           const appendRoundContinuation = () => {
             const delta = continuationSession.completeToolStep({
               toolMessages: roundToolMessages,
@@ -2357,25 +2726,47 @@ export class AgentRuntime {
           let roundHadSuccessfulToolResult = false;
           let roundHadToolFailure = false;
           let roundHadInputRejection = false;
-          for (const call of calls) {
+          // Papers of the turn's job a call failed on: their failures are the
+          // papers', not the run's, and do not count as repeated tool errors.
+          const givenUp = new Map<string, string[]>();
+          const jobPapers = recordsOutcomes()
+            ? new Set(
+                readLongJob(request.executionCheckpoint, longJob.following)
+                  ?.notDone || [],
+              )
+            : new Set<string>();
+          const doneBeforeRound = settledTargetCount(
+            request.executionCheckpoint,
+          );
+          for (const [index, call] of calls.entries()) {
             const outcome = await toolExecution.executeToolWorkflow(
               call,
               round,
               {
                 modelCallId: call.id,
+                followingCallCount: calls.length - index - 1,
               },
             );
             if (outcome.toolResult.ok) roundHadSuccessfulToolResult = true;
             else if (outcome.toolResult.inputRejected)
               roundHadInputRejection = true;
-            else if (!isUserDeniedToolResult(outcome.toolResult))
-              roundHadToolFailure = true;
-            if (
-              outcome.toolResult.ok &&
-              outcome.toolResult.continuationCheckpoint
+            else if (
+              // A call Stop kept from starting failed at nothing.
+              !outcome.notStarted &&
+              !isUserDeniedToolResult(outcome.toolResult)
             ) {
-              continuationCheckpoint =
-                outcome.toolResult.continuationCheckpoint;
+              const papers = namedItemTargets(call.arguments).filter((target) =>
+                jobPapers.has(target),
+              );
+              if (!papers.length) roundHadToolFailure = true;
+              const reason = toolFailureReason(outcome.toolResult.content);
+              for (const target of papers) {
+                const key = `${target}\n${reason}`;
+                const failures = (paperFailures.get(key) || 0) + 1;
+                paperFailures.set(key, failures);
+                if (failures >= 2)
+                  givenUp.set(reason, [...(givenUp.get(reason) || []), target]);
+              }
             }
             if (outcome.delivery) {
               const toolMessage: AgentToolMessage = {
@@ -2405,9 +2796,13 @@ export class AgentRuntime {
                 });
               }
               await persistTranscriptCheckpoint();
+              // A finalized document that ends the turn is its answer.
+              if (!outcome.failed && outcome.documentId && recordsOutcomes())
+                await recordOutcomeEvidence({ kind: "answer" });
               return await completeRun(
                 stopFinalText,
                 outcome.failed ? "failed" : "completed",
+                outcome.failed ? "tool_action_failed" : "terminal_tool",
                 {
                   documentId: outcome.documentId,
                 },
@@ -2425,34 +2820,58 @@ export class AgentRuntime {
             if (roundHadInputRejection && !roundHadToolFailure)
               consecutiveInputRejectionRounds += 1;
           }
+          if (givenUp.size) {
+            for (const [reason, targets] of givenUp)
+              await recordOutcomeEvidence({ kind: "failed", targets, reason });
+          }
+          longJobGaveUp = [...givenUp.values()].flat();
+          if (recordsOutcomes()) {
+            const given = longJobGaveUp.length;
+            const doneThisRound =
+              settledTargetCount(request.executionCheckpoint) -
+              doneBeforeRound -
+              given;
+            if (doneThisRound > 0) failedInARow = 0;
+            if (given && !failedInARow) {
+              const page = longJob.openPage(request.executionCheckpoint);
+              failedInARowLimit = Math.max(
+                2,
+                page ? page.targets.length : jobPapers.size,
+              );
+            }
+            failedInARow += given;
+            // A page's worth of papers failed in a row: something beyond one
+            // paper is wrong. The job stops where it is, resumable.
+            if (given && failedInARow >= failedInARowLimit) {
+              await persistTranscriptCheckpoint();
+              const [reason] = [...givenUp.keys()];
+              return await completeRun(
+                `Stopped: the last ${failedInARow} papers in a row failed (${reason}). The job's progress is saved; say "continue" to go on with the papers left.`,
+                "failed",
+                "page_failed",
+              );
+            }
+          }
           if (
             consecutiveToolErrorRounds >= 3 ||
             consecutiveInputRejectionRounds >= 6
           ) {
             await persistTranscriptCheckpoint();
+            const stopRule: RunStopRule =
+              consecutiveInputRejectionRounds >= 6
+                ? "repeated_input_rejections"
+                : "repeated_tool_errors";
             const finalText =
               currentAnswerText ||
-              (consecutiveInputRejectionRounds >= 6
+              (stopRule === "repeated_input_rejections"
                 ? "Agent stopped after repeated invalid tool inputs. Please adjust the request and try again."
                 : "Agent stopped after repeated tool errors. Please adjust the request and try again.");
-            return await completeRun(finalText, "failed");
+            return await completeRun(finalText, "failed", stopRule);
           }
-          if (continuationCheckpoint) {
-            await restartFromSemanticCheckpoint({
-              sourceMessages: messages,
-              retryInstruction: continuationCheckpoint.instruction,
-            });
-            await emit({
-              type: "provider_event",
-              providerType: "agent_context_budget",
-              payload: {
-                action: "checkpoint_durable_tool_state",
-                reason: continuationCheckpoint.reason,
-              },
-            });
-          } else {
-            await persistTranscriptCheckpoint();
-          }
+          await persistTranscriptCheckpoint();
+          // A stopped run advances no page: its next step ends it, and
+          // records what the open page had read.
+          if (!params.signal?.aborted) await advanceLongJob();
         }
 
         const newFingerprints = toolExecutionRecords
@@ -2466,11 +2885,20 @@ export class AgentRuntime {
           )
           .map(buildToolProgressFingerprint)
           .filter((fingerprint) => !seenProgressFingerprints.has(fingerprint));
-        if (!newFingerprints.length) {
+        // A newly settled target is progress too: a long job going through
+        // its papers is never stopped here, even when its results repeat.
+        const settledNewTargets =
+          settledTargetCount(request.executionCheckpoint) >
+          settledAtSegmentStart;
+        if (!newFingerprints.length && !settledNewTargets) {
           const finalText =
             currentAnswerText ||
             `Agent stopped after segment ${segment} produced no new successful tool result. The completed transcript was saved; narrow or redirect the request before continuing.`;
-          return await completeRun(finalText, "failed");
+          return await completeRun(
+            finalText,
+            "failed",
+            "segment_without_progress",
+          );
         }
         for (const fingerprint of newFingerprints) {
           seenProgressFingerprints.add(fingerprint);
@@ -2486,28 +2914,29 @@ export class AgentRuntime {
         segment += 1;
       }
     } catch (error) {
-      if (!runTerminalized)
-        await planSession
-          ?.interrupt(
-            params.signal?.aborted
-              ? "The user stopped the approved plan execution"
-              : "The provider or runtime failed before the approved plan completed",
-          )
-          .catch(() => undefined);
-      if (webSourceRunId && !runTerminalized) {
+      if (webSourceRunId && !runTerminating) {
         const message = redactRunTerminalText(
           error instanceof Error ? error.message : String(error),
         );
-        await persistIfLive(() =>
-          finishAgentRun(
-            webSourceRunId!,
-            params.signal?.aborted ? "cancelled" : "failed",
-            params.signal?.aborted ? message : INTERRUPTED_AGENT_RUN_MARKER,
+        await recordUnfinishedPage?.().catch((failure) =>
+          logRuntimeWarning(
+            "LLM Agent: recording a stopped page's results failed",
+            failure,
           ),
+        );
+        await terminateRun(
+          params.signal?.aborted ? "cancelled" : "failed",
+          params.signal?.aborted ? message : INTERRUPTED_AGENT_RUN_MARKER,
+          params.signal?.aborted
+            ? "cancelled_in_flight"
+            : "interrupted_by_error",
         ).catch(() => undefined);
       }
       throw error;
     } finally {
+      if (unsettledTurns.get(request.conversationKey) === settling)
+        unsettledTurns.delete(request.conversationKey);
+      settled();
       // Completion, provider failure, and abort all land here: write the one
       // usage row for this turn. It never throws, and it is not awaited so a
       // slow database cannot delay the turn's teardown.
@@ -2516,4 +2945,26 @@ export class AgentRuntime {
       pathLease.release();
     }
   }
+}
+
+/**
+ * Cheap keyword signals from the user's text, computed once per ordinary
+ * turn. They only select which tool guidance is shown; never authority.
+ */
+export function computeUserTextSignals(
+  userText: string,
+): NonNullable<AgentRuntimeRequest["userTextSignals"]> {
+  return {
+    mentionsDuplicates: /\bduplicat|\bmerg(e|ed|es|ing)\b|重复|合并/i.test(
+      userText,
+    ),
+    mentionsTrash: /\btrash\b|\brestor(e|ed|ing)\b|回收站|恢复/i.test(userText),
+    mentionsAttachment:
+      /\battachments?\b|\brenam(e|ed|ing)\b|\brelink(ed|ing)?\b|附件/i.test(
+        userText,
+      ),
+    mentionsImport: /\bimport(s|ed|ing)?\b|导入|add .* to (my )?library/i.test(
+      userText,
+    ),
+  };
 }

@@ -154,7 +154,9 @@ describe("workflow: sidebar pointer reentry", function () {
     box.dispatchEvent(new win.Event("scroll"));
     await settle();
     const boxTop = box.getBoundingClientRect().top;
-    const paragraph = Array.from(box.querySelectorAll("p")).find((node) => {
+    const paragraph = (
+      Array.from(box.querySelectorAll("p")) as HTMLParagraphElement[]
+    ).find((node) => {
       const rect = node.getBoundingClientRect();
       return rect.bottom > boxTop && rect.top < boxTop + box.clientHeight;
     });
@@ -260,7 +262,12 @@ describe("workflow: sidebar pointer reentry", function () {
       fixture = undefined;
       for (const [name, value] of previous) {
         if (value === undefined) Zotero.Prefs.clear(prefix + name, true);
-        else Zotero.Prefs.set(prefix + name, value, true);
+        else
+          Zotero.Prefs.set(
+            prefix + name,
+            value as string | number | boolean,
+            true,
+          );
       }
       previous.clear();
     }

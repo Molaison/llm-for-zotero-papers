@@ -76,10 +76,10 @@ export function readLatestTranscriptGoal(
 /**
  * What a turn has to know about work the conversation left unfinished.
  *
- * Both sections answer the same question -- what already exists, so that the
+ * Every section answers the same question -- what already exists, so that the
  * model continues it instead of making it again -- so they travel as one host
  * message. A second message would stack another block into every prompt for
- * as long as either stayed outstanding. Returns null when nothing is
+ * as long as any stayed outstanding. Returns null when nothing is
  * outstanding.
  */
 export function buildTurnStartRecoveryMessage(params: {

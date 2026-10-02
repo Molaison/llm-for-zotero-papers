@@ -16,6 +16,7 @@ import {
 import {
   CHUNK_OVERLAP,
   EMBEDDING_BATCH_SIZE,
+  EMBEDDING_BATCH_TIMEOUT_MS,
   CHUNK_TARGET_LENGTH,
   RETRIEVAL_TOP_K_PER_PAPER,
   RRF_K,
@@ -42,7 +43,11 @@ import {
 } from "../quotes/quoteCitations";
 import { readNoteSnapshot } from "../notes/noteSnapshot";
 import { readAttachmentBytes } from "../attachmentStorage";
-import { pdfTextCache, pdfTextLoadingTasks } from "./contextCache";
+import {
+  notifyPdfContextLoaded,
+  pdfTextCache,
+  pdfTextLoadingTasks,
+} from "./contextCache";
 import {
   buildAndWriteManifest,
   buildManifest,
@@ -413,7 +418,10 @@ async function cacheTextAttachment(
 
 async function cachePDFText(
   item: Zotero.Item,
-  options?: { sourceMode?: PaperContentSourceMode },
+  options?: {
+    sourceMode?: PaperContentSourceMode;
+    preferFulltextCache?: boolean;
+  },
 ) {
   if (pdfTextCache.has(item.id)) return;
 
@@ -466,7 +474,7 @@ async function cachePDFText(
     }
 
     // 2. Fallback to Zotero.PDFWorker
-    if (!pdfText && pdfItem) {
+    const tryPdfWorker = async (pdfItem: Zotero.Item) => {
       try {
         const result = await Zotero.PDFWorker.getFullText(pdfItem.id);
         if (result && result.text) {
@@ -484,15 +492,28 @@ async function cachePDFText(
       } catch (e) {
         appLogger.warn("PDF extraction failed:", e);
       }
-    }
+    };
 
     // 3. Fallback to Zotero's full-text cache/index. PDFWorker can return no
     // text even when Zotero already has indexed text for the attachment.
-    if (!pdfText && pdfItem) {
+    const tryFulltextCache = async (pdfItem: Zotero.Item) => {
       const cachedText = await readZoteroFulltextCache(pdfItem);
       if (cachedText) {
         pdfText = cachedText;
         sourceType = "zotero-fulltext-cache";
+      }
+    };
+
+    // Background indexing (preferFulltextCache) swaps steps 2 and 3 so it
+    // almost never runs pdf.js; interactive callers keep the page-aware
+    // PDFWorker text first.
+    if (!pdfText && pdfItem) {
+      if (options?.preferFulltextCache) {
+        await tryFulltextCache(pdfItem);
+        if (!pdfText) await tryPdfWorker(pdfItem);
+      } else {
+        await tryPdfWorker(pdfItem);
+        if (!pdfText) await tryFulltextCache(pdfItem);
       }
     }
 
@@ -653,7 +674,12 @@ async function cachePDFText(
 
 export async function ensurePDFTextCached(
   item: Zotero.Item,
-  options?: { sourceMode?: PaperContentSourceMode },
+  options?: {
+    sourceMode?: PaperContentSourceMode;
+    preferFulltextCache?: boolean;
+    /** Background index loads: fill the cache without firing the write-through hook. */
+    silentLoad?: boolean;
+  },
 ): Promise<void> {
   const cached = pdfTextCache.get(item.id);
   if (cached && cachedContextMatchesSourceMode(cached, options?.sourceMode)) {
@@ -679,6 +705,11 @@ export async function ensurePDFTextCached(
   const task = (async () => {
     try {
       await cachePDFText(item, options);
+      // Fresh loads with text only; cache hits and waits on an existing task return before this.
+      const loaded = pdfTextCache.get(item.id);
+      if (loaded && loaded.chunks.length && !options?.silentLoad) {
+        notifyPdfContextLoaded(item.id);
+      }
     } finally {
       pdfTextLoadingTasks.delete(item.id);
     }
@@ -771,6 +802,14 @@ export function invalidateCachedContextText(itemId: number): void {
   // text and scores after a MinerU refresh.  Lazy import to avoid circular
   // dependency (multiContextPlanner imports from pdfContext).
   invalidateRetrievalCandidates(normalizedItemId);
+  // Re-index the new text. Lazy import: indexer.ts imports this module.
+  void import("../libraryTextIndex/scheduler")
+    .then(({ libraryTextIndexScheduler }) =>
+      libraryTextIndexScheduler.enqueue([normalizedItemId], "textInvalidated"),
+    )
+    .catch((error) =>
+      appLogger.debug("LLM index: re-index enqueue failed", error),
+    );
   // Clear embedding cache — chunks will change when MinerU content is refreshed,
   // so cached embeddings are stale. Do NOT delete MinerU files themselves:
   // this function is called right after writeMineruCacheFiles(), so deleting
@@ -1015,8 +1054,16 @@ function buildChunkMetadataFromManifest(
 ): PdfChunkMeta[] {
   const sourceFingerprint = buildPdfSourceFingerprint(fullText, "mineru");
   // Build a lookup: for any char position in fullText, which section is it?
+  // Chunks come in document order, so each is searched for after the one
+  // before it: text that repeats (a running header) is found where it
+  // occurs, not at its first occurrence.
+  let searchFrom = 0;
   function findChunkPosition(chunkText: string): number {
-    return fullText.indexOf(chunkText.slice(0, 100));
+    const probe = chunkText.slice(0, 100);
+    const position = fullText.indexOf(probe, searchFrom);
+    if (position < 0) return fullText.indexOf(probe);
+    searchFrom = position + 1;
+    return position;
   }
 
   function findSectionIndexForPosition(pos: number): number {
@@ -1028,6 +1075,7 @@ function buildChunkMetadataFromManifest(
     return -1;
   }
 
+  const enclosing = enclosingStandardSections(sections);
   const meta: PdfChunkMeta[] = [];
   for (const [chunkIndex, chunkText] of chunks.entries()) {
     const sourceStart = findChunkPosition(chunkText);
@@ -1038,6 +1086,8 @@ function buildChunkMetadataFromManifest(
     const sectionIndex = findSectionIndexForPosition(sourceStart);
     const section = sectionIndex >= 0 ? sections[sectionIndex] : undefined;
     const sectionLabel = section?.heading;
+    const enclosingSection =
+      sectionIndex >= 0 ? enclosing[sectionIndex] : undefined;
     // The manifest heading decides the kind when it names a standard section;
     // otherwise ("2.2 Kinematic condition") the chunk text decides.
     const headingKind = section
@@ -1107,6 +1157,7 @@ function buildChunkMetadataFromManifest(
             sectionLevel: section.level,
           }
         : {}),
+      ...(enclosingSection ? { enclosingSection } : {}),
       chunkKind,
       kindSource: headingKind ? "manifest" : "heuristic",
       anchorText: buildEvidenceAnchorFromText(cleaned.text) || undefined,
@@ -1217,6 +1268,101 @@ export function classifyHeadingKind(
     }
   }
   return undefined;
+}
+
+// ── Enclosing standard section ───────────────────────────────────────────────
+
+/** The standard sections a chunk can lie in. */
+const STANDARD_SECTION_KINDS = new Set<PdfChunkKind>([
+  "abstract",
+  "introduction",
+  "methods",
+  "results",
+  "discussion",
+  "conclusion",
+]);
+
+/**
+ * Standard sections whose subsections inherit them. An abstract or an
+ * introduction does not: a paper without a Results heading follows its
+ * introduction with result subsections, which must not read as introduction.
+ */
+const INHERITED_SECTION_KINDS = new Set<PdfChunkKind>([
+  "methods",
+  "results",
+  "discussion",
+  "conclusion",
+]);
+
+/** Back matter ends the standard section before it: nothing after inherits. */
+const BACK_MATTER_HEADING_PATTERN =
+  /^(?:references?|bibliography|literature cited|works cited|acknowledg(?:e)?ments?|funding|financial (?:support|disclosures?)|authors?['’]?s? contributions?|competing (?:financial )?interests?|conflicts? of interests?|declarations?(?: of (?:competing )?interests?)?|(?:(?:data|code|materials?|software)(?:,|\s+(?:and|&))?\s+)+availability|availability of (?:data|code|materials?)|supplementary|supporting information|additional (?:information|files)|appendix|appendices)\b/i;
+
+function stripHeadingEnumerator(heading: string): string {
+  return normalizeEvidenceText(heading)
+    .replace(/^#{1,6}\s+/, "")
+    .replace(HEADING_ENUMERATOR_PATTERN, "")
+    .trim();
+}
+
+function isBackMatterHeading(heading: string): boolean {
+  return BACK_MATTER_HEADING_PATTERN.test(stripHeadingEnumerator(heading));
+}
+
+/**
+ * A back-matter heading opening a chunk of unsectioned text: a short heading
+ * line, or a heading run into the first sentence ("Funding: This work").
+ */
+function matchBackMatterHeading(
+  chunkText: string,
+): SectionHeadingMatch | undefined {
+  const firstLine = sanitizePdfText(chunkText).split(/\n+/, 1)[0] || "";
+  const candidate = stripHeadingEnumerator(firstLine);
+  const match = BACK_MATTER_HEADING_PATTERN.exec(candidate);
+  if (!match) return undefined;
+  const rest = candidate.slice(match[0].length);
+  const headingLine = candidate.length <= 80 && !/[.!?]\s+\S/.test(rest);
+  const runOn = /^[:.]?\s+[A-Z]/.test(rest);
+  if (!headingLine && !runOn) return undefined;
+  return {
+    label: headingLine ? candidate.replace(/[:.\s-]+$/, "") : match[0],
+    kind: "body",
+  };
+}
+
+/**
+ * The enclosing standard section of each manifest section, in document
+ * order: a standard heading encloses itself, its subsections inherit it
+ * (methods, results, discussion and conclusion only), and back matter ends
+ * it. MinerU writes every heading at one level, so order is the only
+ * structure; when the markdown does nest its headings, a heading no deeper
+ * than the standard one is a sibling, not a subsection, and ends it too.
+ */
+function enclosingStandardSections(
+  sections: ManifestSection[],
+): Array<string | undefined> {
+  const nested = new Set(sections.map((section) => section.level)).size > 1;
+  let inherited: { heading: string; level: number } | undefined;
+  return sections.map((section) => {
+    const kind = classifyHeadingKind(section.heading)?.kind;
+    if (
+      kind === "references" ||
+      kind === "appendix" ||
+      isBackMatterHeading(section.heading)
+    ) {
+      inherited = undefined;
+      return undefined;
+    }
+    if (kind && STANDARD_SECTION_KINDS.has(kind)) {
+      inherited = INHERITED_SECTION_KINDS.has(kind)
+        ? { heading: section.heading, level: section.level }
+        : undefined;
+      return section.heading;
+    }
+    if (inherited && nested && section.level <= inherited.level)
+      inherited = undefined;
+    return inherited?.heading;
+  });
 }
 
 const FIGURE_CAPTION_PATTERN =
@@ -1528,6 +1674,9 @@ export function buildChunkMetadata(
     sourceType,
   );
   let activeSection: SectionHeadingMatch | undefined;
+  // Unsectioned text shows only standard and back-matter headings, so the
+  // active standard section encloses every chunk until the next heading.
+  let enclosingSection: string | undefined;
   let sourceCursor = 0;
   let sourceSearchCursor = 0;
   const pageBoundaries = (() => {
@@ -1561,12 +1710,15 @@ export function buildChunkMetadata(
   };
   for (const [chunkIndex, chunkText] of chunks.entries()) {
     const explicitSection =
-      sourceType === "mineru"
+      (sourceType === "mineru"
         ? matchMarkdownSectionHeading(chunkText) ||
           matchSectionHeading(chunkText)
-        : matchSectionHeading(chunkText);
+        : matchSectionHeading(chunkText)) || matchBackMatterHeading(chunkText);
     if (explicitSection) {
       activeSection = explicitSection;
+      enclosingSection = STANDARD_SECTION_KINDS.has(explicitSection.kind)
+        ? explicitSection.label
+        : undefined;
     }
     const normalizedText = normalizeEvidenceText(chunkText);
     const sectionHeading = explicitSection || activeSection;
@@ -1616,6 +1768,7 @@ export function buildChunkMetadata(
       text: chunkText,
       normalizedText,
       sectionLabel: sectionHeading?.label,
+      ...(enclosingSection ? { enclosingSection } : {}),
       chunkKind,
       anchorText: buildEvidenceAnchorFromText(cleaned.text) || undefined,
       leadingNoiseRemoved: cleaned.removedLeadingNoise || undefined,
@@ -1780,7 +1933,10 @@ export function scoreChunkBM25(
   return score;
 }
 
-function cosineSimilarity(a: number[], b: number[]): number {
+export function cosineSimilarity(
+  a: readonly number[],
+  b: readonly number[],
+): number {
   if (!a.length || !b.length || a.length !== b.length) return 0;
   let dot = 0;
   let normA = 0;
@@ -1796,11 +1952,21 @@ function cosineSimilarity(a: number[], b: number[]): number {
   return dot / (Math.sqrt(normA) * Math.sqrt(normB));
 }
 
-async function embedTexts(texts: string[]): Promise<number[][]> {
+/**
+ * Embeds a paper's chunks in batches. Each batch gets the longer batch timeout,
+ * not the query default: a slow local provider may need well over 30 s for
+ * 16 chunks. `embed` is injectable for tests.
+ */
+export async function embedTexts(
+  texts: string[],
+  embed: typeof callEmbeddings = callEmbeddings,
+): Promise<number[][]> {
   const all: number[][] = [];
   for (let i = 0; i < texts.length; i += EMBEDDING_BATCH_SIZE) {
     const batch = texts.slice(i, i + EMBEDDING_BATCH_SIZE);
-    const batchEmbeddings = await callEmbeddings(batch);
+    const batchEmbeddings = await embed(batch, {
+      timeoutMs: EMBEDDING_BATCH_TIMEOUT_MS,
+    });
     all.push(...batchEmbeddings);
   }
   return all;
@@ -2204,58 +2370,20 @@ function shouldTryEmbeddings(): boolean {
   return state.enabled;
 }
 
-// ── Intent-driven evidence heuristics ────────────────────────────────────────
-
-type QueryIntent =
-  | "factual"
-  | "conceptual"
-  | "methodological"
-  | "comparative"
-  | "citation"
-  | "visual"
-  | "general";
+// ── Evidence section heuristics ──────────────────────────────────────────────
 
 /**
- * Section priors keyed by query intent. Only the *sign* of a prior survives:
- * a boosted kind moves up a fixed two ranks, a demoted kind moves to the end.
- * `introduction`, `body` and `unknown` never move — a prior may break a tie,
- * it may not decide the order (reciprocal-rank fusion spans ~0.03 in total,
- * so the old additive constants of 0.8–1.5 overruled relevance outright).
+ * Section priors. Only the *sign* of a prior survives: a boosted kind moves
+ * up a fixed two ranks, a demoted kind moves to the end. `introduction`,
+ * `body` and `unknown` never move — a prior may break a tie, it may not
+ * decide the order (reciprocal-rank fusion spans ~0.03 in total, so the old
+ * additive constants of 0.8–1.5 overruled relevance outright).
  */
-const SECTION_BOOST_PROFILES: Record<
-  QueryIntent,
-  { boost: PdfChunkKind[]; demote: PdfChunkKind[] }
-> = {
-  general: {
+const SECTION_BOOST_PROFILE: { boost: PdfChunkKind[]; demote: PdfChunkKind[] } =
+  {
     boost: ["abstract", "results", "discussion", "conclusion"],
     demote: ["figure-caption", "table-caption", "appendix", "references"],
-  },
-  factual: {
-    boost: ["results", "methods", "abstract", "discussion"],
-    demote: ["figure-caption", "table-caption", "appendix", "references"],
-  },
-  conceptual: {
-    boost: ["discussion", "abstract", "results"],
-    demote: ["figure-caption", "table-caption", "appendix", "references"],
-  },
-  methodological: {
-    boost: ["methods", "abstract", "results"],
-    // The old profile gave `appendix` a positive weight for method questions.
-    demote: ["figure-caption", "table-caption", "references"],
-  },
-  comparative: {
-    boost: ["results", "discussion", "abstract"],
-    demote: ["figure-caption", "table-caption", "appendix", "references"],
-  },
-  citation: {
-    boost: ["references", "discussion", "abstract"],
-    demote: ["figure-caption", "table-caption", "appendix"],
-  },
-  visual: {
-    boost: ["figure-caption", "table-caption", "results"],
-    demote: ["appendix", "references"],
-  },
-};
+  };
 
 /** Ranks a boosted section kind can climb. */
 const SECTION_PRIOR_RANK_SHIFT = -2;
@@ -2278,14 +2406,13 @@ function priorShiftFor(params: {
   chunkText: string;
   chunkKind?: PdfChunkKind;
   kindSource?: "manifest" | "heuristic";
-  intent?: QueryIntent;
 }): SectionPrior {
   const chunkText = normalizeEvidenceText(params.chunkText);
   const wordCount = chunkText ? chunkText.split(/\s+/).length : 0;
   if (wordCount < MIN_EVIDENCE_WORD_COUNT) return DEMOTED_PRIOR;
   if (looksLikeReferenceList(params.chunkText)) return DEMOTED_PRIOR;
 
-  const profile = SECTION_BOOST_PROFILES[params.intent || "general"];
+  const profile = SECTION_BOOST_PROFILE;
   const kind = params.chunkKind as PdfChunkKind | undefined;
   if (!kind) return NEUTRAL_PRIOR;
   if (profile.demote.includes(kind)) return DEMOTED_PRIOR;
@@ -2720,8 +2847,6 @@ export async function buildPaperRetrievalCandidates(
   // normalization sensitivity and fixed weight tuning.
   const retrievalMode = options?.mode || "general";
 
-  const intent = queryPlan?.retrievalPurpose;
-
   const candidates = chunkStats.map((chunk, idx) => {
     const bm25Score = bm25Scores[idx] || 0;
     const embeddingScore = rawEmbeddingScores
@@ -2748,6 +2873,7 @@ export async function buildPaperRetrievalCandidates(
       sectionLabel: meta?.sectionLabel,
       sectionIndex: meta?.sectionIndex,
       sectionPath: meta?.sectionPath,
+      enclosingSection: meta?.enclosingSection,
       chunkKind: meta?.chunkKind,
       anchorText: meta?.anchorText,
       leadingNoiseRemoved: meta?.leadingNoiseRemoved,
@@ -2778,7 +2904,6 @@ export async function buildPaperRetrievalCandidates(
               chunkText: chunks[chunk.index],
               chunkKind: meta?.chunkKind,
               kindSource: meta?.kindSource,
-              intent,
             })
           : NEUTRAL_PRIOR),
         kindSource: meta?.kindSource,

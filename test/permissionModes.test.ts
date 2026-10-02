@@ -20,7 +20,6 @@ import {
   getOriginalAgentPermissionMode,
   setOriginalAgentPermissionMode,
 } from "../src/agent/originalAgentPermissionMode";
-import { getOriginalAgentPermissionModeDescription } from "../src/shared/originalAgentPermissionMode";
 import {
   migrateClaudePermissionMode,
   migrateCodexPermissionState,
@@ -620,20 +619,16 @@ describe("provider permission modes", function () {
     assert.include(byKey["original:yolo"], "without permission prompts");
     assert.include(byKey["original:yolo"], "ambiguous or dangerous actions");
     assert.include(byKey["original:yolo"], "Claude Code, Codex");
-    assert.include(byKey["original:yolo"], "requested review workflows");
-    assert.include(byKey["original:yolo"], "required paper selection");
+    // The host refuses importing a discovery's papers around the selection
+    // card in every mode, so the copy names it with the other rails.
+    assert.include(
+      byKey["original:yolo"],
+      "Requested review workflows, execution integrity and the paper selection card for discovered papers remain enforced",
+    );
+    // Nothing enforces this any more, so the copy must not promise it.
+    assert.notInclude(byKey["original:yolo"], "Explicit restrictions");
     assert.notInclude(byKey["original:yolo"], "require review");
     assert.notInclude(byKey["original:yolo"], "Only explicit prohibitions");
-  });
-
-  it("names the same yolo rails in the long mode description", function () {
-    const description = getOriginalAgentPermissionModeDescription();
-    assert.include(description, "chat-only memory");
-    assert.include(
-      description,
-      "the paper selection card before importing discovered papers",
-    );
-    assert.include(description, "the change journal remain enforced");
   });
 
   it("falls back to auto when the preference store is unreadable", function () {

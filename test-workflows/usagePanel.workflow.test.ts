@@ -151,9 +151,9 @@ function centerOf(element: Element): { clientX: number; clientY: number } {
 }
 
 function sectionTitles(root: HTMLElement): string[] {
-  return Array.from(root.querySelectorAll("[data-usage-section]")).map(
-    (node) => node.getAttribute("data-usage-section") || "",
-  );
+  return (
+    Array.from(root.querySelectorAll("[data-usage-section]")) as Element[]
+  ).map((node) => node.getAttribute("data-usage-section") || "");
 }
 
 describe("workflow: usage statistics preferences tab", function () {
@@ -318,9 +318,9 @@ describe("workflow: usage statistics preferences tab", function () {
       // The Usage tab reports tokens, never money: no cost card, and no
       // currency anywhere on the pane.
       assert.deepEqual(
-        Array.from(root.querySelectorAll("[data-usage-card]")).map((card) =>
-          card.getAttribute("data-usage-card"),
-        ),
+        (
+          Array.from(root.querySelectorAll("[data-usage-card]")) as Element[]
+        ).map((card) => card.getAttribute("data-usage-card")),
         ["Paper chat", "Library chat", "Tokens"],
         "Overview shows Paper chat, Library chat and Tokens",
       );
@@ -347,8 +347,10 @@ describe("workflow: usage statistics preferences tab", function () {
         "[data-usage-popover]",
       ) as HTMLElement | null;
       assert.isOk(popover, "the Overview builds one hover card for the grid");
-      const today = Array.from(
-        root.querySelectorAll("[data-usage-heatmap-cell]"),
+      const today = (
+        Array.from(
+          root.querySelectorAll("[data-usage-heatmap-cell]"),
+        ) as Element[]
       ).at(-1) as SVGElement;
       const todayKey = today.getAttribute("data-usage-heatmap-cell") || "";
       sendMouse(win, today, "mouseenter", centerOf(today));
@@ -410,15 +412,15 @@ describe("workflow: usage statistics preferences tab", function () {
         "only one sub-tab's content is in the layout at a time",
       );
       assert.deepEqual(
-        Array.from(root.querySelectorAll("[data-usage-card]")).map((card) =>
-          card.getAttribute("data-usage-card"),
-        ),
+        (
+          Array.from(root.querySelectorAll("[data-usage-card]")) as Element[]
+        ).map((card) => card.getAttribute("data-usage-card")),
         ["Questions", "Tokens", "Papers"],
         "the paper tab shows Questions, Tokens and Papers",
       );
       const paperRows = Array.from(
         root.querySelectorAll('[data-usage-row="detail"]'),
-      );
+      ) as Element[];
       assert.isAtLeast(
         paperRows.length,
         1,
@@ -441,9 +443,9 @@ describe("workflow: usage statistics preferences tab", function () {
         "the library tab never lists paper titles",
       );
       assert.deepEqual(
-        Array.from(root.querySelectorAll("[data-usage-card]")).map((card) =>
-          card.getAttribute("data-usage-card"),
-        ),
+        (
+          Array.from(root.querySelectorAll("[data-usage-card]")) as Element[]
+        ).map((card) => card.getAttribute("data-usage-card")),
         ["Questions", "Tokens", "Conversations"],
         "the library tab shows Questions, Tokens and Conversations",
       );
@@ -475,9 +477,11 @@ describe("workflow: usage statistics preferences tab", function () {
         "the heatmap keeps its own window when the range narrows",
       );
       const narrowedBars = new Set(
-        Array.from(root.querySelectorAll("[data-usage-chart-bar]")).map(
-          (node) => node.getAttribute("data-usage-chart-bar"),
-        ),
+        (
+          Array.from(
+            root.querySelectorAll("[data-usage-chart-bar]"),
+          ) as Element[]
+        ).map((node) => node.getAttribute("data-usage-chart-bar")),
       );
       assert.isAtMost(
         narrowedBars.size,

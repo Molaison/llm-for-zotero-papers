@@ -1,6 +1,5 @@
 /**
- * Shared utilities for PDF-related tools (read_paper, search_paper,
- * view_pdf_pages, read_attachment).
+ * Shared utilities for PDF-related tools (paper_read, read_attachment).
  *
  * Extracted from the former monolithic inspect_pdf tool so that each
  * focused tool can reuse target resolution, caching, and multimodal
@@ -11,7 +10,6 @@ import { readAttachmentBytes } from "../../../services/attachmentStorage";
 import type {
   AgentModelContentPart,
   AgentRuntimeRequest,
-  AgentToolContext,
   AgentToolDefinition,
 } from "../../types";
 import type { ZoteroGateway } from "../../services/zoteroGateway";
@@ -462,57 +460,15 @@ export function resolveDefaultTargets(
     }
     return [paperContext];
   }
-  const scope = getTurnPaperScopeFromRequest(context.request);
-  const activePaper = getActiveTurnPaper(scope);
-  const activeKey = activePaper
-    ? `${activePaper.libraryID}:${activePaper.itemId}:${activePaper.contextItemId}`
-    : "";
-  const addedPapers = scope.papers
-    .filter(
-      (entry) =>
-        `${entry.paper.libraryID}:${entry.paper.itemId}:${entry.paper.contextItemId}` !==
-        activeKey,
-    )
-    .map((entry) => entry.paper);
-  const allPapers = scope.papers.map((entry) => entry.paper);
-  const paperTargetIntent = context.request.classifiedIntent?.paperTargetIntent;
-  const classifiedTargets =
-    paperTargetIntent === "active"
-      ? activePaper
-        ? [activePaper]
-        : []
-      : paperTargetIntent === "added"
-        ? activePaper
-          ? addedPapers
-          : allPapers
-        : paperTargetIntent === "all_visible"
-          ? allPapers
-          : paperTargetIntent === "unspecified"
-            ? activePaper
-              ? [activePaper]
-              : allPapers
-            : undefined;
-  // Fresh direct-agent turns have no semantic paper-target prediction. An
-  // omitted selector still has one precise meaning in paper chat: the active
+  // An omitted selector has one precise meaning in paper chat: the active
   // paper supplied by the host. Broader scopes must be named explicitly.
-  const implicit =
-    classifiedTargets ||
-    (!context.request.classifiedIntent?.semantic && activePaper
-      ? [activePaper]
-      : []);
-  return dedupePaperContextRefs(implicit).slice(0, maxCount);
-}
-
-// ---------------------------------------------------------------------------
-// PDF visual mode inference
-// ---------------------------------------------------------------------------
-
-export type PdfVisualMode = "general" | "figure" | "equation";
-
-export function semanticPdfMode(
-  request: Pick<AgentToolContext["request"], "classifiedIntent">,
-): PdfVisualMode {
-  return request.classifiedIntent?.semantic?.visualMode || "general";
+  const activePaper = getActiveTurnPaper(
+    getTurnPaperScopeFromRequest(context.request),
+  );
+  return dedupePaperContextRefs(activePaper ? [activePaper] : []).slice(
+    0,
+    maxCount,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -552,7 +508,7 @@ export function encodeBase64(bytes: Uint8Array): string {
 }
 
 // ---------------------------------------------------------------------------
-// Page caches (used by view_pdf_pages)
+// Page caches (used by paper_read visual/capture page rendering)
 // ---------------------------------------------------------------------------
 
 type PreparedPdfCache = {

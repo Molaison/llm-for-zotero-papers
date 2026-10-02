@@ -68,7 +68,9 @@ describe("workflow: streaming in actual native chat hosts", function () {
               pdfTitle: `Native stream PDF ${readers.length + 1}`,
             });
             fixtures.push(fixture);
-            const reader = await Zotero.Reader.open(fixture.pdfAttachmentId);
+            const reader = (await Zotero.Reader.open(
+              fixture.pdfAttachmentId,
+            )) as _ZoteroTypes.ReaderInstance;
             await reader._initPromise;
             await reader._waitForReader();
             readers.push(reader);

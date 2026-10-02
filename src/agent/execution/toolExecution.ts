@@ -14,8 +14,24 @@ import {
   type ToolWorkflowOutcome,
 } from "../model/toolArtifactDelivery";
 import { resolveCapabilitiesContentInputs } from "../model/contentCapabilities";
-import { createTrustedReadObservations } from "../plans/readObservation";
-import type { PlanExecutionRunSession } from "../plans/runSession";
+import {
+  attestAndRecordRead,
+  buildPaperLedgerUpdateEvent,
+} from "../context/taskPaperLedgerRecorder";
+import {
+  readObservationSourceKey,
+  readObservationSourceKeys,
+} from "../context/readObservation";
+import { shortEvidenceRef } from "../context/evidenceRefTokens";
+import {
+  taskPaperReadDepths,
+  type TaskPaperLedgerDelta,
+} from "../context/taskPaperLedger";
+import {
+  openDeclaredOutcomes,
+  papersAlreadyWritten,
+  type OutcomeEvidence,
+} from "../loop/outcomes";
 import { canonicalJson } from "../services/libraryMutation/canonicalJson";
 import { sha256Text } from "../store/journalRecoveryBlobStore";
 import {
@@ -25,7 +41,6 @@ import {
 import { buildAgentStageEvent } from "../stageEvents";
 import { resolvePreparedActionReview } from "../tools/execution/review";
 import type { AgentToolRegistry } from "../tools/registry";
-import type { PreparedActionCall } from "../tools/workflowSteps";
 import { resolveAgentToolPresentationLabel } from "../toolPresentation";
 import { resolveAgentToolCallWorkCategory } from "../workCategory";
 import { withConversationWriteLock } from "../../shared/conversationWriteFence";
@@ -36,6 +51,7 @@ import {
   setToolResultReadAvailability,
 } from "./toolResultLifecycle";
 import type {
+  AgentActionProposal,
   AgentActionReceipt,
   AgentConfirmationResolution,
   AgentEvent,
@@ -46,9 +62,14 @@ import type {
   AgentRuntimeRequest,
   AgentToolCall,
   AgentToolContext,
+  AgentToolDefinition,
   AgentToolEffect,
   AgentToolResult,
 } from "../types";
+
+/** How the model reaches what a sized view left out. */
+const MODEL_VIEW_HANDLE_NOTICE =
+  "This result is sized to the request; omitted counts what it left out. context_read source:'tool_result' with this handle pages the exact stored result, which lists the rows shown here first: read a row path from offset = the number of rows shown.";
 
 /** One tool call the turn executed, as the runtime's loop consumes it. */
 export type ExecutedToolCall = {
@@ -101,8 +122,6 @@ export type ToolExecutionDeps = {
   adapterCapabilities: AgentModelCapabilities;
   /** The turn's action-contract session, which records tool receipts. */
   actionContractSession: ActionContractRunSession;
-  /** The turn's plan session, which records tool results and progress. */
-  activePlanSession: PlanExecutionRunSession;
   /** The paper-evidence frontier that caches and trims paper reads. */
   paperEvidenceFrontier: PaperEvidenceFrontier;
   /** The turn's resource plan, whose signature keys evidence reuse. */
@@ -127,7 +146,6 @@ export type ToolExecutionDeps = {
   /** The names of the tools this turn called. */
   toolsUsedThisTurn: string[];
   /** The summaries of the prepared actions this turn verified. */
-  workflowSummaries: string[];
   /**
    * The answer text streamed so far.
    *
@@ -150,10 +168,16 @@ export type ToolExecutionDeps = {
    * Records that a durable tool-result handle now exists.
    *
    * A setter because `toolResultReadAvailable` is a `let` in `runTurn` and
-   * the next model step reads it to decide whether to offer the handle-read
-   * tool.
+   * the next model step reads it to decide whether context_read may serve
+   * source:'tool_result' reads.
    */
   setToolResultReadAvailable: (available: boolean) => void;
+  /**
+   * Hands each call's outcome evidence to the turn's ledger owner.
+   *
+   * Supplied only on ordinary Original Agent turns.
+   */
+  recordOutcomeEvidence?: (evidence: OutcomeEvidence) => Promise<void>;
 };
 
 /** The tool-execution collaborator of one turn. */
@@ -163,7 +187,6 @@ export type ToolExecution = {
     round: number,
     options?: {
       inheritedApproval?: AgentInheritedApproval;
-      checkpointedWorkflow?: boolean;
     },
   ) => Promise<ExecutedToolCall>;
   buildToolDelivery: (
@@ -178,13 +201,136 @@ export type ToolExecution = {
     round: number,
     options?: {
       modelCallId?: string;
-      preparedAction?: PreparedActionCall;
       suppressModelDelivery?: boolean;
       inheritedApproval?: AgentInheritedApproval;
-      checkpointedWorkflow?: boolean;
+      /** Calls after this one in the same model step, still to run. */
+      followingCallCount?: number;
     },
   ) => Promise<ToolWorkflowOutcome>;
 };
+
+/**
+ * The outcome evidence one executed call carries: the papers it read, each
+ * receipt, the material it finalized, and a write the user declined.
+ */
+async function outcomeEvidenceOf(params: {
+  toolResult: AgentToolResult;
+  toolDefinition?: import("../types").AgentToolDefinition<any, any>;
+  input: unknown;
+  context: AgentToolContext;
+  paperLedgerDelta: TaskPaperLedgerDelta | null;
+  observationIds: readonly string[];
+  /** The call's arguments, when a review card showed them to the user. */
+  reviewedArguments?: unknown;
+}): Promise<OutcomeEvidence[]> {
+  const { toolResult } = params;
+  const evidence: OutcomeEvidence[] = [];
+  // How deep the call read each paper decides which parts it ticks.
+  const depths = taskPaperReadDepths(params.paperLedgerDelta);
+  const item = (itemId: number) => `item:${itemId}`;
+  if (
+    toolResult.ok &&
+    (depths.text.length ||
+      depths.shallow.length ||
+      depths.noText.length ||
+      params.observationIds.length)
+  ) {
+    evidence.push({
+      kind: "read",
+      targets: depths.text.map(item),
+      ...(depths.shallow.length ? { shallow: depths.shallow.map(item) } : {}),
+      ...(depths.noText.length ? { noText: depths.noText.map(item) } : {}),
+      observationIds: params.observationIds,
+    });
+  }
+  for (const receipt of toolResult.actionReceipts || []) {
+    evidence.push({ kind: "receipt", receipt });
+  }
+  if (toolResult.materialRef) {
+    evidence.push({ kind: "material", materialRef: toolResult.materialRef });
+  }
+  if (
+    isUserDeniedToolResult(toolResult) &&
+    params.toolDefinition?.describeAction
+  ) {
+    let proposals: AgentActionProposal[] = [];
+    try {
+      proposals =
+        (await params.toolDefinition.describeAction(
+          params.input as never,
+          params.context,
+        )) || [];
+    } catch {
+      proposals = [];
+    }
+    if (proposals.length) {
+      evidence.push({
+        kind: "declined",
+        callId: toolResult.callId,
+        proposals: proposals.map(
+          ({ capability, operation, requestedTargets }) => ({
+            capability,
+            operation,
+            requestedTargets,
+          }),
+        ),
+      });
+    }
+  } else if (params.reviewedArguments !== undefined && params.toolDefinition) {
+    const untouched = await leftUntouchedInReview({
+      callId: toolResult.callId,
+      toolDefinition: params.toolDefinition,
+      shownArguments: params.reviewedArguments,
+      input: params.input,
+      context: params.context,
+    });
+    if (untouched) evidence.push(untouched);
+  }
+  return evidence;
+}
+
+/**
+ * The rows the user left untouched in a card it approved: the targets the
+ * write named as the card showed it that the call no longer names once the
+ * user's edits were applied. Only a write that named several targets has
+ * rows to leave out.
+ */
+async function leftUntouchedInReview(params: {
+  callId: string;
+  toolDefinition: AgentToolDefinition<any, any>;
+  shownArguments: unknown;
+  input: unknown;
+  context: AgentToolContext;
+}): Promise<OutcomeEvidence | undefined> {
+  const describe = params.toolDefinition.describeAction;
+  if (!describe) return undefined;
+  try {
+    const shownInput = params.toolDefinition.validate(params.shownArguments);
+    if (!shownInput.ok) return undefined;
+    const shown = (await describe(shownInput.value, params.context)) || [];
+    if (new Set(shown.flatMap((write) => write.requestedTargets)).size < 2) {
+      return undefined;
+    }
+    const kept = new Set(
+      ((await describe(params.input, params.context)) || []).flatMap(
+        (write) => write.requestedTargets,
+      ),
+    );
+    const proposals = shown.flatMap(
+      ({ capability, operation, requestedTargets }) => {
+        const left = requestedTargets.filter((target) => !kept.has(target));
+        return left.length
+          ? [{ capability, operation, requestedTargets: left }]
+          : [];
+      },
+    );
+    return proposals.length
+      ? { kind: "declined", callId: params.callId, proposals, narrowed: true }
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * Builds the tool-execution collaborator for one turn.
@@ -194,12 +340,186 @@ export type ToolExecution = {
  * three closures inside `runTurn`; the state they shared is now `deps`.
  */
 export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
+  // The read evidence of each call this turn, so a re-read the paper
+  // evidence cache answers attests its papers again (a part declared since
+  // the first read still takes them).
+  const readEvidenceByCall = new Map<string, OutcomeEvidence>();
+  /**
+   * Stores a result the model reads only part of under a trh_ handle that
+   * context_read pages for the rest of the conversation. Undefined when no
+   * handle can be made, so nothing may be left out.
+   */
+  const persistResultHandle = async (params: {
+    call: AgentToolCall;
+    input: unknown;
+    content: unknown;
+  }): Promise<string | undefined> => {
+    const inputDigest = `sha256:${await sha256Text(
+      canonicalJson(params.input),
+    )}`;
+    const record = createAgentToolResultHandleRecord({
+      conversationKey: deps.request.conversationKey,
+      toolName: params.call.name,
+      toolCallId: params.call.id,
+      inputDigest,
+      resourceSignature: deps.resourceContextPlan.resourceSignature,
+      content: params.content,
+      createdAt: deps.now(),
+    });
+    if (!record) return undefined;
+    await deps.persistToolResultHandles([record]);
+    deps.preservedTurnHandleRecords.push(record);
+    deps.setToolResultReadAvailable(true);
+    setToolResultReadAvailability(deps.request, true);
+    return record.handle;
+  };
+
+  /**
+   * The model's view of a result whose tool sizes it: the view, the evidence
+   * refs of the rows it keeps, and the handle holding everything else.
+   */
+  const buildModelViewContent = async (params: {
+    call: AgentToolCall;
+    toolDefinition: AgentToolDefinition<any, any>;
+    input: unknown;
+    toolResult: AgentToolResult;
+    documentEvidenceRefs?: unknown[];
+  }): Promise<Record<string, unknown> | undefined> => {
+    const view = params.toolDefinition.buildModelView?.(
+      params.input as never,
+      params.toolResult.content as never,
+      deps.context,
+    );
+    if (!view) return undefined;
+    const refs = (params.documentEvidenceRefs || []) as Array<
+      Record<string, unknown>
+    >;
+    const shown = refs.length
+      ? readObservationSourceKeys({
+          toolName: params.toolResult.name,
+          input: params.input,
+          result: view.content,
+        })
+      : new Set<string>();
+    const keptRefs = refs.filter((ref) =>
+      shown.has(readObservationSourceKey(ref)),
+    );
+    const omittedRefs = refs.filter(
+      (ref) => !shown.has(readObservationSourceKey(ref)),
+    );
+    const stored = view.stored ?? params.toolResult.content;
+    const handle = await persistResultHandle({
+      call: params.call,
+      input: params.input,
+      content:
+        refs.length && stored && typeof stored === "object"
+          ? { ...stored, documentEvidenceRefs: [...keptRefs, ...omittedRefs] }
+          : stored,
+    });
+    if (!handle) return undefined;
+    const omitted = {
+      ...((view.content.omitted as Record<string, number> | undefined) || {}),
+      ...(omittedRefs.length
+        ? { documentEvidenceRefs: omittedRefs.length }
+        : {}),
+    };
+    return {
+      ...view.content,
+      ...(keptRefs.length ? { documentEvidenceRefs: keptRefs } : {}),
+      ...(Object.keys(omitted).length ? { omitted } : {}),
+      toolResultHandle: handle,
+      toolResultHandleNotice: MODEL_VIEW_HANDLE_NOTICE,
+    };
+  };
+
+  /**
+   * A note the turn's job has already written on its paper is not written
+   * again: the host answers the call itself and runs nothing, so no paper
+   * gets a second note, and the model reads why. A call that mixes such
+   * papers with papers still owed a note is refused, to be sent again
+   * without them. The receipts that ticked the papers stay the proof
+   * (`papersAlreadyWritten`). A part counts one note a paper, so the answer
+   * also says how a request for a second, different note on a paper is
+   * asked: by a part of its own, which then owes that note. Null for every
+   * other call, which runs as ever.
+   */
+  const answerNoteWrittenInJob = async (
+    call: AgentToolCall,
+    toolDefinition: AgentToolDefinition<any, any> | undefined,
+  ): Promise<AgentToolResult | null> => {
+    const checkpoint = deps.request.executionCheckpoint;
+    if (
+      !deps.recordOutcomeEvidence ||
+      !checkpoint?.tasks.length ||
+      toolDefinition?.spec.executionClass !== "external_effect" ||
+      !toolDefinition.describeAction
+    )
+      return null;
+    const args =
+      call.arguments &&
+      typeof call.arguments === "object" &&
+      !Array.isArray(call.arguments)
+        ? Object.fromEntries(
+            Object.entries(call.arguments as Record<string, unknown>).filter(
+              ([key]) => key !== "review",
+            ),
+          )
+        : call.arguments;
+    const validation = toolDefinition.validate(args);
+    if (!validation.ok) return null;
+    let proposals: AgentActionProposal[] = [];
+    try {
+      proposals =
+        (await toolDefinition.describeAction(
+          validation.value as never,
+          deps.context,
+        )) || [];
+    } catch {
+      return null;
+    }
+    const found = papersAlreadyWritten(checkpoint, proposals);
+    if (!found) return null;
+    const ids = (targets: readonly string[]) =>
+      targets.map((target) => target.replace(/^item:/, "")).join(", ");
+    const one = found.written.length === 1;
+    const which = `item${one ? "" : "s"} ${ids(found.written)} already ${
+      one ? "has" : "have"
+    } the note this job writes (${found.parts
+      .map((part) => `“${part}”`)
+      .join(", ")})`;
+    const another =
+      "If the request asks for another, different note on a paper, declare it as a part of its own with task_update, then send it again.";
+    if (!found.left.length)
+      return {
+        callId: call.id,
+        name: call.name,
+        ok: true,
+        effect: "none",
+        actionReceipts: [],
+        content: {
+          skipped: true,
+          note: `Skipped by the host: ${which}, so nothing was written. Go on with the papers left. ${another}`,
+        },
+      };
+    return {
+      callId: call.id,
+      name: call.name,
+      ok: false,
+      inputRejected: true,
+      actionReceipts: [],
+      content: {
+        error: `Not run: ${which}, and a second would write ${
+          one ? "it" : "them"
+        } twice. Send the call again with only the papers left: ${ids(found.left)}. ${another}`,
+      },
+    };
+  };
+
   const executePreparedToolCall = async (
     call: AgentToolCall,
     round: number,
     options: {
       inheritedApproval?: AgentInheritedApproval;
-      checkpointedWorkflow?: boolean;
     } = {},
   ): Promise<ExecutedToolCall> => {
     const toolDefinition = deps.registry.getTool(call.name);
@@ -252,6 +572,17 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
       },
     });
     const executionAllowed = () => !deps.signal?.aborted && deps.writeAllowed();
+    /**
+     * Whether a call that came back must still be dropped. A conversation
+     * changed under it (Clear, deletion) keeps nothing of it. Stop does not
+     * undo a call that ran to its result: that result and its receipts are
+     * the only record of what it wrote, so they are kept. A call that did not
+     * (Stop kept it from starting, or it failed) is dropped as before; a
+     * write it made before failing is still in the change journal, which a
+     * resumed ledger reads (`journalReceipts.ts`).
+     */
+    const droppedAfterReturn = (result: AgentToolResult) =>
+      !deps.writeAllowed() || (Boolean(deps.signal?.aborted) && !result.ok);
     if (!executionAllowed()) return lifecycleError();
     await emitCallStage("started");
     await deps.emit({
@@ -261,14 +592,6 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
       args: call.arguments,
       toolLabel,
       workCategory,
-      executionId:
-        deps.request.planContext?.phase === "executing"
-          ? deps.request.planContext.executionId
-          : undefined,
-      taskId:
-        deps.request.planContext?.phase === "executing"
-          ? deps.request.planContext.activeTaskId
-          : undefined,
     });
     deps.toolsUsedThisTurn.push(call.name);
     const cachedPaperEvidence =
@@ -285,6 +608,11 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
       input?: unknown;
       documentEvidenceRefs?: unknown[];
     };
+    /** The arguments a review card showed the user before the call ran. */
+    let reviewedArguments: unknown;
+    const writtenInJob = cachedPaperEvidence
+      ? null
+      : await answerNoteWrittenInJob(call, toolDefinition);
     if (cachedPaperEvidence) {
       executedCall = {
         toolResult: {
@@ -295,6 +623,12 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
           content: cachedPaperEvidence.content,
         },
         toolDefinition: deps.registry.getTool(call.name),
+        input: call.arguments,
+      };
+    } else if (writtenInJob) {
+      executedCall = {
+        toolResult: writtenInJob,
+        toolDefinition,
         input: call.arguments,
       };
     } else {
@@ -316,8 +650,9 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
         {
           callerKind: options.inheritedApproval ? "action" : "model",
           inheritedApproval: options.inheritedApproval,
-          checkpointedWorkflow: options.checkpointedWorkflow,
-          isExecutionAllowed: executionAllowed,
+          // The conversation's lifecycle only: the controller reads Stop
+          // from the context's signal itself, before the tool runs.
+          isExecutionAllowed: deps.writeAllowed,
           executeWithLock: (task) =>
             withConversationWriteLock(deps.request.conversationKey, task),
         },
@@ -340,13 +675,17 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
             next.resolution,
           );
         }
+        if (droppedAfterReturn(confirmedExecution.execution.result))
+          return lifecycleError();
         executedCall = {
           toolResult: confirmedExecution.execution.result,
           toolDefinition: confirmedExecution.execution.tool,
           input: confirmedExecution.execution.input,
         };
+        reviewedArguments = call.arguments;
       } else {
-        if (!executionAllowed()) return lifecycleError();
+        if (droppedAfterReturn(execution.execution.result))
+          return lifecycleError();
         executedCall = {
           toolResult: execution.execution.result,
           toolDefinition: execution.execution.tool,
@@ -356,11 +695,9 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
     }
     const { toolResult } = executedCall;
     let readActivityContent = toolResult.content;
-    if (
-      toolResult.ok &&
-      toolResult.artifacts?.length &&
-      deps.request.documentOutcomePolicy?.required
-    ) {
+    // A submitted document may include only assets a successful call of this
+    // turn emitted, such as a figure crop paper_read returned.
+    if (toolResult.ok && toolResult.artifacts?.length) {
       const artifactsByPath = new Map(
         (deps.request.documentArtifactObservations || []).map((artifact) => [
           artifact.storedPath,
@@ -372,17 +709,30 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
       }
       deps.request.documentArtifactObservations = [...artifactsByPath.values()];
     }
+    // Recorded at attestation, from the original content (the paper
+    // frontier may replace it with a handle below), and emitted right after
+    // this call's tool_result.
+    let paperLedgerDelta: TaskPaperLedgerDelta | null = null;
+    let attestedObservationIds: string[] = [];
     if (
       !cachedPaperEvidence &&
       toolResult.ok &&
       executedCall.toolDefinition?.spec.executionClass === "read"
     ) {
-      const observations = await createTrustedReadObservations({
+      const attested = await attestAndRecordRead({
         toolName: toolResult.name,
         callId: toolResult.callId,
         input: executedCall.input,
         result: toolResult.content,
+        conversationKey: deps.request.conversationKey,
+        libraryID: deps.request.libraryID,
+        runId: deps.runId,
       });
+      const observations = attested.observations;
+      paperLedgerDelta = attested.paperLedgerDelta;
+      attestedObservationIds = observations.map(
+        (observation) => observation.observationId,
+      );
       if (observations.length) {
         const merged = new Map(
           (deps.request.documentReadObservations || []).map((entry) => [
@@ -394,8 +744,9 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
           merged.set(observation.observationId, observation);
         }
         deps.request.documentReadObservations = [...merged.values()];
+        // The model cites the short ref; the document finalizer expands it.
         executedCall.documentEvidenceRefs = observations.map((observation) => ({
-          evidenceRef: observation.observationId,
+          evidenceRef: shortEvidenceRef(observation.observationId),
           libraryID: observation.libraryID,
           itemKey: observation.itemKey,
           capabilities: observation.capabilities,
@@ -417,26 +768,8 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
         content: originalContent,
         toolCallId: call.id,
         resourceSignature: deps.resourceContextPlan.resourceSignature,
-        persistOriginal: async (content) => {
-          const inputDigest = `sha256:${await sha256Text(
-            canonicalJson(executedCall.input),
-          )}`;
-          const record = createAgentToolResultHandleRecord({
-            conversationKey: deps.request.conversationKey,
-            toolName: call.name,
-            toolCallId: call.id,
-            inputDigest,
-            resourceSignature: deps.resourceContextPlan.resourceSignature,
-            content,
-            createdAt: deps.now(),
-          });
-          if (!record) return undefined;
-          await deps.persistToolResultHandles([record]);
-          deps.preservedTurnHandleRecords.push(record);
-          deps.setToolResultReadAvailable(true);
-          setToolResultReadAvailability(deps.request, true);
-          return record.handle;
-        },
+        persistOriginal: (content) =>
+          persistResultHandle({ call, input: executedCall.input, content }),
       });
       toolResult.content = processed.content;
       readActivityContent = processed.originalContent ?? originalContent;
@@ -506,15 +839,10 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
       actionReceipts: toolResult.actionReceipts,
       content: toolResult.content,
       artifacts: toolResult.artifacts,
-      executionId:
-        deps.request.planContext?.phase === "executing"
-          ? deps.request.planContext.executionId
-          : undefined,
-      taskId:
-        deps.request.planContext?.phase === "executing"
-          ? deps.request.planContext.activeTaskId
-          : undefined,
     });
+    if (paperLedgerDelta) {
+      await deps.emit(buildPaperLedgerUpdateEvent(paperLedgerDelta));
+    }
     if (toolResult.materialRef) {
       deps.finalizedMaterialRefs.set(
         toolResult.materialRef.documentId,
@@ -571,17 +899,28 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
         callId: toolResult.callId,
       });
     }
-    await deps.actionContractSession.recordToolReceipts(
-      toolResult.actionReceipts,
-    );
-    await deps.activePlanSession.recordToolResult({
-      toolName: toolResult.name,
-      executionClass: executedCall.toolDefinition?.spec.executionClass,
-      input: executedCall.input,
-      result: toolResult,
-      artifacts: toolResult.artifacts,
-      runId: deps.runId,
-    });
+    if (deps.recordOutcomeEvidence) {
+      const evidence = await outcomeEvidenceOf({
+        toolResult,
+        toolDefinition: executedCall.toolDefinition,
+        input: executedCall.input,
+        context: deps.context,
+        paperLedgerDelta,
+        observationIds: attestedObservationIds,
+        reviewedArguments,
+      });
+      const source = cachedPaperEvidence?.sourceToolCallId
+        ? readEvidenceByCall.get(cachedPaperEvidence.sourceToolCallId)
+        : undefined;
+      if (source) evidence.push(source);
+      for (const entry of evidence) {
+        if (entry.kind === "read" && !cachedPaperEvidence) {
+          readEvidenceByCall.set(toolResult.callId, entry);
+        }
+        await deps.recordOutcomeEvidence(entry);
+      }
+    }
+    deps.actionContractSession.recordToolReceipts(toolResult.actionReceipts);
     return executedCall;
   };
   const buildToolDelivery = async (
@@ -633,12 +972,7 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
     return {
       callId,
       name: toolResult.name,
-      content: {
-        ...contentWithReceipt,
-        ...(deps.activePlanSession.workflowProgress()
-          ? { planProgress: deps.activePlanSession.workflowProgress() }
-          : {}),
-      },
+      content: contentWithReceipt,
       followupMessages,
     };
   };
@@ -647,13 +981,37 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
     round: number,
     options: {
       modelCallId?: string;
-      preparedAction?: PreparedActionCall;
       suppressModelDelivery?: boolean;
       inheritedApproval?: AgentInheritedApproval;
-      checkpointedWorkflow?: boolean;
+      followingCallCount?: number;
     } = {},
   ): Promise<ToolWorkflowOutcome> => {
-    if (deps.signal?.aborted) throw new Error("Aborted");
+    // Stop kept this call from starting. It is answered, not thrown: the
+    // round completes, so the results of the calls that ran before it (the
+    // only record of what they did) reach the transcript with it, and the
+    // next model step ends the run as cancelled. Nothing ran, so nothing is
+    // published, recorded or proved.
+    if (deps.signal?.aborted) {
+      const toolResult: AgentToolResult = {
+        callId: call.id,
+        name: call.name,
+        ok: false,
+        effect: "none",
+        actionReceipts: [],
+        content: {
+          status: "not_started",
+          error:
+            "Stopped before it started: the user pressed Stop, so this call did not run and changed nothing.",
+        },
+      };
+      return {
+        notStarted: true,
+        toolResult,
+        delivery: options.suppressModelDelivery
+          ? undefined
+          : await buildToolDelivery(toolResult, options.modelCallId || call.id),
+      };
+    }
     if (!deps.writeAllowed()) {
       return {
         failed: true,
@@ -675,70 +1033,40 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
         },
       };
     }
-    // A provider may batch a prerequisite read and a bound action. Recheck
-    // readiness at this tool boundary, using the host's canonical arguments
-    // while preserving the provider call ID solely for result delivery.
-    let preparedAction = options.preparedAction;
-    if (!preparedAction && options.modelCallId && !options.inheritedApproval) {
-      const next = await deps.registry.getNextWorkflowStep(
-        deps.request,
-        deps.activePlanSession.activeWorkflowObligationIds(),
-      );
-      if (next.kind === "action" && next.prepared.call.name === call.name)
-        preparedAction = next.prepared;
-    }
-    if (preparedAction) call = preparedAction.call;
     const executedCall = await executePreparedToolCall(call, round, {
       inheritedApproval: options.inheritedApproval,
-      checkpointedWorkflow:
-        Boolean(preparedAction) || options.checkpointedWorkflow,
     });
     const { toolResult, toolDefinition, input, documentEvidenceRefs } =
       executedCall;
     const deliveryCallId = options.modelCallId || call.id;
-    const contentForModel = documentEvidenceRefs?.length
-      ? toolResult.content &&
-        typeof toolResult.content === "object" &&
-        !Array.isArray(toolResult.content)
-        ? {
-            ...(toolResult.content as Record<string, unknown>),
+    const modelView =
+      toolResult.ok && toolDefinition?.buildModelView
+        ? await buildModelViewContent({
+            call,
+            toolDefinition,
+            input,
+            toolResult,
             documentEvidenceRefs,
-          }
-        : { content: toolResult.content, documentEvidenceRefs }
-      : undefined;
+          })
+        : undefined;
+    const contentForModel =
+      modelView ||
+      (documentEvidenceRefs?.length
+        ? toolResult.content &&
+          typeof toolResult.content === "object" &&
+          !Array.isArray(toolResult.content)
+          ? {
+              ...(toolResult.content as Record<string, unknown>),
+              documentEvidenceRefs,
+            }
+          : { content: toolResult.content, documentEvidenceRefs }
+        : undefined);
+    // A call that ran while the user pressed Stop is recorded and delivered,
+    // and nothing more: no terminal answer and no review card, so the run
+    // ends as the user stopped it.
+    const stopped = Boolean(deps.signal?.aborted);
 
-    if (preparedAction) {
-      const verified =
-        toolResult.ok &&
-        toolResult.actionReceipts.some(
-          (receipt) =>
-            receipt.obligationId === preparedAction.obligationId &&
-            receipt.verification === "verified" &&
-            ["applied", "already_satisfied"].includes(receipt.status),
-        );
-      if (!verified) {
-        const failure =
-          readToolError(toolResult) ||
-          "The requested state change could not be verified. Remaining actions have not been executed; recorded progress has been retained.";
-        return {
-          toolResult,
-          failed: true,
-          stopRun: true,
-          finalText: failure,
-          delivery: options.suppressModelDelivery
-            ? undefined
-            : await buildToolDelivery(
-                toolResult,
-                deliveryCallId,
-                toolDefinition,
-                { error: failure, result: toolResult.content },
-              ),
-        };
-      }
-      deps.workflowSummaries.push(preparedAction.summary);
-    }
-
-    if (toolResult.ok && toolDefinition?.resolveTerminalResult) {
+    if (!stopped && toolResult.ok && toolDefinition?.resolveTerminalResult) {
       const terminal = await toolDefinition.resolveTerminalResult(
         input as never,
         toolResult,
@@ -750,28 +1078,20 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
             documentId: terminal.documentId,
             finalText: terminal.finalText,
           });
-          const actionDecision = await deps.actionContractSession.evaluateFinal(
-            {
-              canCorrect: true,
-            },
+          const actionDecision = deps.actionContractSession.evaluateFinal();
+          const accepted = actionDecision.kind === "accept";
+          // An accepted document ends the turn only when nothing else was
+          // requested: a later call of this step, or a part the model
+          // declared that still needs more than the answer, has to run with
+          // it. A declared reasoning part is answered by the document itself.
+          const openTasks = openDeclaredOutcomes(
+            deps.request.executionCheckpoint,
           );
-          const planDecision = await deps.activePlanSession.evaluateFinal({
-            canCorrect: true,
-          });
-          if (
-            actionDecision.kind !== "accept" ||
-            planDecision.kind !== "accept"
-          ) {
+          if (!accepted || options.followingCallCount || openTasks.length) {
             const remainingWork =
-              actionDecision.kind === "correct"
-                ? actionDecision.correction
-                : actionDecision.kind === "fail"
-                  ? actionDecision.failure
-                  : planDecision.kind === "correct"
-                    ? planDecision.correction
-                    : planDecision.kind === "fail"
-                      ? planDecision.failure
-                      : "";
+              actionDecision.kind === "fail"
+                ? actionDecision.failure
+                : openTasks.map((task) => task.description).join("; ");
             return {
               toolResult,
               delivery: options.suppressModelDelivery
@@ -782,10 +1102,11 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
                     toolDefinition,
                     {
                       content: contentForModel || toolResult.content,
-                      remainingWork,
+                      ...(remainingWork ? { remainingWork } : {}),
                       finalizedDocumentId: terminal.documentId,
-                      instruction:
-                        "The material is finalized and preserved. Complete the remaining authorized actions using this finalized payload; do not regenerate the document.",
+                      instruction: accepted
+                        ? "The document is finalized and preserved. Complete any remaining requested work with this finalized document, passing its documentId where a tool accepts one; do not regenerate it."
+                        : "The material is finalized and preserved. Complete the remaining authorized actions using this finalized payload; do not regenerate the document.",
                     },
                   ),
             };
@@ -811,6 +1132,7 @@ export function createToolExecution(deps: ToolExecutionDeps): ToolExecution {
     }
 
     if (
+      !stopped &&
       toolResult.ok &&
       toolDefinition?.createResultReviewAction &&
       toolDefinition.resolveResultReview

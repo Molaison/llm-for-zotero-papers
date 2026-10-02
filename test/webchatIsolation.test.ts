@@ -8,6 +8,10 @@ import {
   markWebChatConversationForceNewChat,
   resetWebChatConversationSessionState,
 } from "../src/modules/contextPanel/state";
+import {
+  resolveSidebarChatModeTabAction,
+  resolveSidebarChatModeToggleState,
+} from "../src/modules/contextPanel/sidebarChatModeToggle";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -16,7 +20,7 @@ describe("webchat isolation", function () {
     clearAllState();
   });
 
-  it("does not let the webchat mode chip switch paper/library modes", function () {
+  it("does not let the webchat mode toggle switch paper/library modes", function () {
     const source = readFileSync(
       resolve(
         here,
@@ -24,24 +28,47 @@ describe("webchat isolation", function () {
       ),
       "utf8",
     );
-    const handlerStart = source.indexOf("// --- Mode chip handler ---");
-    const webchatGuard = source.indexOf(
-      "if (isNoteSession() || isWebChatMode()) return;",
+    const handlerStart = source.indexOf(
+      "// --- Paper chat | Library chat toggle ---",
+    );
+    const webchatInput = source.indexOf(
+      "isWebChat: isWebChatMode(),",
+      handlerStart,
+    );
+    const noopGuard = source.indexOf(
+      'if (action === "noop") return;',
       handlerStart,
     );
     const paperSwitch = source.indexOf(
-      "void switchPaperConversation();",
+      "await switchPaperConversation(",
       handlerStart,
     );
     const globalSwitch = source.indexOf(
-      "void switchGlobalConversation",
+      "await switchGlobalConversation(",
       handlerStart,
     );
 
     assert.isAtLeast(handlerStart, 0);
-    assert.isAtLeast(webchatGuard, handlerStart);
-    assert.isBelow(webchatGuard, paperSwitch);
-    assert.isBelow(webchatGuard, globalSwitch);
+    assert.isAtLeast(webchatInput, handlerStart);
+    assert.isAbove(noopGuard, webchatInput);
+    assert.isBelow(noopGuard, paperSwitch);
+    assert.isBelow(noopGuard, globalSwitch);
+
+    const webchat = resolveSidebarChatModeToggleState({
+      isGlobalMode: false,
+      isNoteSession: false,
+      isWebChat: true,
+    });
+    for (const requested of ["paper", "library"] as const) {
+      assert.equal(
+        resolveSidebarChatModeTabAction({
+          requested,
+          state: webchat,
+          hasPaper: true,
+        }),
+        "noop",
+      );
+    }
   });
 
   it("marks fresh webchat paper switches as new remote chats without clearing existing history", function () {

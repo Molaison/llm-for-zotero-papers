@@ -119,7 +119,8 @@ describe("external MCP writes against native Zotero", function () {
       };
       try {
         setOriginalAgentPermissionMode(mode);
-        const collectionResult = await call("collection_update", {
+        const collectionResult = await call("library_update", {
+          kind: "collection",
           action: "create",
           name: suffix,
         });
@@ -159,15 +160,7 @@ describe("external MCP writes against native Zotero", function () {
           "external_runtime",
         );
         assert.equal(
-          evaluatePreparedActionContract(
-            {
-              actionPreparation: {
-                state: "needs_input",
-                issues: ["Unresolved Original Agent intent"],
-              },
-            },
-            tagged.actionReceipts,
-          ).state,
+          evaluatePreparedActionContract(tagged.actionReceipts).state,
           "satisfied",
         );
         const saved = await call("note_write", {
@@ -194,7 +187,7 @@ describe("external MCP writes against native Zotero", function () {
           (id) => typeof id === "string",
         );
         assert.isString(actionId, JSON.stringify(edited));
-        await call("undo_last_action", { actionId });
+        await call("undo", { actionId });
         await note.reload();
         assert.include(note.getNote(), `${suffix} original`);
         assert.notInclude(note.getNote(), `${suffix} edited`);
@@ -212,7 +205,7 @@ describe("external MCP writes against native Zotero", function () {
           (id) => typeof id === "string",
         );
         assert.isString(secondTagId);
-        await call("revert_changes", { actionIds: [tagId, secondTagId] });
+        await call("undo", { actionIds: [tagId, secondTagId] });
         await item.reload();
         assert.isFalse(item.hasTag(suffix));
         assert.isFalse(item.hasTag(`${suffix}-second`));

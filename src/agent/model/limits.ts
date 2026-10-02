@@ -7,18 +7,74 @@ import {
 import { resolveModelInputTokenLimit } from "../../utils/modelInputCap";
 import type { ProviderProtocol } from "../../utils/providerProtocol";
 
-/** Whole-run boundaries; independent of any one response's output policy. */
+/**
+ * Rounds per segment: how often the loop checks that the run still makes
+ * progress (a new successful tool result, or a newly settled target). A run
+ * that does goes on, so this is no cap on its rounds.
+ */
 export const MAX_AGENT_ROUNDS = 24;
+/**
+ * Tool calls an ordinary step may make. A step of item-scoped work may make
+ * one for each of its job's open papers and one more
+ * (`LongJobPager.stepLimit`); an ordinary turn has no item scope to derive a
+ * limit from, and this one guards against runaway steps.
+ */
 export const MAX_AGENT_TOOL_CALLS_PER_ROUND = 8;
 
 export const MAX_BULK_AGENT_ROUNDS = 32;
 export const MAX_BULK_TOOL_CALLS_PER_ROUND = 10;
 
+/** Words, as the answer-continuation check compares them. */
+function answerWords(text: string): string[] {
+  return text.toLowerCase().match(/[\p{L}\p{N}]+/gu) || [];
+}
+
+/** Runs of this many words compare one answer chunk with another. */
+const ANSWER_RUN_WORDS = 4;
+
 /**
- * How many times a final answer cut off by the provider's output limit is
- * asked to continue before the text written so far is delivered as is.
+ * Whether a continuation of a cut-off answer adds new text rather than
+ * repeating what the answer already holds: at least half of its runs of four
+ * words are new (a chunk shorter than one run: it does not occur already).
+ * A model that starts over, or writes the same part again, adds nothing.
  */
-export const MAX_ANSWER_CONTINUATIONS = 3;
+export function addsNewAnswerText(chunk: string, before: string): boolean {
+  const added = answerWords(chunk);
+  if (!added.length) return false;
+  const seen = answerWords(before);
+  if (added.length < ANSWER_RUN_WORDS)
+    return !` ${seen.join(" ")} `.includes(` ${added.join(" ")} `);
+  const runs = (words: readonly string[]) =>
+    words
+      .slice(0, words.length - ANSWER_RUN_WORDS + 1)
+      .map((_, index) =>
+        words.slice(index, index + ANSWER_RUN_WORDS).join(" "),
+      );
+  const known = new Set(runs(seen));
+  const chunkRuns = runs(added);
+  const fresh = chunkRuns.filter((run) => !known.has(run)).length;
+  return fresh * 2 >= chunkRuns.length;
+}
+
+/**
+ * The most times a cut-off answer is asked to continue: as many full-size
+ * answers (the output reserve) as the input budget left beside the prompt
+ * holds, and at least one. Each continuation sends the answer so far again,
+ * so past that the answer could no longer be seen whole.
+ */
+export function answerContinuationCeiling(params: {
+  budgetTokens: number;
+  promptTokens: number;
+  outputTokens: number;
+}): number {
+  return Math.max(
+    1,
+    Math.floor(
+      (params.budgetTokens - params.promptTokens) /
+        Math.max(1, params.outputTokens),
+    ),
+  );
+}
 
 /**
  * Resolve one Agent inference's wire policy. Whole-run limits remain owned by
