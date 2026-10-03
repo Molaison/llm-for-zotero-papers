@@ -13290,34 +13290,63 @@ details.llm-agent-action-row[open] > summary .llm-agent-action-row-marker {
   border-color: transparent;
 }
 
-.llm-send-btn {
-  width: auto;
-  min-width: 78px;
-  height: var(--llm-action-height);
-  min-height: var(--llm-action-height);
-  padding: var(--llm-action-pill-padding);
-  border-radius: 999px;
-  font-size: var(--llm-action-font-size);
-  font-weight: 600;
-  line-height: 1;
-}
-
+/* Send / Cancel: 28px round icon buttons. Send is a blue circle with an
+   up-arrow; Cancel is a neutral circle with a stop square, so a streaming
+   reply never reads as an error. Names live in title + aria-label. */
+.llm-send-btn,
 .llm-send-btn.llm-action-icon-only {
-  width: 36px;
-  min-width: 36px;
+  flex: 0 0 auto;
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  min-height: 28px;
   padding: 0;
   border-radius: 999px;
-  font-size: var(--llm-action-icon-font-size);
-  font-weight: 700;
+  font-size: 0;
+  line-height: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
-.llm-cancel-btn {
-  width: auto;
-  min-width: 82px;
-  height: var(--llm-action-height);
-  min-height: var(--llm-action-height);
-  padding: var(--llm-action-pill-padding);
-  font-size: var(--llm-action-font-size);
+.llm-send-btn::before {
+  content: "";
+  display: block;
+  width: 16px;
+  height: 16px;
+  background-color: currentColor;
+  mask-image: url("icons/action-send-arrow.svg");
+  -webkit-mask-image: url("icons/action-send-arrow.svg");
+  mask-repeat: no-repeat;
+  mask-position: center;
+  mask-size: contain;
+  -webkit-mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  -webkit-mask-size: contain;
+  pointer-events: none;
+}
+
+.llm-cancel-btn,
+.llm-cancel-btn.llm-action-icon-only {
+  background: var(--fill-primary);
+  border-color: var(--fill-primary);
+  color: var(--material-background);
+}
+
+.llm-cancel-btn:hover:not(:disabled) {
+  background: var(--fill-secondary);
+  border-color: var(--fill-secondary);
+}
+
+.llm-cancel-btn:active:not(:disabled) {
+  transform: scale(0.96);
+}
+
+.llm-cancel-btn::before {
+  width: 12px;
+  height: 12px;
+  mask-image: url("icons/action-stop.svg");
+  -webkit-mask-image: url("icons/action-stop.svg");
 }
 
 .llm-send-icon {

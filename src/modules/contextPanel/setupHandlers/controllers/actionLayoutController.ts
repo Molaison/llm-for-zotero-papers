@@ -77,10 +77,12 @@ export function createActionLayoutController(
     button.classList.toggle("llm-action-icon-only", mode === "icon");
   };
 
-  const setSendButtonLabel = (mode: ActionLabelMode) => {
-    setActionButtonLabel(sendBtn, "Send", "↑", mode);
+  // Send and Cancel are always round icon buttons (arrow / stop square);
+  // the name lives in title + aria-label, so every width mode is the same.
+  const setSendButtonLabel = (_mode: ActionLabelMode) => {
+    setActionButtonLabel(sendBtn, "", "", "icon");
     sendBtn.title = "Send";
-    setActionButtonLabel(cancelBtn, "Cancel", "X", mode);
+    setActionButtonLabel(cancelBtn, "", "", "icon");
     if (cancelBtn) {
       cancelBtn.title = "Cancel";
     }
@@ -260,7 +262,6 @@ export function createActionLayoutController(
     };
 
     const uploadSlot = uploadBtn?.parentElement as HTMLElement | null;
-    const sendSlot = sendBtn?.parentElement as HTMLElement | null;
 
     const getModelWidth = (mode: ModelLabelMode) => {
       if (!modelBtn) return 0;
@@ -282,19 +283,8 @@ export function createActionLayoutController(
         : ACTION_LAYOUT_DROPDOWN_ICON_WIDTH_PX;
     };
 
-    const getSendWidth = (mode: ActionLabelMode) => {
-      if (!sendBtn) return 0;
-      if (mode === "icon") {
-        return ACTION_LAYOUT_CONTEXT_ICON_WIDTH_PX;
-      }
-      const sendWidth = getFullSlotRequiredWidth(sendSlot, sendBtn, "Send");
-      const cancelWidth = getFullSlotRequiredWidth(
-        sendSlot,
-        cancelBtn,
-        "Cancel",
-      );
-      return Math.max(sendWidth, cancelWidth, 72);
-    };
+    const getSendWidth = (_mode: ActionLabelMode) =>
+      sendBtn ? ACTION_LAYOUT_CONTEXT_ICON_WIDTH_PX : 0;
 
     const getRequiredWidth = (state: ActionRevealState) => {
       const leftSlotWidths = [

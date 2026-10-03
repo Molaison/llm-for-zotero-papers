@@ -998,10 +998,9 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
   const sendBtn = createElement(
     doc,
     "button",
-    "llm-shortcut-btn llm-action-btn llm-action-btn-primary llm-send-btn",
+    "llm-shortcut-btn llm-action-btn llm-action-btn-primary llm-send-btn llm-action-icon-only",
     {
       id: "llm-send",
-      textContent: t("Send"),
       title: t("Send"),
       disabled: !hasItem,
     },
@@ -1009,12 +1008,14 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
   const cancelBtn = createElement(
     doc,
     "button",
-    "llm-shortcut-btn llm-action-btn llm-action-btn-danger llm-send-btn llm-cancel-btn",
+    "llm-shortcut-btn llm-action-btn llm-send-btn llm-cancel-btn llm-action-icon-only",
     {
       id: "llm-cancel",
-      textContent: t("Cancel"),
+      title: t("Cancel"),
     },
   );
+  sendBtn.setAttribute("aria-label", t("Send"));
+  cancelBtn.setAttribute("aria-label", t("Cancel"));
   cancelBtn.style.display = "none";
   const sendSlot = createElement(doc, "div", "llm-action-slot");
   sendSlot.append(sendBtn, cancelBtn);
