@@ -138,6 +138,8 @@ export async function parsePdfWithMineru(
           signal,
           settings,
         );
+        if (result?.pageCount !== undefined && result.pageCount !== pageCount)
+          throw new Error("MinerU returned an incomplete PDF result");
         return result ? { ...result, pageCount, sourceHash } : null;
       }
 
@@ -180,6 +182,11 @@ export async function parsePdfWithMineru(
             settings,
           );
           if (!result) return null;
+          if (
+            result.pageCount !== undefined &&
+            result.pageCount !== range.endPage - range.startPage + 1
+          )
+            throw new Error("MinerU returned an incomplete PDF chunk");
           const chunk = { range, result };
           await checkpoint?.save(chunk);
           chunks.push(chunk);

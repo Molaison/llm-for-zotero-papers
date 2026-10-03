@@ -1,3 +1,4 @@
+import { mineruLegacyHealth } from "./helpers/mineruLegacyHealth";
 import { mineruResultFixture } from "./helpers/mineruResultFixture";
 import {
   getMineruCheckpointDir,
@@ -54,7 +55,11 @@ describe("MinerU durable recovery", function () {
     };
     (globalThis as any).ztoolkit = {
       log() {},
-      getGlobal: (key: string) => (globalThis as any)[key],
+      getGlobal: (key: string) =>
+        key === "fetch"
+          ? async (url: string, init: RequestInit) =>
+              mineruLegacyHealth(String(url)) ?? globalThis.fetch(url, init)
+          : (globalThis as any)[key],
     };
     (globalThis as any).PathUtils = {
       join: path.join,

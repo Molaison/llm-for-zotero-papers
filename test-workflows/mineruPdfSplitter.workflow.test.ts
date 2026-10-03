@@ -1,3 +1,4 @@
+import { mineruLegacyHealth } from "../test/helpers/mineruLegacyHealth";
 import { parsePdfWithMineru } from "../src/services/mineru/mineruParser";
 import { assert } from "chai";
 import { zipSync } from "fflate";
@@ -92,15 +93,17 @@ describe("workflow: bundled MinerU PDF splitter", function () {
       toolkit.getGlobal = function (name: string) {
         if (name !== "fetch") return originalGetGlobal.call(this, name);
         return async (url: string, init: RequestInit) => {
+          const health = mineruLegacyHealth(String(url));
+          if (health) return health;
           assert.equal(String(url), "http://127.0.0.1:8000/file_parse");
           const body = init.body as any;
           if (typeof body.get === "function") {
-            assert.equal(body.get("backend"), "hybrid-auto-engine");
+            assert.equal(body.get("backend"), "hybrid-engine");
             assert.equal(body.get("parse_method"), "ocr");
             uploads.push(body.get("files").name);
           } else {
             const text = new TextDecoder().decode(body);
-            assert.include(text, "hybrid-auto-engine");
+            assert.include(text, "hybrid-engine");
             assert.include(text, "\r\nocr\r\n");
             uploads.push(/filename="([^"]+)"/.exec(text)![1]);
           }

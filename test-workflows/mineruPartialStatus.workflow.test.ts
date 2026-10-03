@@ -1,3 +1,4 @@
+import { mineruLegacyHealth } from "../test/helpers/mineruLegacyHealth";
 import { mineruResultFixture } from "../test/helpers/mineruResultFixture";
 import { assert } from "chai";
 import {
@@ -91,6 +92,8 @@ describe("workflow: MinerU Partial status", function () {
       toolkit.getGlobal = function (name: string) {
         if (name !== "fetch") return getGlobal.call(this, name);
         return async (url: string) => {
+          const health = mineruLegacyHealth(String(url));
+          if (health) return health;
           assert.isTrue(String(url).endsWith("/file_parse"));
           const part = nextPart++;
           record.uploads.push(part);

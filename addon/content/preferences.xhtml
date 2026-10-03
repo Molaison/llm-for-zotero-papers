@@ -2461,7 +2461,8 @@
                     border-radius: 6px;
                     box-sizing: border-box;
                   "
-                ></html:input>
+                >
+                </html:input>
                 <html:span
                   style="
                     font-size: 10.5px;
@@ -2469,14 +2470,64 @@
                     margin-top: 1px;
                   "
                 >
-                  Uses a self-hosted mineru-api server. Test Connection only
-                  checks that the server process is reachable.
+                  Start a local MinerU API server separately. Test Connection
+                  detects its API; it does not parse a PDF.
                 </html:span>
               </html:div>
 
-              <html:div style="display: flex; flex-direction: column; gap: 4px">
+              <html:div
+                id="__addonRef__-mineru-legacy-options"
+                style="display: flex; flex-direction: column; gap: 8px"
+              >
+                <html:div
+                  style="display: flex; flex-direction: column; gap: 4px"
+                >
+                  <html:label
+                    for="__addonRef__-mineru-local-backend"
+                    style="
+                      display: block;
+                      font-weight: 600;
+                      font-size: 12px;
+                      color: var(--fill-primary, inherit);
+                      margin-bottom: 2px;
+                    "
+                  >
+                    Backend (MinerU 2/3)
+                  </html:label>
+                  <html:select
+                    id="__addonRef__-mineru-local-backend"
+                    style="
+                      width: 100%;
+                      padding: 6px 10px;
+                      font-size: 13px;
+                      border-radius: 6px;
+                      box-sizing: border-box;
+                    "
+                  >
+                    <html:option value="pipeline">pipeline</html:option>
+                    <html:option value="vlm">vlm</html:option>
+                    <html:option value="hybrid">hybrid</html:option>
+                    <html:option value="vlm-http-client"
+                      >vlm-http-client</html:option
+                    >
+                    <html:option value="hybrid-http-client"
+                      >hybrid-http-client</html:option
+                    >
+                  </html:select>
+                  <html:span
+                    style="
+                      font-size: 10.5px;
+                      color: var(--fill-secondary, #888);
+                      margin-top: 1px;
+                    "
+                  >
+                    Switching backend triggers a cold start: the first parse
+                    afterwards may take noticeably longer while the model loads.
+                  </html:span>
+                </html:div>
+
                 <html:label
-                  for="__addonRef__-mineru-local-backend"
+                  for="__addonRef__-mineru-local-effort"
                   style="
                     display: block;
                     font-weight: 600;
@@ -2484,11 +2535,10 @@
                     color: var(--fill-primary, inherit);
                     margin-bottom: 2px;
                   "
+                  >Hybrid effort (MinerU 3.3+)</html:label
                 >
-                  Backend
-                </html:label>
                 <html:select
-                  id="__addonRef__-mineru-local-backend"
+                  id="__addonRef__-mineru-local-effort"
                   style="
                     width: 100%;
                     padding: 6px 10px;
@@ -2497,34 +2547,113 @@
                     box-sizing: border-box;
                   "
                 >
-                  <html:option value="pipeline">pipeline</html:option>
-                  <html:option value="vlm">vlm</html:option>
-                  <html:option value="hybrid">hybrid</html:option>
+                  <html:option value="medium">medium</html:option>
+                  <html:option value="high">high</html:option>
                 </html:select>
-                <html:span
+                <html:label>
+                  <html:input
+                    id="__addonRef__-mineru-local-imageAnalysis"
+                    type="checkbox"
+                  >
+                  </html:input>
+                  Analyze images and charts (VLM or hybrid high
+                  effort)</html:label
+                >
+                <html:label
+                  for="__addonRef__-mineru-local-serverUrl"
                   style="
-                    font-size: 10.5px;
-                    color: var(--fill-secondary, #888);
-                    margin-top: 1px;
+                    display: block;
+                    font-weight: 600;
+                    font-size: 12px;
+                    color: var(--fill-primary, inherit);
+                    margin-bottom: 2px;
+                  "
+                  >VLM server URL (HTTP-client backends)</html:label
+                >
+                <html:input
+                  id="__addonRef__-mineru-local-serverUrl"
+                  type="text"
+                  placeholder="http://127.0.0.1:30000"
+                  style="
+                    width: 100%;
+                    padding: 6px 10px;
+                    font-size: 13px;
+                    border-radius: 6px;
+                    box-sizing: border-box;
                   "
                 >
-                  Switching backend triggers a cold start: the first parse
-                  afterwards may take noticeably longer while the model loads.
-                </html:span>
+                </html:input>
+                <html:span
+                  style="font-size: 11px; color: var(--fill-secondary, #888)"
+                  >Legacy servers can keep parsing after Pause. Restart the
+                  server to stop that work.</html:span
+                >
               </html:div>
-
-              <html:span
+              <html:div
+                id="__addonRef__-mineru-v1-options"
+                style="display: flex; flex-direction: column; gap: 4px"
+              >
+                <html:label
+                  for="__addonRef__-mineru-local-tier"
+                  style="
+                    display: block;
+                    font-weight: 600;
+                    font-size: 12px;
+                    color: var(--fill-primary, inherit);
+                    margin-bottom: 2px;
+                  "
+                  >Quality tier (MinerU 4)</html:label
+                >
+                <html:select
+                  id="__addonRef__-mineru-local-tier"
+                  style="
+                    width: 100%;
+                    padding: 6px 10px;
+                    font-size: 13px;
+                    border-radius: 6px;
+                    box-sizing: border-box;
+                  "
+                >
+                  <html:option value="auto">Server default</html:option>
+                  <html:option value="flash">flash</html:option>
+                  <html:option value="basic">basic</html:option>
+                  <html:option value="standard">standard</html:option>
+                  <html:option value="advanced">advanced</html:option>
+                </html:select>
+                <html:span
+                  style="font-size: 11px; color: var(--fill-secondary, #888)"
+                  >For MinerU 4, configure the VLM server on the MinerU service.
+                  Pause requests job cancellation.</html:span
+                >
+              </html:div>
+              <html:label
+                for="__addonRef__-mineru-local-apiKey"
                 style="
-                  font-size: 11px;
-                  color: #f59e0b;
-                  line-height: 1.45;
-                  margin-top: 2px;
+                  display: block;
+                  font-weight: 600;
+                  font-size: 12px;
+                  color: var(--fill-primary, inherit);
+                  margin-bottom: 2px;
+                "
+                >Local service API key (optional)</html:label
+              >
+              <html:input
+                id="__addonRef__-mineru-local-apiKey"
+                type="password"
+                placeholder=""
+                style="
+                  width: 100%;
+                  padding: 6px 10px;
+                  font-size: 13px;
+                  border-radius: 6px;
+                  box-sizing: border-box;
                 "
               >
-                Note: Pause stops the queue, but an already-running local parse
-                keeps executing on the mineru-api server — it has no cancel
-                endpoint. To abort immediately (e.g. to switch backend right
-                away), restart your mineru-api process manually.
+              </html:input>
+              <html:span
+                id="__addonRef__-mineru-local-service"
+                style="font-size: 11px; color: var(--fill-secondary, #888)"
+              >
               </html:span>
             </html:div>
 

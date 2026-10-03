@@ -1,3 +1,4 @@
+import { bindMineruLocalPreferences } from "./mineruLocalPreferences";
 import { appLogger } from "../core/logging";
 import { createProviderRequestScope } from "../utils/providerTransport";
 import {
@@ -5463,6 +5464,11 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
     mineruTestStatus.style.display = "none";
     mineruTestStatus.textContent = "";
   };
+  const updateMineruLocalOptions = bindMineruLocalPreferences(
+    doc,
+    clearMineruTestStatus,
+  );
+  updateMineruLocalOptions();
   const applyMineruModeButtonState = () => {
     const updateButton = (
       button: HTMLButtonElement | null,
@@ -5749,6 +5755,8 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
     const commitMineruLocalApiBase = () => {
       setMineruLocalApiBase(mineruLocalApiBaseInput.value);
       mineruLocalApiBaseInput.value = getMineruLocalApiBase();
+      updateMineruLocalOptions();
+      clearMineruTestStatus();
     };
     mineruLocalApiBaseInput.addEventListener(
       "change",
@@ -5790,7 +5798,10 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
       mineruTestStatus.style.color = "var(--fill-secondary, #888)";
       try {
         if (mode === "local") {
-          await testMineruLocalConnection(getMineruLocalApiBase());
+          const service = await testMineruLocalConnection(
+            getMineruLocalApiBase(),
+          );
+          updateMineruLocalOptions(service);
         } else {
           const apiKey = getMineruApiKey().trim();
           if (apiKey) {
@@ -5801,7 +5812,9 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
             return;
           }
         }
-        mineruTestStatus.textContent = t("✓ Connection successful");
+        mineruTestStatus.textContent = t(
+          "✓ Service reachable; PDF parsing has not been tested",
+        );
         mineruTestStatus.style.color = "green";
       } catch (error) {
         mineruTestStatus.textContent = `\u2717 ${(error as Error).message}`;

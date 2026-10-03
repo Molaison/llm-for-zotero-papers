@@ -21,6 +21,20 @@ describe("mineruConfig", function () {
     assert.equal(normalizeMineruMaxAutoPages(undefined), 200);
   });
 
+  it("preserves HTTP-client backends and uses the supported engine names", function () {
+    assert.equal(
+      normalizeMineruLocalBackend("vlm-http-client"),
+      "vlm-http-client",
+    );
+    assert.equal(
+      normalizeMineruLocalBackend("hybrid-http-client"),
+      "hybrid-http-client",
+    );
+    assert.equal(toMineruApiBackend("vlm", "3.4.5"), "vlm-engine");
+    assert.equal(toMineruApiBackend("hybrid", "3.4.5"), "hybrid-engine");
+    assert.equal(toMineruApiBackend("hybrid", "3.3.0"), "hybrid-auto-engine");
+  });
+
   describe("normalizeMineruMode", function () {
     it("accepts local and otherwise falls back to cloud", function () {
       assert.equal(normalizeMineruMode("local"), "local");

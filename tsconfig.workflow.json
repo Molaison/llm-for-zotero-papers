@@ -4,5 +4,11 @@
   "compilerOptions": {
     "composite": false
   },
-  "include": ["src", "typings", "test-workflows", "test-live-loop"]
+  "include": [
+    "src",
+    "typings",
+    "test-workflows",
+    "test-live-loop",
+    "test-live-mineru"
+  ]
 }

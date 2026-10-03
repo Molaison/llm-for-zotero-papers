@@ -1,5 +1,18 @@
 import { unzipSync } from "fflate";
 
+export type MineruContentListEntry = {
+  type: string;
+  text?: string;
+  text_level?: number;
+  page_idx?: number;
+  img_path?: string;
+  image_caption?: string[];
+  image_footnote?: string[];
+  table_body?: string;
+  table_caption?: string[];
+  table_footnote?: string[];
+};
+
 export type MinerUZipFile = {
   relativePath: string;
   data: Uint8Array;

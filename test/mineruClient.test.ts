@@ -1,3 +1,4 @@
+import { mineruLegacyHealth } from "./helpers/mineruLegacyHealth";
 import { parsePdfWithMineru } from "../src/services/mineru/mineruParser";
 import { PDFDocument } from "pdf-lib";
 import { createPdfFixture } from "./helpers/pdfFixture";
@@ -56,10 +57,16 @@ function setupLocalMineruClientTest(files: Record<string, string>): void {
   (globalThis as unknown as { Zotero: unknown }).Zotero = {
     isWin: false,
     version: "test",
+    Prefs: { get: () => undefined },
   };
   (globalThis as unknown as { ztoolkit: unknown }).ztoolkit = {
     getGlobal: (name: string) => {
-      if (name === "fetch") return globalThis.fetch;
+      if (name === "fetch")
+        return (url: string, init: RequestInit) => {
+          const health = mineruLegacyHealth(String(url));
+          if (health) return Promise.resolve(health);
+          return globalThis.fetch(url, init);
+        };
       if (name === "AbortController") return AbortController;
       return undefined;
     },
@@ -191,7 +198,7 @@ describe("mineruClient", function () {
           uploads++;
           assert.equal(
             await readMultipartTextField(init?.body, "backend"),
-            "hybrid-auto-engine",
+            "hybrid-engine",
           );
           assert.equal(
             await readMultipartTextField(init?.body, "parse_method"),

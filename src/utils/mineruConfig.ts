@@ -24,7 +24,51 @@ export type MineruMode = "cloud" | "local";
 
 export type MineruCloudModel = "pipeline" | "vlm";
 
-export type MineruLocalBackend = "pipeline" | "vlm" | "hybrid";
+export type MineruLocalBackend =
+  | "pipeline"
+  | "vlm"
+  | "hybrid"
+  | "vlm-http-client"
+  | "hybrid-http-client";
+
+export const MINERU_LOCAL_TIERS = [
+  "auto",
+  "flash",
+  "basic",
+  "standard",
+  "advanced",
+] as const;
+export type MineruLocalTier = (typeof MINERU_LOCAL_TIERS)[number];
+export type MineruLocalOptions = {
+  tier: MineruLocalTier;
+  effort: "medium" | "high";
+  imageAnalysis: boolean;
+  serverUrl: string;
+  apiKey: string;
+};
+
+export function getMineruLocalOptions(): MineruLocalOptions {
+  const read = (name: string) =>
+    Zotero.Prefs.get(`${config.prefsPrefix}.mineruLocal${name}`, true);
+  const tier = read("Tier");
+  return {
+    tier: MINERU_LOCAL_TIERS.includes(tier as MineruLocalTier)
+      ? (tier as MineruLocalTier)
+      : "auto",
+    effort: read("Effort") === "high" ? "high" : "medium",
+    imageAnalysis: read("ImageAnalysis") !== false,
+    serverUrl: String(read("ServerUrl") || "").trim(),
+    apiKey: String(read("ApiKey") || "").trim(),
+  };
+}
+
+export function setMineruLocalOption<K extends keyof MineruLocalOptions>(
+  key: K,
+  value: MineruLocalOptions[K],
+): void {
+  const suffix = key[0].toUpperCase() + key.slice(1);
+  Zotero.Prefs.set(`${config.prefsPrefix}.mineruLocal${suffix}`, value, true);
+}
 
 export type MineruFilenameMatcher = {
   matches: (filename: string) => boolean;
@@ -38,6 +82,8 @@ export const MINERU_LOCAL_BACKENDS: readonly MineruLocalBackend[] = [
   "pipeline",
   "vlm",
   "hybrid",
+  "vlm-http-client",
+  "hybrid-http-client",
 ] as const;
 
 export const MINERU_CLOUD_MODELS: readonly MineruCloudModel[] = [
@@ -49,9 +95,20 @@ const MINERU_BACKEND_API_VALUES: Record<MineruLocalBackend, string> = {
   pipeline: "pipeline",
   vlm: "vlm-auto-engine",
   hybrid: "hybrid-auto-engine",
+  "vlm-http-client": "vlm-http-client",
+  "hybrid-http-client": "hybrid-http-client",
 };
 
-export function toMineruApiBackend(backend: MineruLocalBackend): string {
+export function toMineruApiBackend(
+  backend: MineruLocalBackend,
+  serverVersion?: string,
+): string {
+  const [major, minor] = (serverVersion || "").split(".").map(Number);
+  if (
+    (major > 3 || (major === 3 && minor >= 4)) &&
+    (backend === "vlm" || backend === "hybrid")
+  )
+    return `${backend}-engine`;
   return MINERU_BACKEND_API_VALUES[backend];
 }
 

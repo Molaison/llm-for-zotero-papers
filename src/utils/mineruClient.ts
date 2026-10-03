@@ -15,12 +15,21 @@ import {
   getMineruLocalApiBase,
   getMineruLocalBackend,
   getMineruMode,
+  getMineruLocalOptions,
+  type MineruLocalOptions,
   normalizeMineruLocalApiBase,
   toMineruApiBackend,
   type MineruCloudModel,
   type MineruLocalBackend,
 } from "./mineruConfig";
 import { t } from "./i18n";
+import { MineruCancelledError } from "./mineruErrors";
+export { MineruCancelledError } from "./mineruErrors";
+import {
+  detectMineruLocalService,
+  parseMineruV1,
+  mineruErrorDetail,
+} from "./mineruLocalClient";
 import { buildMultipartRequest } from "./multipart";
 
 const MINERU_DIRECT_API_BASE = "https://mineru.net/api/v4";
@@ -112,13 +121,6 @@ export class MineruPageLimitError extends Error {
       `PDF has ${pageCount} pages, exceeding the automatic MinerU limit of ${maxPages}`,
     );
     this.name = "MineruPageLimitError";
-  }
-}
-
-export class MineruCancelledError extends Error {
-  constructor() {
-    super("Cancelled");
-    this.name = "MineruCancelledError";
   }
 }
 
@@ -924,6 +926,8 @@ function buildLocalFileParseBody(params: {
   fileName: string;
   pdfBytes: Uint8Array;
   backend: MineruLocalBackend;
+  options: MineruLocalOptions;
+  serverVersion: string;
   forceOcr?: boolean;
 }): { body: BodyInit; contentType?: string; mode: "formdata" | "manual" } {
   const request = buildMultipartRequest(
@@ -934,7 +938,24 @@ function buildLocalFileParseBody(params: {
         contentType: "application/pdf",
         data: params.pdfBytes,
       },
-      { name: "backend", value: toMineruApiBackend(params.backend) },
+      {
+        name: "backend",
+        value: toMineruApiBackend(params.backend, params.serverVersion),
+      },
+      ...(params.backend.startsWith("hybrid")
+        ? [{ name: "effort", value: params.options.effort }]
+        : []),
+      ...(params.backend !== "pipeline"
+        ? [
+            {
+              name: "image_analysis",
+              value: String(params.options.imageAnalysis),
+            },
+          ]
+        : []),
+      ...(params.backend.endsWith("-http-client")
+        ? [{ name: "server_url", value: params.options.serverUrl }]
+        : []),
       { name: "parse_method", value: params.forceOcr ? "ocr" : "auto" },
       { name: "formula_enable", value: "true" },
       { name: "table_enable", value: "true" },
@@ -968,6 +989,8 @@ async function submitLocalFileParseRequest(params: {
   sizeMB: string;
   pdfBytes: Uint8Array;
   backend: MineruLocalBackend;
+  options: MineruLocalOptions;
+  serverVersion: string;
   forceOcr?: boolean;
   report: (s: string) => void;
   signal?: AbortSignal;
@@ -977,6 +1000,8 @@ async function submitLocalFileParseRequest(params: {
     fileName: params.fileName,
     pdfBytes: params.pdfBytes,
     backend: params.backend,
+    options: params.options,
+    serverVersion: params.serverVersion,
     forceOcr: params.forceOcr,
   });
   params.report(
@@ -989,7 +1014,9 @@ async function submitLocalFileParseRequest(params: {
   }, LOCAL_PROGRESS_INTERVAL_MS);
 
   try {
-    const headers: Record<string, string> = {};
+    const headers: Record<string, string> = params.options.apiKey
+      ? getMineruAuthHeaders(params.options.apiKey)
+      : {};
     if (contentType) headers["Content-Type"] = contentType;
     return await raceAbort(
       fetchWithTimeout(
@@ -1029,10 +1056,11 @@ function buildLocalParseHttpFailureMessage(
   return `${t("Local parse failed: HTTP %s").replace("%s", `${status}`)}${suffix}`;
 }
 
-async function parsePdfViaLocalFileParse(
+async function parsePdfViaLocalService(
   pdfPath: string,
   baseUrl: string,
   backend: MineruLocalBackend,
+  options: MineruLocalOptions,
   forceOcr: boolean,
   report: (s: string) => void,
   signal?: AbortSignal,
@@ -1049,6 +1077,32 @@ async function parsePdfViaLocalFileParse(
   const sizeMB = (pdfBytes.length / (1024 * 1024)).toFixed(1);
 
   throwIfAborted(signal);
+  const service = await detectMineruLocalService(
+    baseUrl,
+    options.apiKey,
+    signal,
+  );
+  if (service.api === "v1")
+    return parseMineruV1({
+      baseUrl,
+      fileName,
+      pdfBytes,
+      service,
+      options,
+      forceOcr,
+      report,
+      signal,
+    });
+  if (backend.endsWith("-http-client")) {
+    let valid = false;
+    try {
+      valid = ["http:", "https:"].includes(new URL(options.serverUrl).protocol);
+    } catch {
+      /* invalid */
+    }
+    if (!valid)
+      throw new Error("Enter the VLM server URL for the HTTP-client backend");
+  }
   const url = joinApiPath(baseUrl, "/file_parse");
   const releaseGate = await acquireLocalFileParseGate(signal, () => {
     report(t("Waiting for another local MinerU parse to finish…"));
@@ -1064,6 +1118,8 @@ async function parsePdfViaLocalFileParse(
         sizeMB,
         pdfBytes,
         backend,
+        options,
+        serverVersion: service.version,
         forceOcr,
         report,
         signal,
@@ -1654,16 +1710,40 @@ async function parsePdfViaUpload(
       getMineruAuthHeaders(apiKey),
     );
 
+    if (pollResult.status === 429)
+      throw new MineruRateLimitError(
+        "MinerU status request rate limited (HTTP 429)",
+      );
+    if ([401, 403, 404].includes(pollResult.status)) {
+      report(
+        `MinerU status request failed: HTTP ${pollResult.status}${mineruErrorDetail(pollResult.data) ? `: ${mineruErrorDetail(pollResult.data)}` : ""}`,
+      );
+      return null;
+    }
     if (pollResult.status < 200 || pollResult.status >= 300) {
+      report(
+        `MinerU status temporarily unavailable: HTTP ${pollResult.status}`,
+      );
       appLogger.debug(`MinerU: poll HTTP ${pollResult.status}`);
       continue;
     }
 
+    const cloudError = pollResult.data as {
+      code?: number;
+      msg?: string;
+    } | null;
+    if (cloudError?.code !== undefined && cloudError.code !== 0) {
+      report(
+        `MinerU status request failed (${cloudError.code})${mineruErrorDetail(cloudError) ? `: ${mineruErrorDetail(cloudError)}` : ""}`,
+      );
+      return null;
+    }
     const pollData = pollResult.data as {
       data?: {
         extract_result?: Array<{
           state?: string;
           full_zip_url?: string;
+          err_msg?: string;
           extract_progress?: {
             extracted_pages?: number;
             total_pages?: number;
@@ -1674,17 +1754,29 @@ async function parsePdfViaUpload(
     const extractResult = pollData?.data?.extract_result?.[0];
     if (!extractResult) {
       appLogger.warn(
-        `MinerU: poll response has no extract_result: ${JSON.stringify(pollResult.data).slice(0, 200)}`,
+        `MinerU: cloud poll response has no extract_result${mineruErrorDetail(pollResult.data) ? `: ${mineruErrorDetail(pollResult.data)}` : ""}`,
       );
       report(t("Waiting for MinerU status… (%ss)").replace("%s", `${elapsed}`));
       continue;
     }
 
     const state = normalizeMineruCloudState(extractResult.state);
+    if (
+      state &&
+      ![
+        "waiting-file",
+        "pending",
+        "running",
+        "converting",
+        "done",
+        "failed",
+      ].includes(state)
+    ) {
+      report(`MinerU returned an unsupported status: ${state.slice(0, 60)}`);
+      return null;
+    }
     if (!state) {
-      appLogger.warn(
-        `MinerU: poll response has empty state: ${JSON.stringify(pollResult.data).slice(0, 200)}`,
-      );
+      appLogger.warn("MinerU: cloud poll response has empty state");
       report(t("Waiting for MinerU status… (%ss)").replace("%s", `${elapsed}`));
       continue;
     }
@@ -1694,7 +1786,7 @@ async function parsePdfViaUpload(
       activeStartedAtMs = pollTimeMs;
     }
 
-    appLogger.debug(`MinerU: poll state="${state}"`);
+    appLogger.debug(`MinerU: cloud poll state="${state}" elapsed=${elapsed}s`);
 
     if (state === "done") {
       if (!extractResult.full_zip_url) {
@@ -1720,7 +1812,10 @@ async function parsePdfViaUpload(
     }
 
     if (state === "failed") {
-      report(t("Extraction failed on server"));
+      const detail = mineruErrorDetail(extractResult);
+      report(
+        `${t("Extraction failed on server")}${detail ? `: ${detail}` : ""}`,
+      );
       return null;
     }
 
@@ -1792,16 +1887,18 @@ export async function parsePdfWithMineruLocal(
   onProgress?: MinerUProgressCallback,
   signal?: AbortSignal,
   forceOcr = DEFAULT_MINERU_FORCE_OCR,
+  options = getMineruLocalOptions(),
 ): Promise<MinerUResult> {
   const report = (stage: string) => {
     appLogger.debug(`MinerU local: ${stage}`);
     onProgress?.(stage);
   };
   try {
-    return await parsePdfViaLocalFileParse(
+    return await parsePdfViaLocalService(
       pdfPath,
       baseUrl,
       backend,
+      options,
       forceOcr,
       report,
       signal,
@@ -1828,6 +1925,7 @@ export async function parsePdfWithMineruSingle(
       onProgress,
       signal,
       forceOcr,
+      settings.localOptions,
     );
   }
   return parsePdfWithMineruCloud(
@@ -1864,6 +1962,31 @@ export async function testMineruConnection(apiKey: string): Promise<void> {
   );
   if (result.status === 401 || result.status === 403) {
     throw new Error("Invalid API key — authentication failed");
+  }
+
+  // This deliberately nonexistent batch may return 404, but service failures
+  // and malformed success bodies must never produce a green connection result.
+  if (result.status !== 404 && (result.status < 200 || result.status >= 300)) {
+    throw new Error(`MinerU API connection failed: HTTP ${result.status}`);
+  }
+  if (
+    !result.data ||
+    typeof result.data !== "object" ||
+    typeof (result.data as { code?: unknown }).code !== "number"
+  ) {
+    throw new Error("MinerU API returned an invalid connection-test response");
+  }
+
+  const probe = result.data as { code: number; msg?: string };
+  if (
+    probe.code !== 0 &&
+    !/not.?found|does not exist|不存在|invalid (?:batch|task)|(?:batch|task).*(?:invalid|expired)|(?:批次|任务).*(?:无效|过期)|无效.*(?:任务|批次)/i.test(
+      probe.msg || "",
+    )
+  ) {
+    throw new Error(
+      `MinerU API connection failed (${probe.code})${mineruErrorDetail(probe) ? `: ${mineruErrorDetail(probe)}` : ""}`,
+    );
   }
 
   // Also verify connectivity to Alibaba Cloud OSS (used for upload/download).
@@ -1922,25 +2045,8 @@ export async function testMineruConnection(apiKey: string): Promise<void> {
   }
 }
 
-export async function testMineruLocalConnection(
-  baseUrl: string,
-): Promise<void> {
-  const url = joinApiPath(baseUrl, "/health");
-  const response = await fetchWithTimeout(
-    url,
-    { method: "GET" },
-    undefined,
-    10000,
-    t("Local MinerU health check timed out"),
-  );
-  if (!response.ok) {
-    throw new Error(
-      t("Local MinerU health check failed: HTTP %s").replace(
-        "%s",
-        `${response.status}`,
-      ),
-    );
-  }
+export async function testMineruLocalConnection(baseUrl: string) {
+  return detectMineruLocalService(baseUrl, getMineruLocalOptions().apiKey);
 }
 
 export function getMineruParseSettings() {
@@ -1948,6 +2054,7 @@ export function getMineruParseSettings() {
     mode: getMineruMode(),
     localApiBase: getMineruLocalApiBase(),
     localBackend: getMineruLocalBackend(),
+    localOptions: getMineruLocalOptions(),
     cloudModel: getMineruCloudModel(),
     forceOcr: isMineruForceOcrEnabled(),
   };

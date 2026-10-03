@@ -530,6 +530,25 @@ const zhCN: Record<string, string> = {
   "Uploading PDF…": "正在上传 PDF…",
   "Uploading to local server… (%s MB)": "正在上传到本地服务…（%s MB）",
   "Upload failed: HTTP %s to %s": "上传失败：HTTP %s 到 %s",
+  "✓ Service reachable; PDF parsing has not been tested":
+    "✓ 服务可访问；尚未测试 PDF 解析",
+  "Legacy API": "旧版 API",
+  "Test Connection detects the local API and available options.":
+    "测试连接会识别本地 API 和可用选项。",
+  "Backend (MinerU 2/3)": "后端模型（MinerU 2/3）",
+  "Quality tier (MinerU 4)": "解析档位（MinerU 4）",
+  "Hybrid effort (MinerU 3.3+)": "混合模型精度（MinerU 3.3+）",
+  "Server default": "服务器默认",
+  "VLM server URL (HTTP-client backends)": "VLM 服务器地址（HTTP-client 后端）",
+  "Local service API key (optional)": "本地服务 API 密钥（可选）",
+  "Analyze images and charts (VLM or hybrid high effort)":
+    "分析图片和图表（VLM 或高精度混合模型）",
+  "Start a local MinerU API server separately. Test Connection detects its API; it does not parse a PDF.":
+    "请先单独启动本地 MinerU API 服务。测试连接会识别 API，但不会解析 PDF。",
+  "Legacy servers can keep parsing after Pause. Restart the server to stop that work.":
+    "旧版服务可能在暂停后继续解析。如需停止，请重启服务。",
+  "For MinerU 4, configure the VLM server on the MinerU service. Pause requests job cancellation.":
+    "MinerU 4 的 VLM 服务器需在服务端配置。暂停会请求取消任务。",
   "Waiting for MinerU to start…": "正在等待 MinerU 开始处理…",
   "Waiting for MinerU to start… (%ss)": "正在等待 MinerU 开始处理…（%s 秒）",
   "Waiting for MinerU upload to be accepted… (%ss)":
