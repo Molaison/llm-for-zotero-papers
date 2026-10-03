@@ -83,6 +83,8 @@ const PREF_PREFIX = "extensions.zotero.llmforzotero";
 const MODEL_ENTRY_ID = "live-digest-model";
 /** As the 12-paper lag test: one turn may take up to 14 minutes. */
 const TURN_TIMEOUT_MS = 840_000;
+/** How often the turn is checked for an approval request to deny. */
+const APPROVAL_POLL_MS = 2_000;
 /** `PAPER_DIGEST_HANDLE_TOOL` in src/agent/digests/digestJobHost.ts. */
 const PAPER_DIGEST_HANDLE_TOOL = "paper_digest";
 /** Characters of a title that count as naming the paper. */
@@ -671,21 +673,29 @@ function checkMisfiledPaper(data: ScenarioData, check: Check): void {
   const withText = data.collection.papers.filter((paper) => paper.hasText);
 
   // Some digest part covers the folder (X1, which has no text, has its own
-  // check below).
+  // check below). The agent may instead read the papers itself; then the
+  // per-paper verdict checks do not apply, and only its decision is checked.
   const digestParts = data.tasks.filter((task) => task.effect === "digest");
-  check(digestParts.length, "no digest part was declared");
+  const digested = digestParts.length > 0;
+  if (!digested)
+    data.warnings.push(
+      "no digest part was declared: the agent read the papers itself, so the per-paper verdict checks were skipped",
+    );
+  const verdictCheck: Check = (ok, message) => {
+    if (digested) check(ok, message);
+  };
   const digestTargets = new Set(
     digestParts.flatMap((task) => task.targets || []),
   );
   const uncovered = withText.filter(
     (paper) => !digestTargets.has(targetOf(paper)),
   );
-  check(
+  verdictCheck(
     !uncovered.length,
     `no digest part covers: ${uncovered.map(describePaper).join("; ")}`,
   );
   for (const paper of withText) {
-    check(
+    verdictCheck(
       answered(data, paper),
       `${describePaper(paper)} has no digest read with an answer`,
     );
@@ -699,7 +709,7 @@ function checkMisfiledPaper(data: ScenarioData, check: Check): void {
         exception.targets.includes(targetOf(x1)),
       ),
     );
-  check(
+  verdictCheck(
     x1Failed || namesPaper(data, x1),
     `${describePaper(x1)} has no digest failure and the answer does not name it`,
   );
@@ -711,7 +721,7 @@ function checkMisfiledPaper(data: ScenarioData, check: Check): void {
   // C1: judged irrelevant with a reason, excluded with a reason, not cited,
   // named in the answer.
   const c1Judged = readsOf(data, c1).filter((read) => read.relevance);
-  check(
+  verdictCheck(
     c1Judged.some(
       (read) =>
         read.ok &&
@@ -1368,10 +1378,49 @@ describe("live: instruction-driven digest scenarios", function () {
       "the conversation did not change before sending",
     );
 
-    // The turn.
+    // The turn. No scenario asks for a write, so any approval the run asks
+    // for is an unrequested write proposal: deny it at once and record it,
+    // instead of waiting for the turn timeout with nobody to approve.
     const startedAt = Date.now();
     let answerText = "";
     let turnError: string | null = null;
+    const deniedApprovals: string[] = [];
+    let watching = true;
+    const watcher = (async () => {
+      const seen = new Set<string>();
+      while (watching) {
+        await Zotero.Promise.delay(APPROVAL_POLL_MS);
+        if (!watching) break;
+        const rows = (await Zotero.DB.queryAsync(
+          "SELECT e.payload_json AS payload FROM llm_for_zotero_agent_run_events e JOIN llm_for_zotero_agent_runs r ON r.run_id = e.run_id WHERE r.conversation_key = ? AND r.created_at >= ? AND e.event_type = 'confirmation_required'",
+          [String(conversationKey), startedAt],
+        )) as Array<{ payload: string }> | undefined;
+        for (const row of rows || []) {
+          let event: {
+            requestId?: string;
+            action?: { toolName?: string; title?: string };
+          } = {};
+          try {
+            event = JSON.parse(String(row.payload));
+          } catch {
+            continue;
+          }
+          if (!event.requestId || seen.has(event.requestId)) continue;
+          seen.add(event.requestId);
+          deniedApprovals.push(
+            `${event.action?.toolName || "a tool"}: ${event.action?.title || "an action"}`,
+          );
+          try {
+            Zotero.LLMForZotero.api.agent.resolveConfirmation(
+              event.requestId,
+              false,
+            );
+          } catch (error) {
+            warnings.push(`could not deny ${event.requestId}: ${error}`);
+          }
+        }
+      }
+    })();
     try {
       const turn = await api.sendLiveChatTurn(
         panel.panelId,
@@ -1381,6 +1430,9 @@ describe("live: instruction-driven digest scenarios", function () {
       answerText = turn.answerText || "";
     } catch (error) {
       turnError = String((error as Error)?.stack || error);
+    } finally {
+      watching = false;
+      await watcher;
     }
     const wallMs = Date.now() - startedAt;
     const sent = api.getLastSend();
@@ -1418,6 +1470,10 @@ describe("live: instruction-driven digest scenarios", function () {
     // Every scenario: the turn ran in Agent mode over the folder and its run
     // completed; then the scenario's own checks.
     check(!turnError, `the turn failed: ${turnError}`);
+    check(
+      !deniedApprovals.length,
+      `the run asked for approval of an unrequested write (denied): ${deniedApprovals.join("; ")}`,
+    );
     check(data.runId, "no agent run was recorded for the conversation");
     check(
       data.runStatus === "completed",

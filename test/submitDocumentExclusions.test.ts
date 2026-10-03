@@ -159,6 +159,46 @@ describe("submit_document: papers the document leaves out", function () {
   });
 
   describe("ledger", function () {
+    it("records the papers on a reasoning part the document names when no artifact part takes it", function () {
+      const ledger = declareOutcomes(
+        createEmptyExecutionCheckpoint(executionContext, 10),
+        [
+          {
+            taskId: "review",
+            description: "Synthesize the per-paper results into a review",
+            effect: "answer",
+            targets: ["item:5", "item:6", "item:7"],
+          },
+        ],
+        20,
+      );
+      const result = apply(
+        ledger,
+        document(["item:5", "item:6"], [{ targets: ["7", "5"], reason: off }]),
+      );
+      assert.isTrue(result.changed);
+      const part = review(result.checkpoint);
+      assert.deepEqual(
+        part.excludedTargets,
+        [{ targets: ["item:7"], reason: off }],
+        "the cited item:5 is not left out",
+      );
+      assert.equal(
+        part.status,
+        "pending",
+        "the answer completes it, as before",
+      );
+      assert.deepEqual(part.materialRefs, [], "the document binds nowhere");
+      // A document naming no part, or with nothing left out, changes nothing.
+      assert.isFalse(
+        apply(ledger, {
+          ...document(["item:5"], [{ targets: ["7"], reason: off }]),
+          taskId: undefined,
+        }).changed,
+      );
+      assert.isFalse(apply(ledger, document(["item:5"])).changed);
+    });
+
     it("records the papers on the review part, never one the document cites or the part does not name, and the run ends completed", function () {
       const result = apply(
         declared(["item:5", "item:6", "item:7", "item:8"]),

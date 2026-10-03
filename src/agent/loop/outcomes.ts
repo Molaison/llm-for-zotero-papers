@@ -1216,7 +1216,7 @@ function applyMaterial(
     taskId: evidence.taskId,
     kind: evidence.documentKind,
   });
-  if (!chosen) return unchanged(checkpoint);
+  if (!chosen) return namedReasoningExclusions(checkpoint, evidence, now);
   const { documentId, documentVersion, contentHash } = evidence.materialRef;
   return mapTasks(checkpoint, now, (task, index) => {
     if (index !== chosen.index) return undefined;
@@ -1241,6 +1241,42 @@ function applyMaterial(
         { documentId, documentVersion, contentHash },
       ],
     };
+  });
+}
+
+/**
+ * The papers a document leaves out when no artifact part takes it but it
+ * names a reasoning part: the model declared the synthesis as an answer and
+ * delivered it as a document, and what it left out is still its decision on
+ * that part. Nothing else of the document binds there.
+ */
+function namedReasoningExclusions(
+  checkpoint: ExecutionCheckpoint,
+  evidence: Extract<OutcomeEvidence, { kind: "material" }>,
+  now: number,
+): EvidenceResult {
+  if (!evidence.excluded?.length || !evidence.taskId)
+    return unchanged(checkpoint);
+  let taskId: string;
+  try {
+    taskId = ordinaryExecutionTaskId(checkpoint.executionId, evidence.taskId);
+  } catch {
+    return unchanged(checkpoint);
+  }
+  const named = successorOf(
+    checkpoint,
+    checkpoint.tasks.findIndex((task) => task.taskId === taskId),
+  );
+  return mapTasks(checkpoint, now, (task, index) => {
+    if (index !== named || (task.effect || "answer") !== "answer")
+      return undefined;
+    const next = withDocumentExclusions(
+      task,
+      evidence.excluded,
+      evidence.citedTargets,
+      now,
+    );
+    return next === task ? undefined : next;
   });
 }
 
