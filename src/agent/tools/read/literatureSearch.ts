@@ -181,7 +181,7 @@ export function createLiteratureSearchTool(
     spec: {
       name: "literature_search",
       description:
-        "Search scholarly sources and save candidates to rank. For discovery or recommendations, call literature_review to show the selection card; discovery never imports silently. Explicit imports use workflow:'answer', then library_import; To read a paper's abstract or details, use workflow:'answer'; workflow:'review' with mode:'metadata' proposes metadata changes the user must approve, so use it only when the user asks to check or fix an item's metadata.",
+        "Search scholarly sources outside the library, only when the user asks to find, recommend or import papers, or to fix metadata; never for work on papers already in the turn's scope (summaries, reviews, comparisons). For discovery or recommendations, call literature_review to show the selection card; discovery never imports silently. Explicit imports use workflow:'answer', then library_import; To read a paper's abstract or details, use workflow:'answer'; workflow:'review' with mode:'metadata' proposes metadata changes the user must approve, so use it only when the user asks to check or fix an item's metadata.",
       inputSchema: {
         type: "object",
         required: ["mode"],

@@ -34,6 +34,12 @@ describe("literature_search tool", function () {
       tool.spec.description,
       "To read a paper's abstract or details, use workflow:'answer'; workflow:'review' with mode:'metadata' proposes metadata changes the user must approve, so use it only when the user asks to check or fix an item's metadata.",
     );
+    // A summary of the folder once turned into a discovery card of
+    // external papers nobody asked for.
+    assert.include(
+      tool.spec.description,
+      "never for work on papers already in the turn's scope (summaries, reviews, comparisons)",
+    );
   });
 
   it("supports metadata lookups through the unified online tool", async function () {

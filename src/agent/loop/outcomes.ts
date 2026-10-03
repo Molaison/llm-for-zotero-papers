@@ -1130,9 +1130,15 @@ function coverTargets(
       updatedAt: now,
     };
   if (!cited) return { ...completed(task), updatedAt: now };
+  // A folder or tag target is covered by content that cites any paper: the
+  // part asked for a synthesis over that scope, and the papers it left out
+  // are the model's exclusions.
   const doneTargets = union(
     task.doneTargets,
-    targets.filter((target) => cited.includes(target)),
+    targets.filter(
+      (target) =>
+        cited.includes(target) || (!isPaperTarget(target) && cited.length > 0),
+    ),
   );
   const done = new Set(doneTargets);
   const excludedTargets = withoutDone(task.excludedTargets || [], doneTargets);
@@ -1698,7 +1704,17 @@ function itemTarget(value: string): string | undefined {
  */
 function excludedPaper(task: Task, value: string): string | undefined {
   const targets = task.targets || [];
-  return targets.length ? resolveTarget(value, targets) : itemTarget(value);
+  // A part over a folder or tag (no paper among its targets) names its
+  // papers only through that scope, so it takes any paper, as a part that
+  // names none does.
+  return targets.some(isPaperTarget)
+    ? resolveTarget(value, targets)
+    : itemTarget(value);
+}
+
+/** Whether a target names a paper (`item:<id>`), not a folder or a tag. */
+function isPaperTarget(target: string): boolean {
+  return target.startsWith("item:");
 }
 
 /**

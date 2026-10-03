@@ -159,6 +159,28 @@ describe("submit_document: papers the document leaves out", function () {
   });
 
   describe("ledger", function () {
+    it("treats a review declared over a folder as that scope: the document covers it and its exclusions are recorded", function () {
+      const result = apply(
+        declared(["collection:1"]),
+        document(["item:5", "item:6"], [{ targets: ["7"], reason: off }]),
+      );
+      const part = review(result.checkpoint);
+      assert.equal(part.status, "completed");
+      assert.deepEqual(part.doneTargets, ["collection:1"]);
+      assert.notProperty(part, "exceptions", "the folder is not Not covered");
+      assert.deepEqual(part.excludedTargets, [
+        { targets: ["item:7"], reason: off },
+      ]);
+      assert.equal(decideRunEnd(result.checkpoint, RUN), "completed");
+      // Content that cites nothing does not cover the folder.
+      const empty = review(
+        apply(declared(["collection:1"]), document([])).checkpoint,
+      );
+      assert.deepEqual(empty.exceptions, [
+        { targets: ["collection:1"], reason: OUTCOME_REASONS.notCovered },
+      ]);
+    });
+
     it("records the papers on a reasoning part the document names when no artifact part takes it", function () {
       const ledger = declareOutcomes(
         createEmptyExecutionCheckpoint(executionContext, 10),
