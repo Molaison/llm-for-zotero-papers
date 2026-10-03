@@ -83,7 +83,7 @@ describe("literature-review skill", function () {
     // With nothing attached the agent chooses the papers before naming them.
     assert.include(
       text,
-      "With nothing attached, search with `library_retrieve` first, choose the papers from its results without opening candidates with `paper_read`, and declare the digest part with the chosen papers' `targetIds`.",
+      "With nothing attached, choose the papers from `library_retrieve` results without opening them with `paper_read`, then declare the digest part with their `targetIds`.",
     );
     // A paper with no text is named as not read: no retry, read or search.
     assert.include(

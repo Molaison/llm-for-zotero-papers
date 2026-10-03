@@ -18,7 +18,7 @@ A review is an argument about a body of work, not a catalog of it: a faithful ac
    A selected folder, tag or paper set is the source boundary: each paper in it is a candidate, and none is relevant only because it is there.
 2. **Parts.** In your first step, declare the parts with `task_update`.
    When the user asked for something per paper (summaries, each paper's method, a table with a row per paper), or when the review must account for more than four papers, declare a digest part: `{ taskId:'papers', description:'For the review question "<question>": summarize each paper and judge how it bears on the question', expectedEffect:'digest', scope:true }` (or explicit `targetIds`), and do not also declare a read part over the same papers.
-   With nothing attached, search with `library_retrieve` first, choose the papers from its results without opening candidates with `paper_read`, and declare the digest part with the chosen papers' `targetIds`.
+   With nothing attached, choose the papers from `library_retrieve` results without opening them with `paper_read`, then declare the digest part with their `targetIds`.
    The host then analyzes each paper itself inside that call and returns the results; do not read those papers with `paper_read` first.
    Then declare the review (`expectedEffect:'artifact'`) and, only when the user asked to save it, the note (`expectedEffect:'mutation'`, `expectedCapability:'zotero.notes'`).
    For four papers or fewer without a per-paper request, declare a read part (`expectedEffect:'read'`) instead and read them with `paper_read`.
