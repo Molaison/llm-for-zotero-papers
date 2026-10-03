@@ -346,10 +346,12 @@ describe("task_update runs a declared digest part", function () {
         "call-digest:digest:7:failed",
       ],
     );
-    // Every paper's digest read, and the failure's, names its part.
+    // Every paper's digest read, and the failure's, names its part by its
+    // full task id, which carries its run.
+    const executionId = harness.request.executionCheckpoint!.executionId;
     for (const delta of deltas)
       assert.include(delta.reads[0], {
-        partId: "summaries",
+        partId: `${executionId}:task:summaries`,
         label: "Summarize each selected paper",
       });
     const paper5 = deltas.find((delta) => delta.papers[0].itemId === 5)!;
@@ -371,8 +373,17 @@ describe("task_update runs a declared digest part", function () {
     );
     assert.isAbove(resultIndex, lastDeltaIndex);
 
+    // One part renders as it did before parts were grouped: no part heading.
+    assert.notInclude(answer.digests, "## Part");
+    assert.isTrue(
+      (answer.digests as string).startsWith("### Drift A (item:5)"),
+    );
     // Each digest is stored for context_read and named by its handle.
     assert.lengthOf(answer.digestHandles, 2);
+    assert.deepEqual(
+      answer.digestHandles.map((entry: { taskId: string }) => entry.taskId),
+      ["summaries", "summaries"],
+    );
     assert.sameMembers(
       answer.digestHandles.map((entry: { itemId: number }) => entry.itemId),
       [5, 6],
@@ -876,6 +887,7 @@ describe("task_update runs a declared digest part", function () {
       });
       const answer = outcome.toolResult.content as Record<string, any>;
       const digestReads = ledgerDeltas(harness).map((delta) => delta.reads[0]);
+      const executionId = harness.request.executionCheckpoint!.executionId;
       assert.sameDeepMembers(
         digestReads.map((read) => [
           read.partId,
@@ -883,9 +895,13 @@ describe("task_update runs a declared digest part", function () {
           read.relevance?.level,
         ]),
         [
-          ["summaries", "Summarize each selected paper", undefined],
           [
-            "relevance",
+            `${executionId}:task:summaries`,
+            "Summarize each selected paper",
+            undefined,
+          ],
+          [
+            `${executionId}:task:relevance`,
             "Judge whether each paper bears on representational drift",
             "direct",
           ],
@@ -900,6 +916,16 @@ describe("task_update runs a declared digest part", function () {
         (entry) => entry.handle,
       );
       assert.lengthOf(new Set(handles), 2);
+      // Each handle names the part it answers, as the model names the part.
+      assert.sameDeepMembers(
+        (answer.digestHandles as Array<{ itemId: number; taskId: string }>).map(
+          (entry) => [entry.itemId, entry.taskId],
+        ),
+        [
+          [5, "summaries"],
+          [5, "relevance"],
+        ],
+      );
       const blocks = (answer.digests as string)
         .split("\n\n")
         .filter((block) => block.startsWith("### "));
@@ -916,9 +942,27 @@ describe("task_update runs a declared digest part", function () {
       assert.notEqual(summaryHandle, verdictHandle);
       assert.sameMembers([summaryHandle, verdictHandle], handles);
       assert.include(verdictBlock, "Relevance: direct — It measures drift.");
-      assert.isTrue(
-        (answer.digests as string).startsWith("Relevance: 1 direct\n"),
+      // The result groups by part: a heading, then that part's own relevance
+      // count line and blocks, so the model knows which block answers which.
+      const rendered = answer.digests as string;
+      const summaryHeading = "## Part summaries: Summarize each selected paper";
+      const verdictHeading =
+        "## Part relevance: Judge whether each paper bears on representational drift";
+      assert.isTrue(rendered.startsWith(`${summaryHeading}\n\n### Drift A`));
+      assert.include(
+        rendered,
+        `${verdictHeading}\n\nRelevance: 1 direct\n\n### Drift A`,
       );
+      assert.lengthOf(
+        rendered.match(/^Relevance: \d/gm) || [],
+        1,
+        "the count line sits under the part that judged",
+      );
+      const [summarySection, verdictSection] = rendered.split(verdictHeading);
+      assert.include(summarySection, "Cells drift slowly.");
+      assert.notInclude(summarySection, "Directly about drift.");
+      assert.include(verdictSection, "Directly about drift.");
+      assert.notInclude(verdictSection, "Cells drift slowly.");
     } finally {
       zotero.Items = originalItems;
     }
@@ -947,6 +991,17 @@ describe("task_update runs a declared digest part", function () {
     assert.include(note, "Judged unrelated to the request: Drift A (item:5).");
     assert.notInclude(note, "item:6");
     assert.include(note, "task_update excluded:");
+    // A relevance of none is a signal: the model decides, and says so by title.
+    assert.include(
+      note,
+      "If its content does not bear on the request, leave it out with task_update excluded:",
+    );
+    assert.include(
+      note,
+      "name it by title with that reason in the output, without a citation.",
+    );
+    assert.notInclude(note, "Leave each such paper out");
+    assert.include(note, "never stretch one in by analogy");
     assert.include(note, "When the user asked for every paper");
 
     const related = createHarness(

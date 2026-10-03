@@ -354,6 +354,8 @@ type ScenarioData = {
   /** Parts no other part replaced. */
   standing: readonly ExecutionCheckpointTask[];
   endState: string | undefined;
+  /** Notes for the report that are not failures. */
+  warnings: string[];
   toolCalls: ToolCallRecord[];
   digestReads: Map<number, DigestRead[]>;
   digestRecords: HostPaperDigest[];
@@ -581,6 +583,7 @@ async function gatherScenarioData(params: {
     tasks,
     standing: tasks.filter((task) => !task.supersededBy),
     endState: ledger?.end?.state,
+    warnings,
     toolCalls: toolCallsOf(events),
     digestReads: digestReadsOf(events),
     digestRecords: await digestRecordsOf(conversationKey),
@@ -765,10 +768,13 @@ function checkMisfiledPaper(data: ScenarioData, check: Check): void {
   // The run ends completed, or with exceptions that name only X1.
   if (data.endState === "completed_with_exceptions") {
     for (const task of data.standing) {
-      check(
-        task.status === "completed",
-        `part ${task.taskId} ended ${task.status}${task.reason ? `: ${task.reason}` : ""}`,
-      );
+      // A synthesis or digest part must complete. A side part the agent
+      // planned and then skipped (a listing, a read) is planning noise,
+      // reported as a warning, not as the selection failing.
+      const ended = `part ${task.taskId} ended ${task.status}${task.reason ? `: ${task.reason}` : ""}`;
+      if (["artifact", "answer", "digest"].includes(task.effect || "answer"))
+        check(task.status === "completed", ended);
+      else if (task.status !== "completed") data.warnings.push(ended);
       for (const exception of task.exceptions || []) {
         check(
           exception.targets.length &&
@@ -953,7 +959,7 @@ const SCENARIOS: Record<string, ScenarioSpec> = {
   "1h": {
     title: "held-out misfiled paper",
     prompt:
-      "Write a short review, from the papers in this collection, of what is known about how gaze and eye movements reveal internal beliefs during navigation.",
+      "From the papers in this collection, write a short review of how animals and artificial agents estimate their own position from self-motion when landmarks are absent.",
     collection: "heldout",
     checks: checkMisfiledPaper,
   },

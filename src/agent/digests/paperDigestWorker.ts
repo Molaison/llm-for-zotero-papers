@@ -433,7 +433,7 @@ export function buildDigestPrompt(params: {
   const instruction =
     bounded(params.instruction, DIGEST_MAX_INSTRUCTION_CHARS) || DEFAULT_TASK;
   // The paper is data. A literal closing tag inside it must not end the block.
-  const text = `${params.text ?? ""}`.replace(/<\/paper\s*>/gi, "</paper >");
+  const text = `${params.text ?? ""}`.replace(/<\/paper/gi, "<\\/paper");
   const lines = [
     ...(question ? [`The user's request (context): ${question}`] : []),
     `Task for this paper: ${instruction}`,
@@ -566,6 +566,12 @@ const handleLine = (handle: string) =>
  * characters of its answer and its handle, so the result stays bounded and
  * no verdict is lost. The callbacks receive the digest too, so two digests
  * of one paper (two parts) each name their own handle and source.
+ *
+ * `headingOf` names the part a digest or a failure answers (a line such as
+ * `## Part relevance: Judge each paper`). With it, the result is grouped by
+ * part in order: each part's heading, then its own relevance count line, its
+ * digests and its failures, so one paper digested for two parts reads as two
+ * answers to two tasks. Without it the output is one flat list.
  */
 export function renderHostPaperDigests(
   digests: readonly HostPaperDigest[],
@@ -576,11 +582,14 @@ export function renderHostPaperDigests(
     digest: HostPaperDigest,
   ) => HostPaperDigestCitationSource | undefined,
   handleOf?: (itemId: number, digest: HostPaperDigest) => string | undefined,
+  headingOf?: (
+    entry: HostPaperDigest | PaperDigestFailure,
+  ) => string | undefined,
 ): string {
   const label = (itemId: number, title?: string) =>
     normalizeWhitespace(title || titleOf?.(itemId) || "") || `Item ${itemId}`;
   const compact = digests.length > DIGEST_COMPACT_RENDER_ABOVE;
-  const blocks = digests.map((digest) => {
+  const render = (digest: HostPaperDigest) => {
     const source = sourceOf?.(digest.itemId, digest);
     const handle = handleOf?.(digest.itemId, digest);
     const heading = `### ${label(digest.itemId, digest.title)} (item:${digest.itemId})${
@@ -631,21 +640,50 @@ export function renderHostPaperDigests(
     }
     if (handle) lines.push(handleLine(handle));
     return lines.join("\n");
-  });
-  const counts = relevanceCountLine(digests);
-  if (counts) blocks.unshift(counts);
-  if (failures.length) {
-    blocks.push(
-      [
-        "Not analyzed:",
-        ...failures.map(
-          (failure) =>
-            `- ${label(failure.itemId)} (${failure.target}): ${failure.reason}`,
-        ),
-      ].join("\n"),
-    );
-  }
-  return blocks.join("\n\n");
+  };
+  /** One group's blocks: its count line, its digests, its failures. */
+  const renderGroup = (
+    group: readonly HostPaperDigest[],
+    failed: readonly PaperDigestFailure[],
+  ) => {
+    const blocks = group.map(render);
+    const counts = relevanceCountLine(group);
+    if (counts) blocks.unshift(counts);
+    if (failed.length) {
+      blocks.push(
+        [
+          "Not analyzed:",
+          ...failed.map(
+            (failure) =>
+              `- ${label(failure.itemId)} (${failure.target}): ${failure.reason}`,
+          ),
+        ].join("\n"),
+      );
+    }
+    return blocks;
+  };
+  if (!headingOf) return renderGroup(digests, failures).join("\n\n");
+  const groups = new Map<
+    string,
+    { digests: HostPaperDigest[]; failures: PaperDigestFailure[] }
+  >();
+  const groupOf = (entry: HostPaperDigest | PaperDigestFailure) => {
+    const key = headingOf(entry) || "";
+    let group = groups.get(key);
+    if (!group) {
+      group = { digests: [], failures: [] };
+      groups.set(key, group);
+    }
+    return group;
+  };
+  for (const digest of digests) groupOf(digest).digests.push(digest);
+  for (const failure of failures) groupOf(failure).failures.push(failure);
+  return [...groups.entries()]
+    .flatMap(([heading, group]) => [
+      ...(heading ? [heading] : []),
+      ...renderGroup(group.digests, group.failures),
+    ])
+    .join("\n\n");
 }
 
 function parseItemTarget(target: string): number | null {

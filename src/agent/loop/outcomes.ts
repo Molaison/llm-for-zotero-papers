@@ -53,7 +53,10 @@ import type { RunStopRule } from "./stopRules";
  * (`excludeOutcomeTargets`). An excluded paper is the model's decision, not
  * an exception: it is never "not covered", so a part whose only papers not
  * done are excluded completes clean. Content that cites an excluded paper
- * after all makes it done, as what the output used wins. Every other part
+ * after all makes it done, as what the output used wins. A part that names
+ * no papers (a review declared without scope) takes any paper as an
+ * exclusion, has none to be done, and completes whole; content that cites
+ * an excluded paper drops that exclusion there too. Every other part
  * covers every paper it names, and takes no exclusion.
  *
  * Revision. Declaring a part again with another description, effect,
@@ -1082,6 +1085,21 @@ function artifactPartFor(
 }
 
 /**
+ * `task` without the exclusions that content citing `cited` contradicts: a
+ * paper the content cites is one it used, so it is no longer left out.
+ * Unchanged when what the content cites is unknown.
+ */
+function withoutCitedExclusions(
+  task: Task,
+  cited: readonly string[] | undefined,
+): Task {
+  if (!cited || !task.excludedTargets?.length) return task;
+  const { excludedTargets: held, ...rest } = task;
+  const left = withoutDone(held!, cited);
+  return left.length ? { ...rest, excludedTargets: left } : rest;
+}
+
+/**
  * Complete an artifact part from content citing `cited`. With `cited`
  * unknown the part completes whole. Otherwise each of its targets the content
  * cites is done, an excluded one included, and each other target is excepted
@@ -1094,7 +1112,14 @@ function coverTargets(
   now: number,
 ): Task {
   const targets = task.targets || [];
-  if (!targets.length || !cited) return { ...completed(task), updatedAt: now };
+  // A part with no papers completes whole; what the content cites is no
+  // longer left out.
+  if (!targets.length)
+    return {
+      ...completed(withoutCitedExclusions(task, cited)),
+      updatedAt: now,
+    };
+  if (!cited) return { ...completed(task), updatedAt: now };
   const doneTargets = union(
     task.doneTargets,
     targets.filter((target) => cited.includes(target)),
@@ -1314,8 +1339,14 @@ function applyAnswer(
   // Content written in the accepted answer is the artifact a part asked for.
   return mapTasks(checkpoint, now, (task) => {
     if (task.status !== "pending") return undefined;
+    // A reasoning part completes whole, and a paper the answer cites is not
+    // one it left out.
     if (!task.effect || task.effect === "answer")
-      return { ...task, status: "completed", updatedAt: now };
+      return {
+        ...withoutCitedExclusions(task, evidence.citedTargets),
+        status: "completed",
+        updatedAt: now,
+      };
     // The runtime passes the papers the answer cites; unknown (undefined)
     // completes the part whole.
     if (task.effect === "artifact")
@@ -1378,7 +1409,10 @@ function declaredEffect(declaration: OutcomeDeclaration): OutcomeEffect {
  * description, effect, capability or set of papers. The same papers in
  * another order, or by the other id form, are the same part, and a part
  * over the scope declared again over the scope names the papers it froze,
- * whatever the scope holds now.
+ * whatever the scope holds now. A part that no longer changes in place (it
+ * has progress, or is settled) keeps its papers, so a repeat that names only
+ * some of them, or the scope, restates it and is no change; and a read
+ * capability added to it is none either (`capabilityChanges`).
  */
 export function declarationChanges(
   prior: Task,
@@ -1390,15 +1424,34 @@ export function declarationChanges(
       : "";
   const targets = outcomeTargets(declaration.targets, declaration.capability);
   const held = new Set(prior.targets || []);
+  const ownPapers = targets.every((target) => held.has(target));
   const samePapers =
     (prior.scope && declaration.scope) ||
-    (targets.length === held.size &&
-      targets.every((target) => held.has(target)));
+    (targets.length === held.size && ownPapers) ||
+    // A part that no longer changes in place keeps its papers: a repeat that
+    // only names some of them, or the scope, restates the part.
+    (!redeclarable(prior) && (declaration.scope || ownPapers));
   return (
     description !== prior.description ||
     declaredEffect(declaration) !== (prior.effect || "answer") ||
-    declaration.capability !== prior.capability ||
+    capabilityChanges(prior, declaration.capability) ||
     !samePapers
+  );
+}
+
+/**
+ * Whether declaring `capability` for `prior` is a change. Any other
+ * capability changes a part with no progress. On a part with progress only a
+ * write capability does: a read capability cannot make the part a write, so
+ * a repeat that adds one is still a repeat.
+ */
+export function capabilityChanges(
+  prior: Task,
+  capability: AgentActionCapability | undefined,
+): boolean {
+  if (capability === prior.capability) return false;
+  return (
+    redeclarable(prior) || (capability !== undefined && isWrite({ capability }))
   );
 }
 
@@ -1532,13 +1585,20 @@ export function declareOutcomes(
   return changed ? { ...checkpoint, tasks, updatedAt: now } : checkpoint;
 }
 
+/** A paper as `item:<id>`, or undefined for a value that names no paper. */
+function itemTarget(value: string): string | undefined {
+  const [target] = outcomeTargets([value]);
+  return target?.startsWith("item:") ? target : undefined;
+}
+
 /**
  * Record papers the model leaves out of an artifact or reasoning part, with
  * its reason, as `excludedTargets`. Only those parts deliver a synthesis
  * from a selection: a digest, read or write part covers every paper it
  * names, so an exclusion on one is refused, as is one on a settled part
  * other than a completed one, and one naming a paper that is not the part's
- * own or that it has done. A paper the delivered content left uncited moves
+ * own or that it has done. A part that names no papers takes any paper
+ * (`item:<id>`). A paper the delivered content left uncited moves
  * from that exception to the exclusion; other exceptions stay. A paper
  * excluded already keeps its first reason. Any refusal changes nothing, so
  * a call is applied whole or not at all.
@@ -1578,7 +1638,10 @@ export function excludeOutcomeTargets(
     const named = unique(
       exclusion.targets.map((value) => String(value).trim()).filter(Boolean),
     );
-    const papers = named.map((value) => resolveTarget(value, targets));
+    // A part that names no papers takes any paper as an exclusion.
+    const papers = named.map((value) =>
+      targets.length ? resolveTarget(value, targets) : itemTarget(value),
+    );
     const notTargets = named.filter((_, at) => papers[at] === undefined);
     const done = named.filter(
       (_, at) =>

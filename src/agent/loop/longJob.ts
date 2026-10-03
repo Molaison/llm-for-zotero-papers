@@ -233,13 +233,19 @@ function needsText(task: Task): boolean {
   );
 }
 
-/** Papers a digest part has done: the host read and summarized them. */
+/**
+ * Papers a digest part has done: the host read and summarized them. A part
+ * another part replaced is history, and its results are not what the work is
+ * written from.
+ */
 function digestedPapers(
   checkpoint: ExecutionCheckpoint | undefined,
 ): Set<string> {
   return new Set(
     (checkpoint?.tasks || []).flatMap((task) =>
-      task.effect === "digest" ? task.doneTargets || [] : [],
+      task.effect === "digest" && !task.supersededBy
+        ? task.doneTargets || []
+        : [],
     ),
   );
 }

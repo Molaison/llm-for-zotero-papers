@@ -24,6 +24,7 @@ import {
   type DigestRunResult,
 } from "../../digests/digestJobHost";
 import {
+  capabilityChanges,
   declarationChanges,
   declareOutcomes,
   excludeOutcomeTargets,
@@ -168,7 +169,7 @@ function fixedPartNote(local: string, task: ExecutionCheckpointTask): string {
   if (task.status !== "pending")
     return `Task ${local} is ${task.status}, so it cannot change. Declare the new work as a part under a new taskId.`;
   if (!replaceable(task))
-    return `Task ${local} holds writes, so it stays as it is. Declare the further work as a part under a new taskId, without replaces.`;
+    return `Task ${local} holds writes, so it stays as it is: further writes on its own papers complete it. Use a new taskId, without replaces, only for papers it does not name.`;
   return `Task ${local} already has progress, so its description and papers cannot change. Declare the changed part under a new taskId with replaces: "${local}" and the reason; the old part keeps what it did.`;
 }
 /** The note for `replaces` on a part that cannot be replaced. */
@@ -178,7 +179,7 @@ function notReplaceableNote(
 ): string {
   return task.status !== "pending"
     ? `Task ${local} is ${task.status}, so there is nothing to replace. Declare the new part without replaces.`
-    : `Task ${local} holds writes, so it cannot be replaced: writes stay as they were made. Declare the further writes as a part of their own, without replaces.`;
+    : `Task ${local} holds writes, so it cannot be replaced: writes stay as they were made, and further writes on its own papers complete it. Use a new taskId, without replaces, only for papers it does not name.`;
 }
 /** The note for declaring again a part another part replaced. */
 function replacedNote(local: string, successor: string): string {
@@ -689,7 +690,7 @@ export function applyOrdinaryTaskUpdates(
         request.description !== undefined &&
         request.description !== prior.description;
       const newCapability =
-        capability !== undefined && capability !== prior.capability;
+        capability !== undefined && capabilityChanges(prior, capability);
       const reframes = newEffect || newDescription || newCapability;
       if (priorEffect === "digest" && !reframes) {
         digestRuns.push({ taskId, targetIds: request.targetIds });

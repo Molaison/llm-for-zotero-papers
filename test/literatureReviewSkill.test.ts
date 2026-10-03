@@ -124,7 +124,8 @@ describe("literature-review skill", function () {
       "list each paper you leave out under `excluded` on the review part with a one-sentence reason",
       "Never leave a paper out because its text could not be read; name it as not read.",
       "every paper keeps its summary in Paper summaries; flag one that does not fit the question instead of dropping it",
-      "In Scope and method, name each paper you left out and the reason.",
+      "name it by title with that reason in Scope and method, without a citation: a citation means the review uses the paper",
+      "In Scope and method, name each paper you left out by title, with the reason and without a citation.",
       "In narrative and scoping reviews, include papers by their relevance to the question and name each excluded paper with its reason.",
       "in other reviews, name each excluded paper with its reason",
     ]) {

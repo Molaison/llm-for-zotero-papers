@@ -267,6 +267,102 @@ describe("task_update: papers a synthesis leaves out", function () {
     assert.equal(decideRunEnd(ledger, RUN), "completed");
   });
 
+  it("takes any paper as an exclusion on a review declared without papers, which still completes whole", function () {
+    const open = {
+      taskId: "review",
+      description: "Write the literature review",
+      expectedEffect: "artifact",
+    };
+    let ledger = update(empty(), { tasks: [open] }).checkpoint;
+    assert.isUndefined(find(ledger, "review").targets);
+    const excluded = update(ledger, {
+      excluded: [{ taskId: "review", targetIds: ["7", "item:9"], reason: off }],
+    });
+    assert.isFalse(excluded.ignored);
+    ledger = excluded.checkpoint;
+    assert.deepEqual(find(ledger, "review").excludedTargets, [
+      { targets: ["item:7", "item:9"], reason: off },
+    ]);
+    // A later exclusion adds to it and an excluded paper keeps its reason.
+    ledger = update(ledger, {
+      excluded: [
+        { taskId: "review", targetIds: ["item:7", "8"], reason: "Duplicate" },
+      ],
+    }).checkpoint;
+    assert.deepEqual(find(ledger, "review").excludedTargets, [
+      { targets: ["item:7", "item:9"], reason: off },
+      { targets: ["item:8"], reason: "Duplicate" },
+    ]);
+    // Only papers: a folder is no exclusion.
+    const folder = refusal(() =>
+      update(ledger, {
+        excluded: [
+          { taskId: "review", targetIds: ["collection:3"], reason: off },
+        ],
+      }),
+    );
+    assert.include(folder.message, "collection:3");
+    // The document completes the part whole and keeps what it left out.
+    ledger = evidence(ledger, document(["item:5", "item:6"]));
+    const part = find(ledger, "review");
+    assert.equal(part.status, "completed");
+    assert.isUndefined(part.exceptions);
+    assert.deepEqual(part.excludedTargets, [
+      { targets: ["item:7", "item:9"], reason: off },
+      { targets: ["item:8"], reason: "Duplicate" },
+    ]);
+    assert.equal(decideRunEnd(ledger, RUN), "completed");
+    // A paper the document cites is one it used: no longer left out.
+    const cited = evidence(
+      update(update(empty(), { tasks: [open] }).checkpoint, {
+        excluded: [{ taskId: "review", targetIds: ["7", "9"], reason: off }],
+      }).checkpoint,
+      document(["item:7"]),
+    );
+    assert.deepEqual(find(cited, "review").excludedTargets, [
+      { targets: ["item:9"], reason: off },
+    ]);
+    // A part that names papers still refuses a paper that is not its own.
+    const scoped = update(empty(), { tasks: [review] }).checkpoint;
+    const refused = refusal(() =>
+      update(scoped, {
+        excluded: [{ taskId: "review", targetIds: ["99"], reason: off }],
+      }),
+    );
+    assert.match(refused.message, /99 \(not one of its papers\)/);
+  });
+
+  it("drops a paper the accepted answer cites from a reasoning part's exclusions", function () {
+    const explain = {
+      taskId: "explain",
+      description: "Explain which papers bear on drift",
+      expectedEffect: "reasoning",
+      scope: true,
+    };
+    const excludedSix = update(empty(), {
+      tasks: [explain],
+      excluded: [{ taskId: "explain", targetIds: ["6", "7"], reason: off }],
+    }).checkpoint;
+    const answered = evidence(excludedSix, {
+      kind: "answer",
+      citedTargets: ["item:5", "item:7"],
+    });
+    assert.equal(find(answered, "explain").status, "completed");
+    assert.deepEqual(find(answered, "explain").excludedTargets, [
+      { targets: ["item:6"], reason: off },
+    ]);
+    const allCited = evidence(excludedSix, {
+      kind: "answer",
+      citedTargets: ["item:6", "item:7"],
+    });
+    assert.notProperty(find(allCited, "explain"), "excludedTargets");
+    // An answer whose citations are unknown leaves the decision as it was.
+    const unknown = evidence(excludedSix, { kind: "answer" });
+    assert.deepEqual(find(unknown, "explain").excludedTargets, [
+      { targets: ["item:6", "item:7"], reason: off },
+    ]);
+  });
+
   it("an excluded paper the document cites anyway is done and no longer excluded", function () {
     let ledger = update(empty(), { tasks: [review] }).checkpoint;
     ledger = update(ledger, {
@@ -469,13 +565,127 @@ describe("task_update: a part changed before it has progress", function () {
     });
     for (const change of [
       { taskId: "read-all", description: "Read each paper's methods" },
-      { taskId: "read-all", targetIds: ["5", "6"] },
+      // Item 8 is no paper the part names: a change, not a repeat.
+      { taskId: "read-all", targetIds: ["5", "8"] },
     ]) {
       const error = refusal(() => update(read, { tasks: [change] }));
       assert.include(error.message, "already has progress");
       assert.include(error.message, `replaces: "read-all"`);
       assert.include(error.message, "reason");
     }
+  });
+
+  it("ignores a repeat that only names papers the part already names, and says nothing changed", function () {
+    // A part over the scope, one paper written, declared again on "continue"
+    // over the papers it still owes.
+    const written = evidence(
+      update(empty(), { tasks: [notes] }).checkpoint,
+      noteReceipt("item:5"),
+    );
+    const repeated = update(written, {
+      tasks: [
+        {
+          taskId: "notes",
+          expectedEffect: "mutation",
+          expectedCapability: "zotero.notes",
+          targetIds: ["6", "7"],
+        },
+      ],
+    });
+    assert.isTrue(repeated.ignored);
+    assert.deepEqual(repeated.changed, []);
+    assert.deepEqual(repeated.refused, []);
+    assert.strictEqual(repeated.checkpoint, written);
+    assert.lengthOf(repeated.checkpoint.tasks, 1, "no part is added");
+    assert.deepEqual(find(repeated.checkpoint, "notes").targets, [
+      "item:5",
+      "item:6",
+      "item:7",
+    ]);
+
+    // The scope, repeated over a part that named some papers, restates it.
+    const partial = evidence(
+      update(empty(), {
+        tasks: [{ ...readAll, scope: undefined, targetIds: ["5"] }],
+      }).checkpoint,
+      { kind: "read", targets: ["item:5"], observationIds: ["obs-5"] },
+    );
+    const scoped = update(partial, {
+      tasks: [{ taskId: "read-all", scope: true }],
+    });
+    assert.isTrue(scoped.ignored);
+    assert.strictEqual(scoped.checkpoint, partial);
+    // One that names a paper the part does not is a change, and refused.
+    refusal(() =>
+      update(partial, {
+        tasks: [{ taskId: "read-all", targetIds: ["5", "6"] }],
+      }),
+    );
+  });
+
+  it("tells a write part with progress to stay as it is, and to take a new taskId only for papers it does not name", function () {
+    const written = evidence(
+      update(empty(), { tasks: [notes] }).checkpoint,
+      noteReceipt("item:5"),
+    );
+    const error = refusal(() =>
+      update(written, {
+        tasks: [
+          {
+            taskId: "notes",
+            expectedEffect: "mutation",
+            expectedCapability: "zotero.notes",
+            targetIds: ["6", "9"],
+          },
+        ],
+      }),
+    );
+    assert.include(error.message, "Task notes holds writes");
+    assert.include(error.message, "stays as it is");
+    assert.include(
+      error.message,
+      "further writes on its own papers complete it",
+    );
+    assert.include(error.message, "only for papers it does not name");
+    assert.notInclude(
+      error.message,
+      "Declare the further work as a part under a new taskId",
+    );
+  });
+
+  it("takes a read capability repeated on a part with progress as a repeat, and still refuses a write capability", function () {
+    const read = evidence(update(empty(), { tasks: [readAll] }).checkpoint, {
+      kind: "read",
+      targets: ["item:5"],
+      observationIds: ["obs-5"],
+    });
+    const repeated = update(read, {
+      tasks: [{ taskId: "read-all", expectedCapability: "zotero.read" }],
+    });
+    assert.isTrue(repeated.ignored);
+    assert.deepEqual(repeated.changed, []);
+    assert.strictEqual(repeated.checkpoint, read);
+    const error = refusal(() =>
+      update(read, {
+        tasks: [{ taskId: "read-all", expectedCapability: "zotero.notes" }],
+      }),
+    );
+    assert.include(error.message, "already has progress");
+    // A digest part with progress still retries under the same repeat.
+    const progressed = evidence(
+      update(empty(), { tasks: [summaries] }).checkpoint,
+      {
+        kind: "digest",
+        taskId: taskId("summaries"),
+        done: ["item:5"],
+        failed: [{ target: "item:6", reason: "No readable text" }],
+      },
+    );
+    const retried = update(progressed, {
+      tasks: [{ taskId: "summaries", expectedCapability: "zotero.read" }],
+    });
+    assert.lengthOf(retried.digestParts, 1);
+    assert.strictEqual(retried.checkpoint, progressed);
   });
 
   it("refuses a change to a settled part without offering replaces", function () {

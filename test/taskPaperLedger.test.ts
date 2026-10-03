@@ -1089,6 +1089,98 @@ describe("taskPaperLedger", function () {
       assert.lengthOf(ledger.papers["1:2"].turns[1].reads, 3);
     });
 
+    it("never drops a digest read at the per-turn cap: three parts of six quotes each on one paper keep three digest reads", function () {
+      const parts = ["papers", "stance", "limits"];
+      const deltas = parts.map((partId) =>
+        buildDigestLedgerDelta({
+          runId: "run-d",
+          callId: `call-7:${partId}`,
+          toolName: "task_update",
+          partId,
+          label: `Part ${partId}`,
+          digest: digest(1, {
+            answer: `Answer of ${partId}.`,
+            evidence: Array.from({ length: 6 }, (_, index) => ({
+              quote: `Quote ${partId} ${index}.`,
+            })),
+          }),
+          paper: paper(1),
+        }),
+      );
+      const ledger = createTaskPaperLedger();
+      for (const delta of deltas) applyTaskPaperLedgerDelta(ledger, delta, 1);
+      const turn = ledger.papers["1:1"].turns[1];
+      assert.deepEqual(
+        turn.reads
+          .filter((read) => read.granularity === "digest")
+          .map((read) => [read.partId, read.snippet]),
+        parts.map((partId) => [partId, `Answer of ${partId}.`]),
+        "every part's digest read survives",
+      );
+      assert.lengthOf(turn.reads, TASK_PAPER_MAX_READS_PER_TURN);
+      assert.equal(
+        turn.reads.length + turn.droppedReads,
+        3 * 7,
+        "the reads that did not fit are counted, none lost silently",
+      );
+
+      const replayed = createTaskPaperLedger();
+      for (const delta of JSON.parse(JSON.stringify(deltas))) {
+        applyTaskPaperLedgerDelta(replayed, delta, 1);
+      }
+      assert.deepEqual(
+        replayed.papers["1:1"].turns,
+        ledger.papers["1:1"].turns,
+      );
+    });
+
+    it("keeps a part's digest read when earlier reads of the paper already fill the turn", function () {
+      const ledger = createTaskPaperLedger();
+      const earlier: TaskPaperLedgerDelta = {
+        version: 1,
+        callId: "call-1",
+        toolName: "paper_read",
+        papers: [{ key: "1:1", libraryID: 1, itemId: 1, state: "read" }],
+        reads: Array.from(
+          { length: TASK_PAPER_MAX_READS_PER_TURN },
+          (_, i) => ({
+            key: "1:1",
+            callId: "call-1",
+            toolName: "paper_read",
+            granularity: "passage" as const,
+            method: "paper_read",
+            snippet: `Earlier ${i}.`,
+          }),
+        ),
+      };
+      applyTaskPaperLedgerDelta(ledger, earlier, 1);
+      applyTaskPaperLedgerDelta(
+        ledger,
+        buildDigestLedgerDelta({
+          callId: "call-7",
+          toolName: "task_update",
+          partId: "papers",
+          digest: digest(1, { evidence: [] }),
+          paper: paper(1),
+        }),
+        1,
+      );
+      const turn = ledger.papers["1:1"].turns[1];
+      assert.lengthOf(turn.reads, TASK_PAPER_MAX_READS_PER_TURN);
+      assert.deepEqual(
+        turn.reads.filter((read) => read.granularity === "digest"),
+        [turn.reads[turn.reads.length - 1]],
+      );
+      assert.equal(turn.droppedReads, 1);
+      // A later passage read still yields to the cap.
+      applyTaskPaperLedgerDelta(ledger, { ...earlier, callId: "call-2" }, 1);
+      assert.lengthOf(turn.reads, TASK_PAPER_MAX_READS_PER_TURN);
+      assert.lengthOf(
+        turn.reads.filter((read) => read.granularity === "digest"),
+        1,
+      );
+    });
+
     it("records a failure's reason on the paper's row without reading it", function () {
       const failed = buildDigestFailureLedgerDelta({
         runId: "run-d",

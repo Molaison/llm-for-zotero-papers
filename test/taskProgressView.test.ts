@@ -2797,6 +2797,49 @@ describe("task progress view of an outcome ledger", function () {
         assert.equal(tailOf(row), PATH);
       });
 
+      it("keeps two questions' parts apart when both declare a part 'papers': the part is named by its execution-qualified id", function () {
+        seedScope(2);
+        const harness = track(mount());
+        const question = (
+          runId: string,
+          turnIndex: number,
+          result: { summary: string } | { failure: string },
+          label: string,
+        ) => {
+          beginTaskRun(KEY, { runId, turnIndex });
+          applyTaskPaperUpdate(
+            KEY,
+            digestLedgerDelta(`call-${runId}`, 1, {
+              runId,
+              partId: `exec-${runId}:task:papers`,
+              label,
+              ...result,
+            }),
+            runId,
+          );
+          completeTaskRun(KEY, { runId });
+        };
+        question("q1", 1, { summary: "Gaze tracks the belief." }, BRIEF);
+        // The newer question's part fails; it must not hide the older result.
+        question("q2", 2, { failure: "The model call timed out" }, PATH);
+        harness.row.dispatchFakeEvent("click");
+        const row = paperRow(harness, "1:1");
+        assert.deepEqual(blocksOf(expand(row)), [
+          {
+            heading: BRIEF,
+            lines: [],
+            answer: "Gaze tracks the belief.",
+            note: undefined,
+          },
+          {
+            heading: `${PATH} failed`,
+            lines: [],
+            answer: undefined,
+            note: "The model call timed out",
+          },
+        ]);
+      });
+
       it("heads a block with the label the host cut at a word, and clips a longer one", function () {
         seedScope(3);
         const harness = track(mount());

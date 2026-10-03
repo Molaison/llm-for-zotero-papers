@@ -1230,6 +1230,75 @@ describe("long job", function () {
       assert.deepEqual([...readLongJob(failed)!.reading], ["item:3"]);
     });
 
+    it("reads a paper again that only a replaced digest part digested: the replaced part's results are not what the note is written from", function () {
+      const NOTE_ALL = "Save a summary note on each paper";
+      let ledger = declareOutcomes(
+        createEmptyExecutionCheckpoint(executionContext, 1),
+        [
+          {
+            taskId: "summaries",
+            description: "Summarize each paper",
+            effect: "digest",
+            targets: items(40),
+            scope: true,
+          },
+          {
+            taskId: "notes",
+            description: NOTE_ALL,
+            effect: "mutation",
+            capability: "zotero.notes",
+            targets: items(40),
+            scope: true,
+          },
+        ],
+        2,
+      );
+      ledger = applyOutcomeEvidence(
+        ledger,
+        {
+          kind: "digest",
+          taskId: ledger.tasks[0].taskId,
+          done: items(20),
+          failed: [],
+        },
+        3,
+      ).checkpoint;
+      assert.equal(ledger.tasks[0].status, "pending");
+      assert.equal(
+        readLongJob(ledger)!.reading.size,
+        20,
+        "the 20 digested papers are not read",
+      );
+      // The model changes the question: a new digest part replaces the old.
+      ledger = declareOutcomes(
+        ledger,
+        [
+          {
+            taskId: "summaries-2",
+            description: "State each paper's evidence on drift",
+            effect: "digest",
+            targets: items(40),
+            scope: true,
+            replaces: "summaries",
+            reason: "The user narrowed the question",
+          },
+        ],
+        4,
+      );
+      assert.equal(ledger.tasks[0].status, "cancelled");
+      assert.exists(ledger.tasks[0].supersededBy);
+      assert.deepEqual(
+        ledger.tasks[0].doneTargets,
+        items(20),
+        "the old part keeps what it did",
+      );
+      assert.equal(
+        readLongJob(ledger)!.reading.size,
+        40,
+        "no paper is digested for the part that now stands",
+      );
+    });
+
     it("measures a page of changes from its own calls", function () {
       const pager = libraryPager();
       let ledger = moveLedger(items(60));

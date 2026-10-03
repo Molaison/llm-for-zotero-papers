@@ -35,7 +35,7 @@ A review is an argument about a body of work, not a catalog of it: a faithful ac
 4. **Select.** Decide from each paper's content which papers the review uses.
    Include every paper whose content bears on the question, whatever its field.
    Leave a paper out only when its content does not bear on the question: a relevance of none is a signal, not the decision.
-   Before you submit, list each paper you leave out under `excluded` on the review part with a one-sentence reason, and name it with that reason in Scope and method.
+   Before you submit, list each paper you leave out under `excluded` on the review part with a one-sentence reason, and name it by title with that reason in Scope and method, without a citation: a citation means the review uses the paper.
    Never leave a paper out because its text could not be read; name it as not read.
    When the user asked to summarize every paper, every paper keeps its summary in Paper summaries; flag one that does not fit the question instead of dropping it.
 5. **Write.** Write one cited document and finish with `submit_document`, as described under Document; pass the `taskId` of the review part.
@@ -80,7 +80,7 @@ Prefer these sections unless the user asks for another structure:
 - Put `[[cite:C1]]` tokens at supported claims and identify each citation source by `libraryID` and `itemKey`; the host binds the evidence your reads produced.
 - Cite only papers you read for this review; a direct quotation uses a `[[quote:Q1]]` token whose mapping carries the verbatim text and the evidence IDs the read returned.
 - Never hand-format author-year citations or a References section; Zotero's CSL service formats both.
-- In Scope and method, name each paper you left out and the reason.
+- In Scope and method, name each paper you left out by title, with the reason and without a citation.
 - In Scope and limitations, name each paper whose digest failed and the reason the host gave.
 - In Scope and limitations, state the coverage: how many papers were read in full, in part, and from metadata only, as `paper_read` reported them, and name any paper that stayed unread.
 - State the actual coverage frontier and its limitations, and never imply an exhaustive review from sampled text.

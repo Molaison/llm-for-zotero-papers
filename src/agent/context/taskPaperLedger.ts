@@ -105,7 +105,9 @@ export type TaskPaperReadEvent = {
   /** Host observation ids this read attested. */
   observationIds?: string[];
   /**
-   * A digest's reads only: the local id of the part whose result they are.
+   * A digest's reads only: the part whose result they are, by its full task
+   * id, which names its run, so two runs that both declare a part "papers"
+   * stay two parts.
    * Absent on rows saved before parts were recorded.
    */
   partId?: string;
@@ -1314,7 +1316,7 @@ export type BuildDigestLedgerDeltaParams = {
   callId: string;
   toolName: string;
   turnIndex?: number;
-  /** The local id of the digest part the paper's result answers. */
+  /** The full task id of the digest part the paper's result answers. */
   partId?: string;
   /** The part's label (`taskPaperDigestPartLabel`); none without one. */
   label?: string;
@@ -1481,7 +1483,7 @@ export function buildDigestLedgerDelta(
   if (relevance) answer.relevance = relevance;
   const stance = digestJudgment(digest.stance);
   if (stance) answer.stance = stance;
-  const seeds: ReadSeed[] = [answer];
+  const passages: ReadSeed[] = [];
   for (const evidence of digest.evidence || []) {
     const seed = readSeed({
       granularity: "passage",
@@ -1492,14 +1494,15 @@ export function buildDigestLedgerDelta(
     if (!seed.snippet) continue;
     const chunk = nonNegative(evidence.chunk);
     if (chunk !== undefined) seed.chunk = chunk;
-    seeds.push(seed);
+    passages.push(seed);
   }
-  const kept = seeds.slice(0, TASK_PAPER_MAX_READS_PER_TURN);
-  delta.reads = kept.map((seed) =>
+  // The digest read is never dropped by the cap; the evidence fills the rest.
+  const keptPassages = passages.slice(0, TASK_PAPER_MAX_READS_PER_TURN - 1);
+  delta.reads = [answer, ...keptPassages].map((seed) =>
     digestRead(delta, paper.key, seed, params.partId),
   );
-  if (seeds.length > kept.length) {
-    delta.droppedReads = seeds.length - kept.length;
+  if (passages.length > keptPassages.length) {
+    delta.droppedReads = passages.length - keptPassages.length;
   }
   return delta;
 }
@@ -1651,12 +1654,29 @@ export function applyTaskPaperLedgerDelta(
     const record = turnOf(entry, turn);
     if (runId && !takesReadsFrom(record, runId, options.newerRunIds)) continue;
     if (record.reads.length >= TASK_PAPER_MAX_READS_PER_TURN) {
-      record.droppedReads += 1;
-      continue;
+      // A digest read is a part's result, and its block and verdict live
+      // on it: it makes room by dropping the newest read that is not a
+      // digest, and is never dropped itself. Any other read yields.
+      const room =
+        read.granularity === "digest" ? lastIndexOfNonDigest(record.reads) : -1;
+      if (room >= 0) {
+        record.reads.splice(room, 1);
+        record.droppedReads += 1;
+      } else if (read.granularity !== "digest") {
+        record.droppedReads += 1;
+        continue;
+      }
     }
     record.reads.push({ ...read, turnIndex: turn });
   }
   return ledger;
+}
+
+function lastIndexOfNonDigest(reads: readonly TaskPaperReadEvent[]): number {
+  for (let index = reads.length - 1; index >= 0; index -= 1) {
+    if (reads[index].granularity !== "digest") return index;
+  }
+  return -1;
 }
 
 /**

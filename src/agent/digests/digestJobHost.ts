@@ -134,6 +134,8 @@ export type DigestRunResult = {
    */
   digestHandles?: Array<{
     itemId: number;
+    /** The part the digest answers, as the model names it. */
+    taskId?: string;
     handle?: string;
     evidenceRefs?: string[];
   }>;
@@ -544,7 +546,24 @@ export async function runDigestParts(params: {
     retries = new Map();
     failureRetries.set(request, retries);
   }
+  /** A part's local id, its label, and the heading its results render under. */
+  const partInfo = (taskId: string) => {
+    const local = params.localTaskId(taskId);
+    const label = taskPaperDigestPartLabel(
+      request.executionCheckpoint?.tasks.find(
+        (entry) => entry.taskId === taskId,
+      )?.description,
+    );
+    return {
+      local,
+      label,
+      heading: `## Part ${local}${label ? `: ${label}` : ""}`,
+    };
+  };
+  /** Each digest and failure → the part it belongs to, by object identity. */
+  const partOf = new Map<object, ReturnType<typeof partInfo>>();
   for (const requested of params.parts) {
+    const requestedPart = partInfo(requested.taskId);
     // Failed papers whose retries are spent stay failed, reason unchanged.
     const retried = new Map(
       (requested.retried || []).map((entry) => [entry.target, entry.reason]),
@@ -554,11 +573,13 @@ export async function runDigestParts(params: {
       const used = retries.get(`${requested.taskId}\u0000${target}`) || 0;
       if (used < DIGEST_MAX_FAILURE_RETRIES) return true;
       const itemId = Number(/^item:(\d+)$/.exec(target)?.[1]) || 0;
-      finalFailures.push({
+      const spent: PaperDigestFailure = {
         target,
         itemId,
         reason: retried.get(target)!,
-      });
+      };
+      partOf.set(spent, requestedPart);
+      finalFailures.push(spent);
       return false;
     });
     if (signal?.aborted) {
@@ -576,7 +597,7 @@ export async function runDigestParts(params: {
       retries.set(key, (retries.get(key) || 0) + 1);
     }
     const part = { ...requested, targets: batch };
-    const local = params.localTaskId(part.taskId);
+    const { local, label } = requestedPart;
     const base = context.toolCallId || `${context.runId || "run"}:${local}`;
     // One call id per part, so two parts over one paper both apply.
     const callId = params.parts.length > 1 ? `${base}:${local}` : base;
@@ -584,9 +605,10 @@ export async function runDigestParts(params: {
       (entry) => entry.taskId === part.taskId,
     );
     const instruction = task?.description || "";
-    // The paper rows name the part: its local id and its label.
-    const label = taskPaperDigestPartLabel(instruction);
-    const partRow = { partId: local, ...(label ? { label } : {}) };
+    // The paper rows name the part: its full task id, so two runs of one
+    // conversation that both declare a part 'papers' stay two parts, and its
+    // label.
+    const partRow = { partId: part.taskId, ...(label ? { label } : {}) };
     const result = await runPaperDigestJob({
       targets: part.targets,
       instruction,
@@ -646,6 +668,9 @@ export async function runDigestParts(params: {
         );
       },
     });
+    for (const entry of [...result.digests, ...result.failures]) {
+      partOf.set(entry, requestedPart);
+    }
     digests.push(...result.digests);
     failures.push(...result.failures);
     pending.push(...result.pending);
@@ -677,9 +702,11 @@ export async function runDigestParts(params: {
           : {}),
       });
     if (handle) handleByDigest.set(digest.cacheKey, handle);
+    const part = partOf.get(digest);
     if (handle || ref)
       handles.push({
         itemId: digest.itemId,
+        ...(part ? { taskId: part.local } : {}),
         ...(handle ? { handle } : {}),
         ...(ref ? { evidenceRefs: [ref] } : {}),
       });
@@ -722,7 +749,7 @@ export async function runDigestParts(params: {
         )
         .join(
           ", ",
-        )}. Use a paper in a synthesis only where its content bears on the request; never stretch one in by analogy. Leave each such paper out with task_update excluded:[{ taskId:'<the review or answer part>', targetIds:['item:N'], reason:'<one sentence>' }] before you submit, and name it with that reason in the output. When the user asked for every paper, keep its result and flag the mismatch instead.`,
+        )}. Use a paper in a synthesis only where its content bears on the request; never stretch one in by analogy. If its content does not bear on the request, leave it out with task_update excluded:[{ taskId:'<the review or answer part>', targetIds:['item:N'], reason:'<one sentence>' }] before you submit, and name it by title with that reason in the output, without a citation. When the user asked for every paper, keep its result and flag the mismatch instead.`,
     );
   return {
     ...(digests.length || allFailures.length
@@ -733,6 +760,10 @@ export async function runDigestParts(params: {
             titleOf,
             citationSourceOf,
             (_itemId, digest) => handleByDigest.get(digest.cacheKey),
+            // With two parts, each result names the part it answers.
+            params.parts.length > 1
+              ? (entry) => partOf.get(entry)?.heading
+              : undefined,
           ),
         }
       : {}),
