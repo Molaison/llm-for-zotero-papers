@@ -202,11 +202,15 @@ function isJobPart(task: Task): boolean {
   );
 }
 
-/** Targets a part has done or excepted. */
+/**
+ * Targets a part has done, excepted, or excluded: an artifact is not
+ * written from a paper the model left out of it.
+ */
 function accountedTargets(task: Task): Set<string> {
   return new Set([
     ...(task.doneTargets || []),
     ...(task.exceptions || []).flatMap((entry) => entry.targets),
+    ...(task.excludedTargets || []).flatMap((entry) => entry.targets),
   ]);
 }
 

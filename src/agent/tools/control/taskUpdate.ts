@@ -24,12 +24,18 @@ import {
   type DigestRunResult,
 } from "../../digests/digestJobHost";
 import {
+  declarationChanges,
   declareOutcomes,
+  excludeOutcomeTargets,
   isOutcomeTargetId,
   markOutcomes,
+  redeclarable,
+  replaceable,
   type OutcomeDeclaration,
+  type OutcomeExclusionRefusal,
   type OutcomeModelMark,
 } from "../../loop/outcomes";
+import { isExplicitContinueCommand } from "../../continuation/continueCommand";
 
 type ExpectedEffect = "read" | "artifact" | "mutation" | "reasoning" | "digest";
 
@@ -42,10 +48,17 @@ type TaskDeclaration = {
   targetIds?: string[];
   /** The part covers every paper of the turn's scope. */
   scope?: boolean;
+  /** A new part only: the taskId of the pending part it replaces. */
+  replaces?: string;
+  /** Why it replaces that part; required with `replaces`. */
+  reason?: string;
 };
 
 /** A declared part that cannot be done, and why. */
 type TaskException = { taskId: string; reason: string };
+
+/** Papers an artifact or reasoning part leaves out, and why. */
+type TaskExclusion = { taskId: string; targetIds: string[]; reason: string };
 
 type ExceptionStatus = OutcomeModelMark["status"];
 
@@ -57,6 +70,7 @@ const EXCEPTION_STATUSES: readonly ExceptionStatus[] = [
 
 type TaskUpdateInput = {
   tasks: TaskDeclaration[];
+  excluded: TaskExclusion[];
 } & Record<ExceptionStatus, TaskException[]>;
 
 const EXPECTED_EFFECTS: readonly ExpectedEffect[] = [
@@ -78,6 +92,8 @@ const DECLARATION_SCHEMA = {
     expectedCapability: { type: "string" },
     targetIds: { type: "array", items: { type: "string" } },
     scope: { type: "boolean" },
+    replaces: { type: "string" },
+    reason: { type: "string" },
   },
 } as const;
 
@@ -90,6 +106,21 @@ const EXCEPTION_SCHEMA = {
     required: ["taskId", "reason"],
     properties: {
       taskId: { type: "string" },
+      reason: { type: "string" },
+    },
+  },
+} as const;
+
+const EXCLUSION_SCHEMA = {
+  type: "array",
+  minItems: 1,
+  items: {
+    type: "object",
+    additionalProperties: false,
+    required: ["taskId", "targetIds", "reason"],
+    properties: {
+      taskId: { type: "string" },
+      targetIds: { type: "array", items: { type: "string" } },
       reason: { type: "string" },
     },
   },
@@ -112,15 +143,76 @@ function notIdsNote(values: readonly string[]): string {
       ", ",
     )}. Find the papers' ids with library_search, or use scope:true for the whole Paper scope.`;
 }
+/** An effect as the model names it. */
+function effectName(effect: OutcomeEffect): string {
+  return effect === "answer" ? "reasoning" : effect;
+}
 /** The note for a new effect on a part that already holds evidence. */
 function effectFixedNote(
   local: string,
-  prior: OutcomeEffect,
+  prior: ExecutionCheckpointTask,
   requested: OutcomeEffect,
 ): string {
-  const name = (effect: OutcomeEffect) =>
-    effect === "answer" ? "reasoning" : effect;
-  return `Task ${local} already has progress as a ${name(prior)} part, so it cannot become a ${name(requested)} part. Declare the ${name(requested)} part under a new taskId, such as "${local}-${name(requested)}".`;
+  const was = effectName(prior.effect || "answer");
+  const now = effectName(requested);
+  const replace = replaceable(prior)
+    ? ` If it replaces this part, add replaces: "${local}" and the reason.`
+    : "";
+  return `Task ${local} already has progress as a ${was} part, so it cannot become a ${now} part. Declare the ${now} part under a new taskId, such as "${local}-${now}".${replace}`;
+}
+/**
+ * The note for a change to a part that no longer changes in place: one with
+ * progress is replaced, one that holds writes or is settled is not.
+ */
+function fixedPartNote(local: string, task: ExecutionCheckpointTask): string {
+  if (task.status !== "pending")
+    return `Task ${local} is ${task.status}, so it cannot change. Declare the new work as a part under a new taskId.`;
+  if (!replaceable(task))
+    return `Task ${local} holds writes, so it stays as it is. Declare the further work as a part under a new taskId, without replaces.`;
+  return `Task ${local} already has progress, so its description and papers cannot change. Declare the changed part under a new taskId with replaces: "${local}" and the reason; the old part keeps what it did.`;
+}
+/** The note for `replaces` on a part that cannot be replaced. */
+function notReplaceableNote(
+  local: string,
+  task: ExecutionCheckpointTask,
+): string {
+  return task.status !== "pending"
+    ? `Task ${local} is ${task.status}, so there is nothing to replace. Declare the new part without replaces.`
+    : `Task ${local} holds writes, so it cannot be replaced: writes stay as they were made. Declare the further writes as a part of their own, without replaces.`;
+}
+/** The note for declaring again a part another part replaced. */
+function replacedNote(local: string, successor: string): string {
+  return `Task ${local} was replaced by ${successor}, so it takes no further work. Declare ${successor} instead, or a new part.`;
+}
+function replacesNeedsNewIdNote(local: string): string {
+  return `replaces declares a new part, and ${local} is already a task. Give the new part a new taskId, such as "${local}-2".`;
+}
+function replacesUnknownNote(named: string): string {
+  return `replaces names no task of this run: ${named}. Name the taskId of the pending part the new one replaces.`;
+}
+/** The note for exclusions the ledger refused. */
+function exclusionRefusedNote(
+  refusals: readonly OutcomeExclusionRefusal[],
+  local: (taskId: string) => string,
+): string {
+  return refusals
+    .map((refusal) => {
+      const id = local(refusal.taskId);
+      if (refusal.kind === "effect")
+        return `Task ${id} is a ${effectName(refusal.effect)} part, which covers every paper it names: excluded applies only to artifact and reasoning parts. If the part cannot be done, list it under skipped or blocked with the reason.`;
+      if (refusal.kind === "status")
+        return `Task ${id} is ${refusal.status}, so it has no papers left to exclude.`;
+      const named = [
+        ...(refusal.notTargets.length
+          ? [`${refusal.notTargets.join(", ")} (not one of its papers)`]
+          : []),
+        ...(refusal.done.length
+          ? [`${refusal.done.join(", ")} (already covered)`]
+          : []),
+      ];
+      return `Task ${id} cannot exclude ${named.join("; ")}: excluded takes only the part's own papers that are not done yet.`;
+    })
+    .join(" ");
 }
 const HOST_MARKS_DONE =
   "Nothing changed: the host marks parts done from the tools' results, so progress needs no task_update call. Continue the work, or answer when it is done.";
@@ -147,6 +239,8 @@ type TaskUpdatePart = {
   /** Targets not done, with up to three of the host's reasons. */
   exceptions?: number;
   reasons?: string[];
+  /** Targets the model left out of the part, with its reasons. */
+  excluded?: number;
   /** Why it was skipped, blocked or cancelled, or why a write failed. */
   reason?: string;
   scope?: true;
@@ -161,6 +255,10 @@ function answerPart(
   const prefix = `${checkpoint.executionId}:task:`;
   const exceptions = task.exceptions || [];
   const excepted = exceptions.reduce(
+    (count, entry) => count + entry.targets.length,
+    0,
+  );
+  const excluded = (task.excludedTargets || []).reduce(
     (count, entry) => count + entry.targets.length,
     0,
   );
@@ -181,6 +279,7 @@ function answerPart(
           ),
         }
       : {}),
+    ...(excluded ? { excluded } : {}),
     ...(task.reason ? { reason: task.reason } : {}),
     ...(task.scope ? { scope: true as const } : {}),
   };
@@ -209,6 +308,16 @@ function parseDeclaration(
   if (raw.scope !== undefined && typeof raw.scope !== "boolean") {
     return fail(`${label}.scope must be true or false`);
   }
+  if (raw.replaces !== undefined && !optionalText(raw.replaces)) {
+    return fail(`${label}.replaces must be the taskId of the part it replaces`);
+  }
+  const replaces = optionalText(raw.replaces);
+  const reason = optionalText(raw.reason);
+  if (replaces && !reason) {
+    return fail(
+      `${label} needs a reason with replaces: why it replaces that part`,
+    );
+  }
   return ok({
     taskId,
     description: optionalText(raw.description),
@@ -218,7 +327,31 @@ function parseDeclaration(
       ? raw.targetIds.map(String).filter(Boolean)
       : undefined,
     ...(raw.scope === true ? { scope: true } : {}),
+    // A reason without replaces explains nothing the host keeps.
+    ...(replaces ? { replaces, reason } : {}),
   });
+}
+
+function parseExclusion(
+  raw: unknown,
+  label: string,
+): AgentToolInputValidation<TaskExclusion> {
+  if (!validateObject<Record<string, unknown>>(raw)) {
+    return fail(`${label} must be an object`);
+  }
+  const taskId = typeof raw.taskId === "string" ? raw.taskId.trim() : "";
+  if (!taskId) return fail(`${label} needs a taskId`);
+  const targetIds = Array.isArray(raw.targetIds)
+    ? raw.targetIds.map((value) => String(value).trim()).filter(Boolean)
+    : [];
+  if (!targetIds.length) {
+    return fail(`${label} needs targetIds: the papers the part leaves out`);
+  }
+  const reason = optionalText(raw.reason);
+  if (!reason) {
+    return fail(`${label} needs a reason: why the part leaves them out`);
+  }
+  return ok({ taskId, targetIds, reason });
 }
 
 function parseException(
@@ -259,8 +392,15 @@ export function validateTaskUpdateInput(
   }
   const tasks = parseList(args.tasks, "task_update.tasks", parseDeclaration);
   if (!tasks.ok) return tasks;
+  const excluded = parseList(
+    args.excluded,
+    "task_update.excluded",
+    parseExclusion,
+  );
+  if (!excluded.ok) return excluded;
   const input: TaskUpdateInput = {
     tasks: tasks.value,
+    excluded: excluded.value,
     skipped: [],
     blocked: [],
     cancelled: [],
@@ -276,10 +416,11 @@ export function validateTaskUpdateInput(
   }
   if (
     !input.tasks.length &&
+    !input.excluded.length &&
     EXCEPTION_STATUSES.every((status) => !input[status].length)
   ) {
     return fail(
-      "task_update needs tasks to declare, or parts listed under skipped, blocked or cancelled",
+      "task_update needs tasks to declare, parts listed under skipped, blocked or cancelled, or papers listed under excluded",
     );
   }
   return ok(input);
@@ -354,58 +495,95 @@ function outcomeEffect(
   return expected === "reasoning" ? "answer" : expected;
 }
 
+/** The most characters of the user's request a digest part keeps. */
+const DIGEST_QUESTION_CHARACTERS = 2_000;
+const SHORTENED = " [shortened]";
+
 /**
- * Whether a declared part still holds nothing the host bound to it: it is
- * pending, the model declared it, and no read, write, material, digested
- * paper or exception is on it. Only such a part may take a new effect.
+ * The user's request a digest part declared now serves: the turn's text,
+ * trimmed, and cut to 2,000 characters ending with "[shortened]". A continue
+ * command asks for no new work, so the part serves the request the ledger's
+ * newest part saved (the last in the ledger that has one), or none when no
+ * part saved one.
  */
-function redeclarable(task: ExecutionCheckpointTask): boolean {
-  return (
-    task.status === "pending" &&
-    task.origin !== "host" &&
-    [
-      task.journalActionIds,
-      task.verifiedReceiptIds,
-      task.readEvidenceIds,
-      task.materialRefs,
-      task.receiptIds || [],
-      task.doneTargets || [],
-      task.exceptions || [],
-    ].every((entries) => entries.length === 0)
-  );
+function digestQuestion(
+  checkpoint: ExecutionCheckpoint,
+  userText: string | undefined,
+): string | undefined {
+  const text = (userText || "").trim();
+  if (!text) return undefined;
+  if (isExplicitContinueCommand(text)) {
+    return [...checkpoint.tasks].reverse().find((task) => task.question)
+      ?.question;
+  }
+  if (text.length <= DIGEST_QUESTION_CHARACTERS) return text;
+  return `${text.slice(0, DIGEST_QUESTION_CHARACTERS - SHORTENED.length).trimEnd()}${SHORTENED}`;
+}
+
+/** A digest part names some papers, and no more than one part digests. */
+function checkDigestPapers(
+  effect: OutcomeEffect | undefined,
+  effectiveEffect: OutcomeEffect | undefined,
+  targets: readonly string[] | undefined,
+): void {
+  if (effect === "digest" && !targets?.length)
+    throw new ToolInputRejection(DIGEST_NEEDS_PAPERS);
+  if (
+    effectiveEffect === "digest" &&
+    (targets?.length || 0) > DIGEST_MAX_PAPERS_PER_PART
+  )
+    throw new ToolInputRejection(digestTooLarge(targets!.length));
 }
 
 /**
  * One ordinary call: its declarations become declared parts, then its
- * skipped, blocked or cancelled parts are marked with their reasons. A
- * repeated declaration changes nothing, and `ignored` says so, except for a
- * digest part: declaring one, or repeating it, asks the host to run it, and
- * `digestParts` lists those runs with their papers. A repeat with a new
- * expectedEffect re-declares a part that holds no evidence yet: the part is
- * replaced in place under its id, pending, with the new effect, description
- * and capability, and with targets frozen again when the repeat gives
- * targetIds or scope (else it keeps its own). `changed` lists those parts. A
- * part with evidence keeps its effect, and the repeat is refused. A
- * malformed call is an input rejection.
+ * skipped, blocked or cancelled parts are marked with their reasons, then
+ * the papers it excludes are recorded on their parts.
+ *
+ * A part declared again as it is changes nothing, and `ignored` says so,
+ * except for a digest part: declaring one, or repeating it, asks the host to
+ * run it, and `digestParts` lists those runs with their papers. A digest part
+ * repeated as it is runs over the papers its targetIds name, or every paper
+ * it has not done: its targetIds and scope select papers, never change them.
+ *
+ * A part declared again with a change (a new description, expectedEffect,
+ * expectedCapability, or other papers) is changed in place while it holds no
+ * progress: it keeps its id, place and creation time, takes the change, and
+ * freezes its targets again when the repeat gives targetIds or scope (a
+ * scope it already froze stays as frozen, unless the repeat changes the
+ * part otherwise). `changed` lists those parts; a digest part changed runs
+ * again. A part with progress is not changed: the model declares a new part
+ * that names it in `replaces`, with the reason, and `replaced` lists those.
+ * A new effect for a part with progress keeps its own note. A malformed or
+ * refused call is an input rejection, and changes nothing.
+ *
+ * A digest part declared, changed or declared as a replacement saves the
+ * user's request as its `question` (`digestQuestion`); a repeat keeps the
+ * one it has.
  */
 export function applyOrdinaryTaskUpdates(
   checkpoint: ExecutionCheckpoint,
   input: TaskUpdateInput,
   now: number,
   scopePapers: TaskPaperScopeSet | undefined,
+  userText?: string,
 ): {
   checkpoint: ExecutionCheckpoint;
   ignored: boolean;
   refused: string[];
   digestParts: DigestPartRun[];
   changed: string[];
+  replaced: Array<{ taskId: string; replaces: string }>;
 } {
   try {
     const existing = new Map(
       checkpoint.tasks.map((task) => [task.taskId, task]),
     );
-    const qualified = (local: string) =>
-      ordinaryExecutionTaskId(checkpoint.executionId, local);
+    const prefix = `${checkpoint.executionId}:task:`;
+    const local = (taskId: string) =>
+      taskId.startsWith(prefix) ? taskId.slice(prefix.length) : taskId;
+    const qualified = (id: string) =>
+      ordinaryExecutionTaskId(checkpoint.executionId, id);
     const onlyOnce = (seen: Set<string>, taskId: string) => {
       if (seen.has(taskId)) {
         throw new Error(`Task ${taskId} may appear only once in one update`);
@@ -421,18 +599,27 @@ export function applyOrdinaryTaskUpdates(
         marks.push({ taskId, status, reason: exception.reason });
       }
     }
+    const question = digestQuestion(checkpoint, userText);
     const declarations: OutcomeDeclaration[] = [];
     const declared = new Set<string>();
     let ignored = false;
-    // Digest parts this call asks to run: new ones with every paper, repeated
-    // ones with the papers the repeat names (`digestRetryTargets`).
+    // Digest parts this call asks to run: new or changed ones with every
+    // paper, repeated ones with the papers the repeat names
+    // (`digestRetryTargets`).
     const digestRuns: Array<{ taskId: string; targetIds?: string[] }> = [];
-    // Parts this call re-declares with a new effect, by id.
-    const redeclared = new Map<string, ExecutionCheckpointTask>();
+    // Parts this call changes in place, and the old parts it replaces by the
+    // new parts' ids.
+    const changed = new Set<string>();
+    const replacing = new Map<string, string>();
     for (const request of input.tasks) {
       const taskId = qualified(request.taskId);
       onlyOnce(declared, taskId);
       const prior = existing.get(taskId);
+      // A replaced part is history: its successor carries the work on.
+      if (prior?.supersededBy)
+        throw new ToolInputRejection(
+          replacedNote(request.taskId, local(prior.supersededBy)),
+        );
       const requestedEffect = outcomeEffect(request.expectedEffect);
       // The effect the part would take: a write capability makes it a
       // mutation (`declareOutcomes`), so repeating such a declaration word
@@ -448,11 +635,7 @@ export function applyOrdinaryTaskUpdates(
         effectiveEffect !== (prior.effect || "answer");
       if (newEffect && !redeclarable(prior)) {
         throw new ToolInputRejection(
-          effectFixedNote(
-            request.taskId,
-            prior.effect || "answer",
-            effectiveEffect,
-          ),
+          effectFixedNote(request.taskId, prior, effectiveEffect),
         );
       }
       // Papers are named by id; a write part may also name what is not in
@@ -466,71 +649,116 @@ export function applyOrdinaryTaskUpdates(
         );
         if (notIds.length) throw new ToolInputRejection(notIdsNote(notIds));
       }
-      if (!prior || newEffect) {
+      if (request.replaces !== undefined) {
+        if (prior)
+          throw new ToolInputRejection(replacesNeedsNewIdNote(request.taskId));
+        const old = qualified(request.replaces);
+        const replaced = existing.get(old);
+        if (!replaced)
+          throw new ToolInputRejection(replacesUnknownNote(request.replaces));
+        if (replacing.has(old))
+          throw new Error(`Task ${old} may appear only once in one update`);
+        if (!replaceable(replaced))
+          throw new ToolInputRejection(
+            notReplaceableNote(local(old), replaced),
+          );
+        replacing.set(old, taskId);
+      }
+      if (!prior) {
         const effect = requestedEffect;
         if (!effect) throw new ToolInputRejection(EXPECTED_EFFECT_REQUIRED);
-        const { targets, scope } =
-          prior && !request.scope && !request.targetIds?.length
-            ? {
-                targets: prior.targets ? [...prior.targets] : undefined,
-                scope: prior.scope,
-              }
-            : declaredTargets(request, scopePapers);
-        if (prior) redeclared.set(taskId, prior);
-        if (effect === "digest" && !targets?.length)
-          throw new ToolInputRejection(DIGEST_NEEDS_PAPERS);
-        if (
-          effectiveEffect === "digest" &&
-          (targets?.length || 0) > DIGEST_MAX_PAPERS_PER_PART
-        )
-          throw new ToolInputRejection(digestTooLarge(targets!.length));
+        const { targets, scope } = declaredTargets(request, scopePapers);
+        checkDigestPapers(effect, effectiveEffect, targets);
         if (effect === "digest") digestRuns.push({ taskId });
         declarations.push({
           taskId,
-          description: request.description || prior?.description || "",
+          description: request.description || "",
           effect,
           capability,
           targets,
           ...(scope ? { scope } : {}),
+          ...(question ? { question } : {}),
+          ...(request.replaces !== undefined
+            ? { replaces: request.replaces, reason: request.reason }
+            : {}),
         });
         continue;
       }
-      // A repeat keeps the part; a new description for it is refused.
-      if (request.description)
-        declarations.push({
-          taskId,
-          description: request.description,
-          effect: prior.effect || "answer",
-        });
-      if (prior.effect === "digest") {
+      const priorEffect = prior.effect || "answer";
+      const newDescription =
+        request.description !== undefined &&
+        request.description !== prior.description;
+      const newCapability =
+        capability !== undefined && capability !== prior.capability;
+      const reframes = newEffect || newDescription || newCapability;
+      if (priorEffect === "digest" && !reframes) {
         digestRuns.push({ taskId, targetIds: request.targetIds });
         continue;
       }
-      if (!marked.has(taskId)) ignored = true;
+      const { targets, scope } =
+        request.targetIds?.length ||
+        (request.scope && (reframes || !prior.scope))
+          ? declaredTargets(request, scopePapers)
+          : {
+              targets: prior.targets ? [...prior.targets] : undefined,
+              scope: prior.scope,
+            };
+      const effect = newEffect ? requestedEffect! : priorEffect;
+      const declaration: OutcomeDeclaration = {
+        taskId,
+        description: request.description || prior.description,
+        effect,
+        capability: newEffect ? capability : capability || prior.capability,
+        targets,
+        ...(scope ? { scope } : {}),
+        ...(question ? { question } : {}),
+      };
+      if (!declarationChanges(prior, declaration)) {
+        if (!marked.has(taskId)) ignored = true;
+        continue;
+      }
+      if (!redeclarable(prior))
+        throw new ToolInputRejection(fixedPartNote(request.taskId, prior));
+      checkDigestPapers(
+        effect,
+        newEffect ? effectiveEffect : priorEffect,
+        targets,
+      );
+      if (effect === "digest") digestRuns.push({ taskId });
+      changed.add(taskId);
+      declarations.push(declaration);
+    }
+    // A part this call replaces is neither declared nor marked again in it.
+    for (const old of replacing.keys()) {
+      if (declared.has(old) || marked.has(old))
+        throw new Error(`Task ${old} may appear only once in one update`);
     }
     const applied = markOutcomes(
-      replaceInPlace(
-        checkpoint,
-        declareOutcomes(
-          redeclared.size
-            ? {
-                ...checkpoint,
-                tasks: checkpoint.tasks.filter(
-                  (task) => !redeclared.has(task.taskId),
-                ),
-              }
-            : checkpoint,
-          declarations,
-          now,
-        ),
-        redeclared,
-      ),
+      declareOutcomes(checkpoint, declarations, now),
       marks,
       now,
     );
-    const prefix = `${checkpoint.executionId}:task:`;
+    const excluded = excludeOutcomeTargets(
+      applied.checkpoint,
+      input.excluded.map((exclusion) => {
+        const notIds = exclusion.targetIds.filter(
+          (value) => !isOutcomeTargetId(value),
+        );
+        if (notIds.length) throw new ToolInputRejection(notIdsNote(notIds));
+        return {
+          taskId: exclusion.taskId,
+          targets: exclusion.targetIds,
+          reason: exclusion.reason,
+        };
+      }),
+      now,
+    );
+    if (excluded.refused.length)
+      throw new ToolInputRejection(
+        exclusionRefusedNote(excluded.refused, local),
+      );
     const tasks = new Map(
-      applied.checkpoint.tasks.map((task) => [task.taskId, task]),
+      excluded.checkpoint.tasks.map((task) => [task.taskId, task]),
     );
     const digestParts = digestRuns.flatMap(({ taskId, targetIds }) => {
       const task = tasks.get(taskId);
@@ -547,13 +775,19 @@ export function applyOrdinaryTaskUpdates(
       });
       return [{ taskId, targets, ...(retried.length ? { retried } : {}) }];
     });
-    const local = (taskId: string) =>
-      taskId.startsWith(prefix) ? taskId.slice(prefix.length) : taskId;
     return {
-      checkpoint: applied.checkpoint,
+      checkpoint: excluded.checkpoint,
       digestParts,
-      changed: [...redeclared.keys()].map(local),
-      ignored: ignored || applied.ignored.length > 0,
+      changed: [...changed].map(local),
+      replaced: [...replacing].map(([old, taskId]) => ({
+        taskId: local(taskId),
+        replaces: local(old),
+      })),
+      // A call whose exclusions moved the ledger did something, whatever it
+      // repeated beside them.
+      ignored:
+        (ignored || applied.ignored.length > 0) &&
+        excluded.checkpoint === applied.checkpoint,
       refused: applied.refused.map(({ taskId }) => local(taskId)),
     };
   } catch (error) {
@@ -562,32 +796,6 @@ export function applyOrdinaryTaskUpdates(
       error instanceof Error ? error.message : String(error),
     );
   }
-}
-
-/**
- * Put each re-declared part back where its predecessor stood, keeping when it
- * was first declared; `declared` appended it as new.
- */
-function replaceInPlace(
-  original: ExecutionCheckpoint,
-  declared: ExecutionCheckpoint,
-  redeclared: ReadonlyMap<string, ExecutionCheckpointTask>,
-): ExecutionCheckpoint {
-  if (!redeclared.size) return declared;
-  const byId = new Map(declared.tasks.map((task) => [task.taskId, task]));
-  const placed = new Set(original.tasks.map((task) => task.taskId));
-  const tasks = original.tasks.map((task) => {
-    const prior = redeclared.get(task.taskId);
-    const next = byId.get(task.taskId)!;
-    return prior ? { ...next, createdAt: prior.createdAt } : next;
-  });
-  return {
-    ...declared,
-    tasks: [
-      ...tasks,
-      ...declared.tasks.filter((task) => !placed.has(task.taskId)),
-    ],
-  };
 }
 
 export type TaskUpdateToolDeps = {
@@ -600,8 +808,10 @@ export type TaskUpdateToolDeps = {
 
 type TaskUpdateResult = {
   parts: TaskUpdatePart[];
-  /** Parts this call re-declared with a new effect. */
+  /** Parts this call changed in place. */
   changed?: string[];
+  /** New parts this call declared in place of others, by local taskId. */
+  replaced?: Array<{ taskId: string; replaces: string }>;
   note?: string;
 } & DigestRunResult;
 
@@ -621,6 +831,7 @@ export function createTaskUpdateTool(
           skipped: EXCEPTION_SCHEMA,
           blocked: EXCEPTION_SCHEMA,
           cancelled: EXCEPTION_SCHEMA,
+          excluded: EXCLUSION_SCHEMA,
         },
       },
       executionClass: "control",
@@ -657,6 +868,7 @@ export function createTaskUpdateTool(
       let refused: string[] = [];
       let digestParts: DigestPartRun[] = [];
       let changed: string[] = [];
+      let replaced: Array<{ taskId: string; replaces: string }> = [];
       let checkpoint = await context.updateExecutionCheckpoint((current) => {
         assertCheckpointOwner(current, execution);
         const applied = applyOrdinaryTaskUpdates(
@@ -664,11 +876,13 @@ export function createTaskUpdateTool(
           input,
           Date.now(),
           context.request.turnScopePapers,
+          context.request.userText,
         );
         ignored = applied.ignored;
         refused = applied.refused;
         digestParts = applied.digestParts;
         changed = applied.changed;
+        replaced = applied.replaced;
         return applied.checkpoint;
       });
       let digests: DigestRunResult = {};
@@ -692,6 +906,7 @@ export function createTaskUpdateTool(
       const reported = {
         parts,
         ...(changed.length ? { changed } : {}),
+        ...(replaced.length ? { replaced } : {}),
       };
       // A refused skip is the note the model must act on; it outranks the
       // reminder that progress needs no call.

@@ -12,6 +12,7 @@ import {
 import type {
   ExecutionCheckpoint,
   ExecutionCheckpointTask,
+  ExecutionTaskStatus,
   OutcomeEffect,
   OutcomeException,
   RunEndState,
@@ -46,6 +47,22 @@ import type { RunStopRule } from "./stopRules";
  * when any is done, and is skipped with the first reason when none is. The
  * answer does not complete a digest part, and the long-job pager never pages
  * one.
+ *
+ * Selection. An artifact or a reasoning part delivers a synthesis from the
+ * papers it names, and the model may leave some out with its reason
+ * (`excludeOutcomeTargets`). An excluded paper is the model's decision, not
+ * an exception: it is never "not covered", so a part whose only papers not
+ * done are excluded completes clean. Content that cites an excluded paper
+ * after all makes it done, as what the output used wins. Every other part
+ * covers every paper it names, and takes no exclusion.
+ *
+ * Revision. Declaring a part again with another description, effect,
+ * capability or papers changes it in place while it holds no progress
+ * (`redeclarable`). A part with progress is replaced instead: a new part
+ * names it in `replaces`, with the reason, and the old part is cancelled
+ * with `supersededBy`, keeping what it did. A replaced part no longer counts
+ * toward how the run ended (`decideRunEnd`), takes no further evidence, and
+ * content that names it is its successor's.
  */
 
 export type OutcomeDeclaration = {
@@ -56,7 +73,30 @@ export type OutcomeDeclaration = {
   targets?: readonly string[];
   /** The targets are every paper of the turn's scope, frozen now. */
   scope?: boolean;
+  /** A digest part's user request, as `task_update` captured it. */
+  question?: string;
+  /** The local or qualified taskId of the pending part this one replaces. */
+  replaces?: string;
+  /** Why it replaces that part; required with `replaces`. */
+  reason?: string;
 };
+
+/** Papers the model leaves out of an artifact or reasoning part. */
+export type OutcomeExclusion = {
+  taskId: string;
+  /** The papers as the model names them: `12` or `item:12`. */
+  targets: readonly string[];
+  reason: string;
+};
+
+/** Why an exclusion was refused; a refused call changes nothing. */
+export type OutcomeExclusionRefusal =
+  /** The part covers every paper it names: digest, read or write. */
+  | { taskId: string; kind: "effect"; effect: OutcomeEffect }
+  /** The part is settled without papers left to leave out. */
+  | { taskId: string; kind: "status"; status: ExecutionTaskStatus }
+  /** Papers, as named, that are not its targets, or that it has done. */
+  | { taskId: string; kind: "papers"; notTargets: string[]; done: string[] };
 
 export type OutcomeModelMark = {
   taskId: string;
@@ -134,6 +174,9 @@ export const OUTCOME_REASONS = Object.freeze({
   notCovered: "Not covered by the delivered content",
 });
 
+/** The refusal of an exclusion without its reason. */
+const EXCLUSION_REASON_REQUIRED = "An excluded paper needs the reason.";
+
 type Task = ExecutionCheckpointTask;
 type Write = Pick<AgentActionProposal, "capability" | "requestedTargets">;
 type EvidenceResult = { checkpoint: ExecutionCheckpoint; changed: boolean };
@@ -168,6 +211,13 @@ const RECEIPT_CANDIDATE_STATUSES: ReadonlySet<string> = new Set([
 const DECLINE_CANDIDATE_STATUSES: ReadonlySet<string> = new Set([
   "pending",
   "in_progress",
+]);
+/** A part takes an exclusion while open, and once completed with papers left. */
+const EXCLUDABLE_STATUSES: ReadonlySet<string> = new Set([
+  "pending",
+  "in_progress",
+  "blocked",
+  "completed",
 ]);
 const PROOF_VERIFICATIONS: ReadonlySet<string> = new Set([
   "verified",
@@ -957,6 +1007,22 @@ function isPendingArtifact(task: Task): boolean {
 }
 
 /**
+ * The part at `index` as it stands now: itself, or the part that replaced
+ * it, followed to the last replacement. -1 when `index` is -1, or when the
+ * ledger does not hold a replacement it names.
+ */
+function successorOf(checkpoint: ExecutionCheckpoint, index: number): number {
+  const seen = new Set<number>();
+  let at = index;
+  while (at >= 0 && checkpoint.tasks[at].supersededBy && !seen.has(at)) {
+    seen.add(at);
+    const next = checkpoint.tasks[at].supersededBy;
+    at = checkpoint.tasks.findIndex((task) => task.taskId === next);
+  }
+  return at;
+}
+
+/**
  * The part delivered content binds to, and whether it binds as a revision.
  *
  * A call that names a part binds only to it: an open artifact part is
@@ -967,8 +1033,9 @@ function isPendingArtifact(task: Task): boolean {
  * already holds a document and whose description names the kind (the
  * ledger keeps no document kind, so a part's description stands for the
  * kind it delivers); else to the first pending artifact part. A revision of
- * a delivered document is never another part's delivery. Undefined when
- * nothing takes it.
+ * a delivered document is never another part's delivery. A named part the
+ * model replaced stands for the part that replaced it, and a replaced part
+ * takes no revision by its kind. Undefined when nothing takes it.
  */
 function artifactPartFor(
   checkpoint: ExecutionCheckpoint,
@@ -982,9 +1049,10 @@ function artifactPartFor(
   } catch {
     // A malformed id names no part; the content still binds by its kind.
   }
-  const own = taskId
-    ? checkpoint.tasks.findIndex((task) => task.taskId === taskId)
-    : -1;
+  const own = successorOf(
+    checkpoint,
+    taskId ? checkpoint.tasks.findIndex((task) => task.taskId === taskId) : -1,
+  );
   if (own >= 0) {
     const task = checkpoint.tasks[own];
     if (task.effect !== "artifact") return undefined;
@@ -1003,6 +1071,7 @@ function artifactPartFor(
     ? checkpoint.tasks.findIndex(
         (task) =>
           task.effect === "artifact" &&
+          !task.supersededBy &&
           task.materialRefs.length > 0 &&
           pattern.test(task.description),
       )
@@ -1015,8 +1084,9 @@ function artifactPartFor(
 /**
  * Complete an artifact part from content citing `cited`. With `cited`
  * unknown the part completes whole. Otherwise each of its targets the content
- * cites is done, and each other target is excepted as not covered. A paper
- * done stays done, so a revision only adds the papers it covers.
+ * cites is done, an excluded one included, and each other target is excepted
+ * as not covered unless the model excluded it. A paper done stays done, so a
+ * revision only adds the papers it covers.
  */
 function coverTargets(
   task: Task,
@@ -1030,16 +1100,23 @@ function coverTargets(
     targets.filter((target) => cited.includes(target)),
   );
   const done = new Set(doneTargets);
+  const excludedTargets = withoutDone(task.excludedTargets || [], doneTargets);
+  const excluded = new Set(excludedTargets.flatMap((entry) => entry.targets));
   const exceptions = exceptTargets(
     withoutDone(task.exceptions || [], doneTargets),
-    targets.filter((target) => !done.has(target)),
+    targets.filter((target) => !done.has(target) && !excluded.has(target)),
     OUTCOME_REASONS.notCovered,
   );
-  const { exceptions: _previous, ...rest } = completed(task);
+  const {
+    exceptions: _previous,
+    excludedTargets: _excluded,
+    ...rest
+  } = completed(task);
   return {
     ...rest,
     doneTargets,
     ...(exceptions.length ? { exceptions } : {}),
+    ...(excludedTargets.length ? { excludedTargets } : {}),
     updatedAt: now,
   };
 }
@@ -1259,15 +1336,98 @@ function hasEvidence(task: Task): boolean {
   ].some((entries) => entries.length > 0);
 }
 
-/** Add declared parts as pending model outcomes; a repeat is a no-op. */
+/**
+ * Whether a part may change in place: the model declared it, it is pending,
+ * and nothing the host bound is on it (no read, write, document, digested
+ * paper or exception). The papers it excluded are a decision, not progress.
+ */
+export function redeclarable(task: Task): boolean {
+  return (
+    task.status === "pending" && task.origin !== "host" && !hasEvidence(task)
+  );
+}
+
+/**
+ * Whether a part may be replaced: the model declared it, it is pending, and
+ * it is no write part that holds a receipt. Writes stay facts: further
+ * writes are a part of their own.
+ */
+export function replaceable(task: Task): boolean {
+  return (
+    task.status === "pending" &&
+    task.origin !== "host" &&
+    !(
+      task.effect === "mutation" &&
+      ((task.receiptIds?.length || 0) > 0 || task.verifiedReceiptIds.length > 0)
+    )
+  );
+}
+
+/** The effect a part takes from its declaration. */
+function declaredEffect(declaration: OutcomeDeclaration): OutcomeEffect {
+  // A part that names a write capability is a write, whatever effect it
+  // claims: models declare "save it as a note" as an artifact too.
+  return declaration.capability &&
+    isWrite({ capability: declaration.capability })
+    ? "mutation"
+    : declaration.effect;
+}
+
+/**
+ * Whether `declaration` changes the existing part `prior`: another
+ * description, effect, capability or set of papers. The same papers in
+ * another order, or by the other id form, are the same part, and a part
+ * over the scope declared again over the scope names the papers it froze,
+ * whatever the scope holds now.
+ */
+export function declarationChanges(
+  prior: Task,
+  declaration: OutcomeDeclaration,
+): boolean {
+  const description =
+    typeof declaration.description === "string"
+      ? declaration.description.trim()
+      : "";
+  const targets = outcomeTargets(declaration.targets, declaration.capability);
+  const held = new Set(prior.targets || []);
+  const samePapers =
+    (prior.scope && declaration.scope) ||
+    (targets.length === held.size &&
+      targets.every((target) => held.has(target)));
+  return (
+    description !== prior.description ||
+    declaredEffect(declaration) !== (prior.effect || "answer") ||
+    declaration.capability !== prior.capability ||
+    !samePapers
+  );
+}
+
+/** Effects whose parts deliver a synthesis from a selection of their papers. */
+const SELECTING_EFFECTS: ReadonlySet<string> = new Set(["artifact", "answer"]);
+
+/**
+ * Add declared parts as pending model outcomes.
+ *
+ * A part declared again as it is changes nothing. One declared with a change
+ * (`declarationChanges`) is rebuilt in place while it holds no progress
+ * (`redeclarable`): its id, place and creation time stay, its targets are
+ * frozen anew, and the papers it excluded stay while it still names them
+ * and still takes exclusions. A part with progress, or settled, does not
+ * change. A declaration that `replaces` a pending part adds the new part and
+ * cancels the old one with the reason and `supersededBy` (the new part's
+ * qualified id); the old part keeps what it did. A digest part keeps the
+ * user's `question`: the declaration's, else the one it had.
+ */
 export function declareOutcomes(
   checkpoint: ExecutionCheckpoint,
   declarations: readonly OutcomeDeclaration[],
   now: number,
 ): ExecutionCheckpoint {
-  const existing = new Map(checkpoint.tasks.map((task) => [task.taskId, task]));
+  const tasks = [...checkpoint.tasks];
+  const indexById = new Map(tasks.map((task, index) => [task.taskId, index]));
+  const declaredBefore = checkpoint.tasks.length;
   const seen = new Set<string>();
-  const created: Task[] = [];
+  let changed = false;
   for (const declaration of declarations) {
     const taskId = ordinaryExecutionTaskId(
       checkpoint.executionId,
@@ -1284,12 +1444,20 @@ export function declareOutcomes(
     if (!description) {
       throw new Error(`New task ${taskId} requires a description`);
     }
-    const prior = existing.get(taskId);
+    const index = indexById.get(taskId);
+    const prior = index === undefined ? undefined : tasks[index];
+    if (prior && declaration.replaces !== undefined) {
+      throw new Error(
+        `Task ${taskId} already exists; a part that replaces another needs a new taskId`,
+      );
+    }
     if (prior) {
-      if (prior.description !== description) {
-        throw new Error(`Existing task ${taskId} has immutable presentation`);
+      if (!declarationChanges(prior, declaration)) continue;
+      if (!redeclarable(prior)) {
+        throw new Error(
+          `Existing task ${taskId} cannot change: it has progress or is settled`,
+        );
       }
-      continue;
     }
     if (!OUTCOME_EFFECTS.has(declaration.effect)) {
       throw new Error(
@@ -1297,27 +1465,158 @@ export function declareOutcomes(
       );
     }
     const targets = outcomeTargets(declaration.targets, declaration.capability);
-    // A part that names a write capability is a write, whatever effect it
-    // claims: models declare "save it as a note" as an artifact too.
-    const effect =
-      declaration.capability && isWrite({ capability: declaration.capability })
-        ? "mutation"
-        : declaration.effect;
-    created.push({
+    const effect = declaredEffect(declaration);
+    const question =
+      effect === "digest"
+        ? declaration.question?.trim() || prior?.question
+        : undefined;
+    // The papers it excluded, of those it still names.
+    const excludedTargets =
+      prior && SELECTING_EFFECTS.has(effect)
+        ? (prior.excludedTargets || []).flatMap((entry) => {
+            const left = entry.targets.filter((target) =>
+              targets.includes(target),
+            );
+            return left.length ? [{ ...entry, targets: left }] : [];
+          })
+        : [];
+    const task: Task = {
       ...newTask(taskId, description, now),
+      ...(prior ? { createdAt: prior.createdAt } : {}),
       effect,
       origin: "model",
       ...(declaration.capability ? { capability: declaration.capability } : {}),
       ...(targets.length ? { targets } : {}),
       ...(declaration.scope && targets.length ? { scope: true as const } : {}),
-    });
+      ...(question ? { question } : {}),
+      ...(excludedTargets.length ? { excludedTargets } : {}),
+    };
+    if (declaration.replaces !== undefined) {
+      const replaced = ordinaryExecutionTaskId(
+        checkpoint.executionId,
+        declaration.replaces,
+      );
+      const reason =
+        typeof declaration.reason === "string" ? declaration.reason.trim() : "";
+      if (!reason) {
+        throw new Error(
+          `Task ${taskId} replaces ${replaced} and needs the reason`,
+        );
+      }
+      // Only a part the ledger held before this update is replaced.
+      const at = indexById.get(replaced);
+      if (at === undefined || at >= declaredBefore) {
+        throw new Error(`Unknown task ${replaced}`);
+      }
+      if (!replaceable(tasks[at])) {
+        throw new Error(
+          `Task ${replaced} cannot be replaced: it is settled or holds writes`,
+        );
+      }
+      tasks[at] = {
+        ...tasks[at],
+        status: "cancelled",
+        reason,
+        supersededBy: taskId,
+        updatedAt: now,
+      };
+    }
+    if (index === undefined) {
+      indexById.set(taskId, tasks.length);
+      tasks.push(task);
+    } else {
+      tasks[index] = task;
+    }
+    changed = true;
   }
-  if (!created.length) return checkpoint;
-  return {
-    ...checkpoint,
-    tasks: [...checkpoint.tasks, ...created],
-    updatedAt: now,
-  };
+  return changed ? { ...checkpoint, tasks, updatedAt: now } : checkpoint;
+}
+
+/**
+ * Record papers the model leaves out of an artifact or reasoning part, with
+ * its reason, as `excludedTargets`. Only those parts deliver a synthesis
+ * from a selection: a digest, read or write part covers every paper it
+ * names, so an exclusion on one is refused, as is one on a settled part
+ * other than a completed one, and one naming a paper that is not the part's
+ * own or that it has done. A paper the delivered content left uncited moves
+ * from that exception to the exclusion; other exceptions stay. A paper
+ * excluded already keeps its first reason. Any refusal changes nothing, so
+ * a call is applied whole or not at all.
+ */
+export function excludeOutcomeTargets(
+  checkpoint: ExecutionCheckpoint,
+  exclusions: readonly OutcomeExclusion[],
+  now: number,
+): { checkpoint: ExecutionCheckpoint; refused: OutcomeExclusionRefusal[] } {
+  const indexById = new Map(
+    checkpoint.tasks.map((task, index) => [task.taskId, index]),
+  );
+  const tasks = [...checkpoint.tasks];
+  const refused: OutcomeExclusionRefusal[] = [];
+  let changed = false;
+  for (const exclusion of exclusions) {
+    const taskId = ordinaryExecutionTaskId(
+      checkpoint.executionId,
+      exclusion.taskId,
+    );
+    const index = indexById.get(taskId);
+    if (index === undefined) throw new Error(`Unknown task ${taskId}`);
+    const reason =
+      typeof exclusion.reason === "string" ? exclusion.reason.trim() : "";
+    if (!reason) throw new Error(EXCLUSION_REASON_REQUIRED);
+    const task = tasks[index];
+    const effect = task.effect || "answer";
+    if (!SELECTING_EFFECTS.has(effect)) {
+      refused.push({ taskId, kind: "effect", effect });
+      continue;
+    }
+    if (!EXCLUDABLE_STATUSES.has(task.status)) {
+      refused.push({ taskId, kind: "status", status: task.status });
+      continue;
+    }
+    const targets = task.targets || [];
+    const named = unique(
+      exclusion.targets.map((value) => String(value).trim()).filter(Boolean),
+    );
+    const papers = named.map((value) => resolveTarget(value, targets));
+    const notTargets = named.filter((_, at) => papers[at] === undefined);
+    const done = named.filter(
+      (_, at) =>
+        papers[at] !== undefined &&
+        (task.doneTargets || []).includes(papers[at]!),
+    );
+    if (notTargets.length || done.length) {
+      refused.push({ taskId, kind: "papers", notTargets, done });
+      continue;
+    }
+    const excluded = unique(papers as string[]);
+    const excludedTargets = exceptTargets(
+      task.excludedTargets || [],
+      excluded,
+      reason,
+    );
+    const exceptions = (task.exceptions || []).flatMap((entry) => {
+      if (entry.reason !== OUTCOME_REASONS.notCovered) return [entry];
+      const left = entry.targets.filter((target) => !excluded.includes(target));
+      return left.length ? [{ ...entry, targets: left }] : [];
+    });
+    if (
+      JSON.stringify(excludedTargets) ===
+        JSON.stringify(task.excludedTargets || []) &&
+      JSON.stringify(exceptions) === JSON.stringify(task.exceptions || [])
+    )
+      continue;
+    const { exceptions: _previous, ...rest } = task;
+    tasks[index] = {
+      ...rest,
+      excludedTargets,
+      ...(exceptions.length ? { exceptions } : {}),
+      updatedAt: now,
+    };
+    changed = true;
+  }
+  if (refused.length || !changed) return { checkpoint, refused };
+  return { checkpoint: { ...checkpoint, tasks, updatedAt: now }, refused };
 }
 
 /**
@@ -1616,40 +1915,49 @@ export function openDeclaredOutcomes(
   );
 }
 
-/** Outcome progress as a string that moves only with evidence or a mark. */
+/**
+ * Outcome progress as a string that moves only with evidence, a mark or an
+ * exclusion.
+ */
 export function outcomeProgressSignature(
   checkpoint: ExecutionCheckpoint | undefined,
 ): string {
+  const count = (entries: readonly OutcomeException[] | undefined) =>
+    (entries || []).reduce((sum, entry) => sum + entry.targets.length, 0);
   return JSON.stringify(
     (checkpoint?.tasks || []).map((task) => [
       task.taskId,
       task.status,
       task.doneTargets?.length || 0,
-      (task.exceptions || []).reduce(
-        (count, entry) => count + entry.targets.length,
-        0,
-      ),
+      count(task.exceptions),
       task.verifiedReceiptIds.length,
       task.readEvidenceIds.length,
       task.materialRefs.length,
+      count(task.excludedTargets),
     ]),
   );
 }
 
-/** The honest end state from the run status, stop rule and ledger. */
+/**
+ * The honest end state from the run status, stop rule and ledger. A part
+ * the model replaced answers to the part that replaced it: its cancellation
+ * neither leaves the run partly done nor blocks it, and only the work it
+ * did still counts as the run's progress.
+ */
 export function decideRunEnd(
   checkpoint: ExecutionCheckpoint | undefined,
   run: { status: "completed" | "failed" | "cancelled"; stopRule: RunStopRule },
 ): RunEndState {
   const tasks = checkpoint?.tasks || [];
+  const standing = tasks.filter((task) => !task.supersededBy);
   if (run.status === "cancelled") return "cancelled";
-  if (tasks.some((task) => task.status === "blocked")) return "blocked";
+  if (standing.some((task) => task.status === "blocked")) return "blocked";
   if (run.status === "failed") {
     return INTERRUPTING_STOP_RULES.has(run.stopRule) && tasks.some(hasEvidence)
       ? "interrupted"
       : "failed";
   }
-  return tasks.some(
+  return standing.some(
     (task) => task.status !== "completed" || task.exceptions?.length,
   )
     ? "completed_with_exceptions"

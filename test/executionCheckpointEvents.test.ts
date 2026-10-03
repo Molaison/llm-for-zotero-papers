@@ -10,6 +10,7 @@ import {
 import {
   applyOutcomeEvidence,
   declareOutcomes,
+  excludeOutcomeTargets,
   markOutcomes,
   settleOutcomes,
 } from "../src/agent/loop/outcomes";
@@ -278,6 +279,124 @@ describe("execution checkpoint events", function () {
       latestExecutionCheckpoint(stored(healed as AgentEvent[])),
       JSON.parse(JSON.stringify(ledgers[5])),
     );
+  });
+
+  it("carries a digest part's question, excluded papers and a replacement through the events", function () {
+    const ledgers: ExecutionCheckpoint[] = [];
+    let ledger = createEmptyExecutionCheckpoint(executionContext, 100);
+    const publish = (next: ExecutionCheckpoint) => {
+      assert.notStrictEqual(next, ledger, "each step changes the ledger");
+      ledgers.push(next);
+      ledger = next;
+    };
+    const exclude = (targets: string[], reason: string, now: number) => {
+      const result = excludeOutcomeTargets(
+        ledger,
+        [{ taskId: "review", targets, reason }],
+        now,
+      );
+      assert.deepEqual(result.refused, []);
+      return result.checkpoint;
+    };
+    publish(
+      declareOutcomes(
+        ledger,
+        [
+          {
+            taskId: "summaries",
+            description: "Summarize each paper",
+            effect: "digest",
+            targets: items(4),
+            question: "Which papers test representational drift?",
+          },
+          {
+            taskId: "review",
+            description: "Write the review",
+            effect: "artifact",
+            targets: items(4),
+          },
+        ],
+        101,
+      ),
+    );
+    publish(exclude([items(4)[3]], "Chemistry, off the question", 102));
+    publish(exclude([items(4)[2]], "A methods note", 103));
+    publish(exclude([items(4)[1]], "A methods note", 104));
+    publish(
+      declareOutcomes(
+        ledger,
+        [
+          {
+            taskId: "drift",
+            description: "State each paper's evidence on drift",
+            effect: "digest",
+            targets: items(2),
+            question: "Which papers show drift, and how fast?",
+            replaces: "summaries",
+            reason: "The user narrowed the question",
+          },
+        ],
+        105,
+      ),
+    );
+    const events = published(ledgers);
+    assert.deepEqual(
+      events.map((event) => event.type),
+      [
+        "execution_checkpoint",
+        "execution_checkpoint_delta",
+        "execution_checkpoint_delta",
+        "execution_checkpoint_delta",
+        "execution_checkpoint_delta",
+      ],
+    );
+    const deltas = events
+      .slice(1)
+      .map((event) =>
+        event.type === "execution_checkpoint_delta" ? event.delta : undefined,
+      );
+    // A new exclusion is set, a new reason grows the list, a paper more
+    // under a reason sets it again; the replacement sets the old part's
+    // fields and adds the new part whole.
+    assert.deepEqual(deltas[0]?.tasks[0].set?.excludedTargets, [
+      { targets: [items(4)[3]], reason: "Chemistry, off the question" },
+    ]);
+    assert.deepEqual(deltas[1]?.tasks[0].grow?.excludedTargets, {
+      from: 1,
+      add: [{ targets: [items(4)[2]], reason: "A methods note" }],
+    });
+    assert.deepEqual(deltas[2]?.tasks[0].set?.excludedTargets, [
+      { targets: [items(4)[3]], reason: "Chemistry, off the question" },
+      { targets: [items(4)[2], items(4)[1]], reason: "A methods note" },
+    ]);
+    const replacement = deltas[3]!.tasks;
+    assert.deepEqual(replacement[0].set, {
+      status: "cancelled",
+      reason: "The user narrowed the question",
+      supersededBy: "execution-41-3-1790000000000:task:drift",
+      updatedAt: 105,
+    });
+    assert.equal(
+      replacement[1].task?.question,
+      "Which papers show drift, and how fast?",
+    );
+    ledgers.forEach((expected, index) => {
+      assert.deepEqual(
+        latestExecutionCheckpoint(stored(events.slice(0, index + 1))),
+        JSON.parse(JSON.stringify(expected)),
+        `ledger ${index + 1} of ${ledgers.length}`,
+      );
+    });
+    const folded = latestExecutionCheckpoint(stored(events))!;
+    assert.equal(
+      folded.tasks[0].question,
+      "Which papers test representational drift?",
+    );
+    assert.equal(
+      folded.tasks[0].supersededBy,
+      `${ledger.executionId}:task:drift`,
+    );
+    assert.lengthOf(folded.tasks[1].excludedTargets!, 2);
   });
 
   it("folds live, one event at a time, as Task progress receives them", function () {

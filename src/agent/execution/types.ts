@@ -72,10 +72,30 @@ export type ExecutionCheckpointTask = Readonly<{
    */
   doneTargets?: readonly string[];
   exceptions?: readonly OutcomeException[];
+  /**
+   * Artifact and reasoning parts only: targets the model chose to leave out
+   * of what the part delivers, each with the model's reason. They are not
+   * exceptions: a part whose only papers not done are excluded is complete.
+   */
+  excludedTargets?: readonly OutcomeException[];
   /** Every receipt bound here, verified or not, so none binds twice. */
   receiptIds?: readonly string[];
-  /** Why the model marked it skipped or blocked, or why the host settled it. */
+  /**
+   * Why the model marked it skipped or blocked, why the host settled it, or
+   * why the model replaced it.
+   */
   reason?: string;
+  /**
+   * The qualified taskId of the part that replaced this one. A replaced part
+   * is cancelled with the reason, keeps what it did, and no longer counts
+   * toward how the run ended.
+   */
+  supersededBy?: string;
+  /**
+   * Digest parts only: the user's request the part serves, as declared (at
+   * most 2,000 characters). The per-paper worker reads it as context.
+   */
+  question?: string;
 }>;
 
 /** Entries a list gained: it had `from` entries and now ends with `add`. */

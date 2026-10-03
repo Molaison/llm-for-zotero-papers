@@ -290,7 +290,7 @@ describe("outcome ledger: model declarations", function () {
     assert.lengthOf(ledger.tasks, 0);
   });
 
-  it("refuses a duplicate or invalid task id, and a changed description for an existing one", function () {
+  it("refuses a duplicate or invalid task id, and a change to an existing part with progress", function () {
     const ledger = ledgerWith(saveNote);
     assert.throws(
       () =>
@@ -306,20 +306,46 @@ describe("outcome ledger: model declarations", function () {
         declareOutcomes(ledger, [{ ...saveNote, taskId: "save the note" }], 30),
       /Task IDs must use/,
     );
-    assert.throws(
-      () =>
-        declareOutcomes(
-          ledger,
-          [{ ...saveNote, description: "Save somewhere else" }],
-          30,
-        ),
-      /immutable/,
-    );
+    const written = apply(ledger, {
+      kind: "receipt",
+      receipt: receipt(),
+    }).checkpoint;
+    for (const change of [
+      { ...saveNote, description: "Save somewhere else" },
+      { ...saveNote, targets: ["item:2"] },
+    ])
+      assert.throws(
+        () => declareOutcomes(written, [change], 30),
+        /has progress/,
+      );
     assert.strictEqual(
       declareOutcomes(ledger, [{ ...saveNote, taskId: taskId("save") }], 30),
       ledger,
       "re-declaring the same outcome changes nothing",
     );
+  });
+
+  it("changes a part with no progress in place: its id, place and creation stay", function () {
+    const ledger = ledgerWith(saveNote, {
+      taskId: "read",
+      description: "Read it",
+      effect: "read",
+    });
+    const changed = declareOutcomes(
+      ledger,
+      [{ ...saveNote, description: "Save it in the Drift folder's note" }],
+      30,
+    );
+    assert.deepEqual(
+      changed.tasks.map((task) => [task.taskId, task.description]),
+      [
+        [taskId("save"), "Save it in the Drift folder's note"],
+        [taskId("read"), "Read it"],
+      ],
+    );
+    assert.equal(find(changed, "save").createdAt, 20);
+    assert.equal(find(changed, "save").updatedAt, 30);
+    assert.deepEqual(find(changed, "save").targets, ["item:1"]);
   });
 
   it("marks a pending, in-progress or blocked outcome skipped, blocked or cancelled with the reason", function () {
@@ -1655,7 +1681,7 @@ describe("outcome ledger: final gate inputs", function () {
     assert.deepEqual(openDeclaredOutcomes(undefined), []);
   });
 
-  it("signs progress as each outcome's id, status and evidence counts", function () {
+  it("signs progress as each outcome's id, status and evidence counts, and its excluded papers", function () {
     const ledger = apply(
       ledgerWith(saveNote, {
         taskId: "read",
@@ -1667,8 +1693,8 @@ describe("outcome ledger: final gate inputs", function () {
     assert.equal(
       outcomeProgressSignature(ledger),
       JSON.stringify([
-        [taskId("save"), "pending", 0, 0, 0, 0, 0],
-        [taskId("read"), "completed", 1, 0, 0, 2, 0],
+        [taskId("save"), "pending", 0, 0, 0, 0, 0, 0],
+        [taskId("read"), "completed", 1, 0, 0, 2, 0, 0],
       ]),
     );
     assert.equal(outcomeProgressSignature(undefined), "[]");

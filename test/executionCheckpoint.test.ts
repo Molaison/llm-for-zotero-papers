@@ -472,7 +472,7 @@ describe("task_update ordinary declarations", function () {
     );
   });
 
-  it("refuses a malformed call as an input rejection: a new description, a repeated id, or an invalid id", async function () {
+  it("refuses a malformed call as an input rejection: a repeated id or an invalid id", async function () {
     const ctx = context();
     await call(ctx, { tasks: [declareSave] });
     const draft = {
@@ -481,10 +481,6 @@ describe("task_update ordinary declarations", function () {
       expectedEffect: "artifact",
     };
     for (const [args, message] of [
-      [
-        { tasks: [{ ...declareSave, description: "Save somewhere else" }] },
-        /immutable/,
-      ],
       [{ tasks: [draft, draft] }, /only once/],
       [
         {
