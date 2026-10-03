@@ -5,8 +5,11 @@
  * Seeds folder F (and, for "1h", a held-out folder) into real Zotero
  * collections with neutral names, then runs each scenario in a new Library
  * chat conversation, in the real panel, in Agent mode, on the live model,
- * with the folder attached as the composer context. Each scenario reads
- * structured data only, except where a check names the answer text:
+ * with the folder attached as the composer context. Scenario 7 instead runs
+ * over the whole library with nothing attached: the library then holds only
+ * the 16 papers of LLM_FOR_ZOTERO_DIGEST_LIBRARY_DIR (the folder papers are
+ * erased first, as both sets share papers). Each scenario reads structured
+ * data only, except where a check names the answer text:
  *
  * - the run's final ledger: `latestExecutionCheckpoint` over the run's events
  *   (`api.agent.getRunTrace`), as runtime.ts reads it;
@@ -18,7 +21,9 @@
  * - the cited papers: `material_finalized.citedSources` (the submitted
  *   document), `final.quoteCitations` (the chat answer), and the Task
  *   progress paper rows in state "cited";
- * - the tool-call order: the run's `tool_call` events by sequence.
+ * - the tool-call order: the run's `tool_call` events by sequence;
+ * - the rounds and tokens: the run's `usage` events (see `usageOf`);
+ * - the Task progress row: the driven panel's own row element and curtain.
  *
  * Every failed check goes into the scenario's `violations`, the scenario
  * writes `<scenario>-<n>.json` (and `<scenario>-<n>.answer.md`) into
@@ -30,8 +35,9 @@
  *
  * Fixture JSON (`name.json`, plus `name.md` and `name.pdf` unless
  * `metadataOnly: true`): `title`, `date`, `creators`, and a test-only
- * `role` (N1, N2, N3, C1, C2, X1). Roles never reach titles, file names or
- * collection names.
+ * `role`: N1, N2, N3, C1, C2, X1 in the folders; G (must be shortlisted),
+ * P (either way), U (must not be read in depth), X (no text) in the library
+ * set. Roles never reach titles, file names or collection names.
  *
  * Run (the wrapper starts a second Zotero with `-no-remote`, and the no-op
  * kill command keeps the scaffold from closing the user's own Zotero):
@@ -44,14 +50,17 @@
  *   LLM_FOR_ZOTERO_PERF_REPORT_DIR=<dir> \
  *   LLM_FOR_ZOTERO_DIGEST_PAPERS_DIR=<folder F: f01..f08 .json/.md/.pdf> \
  *   [LLM_FOR_ZOTERO_DIGEST_HELDOUT_DIR=<dir with h01 .json/.md/.pdf>] \
- *   [LLM_FOR_ZOTERO_DIGEST_SCENARIOS=1,2,3,4,5,6,1h] \
+ *   [LLM_FOR_ZOTERO_DIGEST_LIBRARY_DIR=<dir with l01..l16 .json/.md/.pdf>] \
+ *   [LLM_FOR_ZOTERO_DIGEST_SCENARIOS=1,2,3,4,5,6,1h,7] \
  *   [LLM_FOR_ZOTERO_DIGEST_REPEAT=3] \
  *   node scripts/run-workflow-tests.mjs --agent-live
  *
  * Leave LLM_FOR_ZOTERO_PERF_PAPERS_DIR unset so the 12-paper lag test in
  * this folder skips. LLM_FOR_ZOTERO_DIGEST_SCENARIOS defaults to
- * "1,2,3,4,5,6" ("1h" is opt-in and needs the held-out directory), and
- * LLM_FOR_ZOTERO_DIGEST_REPEAT (default 1) repeats scenario 1 only.
+ * "1,2,3,4,5,6" ("1h" and "7" are opt-in and need the held-out and the
+ * library directory), and LLM_FOR_ZOTERO_DIGEST_REPEAT (default 1) repeats
+ * scenarios 1 and 7. The folder directory is needed only by scenarios 1-6 and
+ * 1h.
  */
 import { assert } from "chai";
 import {
@@ -91,7 +100,18 @@ const PAPER_DIGEST_HANDLE_TOOL = "paper_digest";
 const TITLE_HEAD_CHARS = 30;
 const FOLDER_NAME = "Navigation reading list";
 const HELDOUT_FOLDER_NAME = "Navigation papers";
-const FIXTURE_ROLES = ["N1", "N2", "N3", "C1", "C2", "X1"] as const;
+const FIXTURE_ROLES = [
+  "N1",
+  "N2",
+  "N3",
+  "C1",
+  "C2",
+  "X1",
+  "G",
+  "P",
+  "U",
+  "X",
+] as const;
 type Role = (typeof FIXTURE_ROLES)[number];
 
 function env(name: string): string {
@@ -105,6 +125,7 @@ function env(name: string): string {
 const reportDir = env("LLM_FOR_ZOTERO_PERF_REPORT_DIR");
 const papersDir = env("LLM_FOR_ZOTERO_DIGEST_PAPERS_DIR");
 const heldoutDir = env("LLM_FOR_ZOTERO_DIGEST_HELDOUT_DIR");
+const libraryDir = env("LLM_FOR_ZOTERO_DIGEST_LIBRARY_DIR");
 const requestedModel = env("LLM_FOR_ZOTERO_LIVE_MODEL") || "deepseek-flash";
 const selectedScenarios = (
   env("LLM_FOR_ZOTERO_DIGEST_SCENARIOS") || "1,2,3,4,5,6"
@@ -148,8 +169,11 @@ type SeededPaper = {
   year?: string;
 };
 
-type SeededCollection = {
-  ref: CollectionContextRef;
+/** The papers a scenario runs over: a folder's, or the whole library's. */
+type SeededSet = {
+  /** The folder attached as context; null for the whole library. */
+  ref: CollectionContextRef | null;
+  libraryID: number;
   papers: SeededPaper[];
 };
 
@@ -212,6 +236,28 @@ function folderProblem(files: FixtureFile[]): string {
     problems.push("fewer than two papers with role N1 or N2");
   if (files.some((f) => f.role === "X1" && f.hasText))
     problems.push("the X1 paper must be metadataOnly");
+  return problems.join("; ");
+}
+
+/** Why the library set cannot run scenario 7, or "" when it can. */
+function libraryProblem(files: FixtureFile[]): string {
+  const count = (role: Role) => files.filter((f) => f.role === role).length;
+  const problems: string[] = [];
+  if (count("G") !== 1)
+    problems.push(`${count("G")} papers with role G, expected 1`);
+  if (count("U") < 3)
+    problems.push(`${count("U")} papers with role U, expected at least 3`);
+  if (count("X") !== 1)
+    problems.push(`${count("X")} papers with role X, expected 1`);
+  if (files.some((f) => f.role === "G" && !f.hasText))
+    problems.push("the G paper must have text");
+  if (files.some((f) => f.role === "X" && f.hasText))
+    problems.push("the X paper must be metadataOnly");
+  const others = files.filter((f) => !["G", "P", "U", "X"].includes(f.role));
+  if (others.length)
+    problems.push(
+      `papers with folder roles: ${others.map((f) => f.name).join(", ")}`,
+    );
   return problems.join("; ");
 }
 
@@ -340,6 +386,27 @@ type ToolCallRecord = {
   ok: boolean | null;
   /** A task_update call that declares a digest part. */
   digest: boolean;
+  /** The expectedEffect of every part a task_update call declares. */
+  effects: string[];
+};
+
+/** The run's model rounds and tokens, from its `usage` events. */
+type UsageSummary = {
+  rounds: number;
+  inputTokens: number;
+  outputTokens: number;
+};
+
+/** The Task progress row of the driven panel, as the user sees it. */
+type TaskProgressRowView = {
+  /** The row is down: its curtain open and the row not hidden. */
+  shown: boolean;
+  curtain: string;
+  hidden: boolean;
+  /** The row's status word (idle, working, done, ...). */
+  state: string;
+  /** Its count text ("2/3 steps"). */
+  count: string;
 };
 
 type TaskProgressSnapshot = ReturnType<
@@ -347,7 +414,7 @@ type TaskProgressSnapshot = ReturnType<
 >;
 
 type ScenarioData = {
-  collection: SeededCollection;
+  collection: SeededSet;
   conversationKey: number;
   runId: string | null;
   runStatus: string | null;
@@ -360,6 +427,8 @@ type ScenarioData = {
   warnings: string[];
   toolCalls: ToolCallRecord[];
   digestReads: Map<number, DigestRead[]>;
+  /** Papers this run read in depth (`isInDepthRead`), by regular item id. */
+  inDepth: Set<number>;
   digestRecords: HostPaperDigest[];
   cited: {
     document: Set<number>;
@@ -371,6 +440,9 @@ type ScenarioData = {
   text: string;
   answerText: string;
   snapshot: TaskProgressSnapshot;
+  usage: UsageSummary;
+  /** Null when the panel's row element was not found. */
+  row: TaskProgressRowView | null;
 };
 
 function judgment(value: unknown, field: "level" | "position") {
@@ -412,16 +484,49 @@ function digestReadsOf(
   return byItem;
 }
 
-function declaresDigest(args: unknown): boolean {
-  const tasks = (args as { tasks?: unknown } | null)?.tasks;
+/**
+ * A read that took in the paper's text: a digest with an answer, or a
+ * paper_read of the whole text or of its overview body (not its metadata,
+ * abstract or outline, and not a targeted passage).
+ */
+function isInDepthRead(read: {
+  toolName?: string;
+  granularity?: string;
+  method?: string;
+  snippet?: string;
+}): boolean {
+  if (read.granularity === "digest")
+    return Boolean(String(read.snippet || "").trim());
+  if (read.toolName !== "paper_read") return false;
   return (
-    Array.isArray(tasks) &&
-    tasks.some(
-      (task) =>
-        (task as { expectedEffect?: unknown } | null)?.expectedEffect ===
-        "digest",
-    )
+    read.granularity === "full" ||
+    (read.granularity === "passage" &&
+      (read.method === "overview" || read.method === "full"))
   );
+}
+
+function inDepthOf(events: readonly AgentRunEventRecord[]): Set<number> {
+  const items = new Set<number>();
+  for (const event of events) {
+    const payload = event.payload;
+    if (payload?.type !== "paper_ledger_update") continue;
+    for (const read of payload.delta?.reads || []) {
+      const itemId = Number(String(read.key || "").split(":")[1]) || 0;
+      if (itemId && isInDepthRead(read)) items.add(itemId);
+    }
+  }
+  return items;
+}
+
+/** The expectedEffect of every part a task_update call's args declare. */
+function declaredEffects(args: unknown): string[] {
+  const tasks = (args as { tasks?: unknown } | null)?.tasks;
+  if (!Array.isArray(tasks)) return [];
+  return tasks
+    .map(
+      (task) => (task as { expectedEffect?: unknown } | null)?.expectedEffect,
+    )
+    .filter((effect): effect is string => typeof effect === "string");
 }
 
 function toolCallsOf(events: readonly AgentRunEventRecord[]): ToolCallRecord[] {
@@ -430,12 +535,15 @@ function toolCallsOf(events: readonly AgentRunEventRecord[]): ToolCallRecord[] {
   for (const event of events) {
     const payload = event.payload;
     if (payload?.type === "tool_call") {
+      const effects =
+        payload.name === "task_update" ? declaredEffects(payload.args) : [];
       const call: ToolCallRecord = {
         seq: event.seq,
         callId: payload.callId,
         name: payload.name,
         ok: null,
-        digest: payload.name === "task_update" && declaresDigest(payload.args),
+        digest: effects.includes("digest"),
+        effects,
       };
       calls.push(call);
       byCallId.set(payload.callId, call);
@@ -448,6 +556,41 @@ function toolCallsOf(events: readonly AgentRunEventRecord[]): ToolCallRecord[] {
     }
   }
   return calls;
+}
+
+/**
+ * The run's model rounds and tokens from its `usage` events. A round's
+ * counters are cumulative within the round (runtime.ts `onUsage`), so each
+ * round counts its largest report. Input per report: cacheReadTokens +
+ * cacheMissTokens when cacheMissTokens > 0, else promptTokens +
+ * cacheReadTokens; output: completionTokens. Rounds: the largest `round`.
+ */
+function usageOf(events: readonly AgentRunEventRecord[]): UsageSummary {
+  const perRound = new Map<number, { input: number; output: number }>();
+  let rounds = 0;
+  for (const event of events) {
+    const payload = event.payload;
+    if (payload?.type !== "usage" || !("round" in payload)) continue;
+    const round = Number(payload.round) || 0;
+    rounds = Math.max(rounds, round);
+    const prompt = Number(payload.promptTokens) || 0;
+    const read = Number(payload.cacheReadTokens) || 0;
+    const miss = Number(payload.cacheMissTokens) || 0;
+    const input = miss > 0 ? read + miss : prompt + read;
+    const output = Number(payload.completionTokens) || 0;
+    const previous = perRound.get(round) || { input: 0, output: 0 };
+    perRound.set(round, {
+      input: Math.max(previous.input, input),
+      output: Math.max(previous.output, output),
+    });
+  }
+  let inputTokens = 0;
+  let outputTokens = 0;
+  for (const totals of perRound.values()) {
+    inputTokens += totals.input;
+    outputTokens += totals.output;
+  }
+  return { rounds, inputTokens, outputTokens };
 }
 
 /** The conversation's complete digest records in the handle store. */
@@ -511,10 +654,11 @@ async function runEvents(runId: string): Promise<AgentRunEventRecord[]> {
 }
 
 async function gatherScenarioData(params: {
-  collection: SeededCollection;
+  collection: SeededSet;
   conversationKey: number;
   answerText: string;
   warnings: string[];
+  row: TaskProgressRowView | null;
 }): Promise<ScenarioData> {
   const { conversationKey, warnings } = params;
   const api = Zotero.LLMForZotero.api.workflowTest as WorkflowTestApi;
@@ -530,7 +674,7 @@ async function gatherScenarioData(params: {
   if (run && ledger && !ledger.end)
     warnings.push("the run's ledger has no end state");
   const tasks = ledger?.tasks || [];
-  const libraryID = params.collection.ref.libraryID;
+  const libraryID = params.collection.libraryID;
 
   const document = new Set<number>();
   const answer = new Set<number>();
@@ -588,6 +732,7 @@ async function gatherScenarioData(params: {
     warnings,
     toolCalls: toolCallsOf(events),
     digestReads: digestReadsOf(events),
+    inDepth: inDepthOf(events),
     digestRecords: await digestRecordsOf(conversationKey),
     cited: {
       document,
@@ -598,7 +743,51 @@ async function gatherScenarioData(params: {
     text: normalizeText(texts.join("\n")),
     answerText: params.answerText,
     snapshot,
+    usage: usageOf(events),
+    row: params.row,
   };
+}
+
+/**
+ * The driven panel's Task progress row, read from its own elements once the
+ * row settles (it may still be lowering when the turn ends): down means the
+ * curtain is open and the row is not hidden.
+ */
+async function readTaskProgressRow(
+  panelId: string,
+): Promise<TaskProgressRowView | null> {
+  const api = Zotero.LLMForZotero.api.workflowTest as WorkflowTestApi;
+  const probe = (): TaskProgressRowView | null => {
+    const root = Zotero.getMainWindow()?.document?.querySelector(
+      `[data-workflow-panel-id="${panelId}"]`,
+    );
+    const row = root?.querySelector("#llm-task-progress") as
+      | HTMLElement
+      | null
+      | undefined;
+    if (!root || !row) return null;
+    const curtain = root.querySelector(".llm-task-progress-curtain") as
+      | HTMLElement
+      | null
+      | undefined;
+    const state = curtain?.dataset.curtain || "";
+    return {
+      shown: !row.hidden && state === "open",
+      curtain: state,
+      hidden: row.hidden,
+      state: row.dataset.state || "",
+      count:
+        root.querySelector(".llm-task-progress-count")?.textContent?.trim() ||
+        "",
+    };
+  };
+  const deadline = Date.now() + 5_000;
+  for (;;) {
+    api.flushTaskProgress();
+    const view = probe();
+    if (!view || view.shown || Date.now() > deadline) return view;
+    await Zotero.Promise.delay(100);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -931,10 +1120,152 @@ function checkComparison(data: ScenarioData, check: Check): void {
   );
 }
 
+/**
+ * The papers the agent chose to read in depth: the targets of its digest
+ * and read parts declared over explicit targets (not scope:true), replaced
+ * parts included, in first-declared order.
+ */
+function shortlistOf(data: ScenarioData): string[] {
+  const targets = data.tasks
+    .filter(
+      (task) =>
+        (task.effect === "digest" || task.effect === "read") && !task.scope,
+    )
+    .flatMap((task) => task.targets || []);
+  return [...new Set(targets)];
+}
+
+/** Scenario 7: a question over the whole library, nothing attached. */
+function checkWholeLibrary(data: ScenarioData, check: Check): void {
+  const papers = data.collection.papers;
+  const g = paperWithRole(data, "G");
+  const x = paperWithRole(data, "X");
+  const unrelated = papers.filter((paper) => paper.role === "U");
+  const known = new Set(papers.map(targetOf));
+  const list = (items: SeededPaper[]) => items.map(describePaper).join("; ");
+
+  // The row the user sees is down, and the run declared its steps.
+  check(data.row, "the panel has no Task progress row element");
+  check(
+    data.row?.shown,
+    `the Task progress row is not shown after the run (curtain "${data.row?.curtain ?? ""}", hidden ${data.row?.hidden})`,
+  );
+  const declared = (data.snapshot?.checklist?.steps || []).filter(
+    (step) => step.outcome && !step.outcome.host,
+  );
+  check(declared.length, "the Task progress checklist has no declared step");
+
+  // A shortlist over explicit targets, from the 16 papers.
+  const inDepthParts = data.tasks.filter(
+    (task) => task.effect === "digest" || task.effect === "read",
+  );
+  const scoped = inDepthParts.filter((task) => task.scope);
+  check(
+    !scoped.length,
+    `digest or read parts over the whole library (scope:true): ${scoped
+      .map((task) => task.taskId)
+      .join(", ")}`,
+  );
+  const shortlist = shortlistOf(data);
+  check(
+    shortlist.length,
+    "no digest or read part was declared over explicit targets",
+  );
+  if (shortlist.length)
+    check(
+      shortlist.length <= 8,
+      `the shortlist has ${shortlist.length} papers, expected 1 to 8`,
+    );
+  const foreign = shortlist.filter((target) => !known.has(target));
+  check(
+    !foreign.length,
+    `shortlisted targets that are not among the 16 papers: ${foreign.join(", ")}`,
+  );
+
+  // The G paper in, no U paper read in depth, the X paper honest.
+  check(
+    shortlist.includes(targetOf(g)),
+    `${describePaper(g)} is not in the shortlist`,
+  );
+  const shortlistedU = unrelated.filter((paper) =>
+    shortlist.includes(targetOf(paper)),
+  );
+  check(
+    !shortlistedU.length,
+    `unrelated papers in the shortlist: ${list(shortlistedU)}`,
+  );
+  const readU = unrelated.filter((paper) => data.inDepth.has(paper.itemId));
+  check(!readU.length, `unrelated papers read in depth: ${list(readU)}`);
+  const noText = (reason: string | undefined) =>
+    /^no readable text/i.test(String(reason || "").trim());
+  if (
+    data.tasks.some(
+      (task) =>
+        task.effect === "digest" && (task.targets || []).includes(targetOf(x)),
+    )
+  )
+    check(
+      readsOf(data, x).some((read) => !read.ok && noText(read.failure)) ||
+        data.tasks.some((task) =>
+          (task.exceptions || []).some(
+            (exception) =>
+              exception.targets.includes(targetOf(x)) &&
+              noText(exception.reason),
+          ),
+        ),
+      `${describePaper(x)} is in a digest part but did not fail with "No readable text"`,
+    );
+  check(
+    !relevanceLevels(data, x).includes("none"),
+    `${describePaper(x)} has relevance "none" without text`,
+  );
+
+  // The paper rows show each shortlisted paper read in depth.
+  for (const paper of papers) {
+    if (!paper.hasText || !shortlist.includes(targetOf(paper))) continue;
+    const row =
+      data.snapshot?.paperRows?.[
+        `${data.collection.libraryID}:${paper.itemId}`
+      ];
+    check(
+      (row?.reads || []).some(isInDepthRead),
+      `${describePaper(paper)} is shortlisted, but its row shows no digest answer or full read (row state: ${row?.state || "no row"})`,
+    );
+  }
+
+  // Retrieval before the first in-depth part.
+  const retrieve = data.toolCalls.find(
+    (call) =>
+      (call.name === "library_retrieve" || call.name === "library_search") &&
+      call.ok !== false,
+  );
+  const declare = data.toolCalls.find(
+    (call) =>
+      call.name === "task_update" &&
+      call.ok !== false &&
+      (call.effects.includes("digest") || call.effects.includes("read")),
+  );
+  check(retrieve, "no library_retrieve or library_search call was made");
+  if (retrieve && declare)
+    check(
+      retrieve.seq < declare.seq,
+      "the first digest or read part was declared before any library_retrieve or library_search call",
+    );
+
+  // The answer covers the G paper and cites no U paper.
+  check(
+    data.cited.all.has(g.itemId) || namesPaper(data, g),
+    `the answer neither cites nor names ${describePaper(g)}`,
+  );
+  const citedU = unrelated.filter((paper) => data.cited.all.has(paper.itemId));
+  check(!citedU.length, `unrelated papers cited: ${list(citedU)}`);
+}
+
 type ScenarioSpec = {
   title: string;
   prompt: string;
-  collection: "folder" | "heldout";
+  /** The folder attached as context, or the whole library with nothing. */
+  collection: "folder" | "heldout" | "library";
   checks: (data: ScenarioData, check: Check) => void;
 };
 
@@ -987,6 +1318,13 @@ const SCENARIOS: Record<string, ScenarioSpec> = {
     collection: "heldout",
     checks: checkMisfiledPaper,
   },
+  "7": {
+    title: "whole library",
+    prompt:
+      "Find the papers in my library that use eye movements or gaze to study what an animal believes or infers during navigation, and summarize what each one found.",
+    collection: "library",
+    checks: checkWholeLibrary,
+  },
 };
 
 // ---------------------------------------------------------------------------
@@ -1006,10 +1344,17 @@ function scenarioReport(data: ScenarioData, label: (target: string) => string) {
       reason: entry.reason,
     }));
   const nameOf = (id: number) => label(`item:${id}`);
+  const rowOf = (paper: SeededPaper) =>
+    data.snapshot?.paperRows?.[`${data.collection.libraryID}:${paper.itemId}`];
   return {
     runId: data.runId,
     runStatus: data.runStatus,
     endState: data.endState || null,
+    usage: data.usage,
+    shortlist: shortlistOf(data).map((target) => ({
+      target,
+      paper: label(target),
+    })),
     parts: data.tasks.map((task) => ({
       taskId: task.taskId,
       effect: task.effect || "answer",
@@ -1036,6 +1381,8 @@ function scenarioReport(data: ScenarioData, label: (target: string) => string) {
       itemId: paper.itemId,
       title: paper.title,
       hasText: paper.hasText,
+      rowState: rowOf(paper)?.state || null,
+      readInDepth: data.inDepth.has(paper.itemId),
       cited: data.cited.all.has(paper.itemId),
       excluded: exclusionsOf(data.tasks, paper).map(({ task, exclusion }) => ({
         taskId: task.taskId,
@@ -1066,6 +1413,8 @@ function scenarioReport(data: ScenarioData, label: (target: string) => string) {
       answer: [...data.cited.answer].map(nameOf),
       rows: [...data.cited.rows].map(nameOf),
     },
+    taskProgressRow: data.row,
+    taskProgressPlanSeen: data.snapshot?.planSeen ?? null,
     taskProgress: data.snapshot?.checklist
       ? {
           end: data.snapshot.checklist.end || null,
@@ -1145,7 +1494,7 @@ function livePrefs(creds: LiveAgentCredentials): Record<string, unknown> {
 /** One test per selected scenario run, built before the suite is. */
 const TEST_CASES = selectedScenarios.flatMap((id) => {
   const spec = SCENARIOS[id] as ScenarioSpec | undefined;
-  const runs = id === "1" ? scenarioOneRepeat : 1;
+  const runs = id === "1" || id === "7" ? scenarioOneRepeat : 1;
   return Array.from({ length: spec ? runs : 1 }, (_, index) => ({
     id,
     run: index + 1,
@@ -1160,8 +1509,9 @@ const TEST_CASES = selectedScenarios.flatMap((id) => {
 
 describe("live: instruction-driven digest scenarios", function () {
   // A full-length turn, then up to about 70 s for the run to settle and its
-  // ledger end to arrive, then the setup and the reads.
-  this.timeout(1_000_000);
+  // ledger end to arrive, then the setup (seeding a paper set when the
+  // scenario needs the other one) and the reads.
+  this.timeout(1_100_000);
   // The runner passes --abort-on-fail (mocha bail), and a suite takes its
   // parent's bail. Each scenario is its own test, so one failure must not
   // stop the scenarios after it.
@@ -1169,21 +1519,38 @@ describe("live: instruction-driven digest scenarios", function () {
   this.bail(false);
 
   const state: {
+    /** Skips every scenario: no report directory, or no model. */
     skipReason: string;
+    /** Skips scenarios 1-6 and 1h: folder F is missing or invalid. */
+    folderSkipReason: string;
     heldoutSkipReason: string;
+    librarySkipReason: string;
     creds: LiveAgentCredentials | null;
-    folder: SeededCollection | null;
-    heldout: SeededCollection | null;
+    folderFiles: FixtureFile[];
+    heldoutFiles: FixtureFile[];
+    libraryFiles: FixtureFile[];
+    /** Which paper set the library holds now; the two never coexist. */
+    seeded: "folders" | "library" | null;
+    folder: SeededSet | null;
+    heldout: SeededSet | null;
+    library: SeededSet | null;
     collectionIds: number[];
     itemIds: number[];
     restorePrefs: (() => void) | null;
     usedConversationKeys: number[];
   } = {
     skipReason: "",
+    folderSkipReason: "",
     heldoutSkipReason: "",
+    librarySkipReason: "",
     creds: null,
+    folderFiles: [],
+    heldoutFiles: [],
+    libraryFiles: [],
+    seeded: null,
     folder: null,
     heldout: null,
+    library: null,
     collectionIds: [],
     itemIds: [],
     restorePrefs: null,
@@ -1199,25 +1566,26 @@ describe("live: instruction-driven digest scenarios", function () {
       createAncestors: true,
       ignoreExisting: true,
     });
-    const skip = async (reason: string) => {
-      state.skipReason = reason;
-      await write("digest-scenarios-skipped.txt", reason);
-    };
-    if (!papersDir) {
-      await skip("LLM_FOR_ZOTERO_DIGEST_PAPERS_DIR is not set");
-      return;
+    const selected = (ids: string[]) =>
+      selectedScenarios.some((id) => ids.includes(id));
+
+    // Folder F, for scenarios 1-6 and 1h.
+    if (!selected(["1", "2", "3", "4", "5", "6", "1h"])) {
+      state.folderSkipReason = "no folder scenario was selected";
+    } else if (!papersDir) {
+      state.folderSkipReason = "LLM_FOR_ZOTERO_DIGEST_PAPERS_DIR is not set";
+    } else {
+      const read = await readFixtureDir(papersDir);
+      const problems = [...read.problems, folderProblem(read.files)].filter(
+        Boolean,
+      );
+      if (problems.length)
+        state.folderSkipReason = `folder F fixtures: ${problems.join("; ")}`;
+      else state.folderFiles = read.files;
     }
-    const folderFiles = await readFixtureDir(papersDir);
-    const problem = [
-      ...folderFiles.problems,
-      folderProblem(folderFiles.files),
-    ].filter(Boolean);
-    if (problem.length) {
-      await skip(`folder F fixtures: ${problem.join("; ")}`);
-      return;
-    }
-    let heldoutFiles: FixtureFile[] = [];
-    if (!selectedScenarios.includes("1h")) {
+
+    // The held-out misfit, for 1h.
+    if (!selected(["1h"])) {
       state.heldoutSkipReason = "scenario 1h was not selected";
     } else if (!heldoutDir) {
       state.heldoutSkipReason = "LLM_FOR_ZOTERO_DIGEST_HELDOUT_DIR is not set";
@@ -1236,57 +1604,40 @@ describe("live: instruction-driven digest scenarios", function () {
         ]
           .filter(Boolean)
           .join("; ")}`;
-      else heldoutFiles = misfits;
-    }
-    state.creds = await resolveLiveAgentCredentials({ requestedModel });
-    if (!state.creds) {
-      await skip(
-        `model ${requestedModel} is not configured in the live profile`,
-      );
-      return;
+      else state.heldoutFiles = misfits;
     }
 
-    const api = Zotero.LLMForZotero.api.workflowTest as WorkflowTestApi;
-    await api.reset();
-    const libraryID = Number(Zotero.Libraries.userLibraryID);
-    const folder = await createCollection(libraryID, FOLDER_NAME);
-    state.collectionIds.push(folder.id);
-    const heldout = heldoutFiles.length
-      ? await createCollection(libraryID, HELDOUT_FOLDER_NAME)
-      : null;
-    if (heldout) state.collectionIds.push(heldout.id);
-    const folderPapers: SeededPaper[] = [];
-    const heldoutPapers: SeededPaper[] = [];
-    for (const file of folderFiles.files) {
-      // The held-out folder is folder F with its misfit swapped.
-      const inHeldout = Boolean(heldout) && file.role !== "C1";
-      const paper = await seedPaper(
-        file,
-        libraryID,
-        inHeldout && heldout ? [folder.id, heldout.id] : [folder.id],
+    // The whole-library set, for 7.
+    if (!selected(["7"])) {
+      state.librarySkipReason = "scenario 7 was not selected";
+    } else if (!libraryDir) {
+      state.librarySkipReason = "LLM_FOR_ZOTERO_DIGEST_LIBRARY_DIR is not set";
+    } else {
+      const read = await readFixtureDir(libraryDir);
+      const problems = [...read.problems, libraryProblem(read.files)].filter(
+        Boolean,
       );
-      state.itemIds.push(paper.itemId);
-      folderPapers.push(paper);
-      if (inHeldout) heldoutPapers.push(paper);
+      if (problems.length)
+        state.librarySkipReason = `library fixtures: ${problems.join("; ")}`;
+      else state.libraryFiles = read.files;
     }
-    if (heldout) {
-      for (const file of heldoutFiles) {
-        const paper = await seedPaper(file, libraryID, [heldout.id]);
-        state.itemIds.push(paper.itemId);
-        heldoutPapers.push(paper);
-      }
-    }
-    state.folder = {
-      ref: { collectionId: folder.id, name: folder.name, libraryID },
-      papers: folderPapers,
-    };
-    state.heldout = heldout
-      ? {
-          ref: { collectionId: heldout.id, name: heldout.name, libraryID },
-          papers: heldoutPapers,
-        }
-      : null;
-    state.restorePrefs = applyPrefs(livePrefs(state.creds));
+
+    state.creds = await resolveLiveAgentCredentials({ requestedModel });
+    if (!state.creds)
+      state.skipReason = `model ${requestedModel} is not configured in the live profile`;
+    const reasons = [
+      state.skipReason,
+      selected(["1", "2", "3", "4", "5", "6", "1h"])
+        ? state.folderSkipReason
+        : "",
+      selected(["1h"]) ? state.heldoutSkipReason : "",
+      selected(["7"]) ? state.librarySkipReason : "",
+    ].filter(Boolean);
+    if (reasons.length)
+      await write("digest-scenarios-skipped.txt", reasons.join("\n"));
+    if (state.skipReason) return;
+    await (Zotero.LLMForZotero.api.workflowTest as WorkflowTestApi).reset();
+    state.restorePrefs = applyPrefs(livePrefs(state.creds!));
   });
 
   after(async function () {
@@ -1294,28 +1645,124 @@ describe("live: instruction-driven digest scenarios", function () {
     if (!state.itemIds.length && !state.collectionIds.length) return;
     const api = Zotero.LLMForZotero.api.workflowTest as WorkflowTestApi;
     await api.reset().catch(() => undefined);
-    if (state.itemIds.length)
-      await Zotero.Items.erase(state.itemIds).catch(() => undefined);
-    for (const id of state.collectionIds)
+    await eraseSeeded(state.itemIds, state.collectionIds);
+  });
+
+  async function eraseSeeded(itemIds: number[], collectionIds: number[]) {
+    if (itemIds.length)
+      await Zotero.Items.erase(itemIds).catch(() => undefined);
+    for (const id of collectionIds)
       await Zotero.Collections.get(id)
         ?.eraseTx()
         .catch(() => undefined);
-  });
+  }
+
+  /**
+   * Makes the library hold the paper set a scenario needs: the folders (F
+   * and the held-out one) or the 16 library papers, never both, as both
+   * sets share papers. The new set is saved before the old one is erased,
+   * so no new item takes an erased item's id.
+   */
+  async function ensureSeeded(set: "folders" | "library"): Promise<void> {
+    if (state.seeded === set) return;
+    const libraryID = Number(Zotero.Libraries.userLibraryID);
+    const oldItemIds = state.itemIds;
+    const oldCollectionIds = state.collectionIds;
+    state.itemIds = [];
+    state.collectionIds = [];
+    state.folder = null;
+    state.heldout = null;
+    state.library = null;
+    if (set === "library") {
+      const papers: SeededPaper[] = [];
+      for (const file of state.libraryFiles) {
+        const paper = await seedPaper(file, libraryID, []);
+        state.itemIds.push(paper.itemId);
+        papers.push(paper);
+      }
+      state.library = { ref: null, libraryID, papers };
+    } else {
+      const folder = await createCollection(libraryID, FOLDER_NAME);
+      state.collectionIds.push(folder.id);
+      const heldout = state.heldoutFiles.length
+        ? await createCollection(libraryID, HELDOUT_FOLDER_NAME)
+        : null;
+      if (heldout) state.collectionIds.push(heldout.id);
+      const folderPapers: SeededPaper[] = [];
+      const heldoutPapers: SeededPaper[] = [];
+      for (const file of state.folderFiles) {
+        // The held-out folder is folder F with its misfit swapped.
+        const inHeldout = Boolean(heldout) && file.role !== "C1";
+        const paper = await seedPaper(
+          file,
+          libraryID,
+          inHeldout && heldout ? [folder.id, heldout.id] : [folder.id],
+        );
+        state.itemIds.push(paper.itemId);
+        folderPapers.push(paper);
+        if (inHeldout) heldoutPapers.push(paper);
+      }
+      if (heldout) {
+        for (const file of state.heldoutFiles) {
+          const paper = await seedPaper(file, libraryID, [heldout.id]);
+          state.itemIds.push(paper.itemId);
+          heldoutPapers.push(paper);
+        }
+      }
+      state.folder = {
+        ref: { collectionId: folder.id, name: folder.name, libraryID },
+        libraryID,
+        papers: folderPapers,
+      };
+      state.heldout = heldout
+        ? {
+            ref: { collectionId: heldout.id, name: heldout.name, libraryID },
+            libraryID,
+            papers: heldoutPapers,
+          }
+        : null;
+    }
+    await eraseSeeded(oldItemIds, oldCollectionIds);
+    state.seeded = set;
+  }
 
   async function runScenario(
     id: string,
     run: number,
     spec: ScenarioSpec,
   ): Promise<void> {
-    const collection =
-      spec.collection === "heldout" ? state.heldout : state.folder;
-    assert.isOk(collection, `the ${spec.collection} collection was seeded`);
-    const fixture = collection!;
     const api = Zotero.LLMForZotero.api.workflowTest as WorkflowTestApi;
-
-    // A new Library chat conversation in Agent mode on the live model.
     await api.reset();
-    const panel = await api.renderPanelForItem(fixture.papers[0].itemId);
+    const wholeLibrary = spec.collection === "library";
+    await ensureSeeded(wholeLibrary ? "library" : "folders");
+    const seededSet =
+      spec.collection === "library"
+        ? state.library
+        : spec.collection === "heldout"
+          ? state.heldout
+          : state.folder;
+    assert.isOk(seededSet, `the ${spec.collection} papers were seeded`);
+    const fixture = seededSet!;
+    if (wholeLibrary) {
+      // The whole library is exactly the seeded papers.
+      const ids = new Set(fixture.papers.map((paper) => paper.itemId));
+      const others = (
+        (await Zotero.Items.getAll(fixture.libraryID, true, false)) as any[]
+      ).filter((item) => item.isRegularItem?.() && !ids.has(Number(item.id)));
+      assert.deepEqual(
+        others.map(
+          (item) => `item:${item.id} "${clip(item.getField?.("title"), 50)}"`,
+        ),
+        [],
+        "the library holds only the scenario's papers",
+      );
+    }
+
+    // A new Library chat conversation in Agent mode on the live model, from
+    // a paper the scenario does not look for.
+    const host =
+      fixture.papers.find((paper) => paper.role === "P") || fixture.papers[0];
+    const panel = await api.renderPanelForItem(host.itemId);
     let diag = await api.getDiagnostics(panel.panelId);
     if (diag.conversationKind !== "global") {
       diag = await api.togglePanelConversationMode(panel.panelId);
@@ -1348,29 +1795,39 @@ describe("live: instruction-driven digest scenarios", function () {
     );
     state.usedConversationKeys.push(conversationKey);
 
-    // The folder is the composer context, and its chip is shown.
+    // The folder is the composer context, and its chip is shown; for the
+    // whole library the composer holds nothing.
+    const folderRef = fixture.ref;
     await api.setTaskProgressComposerContexts({
       panelId: panel.panelId,
-      collectionContexts: [fixture.ref],
+      ...(folderRef ? { collectionContexts: [folderRef] } : {}),
     });
     const contexts = await api.readTaskProgressComposerContexts({
       panelId: panel.panelId,
     });
-    assert.isTrue(
-      contexts.collections.some(
-        (entry) => entry.collectionId === fixture.ref.collectionId,
-      ),
-      `the folder is attached: ${JSON.stringify(contexts)}`,
-    );
-    assert.isTrue(
-      contexts.chipLabels.some((chip) => chip.includes(fixture.ref.name)),
-      `the folder chip is shown: ${JSON.stringify(contexts.chipLabels)}`,
-    );
     const warnings: string[] = [];
-    if (contexts.paperItemIds.length)
-      warnings.push(
-        `paper chips beside the folder: ${contexts.paperItemIds.join(", ")}`,
+    if (folderRef) {
+      assert.isTrue(
+        contexts.collections.some(
+          (entry) => entry.collectionId === folderRef.collectionId,
+        ),
+        `the folder is attached: ${JSON.stringify(contexts)}`,
       );
+      assert.isTrue(
+        contexts.chipLabels.some((chip) => chip.includes(folderRef.name)),
+        `the folder chip is shown: ${JSON.stringify(contexts.chipLabels)}`,
+      );
+      if (contexts.paperItemIds.length)
+        warnings.push(
+          `paper chips beside the folder: ${contexts.paperItemIds.join(", ")}`,
+        );
+    } else {
+      assert.deepEqual(
+        contexts,
+        { paperItemIds: [], collections: [], chipLabels: [] },
+        "the composer context is empty",
+      );
+    }
     const beforeSend = await api.getDiagnostics(panel.panelId);
     assert.equal(
       Number(beforeSend.conversationKey || beforeSend.panelConversationKey),
@@ -1436,6 +1893,7 @@ describe("live: instruction-driven digest scenarios", function () {
     }
     const wallMs = Date.now() - startedAt;
     const sent = api.getLastSend();
+    const rowView = await readTaskProgressRow(panel.panelId);
 
     // The harness can throw after the run already completed (a late wrapper
     // or DOM check): keep that as a warning and read the answer from the
@@ -1462,13 +1920,15 @@ describe("live: instruction-driven digest scenarios", function () {
       conversationKey,
       answerText,
       warnings,
+      row: rowView,
     });
     const violations: string[] = [];
     const check: Check = (ok, message) => {
       if (!ok) violations.push(message);
     };
-    // Every scenario: the turn ran in Agent mode over the folder and its run
-    // completed; then the scenario's own checks.
+    // Every scenario: the turn ran in Agent mode over the folder (or over
+    // the whole library with nothing attached) and its run completed; then
+    // the scenario's own checks.
     check(!turnError, `the turn failed: ${turnError}`);
     check(
       !deniedApprovals.length,
@@ -1479,12 +1939,32 @@ describe("live: instruction-driven digest scenarios", function () {
       data.runStatus === "completed",
       `the run's status is ${data.runStatus}`,
     );
-    check(
-      (sent?.selectedCollectionContexts || []).some(
-        (entry) => entry.collectionId === fixture.ref.collectionId,
-      ),
-      "the sent turn did not carry the folder",
-    );
+    if (folderRef)
+      check(
+        (sent?.selectedCollectionContexts || []).some(
+          (entry) => entry.collectionId === folderRef.collectionId,
+        ),
+        "the sent turn did not carry the folder",
+      );
+    else {
+      const attached = [
+        ...(sent?.selectedCollectionContexts || []).map(
+          (entry) => `folder ${entry.collectionId}`,
+        ),
+        ...(sent?.selectedTagContexts || []).map(
+          (entry) => `tag ${entry.name}`,
+        ),
+        ...[
+          ...(sent?.paperContexts || []),
+          ...(sent?.fullTextPaperContexts || []),
+          ...(sent?.pdfPaperContexts || []),
+        ].map((entry) => `paper ${entry.itemId}`),
+      ];
+      check(
+        !attached.length,
+        `the sent turn carried context: ${attached.join(", ")}`,
+      );
+    }
     check(
       sent?.runtimeMode === "agent",
       `the turn was sent in ${sent?.runtimeMode} mode`,
@@ -1510,8 +1990,8 @@ describe("live: instruction-driven digest scenarios", function () {
       prompt: spec.prompt,
       model: state.creds?.model,
       collection: {
-        id: fixture.ref.collectionId,
-        name: fixture.ref.name,
+        id: folderRef?.collectionId ?? null,
+        name: folderRef?.name ?? "whole library",
         papers: fixture.papers,
       },
       conversationKey,
@@ -1537,7 +2017,10 @@ describe("live: instruction-driven digest scenarios", function () {
       }
       if (
         state.skipReason ||
-        (spec.collection === "heldout" && state.heldoutSkipReason)
+        (spec.collection === "library"
+          ? state.librarySkipReason
+          : state.folderSkipReason ||
+            (spec.collection === "heldout" && state.heldoutSkipReason))
       ) {
         this.skip();
         return;
