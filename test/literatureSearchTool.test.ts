@@ -26,6 +26,16 @@ describe("literature_search tool", function () {
       originalFetch;
   });
 
+  it("says its metadata mode proposes changes to approve, and reading a paper uses answer", function () {
+    const tool = createLiteratureSearchTool({} as never);
+    // A literature review once called workflow:'review' to read an abstract
+    // and waited on a metadata-change card nobody asked for.
+    assert.include(
+      tool.spec.description,
+      "To read a paper's abstract or details, use workflow:'answer'; workflow:'review' with mode:'metadata' proposes metadata changes the user must approve, so use it only when the user asks to check or fix an item's metadata.",
+    );
+  });
+
   it("supports metadata lookups through the unified online tool", async function () {
     const crossRefItem = {
       DOI: "10.1000/example",

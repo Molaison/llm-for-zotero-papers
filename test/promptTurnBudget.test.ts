@@ -20,12 +20,15 @@ import {
  * purpose by the workflow sentence that asks for a digest part when the work
  * needs one result per paper (274 characters, 2026-10-02), and again by
  * submit_document's excluded list, which records the papers a document
- * leaves out (214 tool characters, 2026-10-02).
+ * leaves out (214 tool characters, 2026-10-02), and again by literature_search
+ * saying that its metadata mode proposes changes for the user to approve, so
+ * a review never asks to change an item it only reads (163 tool characters,
+ * 2026-10-03).
  */
 const TURN_BUDGETS: Record<string, number> = {
-  global: 35_150,
+  global: 35_313,
   paper: 34_764,
-  collection: 35_248,
+  collection: 35_411,
 };
 
 const TURNS: Record<string, Record<string, unknown>> = {

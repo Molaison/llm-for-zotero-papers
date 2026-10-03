@@ -37,7 +37,7 @@ type LiteratureSearchMode =
 type LiteratureSearchWorkflow = "answer" | "review";
 
 export const LITERATURE_WORKFLOW_GUIDANCE =
-  "Use literature_search to retrieve scholarly candidates, not to present a raw result pool. When the user only asks to find/recommend relevant papers, read the current paper, search and assess titles/abstracts, then call literature_review with the requested number (five when unspecified) of ranked candidate references and short evidence-based relevance reasons. Search further if results are weak; never pad a shortlist. Respect explicit references/citations/source constraints. A Find more continuation requests another batch of the original size: assess unused saved candidates first, then search further as needed, and submit only new candidates with the provided sessionId and revision. The paper-only import-selection card is required in Safe, Auto and YOLO, and discovery never imports silently. Explicit import requests instead use workflow:'answer' to gather and rank candidates, skip existing duplicates, then call library_import for exactly the requested number and destination. Central mutation authorization handles Safe confirmation and direct Auto/YOLO execution. Do not substitute a discovery card for an explicit import. Use workflow:'answer' for evidence supporting an answer/review document; only metadata review continues to use workflow:'review', mode:'metadata'.";
+  "Use literature_search to retrieve scholarly candidates, not to present a raw result pool. When the user only asks to find/recommend relevant papers, read the current paper, search and assess titles/abstracts, then call literature_review with the requested number (five when unspecified) of ranked candidate references and short evidence-based relevance reasons. Search further if results are weak; never pad a shortlist. Respect explicit references/citations/source constraints. A Find more continuation requests another batch of the original size: assess unused saved candidates first, then search further as needed, and submit only new candidates with the provided sessionId and revision. The paper-only import-selection card is required in Safe, Auto and YOLO, and discovery never imports silently. Explicit import requests instead use workflow:'answer' to gather and rank candidates, skip existing duplicates, then call library_import for exactly the requested number and destination. Central mutation authorization handles Safe confirmation and direct Auto/YOLO execution. Do not substitute a discovery card for an explicit import. Use workflow:'answer' for evidence supporting an answer/review document; only metadata review continues to use workflow:'review', mode:'metadata': it proposes changes to an existing item that the user must approve, so use it only when the user asks to check or fix that item's metadata, never to read a paper's abstract or details.";
 
 type LiteratureSearchInput = {
   workflow: LiteratureSearchWorkflow;
@@ -181,7 +181,7 @@ export function createLiteratureSearchTool(
     spec: {
       name: "literature_search",
       description:
-        "Search scholarly sources and save candidates to rank. For discovery or recommendations, call literature_review to show the selection card; discovery never imports silently. Explicit imports use workflow:'answer', then library_import; metadata review uses workflow:'review', mode:'metadata'.",
+        "Search scholarly sources and save candidates to rank. For discovery or recommendations, call literature_review to show the selection card; discovery never imports silently. Explicit imports use workflow:'answer', then library_import; To read a paper's abstract or details, use workflow:'answer'; workflow:'review' with mode:'metadata' proposes metadata changes the user must approve, so use it only when the user asks to check or fix an item's metadata.",
       inputSchema: {
         type: "object",
         required: ["mode"],
@@ -191,7 +191,7 @@ export function createLiteratureSearchTool(
             type: "string",
             enum: ["answer", "review"],
             description:
-              "answer returns scholarly evidence. review marks discovery candidates for subsequent ranking and literature_review; only mode:'metadata' opens review immediately.",
+              "answer returns scholarly evidence. review marks discovery candidates for subsequent ranking and literature_review; with mode:'metadata' it proposes metadata changes for the user to approve.",
           },
           mode: {
             type: "string",
