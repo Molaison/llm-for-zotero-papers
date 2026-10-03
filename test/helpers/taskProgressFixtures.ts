@@ -2,6 +2,8 @@
 import {
   buildDigestFailureLedgerDelta,
   buildDigestLedgerDelta,
+  type TaskPaperDigestRelevance,
+  type TaskPaperDigestStance,
   type TaskPaperLedgerDelta,
   type TaskPaperState,
 } from "../../src/agent/context/taskPaperLedger";
@@ -93,9 +95,11 @@ export function quoteCitation(id: string, itemId: number): QuoteCitation {
 }
 
 /**
- * What the host records for one paper of a digest part: its summary and
- * verified evidence, or, given `failure`, why it has none. Built by the
- * production builders, as `task_update` emits them.
+ * What the host records for one paper of a digest part: its answer (given
+ * as `summary`) and verified evidence, or, given `failure`, why it has none.
+ * Given `partId` and `label`, the reads name the part they answer, as they
+ * do since parts were recorded; without them, a row saved before. Built by
+ * the production builders, as `task_update` emits them.
  */
 export function digestLedgerDelta(
   callId: string,
@@ -105,14 +109,23 @@ export function digestLedgerDelta(
     summary?: string;
     evidence?: Array<{ section?: string; quote: string; chunk?: number }>;
     failure?: string;
+    partId?: string;
+    label?: string;
+    relevance?: TaskPaperDigestRelevance;
+    stance?: TaskPaperDigestStance;
   } = {},
 ): TaskPaperLedgerDelta {
   const paper = { libraryID: 1, itemId, title: `Paper ${itemId}` };
+  const part = {
+    ...(options.partId ? { partId: options.partId } : {}),
+    ...(options.label ? { label: options.label } : {}),
+  };
   if (options.failure) {
     return buildDigestFailureLedgerDelta({
       runId: options.runId,
       callId,
       toolName: "task_update",
+      ...part,
       failure: { target: `item:${itemId}`, itemId, reason: options.failure },
       paper,
     });
@@ -121,15 +134,23 @@ export function digestLedgerDelta(
     runId: options.runId,
     callId,
     toolName: "task_update",
+    ...part,
     digest: {
+      schema: 2,
       itemId,
       contextItemId: itemId + 100,
-      summary: options.summary ?? `Paper ${itemId} in brief.`,
-      contributions: [],
-      methods: "",
-      limitations: "",
+      answer: options.summary ?? `Paper ${itemId} in brief.`,
+      ...(options.relevance ? { relevance: options.relevance } : {}),
+      ...(options.stance ? { stance: options.stance } : {}),
       evidence: options.evidence ?? [],
-      source: { backend: "mineru", characters: 1000, complete: true },
+      facets: [],
+      gaps: [],
+      source: {
+        backend: "mineru",
+        readCharacters: 1000,
+        totalCharacters: 1000,
+        complete: true,
+      },
       model: "test-model",
       producedAt: 1,
       cacheKey: `digest-${itemId}`,

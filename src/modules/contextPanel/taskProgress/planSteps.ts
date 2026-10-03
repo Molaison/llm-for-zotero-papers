@@ -1,8 +1,9 @@
 /**
  * The Steps block of the Task progress drawer, a checklist: a built-in
  * action's steps and summary, the plan Codex keeps with its own checklist
- * tool, or a run's outcome ledger (each outcome with its pill and reason, a
- * "not done" row for the targets it left undone, and how the run ended).
+ * tool, or a run's outcome ledger (each outcome with its pill and reason,
+ * the papers it left out or the part that replaced it, a "not done" row for
+ * the targets it left undone, and how the run ended).
  *
  * This is the one place step progress renders (the floating capsule, the
  * in-chat action "Working" card and the Codex checklist trace row it
@@ -10,6 +11,7 @@
  * matching task rows by id, so an open `<details>` row and the nodes a
  * reader is looking at survive every ledger update.
  */
+import type { OutcomeException } from "../../../agent/execution/types";
 import { OUTCOME_REASONS } from "../../../agent/loop/outcomes";
 import { formatPaperDisplayLabel } from "../../../shared/paperDisplayLabels";
 import { t } from "../../../utils/i18n";
@@ -173,16 +175,67 @@ function targetLabel(
 }
 
 /**
+ * One reason and the targets it covers: "Reason: (Lee, 2020), item:99", the
+ * first `NOT_DONE_NAMED_TARGETS` named and the rest counted.
+ */
+function targetsText(
+  entry: OutcomeException,
+  options: ChecklistRenderOptions,
+): string {
+  const reason = outcomeReasonText(entry.reason);
+  if (!entry.targets.length) return reason;
+  const named = entry.targets
+    .slice(0, NOT_DONE_NAMED_TARGETS)
+    .map((target) => targetLabel(target, options.resolvePaperLabel))
+    .join(", ");
+  const rest = entry.targets.length - NOT_DONE_NAMED_TARGETS;
+  return rest > 0
+    ? `${reason}: ${named} ${t("and {count} more").replace("{count}", `${rest}`)}`
+    : `${reason}: ${named}`;
+}
+
+/** A translated "…: {reason}" with the reason as written, "$" included. */
+function withReason(template: string, reason: string): string {
+  return t(template).replace("{reason}", () => reason);
+}
+
+/**
+ * An outcome's reason line: why it ended as it did ("Replaced: <reason>"
+ * for a part another replaced), then each reason it left papers out for
+ * ("Excluded: <reason>: <papers>"). Empty when it has none.
+ */
+function outcomeDetailText(
+  step: TaskProgressStep,
+  options: ChecklistRenderOptions,
+): string {
+  const parts: string[] = [];
+  if (step.detail) {
+    const reason = outcomeReasonText(step.detail);
+    parts.push(
+      step.outcome?.replaced
+        ? withReason("Replaced: {reason}", reason)
+        : reason,
+    );
+  }
+  for (const entry of step.outcome?.excluded || []) {
+    parts.push(withReason("Excluded: {reason}", targetsText(entry, options)));
+  }
+  return parts.join(" · ");
+}
+
+/**
  * A step row: badge, label, and, for an outcome, its reason and pill. A read,
  * a digest or a write over several targets counts them as evidence ticks
  * them, "Read each paper in Drift · 48 of 48", "Summarize each selected
- * paper · 7 of 12"; a part the answer completes ticks none.
+ * paper · 7 of 12"; a part the answer completes ticks none. A part another
+ * replaced reads "Replaced", not "Cancelled".
  */
 function buildChecklistRow(
   doc: Document,
   step: TaskProgressStep,
   index: number,
   outcomes: boolean,
+  options: ChecklistRenderOptions,
 ): HTMLElement {
   const row = doc.createElement("div");
   row.dataset.taskId = `step-${index + 1}`;
@@ -210,19 +263,21 @@ function buildChecklistRow(
           .replace("{total}", `${targets}`)}`
       : step.label;
   content.appendChild(label);
-  if (outcomes && step.detail) {
+  const detail = outcomes ? outcomeDetailText(step, options) : "";
+  if (detail) {
     const reason = doc.createElement("span");
     reason.className = "llm-plan-task-original";
-    reason.textContent = outcomeReasonText(step.detail);
+    reason.textContent = detail;
     content.appendChild(reason);
   }
   line.append(badge, content);
   if (outcomes) {
     const pill = doc.createElement("span");
     pill.className = `llm-plan-task-pill llm-plan-task-pill-${step.status}`;
-    pill.textContent = PLAN_STATUS_PILLS[step.status]
-      ? t(PLAN_STATUS_PILLS[step.status])
-      : "";
+    const pillText = step.outcome?.replaced
+      ? "Replaced"
+      : PLAN_STATUS_PILLS[step.status];
+    pill.textContent = pillText ? t(pillText) : "";
     if (!pill.textContent) pill.hidden = true;
     line.appendChild(pill);
   }
@@ -263,18 +318,7 @@ function buildNotDoneRow(
   const detail = doc.createElement("span");
   detail.className = "llm-plan-task-original";
   detail.textContent = exceptions
-    .map((entry) => {
-      const reason = outcomeReasonText(entry.reason);
-      if (!entry.targets.length) return reason;
-      const named = entry.targets
-        .slice(0, NOT_DONE_NAMED_TARGETS)
-        .map((target) => targetLabel(target, options.resolvePaperLabel))
-        .join(", ");
-      const rest = entry.targets.length - NOT_DONE_NAMED_TARGETS;
-      return rest > 0
-        ? `${reason}: ${named} ${t("and {count} more").replace("{count}", `${rest}`)}`
-        : `${reason}: ${named}`;
-    })
+    .map((entry) => targetsText(entry, options))
     .join(" · ");
   content.append(label, detail);
   line.append(badge, content);
@@ -333,7 +377,7 @@ function buildChecklistContent(
   tasks.setAttribute("role", "list");
   checklist.steps.forEach((step, index) => {
     if (!step.label) return;
-    tasks.appendChild(buildChecklistRow(doc, step, index, outcomes));
+    tasks.appendChild(buildChecklistRow(doc, step, index, outcomes, options));
     if (outcomes && step.outcome?.exceptions.length) {
       tasks.appendChild(buildNotDoneRow(doc, step, index, options));
     }

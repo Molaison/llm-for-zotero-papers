@@ -725,6 +725,49 @@ describe("task progress outcome ledger", function () {
     );
   });
 
+  it("carries a part's excluded papers and its replacement to its step, and counts the steps without a replaced part", function () {
+    beginTaskRun(31, { runId: "run-a" });
+    const excludedTargets = [
+      { targets: ["item:2", "item:3"], reason: "Off the question" },
+    ];
+    setTaskOutcomes(
+      31,
+      "run-a",
+      outcomeCheckpoint([
+        outcomeTask("old", {
+          description: "Read each paper on drift",
+          effect: "read",
+          status: "cancelled",
+          reason: "The user narrowed the question",
+          supersededBy: "execution-1:task:review",
+        }),
+        outcomeTask("review", {
+          description: "Write the review",
+          effect: "artifact",
+          status: "completed",
+          targets: ["item:1", "item:2", "item:3"],
+          doneTargets: ["item:1"],
+          excludedTargets,
+        }),
+      ]),
+    );
+    const checklist = getTaskProgress(31)!.checklist!;
+    assert.deepEqual(
+      checklist.steps.map((step) => [
+        step.detail,
+        step.outcome?.replaced,
+        step.outcome?.excluded,
+        step.outcome?.exceptions,
+      ]),
+      [
+        ["The user narrowed the question", true, [], []],
+        [undefined, false, excludedTargets, []],
+      ],
+    );
+    assert.equal(checklist.done, 1);
+    assert.equal(checklist.total, 1, "a replaced part is not a step to do");
+  });
+
   it("changes nothing for a checkpoint with no outcome and no end", function () {
     beginTaskRun(21, { runId: "run-a" });
     const version = getTaskProgress(21)!.version;

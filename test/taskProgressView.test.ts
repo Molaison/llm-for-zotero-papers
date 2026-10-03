@@ -1,9 +1,13 @@
 import { assert } from "chai";
 import type { TaskPaperScopeEntry } from "../src/agent/context/taskPaperScopeListing";
-import type {
-  TaskPaperLedgerEntry,
-  TaskPaperReadEvent,
+import {
+  taskPaperDigestPartLabel,
+  type TaskPaperLedgerEntry,
+  type TaskPaperReadEvent,
 } from "../src/agent/context/taskPaperLedger";
+import type { ExecutionCheckpointTask } from "../src/agent/execution/types";
+import type { AgentRunEventRecord } from "../src/agent/types";
+import { buildTaskProgressHistory } from "../src/modules/contextPanel/taskProgress/history";
 import {
   applyTaskDocumentCitations,
   applyTaskPaperUpdate,
@@ -24,7 +28,11 @@ import {
   setTaskOutcomes,
   setTaskScope,
 } from "../src/modules/contextPanel/taskProgress/store";
-import { OUTCOME_REASONS } from "../src/agent/loop/outcomes";
+import {
+  OUTCOME_REASONS,
+  decideRunEnd,
+  settleOutcomes,
+} from "../src/agent/loop/outcomes";
 import { DIGEST_FAILURE_REASONS } from "../src/agent/digests/paperDigestWorker";
 import { initI18n, t } from "../src/utils/i18n";
 import {
@@ -2026,6 +2034,192 @@ describe("task progress view of an outcome ledger", function () {
     assert.deepEqual(lookedUp, [11, 12, 13, 14, 15]);
   });
 
+  describe("a part that leaves papers out or was replaced", function () {
+    const items = (count: number, from = 1) =>
+      Array.from({ length: count }, (_, index) => `item:${from + index}`);
+    /** The ledger as the host settles it when the answer is final. */
+    const settled = (tasks: ExecutionCheckpointTask[]) => {
+      const ledger = outcomeCheckpoint(tasks);
+      return settleOutcomes(
+        ledger,
+        decideRunEnd(ledger, { status: "completed", stopRule: "final_answer" }),
+        3,
+      );
+    };
+    const pillOf = (row: FakeElement) =>
+      row.findByClass("llm-plan-task-pill")!.textContent;
+    const review = (overrides: Partial<ExecutionCheckpointTask> = {}) =>
+      outcomeTask("review", {
+        description: "Write the literature review",
+        effect: "artifact",
+        status: "completed",
+        targets: items(8),
+        doneTargets: items(1),
+        excludedTargets: [
+          { targets: items(6, 2), reason: "Off the question" },
+          { targets: ["item:8"], reason: "A methods note" },
+        ],
+        ...overrides,
+      });
+    const label = (itemId: number) => `(Author ${itemId}, 2020)`;
+
+    it("names excluded papers with the reason on the part's row, and leaves nothing open", function () {
+      seedScope();
+      const harness = track(mount({}, { resolvePaperLabel: label }));
+      beginTaskRun(KEY, { runId: "run-a" });
+      const ledger = settled([review()]);
+      assert.equal(ledger.end?.state, "completed", "the host's own ending");
+      setTaskOutcomes(KEY, "run-a", ledger);
+      completeTaskRun(KEY, { runId: "run-a" });
+      harness.view.flush();
+      assert.equal(pill(harness).textContent, "Completed");
+      assert.notEqual(pill(harness).textContent, "Partly done");
+      assert.match(harness.count(), /^1\/1 steps · /);
+      const steps = openSteps(harness);
+      assert.equal(headerStatus(steps), "Completed");
+      assert.lengthOf(rows(steps), 1, "excluded papers make no not-done row");
+      const [row] = rows(steps);
+      assert.equal(labelOf(row), "Write the literature review");
+      assert.equal(pillOf(row), "Done");
+      assert.equal(
+        detailOf(row),
+        "Excluded: Off the question: (Author 2, 2020), (Author 3, 2020), (Author 4, 2020), (Author 5, 2020), (Author 6, 2020) and 1 more · Excluded: A methods note: (Author 8, 2020)",
+      );
+    });
+
+    it("counts only a part's exceptions as not done when it also excluded papers", function () {
+      seedScope();
+      const harness = track(mount({}, { resolvePaperLabel: label }));
+      beginTaskRun(KEY, { runId: "run-a" });
+      setTaskOutcomes(
+        KEY,
+        "run-a",
+        settled([
+          review({
+            exceptions: [
+              {
+                targets: ["item:7"],
+                reason: OUTCOME_REASONS.notCovered,
+              },
+            ],
+            excludedTargets: [
+              { targets: items(5, 2), reason: "Off the question" },
+            ],
+          }),
+        ]),
+      );
+      completeTaskRun(KEY, { runId: "run-a" });
+      harness.view.flush();
+      assert.equal(pill(harness).textContent, "Partly done");
+      const [row, notDone] = rows(openSteps(harness));
+      assert.equal(
+        detailOf(row),
+        "Excluded: Off the question: (Author 2, 2020), (Author 3, 2020), (Author 4, 2020), (Author 5, 2020), (Author 6, 2020)",
+      );
+      assert.equal(labelOf(notDone), "1 not done");
+      assert.equal(
+        detailOf(notDone),
+        `${OUTCOME_REASONS.notCovered}: (Author 7, 2020)`,
+      );
+    });
+
+    it("a replaced part says why and reads Replaced; the run stays Completed and its steps count without it", function () {
+      seedScope();
+      const harness = track(mount());
+      beginTaskRun(KEY, { runId: "run-a" });
+      const replaced = outcomeTask("read-drift", {
+        description: "Read each paper on drift",
+        effect: "read",
+        status: "cancelled",
+        reason: "The user narrowed the question",
+        supersededBy: "execution-1:task:read-ca1",
+        targets: items(3),
+        doneTargets: items(1),
+      });
+      const successor = outcomeTask("read-ca1", {
+        description: "Read each paper on CA1 drift",
+        effect: "read",
+        status: "completed",
+        targets: items(2),
+        doneTargets: items(2),
+      });
+      const ledger = settled([replaced, successor]);
+      assert.equal(ledger.end?.state, "completed", "the host's own ending");
+      setTaskOutcomes(KEY, "run-a", ledger);
+      completeTaskRun(KEY, { runId: "run-a" });
+      harness.view.flush();
+      assert.equal(pill(harness).textContent, "Completed");
+      assert.match(
+        harness.count(),
+        /^1\/1 steps · /,
+        "a replaced part is no step left open",
+      );
+      const steps = openSteps(harness);
+      assert.equal(headerStatus(steps), "Completed");
+      assert.equal(
+        steps.findByClass("llm-plan-progress")!.getAttribute("aria-valuemax"),
+        "1",
+      );
+      assert.lengthOf(rows(steps), 2);
+      const [oldRow, newRow] = rows(steps);
+      assert.equal(labelOf(oldRow), "Read each paper on drift · 1 of 3");
+      assert.equal(pillOf(oldRow), "Replaced");
+      assert.equal(
+        detailOf(oldRow),
+        "Replaced: The user narrowed the question",
+      );
+      assert.equal(pillOf(newRow), "Done");
+      assert.equal(detailOf(newRow), "");
+    });
+
+    it("keeps a '$' in the model's reasons as written", function () {
+      seedScope();
+      const harness = track(mount());
+      beginTaskRun(KEY, { runId: "run-a" });
+      setTaskOutcomes(
+        KEY,
+        "run-a",
+        outcomeCheckpoint([
+          review({
+            excludedTargets: [{ targets: ["item:2"], reason: "Costs $& more" }],
+          }),
+          outcomeTask("old", {
+            description: "Read the papers",
+            status: "cancelled",
+            reason: "Uses $1 now",
+            supersededBy: "execution-1:task:review",
+          }),
+        ]),
+      );
+      harness.view.flush();
+      const [reviewRow, oldRow] = rows(openSteps(harness));
+      assert.equal(detailOf(reviewRow), "Excluded: Costs $& more: item:2");
+      assert.equal(detailOf(oldRow), "Replaced: Uses $1 now");
+    });
+
+    it("a part cancelled without a replacement still reads Cancelled", function () {
+      seedScope();
+      const harness = track(mount());
+      beginTaskRun(KEY, { runId: "run-a" });
+      setTaskOutcomes(
+        KEY,
+        "run-a",
+        outcomeCheckpoint([
+          outcomeTask("save", {
+            description: "Save the summary as a note",
+            status: "cancelled",
+            reason: "The user stopped it",
+          }),
+        ]),
+      );
+      harness.view.flush();
+      const [row] = rows(openSteps(harness));
+      assert.equal(pillOf(row), "Cancelled");
+      assert.equal(detailOf(row), "The user stopped it");
+      assert.match(harness.count(), /^0\/1 steps · /);
+    });
+  });
+
   describe("a part over every paper in the scope", function () {
     const items = (count: number, from = 1) =>
       Array.from({ length: count }, (_, index) => `item:${from + index}`);
@@ -2441,6 +2635,260 @@ describe("task progress view of an outcome ledger", function () {
       assert.include(text, "Retried and summarized.");
       assert.notInclude(text, "timed out");
     });
+
+    describe("over several parts", function () {
+      const BRIEF = "Summarize each paper";
+      const PATH = "Evidence for path integration";
+      /** Each digest block of an expanded row, as a reader sees it. */
+      const blocksOf = (details: FakeElement) =>
+        details.findAllByClass("llm-task-paper-digest").map((block) => ({
+          heading: block.findByClass("llm-task-paper-turn")!.textContent,
+          lines: block
+            .findAllByClass("llm-task-paper-how")
+            .map((line) => line.textContent),
+          answer: block.findByClass("llm-task-paper-snippet")?.textContent,
+          note: block.findByClass("llm-task-paper-empty")?.textContent,
+        }));
+      const apply = (delta: ReturnType<typeof digestLedgerDelta>) =>
+        applyTaskPaperUpdate(KEY, delta, "run-d");
+      const brief = (callId: string, itemId: number, summary: string) =>
+        digestLedgerDelta(callId, itemId, {
+          runId: "run-d",
+          partId: "brief",
+          label: BRIEF,
+          summary,
+        });
+      const path = (
+        callId: string,
+        itemId: number,
+        result: { summary: string } | { failure: string },
+      ) =>
+        digestLedgerDelta(callId, itemId, {
+          runId: "run-d",
+          partId: "path",
+          label: PATH,
+          ...result,
+          ...("summary" in result
+            ? {
+                relevance: {
+                  level: "direct" as const,
+                  reason: "It measures belief during navigation.",
+                },
+                stance: {
+                  position: "supports" as const,
+                  reason: "Eye movements follow the latent position.",
+                },
+              }
+            : {}),
+        });
+
+      it("shows one block per part under its label, the newest result of each, in the order the parts first appeared", function () {
+        seedScope(2);
+        const harness = track(mount());
+        beginTaskRun(KEY, { runId: "run-d" });
+        apply(brief("call-a", 1, "First brief."));
+        apply(path("call-b", 1, { failure: "The model call timed out" }));
+        apply(path("call-c", 1, { summary: "Gaze tracks the belief." }));
+        apply(brief("call-d", 1, "Second brief."));
+        // A later failure of a part does not hide the part's result.
+        apply(path("call-e", 1, { failure: "The model call failed" }));
+        harness.row.dispatchFakeEvent("click");
+        const row = paperRow(harness, "1:1");
+        const details = expand(row);
+        assert.deepEqual(blocksOf(details), [
+          {
+            heading: BRIEF,
+            lines: [],
+            answer: "Second brief.",
+            note: undefined,
+          },
+          {
+            heading: PATH,
+            lines: [
+              "Directly relevant — It measures belief during navigation.",
+              "Supports — Eye movements follow the latent position.",
+            ],
+            answer: "Gaze tracks the belief.",
+            note: undefined,
+          },
+        ]);
+        const text = collectFakeText(details);
+        assert.notInclude(text, "First brief.");
+        assert.notInclude(text, "timed out");
+        assert.notInclude(text, "Summary", "every block has its part's label");
+        assert.equal(
+          tailOf(row),
+          BRIEF,
+          "the tail names the part whose result came last",
+        );
+      });
+
+      it("a failed part shows '<label> failed' with the host's reason beside a part that succeeded", function () {
+        seedScope(2);
+        const harness = track(mount());
+        beginTaskRun(KEY, { runId: "run-d" });
+        apply(path("call-b", 1, { failure: "The model call timed out" }));
+        apply(brief("call-a", 1, "In brief."));
+        // Paper 2: its only part failed.
+        apply(path("call-c", 2, { failure: "No readable text" }));
+        harness.row.dispatchFakeEvent("click");
+        const first = paperRow(harness, "1:1");
+        assert.deepEqual(blocksOf(expand(first)), [
+          {
+            heading: `${PATH} failed`,
+            lines: [],
+            answer: undefined,
+            note: "The model call timed out",
+          },
+          {
+            heading: BRIEF,
+            lines: [],
+            answer: "In brief.",
+            note: undefined,
+          },
+        ]);
+        assert.equal(tailOf(first), BRIEF);
+        const second = paperRow(harness, "1:2");
+        assert.equal(second.dataset.state, "matched");
+        assert.equal(tailOf(second), `${PATH} failed`);
+        const details = expand(second);
+        assert.deepEqual(blocksOf(details), [
+          {
+            heading: `${PATH} failed`,
+            lines: [],
+            answer: undefined,
+            note: "No readable text",
+          },
+        ]);
+        assert.notInclude(
+          collectFakeText(details),
+          "Matched by title or abstract",
+          "the failure explains the row",
+        );
+      });
+
+      it("a row saved before parts were recorded keeps its one Summary block beside a part's block", function () {
+        seedScope(2);
+        const harness = track(mount());
+        beginTaskRun(KEY, { runId: "run-d" });
+        apply(
+          digestLedgerDelta("call-old", 1, {
+            runId: "run-d",
+            summary: "Saved summary.",
+          }),
+        );
+        apply(
+          digestLedgerDelta("call-older", 1, {
+            runId: "run-d",
+            failure: "The summary call timed out",
+          }),
+        );
+        apply(path("call-c", 1, { summary: "Gaze tracks the belief." }));
+        harness.row.dispatchFakeEvent("click");
+        const row = paperRow(harness, "1:1");
+        const blocks = blocksOf(expand(row));
+        assert.deepEqual(
+          blocks.map((block) => [block.heading, block.answer]),
+          [
+            ["Summary", "Saved summary."],
+            [PATH, "Gaze tracks the belief."],
+          ],
+        );
+        assert.equal(tailOf(row), PATH);
+      });
+
+      it("heads a block with the label the host cut at a word, and clips a longer one", function () {
+        seedScope(3);
+        const harness = track(mount());
+        beginTaskRun(KEY, { runId: "run-d" });
+        const label = taskPaperDigestPartLabel(
+          "For each paper, list the evidence that connects it to path integration during naturalistic navigation. Name the task.",
+        )!;
+        assert.isAtMost(label.length, 60);
+        assert.match(label, /…$/);
+        apply(
+          digestLedgerDelta("call-a", 1, {
+            runId: "run-d",
+            partId: "evidence",
+            label,
+          }),
+        );
+        // A label saved longer than the host writes is clipped, not trusted.
+        apply(
+          digestLedgerDelta("call-b", 2, {
+            runId: "run-d",
+            partId: "long",
+            label: "x".repeat(80),
+          }),
+        );
+        harness.row.dispatchFakeEvent("click");
+        const first = paperRow(harness, "1:1");
+        assert.equal(blocksOf(expand(first))[0].heading, label);
+        assert.equal(tailOf(first), label);
+        const second = blocksOf(expand(paperRow(harness, "1:2")))[0];
+        assert.lengthOf(second.heading!, 60);
+      });
+
+      it("renders the same blocks after the run is replayed from its saved events", function () {
+        seedScope(2);
+        const deltas = [
+          brief("call-a", 1, "In brief."),
+          path("call-b", 1, { summary: "Gaze tracks the belief." }),
+          path("call-c", 2, { failure: "No readable text" }),
+        ];
+        const events: AgentRunEventRecord[] = deltas.map((delta, index) => ({
+          runId: "run-d",
+          seq: index + 1,
+          eventType: "paper_ledger_update",
+          payload: {
+            type: "paper_ledger_update",
+            callId: delta.callId,
+            delta,
+          },
+          createdAt: index + 1,
+        }));
+        hydrateTaskProgress(
+          KEY,
+          buildTaskProgressHistory(
+            [
+              { role: "user", text: "Summarize them", timestamp: 1 },
+              {
+                role: "assistant",
+                text: "Done.",
+                timestamp: 2,
+                runMode: "agent",
+                agentRunId: "run-d",
+              },
+            ],
+            new Map([["run-d", events]]),
+            1,
+          ),
+        );
+        const harness = track(mount());
+        harness.row.dispatchFakeEvent("click");
+        const first = paperRow(harness, "1:1");
+        assert.deepEqual(
+          blocksOf(expand(first)).map((block) => [
+            block.heading,
+            block.lines,
+            block.answer,
+          ]),
+          [
+            [BRIEF, [], "In brief."],
+            [
+              PATH,
+              [
+                "Directly relevant — It measures belief during navigation.",
+                "Supports — Eye movements follow the latent position.",
+              ],
+              "Gaze tracks the belief.",
+            ],
+          ],
+        );
+        assert.equal(tailOf(first), PATH);
+        assert.equal(tailOf(paperRow(harness, "1:2")), `${PATH} failed`);
+      });
+    });
   });
 
   describe("in Chinese", function () {
@@ -2515,6 +2963,139 @@ describe("task progress view of an outcome ledger", function () {
         t("Summary"),
         t("Abstract"),
         "a summary is not an abstract",
+      );
+    });
+
+    it("translates the relevance and stance words, a part's failure, exclusions and replacements, and keeps the model's words as written", function () {
+      const words = [
+        "Directly relevant",
+        "Partly relevant",
+        "Not relevant",
+        "Relevance unclear",
+        "Supports",
+        "Challenges",
+        "Mixed",
+        "Stance unclear",
+      ];
+      for (const value of [
+        ...words,
+        "{label} failed",
+        "Excluded: {reason}",
+        "Replaced: {reason}",
+        "Replaced",
+      ]) {
+        assert.notEqual(t(value), value, value);
+      }
+      assert.lengthOf(
+        new Set(words.map(t)),
+        words.length,
+        "each value reads differently",
+      );
+      seedScope(2);
+      const harness = track(mount());
+      beginTaskRun(KEY, { runId: "run-d" });
+      const label = "路径整合的证据";
+      applyTaskPaperUpdate(
+        KEY,
+        digestLedgerDelta("call-p", 1, {
+          runId: "run-d",
+          partId: "path",
+          label,
+          summary: "注视追踪信念。",
+          relevance: { level: "partial", reason: "只涉及导航的一部分。" },
+          stance: { position: "mixed", reason: "结果不一。" },
+        }),
+        "run-d",
+      );
+      applyTaskPaperUpdate(
+        KEY,
+        digestLedgerDelta("call-q", 2, {
+          runId: "run-d",
+          partId: "path",
+          label,
+          failure: "No readable text",
+        }),
+        "run-d",
+      );
+      harness.row.dispatchFakeEvent("click");
+      const rowOf = (key: string) =>
+        harness.items().find((item) => item.dataset.key === key)!;
+      const open = (key: string) => {
+        rowOf(key)
+          .findByClass("llm-task-paper-summary")!
+          .dispatchFakeEvent("click");
+        return rowOf(key)
+          .findByClass("llm-task-paper-details")!
+          .findByClass("llm-task-paper-digest")!;
+      };
+      const block = open("1:1");
+      assert.equal(
+        block.findByClass("llm-task-paper-turn")!.textContent,
+        label,
+      );
+      assert.deepEqual(
+        block
+          .findAllByClass("llm-task-paper-how")
+          .map((line) => line.textContent),
+        [
+          `${t("Partly relevant")} — 只涉及导航的一部分。`,
+          `${t("Mixed")} — 结果不一。`,
+        ],
+      );
+      const failed = open("1:2");
+      const heading = t("{label} failed").replace("{label}", label);
+      assert.equal(
+        failed.findByClass("llm-task-paper-turn")!.textContent,
+        heading,
+      );
+      assert.equal(
+        failed.findByClass("llm-task-paper-empty")!.textContent,
+        t("No readable text"),
+      );
+      assert.equal(
+        rowOf("1:2").findByClass("llm-task-paper-tail")!.textContent,
+        heading,
+      );
+    });
+
+    it("says Excluded and Replaced in the reader's language, with the model's reasons as written", function () {
+      seedScope();
+      const harness = track(mount());
+      beginTaskRun(KEY, { runId: "run-a" });
+      setTaskOutcomes(
+        KEY,
+        "run-a",
+        outcomeCheckpoint([
+          outcomeTask("review", {
+            description: "Write the review",
+            effect: "artifact",
+            status: "completed",
+            targets: ["item:1", "item:2"],
+            doneTargets: ["item:1"],
+            excludedTargets: [{ targets: ["item:2"], reason: "化学论文" }],
+          }),
+          outcomeTask("old", {
+            description: "Read the papers",
+            effect: "read",
+            status: "cancelled",
+            reason: "问题变了",
+            supersededBy: "execution-1:task:review",
+          }),
+        ]),
+      );
+      harness.view.flush();
+      const [reviewRow, oldRow] = rows(openSteps(harness));
+      assert.equal(
+        detailOf(reviewRow),
+        t("Excluded: {reason}").replace("{reason}", "化学论文: item:2"),
+      );
+      assert.equal(
+        detailOf(oldRow),
+        t("Replaced: {reason}").replace("{reason}", "问题变了"),
+      );
+      assert.equal(
+        oldRow.findByClass("llm-plan-task-pill")!.textContent,
+        t("Replaced"),
       );
     });
   });

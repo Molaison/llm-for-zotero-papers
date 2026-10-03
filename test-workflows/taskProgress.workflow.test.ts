@@ -17,6 +17,11 @@ import {
 } from "../src/agent/context/taskPaperLedger";
 import { executionCheckpointEvent } from "../src/agent/execution/checkpointEvents";
 import type {
+  ExecutionCheckpoint,
+  ExecutionCheckpointTask,
+} from "../src/agent/execution/types";
+import { decideRunEnd, settleOutcomes } from "../src/agent/loop/outcomes";
+import type {
   HostPaperDigest,
   PaperDigestFailure,
 } from "../src/agent/digests/paperDigestWorker";
@@ -1047,15 +1052,20 @@ describe("workflow: task progress", function () {
         "Place fields reorganize over weeks as spines turn over.";
       // Typed as the worker's own records: the builders take them as they are.
       const digest: HostPaperDigest = {
+        schema: 2,
         itemId: paperId(0),
         contextItemId: fixtures[0].pdfAttachmentId,
         title: PAPERS[0].title,
-        summary: summaryText,
-        contributions: [],
-        methods: "",
-        limitations: "",
+        answer: summaryText,
         evidence: [{ section: "Results", quote: SNIPPETS[2] }],
-        source: { backend: "pdf", characters: 2000, complete: true },
+        facets: [],
+        gaps: [],
+        source: {
+          backend: "pdf",
+          readCharacters: 2000,
+          totalCharacters: 2000,
+          complete: true,
+        },
         model: "workflow-model",
         producedAt: 1,
         cacheKey: `digest-${surface}`,
@@ -1152,6 +1162,261 @@ describe("workflow: task progress", function () {
       );
       view.row.click();
       await settle(view, "closed", `digest drawer (${surface})`);
+    } finally {
+      handle.finish();
+    }
+  }
+
+  /**
+   * A run whose parts changed: two digest parts over one paper (one judged
+   * its relevance), a review that left a paper out, and a read part the
+   * model replaced. The paper's row shows one block per part under its
+   * label, and its tail names the part whose answer came last; the step
+   * rows say "Replaced: <reason>" and "Excluded: <reason>: <paper>", and
+   * neither makes the run Partly done.
+   */
+  async function exercisePartsRun(rootOf: () => HTMLElement, surface: Surface) {
+    const handle = await api.startTaskProgressReplay({
+      surface: surfaceOf(surface),
+      historyTurns: 1,
+      user: {
+        selectedCollectionContexts: [
+          { collectionId: collection.id, name: collection.name, libraryID },
+        ],
+      },
+    });
+    const view = part(rootOf());
+    try {
+      await until(() => {
+        api.flushTaskProgress();
+        return Boolean(
+          api.getTaskProgressSnapshot(handle.conversationKey)?.listingLoaded,
+        );
+      }, `the scope listing resolves (${surface})`);
+      const executionId = `parts-${surface}`;
+      const [paper, other] = [0, 1].map((index) => `item:${paperId(index)}`);
+      const BRIEF = "Summarize each paper";
+      const DRIFT = "Evidence for representational drift";
+      const replacedWhy = "The user narrowed the question";
+      const excludedWhy = "Off the question";
+      const task = (
+        local: string,
+        description: string,
+        fields: Partial<ExecutionCheckpointTask>,
+      ): ExecutionCheckpointTask => ({
+        taskId: `${executionId}:task:${local}`,
+        description,
+        dependencies: [],
+        status: "pending",
+        journalActionIds: [],
+        verifiedReceiptIds: [],
+        readEvidenceIds: [],
+        materialRefs: [],
+        createdAt: 1,
+        updatedAt: 1,
+        origin: "model",
+        ...fields,
+      });
+      const ledger = (done: boolean): ExecutionCheckpoint => ({
+        version: 1,
+        executionId,
+        conversationKey: handle.conversationKey,
+        conversationGeneration: 0,
+        createdAt: 1,
+        updatedAt: done ? 3 : 2,
+        tasks: [
+          task("read-drift", "Read each paper on drift", {
+            effect: "read",
+            targets: [paper, other],
+            ...(done
+              ? {
+                  status: "cancelled",
+                  reason: replacedWhy,
+                  supersededBy: `${executionId}:task:drift`,
+                }
+              : {}),
+          }),
+          task("brief", BRIEF, {
+            effect: "digest",
+            targets: [paper],
+            ...(done ? { status: "completed", doneTargets: [paper] } : {}),
+          }),
+          task("drift", DRIFT, {
+            effect: "digest",
+            targets: [paper],
+            ...(done ? { status: "completed", doneTargets: [paper] } : {}),
+          }),
+          task("review", "Write the review", {
+            effect: "artifact",
+            targets: [paper, other],
+            ...(done
+              ? {
+                  status: "completed",
+                  doneTargets: [paper],
+                  excludedTargets: [{ targets: [other], reason: excludedWhy }],
+                }
+              : {}),
+          }),
+        ],
+      });
+      const before = ledger(false);
+      const finished = ledger(true);
+      // Settled as the host settles a run whose answer is final.
+      const after = settleOutcomes(
+        finished,
+        decideRunEnd(finished, {
+          status: "completed",
+          stopRule: "final_answer",
+        }),
+        3,
+      );
+      assert.equal(after.end?.state, "completed", "the host's own ending");
+      await handle.emit(executionCheckpointEvent(undefined, before));
+      const briefText = "Place fields reorganize over weeks.";
+      const driftText = "Drift follows spine turnover in CA1.";
+      const relevanceWhy = "It measures drift over weeks.";
+      const digest = (
+        answer: string,
+        extra: Partial<HostPaperDigest> = {},
+      ): HostPaperDigest => ({
+        schema: 2,
+        itemId: paperId(0),
+        contextItemId: fixtures[0].pdfAttachmentId,
+        title: PAPERS[0].title,
+        answer,
+        evidence: [],
+        facets: [],
+        gaps: [],
+        source: {
+          backend: "pdf",
+          readCharacters: 2000,
+          totalCharacters: 2000,
+          complete: true,
+        },
+        model: "workflow-model",
+        producedAt: 1,
+        cacheKey: `parts-${surface}-${answer.length}`,
+        ...extra,
+      });
+      for (const delta of [
+        buildDigestLedgerDelta({
+          runId: handle.runId,
+          callId: "task-update-brief",
+          toolName: "task_update",
+          partId: "brief",
+          label: BRIEF,
+          digest: digest(briefText),
+          paper: { ...paperRef(0) },
+        }),
+        buildDigestLedgerDelta({
+          runId: handle.runId,
+          callId: "task-update-drift",
+          toolName: "task_update",
+          partId: "drift",
+          label: DRIFT,
+          digest: digest(driftText, {
+            relevance: { level: "direct", reason: relevanceWhy },
+          }),
+          paper: { ...paperRef(0) },
+        }),
+      ]) {
+        await handle.emit({
+          type: "paper_ledger_update",
+          callId: delta.callId,
+          delta,
+        });
+      }
+      const delta = executionCheckpointEvent(before, after);
+      assert.equal(delta.type, "execution_checkpoint_delta");
+      await handle.emit(delta);
+      api.flushTaskProgress();
+      await settleRow(rootOf, "open", `the revised run (${surface})`);
+      if (view.row.getAttribute("aria-expanded") !== "true") {
+        view.row.click();
+        await settle(view, "open", `revised drawer (${surface})`);
+      }
+      const stepRows = () =>
+        Array.from(
+          rootOf().querySelectorAll(".llm-task-progress-steps .llm-plan-task"),
+        ) as HTMLElement[];
+      const textOf = (node: Element, selector: string) =>
+        node.querySelector(selector)?.textContent || "";
+      await until(
+        () => {
+          api.flushTaskProgress();
+          return textOf(stepRows()[0], ".llm-plan-task-pill") === "Replaced";
+        },
+        () =>
+          `the replaced part reads Replaced (${stepRows()
+            .map((row) => row.textContent)
+            .join(" | ")})`,
+      );
+      assert.deepEqual(
+        stepRows().map((row) => [
+          textOf(row, ".llm-plan-task-label"),
+          textOf(row, ".llm-plan-task-original"),
+          textOf(row, ".llm-plan-task-pill"),
+        ]),
+        [
+          [
+            "Read each paper on drift · 0 of 2",
+            `Replaced: ${replacedWhy}`,
+            "Replaced",
+          ],
+          [BRIEF, "", "Done"],
+          [DRIFT, "", "Done"],
+          [
+            "Write the review",
+            `Excluded: ${excludedWhy}: (${PAPERS[1].author}, 2021)`,
+            "Done",
+          ],
+        ],
+        "no not-done row: an excluded paper is not left undone",
+      );
+      assert.equal(
+        textOf(rootOf(), ".llm-task-progress-pill"),
+        "Completed",
+        "neither the replaced part nor the excluded paper is Partly done",
+      );
+      assert.equal(
+        textOf(rootOf(), ".llm-task-progress-steps .llm-plan-status"),
+        "Completed",
+      );
+      assert.match(view.count(), /(^| · )3\/3 steps( · |$)/);
+      const rowOf = (index: number) =>
+        view.items().find((item) => item.dataset.key === paperKey(index))!;
+      assert.equal(
+        textOf(rowOf(0), ".llm-task-paper-tail"),
+        DRIFT,
+        "the tail names the part whose answer came last",
+      );
+      (
+        rowOf(0).querySelector(".llm-task-paper-summary") as HTMLElement
+      ).click();
+      const details = rowOf(0).querySelector(
+        ".llm-task-paper-details",
+      ) as HTMLElement;
+      assert.isFalse(details.hidden, "the digested paper expands");
+      const blocks = (
+        Array.from(
+          details.querySelectorAll(".llm-task-paper-digest"),
+        ) as HTMLElement[]
+      ).map((block) => [
+        textOf(block, ".llm-task-paper-turn"),
+        (
+          Array.from(
+            block.querySelectorAll(".llm-task-paper-how"),
+          ) as HTMLElement[]
+        ).map((line) => line.textContent),
+        textOf(block, ".llm-task-paper-snippet"),
+      ]);
+      assert.deepEqual(blocks, [
+        [BRIEF, [], briefText],
+        [DRIFT, [`Directly relevant — ${relevanceWhy}`], driftText],
+      ]);
+      assert.notInclude(details.textContent!, "Summary");
+      view.row.click();
+      await settle(view, "closed", `revised drawer (${surface})`);
     } finally {
       handle.finish();
     }
@@ -1400,6 +1665,7 @@ describe("workflow: task progress", function () {
       await exerciseCurtain(rootOf, layout, win);
       await exerciseLibraryRun(rootOf, layout, win);
       await exerciseDigestRun(rootOf, layout);
+      await exercisePartsRun(rootOf, layout);
       await exerciseLongList(rootOf, layout, win);
     });
   }
@@ -1415,6 +1681,7 @@ describe("workflow: task progress", function () {
     await exerciseCurtain(rootOf, "standalone", window);
     await exerciseLibraryRun(rootOf, "standalone", window);
     await exerciseDigestRun(rootOf, "standalone");
+    await exercisePartsRun(rootOf, "standalone");
     await exerciseLongList(rootOf, "standalone", window);
     await api.closeStandalone();
     // A closed window's elements still report isConnected; its panel must

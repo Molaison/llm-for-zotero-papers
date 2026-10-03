@@ -33,11 +33,12 @@
  * Repaints are coalesced to at most four a second. The paper list is built
  * only while the drawer is open, and a paper's details only while expanded.
  */
-import type {
-  TaskPaperLedgerEntry,
-  TaskPaperReadEvent,
-  TaskPaperState,
-  TaskPaperTextSource,
+import {
+  TASK_PAPER_DIGEST_LABEL_MAX_CHARS,
+  type TaskPaperLedgerEntry,
+  type TaskPaperReadEvent,
+  type TaskPaperState,
+  type TaskPaperTextSource,
 } from "../../../agent/context/taskPaperLedger";
 import type { TaskPaperScopeEntry } from "../../../agent/context/taskPaperScopeListing";
 import type { RunEndState } from "../../../agent/execution/types";
@@ -455,7 +456,7 @@ export function cleanTaskPaperSnippet(snippet: string): string {
 
 /**
  * The reads worth listing: what was actually read, once each. A host
- * digest shows in its own Summary block (`paperDigest`), not as a read.
+ * digest shows in its part's own block (`paperDigests`), not as a read.
  */
 function visibleReads(reads: readonly TaskPaperReadEvent[]) {
   const seen = new Set<string>();
@@ -508,8 +509,9 @@ function readSectionLabel(
 }
 
 /**
- * The paper's host digest: the latest one with a summary, else the latest
- * failure (no summary; `whyMatched` holds the host's reason), else null.
+ * The paper's newest host digest over every part: the latest one with an
+ * answer, else the latest failure (no answer; `whyMatched` holds the host's
+ * reason), else null.
  */
 function paperDigest(
   reads: readonly TaskPaperReadEvent[],
@@ -524,16 +526,80 @@ function paperDigest(
   return done || failed;
 }
 
+/**
+ * The paper's host digests, one per part, in the order the parts first
+ * appeared: each part's latest result with an answer, else its latest
+ * failure. Reads saved before parts were recorded have no `partId`; they
+ * are one part, shown as "Summary".
+ */
+function paperDigests(
+  reads: readonly TaskPaperReadEvent[],
+): TaskPaperReadEvent[] {
+  const parts = new Map<string, TaskPaperReadEvent[]>();
+  for (const read of reads) {
+    if (read.granularity !== "digest") continue;
+    const part = parts.get(read.partId || "");
+    if (part) part.push(read);
+    else parts.set(read.partId || "", [read]);
+  }
+  return [...parts.values()].map((part) => paperDigest(part)!);
+}
+
+/**
+ * A digest's part label, as the host cut it (at most 60 characters; a
+ * longer saved one is clipped); empty on a read saved before parts were
+ * recorded.
+ */
+function digestPartLabel(read: TaskPaperReadEvent): string {
+  const label = (read.label || "").trim();
+  const max = TASK_PAPER_DIGEST_LABEL_MAX_CHARS;
+  return label.length > max ? `${label.slice(0, max - 1)}…` : label;
+}
+
+/** A failed digest's words: "<label> failed", or "Summary failed". */
+function digestFailedText(read: TaskPaperReadEvent): string {
+  const label = digestPartLabel(read);
+  return label ? format("{label} failed", { label }) : t("Summary failed");
+}
+
+const RELEVANCE_WORDS = new Map<string, string>([
+  ["direct", "Directly relevant"],
+  ["partial", "Partly relevant"],
+  ["none", "Not relevant"],
+  ["unclear", "Relevance unclear"],
+]);
+
+const STANCE_WORDS = new Map<string, string>([
+  ["supports", "Supports"],
+  ["challenges", "Challenges"],
+  ["mixed", "Mixed"],
+  ["unclear", "Stance unclear"],
+]);
+
+/**
+ * A digest's judgment as a line, "Directly relevant — <reason>"; empty for
+ * a value this version does not know.
+ */
+function digestJudgmentText(
+  word: string | undefined,
+  reason: string | undefined,
+): string {
+  if (!word) return "";
+  const why = `${reason || ""}`.replace(/\s+/g, " ").trim();
+  return why ? `${t(word)} — ${why}` : t(word);
+}
+
 /** Section names the tail lists before it says "…". */
 const TAIL_SECTIONS = 3;
 
 /**
  * The row's tail over every question: "Full text" for a whole-paper read;
- * for a paper the host digested, its evidence passage count ("Summary" when
- * no evidence survived); else the sections a targeted read named ("Methods,
- * Results"), else a passage count; then "cited N". A paper whose digest
- * failed and that nothing else read says "Summary failed". Never a byte
- * size or a section count.
+ * for a paper the host digested, its evidence passage count (when no
+ * evidence survived, the label of the part whose answer came last, or
+ * "Summary"); else the sections a targeted read named ("Methods,
+ * Results"), else a passage count; then "cited N". A paper whose digests
+ * all failed and that nothing else read says "<label> failed" ("Summary
+ * failed"). Never a byte size or a section count.
  */
 export function formatTaskPaperTail(row: TaskProgressPaperRow): string {
   if (row.state === "listed") return "";
@@ -542,7 +608,7 @@ export function formatTaskPaperTail(row: TaskProgressPaperRow): string {
   const digest = paperDigest(reads);
   if (row.state === "matched") {
     return digest && !digest.snippet
-      ? t("Summary failed")
+      ? digestFailedText(digest)
       : t("title/abstract");
   }
   const citations = turns.flatMap((entry) => entry.citations);
@@ -566,7 +632,9 @@ export function formatTaskPaperTail(row: TaskProgressPaperRow): string {
   if (reads.some((read) => read.granularity === "full")) {
     parts.push(t("Full text"));
   } else if (digest?.snippet) {
-    parts.push(passages ? passageCount() : t("Summary"));
+    parts.push(
+      passages ? passageCount() : digestPartLabel(digest) || t("Summary"),
+    );
   } else if (sections.length) {
     parts.push(
       sections.slice(0, TAIL_SECTIONS).join(", ") +
@@ -1462,26 +1530,49 @@ export function mountTaskProgressView(params: {
     const readsByTurn = new Map(
       turns.map((turn) => [turn, visibleReads(model.entry!.turns[turn].reads)]),
     );
-    // The host's digest of the paper leads: its summary, or why it failed.
-    const digest = paperDigest(
+    // The host's digests of the paper lead, one block per part: its label,
+    // the relevance and stance it judged, and its answer, or why it failed.
+    const digests = paperDigests(
       turns.flatMap((turn) => model.entry!.turns[turn].reads),
     );
-    if (digest) {
+    for (const digest of digests) {
       const block = el(doc, "div", "llm-task-paper-read llm-task-paper-digest");
-      block.append(el(doc, "div", "llm-task-paper-turn", t("Summary")));
-      const summary = digest.snippet
+      const label = digestPartLabel(digest);
+      const answer = digest.snippet
         ? cleanTaskPaperSnippet(digest.snippet)
         : "";
-      block.append(
-        summary
-          ? el(doc, "blockquote", "llm-task-paper-snippet", summary)
-          : el(
-              doc,
-              "div",
-              "llm-task-paper-empty",
-              digest.whyMatched ? t(digest.whyMatched) : t("Summary failed"),
-            ),
-      );
+      // A row saved before parts were recorded keeps its "Summary" heading,
+      // and its failure says why under it, as it did.
+      const heading = !label
+        ? t("Summary")
+        : digest.snippet
+          ? label
+          : digestFailedText(digest);
+      block.append(el(doc, "div", "llm-task-paper-turn", heading));
+      for (const line of [
+        digestJudgmentText(
+          RELEVANCE_WORDS.get(digest.relevance?.level || ""),
+          digest.relevance?.reason,
+        ),
+        digestJudgmentText(
+          STANCE_WORDS.get(digest.stance?.position || ""),
+          digest.stance?.reason,
+        ),
+      ]) {
+        if (line) block.append(el(doc, "div", "llm-task-paper-how", line));
+      }
+      if (answer) {
+        block.append(el(doc, "blockquote", "llm-task-paper-snippet", answer));
+      } else if (digest.whyMatched || !label) {
+        block.append(
+          el(
+            doc,
+            "div",
+            "llm-task-paper-empty",
+            digest.whyMatched ? t(digest.whyMatched) : t("Summary failed"),
+          ),
+        );
+      }
       children.push(block);
     }
     // Question headings only help when more than one question read it.
@@ -1573,7 +1664,7 @@ export function mountTaskProgressView(params: {
       );
     } else if (
       state === "matched" &&
-      !digest &&
+      !digests.length &&
       !turns.some((turn) =>
         model.entry!.turns[turn].reads.some((read) => read.snippet),
       )

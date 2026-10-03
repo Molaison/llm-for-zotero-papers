@@ -65,6 +65,16 @@ export type TaskProgressOutcomeStep = {
   doneTargets: number;
   /** Targets it did not do, by the host's reason. */
   exceptions: readonly OutcomeException[];
+  /**
+   * Targets the model left out of what the part delivers, by its reason:
+   * not exceptions, so none of them is "not done".
+   */
+  excluded: readonly OutcomeException[];
+  /**
+   * Replaced by another part: cancelled with the replacement's reason, and
+   * no longer a step to do.
+   */
+  replaced: boolean;
 };
 
 export type TaskProgressStep = {
@@ -613,6 +623,11 @@ function countDone(steps: readonly TaskProgressStep[]): number {
   return steps.filter((step) => step.status === "completed").length;
 }
 
+/** Steps there are to do: every step but a part another replaced. */
+function countSteps(steps: readonly TaskProgressStep[]): number {
+  return steps.filter((step) => !step.outcome?.replaced).length;
+}
+
 /**
  * A built-in action starts. Its steps become the conversation's steps and
  * the row shows it working, unless a question is running: an action never
@@ -759,9 +774,19 @@ export function setTaskChecklist(
   changed(record);
 }
 
+function copyExceptions(
+  entries: readonly OutcomeException[] | undefined,
+): OutcomeException[] {
+  return (entries || []).map((entry) => ({
+    targets: [...entry.targets],
+    reason: entry.reason,
+  }));
+}
+
 /**
  * The steps a run's outcome ledger shows, one per outcome, with how the run
- * ended once it settled. Null for a ledger with no outcome and no end.
+ * ended once it settled. A replaced part keeps its row but is not counted
+ * among the steps to do. Null for a ledger with no outcome and no end.
  */
 export function taskOutcomesChecklist(
   runId: string,
@@ -779,10 +804,9 @@ export function taskOutcomesChecklist(
       digest: task.effect === "digest",
       targets: task.targets?.length || 0,
       doneTargets: task.doneTargets?.length || 0,
-      exceptions: (task.exceptions || []).map((entry) => ({
-        targets: [...entry.targets],
-        reason: entry.reason,
-      })),
+      exceptions: copyExceptions(task.exceptions),
+      excluded: copyExceptions(task.excludedTargets),
+      replaced: Boolean(task.supersededBy),
     },
   }));
   const scopePapers = new Set(
@@ -794,7 +818,7 @@ export function taskOutcomesChecklist(
     title: "",
     steps,
     done: countDone(steps),
-    total: steps.length,
+    total: countSteps(steps),
     summary: "",
     ...(checkpoint.end ? { end: checkpoint.end.state } : {}),
     ...(scopePapers ? { scopePapers } : {}),
@@ -934,7 +958,7 @@ export function hydrateTaskProgress(
         title: "",
         steps,
         done: countDone(steps),
-        total: steps.length,
+        total: countSteps(steps),
         summary: "",
       };
       // A ledger that only recorded its ending shows no steps.

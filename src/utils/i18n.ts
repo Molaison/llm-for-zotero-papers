@@ -1265,6 +1265,16 @@ const zhCN: Record<string, string> = {
   "1 passage": "1 段",
   Summary: "总结",
   "Summary failed": "总结失败",
+  // A digest part's block on a paper row: its failure, relevance and stance.
+  "{label} failed": "{label}：失败",
+  "Directly relevant": "直接相关",
+  "Partly relevant": "部分相关",
+  "Not relevant": "不相关",
+  "Relevance unclear": "相关性不明",
+  Supports: "支持",
+  Challenges: "质疑",
+  Mixed: "立场不一",
+  "Stance unclear": "立场不明",
   "{count} passages": "{count} 段",
   outline: "大纲",
   abstract: "摘要",
@@ -1288,6 +1298,10 @@ const zhCN: Record<string, string> = {
   "{done} of {total} done": "已完成 {done}/{total}",
   "{count} not done": "{count} 项未完成",
   "{done} of {total}": "{done}/{total}",
+  // A part's reason line: papers it left out, or the part that replaced it.
+  "Excluded: {reason}": "已排除：{reason}",
+  "Replaced: {reason}": "已替换：{reason}",
+  Replaced: "已替换",
   "Say “continue” to resume.": "回复“继续”即可恢复。",
   // The reasons the host writes into a run's outcome ledger (OUTCOME_REASONS).
   "A skipped, blocked, or cancelled task needs the reason.":
@@ -1300,6 +1314,16 @@ const zhCN: Record<string, string> = {
   "The change was not applied.": "此更改未应用。",
   "No readable text": "无可读文本",
   // Why a host paper digest failed (DIGEST_FAILURE_REASONS).
+  "The model did not return a usable result": "模型未返回可用的结果",
+  "The model returned an empty answer": "模型返回的回答为空",
+  "The model call timed out": "模型调用超时",
+  "The model call failed": "模型调用失败",
+  "No model is configured for paper analysis": "未配置用于分析论文的模型",
+  "The model has no safe reasoning setting for paper analysis":
+    "分析论文的模型没有可安全使用的推理设置",
+  "Too little text to analyze": "文本太少，无法分析",
+  "The analysis could not be prepared": "无法准备分析",
+  // The same reasons as rows saved before schema 2 name them.
   "The model did not return a usable summary": "模型未返回可用的总结",
   "The model returned an empty summary": "模型返回的总结为空",
   "The summary call timed out": "生成总结超时",

@@ -500,6 +500,138 @@ describe("task progress history rebuild of outcome ledgers", function () {
     );
   });
 
+  it("replays two digest parts on one paper, a part's excluded papers and a replaced part", async function () {
+    const digest = (local: string, description: string, done: string[]) =>
+      outcomeTask(local, {
+        description,
+        effect: "digest",
+        status: done.length ? "completed" : "pending",
+        targets: ["item:1"],
+        doneTargets: done,
+      });
+    const review = (excluded: boolean) =>
+      outcomeTask("review", {
+        description: "Write the review",
+        effect: "artifact",
+        targets: ["item:1", "item:2"],
+        ...(excluded
+          ? {
+              status: "completed" as const,
+              doneTargets: ["item:1"],
+              excludedTargets: [
+                { targets: ["item:2"], reason: "Off the question" },
+              ],
+            }
+          : {}),
+      });
+    const oldPart = (replaced: boolean) =>
+      outcomeTask("old", {
+        description: "Read each paper",
+        effect: "read",
+        ...(replaced
+          ? {
+              status: "cancelled" as const,
+              reason: "The user narrowed the question",
+              supersededBy: "execution-1:task:review",
+            }
+          : {}),
+      });
+    const first = outcomeCheckpoint([
+      oldPart(false),
+      digest("brief", "Summarize each paper", []),
+      digest("path", "Evidence for path integration", []),
+      review(false),
+    ]);
+    const second = outcomeCheckpoint(
+      [
+        oldPart(true),
+        digest("brief", "Summarize each paper", ["item:1"]),
+        digest("path", "Evidence for path integration", ["item:1"]),
+        review(true),
+      ],
+      "completed",
+      4,
+    );
+    const deltas = [
+      digestLedgerDelta("call-a", 1, {
+        runId: "run-outcomes",
+        partId: "brief",
+        label: "Summarize each paper",
+        summary: "In brief.",
+      }),
+      digestLedgerDelta("call-b", 1, {
+        runId: "run-outcomes",
+        partId: "path",
+        label: "Evidence for path integration",
+        summary: "Gaze tracks the belief.",
+        relevance: { level: "direct", reason: "It measures belief." },
+      }),
+    ];
+    const replay = [
+      record("run-outcomes", 1, executionCheckpointEvent(undefined, first)),
+      ...deltas.map((delta, index) =>
+        record("run-outcomes", 2 + index, {
+          type: "paper_ledger_update",
+          callId: delta.callId,
+          delta,
+        }),
+      ),
+      record("run-outcomes", 4, executionCheckpointEvent(first, second)),
+    ];
+    assert.equal(replay[3].payload.type, "execution_checkpoint_delta");
+    const history = buildTaskProgressHistory(
+      stored(),
+      new Map([["run-outcomes", replay]]),
+      1,
+    );
+    assert.deepEqual(
+      history.checklist?.steps.map((step) => [
+        step.label,
+        step.status,
+        step.detail,
+        step.outcome?.replaced,
+        step.outcome?.excluded,
+      ]),
+      [
+        [
+          "Read each paper",
+          "cancelled",
+          "The user narrowed the question",
+          true,
+          [],
+        ],
+        ["Summarize each paper", "completed", undefined, false, []],
+        ["Evidence for path integration", "completed", undefined, false, []],
+        [
+          "Write the review",
+          "completed",
+          undefined,
+          false,
+          [{ targets: ["item:2"], reason: "Off the question" }],
+        ],
+      ],
+    );
+
+    setTaskProgressHistoryLoaderForTests(async () => replay);
+    chatHistory.set(KEY, stored());
+    loadedConversationKeys.add(KEY);
+    ensureTaskProgressHydrated(KEY, 1);
+    await waitForTaskProgressHydrationForTests(KEY);
+    const rebuilt = getTaskProgress(KEY)!;
+    assert.equal(displayedTaskRunState(rebuilt), "completed");
+    assert.equal(rebuilt.checklist?.done, 3);
+    assert.equal(rebuilt.checklist?.total, 3, "the replaced part is left out");
+    assert.deepEqual(
+      rebuilt.ledger.papers["1:1"].turns[1].reads
+        .filter((read) => read.granularity === "digest")
+        .map((read) => [read.partId, read.label, read.relevance?.level]),
+      [
+        ["brief", "Summarize each paper", undefined],
+        ["path", "Evidence for path integration", "direct"],
+      ],
+    );
+  });
+
   it("keeps an ending with no outcome off the steps, and an earlier run's outcomes to the row", async function () {
     const endOnly = [
       record("run-outcomes", 1, {
