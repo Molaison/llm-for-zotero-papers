@@ -10,10 +10,16 @@
  * Complete digests are cached in the conversation's tool-result handle
  * store, where context_read reads them by handle; failures never are.
  *
+ * The worker gets the part's description as its task and the user's request
+ * the part saved when it was declared (`question`) as context, so a resumed
+ * part answers the original request, not "continue". Each paper's row update
+ * names the part (its local id and label), so two parts over one paper stay
+ * two results.
+ *
  * Each completed digest is also a host-verified read of its paper: the host
  * issues one read observation for it (read mode `digest`), so a document may
  * cite a digested paper the model never read itself. Its depth is the text
- * the digest read: body for the whole text or an excerpt of 5,000 characters
+ * the worker read: body for the whole text or an excerpt of 5,000 characters
  * or more, abstract below that.
  *
  * Bounds. One `task_update` call digests at most 30 papers; the rest stay
@@ -27,6 +33,7 @@ import type { PaperContextRef } from "../../shared/types";
 import {
   buildDigestFailureLedgerDelta,
   buildDigestLedgerDelta,
+  taskPaperDigestPartLabel,
   type TaskPaperDigestPaper,
 } from "../context/taskPaperLedger";
 import { getTurnPapers } from "../context/requestTurnPaperScope";
@@ -68,7 +75,7 @@ export const DIGEST_MAX_PAPERS_PER_CALL = 30;
 /** Re-declarations that run a failed paper again before its failure is final. */
 export const DIGEST_MAX_FAILURE_RETRIES = 2;
 
-/** A digest of the whole text, or of at least this much, reads the body. */
+/** A digest of the whole text, or of at least this much read, is body depth. */
 export const DIGEST_BODY_DEPTH_CHARS = 5_000;
 
 /**
@@ -199,9 +206,10 @@ function digestPaperIdentity(digest: HostPaperDigest): {
 /**
  * The read observation the host issues for one completed digest: the paper's
  * text was read whole or in part by the host, under a call id of its own per
- * paper. Its depth is body when the digest read the whole text or at least
- * 5,000 characters, else abstract. Null when the paper has no Zotero
- * identity.
+ * paper. Its result digest covers the answer, the relevance and stance, the
+ * evidence and the source. Its depth is body when the worker read the whole
+ * text or at least 5,000 characters, else abstract. Null when the paper has
+ * no Zotero identity.
  */
 export async function createDigestReadObservation(params: {
   callId: string;
@@ -218,7 +226,9 @@ export async function createDigestReadObservation(params: {
   )}`;
   const resultDigest = `sha256:${await sha256Text(
     canonicalJson({
-      summary: digest.summary,
+      answer: digest.answer,
+      relevance: digest.relevance,
+      stance: digest.stance,
       evidence: digest.evidence,
       source: digest.source,
     }),
@@ -241,7 +251,7 @@ export async function createDigestReadObservation(params: {
     ...identity,
     capabilities: [
       digest.source.complete ||
-      digest.source.characters >= DIGEST_BODY_DEPTH_CHARS
+      digest.source.readCharacters >= DIGEST_BODY_DEPTH_CHARS
         ? "body"
         : "abstract",
     ] as TrustedReadObservation["capabilities"],
@@ -259,6 +269,11 @@ type DigestCacheContent = {
   rendered: string;
 };
 
+/**
+ * The schema 2 digest a handle record holds, or null. A schema 1 record (a
+ * summary, from before instruction-driven digests) is never served: it stays
+ * in the store, where context_read still reads its stored text.
+ */
 function cachedDigest(
   record: AgentToolResultHandleRecord,
 ): HostPaperDigest | null {
@@ -269,9 +284,10 @@ function cachedDigest(
     typeof content.cacheKey !== "string" ||
     !digest ||
     typeof digest !== "object" ||
+    digest.schema !== 2 ||
     digest.cacheKey !== content.cacheKey ||
-    typeof digest.summary !== "string" ||
-    !digest.summary.trim()
+    typeof digest.answer !== "string" ||
+    !digest.answer.trim()
   )
     return null;
   return digest;
@@ -334,7 +350,7 @@ export function createHandleStorePaperDigestCache(params: {
     get: async (key) => (await load()).get(key) || null,
     set: async (digest) => {
       // Only a complete digest is cached; the worker never hands a failure.
-      if (!digest.summary.trim()) return;
+      if (!digest.answer.trim()) return;
       const digests = await load();
       await store(digest);
       digests.set(digest.cacheKey, digest);
@@ -481,8 +497,11 @@ export async function runDigestParts(params: {
         ).checkpoint,
     );
 
-  /** itemId → the observation issued for the paper's digest this call. */
-  const observations = new Map<number, TrustedReadObservation>();
+  /**
+   * Digest cache key → the observation issued for that digest this call.
+   * Keyed by digest, not paper: two parts over one paper are two digests.
+   */
+  const observations = new Map<string, TrustedReadObservation>();
   const issueObservation = async (callId: string, digest: HostPaperDigest) => {
     try {
       const observation = await createDigestReadObservation({
@@ -490,7 +509,7 @@ export async function runDigestParts(params: {
         digest,
       });
       if (!observation) return [];
-      observations.set(digest.itemId, observation);
+      observations.set(digest.cacheKey, observation);
       context.recordReadObservations?.([observation]);
       return [observation];
     } catch {
@@ -499,9 +518,10 @@ export async function runDigestParts(params: {
     }
   };
   const citationSourceOf = (
-    itemId: number,
+    _itemId: number,
+    digest: HostPaperDigest,
   ): HostPaperDigestCitationSource | undefined => {
-    const observation = observations.get(itemId);
+    const observation = observations.get(digest.cacheKey);
     return observation
       ? {
           libraryID: observation.libraryID,
@@ -560,13 +580,17 @@ export async function runDigestParts(params: {
     const base = context.toolCallId || `${context.runId || "run"}:${local}`;
     // One call id per part, so two parts over one paper both apply.
     const callId = params.parts.length > 1 ? `${base}:${local}` : base;
-    const instruction =
-      request.executionCheckpoint?.tasks.find(
-        (task) => task.taskId === part.taskId,
-      )?.description || "";
+    const task = request.executionCheckpoint?.tasks.find(
+      (entry) => entry.taskId === part.taskId,
+    );
+    const instruction = task?.description || "";
+    // The paper rows name the part: its local id and its label.
+    const label = taskPaperDigestPartLabel(instruction);
+    const partRow = { partId: local, ...(label ? { label } : {}) };
     const result = await runPaperDigestJob({
       targets: part.targets,
       instruction,
+      ...(task?.question ? { question: task.question } : {}),
       readText: async (itemId, maxChars) => {
         const paper = await resolvePaper(itemId);
         if (!paper) return null;
@@ -594,6 +618,7 @@ export async function runDigestParts(params: {
           runId: context.runId,
           callId,
           toolName: "task_update",
+          ...partRow,
           digest,
           paper,
         });
@@ -614,6 +639,7 @@ export async function runDigestParts(params: {
             runId: context.runId,
             callId,
             toolName: "task_update",
+            ...partRow,
             failure,
             paper,
           }),
@@ -626,7 +652,8 @@ export async function runDigestParts(params: {
   }
 
   const handles: NonNullable<DigestRunResult["digestHandles"]> = [];
-  const handleByItem = new Map<number, string>();
+  /** Digest cache key → its handle; two parts over one paper have two. */
+  const handleByDigest = new Map<string, string>();
   const evidenceRefs: DigestEvidenceRef[] = [];
   for (const digest of digests) {
     let handle: string | undefined;
@@ -635,7 +662,7 @@ export async function runDigestParts(params: {
     } catch {
       // The digest stays in the result; only its handle is missing.
     }
-    const observation = observations.get(digest.itemId);
+    const observation = observations.get(digest.cacheKey);
     const ref = observation
       ? shortEvidenceRef(observation.observationId)
       : undefined;
@@ -649,7 +676,7 @@ export async function runDigestParts(params: {
           ? { attachmentItemKey: observation.attachmentItemKey }
           : {}),
       });
-    if (handle) handleByItem.set(digest.itemId, handle);
+    if (handle) handleByDigest.set(digest.cacheKey, handle);
     if (handle || ref)
       handles.push({
         itemId: digest.itemId,
@@ -685,7 +712,7 @@ export async function runDigestParts(params: {
             allFailures,
             titleOf,
             citationSourceOf,
-            (itemId) => handleByItem.get(itemId),
+            (_itemId, digest) => handleByDigest.get(digest.cacheKey),
           ),
         }
       : {}),

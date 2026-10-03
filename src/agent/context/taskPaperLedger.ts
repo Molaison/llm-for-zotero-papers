@@ -58,11 +58,23 @@ export type TaskPaperReadGranularity =
   | "figure"
   | "page"
   /**
-   * A host digest of the paper (`digests/paperDigestWorker.ts`): its summary
+   * A host digest of the paper (`digests/paperDigestWorker.ts`): its answer
    * as the snippet, or, without one, why the digest failed (`whyMatched`).
    * Not the paper's own text: its evidence is recorded as `passage` reads.
    */
   | "digest";
+
+/** How a paper bears on the request, as a host digest judged it. */
+export type TaskPaperDigestRelevance = {
+  level: "direct" | "partial" | "none" | "unclear";
+  reason: string;
+};
+
+/** Whether a paper supports the request's claim, as a host digest judged it. */
+export type TaskPaperDigestStance = {
+  position: "supports" | "challenges" | "mixed" | "unclear";
+  reason: string;
+};
 
 /** One thing the agent read from one paper during one tool call. */
 export type TaskPaperReadEvent = {
@@ -76,7 +88,10 @@ export type TaskPaperReadEvent = {
   granularity: TaskPaperReadGranularity;
   /** How the host found it: bm25, metadata, exact, overview, targeted, ... */
   method?: string;
-  /** Section or page label, when the payload names one. */
+  /**
+   * Section or page label, when the payload names one; on a `digest` read,
+   * the label of the part it answers (`taskPaperDigestPartLabel`).
+   */
   label?: string;
   /**
    * At most `TASK_PAPER_SNIPPET_MAX_CHARS` characters
@@ -89,6 +104,15 @@ export type TaskPaperReadEvent = {
   chunk?: number;
   /** Host observation ids this read attested. */
   observationIds?: string[];
+  /**
+   * A digest's reads only: the local id of the part whose result they are.
+   * Absent on rows saved before parts were recorded.
+   */
+  partId?: string;
+  /** A `digest` read only: the relevance the digest judged, when it did. */
+  relevance?: TaskPaperDigestRelevance;
+  /** A `digest` read only: the stance the digest judged, when it did. */
+  stance?: TaskPaperDigestStance;
 };
 
 export type TaskPaperCitation = {
@@ -1274,7 +1298,9 @@ export type TaskPaperDigestPaper = {
  */
 export type TaskPaperDigestInput = {
   contextItemId?: number;
-  summary: string;
+  answer: string;
+  relevance?: Readonly<TaskPaperDigestRelevance>;
+  stance?: Readonly<TaskPaperDigestStance>;
   evidence?: ReadonlyArray<{ section?: string; quote: string; chunk?: number }>;
   source?: { backend: "mineru" | "pdf" | "text" };
 };
@@ -1288,9 +1314,53 @@ export type BuildDigestLedgerDeltaParams = {
   callId: string;
   toolName: string;
   turnIndex?: number;
+  /** The local id of the digest part the paper's result answers. */
+  partId?: string;
+  /** The part's label (`taskPaperDigestPartLabel`); none without one. */
+  label?: string;
   digest: TaskPaperDigestInput;
   paper: TaskPaperDigestPaper;
 };
+
+/** The most characters a digest part's label keeps. */
+export const TASK_PAPER_DIGEST_LABEL_MAX_CHARS = 60;
+
+/**
+ * A digest part's label for its paper rows: its description's first
+ * sentence, at most 60 characters, cut at a word (with "…") when longer.
+ * Undefined for an empty description.
+ */
+export function taskPaperDigestPartLabel(
+  description: string | undefined,
+): string | undefined {
+  const clean = `${description ?? ""}`.replace(/\s+/g, " ").trim();
+  // A sentence ends at . ! ? before a space, or at 。！？ (unspaced). A
+  // question keeps its mark; a closing period is dropped.
+  const sentence = clean
+    .split(/(?<=[.!?])\s|(?<=[。！？])/u)[0]
+    .replace(/[.。\s]+$/u, "")
+    .trim();
+  if (!sentence) return undefined;
+  const max = TASK_PAPER_DIGEST_LABEL_MAX_CHARS;
+  if (sentence.length <= max) return sentence;
+  const head = sentence.slice(0, max - 1);
+  const space = head.lastIndexOf(" ");
+  // An unspaced script (Han, kana) has no word to cut at.
+  const cut = space > max / 2 ? head.slice(0, space) : head;
+  return `${cut.replace(/[\s,;:]+$/u, "")}…`;
+}
+
+/** A judgment's reason at the snippet cap; defined values only. */
+function digestJudgment<T extends { reason: string }>(
+  judgment: Readonly<T> | undefined,
+): T | undefined {
+  if (!judgment) return undefined;
+  return {
+    ...judgment,
+    reason:
+      clipTaskPaperText(judgment.reason, TASK_PAPER_SNIPPET_MAX_CHARS) || "",
+  } as T;
+}
 
 export type BuildDigestFailureLedgerDeltaParams = Omit<
   BuildDigestLedgerDeltaParams,
@@ -1358,6 +1428,7 @@ function digestRead(
   delta: TaskPaperLedgerDelta,
   key: string,
   seed: ReadSeed,
+  partId?: string,
 ): TaskPaperReadEvent {
   const read: TaskPaperReadEvent = {
     key,
@@ -1367,13 +1438,16 @@ function digestRead(
   };
   if (delta.runId) read.runId = delta.runId;
   if (delta.turnIndex !== undefined) read.turnIndex = delta.turnIndex;
+  const part = text(partId);
+  if (part) read.partId = part;
   return read;
 }
 
 /**
  * What one completed host digest adds to the ledger: the paper read, one
- * `digest` read holding its summary (up to
- * `TASK_PAPER_DIGEST_SNIPPET_MAX_CHARS`), and one `passage` read per verified
+ * `digest` read holding its answer (up to
+ * `TASK_PAPER_DIGEST_SNIPPET_MAX_CHARS`), its part's id and label and the
+ * relevance and stance it judged, and one `passage` read per verified
  * evidence quote under its section. Built directly, never through
  * `deriveTaskPaperLedgerDelta` (the digest is no read tool's payload). Its
  * call id is the job's call id qualified by the paper, so each paper of one
@@ -1393,13 +1467,21 @@ export function buildDigestLedgerDelta(
     `${params.callId}:digest:${params.paper.itemId}`,
     paper,
   );
-  const summary = readSeed({ granularity: "digest", method: "digest" });
+  const answer = readSeed({
+    granularity: "digest",
+    method: "digest",
+    label: params.label,
+  });
   const clipped = clipTaskPaperText(
-    digest.summary,
+    digest.answer,
     TASK_PAPER_DIGEST_SNIPPET_MAX_CHARS,
   );
-  if (clipped) summary.snippet = clipped;
-  const seeds: ReadSeed[] = [summary];
+  if (clipped) answer.snippet = clipped;
+  const relevance = digestJudgment(digest.relevance);
+  if (relevance) answer.relevance = relevance;
+  const stance = digestJudgment(digest.stance);
+  if (stance) answer.stance = stance;
+  const seeds: ReadSeed[] = [answer];
   for (const evidence of digest.evidence || []) {
     const seed = readSeed({
       granularity: "passage",
@@ -1413,7 +1495,9 @@ export function buildDigestLedgerDelta(
     seeds.push(seed);
   }
   const kept = seeds.slice(0, TASK_PAPER_MAX_READS_PER_TURN);
-  delta.reads = kept.map((seed) => digestRead(delta, paper.key, seed));
+  delta.reads = kept.map((seed) =>
+    digestRead(delta, paper.key, seed, params.partId),
+  );
   if (seeds.length > kept.length) {
     delta.droppedReads = seeds.length - kept.length;
   }
@@ -1422,10 +1506,10 @@ export function buildDigestLedgerDelta(
 
 /**
  * What a failed host digest adds to the ledger: the paper as matched (its
- * text was not summarized) and one `digest` read with no snippet whose
- * `whyMatched` is the host's reason, which the paper's row shows. Its call
- * id differs from a success's, so a later digest of the paper in the same
- * call still applies.
+ * text was not analyzed) and one `digest` read with no snippet whose
+ * `whyMatched` is the host's reason, which the paper's row shows, under its
+ * part's id and label. Its call id differs from a success's, so a later
+ * digest of the paper in the same call still applies.
  */
 export function buildDigestFailureLedgerDelta(
   params: BuildDigestFailureLedgerDeltaParams,
@@ -1447,8 +1531,10 @@ export function buildDigestFailureLedgerDelta(
       readSeed({
         granularity: "digest",
         method: "digest",
+        label: params.label,
         whyMatched: params.failure.reason,
       }),
+      params.partId,
     ),
   ];
   return delta;

@@ -17,6 +17,7 @@ import {
   createTaskPaperLedger,
   deriveTaskPaperLedgerDelta,
   firstBodyParagraph,
+  taskPaperDigestPartLabel,
   taskPaperReadDepths,
   type TaskPaperLedgerDelta,
 } from "../src/agent/context/taskPaperLedger";
@@ -907,14 +908,12 @@ describe("taskPaperLedger", function () {
       overrides: Partial<HostPaperDigest> = {},
     ): HostPaperDigest {
       return {
+        schema: 2,
         itemId,
         contextItemId: itemId + 100,
         title: `Paper ${itemId}`,
-        summary:
+        answer:
           "Cells drift slowly over days while the population code stays stable.",
-        contributions: ["Drift is slow."],
-        methods: "Two-photon imaging.",
-        limitations: "Not stated",
         evidence: [
           {
             section: "Methods",
@@ -923,7 +922,14 @@ describe("taskPaperLedger", function () {
           },
           { quote: "Population readouts stayed stable." },
         ],
-        source: { backend: "mineru", characters: 4000, complete: true },
+        facets: [{ label: "Methods", content: "Two-photon imaging." }],
+        gaps: [],
+        source: {
+          backend: "mineru",
+          readCharacters: 4000,
+          totalCharacters: 4000,
+          complete: true,
+        },
         model: "m",
         producedAt: 1,
         cacheKey: "k",
@@ -1012,8 +1018,8 @@ describe("taskPaperLedger", function () {
       assert.deepEqual(taskPaperReadDepths(delta).text, [1]);
     });
 
-    it("keeps a summary whole up to its own cap, evidence at the snippet cap, and caps the reads per paper", function () {
-      // A 220-word summary (the worker's upper bound) is about 1,500 characters.
+    it("keeps an answer whole up to its own cap, evidence at the snippet cap, and caps the reads per paper", function () {
+      // A 220-word answer is about 1,500 characters.
       const whole = "Representational drift ".repeat(65).trim();
       assert.isAbove(whole.length, TASK_PAPER_SNIPPET_MAX_CHARS);
       assert.isAtMost(whole.length, TASK_PAPER_DIGEST_SNIPPET_MAX_CHARS);
@@ -1021,7 +1027,7 @@ describe("taskPaperLedger", function () {
         callId: "call-7",
         toolName: "task_update",
         digest: digest(2, {
-          summary: whole,
+          answer: whole,
           evidence: [{ section: "Results", quote: "quote ".repeat(100) }],
         }),
         paper: paper(2),
@@ -1038,8 +1044,14 @@ describe("taskPaperLedger", function () {
         callId: "call-7",
         toolName: "task_update",
         digest: digest(2, {
-          summary: long,
-          source: { backend: "pdf", characters: 1, complete: false },
+          answer: long,
+          source: {
+            backend: "pdf",
+            readCharacters: 1,
+            totalCharacters: 2,
+            totalEstimated: true,
+            complete: false,
+          },
           evidence: Array.from({ length: 20 }, (_, index) => ({
             quote: `Quote ${index}.`,
           })),
@@ -1115,7 +1127,7 @@ describe("taskPaperLedger", function () {
         failure: {
           target: "item:4",
           itemId: 4,
-          reason: "The summary call timed out",
+          reason: DIGEST_FAILURE_REASONS.timeout,
         },
         paper: paper(4),
       });
@@ -1145,6 +1157,206 @@ describe("taskPaperLedger", function () {
         1,
       );
       assert.equal(ledger.papers["1:3"].state, "read");
+    });
+
+    it("names the part on a digest read: its id, its label, and the relevance and stance it judged", function () {
+      const delta = buildDigestLedgerDelta({
+        runId: "run-d",
+        callId: "call-7",
+        toolName: "task_update",
+        partId: "relevance",
+        label: "Judge whether each paper bears on drift",
+        digest: digest(1, {
+          relevance: {
+            level: "partial",
+            reason: `It studies drift, not decoding. ${"More. ".repeat(80)}`,
+          },
+          stance: { position: "supports", reason: "Decoding stayed stable." },
+        }),
+        paper: paper(1),
+      });
+      const [read, ...passages] = delta.reads;
+      assert.equal(read.granularity, "digest");
+      assert.equal(read.partId, "relevance");
+      assert.equal(read.label, "Judge whether each paper bears on drift");
+      assert.equal(read.relevance?.level, "partial");
+      assert.isAtMost(
+        read.relevance!.reason.length,
+        TASK_PAPER_SNIPPET_MAX_CHARS,
+      );
+      assert.deepEqual(read.stance, {
+        position: "supports",
+        reason: "Decoding stayed stable.",
+      });
+      // The evidence belongs to the part too, and keeps its section label.
+      assert.deepEqual(
+        passages.map((entry) => [entry.partId, entry.label]),
+        [
+          ["relevance", "Methods"],
+          ["relevance", undefined],
+        ],
+      );
+      assert.notProperty(passages[0], "relevance");
+      assert.deepEqual(JSON.parse(JSON.stringify(delta)), delta);
+    });
+
+    it("records a digest without a part as before: no part keys, no label", function () {
+      const delta = buildDigestLedgerDelta({
+        callId: "call-7",
+        toolName: "task_update",
+        digest: digest(1),
+        paper: paper(1),
+      });
+      for (const read of delta.reads) {
+        assert.notProperty(read, "partId");
+        assert.notProperty(read, "relevance");
+        assert.notProperty(read, "stance");
+      }
+      assert.notProperty(delta.reads[0], "label");
+    });
+
+    it("names the part on a failed digest too", function () {
+      const failed = buildDigestFailureLedgerDelta({
+        callId: "call-7",
+        toolName: "task_update",
+        partId: "summaries",
+        label: "Summarize each selected paper",
+        failure: { reason: DIGEST_FAILURE_REASONS.thinText },
+        paper: paper(3),
+      });
+      assert.deepEqual(
+        failed.reads.map((read) => [
+          read.granularity,
+          read.partId,
+          read.label,
+          read.whyMatched,
+          read.snippet,
+        ]),
+        [
+          [
+            "digest",
+            "summaries",
+            "Summarize each selected paper",
+            "Too little text to analyze",
+            undefined,
+          ],
+        ],
+      );
+    });
+
+    it("keeps two parts' digests of one paper as two digest reads, each with its part", function () {
+      const ledger = createTaskPaperLedger();
+      for (const [partId, label, answer] of [
+        ["summaries", "Summarize each selected paper", "A summary."],
+        ["relevance", "Judge each paper's relevance", "A verdict."],
+      ]) {
+        applyTaskPaperLedgerDelta(
+          ledger,
+          buildDigestLedgerDelta({
+            runId: "run-d",
+            callId: `call-7:${partId}`,
+            toolName: "task_update",
+            partId,
+            label,
+            digest: digest(1, { answer, evidence: [] }),
+            paper: paper(1),
+          }),
+          1,
+        );
+      }
+      const reads = ledger.papers["1:1"].turns[1].reads.filter(
+        (read) => read.granularity === "digest",
+      );
+      assert.deepEqual(
+        reads.map((read) => [read.partId, read.label, read.snippet]),
+        [
+          ["summaries", "Summarize each selected paper", "A summary."],
+          ["relevance", "Judge each paper's relevance", "A verdict."],
+        ],
+      );
+    });
+
+    it("still reads a row saved before parts: a digest read with no part fields", function () {
+      const ledger = createTaskPaperLedger();
+      const saved = JSON.parse(
+        JSON.stringify({
+          version: 1,
+          callId: "call-old:digest:1",
+          runId: "run-old",
+          toolName: "task_update",
+          papers: [{ key: "1:1", libraryID: 1, itemId: 1, state: "read" }],
+          reads: [
+            {
+              key: "1:1",
+              callId: "call-old:digest:1",
+              runId: "run-old",
+              toolName: "task_update",
+              granularity: "digest",
+              method: "digest",
+              snippet: "An old summary.",
+            },
+          ],
+        }),
+      ) as TaskPaperLedgerDelta;
+      applyTaskPaperLedgerDelta(ledger, saved, 1);
+      const [read] = ledger.papers["1:1"].turns[1].reads;
+      assert.equal(read.snippet, "An old summary.");
+      assert.notProperty(read, "partId");
+      assert.notProperty(read, "label");
+    });
+
+    describe("taskPaperDigestPartLabel", function () {
+      it("is the description's first sentence", function () {
+        assert.equal(
+          taskPaperDigestPartLabel(
+            "Judge whether each paper bears on drift. Give one reason.",
+          ),
+          "Judge whether each paper bears on drift",
+        );
+        assert.equal(
+          taskPaperDigestPartLabel("  Summarize each selected paper  "),
+          "Summarize each selected paper",
+        );
+        assert.equal(
+          taskPaperDigestPartLabel("判断每篇论文是否与漂移有关。给出理由。"),
+          "判断每篇论文是否与漂移有关",
+        );
+        // A question keeps its mark; a decimal point ends nothing.
+        assert.equal(
+          taskPaperDigestPartLabel(
+            "Does each paper support the idea? Give the reason.",
+          ),
+          "Does each paper support the idea?",
+        );
+        assert.equal(
+          taskPaperDigestPartLabel("这篇论文支持这个想法吗？请说明。"),
+          "这篇论文支持这个想法吗？",
+        );
+        assert.equal(
+          taskPaperDigestPartLabel("Report effects at p < 0.05 only"),
+          "Report effects at p < 0.05 only",
+        );
+      });
+
+      it("cuts a long first sentence at a word, within 60 characters", function () {
+        const label = taskPaperDigestPartLabel(
+          "For each paper extract the sample size, the recording method, the brain area and the main effect",
+        )!;
+        assert.isAtMost(label.length, 60);
+        assert.equal(
+          label,
+          "For each paper extract the sample size, the recording…",
+        );
+        const unspaced = taskPaperDigestPartLabel("漂".repeat(80))!;
+        assert.isAtMost(unspaced.length, 60);
+        assert.isTrue(unspaced.endsWith("…"));
+      });
+
+      it("gives no label for an empty description", function () {
+        assert.isUndefined(taskPaperDigestPartLabel(""));
+        assert.isUndefined(taskPaperDigestPartLabel("   "));
+        assert.isUndefined(taskPaperDigestPartLabel(undefined));
+      });
     });
   });
 

@@ -17,6 +17,7 @@ import {
 import {
   PAPER_DIGEST_HANDLE_TOOL,
   createDigestReadObservation,
+  createHandleStorePaperDigestCache,
   createZoteroPaperDigestSources,
 } from "../src/agent/digests/digestJobHost";
 import type { HostPaperDigest } from "../src/agent/digests/paperDigestWorker";
@@ -24,6 +25,8 @@ import type { MaterialRef } from "../src/agent/documents/materialRef";
 import type { TaskPaperLedgerDelta } from "../src/agent/context/taskPaperLedger";
 import {
   clearAgentToolResultHandleStore,
+  createAgentToolResultHandleRecord,
+  getAgentToolResultHandle,
   upsertAgentToolResultHandles,
   type AgentToolResultHandleRecord,
 } from "../src/agent/store/toolResultHandles";
@@ -61,15 +64,18 @@ const CAPABILITIES: AgentModelCapabilities = {
 /** A paper long enough to summarize (the host refuses under 1,500 characters). */
 const TEXT = `# Introduction\nPlace cells drift slowly across days.\n\n## Methods\nWe recorded forty cells over ten days.\n\n## Appendix\n${"The appendix restates the recording protocol in detail. ".repeat(30)}`;
 
-const reply = (summary: string) => ({
+/** A schema 2 reply: the answer, one verified quote, and summary facets. */
+const reply = (answer: string, extra: Record<string, unknown> = {}) => ({
   text: JSON.stringify({
-    summary,
-    contributions: ["Drift is slow."],
-    methods: "Two-photon imaging.",
-    limitations: "Not stated",
+    answer,
     evidence: [
       { section: "Methods", quote: "We recorded forty cells over ten days." },
     ],
+    facets: [
+      { label: "Contributions", content: "Drift is slow." },
+      { label: "Methods", content: "Two-photon imaging." },
+    ],
+    ...extra,
   }),
   completion: { status: "complete" as const },
 });
@@ -292,8 +298,9 @@ describe("task_update runs a declared digest part", function () {
     ]);
     assert.isUndefined(answer.note, "a digest declaration is never a no-op");
     assert.include(answer.digests, "### Drift A (item:5)");
-    assert.include(answer.digests, "Summary: Cells drift slowly.");
-    assert.include(answer.digests, "Not summarized:");
+    assert.include(answer.digests, "Answer: Cells drift slowly.");
+    assert.include(answer.digests, "- Contributions: Drift is slow.");
+    assert.include(answer.digests, "Not analyzed:");
     assert.deepEqual(answer.digestFailures, [
       { itemId: 7, title: "Drift C", reason: "No readable text" },
     ]);
@@ -339,6 +346,12 @@ describe("task_update runs a declared digest part", function () {
         "call-digest:digest:7:failed",
       ],
     );
+    // Every paper's digest read, and the failure's, names its part.
+    for (const delta of deltas)
+      assert.include(delta.reads[0], {
+        partId: "summaries",
+        label: "Summarize each selected paper",
+      });
     const paper5 = deltas.find((delta) => delta.papers[0].itemId === 5)!;
     assert.include(paper5.papers[0], {
       libraryID: 1,
@@ -602,6 +615,7 @@ describe("task_update runs a declared digest part", function () {
       assert.include(answer.digests, long.slice(0, 400));
       assert.notInclude(answer.digests, "END-OF-SUMMARY");
       assert.notInclude(answer.digests, "Contributions:");
+      assert.notInclude(answer.digests, "Facets:");
       // The stored digest is whole.
       const stored = harness.handles.find(
         (record) => record.toolName === PAPER_DIGEST_HANDLE_TOOL,
@@ -659,13 +673,13 @@ describe("task_update runs a declared digest part", function () {
     };
     try {
       const digest = (source: HostPaperDigest["source"]): HostPaperDigest => ({
+        schema: 2,
         itemId: 5,
         contextItemId: 105,
-        summary: "s",
-        contributions: [],
-        methods: "",
-        limitations: "",
+        answer: "s",
         evidence: [],
+        facets: [],
+        gaps: [],
         source,
         model: "m",
         producedAt: 0,
@@ -681,7 +695,8 @@ describe("task_update runs a declared digest part", function () {
       assert.deepEqual(
         await capabilities({
           backend: "mineru",
-          characters: 3_000,
+          readCharacters: 3_000,
+          totalCharacters: 3_000,
           complete: true,
         }),
         ["body"],
@@ -689,15 +704,20 @@ describe("task_update runs a declared digest part", function () {
       assert.deepEqual(
         await capabilities({
           backend: "pdf",
-          characters: 5_000,
+          readCharacters: 5_000,
+          totalCharacters: 90_000,
+          totalEstimated: true,
           complete: false,
         }),
         ["body"],
       );
+      // The depth is what the worker read, never the paper's length.
       assert.deepEqual(
         await capabilities({
           backend: "pdf",
-          characters: 4_999,
+          readCharacters: 4_999,
+          totalCharacters: 90_000,
+          totalEstimated: true,
           complete: false,
         }),
         ["abstract"],
@@ -705,6 +725,266 @@ describe("task_update runs a declared digest part", function () {
     } finally {
       zotero.Items = originalItems;
     }
+  });
+
+  it("hashes the answer, relevance and stance into the read observation", async function () {
+    const zotero = (globalThis as unknown as { Zotero: any }).Zotero;
+    const originalItems = zotero.Items;
+    zotero.Items = {
+      ...(originalItems || {}),
+      get: (id: number) => ({ id, key: `KEY${id}`, libraryID: 1 }),
+    };
+    try {
+      const base: HostPaperDigest = {
+        schema: 2,
+        itemId: 5,
+        contextItemId: 105,
+        answer: "Relevant.",
+        evidence: [],
+        facets: [],
+        gaps: [],
+        source: {
+          backend: "mineru",
+          readCharacters: 3_000,
+          totalCharacters: 3_000,
+          complete: true,
+        },
+        model: "m",
+        producedAt: 0,
+        cacheKey: "k",
+      };
+      const resultOf = async (digest: HostPaperDigest) =>
+        (await createDigestReadObservation({ callId: "c", digest }))
+          ?.resultDigest;
+      const plain = await resultOf(base);
+      assert.notEqual(await resultOf({ ...base, answer: "Other." }), plain);
+      assert.notEqual(
+        await resultOf({
+          ...base,
+          relevance: { level: "direct", reason: "On topic." },
+        }),
+        plain,
+      );
+      assert.notEqual(
+        await resultOf({
+          ...base,
+          stance: { position: "supports", reason: "Agrees." },
+        }),
+        plain,
+      );
+    } finally {
+      zotero.Items = originalItems;
+    }
+  });
+
+  it("gives the worker the part's saved question, which a resumed part keeps after continue", async function () {
+    const prompts: string[] = [];
+    let stop = true;
+    const controller = new AbortController();
+    const harness = createHarness(
+      scriptedDigests(async (chat) => {
+        prompts.push(chat.prompt);
+        if (stop) controller.abort();
+        return reply("Cells drift slowly.");
+      }),
+      [5, 6],
+    );
+    harness.context.signal = controller.signal;
+    await runCall(harness, "call-first", {
+      tasks: [{ ...SUMMARIZE, scope: undefined, targetIds: ["5", "6"] }],
+    });
+    // The run's saved progress restores the part with the question it was
+    // declared under; the new run's own text is only "continue".
+    const saved = harness.request.executionCheckpoint!;
+    harness.request.executionCheckpoint = {
+      ...saved,
+      tasks: saved.tasks.map((task) => ({
+        ...task,
+        question: "Which papers show representational drift?",
+      })),
+    };
+    harness.request.userText = "continue";
+    harness.context.signal = undefined;
+    stop = false;
+    prompts.length = 0;
+    const resumed = await runCall(harness, "call-resume", {
+      tasks: [{ taskId: "summaries" }],
+    });
+    assert.isTrue(resumed.toolResult.ok);
+    assert.lengthOf(prompts, 1, "only the paper Stop left");
+    assert.include(
+      prompts[0],
+      "The user's request (context): Which papers show representational drift?",
+    );
+    assert.notInclude(prompts[0], "The user's request (context): continue");
+  });
+
+  it("gives the worker the user's request when the part is declared", async function () {
+    const prompts: string[] = [];
+    const harness = createHarness(
+      scriptedDigests(async (chat) => {
+        prompts.push(chat.prompt);
+        return reply("Cells drift slowly.");
+      }),
+      [5],
+    );
+    await runCall(harness, "call-question", { tasks: [SUMMARIZE] });
+    assert.include(
+      prompts[0],
+      "The user's request (context): Summarize all papers for me and write a literature review",
+    );
+    assert.include(
+      prompts[0],
+      "Task for this paper: Summarize each selected paper",
+    );
+  });
+
+  it("runs two parts over one paper as two results, each with its part on the paper's row and its own handle", async function () {
+    const zotero = (globalThis as unknown as { Zotero: any }).Zotero;
+    const originalItems = zotero.Items;
+    zotero.Items = {
+      ...(originalItems || {}),
+      get: (id: number) => ({ id, key: `KEY${id}`, libraryID: 1 }),
+    };
+    try {
+      const harness = createHarness(
+        scriptedDigests(async (chat) =>
+          chat.prompt.includes("Task for this paper: Judge")
+            ? reply("Directly about drift.", {
+                facets: [],
+                relevance: { level: "direct", reason: "It measures drift." },
+              })
+            : reply("Cells drift slowly."),
+        ),
+        [5],
+      );
+      const outcome = await runCall(harness, "call-two", {
+        tasks: [
+          { ...SUMMARIZE, scope: undefined, targetIds: ["5"] },
+          {
+            taskId: "relevance",
+            description:
+              "Judge whether each paper bears on representational drift. Give one reason.",
+            expectedEffect: "digest",
+            targetIds: ["5"],
+          },
+        ],
+      });
+      const answer = outcome.toolResult.content as Record<string, any>;
+      const digestReads = ledgerDeltas(harness).map((delta) => delta.reads[0]);
+      assert.sameDeepMembers(
+        digestReads.map((read) => [
+          read.partId,
+          read.label,
+          read.relevance?.level,
+        ]),
+        [
+          ["summaries", "Summarize each selected paper", undefined],
+          [
+            "relevance",
+            "Judge whether each paper bears on representational drift",
+            "direct",
+          ],
+        ],
+      );
+      assert.sameMembers(
+        ledgerDeltas(harness).map((delta) => delta.callId),
+        ["call-two:summaries:digest:5", "call-two:relevance:digest:5"],
+      );
+      // Two stored results, each block naming its own.
+      const handles = (answer.digestHandles as Array<{ handle: string }>).map(
+        (entry) => entry.handle,
+      );
+      assert.lengthOf(new Set(handles), 2);
+      const blocks = (answer.digests as string)
+        .split("\n\n")
+        .filter((block) => block.startsWith("### "));
+      assert.lengthOf(blocks, 2);
+      const summaryBlock = blocks.find((block) =>
+        block.includes("Cells drift slowly."),
+      )!;
+      const verdictBlock = blocks.find((block) =>
+        block.includes("Directly about drift."),
+      )!;
+      const [summaryHandle, verdictHandle] = [summaryBlock, verdictBlock].map(
+        (block) => /handle:'(trh_[^']+)'/.exec(block)?.[1],
+      );
+      assert.notEqual(summaryHandle, verdictHandle);
+      assert.sameMembers([summaryHandle, verdictHandle], handles);
+      assert.include(verdictBlock, "Relevance: direct — It measures drift.");
+      assert.isTrue(
+        (answer.digests as string).startsWith("Relevance: 1 direct\n"),
+      );
+    } finally {
+      zotero.Items = originalItems;
+    }
+  });
+
+  it("treats a schema 1 record in the handle store as a miss and leaves it untouched", async function () {
+    const conversation = 975_800;
+    const oldDigest = {
+      itemId: 5,
+      contextItemId: 105,
+      summary: "An old summary.",
+      contributions: [],
+      methods: "",
+      limitations: "",
+      evidence: [],
+      source: { backend: "mineru", characters: 4_000, complete: true },
+      model: "test-model",
+      producedAt: 1,
+      cacheKey: "digest:v2:shared-key",
+    };
+    const schema2 = {
+      schema: 2,
+      itemId: 6,
+      contextItemId: 106,
+      answer: "A new answer.",
+      evidence: [],
+      facets: [],
+      gaps: [],
+      source: {
+        backend: "mineru",
+        readCharacters: 4_000,
+        totalCharacters: 4_000,
+        complete: true,
+      },
+      model: "test-model",
+      producedAt: 1,
+      cacheKey: "digest:v2:new-key",
+    };
+    const records = [oldDigest, schema2].map(
+      (digest) =>
+        createAgentToolResultHandleRecord({
+          conversationKey: conversation,
+          toolName: PAPER_DIGEST_HANDLE_TOOL,
+          toolCallId: digest.cacheKey,
+          content: {
+            cacheKey: digest.cacheKey,
+            digest,
+            rendered: `stored ${digest.cacheKey}`,
+          },
+          createdAt: 1,
+        })!,
+    );
+    await upsertAgentToolResultHandles(records);
+    const cache = createHandleStorePaperDigestCache({
+      conversationKey: conversation,
+    });
+    assert.isNull(
+      await cache.get("digest:v2:shared-key"),
+      "a record without schema 2 is never served, even under a matching key",
+    );
+    assert.equal(
+      (await cache.get("digest:v2:new-key"))?.answer,
+      "A new answer.",
+    );
+    // The schema 1 record stays readable by its handle, as it was stored.
+    const kept = await getAgentToolResultHandle({
+      conversationKey: conversation,
+      handle: records[0].handle,
+    });
+    assert.deepEqual(kept?.content, records[0].content);
   });
 
   it("leaves a part of any other effect exactly as before", async function () {

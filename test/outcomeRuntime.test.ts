@@ -3555,11 +3555,13 @@ describe("a digest part in runtime turns", function () {
             : { backend: "mineru", text: TEXT, totalCharacters: TEXT.length },
         llmCall: async (chat) => ({
           text: JSON.stringify({
-            summary: `Summary of ${/Title: (Paper \d+)/.exec(chat.prompt)?.[1]}.`,
-            contributions: ["Drift is slow."],
-            methods: "Imaging.",
-            limitations: "Not stated",
+            answer: `Summary of ${/Title: (Paper \d+)/.exec(chat.prompt)?.[1]}.`,
             evidence: [{ quote: "We recorded forty cells over ten days." }],
+            facets: [
+              { label: "Contributions", content: "Drift is slow." },
+              { label: "Methods", content: "Imaging." },
+              { label: "Limitations", content: "Not stated" },
+            ],
           }),
           completion: { status: "complete" },
         }),
