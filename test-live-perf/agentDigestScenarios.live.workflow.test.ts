@@ -728,14 +728,19 @@ function checkMisfiledPaper(data: ScenarioData, check: Check): void {
       .map((read) => read.relevance?.value)
       .join(", ")}`,
   );
-  const c1Excluded = exclusionsOf(
-    data.standing.filter((task) => task.effect === "artifact"),
-    c1,
+  // The review is an artifact (a document) or a reasoning part (the answer).
+  const synthesis = data.standing.filter(
+    (task) => task.effect === "artifact" || task.effect === "answer",
   );
+  const c1Excluded = exclusionsOf(synthesis, c1);
   check(
     c1Excluded.some(({ exclusion }) => exclusion.reason.trim()),
-    `${describePaper(c1)} is not in an artifact part's excludedTargets with a reason`,
+    `${describePaper(c1)} is not in a review part's excludedTargets with a reason`,
   );
+  // Missing text is never a reason to leave a paper out; the skill says to
+  // name it as not read. A model that excludes it anyway is noted.
+  if (exclusionsOf(synthesis, x1).length)
+    data.warnings.push(`${describePaper(x1)} was excluded for missing text`);
   check(!data.cited.all.has(c1.itemId), `${describePaper(c1)} is cited`);
   check(
     namesPaper(data, c1),
@@ -772,7 +777,16 @@ function checkMisfiledPaper(data: ScenarioData, check: Check): void {
       // planned and then skipped (a listing, a read) is planning noise,
       // reported as a warning, not as the selection failing.
       const ended = `part ${task.taskId} ended ${task.status}${task.reason ? `: ${task.reason}` : ""}`;
-      if (["artifact", "answer", "digest"].includes(task.effect || "answer"))
+      // A digest part over the unreadable X1 alone (a retry) ends skipped
+      // with the host's reason; that is the honest end for it.
+      const onlyX1 =
+        (task.targets || []).length > 0 &&
+        (task.targets || []).every((target) => target === targetOf(x1));
+      if (task.effect === "digest" && onlyX1) {
+        if (task.status !== "completed") data.warnings.push(ended);
+      } else if (
+        ["artifact", "answer", "digest"].includes(task.effect || "answer")
+      )
         check(task.status === "completed", ended);
       else if (task.status !== "completed") data.warnings.push(ended);
       for (const exception of task.exceptions || []) {
