@@ -1144,7 +1144,8 @@ function checkWholeLibrary(data: ScenarioData, check: Check): void {
   const known = new Set(papers.map(targetOf));
   const list = (items: SeededPaper[]) => items.map(describePaper).join("; ");
 
-  // The row the user sees is down, and the run declared its steps.
+  // The row the user sees is down: with nothing attached it shows the
+  // papers read in depth, whether or not the run declared steps.
   check(data.row, "the panel has no Task progress row element");
   check(
     data.row?.shown,
@@ -1153,7 +1154,10 @@ function checkWholeLibrary(data: ScenarioData, check: Check): void {
   const declared = (data.snapshot?.checklist?.steps || []).filter(
     (step) => step.outcome && !step.outcome.host,
   );
-  check(declared.length, "the Task progress checklist has no declared step");
+  if (!declared.length)
+    data.warnings.push(
+      "no declared step: the papers read in depth stand for the shortlist",
+    );
 
   // A shortlist over explicit targets, from the 16 papers.
   const inDepthParts = data.tasks.filter(
@@ -1166,10 +1170,15 @@ function checkWholeLibrary(data: ScenarioData, check: Check): void {
       .map((task) => task.taskId)
       .join(", ")}`,
   );
-  const shortlist = shortlistOf(data);
+  // The papers the agent chose: its declared parts' targets, or, with no
+  // part declared, the papers it read in depth.
+  const declaredShortlist = shortlistOf(data);
+  const shortlist = declaredShortlist.length
+    ? declaredShortlist
+    : papers.filter((paper) => data.inDepth.has(paper.itemId)).map(targetOf);
   check(
     shortlist.length,
-    "no digest or read part was declared over explicit targets",
+    "no paper was chosen: no part over explicit targets and no paper read in depth",
   );
   if (shortlist.length)
     check(

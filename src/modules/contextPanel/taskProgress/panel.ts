@@ -38,6 +38,7 @@ import {
   getTaskProgress,
   setTaskScope,
   subscribeTaskProgress,
+  taskReadInDepth,
   taskTurnIndexFor,
 } from "./store";
 import {
@@ -285,6 +286,7 @@ function resolvePanelInput(body: Element): TaskProgressViewInput | null {
     shouldShowTaskProgress({
       ...visibility,
       planSeen: Boolean(record?.planSeen),
+      readInDepth: taskReadInDepth(record),
     })
   ) {
     const nothingAdded =

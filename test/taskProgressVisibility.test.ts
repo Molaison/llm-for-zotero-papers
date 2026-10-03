@@ -42,6 +42,16 @@ describe("task progress visibility", function () {
         true,
       ],
       [
+        "a library chat whose run read a paper in depth, with nothing added and no steps",
+        { ...library, readInDepth: true },
+        true,
+      ],
+      [
+        "a library chat in WebChat that read a paper in depth",
+        { ...library, readInDepth: true, isWebChat: true },
+        false,
+      ],
+      [
         "a library chat in WebChat, with a paper",
         { ...library, paperCount: 1, isWebChat: true },
         false,
@@ -58,6 +68,12 @@ describe("task progress visibility", function () {
       ["an attached folder", { collectionCount: 1 }, true],
       ["an attached tag", { tagCount: 1 }, true],
       ["a plan in a one-paper chat", { planSeen: true }, true],
+      // A paper chat reads its own paper in depth all the time.
+      [
+        "a one-paper chat that read its paper in depth",
+        { readInDepth: true },
+        false,
+      ],
       ["WebChat", { conversationKind: "global", isWebChat: true }, false],
       [
         "WebChat, even with a plan and a folder",

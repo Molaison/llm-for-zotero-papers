@@ -53,9 +53,11 @@ import {
   displayedTaskRunState,
   getTaskProgress,
   getTaskProgressViewMemo,
+  isInDepthRead,
   isTaskRunLive,
   rememberTaskProgressView,
   subscribeTaskProgress,
+  taskReadInDepth,
   type TaskProgressRecord,
   type TaskRunState,
 } from "./store";
@@ -245,21 +247,6 @@ const STATE_RANK: Record<TaskPaperState, number> = {
   read: 3,
   cited: 4,
 };
-
-/**
- * A read that took in the paper's text: a digest with an answer, or a
- * paper_read of the whole text or of its overview or full-text body (not
- * its metadata, abstract or outline, and not a targeted passage).
- */
-function isInDepthRead(read: TaskPaperReadEvent): boolean {
-  if (read.granularity === "digest") return Boolean(read.snippet?.trim());
-  if (read.toolName !== "paper_read") return false;
-  return (
-    read.granularity === "full" ||
-    ((read.granularity === "passage" || read.granularity === "section") &&
-      (read.method === "overview" || read.method === "full"))
-  );
-}
 
 /** Whether the turn `turn` (every turn, before any) read `entry` in depth. */
 function readInDepth(
@@ -991,7 +978,7 @@ export type TaskProgressViewInput = {
   conversationKey: number | null;
   /** The paper chat's own paper: listed, never removable. */
   basePaperItemId?: number;
-  visibility: Omit<TaskProgressVisibilityInput, "planSeen">;
+  visibility: Omit<TaskProgressVisibilityInput, "planSeen" | "readInDepth">;
   /** False in plain chat: reads are not recorded, only the scope lists. */
   recordsReads: boolean;
   /**
@@ -1130,6 +1117,7 @@ export function mountTaskProgressView(params: {
     shouldShowTaskProgress({
       ...input.visibility,
       planSeen: Boolean(current?.planSeen),
+      readInDepth: taskReadInDepth(current),
     });
 
   /** What this paint stands on: how the next change of the row moves. */
@@ -1144,7 +1132,12 @@ export function mountTaskProgressView(params: {
     ].join("\u0000"),
     shown: visible,
     contextApplies: taskProgressContextApplies(input.visibility),
-    runSteps: Boolean(current?.planSeen),
+    // Papers read in depth show the row in a Library chat as steps do: a
+    // live run's first one lowers it, history's puts it in place.
+    runSteps:
+      Boolean(current?.planSeen) ||
+      (input.visibility.conversationKind === "global" &&
+        taskReadInDepth(current)),
     composerReady: input.composerReady !== false,
     runLive: isTaskRunLive(current),
   });

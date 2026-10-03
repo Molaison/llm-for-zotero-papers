@@ -21,6 +21,7 @@ import {
   type TaskPaperDocumentCitation,
   type TaskPaperLedger,
   type TaskPaperLedgerDelta,
+  type TaskPaperReadEvent,
   type TaskPaperResolvedRef,
 } from "../../../agent/context/taskPaperLedger";
 import { resolveZoteroPaperRef } from "../../../agent/context/taskPaperLedgerRecorder";
@@ -535,6 +536,34 @@ function foldDocumentCitations(
     resolveDocumentCitationItem,
   );
   return JSON.stringify(record.ledger.papers) !== before;
+}
+
+/**
+ * A read that took in the paper's text: a digest with an answer, or a
+ * paper_read of the whole text or of its overview or full-text body (not
+ * its metadata, abstract or outline, and not a targeted passage).
+ */
+export function isInDepthRead(read: TaskPaperReadEvent): boolean {
+  if (read.granularity === "digest") return Boolean(read.snippet?.trim());
+  if (read.toolName !== "paper_read") return false;
+  return (
+    read.granularity === "full" ||
+    ((read.granularity === "passage" || read.granularity === "section") &&
+      (read.method === "overview" || read.method === "full"))
+  );
+}
+
+/**
+ * Whether any question of the conversation read a paper in depth: in a
+ * Library chat with nothing attached, that is what the row has to show,
+ * whether or not the run declared steps.
+ */
+export function taskReadInDepth(record: TaskProgressRecord | null): boolean {
+  return Object.values(record?.ledger.papers || {}).some((entry) =>
+    Object.values(entry.turns || {}).some((turn) =>
+      turn?.reads.some(isInDepthRead),
+    ),
+  );
 }
 
 /** The run stopped early. The partial ledger stays. */

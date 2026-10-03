@@ -25,6 +25,7 @@ import {
   displayedTaskRunState,
   markTaskWaiting,
   setTaskOutcomes,
+  taskReadInDepth,
 } from "../src/modules/contextPanel/taskProgress/store";
 import {
   digestLedgerDelta,
@@ -37,6 +38,61 @@ import {
 describe("task progress store", function () {
   afterEach(function () {
     clearAllTaskProgress();
+  });
+
+  it("knows when a paper was read in depth, not when it was only found", function () {
+    beginTaskRun(7, { runId: "run-a" });
+    // Search hits and their snippets are not reads in depth.
+    applyTaskPaperUpdate(
+      7,
+      ledgerDelta("search", [
+        [1, "read", "Drift grows."],
+        [2, "matched"],
+      ]),
+      "run-a",
+    );
+    assert.isFalse(taskReadInDepth(getTaskProgress(7)));
+    // A targeted passage is not either.
+    applyTaskPaperUpdate(
+      7,
+      {
+        ...ledgerDelta("targeted", [[1, "read"]]),
+        toolName: "paper_read",
+        reads: [
+          {
+            key: "1:1",
+            callId: "targeted",
+            toolName: "paper_read",
+            granularity: "passage",
+            method: "targeted",
+            snippet: "A passage.",
+          },
+        ],
+      },
+      "run-a",
+    );
+    assert.isFalse(taskReadInDepth(getTaskProgress(7)));
+    // An overview read of the paper is.
+    applyTaskPaperUpdate(
+      7,
+      {
+        ...ledgerDelta("overview", [[2, "read"]]),
+        toolName: "paper_read",
+        reads: [
+          {
+            key: "1:2",
+            callId: "overview",
+            toolName: "paper_read",
+            granularity: "passage",
+            method: "overview",
+            snippet: "The paper's body.",
+          },
+        ],
+      },
+      "run-a",
+    );
+    assert.isTrue(taskReadInDepth(getTaskProgress(7)));
+    assert.isFalse(taskReadInDepth(null));
   });
 
   it("applies ledger deltas once, however often they replay", function () {

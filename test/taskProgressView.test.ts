@@ -3378,6 +3378,29 @@ describe("task progress row count with nothing attached", function () {
     );
   });
 
+  it("shows the row once a paper is read in depth, with nothing attached and no steps", function () {
+    seedWholeLibrary();
+    const harness = track(mount(library));
+    beginTaskRun(KEY, { runId: "run-w", turnIndex: 1 });
+    // Search hits alone leave a plain library question without a row.
+    applyTaskPaperUpdate(
+      KEY,
+      ledgerDelta("c-search", [[1, "skimmed", "Hit."]], "run-w"),
+      "run-w",
+    );
+    harness.view.flush();
+    assert.isTrue((harness.row as any).hidden, "nothing read in depth yet");
+    // The agent reads a paper in depth without declaring a step.
+    applyTaskPaperUpdate(
+      KEY,
+      paperRead("c-read-1", 1, "full", "full"),
+      "run-w",
+    );
+    harness.view.flush();
+    assert.isFalse((harness.row as any).hidden);
+    assert.equal(harness.count(), "1 read in depth");
+  });
+
   it("names only the search's hits before any paper is read in depth, and says Answering…", function () {
     seedWholeLibrary();
     const harness = track(mount(library));

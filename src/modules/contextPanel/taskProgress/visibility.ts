@@ -5,12 +5,14 @@
  * The row shows only when it has something to show: the papers, folders and
  * tags the context bar holds (in library chat any of them; in a paper chat a
  * folder, a tag or five papers or more), or a run's steps, which keep it for
- * the rest of the conversation. A run's steps are what `planSeen` records: a
- * built-in action's, a plan's, Codex's own checklist, or the outcomes a run
- * declares (a long job's paged parts among them), live or finished, rebuilt
- * from history after a restart. A run with no steps (a plain question over
- * the whole library) adds nothing to show. The row never shows in WebChat or
- * in a note chat. Everything here is pure.
+ * the rest of the conversation, or, in library chat, a paper the agent read
+ * in depth (with nothing attached the agent chose it, steps or not). A
+ * run's steps are what `planSeen` records: a built-in action's, a plan's,
+ * Codex's own checklist, or the outcomes a run declares (a long job's paged
+ * parts among them), live or finished, rebuilt from history after a
+ * restart. A plain question over the whole library that reads no paper in
+ * depth adds nothing to show. The row never shows in WebChat or in a note
+ * chat. Everything here is pure.
  */
 import type { TaskPaperScopeContexts } from "../../../agent/context/taskPaperScopeListing";
 import type {
@@ -34,6 +36,12 @@ export type TaskProgressVisibilityInput = {
    * checklist or a run's outcomes.
    */
   planSeen: boolean;
+  /**
+   * A paper was read in depth in this conversation (`taskReadInDepth`). In a
+   * Library chat with nothing attached the agent chooses its papers, so the
+   * papers it reads are what the row has to show, steps or not.
+   */
+  readInDepth?: boolean;
 };
 
 /**
@@ -59,7 +67,11 @@ export function shouldShowTaskProgress(
   if (input.isWebChat || input.isNoteSession) return false;
   if (input.conversationKind !== "global" && input.conversationKind !== "paper")
     return false;
-  return input.planSeen || taskProgressContextApplies(input);
+  return (
+    input.planSeen ||
+    taskProgressContextApplies(input) ||
+    (input.conversationKind === "global" && Boolean(input.readInDepth))
+  );
 }
 
 /** What one paint of the row stood on, for deciding how the next change moves. */
