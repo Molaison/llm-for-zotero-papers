@@ -1175,7 +1175,8 @@ function withDocumentExclusions(
   cited: readonly string[] | undefined,
   now: number,
 ): Task {
-  if (!SELECTING_EFFECTS.has(task.effect || "answer")) return task;
+  if (!SELECTING_EFFECTS.has(task.effect || "answer") && !holdsSynthesis(task))
+    return task;
   let next = task;
   for (const exclusion of exclusions || []) {
     const reason =
@@ -1222,7 +1223,7 @@ function applyMaterial(
     taskId: evidence.taskId,
     kind: evidence.documentKind,
   });
-  if (!chosen) return namedReasoningExclusions(checkpoint, evidence, now);
+  if (!chosen) return exclusionsWithoutArtifact(checkpoint, evidence, now);
   const { documentId, documentVersion, contentHash } = evidence.materialRef;
   return mapTasks(checkpoint, now, (task, index) => {
     if (index !== chosen.index) return undefined;
@@ -1251,31 +1252,55 @@ function applyMaterial(
 }
 
 /**
- * The papers a document leaves out when no artifact part takes it but it
- * names a reasoning part: the model declared the synthesis as an answer and
- * delivered it as a document, and what it left out is still its decision on
- * that part. Nothing else of the document binds there.
+ * Whether `task` can stand for a synthesis a document delivered without an
+ * artifact part: a reasoning part, or a part that names no papers (the
+ * model declared "write the review and save it as a note" as one write
+ * part). A digest or read part covers the papers it names, so never.
  */
-function namedReasoningExclusions(
+function holdsSynthesis(task: Task): boolean {
+  const effect = task.effect || "answer";
+  if (effect === "answer") return true;
+  return (
+    effect !== "digest" &&
+    effect !== "read" &&
+    !(task.targets || []).some(isPaperTarget)
+  );
+}
+
+/**
+ * The papers a document leaves out when no artifact part takes it: they are
+ * recorded on the part it names when that part can stand for the synthesis
+ * (`holdsSynthesis`), or, when it names none, on the one standing part in the
+ * ledger that can. Nothing else of the document binds there.
+ */
+function exclusionsWithoutArtifact(
   checkpoint: ExecutionCheckpoint,
   evidence: Extract<OutcomeEvidence, { kind: "material" }>,
   now: number,
 ): EvidenceResult {
-  if (!evidence.excluded?.length || !evidence.taskId)
-    return unchanged(checkpoint);
-  let taskId: string;
-  try {
-    taskId = ordinaryExecutionTaskId(checkpoint.executionId, evidence.taskId);
-  } catch {
-    return unchanged(checkpoint);
+  if (!evidence.excluded?.length) return unchanged(checkpoint);
+  let index = -1;
+  if (evidence.taskId) {
+    let taskId: string;
+    try {
+      taskId = ordinaryExecutionTaskId(checkpoint.executionId, evidence.taskId);
+    } catch {
+      return unchanged(checkpoint);
+    }
+    index = successorOf(
+      checkpoint,
+      checkpoint.tasks.findIndex((task) => task.taskId === taskId),
+    );
+  } else {
+    const candidates = checkpoint.tasks.flatMap((task, at) =>
+      task.origin === "model" && !task.supersededBy && holdsSynthesis(task)
+        ? [at]
+        : [],
+    );
+    if (candidates.length === 1) index = candidates[0];
   }
-  const named = successorOf(
-    checkpoint,
-    checkpoint.tasks.findIndex((task) => task.taskId === taskId),
-  );
-  return mapTasks(checkpoint, now, (task, index) => {
-    if (index !== named || (task.effect || "answer") !== "answer")
-      return undefined;
+  return mapTasks(checkpoint, now, (task, at) => {
+    if (at !== index || !holdsSynthesis(task)) return undefined;
     const next = withDocumentExclusions(
       task,
       evidence.excluded,

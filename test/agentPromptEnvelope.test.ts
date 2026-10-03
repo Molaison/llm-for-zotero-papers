@@ -1,4 +1,5 @@
 import { assert } from "chai";
+import { WHOLE_LIBRARY_SCOPE_RULE } from "../src/agent/context/turnContextEnvelope";
 import { createPaperReadTool } from "../src/agent/tools/read/paperRead";
 import {
   buildAgentInitialMessages,
@@ -700,6 +701,17 @@ describe("agent prompt envelope paper scope", function () {
     assert.deepEqual(scopeLines(turn), [
       "Paper scope: whole library — 2431 papers, 1900 with full text",
     ]);
+    // The agent sets the scope itself: shortlist, then declare the papers
+    // it reads in depth, which is what shows the user its choice.
+    assert.include(turn, WHOLE_LIBRARY_SCOPE_RULE);
+  });
+
+  it("gives the whole-library rule only when nothing is attached", async function () {
+    const { turn } = await rendered(
+      {},
+      { wholeLibrary: false, itemIds: papers(12), withText: 12 },
+    );
+    assert.notInclude(turn, WHOLE_LIBRARY_SCOPE_RULE);
   });
 
   it("names folders, tags and listed papers, and stays one line whatever a name holds", async function () {

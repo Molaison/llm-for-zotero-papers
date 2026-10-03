@@ -24,7 +24,8 @@ A review is an argument about a body of work, not a catalog of it: a faithful ac
    The host marks each part done from the tools' results.
 3. **Read.** With a digest part, write from the results the host returned: each has the answer to the part's description, a relevance line when the description names a question, facets, verified quotes with section labels, gaps, and a handle for `context_read source:'tool_result'` when you need the full record.
    Read a digested paper again only with `paper_read({ mode:'targeted', query:'...' })`: to verify a decisive cross-paper claim, test an apparent contradiction, or close a gap its result names that the review needs; never re-read it in overview or full mode.
-   If the host reports digest failures, declare the part again once with `targetIds` of the failed papers only.
+   A paper that failed with "No readable text" has no text to read: name it as not read, and do not retry it, read it with `paper_read`, or look for it outside the library.
+   If the host reports other digest failures, declare the part again once with `targetIds` of those papers only.
    Then a paper whose digest failed twice may be read with an overview `paper_read` instead; name it as not read only if that read fails too.
    If the part is still open after a Stop and the user says continue, call `task_update` again with the same `taskId` and no description to finish the remaining papers.
    Without a digest part, read the scope's papers with `paper_read`, passing them as `targets` and grouping related papers in one call.

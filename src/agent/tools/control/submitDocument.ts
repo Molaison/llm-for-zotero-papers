@@ -545,11 +545,20 @@ function validateSubmitPlanDocument(
     if (!validateObject<Record<string, unknown>>(args)) {
       return fail("submit_document expects an object");
     }
+    // A list the model left out (models often omit an empty assets list) is
+    // empty: rejecting it made the model resend the whole document only to
+    // add []. A list given in another shape is still refused.
+    const lists = {
+      citations: args.citations ?? [],
+      quotes: args.quotes ?? [],
+      assets: args.assets ?? [],
+      groundingIssues: args.groundingIssues ?? [],
+    };
     if (
-      !Array.isArray(args.citations) ||
-      !Array.isArray(args.quotes) ||
-      !Array.isArray(args.assets) ||
-      !Array.isArray(args.groundingIssues)
+      !Array.isArray(lists.citations) ||
+      !Array.isArray(lists.quotes) ||
+      !Array.isArray(lists.assets) ||
+      !Array.isArray(lists.groundingIssues)
     ) {
       return fail(
         "citations, quotes, assets, and groundingIssues must be arrays",
@@ -590,11 +599,11 @@ function validateSubmitPlanDocument(
         args.integrityPolicy as SubmitPlanDocumentInput["integrityPolicy"],
       title: requiredString(args.title, "title"),
       markdown: requiredString(args.markdown, "markdown"),
-      citations: args.citations.map(parseCitation),
-      quotes: args.quotes.map(parseQuote),
-      assets: args.assets.map(parseAsset),
+      citations: lists.citations.map(parseCitation),
+      quotes: lists.quotes.map(parseQuote),
+      assets: lists.assets.map(parseAsset),
       groundingReviewed: args.groundingReviewed,
-      groundingIssues: args.groundingIssues.map((entry, index) =>
+      groundingIssues: lists.groundingIssues.map((entry, index) =>
         requiredString(entry, `groundingIssues[${index}]`),
       ),
       ...(typeof args.taskId === "string" && args.taskId.trim()

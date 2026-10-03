@@ -657,7 +657,9 @@ describe("task_update runs a declared digest part", function () {
       });
       const answer = again.toolResult.content as Record<string, any>;
       assert.equal(reads7, index + 2, `re-declaration ${index + 1} runs it`);
-      assert.isUndefined(answer.digestNote);
+      // A paper with no text is named as not read, never retried or read.
+      assert.include(answer.digestNote, "No readable text: Drift C (item:7).");
+      assert.include(answer.digestNote, "do not declare it again");
     }
     const last = await runCall(harness, "call-3", {
       tasks: [{ taskId: "summaries", targetIds: ["7"] }],
@@ -667,16 +669,35 @@ describe("task_update runs a declared digest part", function () {
     assert.deepEqual(answer.digestFailures, [
       { itemId: 7, title: "Drift C", reason: "No readable text", final: true },
     ]);
-    assert.include(answer.digestNote, "final");
     assert.include(answer.digestNote, "Drift C");
-    // Task-neutral: a digest answers the part's description, not only a
-    // summary request.
-    assert.include(answer.digestNote, "or name it as not read.");
+    // No text: no overview read is offered, and the note is task-neutral.
+    assert.include(answer.digestNote, "Name it as not read");
+    assert.notInclude(answer.digestNote, "paper_read mode:'overview'");
     assert.notInclude(answer.digestNote, "summar");
     const part = harness.request.executionCheckpoint!.tasks[0];
     assert.deepEqual(part.exceptions, [
       { targets: ["item:7"], reason: "No readable text" },
     ]);
+  });
+
+  it("keeps the overview-read note for a paper that failed for another reason", async function () {
+    const harness = createHarness(
+      scriptedDigests(async (chat) =>
+        chat.prompt.includes("Title: Drift A") ? reply("") : reply("Fine."),
+      ),
+      [5, 6],
+    );
+    await runCall(harness, "call-a", { tasks: [SUMMARIZE] });
+    for (const id of ["call-b", "call-c"])
+      await runCall(harness, id, { tasks: [{ taskId: "summaries" }] });
+    const last = await runCall(harness, "call-d", {
+      tasks: [{ taskId: "summaries", targetIds: ["5"] }],
+    });
+    const note = (last.toolResult.content as Record<string, any>)
+      .digestNote as string;
+    assert.include(note, "Not run again: Drift A (item:5).");
+    assert.include(note, "paper_read mode:'overview'");
+    assert.notInclude(note, "No readable text");
   });
 
   it("issues a body-depth read for a long or complete digest and an abstract-depth one for a short excerpt", async function () {

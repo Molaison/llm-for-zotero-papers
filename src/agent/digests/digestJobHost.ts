@@ -54,6 +54,7 @@ import {
 import { readPaperTextForDigest } from "../tools/read/paperRead";
 import type { AgentRuntimeRequest, AgentToolContext } from "../types";
 import {
+  DIGEST_FAILURE_REASONS,
   renderHostPaperDigests,
   runPaperDigestJob,
   type HostPaperDigest,
@@ -720,15 +721,38 @@ export async function runDigestParts(params: {
         deferred === 1 ? "paper is" : "papers are"
       } left (digestPending). Call task_update again with the same taskId and no description to digest the next batch.`,
     );
-  if (finalFailures.length)
+  // A paper with no text has nothing a retry, a read or a search can add;
+  // live runs spent rounds on all three.
+  const unreadable = [
+    ...new Map(
+      allFailures
+        .filter((failure) => failure.reason === DIGEST_FAILURE_REASONS.noText)
+        .map((failure) => [failure.itemId, failure]),
+    ).values(),
+  ];
+  if (unreadable.length)
     notes.push(
-      `Not run again: ${finalFailures
+      `No readable text: ${unreadable
+        .map(
+          (failure) =>
+            `${titleOf(failure.itemId) || `Item ${failure.itemId}`} (${failure.target})`,
+        )
+        .join(
+          ", ",
+        )}. Name ${unreadable.length === 1 ? "it" : "them"} as not read; do not declare ${unreadable.length === 1 ? "it" : "them"} again, read ${unreadable.length === 1 ? "it" : "them"} with paper_read, or search for ${unreadable.length === 1 ? "it" : "them"} outside the library.`,
+    );
+  const retriable = finalFailures.filter(
+    (failure) => failure.reason !== DIGEST_FAILURE_REASONS.noText,
+  );
+  if (retriable.length)
+    notes.push(
+      `Not run again: ${retriable
         .map(
           (failure) =>
             `${titleOf(failure.itemId) || `Item ${failure.itemId}`} (${failure.target})`,
         )
         .join(", ")}. ${
-        finalFailures.length === 1 ? "Its digest" : "Their digests"
+        retriable.length === 1 ? "Its digest" : "Their digests"
       } already failed after ${DIGEST_MAX_FAILURE_RETRIES} retries, so the failure is final with the reason given. Read such a paper with paper_read mode:'overview' if the work needs it, or name it as not read.`,
     );
   // A paper judged unrelated is the model's to keep or leave out; the note

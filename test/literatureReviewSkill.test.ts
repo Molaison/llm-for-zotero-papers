@@ -80,6 +80,11 @@ describe("literature-review skill", function () {
       text,
       "Read a digested paper again only with `paper_read({ mode:'targeted', query:'...' })`: to verify a decisive cross-paper claim, test an apparent contradiction, or close a gap its result names that the review needs; never re-read it in overview or full mode.",
     );
+    // A paper with no text is named as not read: no retry, read or search.
+    assert.include(
+      text,
+      'A paper that failed with "No readable text" has no text to read: name it as not read, and do not retry it, read it with `paper_read`, or look for it outside the library.',
+    );
     // A paper the host could not digest twice is read, not left unread.
     assert.include(
       text,

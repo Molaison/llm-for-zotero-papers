@@ -100,6 +100,21 @@ function apply(
 
 describe("submit_document: papers the document leaves out", function () {
   describe("input", function () {
+    it("takes a list the model left out as empty and still refuses one in another shape", function () {
+      // Live runs omitted assets and were rejected three times in a row,
+      // each time resending the whole document.
+      const { assets: _assets, quotes: _quotes, ...withoutLists } = BASE;
+      const parsed = validate({ ...withoutLists, quotes: null });
+      assert.isTrue(parsed.ok);
+      if (!parsed.ok) return;
+      assert.deepEqual(parsed.value.assets, []);
+      assert.deepEqual(parsed.value.quotes, []);
+      const wrong = validate({ ...BASE, assets: "none" });
+      assert.isFalse(wrong.ok);
+      if (wrong.ok) return;
+      assert.match(wrong.error, /must be arrays/);
+    });
+
     it("takes excluded papers by Zotero id with a reason, as item ids", function () {
       const schema = createSubmitDocumentTool({} as never).spec
         .inputSchema as any;
@@ -211,14 +226,71 @@ describe("submit_document: papers the document leaves out", function () {
         "the answer completes it, as before",
       );
       assert.deepEqual(part.materialRefs, [], "the document binds nowhere");
-      // A document naming no part, or with nothing left out, changes nothing.
+      // A document with nothing left out changes nothing.
+      assert.isFalse(apply(ledger, document(["item:5"])).changed);
+    });
+
+    it("records the papers on a write part named for the review, or on the only part that can hold it when the document names none", function () {
+      // The model declared "write the review and save it as a note" as one
+      // write part without papers, and submitted naming it, or naming none.
+      const withNote = declareOutcomes(
+        createEmptyExecutionCheckpoint(executionContext, 10),
+        [
+          {
+            taskId: "digest",
+            description: "Summarize each paper",
+            effect: "digest",
+            targets: ["item:5", "item:6", "item:7"],
+          },
+          {
+            taskId: "review",
+            description: "Write the review and save it as a note",
+            effect: "mutation",
+            capability: "zotero.notes",
+          },
+        ],
+        20,
+      );
+      for (const taskId of ["review", undefined]) {
+        const part = review(
+          apply(withNote, {
+            ...document(["item:5"], [{ targets: ["7"], reason: off }]),
+            taskId,
+          }).checkpoint,
+        );
+        assert.deepEqual(
+          part.excludedTargets,
+          [{ targets: ["item:7"], reason: off }],
+          `named ${taskId ?? "none"}`,
+        );
+        assert.equal(part.status, "pending", "the note write completes it");
+      }
+      // Two parts that could hold it, and the document names none: nothing
+      // is guessed.
+      const two = declareOutcomes(
+        withNote,
+        [
+          {
+            taskId: "answer",
+            description: "Answer the question",
+            effect: "answer",
+          },
+        ],
+        30,
+      );
       assert.isFalse(
-        apply(ledger, {
+        apply(two, {
           ...document(["item:5"], [{ targets: ["7"], reason: off }]),
           taskId: undefined,
         }).changed,
       );
-      assert.isFalse(apply(ledger, document(["item:5"])).changed);
+      // A digest part named by the document never takes exclusions.
+      assert.isFalse(
+        apply(withNote, {
+          ...document(["item:5"], [{ targets: ["7"], reason: off }]),
+          taskId: "digest",
+        }).changed,
+      );
     });
 
     it("records the papers on the review part, never one the document cites or the part does not name, and the run ends completed", function () {

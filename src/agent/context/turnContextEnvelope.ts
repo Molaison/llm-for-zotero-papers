@@ -338,6 +338,9 @@ export function renderTurnContextEnvelopeForModel(
 
   if (envelope.scopePapers) {
     lines.push(renderPaperScopeLine(envelope.paperScope, envelope.scopePapers));
+    // Nothing attached: the agent sets the scope itself, and declaring the
+    // papers it reads in depth is what shows the user its choice.
+    if (envelope.scopePapers.wholeLibrary) lines.push(WHOLE_LIBRARY_SCOPE_RULE);
   }
 
   if (envelope.selectedTextCount) {
@@ -438,6 +441,10 @@ export function renderTurnContextEnvelopeForModel(
     'Resolve current-resource references only from the context listed above. "This paper" means the active paper. In Paper Chat, "these papers" or "both papers" means the active paper plus visibly added concrete papers; in Library Chat it means all visibly attached concrete papers. Collections and tags remain lazy resource pools and are never silently included in "these papers". Do not infer missing resource identity from old thread history, citation provenance, retrieved candidates, local PDF transport, or local memory.',
   ].join("\n");
 }
+
+/** How the agent works over the whole library when nothing is attached. */
+export const WHOLE_LIBRARY_SCOPE_RULE =
+  "Nothing is attached, so the scope is the whole library: when the question needs papers read in depth, find candidates with library_retrieve, choose the ones that bear on the question, and declare a digest part over them with targetIds; use scope:true only when the user asks for every paper.";
 
 /**
  * "Paper scope: Drift — 212 papers, 180 with full text": how large the

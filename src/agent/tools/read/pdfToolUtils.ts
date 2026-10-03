@@ -344,6 +344,15 @@ function describeTarget(target: PdfTarget): string {
   return parts.length ? parts.join(", ") : "missing itemId/contextItemId";
 }
 
+/**
+ * Why a paper target could not be read, with what to do: live runs retried
+ * an item with no attachment several times after the host had reported it
+ * had no readable text.
+ */
+function unresolvedTargetMessage(target: PdfTarget): string {
+  return `Could not resolve paper target ${describeTarget(target)}: no PDF or text attachment was found for it. If it has none, name it as not read; do not read or search for it again.`;
+}
+
 function resolveTarget(
   target: PdfTarget,
   zoteroGateway: ZoteroGateway,
@@ -443,9 +452,7 @@ export function resolveDefaultTargets(
     for (const explicitTarget of targets) {
       const paperContext = resolveTarget(explicitTarget, zoteroGateway);
       if (!paperContext) {
-        throw new Error(
-          `Could not resolve paper target ${describeTarget(explicitTarget)}`,
-        );
+        throw new Error(unresolvedTargetMessage(explicitTarget));
       }
       resolved.push(paperContext);
     }
@@ -454,9 +461,7 @@ export function resolveDefaultTargets(
   if (target) {
     const paperContext = resolveTarget(target, zoteroGateway);
     if (!paperContext) {
-      throw new Error(
-        `Could not resolve paper target ${describeTarget(target)}`,
-      );
+      throw new Error(unresolvedTargetMessage(target));
     }
     return [paperContext];
   }
