@@ -1217,7 +1217,7 @@ describe("task progress view", function () {
     assert.equal(formatTaskProgressCount(null, true), "");
   });
 
-  it("shows each paper's strongest state over the conversation, and counts the latest question", function () {
+  it("shows each question's own papers once there are two, and counts the latest question", function () {
     seedScope(5);
     const harness = track(mount());
     beginTaskRun(KEY, { runId: "q1", turnIndex: 1 });
@@ -1243,20 +1243,30 @@ describe("task progress view", function () {
     );
     harness.row.dispatchFakeEvent("click");
     const [first, second, third, fourth] = harness.items();
-    assert.equal(first.dataset.state, "read", "read in question 1 stays read");
-    assert.equal(second.dataset.state, "cited");
+    assert.equal(first.dataset.state, "listed", "question 2 did not read it");
+    assert.equal(second.dataset.state, "listed");
     assert.equal(third.dataset.state, "read");
     assert.equal(fourth.dataset.state, "listed");
-    assert.equal(
-      first.findByClass("llm-task-paper-tail")!.textContent,
-      "Results",
-    );
     const head = harness.drawer.findByClass("llm-task-progress-head")!;
     assert.isTrue(head.hidden, "no summary line above the paper list");
     assert.equal(collectFakeText(head), "");
-    first.findByClass("llm-task-paper-summary")!.dispatchFakeEvent("click");
+    // Question 1's papers are under its own header.
+    const earlier = harness.drawer.findByClass(
+      "llm-task-progress-question-section",
+    )!;
+    earlier
+      .findByClass("llm-task-progress-question")!
+      .dispatchFakeEvent("click");
+    const [read, cited] = earlier.findAllByClass("llm-task-paper");
+    assert.equal(read.dataset.state, "read", "read in question 1 stays read");
+    assert.equal(cited.dataset.state, "cited");
+    assert.equal(
+      read.findByClass("llm-task-paper-tail")!.textContent,
+      "Results",
+    );
+    read.findByClass("llm-task-paper-summary")!.dispatchFakeEvent("click");
     const details = collectFakeText(
-      first.findByClass("llm-task-paper-details")!,
+      read.findByClass("llm-task-paper-details")!,
     );
     assert.include(details, "Earlier passage.");
     assert.notInclude(details, "not read for this question");
@@ -2895,18 +2905,30 @@ describe("task progress view of an outcome ledger", function () {
         const row = paperRow(harness, "1:1");
         assert.deepEqual(blocksOf(expand(row)), [
           {
-            heading: BRIEF,
-            lines: [],
-            answer: "Gaze tracks the belief.",
-            note: undefined,
-          },
-          {
             heading: `${PATH} failed`,
             lines: [],
             answer: undefined,
             note: "The model call timed out",
           },
         ]);
+        // The older question keeps its own result, under its own header.
+        const earlier = harness.drawer.findByClass(
+          "llm-task-progress-question-section",
+        )!;
+        earlier
+          .findByClass("llm-task-progress-question")!
+          .dispatchFakeEvent("click");
+        assert.deepEqual(
+          blocksOf(expand(earlier.findAllByClass("llm-task-paper")[0])),
+          [
+            {
+              heading: BRIEF,
+              lines: [],
+              answer: "Gaze tracks the belief.",
+              note: undefined,
+            },
+          ],
+        );
       });
 
       it("heads a block with the label the host cut at a word, and clips a longer one", function () {
@@ -3466,6 +3488,344 @@ describe("task progress row count with nothing attached", function () {
       const harness = track(mount(library));
       runOverLibrary(harness.view);
       assert.equal(harness.count(), "2/2 步 · 精读 5 · 检索到 13 · 引用 2");
+    });
+  });
+});
+
+describe("task progress history by question", function () {
+  const views: TaskProgressView[] = [];
+  afterEach(function () {
+    for (const view of views.splice(0)) view.dispose();
+    clearAllTaskProgress();
+  });
+  function track(harness: Harness): Harness {
+    views.push(harness.view);
+    return harness;
+  }
+
+  const REVIEW =
+    "Write a review on path integration in the entorhinal cortex and its computational models";
+  const GAZE = "Find papers that use gaze to study belief";
+
+  /** Question 1 declares two steps, reads papers 1 and 2 and cites 2. */
+  function askFirst() {
+    beginTaskRun(KEY, { runId: "q1", turnIndex: 1, text: REVIEW });
+    setTaskOutcomes(
+      KEY,
+      "q1",
+      outcomeCheckpoint(
+        [
+          outcomeTask("read", {
+            description: "Read the papers",
+            effect: "read",
+            status: "completed",
+          }),
+          outcomeTask("write", {
+            description: "Write the review",
+            status: "completed",
+          }),
+        ],
+        "completed",
+      ),
+    );
+    applyTaskPaperUpdate(
+      KEY,
+      ledgerDelta("c1", [
+        [1, "read", "Grid cells integrate self-motion."],
+        [2, "read", "Path integration drifts without landmarks."],
+      ]),
+      "q1",
+    );
+    completeTaskRun(KEY, {
+      runId: "q1",
+      quoteCitations: [quoteCitation("cite-1", 2)],
+    });
+  }
+
+  /** Question 2 reads papers 2 and 3, with no steps. */
+  function askSecond() {
+    beginTaskRun(KEY, { runId: "q2", turnIndex: 2, text: GAZE });
+    applyTaskPaperUpdate(
+      KEY,
+      ledgerDelta("c2", [
+        [2, "read", "Gaze tracks the animal's belief."],
+        [3, "read", "Saccades follow expected reward."],
+      ]),
+      "q2",
+    );
+    completeTaskRun(KEY, { runId: "q2" });
+  }
+
+  const sectionsOf = (harness: Harness) =>
+    harness.drawer.findAllByClass("llm-task-progress-question-section");
+  const headOf = (section: FakeElement) =>
+    section.findByClass("llm-task-progress-question")!;
+  const labelOf = (head: FakeElement) =>
+    // The name and the words are two parts, so narrow drawers cut the words
+    // and never the number.
+    `${head.findByClass("llm-task-progress-question-name")!.textContent}${
+      head.findByClass("llm-task-progress-question-words")!.textContent
+    }`;
+  const pillOf = (head: FakeElement) =>
+    head.findByClass("llm-task-progress-pill") as FakeElement & {
+      hidden: boolean;
+    };
+  const countsOf = (head: FakeElement) =>
+    head.findByClass("llm-task-progress-question-counts")!.textContent;
+  const currentHead = (harness: Harness) =>
+    harness.drawer.findByClass("llm-task-progress-question-current");
+  /** The current question's rows: the drawer's own list. */
+  const currentItems = (harness: Harness) =>
+    harness.drawer
+      .findByClass("llm-task-progress-list")!
+      .findAllByClass("llm-task-paper");
+  const itemOf = (items: FakeElement[], itemId: number) =>
+    items.find((item) => item.dataset.key === `1:${itemId}`)!;
+  const detailsOf = (item: FakeElement) => {
+    const summary = item.findByClass("llm-task-paper-summary")!;
+    if (summary.getAttribute("aria-expanded") !== "true")
+      summary.dispatchFakeEvent("click");
+    return collectFakeText(item.findByClass("llm-task-paper-details"));
+  };
+
+  it("looks as it did with one question: no question header", function () {
+    seedScope(5);
+    const harness = track(mount());
+    askFirst();
+    harness.view.flush();
+    harness.row.dispatchFakeEvent("click");
+    assert.isNull(currentHead(harness));
+    assert.isNull(harness.drawer.findByClass("llm-task-progress-history"));
+    assert.isNull(harness.drawer.findByClass("llm-task-progress-question"));
+    assert.isNull(harness.drawer.findByClass("llm-task-progress-papers-title"));
+    assert.lengthOf(harness.items(), 5);
+  });
+
+  it("lists the questions newest first, the earlier one folded with its words, ending and counts", function () {
+    seedScope(5);
+    const harness = track(mount());
+    askFirst();
+    askSecond();
+    harness.view.flush();
+    assert.equal(
+      harness.count(),
+      "2 of 5 read",
+      "the row still describes the latest question",
+    );
+    harness.row.dispatchFakeEvent("click");
+    const current = currentHead(harness)!;
+    assert.isOk(current, "the current question has a header");
+    assert.notEqual(current.tagName, "button", "it is not a control");
+    assert.equal(labelOf(current), `Question 2 · “${GAZE}”`);
+    assert.equal(pillOf(current).textContent, "Completed");
+    assert.equal(
+      harness.drawer.findByClass("llm-task-progress-papers-title")!.textContent,
+      "Papers (5)",
+    );
+
+    const [earlier, ...rest] = sectionsOf(harness);
+    assert.lengthOf(rest, 0, "one earlier question");
+    const head = headOf(earlier);
+    assert.equal(head.tagName, "button");
+    assert.equal(head.getAttribute("aria-expanded"), "false");
+    assert.equal(
+      labelOf(head),
+      "Question 1 · “Write a review on path integration in the entorhinal…”",
+    );
+    assert.equal(pillOf(head).textContent, "Completed");
+    assert.equal(pillOf(head).dataset.tone, "completed");
+    assert.equal(countsOf(head), "2/2 steps · 2 papers");
+    assert.lengthOf(
+      earlier.findAllByClass("llm-task-paper"),
+      0,
+      "a folded question builds no rows",
+    );
+    assert.isNull(earlier.findByClass("llm-task-progress-steps"));
+
+    // The current question's rows show its reads only.
+    const items = currentItems(harness);
+    assert.deepEqual(
+      items.map((item) => item.dataset.state),
+      ["listed", "read", "read", "listed", "listed"],
+    );
+    const shared = detailsOf(itemOf(items, 2));
+    assert.include(shared, "Gaze tracks the animal's belief.");
+    assert.notInclude(shared, "Path integration drifts");
+    assert.notInclude(shared, "Question");
+    assert.notInclude(shared, "Cited in answer");
+  });
+
+  it("unrolls an earlier question's own steps and papers, and folds it again", function () {
+    seedScope(5);
+    const harness = track(mount());
+    askFirst();
+    askSecond();
+    harness.view.flush();
+    harness.row.dispatchFakeEvent("click");
+    const [earlier] = sectionsOf(harness);
+    const head = headOf(earlier);
+    head.dispatchFakeEvent("click");
+    assert.equal(head.getAttribute("aria-expanded"), "true");
+    const steps = earlier.findByClass("llm-task-progress-steps")!;
+    assert.include(collectFakeText(steps), "Read the papers");
+    assert.include(collectFakeText(steps), "Write the review");
+    assert.equal(
+      earlier.findByClass("llm-task-progress-papers-title")!.textContent,
+      "Papers (2)",
+    );
+    const items = earlier.findAllByClass("llm-task-paper");
+    assert.deepEqual(
+      items.map((item) => [item.dataset.key, item.dataset.state]),
+      [
+        ["1:1", "read"],
+        ["1:2", "cited"],
+      ],
+    );
+    const remove = itemOf(items, 1).findByClass("llm-task-paper-remove") as any;
+    assert.isTrue(
+      remove.hidden,
+      "an earlier question's paper is not removable",
+    );
+    const shared = detailsOf(itemOf(items, 2));
+    assert.include(shared, "Path integration drifts without landmarks.");
+    assert.include(shared, "Cited in answer");
+    assert.notInclude(shared, "Gaze tracks");
+    assert.notInclude(shared, "Question");
+    assert.lengthOf(
+      harness.items().filter((item) => item.dataset.key === "1:2"),
+      2,
+      "a paper both questions read is in both",
+    );
+    head.dispatchFakeEvent("click");
+    assert.equal(head.getAttribute("aria-expanded"), "false");
+    assert.lengthOf(earlier.findAllByClass("llm-task-paper"), 0);
+    assert.isNull(earlier.findByClass("llm-task-progress-steps"));
+  });
+
+  it("keeps an unrolled question unrolled through a repaint and a new mount", function () {
+    seedScope(5);
+    const first = track(mount());
+    askFirst();
+    askSecond();
+    first.view.flush();
+    first.row.dispatchFakeEvent("click");
+    headOf(sectionsOf(first)[0]).dispatchFakeEvent("click");
+    applyTaskPaperUpdate(KEY, ledgerDelta("c3", [[4, "read", "More."]]), "q2");
+    first.view.flush();
+    let [earlier] = sectionsOf(first);
+    assert.equal(headOf(earlier).getAttribute("aria-expanded"), "true");
+    assert.lengthOf(earlier.findAllByClass("llm-task-paper"), 2);
+    first.view.dispose();
+
+    const again = track(mount());
+    assert.isTrue(again.view.isOpen());
+    [earlier] = sectionsOf(again);
+    assert.equal(headOf(earlier).getAttribute("aria-expanded"), "true");
+    assert.lengthOf(earlier.findAllByClass("llm-task-paper"), 2);
+  });
+
+  it("leaves out an earlier question that has no steps and no papers", function () {
+    seedScope(5);
+    const harness = track(mount());
+    beginTaskRun(KEY, { runId: "q1", turnIndex: 1, text: "Hello" });
+    completeTaskRun(KEY, { runId: "q1" });
+    askSecond();
+    harness.view.flush();
+    harness.row.dispatchFakeEvent("click");
+    assert.isNull(currentHead(harness), "nothing to go back to: no history");
+    assert.lengthOf(sectionsOf(harness), 0);
+  });
+
+  it("gives a built-in action its own section, titled with the action", function () {
+    seedScope(5);
+    const harness = track(mount());
+    askFirst();
+    beginTaskAction(KEY, {
+      runId: "action-1",
+      title: "Auto Tag",
+      text: "tag the drift papers",
+    });
+    setTaskActionStep(KEY, "action-1", { step: "Tagging", index: 1, total: 1 });
+    endTaskAction(KEY, "action-1", "completed", "Tagged 2 items");
+    harness.view.flush();
+    harness.row.dispatchFakeEvent("click");
+    assert.equal(
+      labelOf(currentHead(harness)!),
+      "Auto Tag · “tag the drift papers”",
+    );
+    askSecond();
+    harness.view.flush();
+    const [action, question] = sectionsOf(harness);
+    assert.equal(labelOf(headOf(action)), "Auto Tag · “tag the drift papers”");
+    assert.equal(pillOf(headOf(action)).textContent, "Completed");
+    assert.equal(countsOf(headOf(action)), "1/1 steps");
+    assert.match(labelOf(headOf(question)), /^Question 1 · /);
+    headOf(action).dispatchFakeEvent("click");
+    assert.include(
+      collectFakeText(action.findByClass("llm-task-progress-steps")),
+      "Steps · Auto Tag",
+    );
+    assert.lengthOf(action.findAllByClass("llm-task-paper"), 0);
+  });
+
+  it("names an action by its title alone when no request was typed", function () {
+    seedScope(5);
+    const harness = track(mount());
+    askFirst();
+    beginTaskAction(KEY, { runId: "action-1", title: "Auto Tag" });
+    endTaskAction(KEY, "action-1", "failed", "offline");
+    harness.view.flush();
+    harness.row.dispatchFakeEvent("click");
+    assert.equal(labelOf(currentHead(harness)!), "Auto Tag");
+    assert.equal(pillOf(currentHead(harness)!).textContent, "Failed");
+  });
+
+  describe("in Chinese", function () {
+    const globals = globalThis as unknown as { Zotero?: unknown };
+    let previousZotero: unknown;
+    before(function () {
+      previousZotero = globals.Zotero;
+      globals.Zotero = { Prefs: { get: () => "zh-CN" }, locale: "zh-CN" };
+      initI18n();
+    });
+    after(function () {
+      if (previousZotero === undefined) delete globals.Zotero;
+      else globals.Zotero = previousZotero;
+      initI18n();
+    });
+
+    it("names each question once, in the reader's language", function () {
+      for (const value of [
+        "Papers ({count})",
+        "{count} paper",
+        "{count} papers",
+      ])
+        assert.notEqual(t(value), value, value);
+      seedScope(5);
+      const harness = track(mount());
+      askFirst();
+      askSecond();
+      harness.view.flush();
+      harness.row.dispatchFakeEvent("click");
+      const head = headOf(sectionsOf(harness)[0]);
+      assert.equal(
+        labelOf(head),
+        "第 1 个问题 · “Write a review on path integration in the entorhinal…”",
+      );
+      assert.equal(pillOf(head).textContent, "已完成");
+      assert.equal(countsOf(head), "2/2 步 · 2 篇论文");
+      assert.equal(labelOf(currentHead(harness)!), `第 2 个问题 · “${GAZE}”`);
+      const text = collectFakeText(harness.drawer);
+      assert.equal(
+        text.split("第 1 个问题").length - 1,
+        1,
+        "the earlier question is named once",
+      );
+      assert.equal(
+        harness.drawer.findByClass("llm-task-progress-papers-title")!
+          .textContent,
+        "论文（5）",
+      );
     });
   });
 });

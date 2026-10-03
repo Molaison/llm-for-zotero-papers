@@ -1,7 +1,9 @@
 /**
  * The Task progress store: one record per conversation of what the current
  * task is doing — its run state, the per-paper ledger, the scope it covers,
- * and the steps an action, Codex or the run's outcomes hold.
+ * and the steps an action, Codex or the run's outcomes hold — and of the
+ * questions and actions before it, each with its own words, steps and
+ * ending (`questions`).
  *
  * The store owns no DOM. Writers are the turn owners (the agent engine, the
  * Codex callbacks, the request lifecycle); readers are the Task progress
@@ -124,6 +126,29 @@ export type TaskProgressScope = {
   listing: TaskPaperScopeListing | null;
 };
 
+/**
+ * A question the conversation asked, or a built-in action it ran: one
+ * section of the drawer's history. Its papers are the ledger's reads under
+ * its question number.
+ */
+export type TaskProgressQuestion = {
+  /** The question's 1-based number; 0 for a built-in action, which asks none. */
+  turn: number;
+  /** The question's latest run, or the action's own id. */
+  runId?: string;
+  /** The user's words, as sent; absent until known. */
+  text?: string;
+  /** An action's name. */
+  title?: string;
+  /**
+   * Its steps, kept here once another question or action took the
+   * conversation's steps; until then they are the record's `checklist`.
+   */
+  checklist: TaskProgressChecklist | null;
+  /** The run state it was left in when another question or action took the row. */
+  state?: TaskRunState;
+};
+
 export type TaskProgressRecord = {
   conversationKey: number;
   /** Bumped on every change; views repaint only when it moves. */
@@ -138,10 +163,16 @@ export type TaskProgressRecord = {
   ledger: TaskPaperLedger;
   scope: TaskProgressScope | null;
   /**
-   * An action's, Codex's or a run's outcome steps, kept until the next
-   * question starts.
+   * An action's, Codex's or a run's outcome steps: the current question's.
+   * When the next question or action starts they move to their own entry
+   * in `questions`.
    */
   checklist: TaskProgressChecklist | null;
+  /**
+   * The questions and actions run here, oldest first, at most
+   * `TASK_PROGRESS_MAX_QUESTIONS`. The last is the one the row describes.
+   */
+  questions: TaskProgressQuestion[];
   /**
    * True once a plan, an action, a Codex plan or a run's outcomes ran here:
    * the row then stays for the conversation.
@@ -166,6 +197,8 @@ export type TaskProgressRecord = {
 };
 
 export const TASK_PROGRESS_MAX_CONVERSATIONS = 6;
+/** Questions and actions a record keeps, newest kept. */
+export const TASK_PROGRESS_MAX_QUESTIONS = 20;
 
 const records = new Map<number, TaskProgressRecord>();
 let nextEpoch = 1;
@@ -185,6 +218,8 @@ export type TaskProgressViewMemo = {
   expanded: string[];
   /** Rows the list had grown to. */
   limit: number;
+  /** Earlier questions unrolled in the drawer's history, by section id. */
+  questions: string[];
   /** The drawer body's scroll offset while open. */
   scrollTop: number;
   /** The record's collapseSeq when this was written: an answer started since closes it. */
@@ -240,6 +275,7 @@ function emptyRecord(conversationKey: number): TaskProgressRecord {
     ledger: createTaskPaperLedger(),
     scope: null,
     checklist: null,
+    questions: [],
     planSeen: false,
     collapseSeq: 0,
     hydrated: false,
@@ -298,52 +334,231 @@ function highestTurn(record: TaskProgressRecord): number {
   return Math.max(0, record.turnIndex, ...Object.values(record.turnByRunId));
 }
 
+// ---------------------------------------------------------------------------
+// Questions: the drawer's history
+// ---------------------------------------------------------------------------
+
+function questionForTurn(
+  record: TaskProgressRecord,
+  turn: number,
+): TaskProgressQuestion | undefined {
+  return turn > 0
+    ? record.questions.find((question) => question.turn === turn)
+    : undefined;
+}
+
+/** The entry a run belongs to: an action by its id, a question by its number. */
+function questionForRun(
+  record: TaskProgressRecord,
+  runId: string | undefined,
+): TaskProgressQuestion | undefined {
+  if (!runId) return undefined;
+  return (
+    record.questions.find((question) => question.runId === runId) ??
+    questionForTurn(record, record.turnByRunId[runId] ?? 0)
+  );
+}
+
+/** The entry the row describes. */
+function currentQuestion(
+  record: TaskProgressRecord,
+): TaskProgressQuestion | undefined {
+  return record.questions[record.questions.length - 1];
+}
+
+/**
+ * The entry a checklist belongs to: its run's, or the current one for steps
+ * of a run the record cannot name yet.
+ */
+function checklistOwner(
+  record: TaskProgressRecord,
+  checklist: TaskProgressChecklist,
+): TaskProgressQuestion | undefined {
+  return questionForRun(record, checklist.runId) ?? currentQuestion(record);
+}
+
+/** The conversation's steps move on: the outgoing ones stay with their entry. */
+function keepChecklist(record: TaskProgressRecord): void {
+  const outgoing = record.checklist;
+  if (!outgoing) return;
+  const owner = checklistOwner(record, outgoing);
+  if (owner) owner.checklist = outgoing;
+}
+
+/** The current entry stops being the row's: it keeps the state it was left in. */
+function leaveCurrentQuestion(record: TaskProgressRecord): void {
+  const current = currentQuestion(record);
+  if (current) current.state = record.runState;
+}
+
+function boundQuestions(record: TaskProgressRecord): void {
+  const extra = record.questions.length - TASK_PROGRESS_MAX_QUESTIONS;
+  if (extra > 0) record.questions.splice(0, extra);
+}
+
+/**
+ * The run named for question `turn` starts: its entry becomes the current
+ * one. Another run of the same question replaces the question's steps.
+ */
+function startQuestion(
+  record: TaskProgressRecord,
+  turn: number,
+  runId: string | undefined,
+  text: string | undefined,
+): void {
+  if (!(turn > 0)) return;
+  const existing = questionForTurn(record, turn);
+  if (existing && existing.runId === runId) {
+    if (text && !existing.text) existing.text = text;
+    return;
+  }
+  if (existing) record.questions.splice(record.questions.indexOf(existing), 1);
+  const words = text || existing?.text;
+  record.questions.push({
+    turn,
+    ...(runId ? { runId } : {}),
+    ...(words ? { text: words } : {}),
+    checklist: null,
+  });
+  boundQuestions(record);
+}
+
 /**
  * A run starts: the row turns to working. Called by the request lifecycle
  * (no run id yet) and again by the runtime once it names the run; the second
  * call attaches the id to the same run instead of starting another.
  *
  * `turnIndex` is the question's 1-based position in the conversation. It
- * defaults to the run's position in the order runs were seen.
+ * defaults to the run's position in the order runs were seen. `text` is the
+ * user's words.
+ *
+ * The lifecycle's call comes before its question is in the history, so the
+ * number it gives may still be the previous question's (or a retried
+ * question's): it creates a question entry only for a number no entry has,
+ * and the runtime naming the run settles which question it is.
  */
 export function beginTaskRun(
   conversationKey: number,
-  params: { runId?: string; turnIndex?: number } = {},
+  params: { runId?: string; turnIndex?: number; text?: string } = {},
 ): void {
   const record = writable(conversationKey);
   if (!record) return;
   const runId = params.runId?.trim() || undefined;
+  const text = params.text?.trim() || undefined;
   const requestedTurn =
     params.turnIndex && params.turnIndex > 0 ? Math.floor(params.turnIndex) : 0;
   if (runId && record.runId === runId) {
+    const entry = questionForRun(record, runId);
+    let moved = false;
     if (requestedTurn && requestedTurn !== record.turnIndex) {
       record.turnIndex = requestedTurn;
       record.turnByRunId[runId] = requestedTurn;
-      changed(record);
+      if (entry && entry.turn !== requestedTurn) {
+        const other = questionForTurn(record, requestedTurn);
+        if (other && other !== entry) {
+          record.questions.splice(record.questions.indexOf(other), 1);
+        }
+        entry.turn = requestedTurn;
+      }
+      moved = true;
     }
+    const named = Boolean(entry && text && !entry.text);
+    if (entry && named) entry.text = text;
+    if (moved || named) changed(record);
     return;
   }
   if (isLive(record.runState) && !record.runId) {
     // The request began this run; the runtime now names it.
+    const begun = currentQuestion(record);
     record.runId = runId;
     record.turnIndex = requestedTurn || record.turnIndex;
     if (runId) record.turnByRunId[runId] = record.turnIndex;
+    if (begun && !begun.runId && begun.turn === record.turnIndex) {
+      // The lifecycle's own entry for this question.
+      begun.runId = runId;
+      if (text && !begun.text) begun.text = text;
+    } else if (runId) {
+      startQuestion(record, record.turnIndex, runId, text);
+    }
     changed(record);
     return;
   }
   // A replayed start of a run already seen never restarts it.
   if (runId && record.turnByRunId[runId] !== undefined) return;
   const turn = requestedTurn || highestTurn(record) + 1;
+  // A new question starts fresh steps; an earlier action's or Codex plan's
+  // steps stay with their own question or action.
+  if (record.checklist && record.checklist.runId !== runId) {
+    keepChecklist(record);
+    record.checklist = null;
+  }
+  leaveCurrentQuestion(record);
   record.runState = "working";
   record.runId = runId;
   record.turnIndex = turn;
   if (runId) record.turnByRunId[runId] = turn;
-  // A new question starts fresh steps; an earlier action's or Codex plan's
-  // steps are done with.
-  if (record.checklist && record.checklist.runId !== runId) {
-    record.checklist = null;
+  if (runId || !questionForTurn(record, turn)) {
+    startQuestion(record, turn, runId, text);
   }
   changed(record);
+}
+
+/**
+ * The question a request asked, as the history holds it once the request
+ * ended: its words fill in where none were known. A run no runtime named
+ * (plain chat) started under the number the lifecycle could count before
+ * the question was added; it takes the question's own number here (the
+ * previous question kept its state when the run started).
+ */
+export function noteTaskQuestion(
+  conversationKey: number,
+  params: { turnIndex: number; text?: string },
+): void {
+  const record = records.get(normalizeKey(conversationKey));
+  const turn = Math.floor(params.turnIndex || 0);
+  if (!record || !(turn > 0)) return;
+  const text = params.text?.trim() || undefined;
+  let moved = false;
+  if (!record.runId && turn > record.turnIndex) {
+    record.turnIndex = turn;
+    startQuestion(record, turn, undefined, text);
+    moved = true;
+  }
+  const entry = questionForTurn(record, turn);
+  const named = Boolean(entry && text && !entry.text);
+  if (entry && named) entry.text = text;
+  if (!moved && !named) return;
+  writable(conversationKey);
+  changed(record);
+}
+
+/**
+ * An entry's steps: the conversation's own while they are its, else the
+ * ones it kept.
+ */
+export function taskQuestionChecklist(
+  record: TaskProgressRecord,
+  question: TaskProgressQuestion,
+): TaskProgressChecklist | null {
+  const current = record.checklist;
+  if (current && checklistOwner(record, current) === question) return current;
+  return question.checklist;
+}
+
+/**
+ * How an entry ended: its outcome ledger's settled end, an action's own
+ * outcome, or the state it was left in. The current entry is the row's.
+ */
+export function taskQuestionState(
+  record: TaskProgressRecord,
+  question: TaskProgressQuestion,
+): TaskRunState | RunEndState {
+  if (question === currentQuestion(record))
+    return displayedTaskRunState(record);
+  const checklist = taskQuestionChecklist(record, question);
+  if (checklist?.source === "outcomes" && checklist.end) return checklist.end;
+  if (checklist?.source === "action") return checklist.outcome || "working";
+  return question.state || "idle";
 }
 
 function turnFor(
@@ -660,14 +875,35 @@ function countSteps(steps: readonly TaskProgressStep[]): number {
 /**
  * A built-in action starts. Its steps become the conversation's steps and
  * the row shows it working, unless a question is running: an action never
- * takes over a live question's state.
+ * takes over a live question's state. It gets its own entry in the history,
+ * the current one unless a question runs (then it goes just before it).
+ * `text` is the user's words when the action was typed with a request.
  */
 export function beginTaskAction(
   conversationKey: number,
-  params: { runId: string; title: string },
+  params: { runId: string; title: string; text?: string },
 ): void {
   const record = writable(conversationKey);
   if (!record || !params.runId) return;
+  const live = isLive(record.runState);
+  if (record.checklist && record.checklist.runId !== params.runId) {
+    keepChecklist(record);
+  }
+  if (!live) leaveCurrentQuestion(record);
+  const text = params.text?.trim();
+  const entry: TaskProgressQuestion = {
+    turn: 0,
+    runId: params.runId,
+    ...(text ? { text } : {}),
+    ...(params.title ? { title: params.title } : {}),
+    checklist: null,
+  };
+  if (live && record.questions.length) {
+    record.questions.splice(record.questions.length - 1, 0, entry);
+  } else {
+    record.questions.push(entry);
+  }
+  boundQuestions(record);
   record.checklist = {
     source: "action",
     runId: params.runId,
@@ -788,6 +1024,7 @@ export function setTaskChecklist(
   ) {
     return;
   }
+  if (previous && previous.runId !== params.runId) keepChecklist(record);
   const done = countDone(params.steps);
   record.checklist = {
     source: params.source,
@@ -878,6 +1115,9 @@ export function setTaskOutcomes(
   ) {
     return;
   }
+  if (record.checklist && record.checklist.runId !== next.runId) {
+    keepChecklist(record);
+  }
   record.checklist = next;
   record.planSeen = planSeen;
   changed(record);
@@ -886,6 +1126,12 @@ export function setTaskOutcomes(
 // ---------------------------------------------------------------------------
 // History
 // ---------------------------------------------------------------------------
+
+/** A run's Codex plan or outcome steps, as its stored events fold. */
+export type TaskProgressHistoryChecklist = Omit<
+  TaskProgressChecklist,
+  "done" | "total" | "summary" | "title"
+>;
 
 export type TaskProgressHistoryRun = {
   runId: string;
@@ -898,10 +1144,23 @@ export type TaskProgressHistoryRun = {
   quoteCitations?: readonly QuoteCitation[];
   /** The sources the run's submitted documents cite (`material_finalized`). */
   documentCitations?: readonly TaskPaperDocumentCitation[];
+  /** The run's Codex plan or outcome steps, if it had any. */
+  checklist?: TaskProgressHistoryChecklist | null;
+};
+
+/** A question the conversation's user messages hold. */
+export type TaskProgressHistoryQuestion = {
+  turn: number;
+  /** The user's words. */
+  text: string;
+  /** How its answer ended, or null when it has none. */
+  settled: TaskRunState | null;
 };
 
 export type TaskProgressHistory = {
   runs: TaskProgressHistoryRun[];
+  /** Every question, in order (none in a history saved without them). */
+  questions?: TaskProgressHistoryQuestion[];
   /** The latest question's number. */
   latestTurn: number;
   /** How the latest question ended, or null when it has no answer. */
@@ -909,12 +1168,72 @@ export type TaskProgressHistory = {
   /** A plan, a Codex plan or a run's outcomes ran in the conversation. */
   planSeen: boolean;
   /** The latest run's Codex plan or outcome steps, if it had any. */
-  checklist: Omit<
-    TaskProgressChecklist,
-    "done" | "total" | "summary" | "title"
-  > | null;
+  checklist: TaskProgressHistoryChecklist | null;
   libraryID?: number;
 };
+
+/** A stored run's steps as the record holds them. */
+function historyChecklist(
+  checklist: TaskProgressHistoryChecklist,
+): TaskProgressChecklist {
+  const steps = checklist.steps.map((step) => ({ ...step }));
+  return {
+    ...checklist,
+    title: "",
+    steps,
+    done: countDone(steps),
+    total: countSteps(steps),
+    summary: "",
+  };
+}
+
+/**
+ * Fold the history's questions in: each one the record has no entry for
+ * goes in by number, before every entry this session started (an action, a
+ * later question); one it has gains the words, steps and ending it lacks.
+ * Each question takes its latest run's steps.
+ */
+function hydrateQuestions(
+  record: TaskProgressRecord,
+  history: TaskProgressHistory,
+): void {
+  const latestRun = new Map<number, TaskProgressHistoryRun>();
+  for (const run of history.runs) {
+    if (run.runId && run.turn > 0) latestRun.set(run.turn, run);
+  }
+  for (const question of history.questions || []) {
+    if (!(question.turn > 0)) continue;
+    const run = latestRun.get(question.turn);
+    const text = question.text?.trim() || undefined;
+    const existing = questionForTurn(record, question.turn);
+    if (existing) {
+      if (text && !existing.text) existing.text = text;
+      if (!existing.runId && run && !run.live) existing.runId = run.runId;
+      if (
+        !existing.checklist &&
+        run?.checklist &&
+        run.runId === existing.runId
+      ) {
+        existing.checklist = historyChecklist(run.checklist);
+      }
+      if (!existing.state && question.settled) {
+        existing.state = question.settled;
+      }
+      continue;
+    }
+    const at = record.questions.findIndex(
+      (entry) => entry.turn === 0 || entry.turn > question.turn,
+    );
+    record.questions.splice(at < 0 ? record.questions.length : at, 0, {
+      turn: question.turn,
+      ...(run ? { runId: run.runId } : {}),
+      ...(text ? { text } : {}),
+      checklist: run?.checklist ? historyChecklist(run.checklist) : null,
+      ...(question.settled ? { state: question.settled } : {}),
+    });
+  }
+  boundQuestions(record);
+}
 
 /**
  * Fold a conversation's persisted history in: every run's ledger updates
@@ -981,21 +1300,17 @@ export function hydrateTaskProgress(
     }
     if (history.settled) record.runState = history.settled;
     if (history.checklist && !record.checklist) {
-      const steps = history.checklist.steps.map((step) => ({ ...step }));
-      record.checklist = {
-        ...history.checklist,
-        title: "",
-        steps,
-        done: countDone(steps),
-        total: countSteps(steps),
-        summary: "",
-      };
+      record.checklist = historyChecklist(history.checklist);
       // A ledger that only recorded its ending shows no steps.
-      if (history.checklist.source !== "outcomes" || steps.length) {
+      if (
+        history.checklist.source !== "outcomes" ||
+        record.checklist.steps.length
+      ) {
         record.planSeen = true;
       }
     }
   }
+  hydrateQuestions(record, history);
   record.hydrated = true;
   // Views repaint only when the history added something: a live run's row
   // must not churn because its conversation's history was folded in.
@@ -1012,6 +1327,7 @@ function hydrationSignature(record: TaskProgressRecord): string {
     record.runId,
     record.turnIndex,
     record.checklist,
+    record.questions,
   ]);
 }
 
@@ -1034,7 +1350,9 @@ export function getTaskProgressViewMemo(
   conversationKey: number,
 ): TaskProgressViewMemo | null {
   const memo = viewMemos.get(normalizeKey(conversationKey));
-  return memo ? { ...memo, expanded: [...memo.expanded] } : null;
+  return memo
+    ? { ...memo, expanded: [...memo.expanded], questions: [...memo.questions] }
+    : null;
 }
 
 /** Merge into the conversation's card state; only while its record exists. */
@@ -1050,6 +1368,7 @@ export function rememberTaskProgressView(
     open: patch.open ?? previous?.open ?? false,
     expanded: [...(patch.expanded ?? previous?.expanded ?? [])],
     limit: patch.limit ?? previous?.limit ?? 0,
+    questions: [...(patch.questions ?? previous?.questions ?? [])],
     scrollTop: patch.scrollTop ?? previous?.scrollTop ?? 0,
     collapseSeq:
       patch.collapseSeq ?? previous?.collapseSeq ?? record.collapseSeq,

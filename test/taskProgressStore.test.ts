@@ -1,6 +1,7 @@
 import { assert } from "chai";
 import {
   TASK_PROGRESS_MAX_CONVERSATIONS,
+  TASK_PROGRESS_MAX_QUESTIONS,
   applyTaskDocumentCitations,
   applyTaskPaperUpdate,
   beginTaskRun,
@@ -25,6 +26,9 @@ import {
   displayedTaskRunState,
   markTaskWaiting,
   setTaskOutcomes,
+  noteTaskQuestion,
+  taskQuestionChecklist,
+  taskQuestionState,
   taskReadInDepth,
 } from "../src/modules/contextPanel/taskProgress/store";
 import {
@@ -655,6 +659,268 @@ describe("task progress store", function () {
     beginTaskRun(7);
     assert.isFalse(getTaskProgress(7)!.hydrated);
     assert.notEqual(getTaskProgress(7)!.epoch, epoch);
+  });
+
+  describe("questions", function () {
+    const steps = (runId: string, label: string) =>
+      outcomeCheckpoint([
+        outcomeTask(`${runId}-${label}`, {
+          description: label,
+          status: "completed",
+          effect: "read",
+        }),
+      ]);
+    const summary = (key: number) =>
+      getTaskProgress(key)!.questions.map((question) => [
+        question.turn,
+        question.runId,
+        question.text,
+      ]);
+
+    it("keeps each question's steps when the next question starts", function () {
+      beginTaskRun(7, {
+        runId: "q1",
+        turnIndex: 1,
+        text: "Find papers about drift",
+      });
+      setTaskOutcomes(7, "q1", steps("q1", "Read the papers"));
+      completeTaskRun(7, { runId: "q1" });
+      beginTaskRun(7, { runId: "q2", turnIndex: 2, text: "Compare them" });
+      const record = getTaskProgress(7)!;
+      assert.isNull(record.checklist, "the new question starts fresh steps");
+      assert.deepEqual(summary(7), [
+        [1, "q1", "Find papers about drift"],
+        [2, "q2", "Compare them"],
+      ]);
+      const [first, second] = record.questions;
+      assert.equal(first.checklist?.runId, "q1");
+      assert.deepEqual(
+        first.checklist?.steps.map((step) => step.label),
+        ["Read the papers"],
+      );
+      assert.equal(taskQuestionState(record, first), "completed");
+      assert.equal(taskQuestionChecklist(record, first), first.checklist);
+      assert.isNull(taskQuestionChecklist(record, second));
+      setTaskOutcomes(7, "q2", steps("q2", "Compare the methods"));
+      const now = getTaskProgress(7)!;
+      assert.equal(
+        taskQuestionChecklist(now, now.questions[1]),
+        now.checklist,
+        "the current question's steps are the conversation's",
+      );
+      assert.equal(taskQuestionChecklist(now, now.questions[0])?.runId, "q1");
+    });
+
+    it("never takes a question's steps when the request starts before the question is in the history", function () {
+      beginTaskRun(7, { runId: "q1", turnIndex: 1, text: "First" });
+      setTaskOutcomes(7, "q1", steps("q1", "Read"));
+      completeTaskRun(7, { runId: "q1" });
+      // The request lifecycle counts the questions before the new one is
+      // added: it names the previous question's number.
+      beginTaskRun(7, { turnIndex: 1 });
+      let record = getTaskProgress(7)!;
+      assert.deepEqual(summary(7), [[1, "q1", "First"]]);
+      assert.equal(record.questions[0].checklist?.runId, "q1");
+      // The runtime names the run and its question.
+      beginTaskRun(7, { runId: "q2", turnIndex: 2, text: "Second" });
+      record = getTaskProgress(7)!;
+      assert.deepEqual(summary(7), [
+        [1, "q1", "First"],
+        [2, "q2", "Second"],
+      ]);
+      assert.equal(record.questions[0].checklist?.runId, "q1");
+      assert.equal(taskQuestionState(record, record.questions[0]), "completed");
+      // Replayed starts change nothing.
+      const version = record.version;
+      beginTaskRun(7, { runId: "q1" });
+      beginTaskRun(7, { runId: "q2", turnIndex: 2 });
+      assert.equal(getTaskProgress(7)!.version, version);
+      assert.lengthOf(getTaskProgress(7)!.questions, 2);
+    });
+
+    it("replaces a question's steps when it runs again", function () {
+      beginTaskRun(7, { runId: "q1", turnIndex: 1, text: "First" });
+      setTaskOutcomes(7, "q1", steps("q1", "Read"));
+      completeTaskRun(7, { runId: "q1" });
+      beginTaskRun(7, { runId: "q1-retry", turnIndex: 1 });
+      const record = getTaskProgress(7)!;
+      assert.deepEqual(summary(7), [[1, "q1-retry", "First"]]);
+      assert.isNull(record.questions[0].checklist);
+      assert.isNull(record.checklist);
+    });
+
+    it("gives each action its own entry, titled, and keeps the question's steps beside it", function () {
+      beginTaskRun(7, { runId: "q1", turnIndex: 1, text: "First" });
+      setTaskOutcomes(7, "q1", steps("q1", "Read"));
+      completeTaskRun(7, { runId: "q1" });
+      beginTaskAction(7, {
+        runId: "action-1",
+        title: "Auto Tag",
+        text: "tag the drift papers",
+      });
+      setTaskActionStep(7, "action-1", { step: "Tagging", index: 1, total: 1 });
+      endTaskAction(7, "action-1", "failed", "offline");
+      beginTaskRun(7, { runId: "q2", turnIndex: 2, text: "Second" });
+      const record = getTaskProgress(7)!;
+      assert.deepEqual(summary(7), [
+        [1, "q1", "First"],
+        [0, "action-1", "tag the drift papers"],
+        [2, "q2", "Second"],
+      ]);
+      const [question, action] = record.questions;
+      assert.equal(action.title, "Auto Tag");
+      assert.equal(action.checklist?.source, "action");
+      assert.equal(taskQuestionState(record, action), "failed");
+      assert.equal(question.checklist?.runId, "q1");
+      assert.equal(
+        taskQuestionState(record, question),
+        "completed",
+        "the action never takes the question's ending",
+      );
+    });
+
+    it("files an action started during a question before it, and the question stays current", function () {
+      beginTaskRun(7, { runId: "q1", turnIndex: 1, text: "First" });
+      beginTaskAction(7, { runId: "action-1", title: "Auto Tag" });
+      const record = getTaskProgress(7)!;
+      assert.deepEqual(summary(7), [
+        [0, "action-1", undefined],
+        [1, "q1", "First"],
+      ]);
+      // The question's own outcomes take the steps back; the action's stay
+      // with the action.
+      setTaskOutcomes(7, "q1", steps("q1", "Read"));
+      const now = getTaskProgress(7)!;
+      assert.equal(now.checklist?.runId, "q1");
+      assert.equal(now.questions[0].checklist?.source, "action");
+      assert.equal(taskQuestionChecklist(now, now.questions[1])?.runId, "q1");
+      assert.equal(record.runId, "q1");
+    });
+
+    it(`keeps the last ${TASK_PROGRESS_MAX_QUESTIONS} questions`, function () {
+      for (let turn = 1; turn <= TASK_PROGRESS_MAX_QUESTIONS + 5; turn++) {
+        beginTaskRun(7, { runId: `q${turn}`, turnIndex: turn });
+        completeTaskRun(7, { runId: `q${turn}` });
+      }
+      const questions = getTaskProgress(7)!.questions;
+      assert.lengthOf(questions, TASK_PROGRESS_MAX_QUESTIONS);
+      assert.equal(questions[0].turn, 6);
+      assert.equal(questions[questions.length - 1].turn, 25);
+    });
+
+    it("names the question a request asked once the history holds it", function () {
+      beginTaskRun(7, { runId: "q1", turnIndex: 1 });
+      completeTaskRun(7, { runId: "q1" });
+      noteTaskQuestion(7, { turnIndex: 1, text: "First" });
+      assert.deepEqual(summary(7), [[1, "q1", "First"]]);
+      // Plain chat: no runtime names the run; the request started under the
+      // previous question's number.
+      beginTaskRun(7, { turnIndex: 1 });
+      noteTaskQuestion(7, { turnIndex: 2, text: "Second" });
+      const record = getTaskProgress(7)!;
+      assert.equal(record.turnIndex, 2);
+      assert.deepEqual(summary(7), [
+        [1, "q1", "First"],
+        [2, undefined, "Second"],
+      ]);
+      assert.equal(taskQuestionState(record, record.questions[0]), "completed");
+      // A named run keeps its number; the words fill in only once.
+      beginTaskRun(7, { runId: "q3", turnIndex: 3 });
+      noteTaskQuestion(7, { turnIndex: 3, text: "Third" });
+      noteTaskQuestion(7, { turnIndex: 3, text: "Other words" });
+      assert.equal(getTaskProgress(7)!.questions[2].text, "Third");
+      const version = getTaskProgress(7)!.version;
+      noteTaskQuestion(7, { turnIndex: 2, text: "Second" });
+      assert.equal(getTaskProgress(7)!.version, version, "nothing new");
+    });
+
+    it("hydrates every question's words, steps and ending, once", function () {
+      const history = {
+        runs: [
+          {
+            runId: "r1",
+            turn: 1,
+            deltas: [ledgerDelta("c1", [[1, "read", "One"]], "r1")],
+            checklist: {
+              source: "outcomes" as const,
+              runId: "r1",
+              steps: [{ label: "Read", status: "completed" as const }],
+              end: "completed" as const,
+            },
+          },
+          {
+            runId: "r2",
+            turn: 3,
+            deltas: [],
+            checklist: {
+              source: "codex" as const,
+              runId: "r2",
+              steps: [{ label: "Compare", status: "in_progress" as const }],
+            },
+          },
+        ],
+        questions: [
+          {
+            turn: 1,
+            text: "Which papers measure drift?",
+            settled: "completed",
+          },
+          { turn: 2, text: "Thanks", settled: "completed" },
+          { turn: 3, text: "Compare them", settled: "failed" },
+        ],
+        latestTurn: 3,
+        settled: "failed",
+        planSeen: true,
+        checklist: {
+          source: "codex" as const,
+          runId: "r2",
+          steps: [{ label: "Compare", status: "in_progress" as const }],
+        },
+        libraryID: 1,
+      } as const;
+      hydrateTaskProgress(7, history as never);
+      let record = getTaskProgress(7)!;
+      assert.deepEqual(summary(7), [
+        [1, "r1", "Which papers measure drift?"],
+        [2, undefined, "Thanks"],
+        [3, "r2", "Compare them"],
+      ]);
+      assert.equal(record.questions[0].checklist?.source, "outcomes");
+      assert.equal(record.questions[0].checklist?.done, 1);
+      assert.equal(record.questions[0].checklist?.total, 1);
+      assert.equal(taskQuestionState(record, record.questions[1]), "completed");
+      assert.equal(record.checklist?.runId, "r2");
+      const version = record.version;
+      assert.isFalse(hydrateTaskProgress(7, history as never));
+      assert.equal(getTaskProgress(7)!.version, version);
+      assert.lengthOf(getTaskProgress(7)!.questions, 3);
+
+      // A run live in this session stays the current question; the earlier
+      // ones go before it.
+      beginTaskRun(8, { runId: "live", turnIndex: 3, text: "Compare them" });
+      hydrateTaskProgress(8, {
+        ...history,
+        runs: [
+          history.runs[0],
+          { runId: "live", turn: 3, live: true, deltas: [] },
+        ],
+        questions: [
+          history.questions[0],
+          history.questions[1],
+          { turn: 3, text: "Compare them", settled: null },
+        ],
+        settled: null,
+        checklist: null,
+      } as never);
+      record = getTaskProgress(8)!;
+      assert.deepEqual(summary(8), [
+        [1, "r1", "Which papers measure drift?"],
+        [2, undefined, "Thanks"],
+        [3, "live", "Compare them"],
+      ]);
+      assert.equal(record.runState, "working");
+      assert.equal(record.questions[0].checklist?.runId, "r1");
+    });
   });
 
   it("keeps a conversation's card state only as long as its record", function () {

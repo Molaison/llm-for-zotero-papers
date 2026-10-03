@@ -323,6 +323,7 @@ export function createAgentTurnEventHandler(
     beginTaskRun(conversationKey, {
       runId: assistantMessage.agentRunId,
       turnIndex: taskTurnIndexFor(history, pairedUserMessage) || undefined,
+      text: pairedUserMessage.text,
     });
   };
   return async (event: AgentEvent): Promise<void> => {
@@ -1931,6 +1932,7 @@ export async function sendAgentTurn(
         beginTaskRun(conversationKey, {
           runId,
           turnIndex: taskTurnIndexFor(historyForRun, userMessage) || undefined,
+          text: userMessage.text,
         });
         deps.agentRunTraceCache.set(runId, []);
         refreshChatSafely();
@@ -2489,6 +2491,7 @@ export async function retryAgentTurn(
           runId,
           turnIndex:
             taskTurnIndexFor(history, retryPair.userMessage) || undefined,
+          text: retryPair.userMessage.text,
         });
         deps.agentRunTraceCache.set(runId, []);
         refreshChatSafely();

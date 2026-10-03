@@ -27,12 +27,18 @@
  * every frame. A mount, a conversation switch and a conversation still
  * loading put the row in its state at once.
  *
- * Across questions the view accumulates: a paper shows the strongest state
- * any question gave it, its details are grouped by question, and the counts
- * (row and header) describe the latest question.
+ * The row's counts describe the latest question. Once the conversation has
+ * an earlier question (or built-in action) with steps or papers to show, the
+ * drawer is a short history, newest first: the current question named above
+ * its own steps and papers, then each earlier one folded to a header (its
+ * words, how it ended, its counts) that unrolls its own steps and papers. In
+ * a question's list a paper shows only what that question read and cited,
+ * so a paper two questions read is listed under both. With one question the
+ * drawer shows no history.
  *
  * Repaints are coalesced to at most four a second. The paper list is built
- * only while the drawer is open, and a paper's details only while expanded.
+ * only while the drawer is open, an earlier question's rows only while it is
+ * unrolled, and a paper's details only while expanded.
  */
 import {
   TASK_PAPER_DIGEST_LABEL_MAX_CHARS,
@@ -58,7 +64,11 @@ import {
   isTaskRunLive,
   rememberTaskProgressView,
   subscribeTaskProgress,
+  taskQuestionChecklist,
+  taskQuestionState,
   taskReadInDepth,
+  type TaskProgressChecklist,
+  type TaskProgressQuestion,
   type TaskProgressRecord,
   type TaskRunState,
 } from "./store";
@@ -173,22 +183,53 @@ export function paperStateForTurn(
   return entry.turns[turn]?.state || "listed";
 }
 
+/** Whether question `turn` read, cited or found the paper. */
+function touchedInTurn(entry: TaskPaperLedgerEntry, turn: number): boolean {
+  const own = entry.turns[turn];
+  return Boolean(
+    own && (own.state !== "listed" || own.reads.length || own.citations.length),
+  );
+}
+
+/** The paper as one question saw it: that question's reads and citations only. */
+function entryForTurn(
+  entry: TaskPaperLedgerEntry,
+  turn: number,
+): TaskPaperLedgerEntry {
+  const own = entry.turns[turn];
+  return {
+    ...entry,
+    state: own?.state || "listed",
+    latestTurn: turn,
+    turns: own ? { [turn]: own } : {},
+  };
+}
+
 /**
  * The drawer's rows: the scope in order, then any paper the ledger holds
  * that the scope listing does not (read outside the attached scope, or past
  * the whole-library cap).
+ *
+ * Given `turn`, the rows are that question's: each paper shows only what
+ * that question read and cited, and a paper outside the scope lists only
+ * when that question touched it.
  */
 export function buildTaskProgressPaperRows(
   record: TaskProgressRecord | null,
+  options: { turn?: number } = {},
 ): TaskProgressPaperRow[] {
   if (!record) return [];
+  const only = options.turn;
   const turn = summaryTurn(record);
+  const own = (entry: TaskPaperLedgerEntry | undefined) =>
+    entry && only !== undefined ? entryForTurn(entry, only) : entry;
   const rows: TaskProgressPaperRow[] = [];
   const seen = new Set<string>();
   for (const scope of record.scope?.listing?.entries || []) {
     if (seen.has(scope.key)) continue;
     seen.add(scope.key);
-    const entry = record.ledger.papers[scope.key];
+    const full = record.ledger.papers[scope.key];
+    const entry = own(full);
     rows.push({
       key: scope.key,
       index: rows.length + 1,
@@ -203,13 +244,17 @@ export function buildTaskProgressPaperRows(
       inScope: true,
       entry,
       state: entry?.state || "listed",
-      turnState: paperStateForTurn(entry, turn),
+      turnState:
+        only === undefined
+          ? paperStateForTurn(full, turn)
+          : entry?.state || "listed",
     });
   }
   for (const key of record.ledger.order) {
     if (seen.has(key)) continue;
-    const entry = record.ledger.papers[key];
-    if (!entry) continue;
+    const full = record.ledger.papers[key];
+    if (!full || (only !== undefined && !touchedInTurn(full, only))) continue;
+    const entry = own(full)!;
     seen.add(key);
     rows.push({
       key,
@@ -225,7 +270,8 @@ export function buildTaskProgressPaperRows(
       inScope: false,
       entry,
       state: entry.state,
-      turnState: paperStateForTurn(entry, turn),
+      turnState:
+        only === undefined ? paperStateForTurn(entry, turn) : entry.state,
     });
   }
   return rows;
@@ -708,18 +754,221 @@ export function isMetadataOnlyRow(
 
 /**
  * The rows the drawer lists: every row but the metadata-only ones, numbered
- * in the order they list.
+ * in the order they list. Rows of one question (`buildTaskProgressPaperRows`
+ * given a turn) hold that question alone, so `turn` 0 (every turn) folds
+ * them by it.
  */
 export function listedTaskProgressPaperRows(
   record: TaskProgressRecord | null,
   rows: TaskProgressPaperRow[] = buildTaskProgressPaperRows(record),
+  turn: number = summaryTurn(record),
 ): TaskProgressPaperRow[] {
-  const turn = summaryTurn(record);
   return rows
     .filter((row) => !isMetadataOnlyRow(row, turn))
     .map((row, index) =>
       row.index === index + 1 ? row : { ...row, index: index + 1 },
     );
+}
+
+// ---------------------------------------------------------------------------
+// Questions: the drawer's history
+// ---------------------------------------------------------------------------
+
+/** Characters of the user's words a question's header shows. */
+export const TASK_PROGRESS_QUESTION_WORDS_MAX_CHARS = 60;
+
+/**
+ * The user's words as a question's header shows them: one line, at most 60
+ * characters, cut at a word (with "…") when longer.
+ */
+export function clipTaskQuestionWords(text: string | undefined): string {
+  const clean = `${text ?? ""}`.replace(/\s+/g, " ").trim();
+  const max = TASK_PROGRESS_QUESTION_WORDS_MAX_CHARS;
+  if (clean.length <= max) return clean;
+  const head = clean.slice(0, max - 1);
+  const space = head.lastIndexOf(" ");
+  // An unspaced script (Han, kana) has no word to cut at.
+  const cut = space > max / 2 ? head.slice(0, space) : head;
+  return `${cut.replace(/[\s,;:.]+$/u, "")}…`;
+}
+
+/**
+ * A section's name: "Question 2 · “<the user's words>”"; a built-in action
+ * is named by its title, and the request typed with it when there was one.
+ */
+export function formatTaskQuestionLabel(
+  question: TaskProgressQuestion,
+): string {
+  return splitTaskQuestionLabel(question).join("");
+}
+
+/**
+ * A question's label in two parts: its name ("Question 2", or an action's
+ * name) and its words (" · “…”", or "“…”" without a name).
+ */
+export function splitTaskQuestionLabel(
+  question: TaskProgressQuestion,
+): [string, string] {
+  const name =
+    question.turn > 0
+      ? format("Question {number}", { number: question.turn })
+      : question.title || "";
+  const words = clipTaskQuestionWords(question.text);
+  if (!words) return [name, ""];
+  return [name, name ? ` · “${words}”` : `“${words}”`];
+}
+
+/**
+ * One question (or built-in action) in the drawer. The current one's steps
+ * and papers are the drawer's own block and list; an earlier one's unroll
+ * under its header.
+ */
+export type TaskProgressSection = {
+  /** Its key in the view memo: "question:<number>", or "action:<run id>". */
+  id: string;
+  question: TaskProgressQuestion;
+  /** The one the row describes. */
+  current: boolean;
+  label: string;
+  state: TaskRunState | RunEndState;
+  /** Its steps, when there are steps to show. */
+  checklist: TaskProgressChecklist | null;
+  /** An earlier question's papers; the current one lists the drawer's own. */
+  rows: TaskProgressPaperRow[];
+};
+
+/** A ledger that only recorded its ending has no steps to show. */
+function shownChecklist(
+  checklist: TaskProgressChecklist | null | undefined,
+): TaskProgressChecklist | null {
+  return checklist &&
+    (checklist.source !== "outcomes" || checklist.steps.length)
+    ? checklist
+    : null;
+}
+
+function sectionId(question: TaskProgressQuestion): string {
+  return question.turn > 0
+    ? `question:${question.turn}`
+    : `action:${question.runId || ""}`;
+}
+
+/**
+ * The papers an earlier question read, cited or found, in the order the
+ * ledger first saw them, each with that question's reads only. A paper in
+ * the scope keeps the scope's details, but only the current question's rows
+ * can be removed.
+ */
+function questionRows(
+  record: TaskProgressRecord,
+  turn: number,
+  keys: readonly string[],
+  scopeEntries: ReadonlyMap<string, TaskPaperScopeEntry>,
+): TaskProgressPaperRow[] {
+  const rows: TaskProgressPaperRow[] = [];
+  for (const key of keys) {
+    const full = record.ledger.papers[key];
+    if (!full) continue;
+    const entry = entryForTurn(full, turn);
+    const scope = scopeEntries.get(key);
+    const row: TaskProgressPaperRow = {
+      key,
+      index: rows.length + 1,
+      libraryID: entry.libraryID,
+      itemId: entry.itemId,
+      title: scope?.title || entry.title || `#${entry.itemId}`,
+      creator: scope?.firstCreator || entry.creator || "",
+      year: scope?.year || entry.year || "",
+      folders: scope?.collectionPaths || [],
+      tags: scope?.tags || [],
+      scopeText: scope?.text || "unknown",
+      inScope: false,
+      entry,
+      state: entry.state,
+      turnState: entry.state,
+    };
+    if (!isMetadataOnlyRow(row, 0)) rows.push(row);
+  }
+  return rows;
+}
+
+/**
+ * The drawer's history, newest first: the current question (or action),
+ * then each earlier one that has steps or papers to show. With one section
+ * the drawer shows no history, as before there was one.
+ */
+export function buildTaskProgressSections(
+  record: TaskProgressRecord | null,
+): TaskProgressSection[] {
+  const questions = record?.questions || [];
+  if (!record || !questions.length) return [];
+  // Every paper each earlier question touched, in one pass over the ledger;
+  // with one question there is none to look for.
+  const keysByTurn = new Map<number, string[]>();
+  const scopeEntries = new Map<string, TaskPaperScopeEntry>();
+  if (questions.length > 1) {
+    for (const key of record.ledger.order) {
+      const entry = record.ledger.papers[key];
+      if (!entry) continue;
+      for (const turn of Object.keys(entry.turns).map(Number)) {
+        if (!(turn > 0) || !touchedInTurn(entry, turn)) continue;
+        const keys = keysByTurn.get(turn);
+        if (keys) keys.push(key);
+        else keysByTurn.set(turn, [key]);
+      }
+    }
+    for (const entry of record.scope?.listing?.entries || [])
+      scopeEntries.set(entry.key, entry);
+  }
+  const sections: TaskProgressSection[] = [];
+  for (let index = questions.length - 1; index >= 0; index--) {
+    const question = questions[index];
+    const current = index === questions.length - 1;
+    const checklist = shownChecklist(taskQuestionChecklist(record, question));
+    const rows =
+      current || !(question.turn > 0)
+        ? []
+        : questionRows(
+            record,
+            question.turn,
+            keysByTurn.get(question.turn) || [],
+            scopeEntries,
+          );
+    if (!current && !checklist && !rows.length) continue;
+    sections.push({
+      id: sectionId(question),
+      question,
+      current,
+      label: formatTaskQuestionLabel(question),
+      state: taskQuestionState(record, question),
+      checklist,
+      rows,
+    });
+  }
+  return sections;
+}
+
+/** An earlier question's counts: "2/2 steps · 8 papers", a zero left out. */
+export function formatTaskQuestionCounts(section: TaskProgressSection): string {
+  const parts: string[] = [];
+  const checklist = section.checklist;
+  if (checklist && checklist.total > 0) {
+    parts.push(
+      format("{done}/{total} steps", {
+        done: checklist.done,
+        total: checklist.total,
+      }),
+    );
+  }
+  const papers = section.rows.length;
+  if (papers) {
+    parts.push(
+      format(papers === 1 ? "{count} paper" : "{count} papers", {
+        count: papers,
+      }),
+    );
+  }
+  return parts.join(" · ");
 }
 
 const STATE_LABELS: Record<TaskPaperState, string> = {
@@ -928,6 +1177,15 @@ export function createTaskProgressDrawer(doc: Document): HTMLElement {
   return drawer;
 }
 
+/** A list of paper rows: the drawer's own, or an earlier question's. */
+type PaperList = {
+  host: HTMLElement;
+  rowsByKey: Map<string, PaperRowRefs>;
+  ordered: PaperRowRefs[];
+  /** Before its rows' keys in the expanded set: none for the drawer's own. */
+  scope: string;
+};
+
 type PaperRowRefs = {
   li: HTMLElement;
   remove: HTMLButtonElement;
@@ -939,6 +1197,32 @@ type PaperRowRefs = {
   source: HTMLElement;
   details: HTMLElement;
   row: TaskProgressPaperRow;
+  list: PaperList;
+};
+
+/** A question's header: its name, how it ended and, folded, its counts. */
+type QuestionHeadRefs = {
+  head: HTMLElement;
+  label: HTMLElement;
+  /** "Question 2", or an action's name: never cut. */
+  name: HTMLElement;
+  /** " · “the user's words”": cut first when the drawer is narrow. */
+  words: HTMLElement;
+  pill: HTMLElement;
+  counts: HTMLElement | null;
+};
+
+/** An earlier question in the drawer's history; its body exists while unrolled. */
+type SectionRefs = QuestionHeadRefs & {
+  id: string;
+  root: HTMLElement;
+  head: HTMLButtonElement;
+  body: {
+    root: HTMLElement;
+    steps: HTMLElement;
+    papersTitle: HTMLElement;
+    list: PaperList;
+  } | null;
 };
 
 export type TaskProgressViewDeps = {
@@ -1069,9 +1353,29 @@ export function mountTaskProgressView(params: {
   let paintedVersion = -1;
   let seenCollapseSeq = 0;
   let limit = TASK_PROGRESS_WINDOW;
-  let rowsByKey = new Map<string, PaperRowRefs>();
-  let orderedRefs: PaperRowRefs[] = [];
+  /** The drawer's own list: the current question's papers. */
+  const mainList: PaperList = {
+    host: list,
+    rowsByKey: new Map(),
+    ordered: [],
+    scope: "",
+  };
   let expanded = new Set<string>();
+  /** Earlier questions the user unrolled, by section id. */
+  let unrolled = new Set<string>();
+  /** Some list holds rows past the window: scrolling down grows it. */
+  let rowsPastWindow = false;
+  /** The drawer's history, built while it shows more than one question. */
+  let currentHead: QuestionHeadRefs | null = null;
+  let papersTitle: HTMLElement | null = null;
+  let historyHost: HTMLElement | null = null;
+  let sectionRefs = new Map<string, SectionRefs>();
+  /** The sections a record version builds, kept until the record changes. */
+  let sectionsCache: {
+    record: TaskProgressRecord;
+    version: number;
+    sections: TaskProgressSection[];
+  } | null = null;
   /** The conversation's remembered card was open: reopen it once shown. */
   let restorePending = false;
   /** The record the local state belongs to; 0 before there is one. */
@@ -1083,19 +1387,54 @@ export function mountTaskProgressView(params: {
   const record = () =>
     input.conversationKey ? getTaskProgress(input.conversationKey) : null;
 
+  const sectionsOf = (
+    current: TaskProgressRecord | null,
+  ): TaskProgressSection[] => {
+    if (!current) return [];
+    if (
+      sectionsCache?.record !== current ||
+      sectionsCache.version !== current.version
+    ) {
+      sectionsCache = {
+        record: current,
+        version: current.version,
+        sections: buildTaskProgressSections(current),
+      };
+    }
+    return sectionsCache.sections;
+  };
+
+  const clearList = (target: PaperList) => {
+    for (const refs of target.rowsByKey.values()) refs.li.remove();
+    target.rowsByKey = new Map();
+    target.ordered = [];
+  };
+
+  /** Drop the history's nodes: none shows, or another record's did. */
+  const clearHistory = () => {
+    currentHead?.head.remove();
+    papersTitle?.remove();
+    historyHost?.remove();
+    currentHead = null;
+    papersTitle = null;
+    historyHost = null;
+    sectionRefs = new Map();
+  };
+
   /**
    * A record cleared under the view (the conversation deleted, a turn edited)
-   * takes its expanded papers and window with it, as it took its memo.
+   * takes its expanded papers and questions and its window with it, as it
+   * took its memo.
    */
   const adoptRecord = (current: TaskProgressRecord | null) => {
     const epoch = current?.epoch ?? 0;
     if (epoch === seenEpoch) return;
     if (seenEpoch) {
       expanded = new Set();
+      unrolled = new Set();
       limit = TASK_PROGRESS_WINDOW;
-      for (const refs of rowsByKey.values()) refs.li.remove();
-      rowsByKey = new Map();
-      orderedRefs = [];
+      clearList(mainList);
+      clearHistory();
     }
     seenEpoch = epoch;
   };
@@ -1110,6 +1449,7 @@ export function mountTaskProgressView(params: {
     rememberTaskProgressView(key, {
       open,
       expanded: Array.from(expanded),
+      questions: Array.from(unrolled),
       limit,
       collapseSeq: seenCollapseSeq,
       // A closed drawer keeps the place it was left at.
@@ -1788,8 +2128,12 @@ export function mountTaskProgressView(params: {
       "aria-label",
       `${model.index}. ${model.title}, ${t(STATE_LABELS[model.state])}`,
     );
-    if (expanded.has(model.key)) renderDetails(refs);
+    if (expanded.has(expandKey(refs))) renderDetails(refs);
   };
+
+  /** A row's key in the expanded set: its paper, within its list. */
+  const expandKey = (refs: Pick<PaperRowRefs, "list" | "row">) =>
+    `${refs.list.scope}${refs.row.key}`;
 
   const askMineru = (refs: PaperRowRefs) => {
     const model = refs.row;
@@ -1802,15 +2146,24 @@ export function mountTaskProgressView(params: {
       .then((hasMineru) => {
         if (!hasMineru || disposed) return;
         mineruKnown.add(model.key);
-        const current = rowsByKey.get(model.key);
-        if (current && input.conversationKey === conversation) {
-          patchRow(current, current.row);
+        if (input.conversationKey !== conversation) return;
+        // Every list showing the paper takes it.
+        const lists = [
+          mainList,
+          ...Array.from(sectionRefs.values(), (section) => section.body?.list),
+        ];
+        for (const owner of lists) {
+          const current = owner?.rowsByKey.get(model.key);
+          if (current) patchRow(current, current.row);
         }
       })
       .catch(() => undefined);
   };
 
-  const createRowRefs = (model: TaskProgressPaperRow): PaperRowRefs => {
+  const createRowRefs = (
+    model: TaskProgressPaperRow,
+    owner: PaperList,
+  ): PaperRowRefs => {
     const li = el(doc, "li", "llm-task-paper");
     li.dataset.key = model.key;
     li.dataset.itemId = `${model.itemId}`;
@@ -1897,10 +2250,11 @@ export function mountTaskProgressView(params: {
       source,
       details,
       row: model,
+      list: owner,
     };
     summary.addEventListener("click", (event: Event) => {
       event.preventDefault?.();
-      const key = refs.row.key;
+      const key = expandKey(refs);
       const next = !expanded.has(key);
       if (next) expanded.add(key);
       else expanded.delete(key);
@@ -1910,7 +2264,7 @@ export function mountTaskProgressView(params: {
       else details.replaceChildren();
       remember();
     });
-    if (expanded.has(model.key)) {
+    if (expanded.has(expandKey(refs))) {
       summary.setAttribute("aria-expanded", "true");
       details.hidden = false;
     }
@@ -1918,34 +2272,260 @@ export function mountTaskProgressView(params: {
     return refs;
   };
 
-  const renderList = (current: TaskProgressRecord | null) => {
-    const rows = listedTaskProgressPaperRows(current);
+  /** Build or patch a list's window of rows, in order. */
+  const renderRows = (target: PaperList, rows: TaskProgressPaperRow[]) => {
     const window = rows.slice(0, limit);
+    if (rows.length > window.length) rowsPastWindow = true;
     const nextByKey = new Map<string, PaperRowRefs>();
     const nextOrder: PaperRowRefs[] = [];
-    let cursor = list.firstChild as HTMLElement | null;
+    let cursor = target.host.firstChild as HTMLElement | null;
     for (const model of window) {
-      let refs = rowsByKey.get(model.key);
+      let refs = target.rowsByKey.get(model.key);
       if (refs) patchRow(refs, model);
-      else refs = createRowRefs(model);
-      if (refs.li !== cursor) list.insertBefore(refs.li, cursor);
+      else refs = createRowRefs(model, target);
+      if (refs.li !== cursor) target.host.insertBefore(refs.li, cursor);
       else cursor = cursor.nextSibling as HTMLElement | null;
       nextByKey.set(model.key, refs);
       nextOrder.push(refs);
       askMineru(refs);
     }
-    for (const [key, refs] of rowsByKey) {
+    for (const [key, refs] of target.rowsByKey) {
       if (!nextByKey.has(key)) refs.li.remove();
     }
-    rowsByKey = nextByKey;
-    orderedRefs = nextOrder;
+    target.rowsByKey = nextByKey;
+    target.ordered = nextOrder;
+    return window.length;
+  };
+
+  /**
+   * The current question's rows: as they always were while the drawer shows
+   * one question; that question's alone once it shows a history.
+   */
+  const currentRows = (
+    current: TaskProgressRecord | null,
+    sections: TaskProgressSection[],
+  ): TaskProgressPaperRow[] => {
+    if (sections.length < 2) return listedTaskProgressPaperRows(current);
+    return listedTaskProgressPaperRows(
+      current,
+      buildTaskProgressPaperRows(current, {
+        turn: sections[0].question.turn,
+      }),
+      0,
+    );
+  };
+
+  const renderList = (current: TaskProgressRecord | null) => {
+    const sections = sectionsOf(current);
+    rowsPastWindow = false;
+    const rows = currentRows(current, sections);
+    const shown = renderRows(mainList, rows);
     const truncated = current?.scope?.listing?.truncated
       ? current.scope.listing.totalItems - current.scope.listing.listedItems
       : 0;
-    const hiddenRows = rows.length - window.length;
+    const hiddenRows = rows.length - shown;
     more.hidden = !truncated || hiddenRows > 0;
     if (!more.hidden) {
       more.textContent = format("and {count} more", { count: truncated });
+    }
+    renderHistory(sections, rows.length);
+  };
+
+  /** "Papers (3)": a question's list heading, while the drawer shows a history. */
+  const setPapersTitle = (node: HTMLElement, count: number) => {
+    const text = count ? format("Papers ({count})", { count }) : "";
+    if (node.textContent !== text) node.textContent = text;
+    if (node.hidden !== !count) node.hidden = !count;
+  };
+
+  const createQuestionHead = (
+    tag: "div" | "button",
+    className: string,
+    folded: boolean,
+  ): QuestionHeadRefs => {
+    const node = el(doc, tag, `llm-task-progress-question ${className}`);
+    const grid = el(doc, "span", "llm-task-paper-grid");
+    const label = el(
+      doc,
+      "span",
+      "llm-task-paper-title llm-task-progress-question-label",
+    );
+    const name = el(doc, "span", "llm-task-progress-question-name");
+    const words = el(doc, "span", "llm-task-progress-question-words");
+    label.append(name, words);
+    const tail = el(doc, "span", "llm-task-paper-tail");
+    const pill = el(doc, "span", "llm-task-progress-pill");
+    pill.hidden = true;
+    tail.append(pill);
+    let counts: HTMLElement | null = null;
+    if (folded) {
+      counts = el(doc, "span", "llm-task-progress-question-counts");
+      tail.append(counts);
+    }
+    grid.append(label, tail);
+    if (folded) {
+      const chevron = el(doc, "span", "llm-task-paper-chevron");
+      chevron.setAttribute("aria-hidden", "true");
+      chevron.append(
+        svg(
+          doc,
+          "svg",
+          {
+            width: "14",
+            height: "14",
+            viewBox: "0 0 24 24",
+            fill: "none",
+            stroke: "currentColor",
+            "stroke-width": "2.2",
+            "stroke-linecap": "round",
+            "stroke-linejoin": "round",
+          },
+          [svg(doc, "path", { d: "M6 9l6 6 6-6" })],
+        ),
+      );
+      grid.append(chevron);
+    }
+    node.append(grid);
+    return { head: node, label, name, words, pill, counts };
+  };
+
+  const patchQuestionHead = (
+    refs: QuestionHeadRefs,
+    section: TaskProgressSection,
+  ) => {
+    // The name stays whole; only the words give way in a narrow drawer.
+    const [name, words] = splitTaskQuestionLabel(section.question);
+    if (refs.name.textContent !== name) refs.name.textContent = name;
+    if (refs.words.textContent !== words) refs.words.textContent = words;
+    const pillText = taskRunStatePill(section.state);
+    if (refs.pill.textContent !== pillText) refs.pill.textContent = pillText;
+    if (refs.pill.hidden !== !pillText) refs.pill.hidden = !pillText;
+    if (refs.pill.dataset.tone !== section.state)
+      refs.pill.dataset.tone = section.state;
+    const countsText = refs.counts ? formatTaskQuestionCounts(section) : "";
+    if (refs.counts && refs.counts.textContent !== countsText)
+      refs.counts.textContent = countsText;
+    const ariaLabel = [section.label, pillText, countsText]
+      .filter(Boolean)
+      .join(", ");
+    if (refs.head.getAttribute("aria-label") !== ariaLabel)
+      refs.head.setAttribute("aria-label", ariaLabel);
+  };
+
+  const createSectionRefs = (section: TaskProgressSection): SectionRefs => {
+    const root = el(doc, "section", "llm-task-progress-question-section");
+    root.dataset.sectionId = section.id;
+    const head = createQuestionHead(
+      "button",
+      "llm-task-paper-summary",
+      true,
+    ) as QuestionHeadRefs & { head: HTMLButtonElement };
+    head.head.type = "button";
+    head.head.setAttribute("aria-expanded", "false");
+    root.append(head.head);
+    const refs: SectionRefs = { ...head, id: section.id, root, body: null };
+    head.head.addEventListener("click", (event: Event) => {
+      event.preventDefault?.();
+      if (unrolled.has(refs.id)) unrolled.delete(refs.id);
+      else unrolled.add(refs.id);
+      const shown = sectionsOf(record()).find((next) => next.id === refs.id);
+      if (shown) patchSection(refs, shown);
+      remember();
+    });
+    return refs;
+  };
+
+  /** An earlier question's header, and its steps and papers while unrolled. */
+  const patchSection = (refs: SectionRefs, section: TaskProgressSection) => {
+    patchQuestionHead(refs, section);
+    const shown = unrolled.has(refs.id);
+    const expandedText = shown ? "true" : "false";
+    if (refs.head.getAttribute("aria-expanded") !== expandedText)
+      refs.head.setAttribute("aria-expanded", expandedText);
+    if (!shown) {
+      refs.body?.root.remove();
+      refs.body = null;
+      return;
+    }
+    if (!refs.body) {
+      const root = el(doc, "div", "llm-task-progress-question-body");
+      const sectionSteps = el(doc, "section", "llm-task-progress-steps");
+      sectionSteps.setAttribute("aria-label", t("Steps"));
+      const title = el(doc, "div", "llm-task-progress-papers-title");
+      const host = el(doc, "ol", "llm-task-progress-list");
+      host.setAttribute("role", "list");
+      root.append(sectionSteps, title, host);
+      refs.root.append(root);
+      refs.body = {
+        root,
+        steps: sectionSteps,
+        papersTitle: title,
+        list: {
+          host,
+          rowsByKey: new Map(),
+          ordered: [],
+          scope: `${refs.id}\u0000`,
+        },
+      };
+    }
+    const parts = refs.body;
+    if (parts.steps.hidden !== !section.checklist)
+      parts.steps.hidden = !section.checklist;
+    if (section.checklist)
+      renderChecklistSteps(doc, parts.steps, section.checklist, {
+        resolvePaperLabel,
+      });
+    else if (parts.steps.firstChild) parts.steps.replaceChildren();
+    setPapersTitle(parts.papersTitle, section.rows.length);
+    renderRows(parts.list, section.rows);
+  };
+
+  /**
+   * The drawer's history, shown once it holds more than one question: the
+   * current question named above its steps and papers, and each earlier one
+   * as a header that unrolls them. With one question, none of it exists.
+   */
+  const renderHistory = (sections: TaskProgressSection[], papers: number) => {
+    if (sections.length < 2) {
+      if (currentHead || historyHost) clearHistory();
+      return;
+    }
+    if (!currentHead) {
+      currentHead = createQuestionHead(
+        "div",
+        "llm-task-progress-question-current",
+        false,
+      );
+      currentHead.head.setAttribute("role", "heading");
+      currentHead.head.setAttribute("aria-level", "3");
+    }
+    if (currentHead.head.nextSibling !== steps)
+      body.insertBefore(currentHead.head, steps);
+    patchQuestionHead(currentHead, sections[0]);
+    if (!papersTitle) {
+      papersTitle = el(doc, "div", "llm-task-progress-papers-title");
+    }
+    if (papersTitle.nextSibling !== list) body.insertBefore(papersTitle, list);
+    setPapersTitle(papersTitle, papers);
+    if (!historyHost) historyHost = el(doc, "div", "llm-task-progress-history");
+    if (historyHost.parentElement !== body) body.append(historyHost);
+    const earlier = sections.slice(1);
+    const ids = new Set(earlier.map((section) => section.id));
+    for (const [id, refs] of sectionRefs) {
+      if (ids.has(id)) continue;
+      refs.root.remove();
+      sectionRefs.delete(id);
+    }
+    let cursor = historyHost.firstChild as HTMLElement | null;
+    for (const section of earlier) {
+      let refs = sectionRefs.get(section.id);
+      if (!refs) {
+        refs = createSectionRefs(section);
+        sectionRefs.set(section.id, refs);
+      }
+      patchSection(refs, section);
+      if (refs.root !== cursor) historyHost.insertBefore(refs.root, cursor);
+      else cursor = cursor.nextSibling as HTMLElement | null;
     }
   };
 
@@ -1958,13 +2538,12 @@ export function mountTaskProgressView(params: {
     if (head.textContent !== text) head.textContent = text;
     if (head.hidden !== !preparing) head.hidden = !preparing;
     if (note.hidden !== input.recordsReads) note.hidden = input.recordsReads;
-    // A ledger that only recorded its ending has no steps to show.
+    // With a history, the Steps block is the current question's own.
+    const sections = sectionsOf(current);
     const checklist =
-      current?.checklist &&
-      (current.checklist.source !== "outcomes" ||
-        current.checklist.steps.length)
-        ? current.checklist
-        : null;
+      sections.length > 1
+        ? sections[0].checklist
+        : shownChecklist(current?.checklist);
     if (steps.hidden !== !checklist) steps.hidden = !checklist;
     if (checklist)
       renderChecklistSteps(doc, steps, checklist, { resolvePaperLabel });
@@ -2147,8 +2726,7 @@ export function mountTaskProgressView(params: {
     remember();
   };
   const growWindow = () => {
-    const total = listedTaskProgressPaperRows(record()).length;
-    if (limit >= total) return;
+    if (!rowsPastWindow) return;
     const remaining =
       Number(body.scrollHeight || 0) -
       Number(body.scrollTop || 0) -
@@ -2188,9 +2766,8 @@ export function mountTaskProgressView(params: {
       if (switched) closeAtOnce({ remember: false });
       input = next;
       if (switched) {
-        for (const refs of rowsByKey.values()) refs.li.remove();
-        rowsByKey = new Map();
-        orderedRefs = [];
+        clearList(mainList);
+        clearHistory();
         mineruKnown.clear();
         mineruAsked.clear();
         // The conversation shown now comes back as its card was left.
@@ -2198,6 +2775,7 @@ export function mountTaskProgressView(params: {
           ? getTaskProgressViewMemo(next.conversationKey)
           : null;
         expanded = new Set(memo?.expanded || []);
+        unrolled = new Set(memo?.questions || []);
         limit = Math.max(TASK_PROGRESS_WINDOW, memo?.limit || 0);
         restorePending = Boolean(memo?.open);
         seenCollapseSeq = record()?.collapseSeq ?? 0;
@@ -2211,7 +2789,12 @@ export function mountTaskProgressView(params: {
     isVisible: () => visible,
     curtainState: () => curtainState,
     flush,
-    renderedRowCount: () => orderedRefs.length,
+    renderedRowCount: () =>
+      mainList.ordered.length +
+      Array.from(sectionRefs.values()).reduce(
+        (total, section) => total + (section.body?.list.ordered.length || 0),
+        0,
+      ),
     dispose() {
       if (disposed) return;
       disposed = true;

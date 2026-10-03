@@ -15446,6 +15446,7 @@ item-pane-sidenav .llm-persistent-rail-entry[hidden] {
 
 .llm-task-progress-note[hidden],
 .llm-task-progress-steps[hidden],
+.llm-task-progress-papers-title[hidden],
 .llm-task-progress-more[hidden],
 .llm-task-paper-details[hidden],
 .llm-task-paper-source[hidden] {
@@ -15459,7 +15460,8 @@ item-pane-sidenav .llm-persistent-rail-entry[hidden] {
     color-mix(in srgb, var(--llm-popup-surface-border) 80%, transparent);
 }
 
-.llm-task-progress-steps-title {
+.llm-task-progress-steps-title,
+.llm-task-progress-papers-title {
   margin: 0;
   color: var(--fill-secondary);
   font-size: var(--llm-fs-11);
@@ -15551,7 +15553,9 @@ item-pane-sidenav .llm-persistent-rail-entry[hidden] {
   justify-self: end;
 }
 
-.llm-task-paper + .llm-task-paper {
+.llm-task-paper + .llm-task-paper,
+.llm-task-progress-history,
+.llm-task-progress-question-section + .llm-task-progress-question-section {
   border-top: 1px solid
     color-mix(in srgb, var(--llm-popup-surface-border) 70%, transparent);
 }
@@ -15844,6 +15848,41 @@ item-pane-sidenav .llm-persistent-rail-entry[hidden] {
   padding: 8px 14px;
   color: var(--fill-tertiary);
   font-size: var(--llm-fs-11);
+}
+
+/* The drawer's history, once it holds more than one question: the current
+   question named above its steps and papers, and each earlier one a header
+   with a paper row's look that unrolls its own. */
+.llm-task-progress-question-current {
+  padding: 2px 8px 6px 10px;
+}
+
+.llm-task-progress-question-label {
+  /* From the row's first column, flush with the Papers heading. */
+  grid-column: 1 / 4;
+  display: flex;
+  min-width: 0;
+  font-weight: 600;
+}
+
+.llm-task-progress-question-name {
+  flex: none;
+}
+
+.llm-task-progress-question-words {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  /* pre keeps the space before "·", which a flex item would trim. */
+  white-space: pre;
+}
+
+.llm-task-progress-question-counts {
+  margin-left: 6px;
+}
+
+.llm-task-progress-papers-title {
+  padding: 2px 14px 4px;
 }
 
 .llm-quote-card.llm-task-progress-flash {

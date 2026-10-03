@@ -3,7 +3,8 @@
  * conversation is shown again (panel mount, conversation switch, restart).
  *
  * Sources, all already stored — nothing new is written:
- * - the question numbering: the conversation's user messages;
+ * - the question numbering and each question's words: the conversation's
+ *   user messages, and how each was answered: its answer;
  * - every run's `paper_ledger_update` events (in-plugin Agent runs and the
  *   Codex/Claude Code run snapshots, which carry the MCP deltas);
  * - each finished answer's `quoteCitations`, the citations it rendered;
@@ -11,8 +12,9 @@
  * - whether a plan ran (`plan_*` events), Codex kept a plan (its
  *   `codex-plan-checklist` event) or a run had outcomes (its
  *   `execution_checkpoint` events): the row then stays for the conversation;
- * - the latest run's Codex plan, or its latest outcome ledger with how the
- *   run ended, shown as the steps.
+ * - each run's Codex plan, or its latest outcome ledger with how the run
+ *   ended: the latest run's are the steps, every earlier question keeps
+ *   its own in the drawer's history.
  *
  * A built-in action leaves no conversation record, so its steps and its
  * "an action ran here" mark last only for the session.
@@ -41,6 +43,8 @@ import {
   hydrateTaskProgress,
   taskOutcomesChecklist,
   type TaskProgressHistory,
+  type TaskProgressHistoryChecklist,
+  type TaskProgressHistoryQuestion,
   type TaskProgressHistoryRun,
   type TaskRunState,
 } from "./store";
@@ -80,12 +84,22 @@ export function buildTaskProgressHistory(
   libraryID?: number,
 ): TaskProgressHistory {
   const runs: TaskProgressHistoryRun[] = [];
+  const questions: TaskProgressHistoryQuestion[] = [];
+  /** The question the next answer settles; none after a compaction marker. */
+  let asked: TaskProgressHistoryQuestion | null = null;
   let question = 0;
   let planSeen = false;
   for (const message of messages) {
     if (message.role === "user") {
-      if (!message.compactMarker) question += 1;
+      asked = null;
+      if (message.compactMarker) continue;
+      question += 1;
+      asked = { turn: question, text: message.text || "", settled: null };
+      questions.push(asked);
       continue;
+    }
+    if (asked && message.role === "assistant") {
+      asked.settled = settledState(message);
     }
     const runId = message.agentRunId?.trim();
     if (message.role !== "assistant" || !runId || question < 1) continue;
@@ -93,7 +107,10 @@ export function buildTaskProgressHistory(
     const deltas: TaskPaperLedgerDelta[] = [];
     // Every document the run finalized: each names only its own sources.
     const documentCitations: TaskPaperDocumentCitation[] = [];
+    // The run's ledger events fold to its ledger as it stood last; its
+    // steps are that ledger's outcomes, or Codex's latest plan.
     const ledger = new ExecutionCheckpointFold();
+    let checklist: TaskProgressHistoryChecklist | null = null;
     for (const entry of events) {
       const payload: AgentEvent = entry.payload;
       if (payload.type === "paper_ledger_update" && payload.delta) {
@@ -104,11 +121,18 @@ export function buildTaskProgressHistory(
         payload.type === "execution_checkpoint" ||
         payload.type === "execution_checkpoint_delta"
       ) {
-        if (ledger.apply(payload)?.tasks?.length) planSeen = true;
+        const checkpoint = ledger.apply(payload);
+        if (checkpoint?.tasks?.length) planSeen = true;
+        if (checkpoint)
+          checklist = taskOutcomesChecklist(runId, checkpoint) ?? checklist;
       } else if (PLAN_EVENT_TYPES.has(payload.type)) {
         planSeen = true;
-      } else if (readCodexPlanChecklist(payload)) {
-        planSeen = true;
+      } else {
+        const steps = readCodexPlanChecklist(payload);
+        if (steps) {
+          planSeen = true;
+          checklist = { source: "codex", runId, steps };
+        }
       }
     }
     runs.push({
@@ -118,33 +142,19 @@ export function buildTaskProgressHistory(
       deltas,
       quoteCitations: message.quoteCitations,
       ...(documentCitations.length ? { documentCitations } : {}),
+      checklist,
     });
   }
   const last = messages[messages.length - 1];
   const latest = runs[runs.length - 1];
-  let checklist: TaskProgressHistory["checklist"] = null;
-  if (latest && latest.turn === question) {
-    // The run's ledger events fold to its ledger as it stood last.
-    const ledger = new ExecutionCheckpointFold();
-    for (const entry of eventsByRun.get(latest.runId) || []) {
-      const steps = readCodexPlanChecklist(entry.payload);
-      if (steps) checklist = { source: "codex", runId: latest.runId, steps };
-      const checkpoint = ledger.apply(entry.payload);
-      if (
-        checkpoint &&
-        (entry.payload.type === "execution_checkpoint" ||
-          entry.payload.type === "execution_checkpoint_delta")
-      )
-        checklist =
-          taskOutcomesChecklist(latest.runId, checkpoint) ?? checklist;
-    }
-  }
   return {
     runs,
+    questions,
     latestTurn: question,
     settled: settledState(last),
     planSeen,
-    checklist,
+    checklist:
+      latest && latest.turn === question ? latest.checklist || null : null,
     libraryID,
   };
 }

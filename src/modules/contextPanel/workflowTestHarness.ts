@@ -19,7 +19,11 @@ import {
   flushTaskProgressPanels,
   listMountedTaskProgressPanelsForTests,
 } from "./taskProgress/panel";
-import { clearAllTaskProgress, getTaskProgress } from "./taskProgress/store";
+import {
+  clearAllTaskProgress,
+  getTaskProgress,
+  taskQuestionChecklist,
+} from "./taskProgress/store";
 import { resetTaskProgressDrawerHeight } from "./taskProgress/view";
 import { createCodexStreamingScrollReplay } from "./codexStreamingScrollReplay";
 import {
@@ -5738,6 +5742,13 @@ export function installWorkflowTestHarness(targetAddon: {
             entry.state,
           ]),
         ),
+        questions: record.questions.map((question) => ({
+          turn: question.turn,
+          runId: question.runId,
+          text: question.text,
+          title: question.title,
+          checklistSource: taskQuestionChecklist(record, question)?.source,
+        })),
         paperRows: Object.fromEntries(
           Object.values(record.ledger.papers).map((entry) => [
             entry.key,

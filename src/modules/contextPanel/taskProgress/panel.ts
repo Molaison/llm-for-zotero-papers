@@ -6,7 +6,8 @@
  * Also owns the request-lifecycle safety net: every request start marks the
  * conversation's run working, and a request that ends while its run is still
  * live settles it (completed, failed or cancelled) from what the turn left,
- * so the row never spins after its request is gone.
+ * so the row never spins after its request is gone. Every request that ends
+ * names its question (number and words) for the drawer's history.
  *
  * And the standalone window's button (`toggleButton.ts`): a click shows or
  * hides the row for the conversation the panel shows. The choice belongs to
@@ -42,6 +43,7 @@ import {
   completeTaskRun,
   endTaskRun,
   getTaskProgress,
+  noteTaskQuestion,
   setTaskScope,
   subscribeTaskProgress,
   taskReadInDepth,
@@ -133,6 +135,24 @@ function latestUserMessage(conversationKey: number): Message | undefined {
     if (history[index].role === "user") return history[index];
   }
   return undefined;
+}
+
+/**
+ * The question a request asked, once the request ended: the latest question
+ * in the history, its number and its words. A send begins its request before
+ * its question is added, so only now does the history hold it.
+ */
+function noteRequestQuestion(conversationKey: number): void {
+  const history = chatHistory.get(conversationKey) || [];
+  for (let index = history.length - 1; index >= 0; index--) {
+    const message = history[index];
+    if (message.role !== "user" || message.compactMarker) continue;
+    noteTaskQuestion(conversationKey, {
+      turnIndex: taskTurnIndexFor(history, message),
+      text: message.text,
+    });
+    return;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -261,6 +281,7 @@ export function installTaskProgressRequestLifecycle(): void {
     } else {
       const requestId = requestStarts.get(conversationKey) || 0;
       requestStarts.delete(conversationKey);
+      noteRequestQuestion(conversationKey);
       settleFromHistory(conversationKey, requestId);
     }
     syncTaskProgressPanelsForConversation(conversationKey);

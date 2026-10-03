@@ -31,6 +31,7 @@ import {
   clearTaskProgress,
   getTaskProgress,
   setTaskOutcomes,
+  taskTurnIndexFor,
 } from "./taskProgress/store";
 import { flushTaskProgressPanels } from "./taskProgress/panel";
 
@@ -822,6 +823,13 @@ export type TaskProgressReplayInput = {
   >;
   /** Earlier completed turns, so the chat has something to scroll. */
   historyTurns?: number;
+  /** The user's words; a fixed question by default. */
+  question?: string;
+  /**
+   * Ask the next question in the conversation a previous replay left: its
+   * messages and Task progress stay (no earlier turns are added).
+   */
+  followUp?: boolean;
 };
 
 export type TaskProgressReplayHandle = {
@@ -854,10 +862,13 @@ export async function startTaskProgressReplay(
   }
   const key = getConversationKey(item);
   const runId = `task-progress-replay-${Date.now()}`;
-  const history: Message[] = [];
-  const earlier = Math.max(0, input.historyTurns ?? 3);
+  const history: Message[] = input.followUp ? chatHistory.get(key) || [] : [];
+  const earlier = input.followUp
+    ? taskTurnIndexFor(history)
+    : Math.max(0, input.historyTurns ?? 3);
   const base = Date.now() - 10_000;
-  for (let n = 0; n < earlier; n++) {
+  const added = input.followUp ? 0 : earlier;
+  for (let n = 0; n < added; n++) {
     history.push({
       role: "user",
       text: `Earlier question ${n}`,
@@ -873,7 +884,8 @@ export async function startTaskProgressReplay(
   }
   const user: Message = {
     role: "user",
-    text: "What is the commonality of drift across these papers?",
+    text:
+      input.question || "What is the commonality of drift across these papers?",
     timestamp: Date.now(),
     ...input.user,
   };
@@ -897,12 +909,13 @@ export async function startTaskProgressReplay(
   hold(selectedCollectionContextCache, user.selectedCollectionContexts);
   hold(selectedTagContextCache, user.selectedTagContexts);
   initializedConversationComposeContextKeys.add(key);
-  // The synthetic history replaces the conversation's, so does its ledger.
-  clearTaskProgress(key);
+  // The synthetic history replaces the conversation's, so does its ledger;
+  // a follow-up keeps both.
+  if (!input.followUp) clearTaskProgress(key);
   const requestId = nextRequestId();
   if (!tryBeginRequest(key, requestId, null))
     throw new Error("Fixture request is already busy");
-  beginTaskRun(key, { runId, turnIndex: earlier + 1 });
+  beginTaskRun(key, { runId, turnIndex: earlier + 1, text: user.text });
   refreshConversationPanels(body, item);
   await Zotero.Promise.delay(100);
   flushTaskProgressPanels();

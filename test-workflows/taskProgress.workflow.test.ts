@@ -127,10 +127,14 @@ describe("workflow: task progress", function () {
     };
   }
 
-  /** A `paper_ledger_update` as `library_retrieve` would emit it. */
+  /**
+   * A `paper_ledger_update` as `library_retrieve` would emit it; a read's
+   * passage is the paper's own unless `snippets` gives another.
+   */
   function ledgerUpdate(
     callId: string,
     entries: Array<[number, "matched" | "skimmed" | "read"]>,
+    snippets: Record<number, string> = SNIPPETS,
   ) {
     return {
       type: "paper_ledger_update" as const,
@@ -159,7 +163,7 @@ describe("workflow: task progress", function () {
                 : ("metadata" as const),
           method: "bm25",
           ...(state === "read"
-            ? { label: "Results", snippet: SNIPPETS[index] }
+            ? { label: "Results", snippet: snippets[index] }
             : {}),
         })),
       },
@@ -992,6 +996,197 @@ describe("workflow: task progress", function () {
   }
 
   /**
+   * Two questions in one conversation. The drawer lists them newest first:
+   * the current question named above its own papers, the earlier one folded
+   * to its words, ending and count. Unrolled, the earlier one shows its own
+   * papers with its own reads; a paper both read is in both, each with that
+   * question's passage only.
+   */
+  async function exerciseQuestionHistory(
+    rootOf: () => HTMLElement,
+    surface: Surface,
+    shotWindow: any,
+  ) {
+    const scope = {
+      selectedCollectionContexts: [
+        { collectionId: collection.id, name: collection.name, libraryID },
+      ],
+    };
+    const firstWords = "Which papers measure drift over weeks?";
+    const secondWords = "How do they explain it?";
+    const secondRead = "Spine turnover sets the pace of the drift.";
+    const first = await api.startTaskProgressReplay({
+      surface: surfaceOf(surface),
+      historyTurns: 0,
+      question: firstWords,
+      user: scope,
+    });
+    try {
+      await first.emit(
+        ledgerUpdate("history-1", [
+          [2, "read"],
+          [3, "read"],
+        ]),
+      );
+      await first.emit({ type: "final", text: "Two of them measure it." });
+      first.refreshChat();
+    } finally {
+      first.finish();
+    }
+    const second = await api.startTaskProgressReplay({
+      surface: surfaceOf(surface),
+      followUp: true,
+      question: secondWords,
+      user: scope,
+    });
+    const view = part(rootOf());
+    const root = rootOf();
+    try {
+      await until(() => {
+        api.flushTaskProgress();
+        return Boolean(
+          api.getTaskProgressSnapshot(second.conversationKey)?.listingLoaded,
+        );
+      }, `the scope lists (${surface})`);
+      await second.emit(
+        ledgerUpdate(
+          "history-2",
+          [
+            [2, "read"],
+            [4, "skimmed"],
+          ],
+          { 2: secondRead },
+        ),
+      );
+      await second.emit({ type: "final", text: "Spine turnover." });
+      second.refreshChat();
+      await Zotero.Promise.delay(150);
+      api.flushTaskProgress();
+      const snapshot = api.getTaskProgressSnapshot(second.conversationKey)!;
+      assert.deepEqual(
+        snapshot.questions.map((question) => [question.turn, question.text]),
+        [
+          [1, firstWords],
+          [2, secondWords],
+        ],
+      );
+      await settleRow(rootOf, "open", `question history (${surface})`);
+      assert.equal(view.row.dataset.state, "completed");
+      assert.equal(
+        view.count(),
+        "2 of 6 read",
+        "the row describes the latest question",
+      );
+
+      view.row.click();
+      await settle(view, "open", `question history (${surface})`);
+      const current = root.querySelector(
+        ".llm-task-progress-question-current",
+      ) as HTMLElement;
+      assert.isOk(current, `the current question is named (${surface})`);
+      const labelOf = (head: Element) =>
+        head.querySelector(".llm-task-progress-question-label")?.textContent;
+      assert.equal(labelOf(current), `Question 2 · “${secondWords}”`);
+      const sections = Array.from(
+        root.querySelectorAll(".llm-task-progress-question-section"),
+      ) as HTMLElement[];
+      assert.lengthOf(sections, 1, "one earlier question");
+      const head = sections[0].querySelector(
+        ".llm-task-progress-question",
+      ) as HTMLButtonElement;
+      assert.equal(head.tagName.toLowerCase(), "button");
+      assert.equal(head.getAttribute("aria-expanded"), "false");
+      assert.equal(labelOf(head), `Question 1 · “${firstWords}”`);
+      assert.equal(
+        head.querySelector(".llm-task-progress-pill")?.textContent,
+        "Completed",
+      );
+      assert.equal(
+        head.querySelector(".llm-task-progress-question-counts")?.textContent,
+        "2 papers",
+      );
+      assert.lengthOf(
+        sections[0].querySelectorAll(".llm-task-paper"),
+        0,
+        "a folded question builds no rows",
+      );
+      // Newest first: the current question, its papers, then the earlier one.
+      const list = root.querySelector(".llm-task-progress-list") as HTMLElement;
+      assert.isAtLeast(
+        head.getBoundingClientRect().top,
+        list.getBoundingClientRect().bottom - 1,
+        "the earlier question is below the current one's papers",
+      );
+      assert.isAtLeast(
+        list.getBoundingClientRect().top,
+        current.getBoundingClientRect().bottom - 1,
+      );
+
+      const currentItems = Array.from(
+        list.querySelectorAll(".llm-task-paper"),
+      ) as HTMLElement[];
+      const stateIn = (items: HTMLElement[], index: number) =>
+        items.find((item) => item.dataset.key === paperKey(index))?.dataset
+          .state;
+      assert.deepEqual(
+        [0, 1, 2, 3, 4, 5].map((index) => stateIn(currentItems, index)),
+        ["listed", "listed", "read", "listed", "skimmed", "listed"],
+      );
+      const detailsOf = (item: HTMLElement) => {
+        const summary = item.querySelector(
+          ".llm-task-paper-summary",
+        ) as HTMLButtonElement;
+        if (summary.getAttribute("aria-expanded") !== "true") summary.click();
+        return (
+          (item.querySelector(".llm-task-paper-details") as HTMLElement)
+            .textContent || ""
+        );
+      };
+      const shared = currentItems.find(
+        (item) => item.dataset.key === paperKey(2),
+      )!;
+      const sharedNow = detailsOf(shared);
+      assert.include(sharedNow, secondRead);
+      assert.notInclude(sharedNow, SNIPPETS[2]);
+      assert.notInclude(sharedNow, "Question");
+
+      head.click();
+      assert.equal(head.getAttribute("aria-expanded"), "true");
+      const earlierItems = Array.from(
+        sections[0].querySelectorAll(".llm-task-paper"),
+      ) as HTMLElement[];
+      assert.deepEqual(
+        earlierItems.map((item) => [item.dataset.key, item.dataset.state]),
+        [
+          [paperKey(2), "read"],
+          [paperKey(3), "read"],
+        ],
+      );
+      const sharedThen = detailsOf(earlierItems[0]);
+      assert.include(sharedThen, SNIPPETS[2]);
+      assert.notInclude(sharedThen, secondRead);
+      assert.notInclude(sharedThen, "Question");
+      assert.lengthOf(
+        view.items().filter((item) => item.dataset.key === paperKey(2)),
+        2,
+        "a paper both questions read is in both",
+      );
+      // Unrolled questions stay unrolled through a repaint.
+      api.flushTaskProgress();
+      assert.equal(head.getAttribute("aria-expanded"), "true");
+      await Zotero.Promise.delay(450); // the reads fade in
+      await capture(shotWindow, `tp-question-history-${surface}.png`);
+      head.click();
+      assert.equal(head.getAttribute("aria-expanded"), "false");
+      assert.lengthOf(sections[0].querySelectorAll(".llm-task-paper"), 0);
+      view.row.click();
+      await settle(view, "closed", `question history (${surface})`);
+    } finally {
+      second.finish();
+    }
+  }
+
+  /**
    * A digest part: the host summarizes each paper itself. The steps block
    * counts the papers summarized ("· 1 of 2"), a digested paper's row counts
    * its verified evidence and shows its summary in a Summary block, and a
@@ -1664,6 +1859,7 @@ describe("workflow: task progress", function () {
       await switchToLibrary(rootOf, layout);
       await exerciseCurtain(rootOf, layout, win);
       await exerciseLibraryRun(rootOf, layout, win);
+      await exerciseQuestionHistory(rootOf, layout, win);
       await exerciseDigestRun(rootOf, layout);
       await exercisePartsRun(rootOf, layout);
       await exerciseLongList(rootOf, layout, win);
@@ -1680,6 +1876,7 @@ describe("workflow: task progress", function () {
     await switchToLibrary(rootOf, "standalone");
     await exerciseCurtain(rootOf, "standalone", window);
     await exerciseLibraryRun(rootOf, "standalone", window);
+    await exerciseQuestionHistory(rootOf, "standalone", window);
     await exerciseDigestRun(rootOf, "standalone");
     await exercisePartsRun(rootOf, "standalone");
     await exerciseLongList(rootOf, "standalone", window);

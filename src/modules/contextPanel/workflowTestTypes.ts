@@ -736,6 +736,14 @@ export type WorkflowTestApi = {
       end?: string;
     } | null;
     paperStates: Record<string, string>;
+    /** The questions and actions the drawer's history keeps, oldest first. */
+    questions: Array<{
+      turn: number;
+      runId?: string;
+      text?: string;
+      title?: string;
+      checklistSource?: "action" | "codex" | "outcomes";
+    }>;
     /** Each paper row's reads over every turn, by `libraryID:itemId`. */
     paperRows: Record<
       string,

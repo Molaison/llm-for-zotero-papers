@@ -89,6 +89,28 @@ describe("built-in action progress in Task progress", function () {
     );
   });
 
+  it("files the action under its title, with the request typed with it", async function () {
+    await runAgentActionWithLifecycle({
+      actionName: "auto_tag",
+      input: { userQuery: "  tag the drift papers " },
+      requestContext: { mode: "paper", activeItemId: 5 },
+      libraryID: 1,
+      conversationKey: KEY,
+      lifecycle: fakeLifecycle([]),
+      setStatus: () => undefined,
+      logError: () => undefined,
+      runAction: async () => ({ ok: true, output: { tagged: 1 } }),
+    });
+    assert.deepEqual(
+      getTaskProgress(KEY)!.questions.map((entry) => [
+        entry.turn,
+        entry.title,
+        entry.text,
+      ]),
+      [[0, "Auto Tag", "tag the drift papers"]],
+    );
+  });
+
   it("keeps the error text when the action fails", async function () {
     await runAgentActionWithLifecycle({
       actionName: "auto_tag",

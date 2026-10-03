@@ -65,16 +65,22 @@ let actionRunSeq = 0;
 
 /**
  * The action's progress, told to the Task progress store: the row and the
- * overlay's Steps block show it (there is no card in the chat).
+ * overlay's Steps block show it (there is no card in the chat). `userQuery`
+ * is the request the user typed with the action, if any.
  */
 function createActionTaskProgress(
   conversationKey: number | null,
   actionName: string,
+  userQuery?: string,
 ) {
   const key = conversationKey && conversationKey > 0 ? conversationKey : 0;
   const runId = `action-${Date.now()}-${++actionRunSeq}`;
   if (key)
-    beginTaskAction(key, { runId, title: formatActionLabel(actionName) });
+    beginTaskAction(key, {
+      runId,
+      title: formatActionLabel(actionName),
+      text: userQuery,
+    });
   return {
     step: (step: string, index: number, total: number) => {
       if (key) setTaskActionStep(key, runId, { step, index, total });
@@ -125,6 +131,7 @@ export async function runAgentActionWithLifecycle(params: {
   const progress = createActionTaskProgress(
     conversationKey ?? null,
     actionName,
+    typeof input.userQuery === "string" ? input.userQuery : undefined,
   );
   let lastProgressSummary = "";
   const endFailed = (error: unknown) => {

@@ -3715,11 +3715,14 @@ function buildCodexNativeTurnCallbacks(ctx: {
   {
     const history = chatHistory.get(ctx.conversationKey) || [];
     const position = history.indexOf(assistantMessage);
+    const asked = position >= 0 ? history.slice(0, position) : history;
+    const question = asked
+      .filter((message) => message.role === "user" && !message.compactMarker)
+      .pop();
     beginTaskRun(ctx.conversationKey, {
       runId: assistantMessage.agentRunId,
-      turnIndex: taskTurnIndexFor(
-        position >= 0 ? history.slice(0, position) : history,
-      ),
+      turnIndex: taskTurnIndexFor(asked),
+      text: question?.text,
     });
   }
   const noteAnswering = () =>

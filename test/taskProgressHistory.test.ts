@@ -158,6 +158,73 @@ describe("task progress history rebuild", function () {
     assert.isNull(buildTaskProgressHistory(waiting, byRun, 1).settled);
   });
 
+  it("returns every run's own steps and every question's words and ending", function () {
+    const byRun = new Map<string, AgentRunEventRecord[]>([
+      [
+        "run-1",
+        [
+          ...EVENTS.filter((event) => event.runId === "run-1"),
+          record("run-1", 2, {
+            type: "execution_checkpoint",
+            checkpoint: outcomeCheckpoint(
+              [
+                outcomeTask("read", {
+                  description: "Read the drift papers",
+                  effect: "read",
+                  status: "completed",
+                }),
+              ],
+              "completed",
+            ),
+          }),
+        ],
+      ],
+      ["run-2", EVENTS.filter((event) => event.runId === "run-2")],
+    ]);
+    const messages = conversation();
+    messages[3].text = "Error: offline";
+    const history = buildTaskProgressHistory(messages, byRun, 1);
+    assert.deepEqual(
+      history.runs.map((run) => [
+        run.runId,
+        run.checklist?.source,
+        run.checklist?.steps.map((step) => step.label),
+      ]),
+      [
+        ["run-1", "outcomes", ["Read the drift papers"]],
+        ["run-2", "codex", ["Inspect", "Compare"]],
+      ],
+    );
+    assert.equal(history.runs[0].checklist?.end, "completed");
+    assert.deepEqual(history.questions, [
+      { turn: 1, text: "Which papers measure drift?", settled: "completed" },
+      { turn: 2, text: "Compare their methods", settled: "failed" },
+    ]);
+    assert.equal(
+      history.checklist,
+      history.runs[1].checklist,
+      "the latest run's steps are the conversation's",
+    );
+  });
+
+  it("rebuilds every question after a restart, newest last", async function () {
+    ensureTaskProgressHydrated(KEY, 1);
+    await waitForTaskProgressHydrationForTests(KEY);
+    const rebuilt = getTaskProgress(KEY)!;
+    assert.deepEqual(
+      rebuilt.questions.map((question) => [
+        question.turn,
+        question.runId,
+        question.text,
+        question.checklist?.source ?? null,
+      ]),
+      [
+        [1, "run-1", "Which papers measure drift?", null],
+        [2, "run-2", "Compare their methods", "codex"],
+      ],
+    );
+  });
+
   it("restores counts, states and steps after a restart (store cleared)", async function () {
     ensureTaskProgressHydrated(KEY, 1);
     await waitForTaskProgressHydrationForTests(KEY);

@@ -511,20 +511,55 @@ describe("workflow: task progress unified", function () {
         "1 of 4 read",
         "the row counts the latest question",
       );
+      assert.deepEqual(
+        snapshot.questions.map((question) => [question.turn, question.text]),
+        [
+          [1, "Which papers measure drift?"],
+          [2, "And how do they explain it?"],
+        ],
+        "both questions come back with their words",
+      );
       tp().row.click();
       const stateOf = (index: number) =>
         tp()
           .items()
           .find((item) => item.dataset.key === key(index))?.dataset.state;
+      // The latest question's papers show its own reads.
       assert.lengthOf(tp().items(), 4);
       assert.deepEqual([0, 1, 2, 3].map(stateOf), [
-        "read",
-        "cited",
+        "listed",
+        "listed",
         "read",
         "matched",
       ]);
       assert.equal(tp().head(), "", "no summary line above the paper list");
+      // The first question is folded under its own header, newest first.
+      const sections = Array.from(
+        tp().root.querySelectorAll(".llm-task-progress-question-section"),
+      ) as HTMLElement[];
+      assert.lengthOf(sections, 1);
+      const earlier = sections[0].querySelector(
+        ".llm-task-progress-question",
+      ) as HTMLButtonElement;
+      assert.equal(earlier.getAttribute("aria-expanded"), "false");
+      assert.equal(
+        earlier.querySelector(".llm-task-progress-question-label")?.textContent,
+        "Question 1 · “Which papers measure drift?”",
+      );
+      earlier.click();
+      const earlierStates = Array.from(
+        sections[0].querySelectorAll(".llm-task-paper"),
+        (item) => [
+          (item as HTMLElement).dataset.key,
+          (item as HTMLElement).dataset.state,
+        ],
+      );
+      assert.deepEqual(earlierStates, [
+        [key(0), "read"],
+        [key(1), "cited"],
+      ]);
       await capture(panel.panelId, "tp-m5-reopened.png");
+      earlier.click();
       tp().row.click();
 
       await api.clickPanelDelete(panel.panelId);

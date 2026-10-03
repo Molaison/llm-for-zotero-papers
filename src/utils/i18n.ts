@@ -1270,6 +1270,7 @@ const zhCN: Record<string, string> = {
   "and {count} more": "以及另外 {count} 篇",
   "and {count} more reads": "以及另外 {count} 次阅读",
   "Question {number}": "第 {number} 个问题",
+  "Papers ({count})": "论文（{count}）",
   "Cited in answer": "回答中的引用",
   "Cited in document": "文档中的引用",
   "Listed in scope; not read for this question.": "在范围内；本问题未阅读。",

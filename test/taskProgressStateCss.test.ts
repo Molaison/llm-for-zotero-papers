@@ -88,3 +88,52 @@ describe("task progress looks for outcome states", function () {
     assert.include(amber.body, "#d58a22");
   });
 });
+
+describe("task progress history looks", function () {
+  const history = [
+    ".llm-task-progress-question",
+    ".llm-task-progress-question-current",
+    ".llm-task-progress-question-label",
+    ".llm-task-progress-question-counts",
+    ".llm-task-progress-question-section",
+    ".llm-task-progress-question-body",
+    ".llm-task-progress-papers-title",
+    ".llm-task-progress-history",
+  ];
+  const touches = (selector: string) =>
+    history.some((name) =>
+      selector.split(/[\s>+~,:[]+/).some((part) => part === name),
+    );
+
+  it("separates questions with the paper rows' own hairline", function () {
+    const hairline = ruleWith(".llm-task-paper + .llm-task-paper");
+    assert.include(hairline.selectors, ".llm-task-progress-history");
+    assert.include(
+      hairline.selectors,
+      ".llm-task-progress-question-section + .llm-task-progress-question-section",
+    );
+  });
+
+  it("titles a question's papers as its Steps are titled", function () {
+    assert.include(
+      ruleWith(".llm-task-progress-steps-title").selectors,
+      ".llm-task-progress-papers-title",
+    );
+  });
+
+  it("adds no color, background, shadow or accent edge of its own", function () {
+    const own = rules.filter(
+      (rule) =>
+        rule.selectors.some(touches) &&
+        rule.selectors.every((selector) => touches(selector)),
+    );
+    assert.isNotEmpty(own);
+    for (const rule of own) {
+      assert.notMatch(
+        rule.body,
+        /(^|[;\s])(color|background(-color)?|box-shadow|border(-left)?(-color)?|outline)\s*:/,
+        rule.selectors.join(", "),
+      );
+    }
+  });
+});

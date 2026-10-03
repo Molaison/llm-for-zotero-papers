@@ -52,6 +52,38 @@ describe("task progress request lifecycle", function () {
     assert.equal(record.turnIndex, 2);
   });
 
+  it("names each plain-chat question once its request ends, and keeps the one before", function () {
+    // As a send does: the request begins before its question is added.
+    const history: Message[] = [];
+    chatHistory.set(KEY, history);
+    tryBeginRequest(KEY, 1, null);
+    history.push(question("first", 1), {
+      role: "assistant",
+      text: "One.",
+      timestamp: 2,
+      runMode: "chat",
+    });
+    finishRequest(KEY, 1);
+    tryBeginRequest(KEY, 2, null);
+    history.push(question("second", 3), {
+      role: "assistant",
+      text: "Error: offline",
+      timestamp: 4,
+      runMode: "chat",
+    });
+    finishRequest(KEY, 2);
+    const record = getTaskProgress(KEY)!;
+    assert.equal(record.turnIndex, 2);
+    assert.equal(record.runState, "failed");
+    assert.deepEqual(
+      record.questions.map((entry) => [entry.turn, entry.text, entry.state]),
+      [
+        [1, "first", "completed"],
+        [2, "second", undefined],
+      ],
+    );
+  });
+
   it("completes an agent run the runtime never settled, with its citations", function () {
     const answer: Message = {
       role: "assistant",
