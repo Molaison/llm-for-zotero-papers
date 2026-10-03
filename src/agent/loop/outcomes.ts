@@ -57,7 +57,11 @@ import type { RunStopRule } from "./stopRules";
  * no papers (a review declared without scope) takes any paper as an
  * exclusion, has none to be done, and completes whole; content that cites
  * an excluded paper drops that exclusion there too. Every other part
- * covers every paper it names, and takes no exclusion.
+ * covers every paper it names, and takes no exclusion. A document may name
+ * the papers it leaves out as it is submitted: they are recorded on the part
+ * it binds to by the same rules, except that the document is final, so a
+ * paper it cites, or one the part does not name or has done, is ignored
+ * rather than refused.
  *
  * Revision. Declaring a part again with another description, effect,
  * capability or papers changes it in place while it holds no progress
@@ -91,6 +95,9 @@ export type OutcomeExclusion = {
   targets: readonly string[];
   reason: string;
 };
+
+/** Papers a submitted document leaves out of the part it binds to. */
+export type OutcomeDocumentExclusion = Omit<OutcomeExclusion, "taskId">;
 
 /** Why an exclusion was refused; a refused call changes nothing. */
 export type OutcomeExclusionRefusal =
@@ -128,6 +135,8 @@ export type OutcomeEvidence =
       documentKind?: string;
       /** `item:ID` of every source the material cites. */
       citedTargets?: readonly string[];
+      /** Papers the document leaves out, with the model's reasons. */
+      excluded?: readonly OutcomeDocumentExclusion[];
     }
   | {
       kind: "declined";
@@ -992,8 +1001,9 @@ function applyReceipt(
 /*
  * Delivered content. A document, or the accepted answer, is the artifact a
  * part asked for. A part that names papers is accounted per paper: the papers
- * the content cites are done, and the rest become exceptions, so "12/12"
- * means twelve papers were covered. A part that names none completes.
+ * the content cites are done, and the rest become exceptions unless the model
+ * excluded them, so "12/12" means twelve papers were covered. A part that
+ * names none completes.
  */
 
 /** A document kind's words in a part's description, for an unnamed binding. */
@@ -1146,16 +1156,62 @@ function coverTargets(
   };
 }
 
+/**
+ * `task` with the papers a document bound to it leaves out, recorded as
+ * `excludeOutcomeTargets` records them but leniently, as the document is
+ * final: a paper it cites is one it used, so it is never excluded, and a
+ * paper the part does not name, or has done, is ignored, not refused.
+ * `task` itself when that records nothing.
+ */
+function withDocumentExclusions(
+  task: Task,
+  exclusions: readonly OutcomeDocumentExclusion[] | undefined,
+  cited: readonly string[] | undefined,
+  now: number,
+): Task {
+  if (!SELECTING_EFFECTS.has(task.effect || "answer")) return task;
+  let next = task;
+  for (const exclusion of exclusions || []) {
+    const reason =
+      typeof exclusion.reason === "string" ? exclusion.reason.trim() : "";
+    if (!reason) continue;
+    const papers = unique(
+      exclusion.targets.flatMap((value) => {
+        const paper = excludedPaper(next, String(value).trim());
+        return paper &&
+          !(next.doneTargets || []).includes(paper) &&
+          !cited?.includes(paper)
+          ? [paper]
+          : [];
+      }),
+    );
+    if (papers.length) next = withExcluded(next, papers, reason, now) || next;
+  }
+  return next;
+}
+
 function applyMaterial(
   checkpoint: ExecutionCheckpoint,
   evidence: Extract<OutcomeEvidence, { kind: "material" }>,
   now: number,
 ): EvidenceResult {
   const key = materialRefKey(evidence.materialRef);
-  const bound = checkpoint.tasks.some((task) =>
+  const bound = checkpoint.tasks.findIndex((task) =>
     task.materialRefs.some((reference) => materialRefKey(reference) === key),
   );
-  if (bound) return unchanged(checkpoint);
+  // The same document again (identical content) binds nowhere new; only the
+  // papers it now leaves out are recorded, on the part that holds it.
+  if (bound >= 0)
+    return mapTasks(checkpoint, now, (task, index) => {
+      if (index !== bound) return undefined;
+      const next = withDocumentExclusions(
+        task,
+        evidence.excluded,
+        evidence.citedTargets,
+        now,
+      );
+      return next === task ? undefined : next;
+    });
   const chosen = artifactPartFor(checkpoint, {
     taskId: evidence.taskId,
     kind: evidence.documentKind,
@@ -1164,12 +1220,20 @@ function applyMaterial(
   const { documentId, documentVersion, contentHash } = evidence.materialRef;
   return mapTasks(checkpoint, now, (task, index) => {
     if (index !== chosen.index) return undefined;
+    // What the document leaves out is recorded first, so the papers it
+    // excludes are never "not covered".
+    const selected = withDocumentExclusions(
+      task,
+      evidence.excluded,
+      evidence.citedTargets,
+      now,
+    );
     // A revision re-covers its part from what it cites; with what it cites
     // unknown, it leaves the counts as they were.
     const next =
       chosen.revision && !evidence.citedTargets
-        ? { ...task, updatedAt: now }
-        : coverTargets(task, evidence.citedTargets, now);
+        ? { ...selected, updatedAt: now }
+        : coverTargets(selected, evidence.citedTargets, now);
     return {
       ...next,
       materialRefs: [
@@ -1592,6 +1656,53 @@ function itemTarget(value: string): string | undefined {
 }
 
 /**
+ * The paper `value` names as an exclusion on `task`: one of its targets, or,
+ * on a part that names no papers, any paper (`item:<id>`). Undefined when it
+ * names neither.
+ */
+function excludedPaper(task: Task, value: string): string | undefined {
+  const targets = task.targets || [];
+  return targets.length ? resolveTarget(value, targets) : itemTarget(value);
+}
+
+/**
+ * `task` with `papers` left out for `reason`: a paper excluded already keeps
+ * its first reason, and one the delivered content left uncited moves from
+ * that exception to the exclusion; other exceptions stay. Undefined when
+ * that changes nothing.
+ */
+function withExcluded(
+  task: Task,
+  papers: readonly string[],
+  reason: string,
+  now: number,
+): Task | undefined {
+  const excludedTargets = exceptTargets(
+    task.excludedTargets || [],
+    papers,
+    reason,
+  );
+  const exceptions = (task.exceptions || []).flatMap((entry) => {
+    if (entry.reason !== OUTCOME_REASONS.notCovered) return [entry];
+    const left = entry.targets.filter((target) => !papers.includes(target));
+    return left.length ? [{ ...entry, targets: left }] : [];
+  });
+  if (
+    JSON.stringify(excludedTargets) ===
+      JSON.stringify(task.excludedTargets || []) &&
+    JSON.stringify(exceptions) === JSON.stringify(task.exceptions || [])
+  )
+    return undefined;
+  const { exceptions: _previous, ...rest } = task;
+  return {
+    ...rest,
+    excludedTargets,
+    ...(exceptions.length ? { exceptions } : {}),
+    updatedAt: now,
+  };
+}
+
+/**
  * Record papers the model leaves out of an artifact or reasoning part, with
  * its reason, as `excludedTargets`. Only those parts deliver a synthesis
  * from a selection: a digest, read or write part covers every paper it
@@ -1634,14 +1745,11 @@ export function excludeOutcomeTargets(
       refused.push({ taskId, kind: "status", status: task.status });
       continue;
     }
-    const targets = task.targets || [];
     const named = unique(
       exclusion.targets.map((value) => String(value).trim()).filter(Boolean),
     );
     // A part that names no papers takes any paper as an exclusion.
-    const papers = named.map((value) =>
-      targets.length ? resolveTarget(value, targets) : itemTarget(value),
-    );
+    const papers = named.map((value) => excludedPaper(task, value));
     const notTargets = named.filter((_, at) => papers[at] === undefined);
     const done = named.filter(
       (_, at) =>
@@ -1652,30 +1760,9 @@ export function excludeOutcomeTargets(
       refused.push({ taskId, kind: "papers", notTargets, done });
       continue;
     }
-    const excluded = unique(papers as string[]);
-    const excludedTargets = exceptTargets(
-      task.excludedTargets || [],
-      excluded,
-      reason,
-    );
-    const exceptions = (task.exceptions || []).flatMap((entry) => {
-      if (entry.reason !== OUTCOME_REASONS.notCovered) return [entry];
-      const left = entry.targets.filter((target) => !excluded.includes(target));
-      return left.length ? [{ ...entry, targets: left }] : [];
-    });
-    if (
-      JSON.stringify(excludedTargets) ===
-        JSON.stringify(task.excludedTargets || []) &&
-      JSON.stringify(exceptions) === JSON.stringify(task.exceptions || [])
-    )
-      continue;
-    const { exceptions: _previous, ...rest } = task;
-    tasks[index] = {
-      ...rest,
-      excludedTargets,
-      ...(exceptions.length ? { exceptions } : {}),
-      updatedAt: now,
-    };
+    const next = withExcluded(task, unique(papers as string[]), reason, now);
+    if (!next) continue;
+    tasks[index] = next;
     changed = true;
   }
   if (refused.length || !changed) return { checkpoint, refused };

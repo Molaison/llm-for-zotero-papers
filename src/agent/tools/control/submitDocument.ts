@@ -298,6 +298,9 @@ function zoteroCitedSourceItem(
   }
 }
 
+/** Papers the document leaves out, as `item:<id>`, and why. */
+type DocumentExclusion = { targetIds: string[]; reason: string };
+
 type SubmitPlanDocumentResult = {
   documentId: string;
   contentHash: string;
@@ -305,6 +308,8 @@ type SubmitPlanDocumentResult = {
   visibleMarkdown: string;
   /** Format repairs the host made instead of rejecting; omitted when none. */
   repairs?: string[];
+  /** The papers the call leaves out, as the host reads them; omitted when none. */
+  excluded?: DocumentExclusion[];
 };
 
 function requiredString(value: unknown, label: string): string {
@@ -479,10 +484,59 @@ function parseAsset(value: unknown, index: number): PlanDocumentAsset {
 }
 
 /**
- * The call's input: the document, and the declared part it fulfils. The part
- * binds the outcome ledger only; it is not document content.
+ * The call's input: the document, the declared part it fulfils, and the
+ * papers it leaves out. The part and the exclusions bind the outcome ledger
+ * only; they are not document content.
  */
-type SubmitDocumentToolInput = SubmitPlanDocumentInput & { taskId?: string };
+type SubmitDocumentToolInput = SubmitPlanDocumentInput & {
+  taskId?: string;
+  excluded?: DocumentExclusion[];
+};
+
+/** A paper's Zotero id as models write one: `12` or `item:12`. */
+const ITEM_ID = /^(?:item:)?([1-9]\d*)$/;
+
+function parseExclusion(value: unknown, index: number): DocumentExclusion {
+  const label = `excluded[${index}]`;
+  if (!validateObject<Record<string, unknown>>(value)) {
+    throw new Error(`${label} must be an object`);
+  }
+  const named = Array.isArray(value.targetIds)
+    ? value.targetIds.map((entry) => String(entry).trim()).filter(Boolean)
+    : [];
+  if (!named.length) {
+    throw new Error(
+      `${label} needs targetIds: the papers the document leaves out`,
+    );
+  }
+  const notIds = named.filter((entry) => !ITEM_ID.test(entry));
+  if (notIds.length) {
+    throw new Error(
+      `${label}.targetIds take Zotero item ids (12 or item:12), and these are not: ${notIds
+        .map((entry) => JSON.stringify(entry))
+        .join(", ")}`,
+    );
+  }
+  const reason = typeof value.reason === "string" ? value.reason.trim() : "";
+  if (!reason) {
+    throw new Error(
+      `${label} needs a reason: why the document leaves them out`,
+    );
+  }
+  return {
+    targetIds: [
+      ...new Set(named.map((entry) => `item:${ITEM_ID.exec(entry)![1]}`)),
+    ],
+    reason,
+  };
+}
+
+/** The papers the document leaves out; none when the list is absent or empty. */
+function parseExclusions(value: unknown): DocumentExclusion[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new Error("excluded must be an array");
+  return value.map(parseExclusion);
+}
 
 function validateSubmitPlanDocument(
   args: unknown,
@@ -528,6 +582,7 @@ function validateSubmitPlanDocument(
     ) {
       return fail("integrityPolicy is not supported");
     }
+    const excluded = parseExclusions(args.excluded);
     return ok({
       documentKind:
         args.documentKind as SubmitPlanDocumentInput["documentKind"],
@@ -545,6 +600,7 @@ function validateSubmitPlanDocument(
       ...(typeof args.taskId === "string" && args.taskId.trim()
         ? { taskId: args.taskId.trim() }
         : {}),
+      ...(excluded.length ? { excluded } : {}),
     });
   } catch (error) {
     return fail(error instanceof Error ? error.message : String(error));
@@ -559,7 +615,7 @@ export function createSubmitDocumentTool(
     spec: {
       name: "submit_document",
       description:
-        "Finalize an Agent document. Use internal [[cite:C1]] tokens in Markdown and provide Zotero item mappings; research-grounded documents also require the host-issued evidence IDs returned by read tools. This tool validates and persists the exact authored content, which becomes the visible answer. The host repairs unused quotes, unverifiable quotes, and missing required headings, and lists the repairs in the result; it rejects only unresolved tokens, fabricated evidence, and quotes the open PDF does not contain.",
+        "Finalize an Agent document. Use internal [[cite:C1]] tokens in Markdown and provide Zotero item mappings; research-grounded documents also require the host-issued evidence IDs returned by read tools. This tool validates and persists the exact authored content, which becomes the visible answer. The host repairs unused quotes, unverifiable quotes, and missing required headings, and lists the repairs in the result; it rejects only unresolved tokens, fabricated evidence, and quotes the open PDF does not contain. List papers the document leaves out under excluded, with the reason.",
       inputSchema: {
         type: "object",
         additionalProperties: false,
@@ -577,6 +633,19 @@ export function createSubmitDocumentTool(
             type: "string",
             description:
               "The task_update part this document fulfils (its taskId), when parts were declared. Name it so the host ticks the right part.",
+          },
+          excluded: {
+            type: "array",
+            description: "Papers left out, by id (12 or item:12).",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              required: ["targetIds", "reason"],
+              properties: {
+                targetIds: { type: "array", items: { type: "string" } },
+                reason: { type: "string" },
+              },
+            },
           },
           documentKind: {
             type: "string",
@@ -780,7 +849,9 @@ export function createSubmitDocumentTool(
         reason:
           "This host-owned control submits an already prepared workflow document.",
       }),
-    execute: async ({ taskId: _part, ...input }, context) => {
+    // The toolExecution host reads the part and the exclusions from the
+    // validated input onto the material's outcome evidence.
+    execute: async ({ taskId: _part, excluded, ...input }, context) => {
       const { document, repairs } = await directFinalizer.finalize({
         request: context.request,
         runId:
@@ -800,6 +871,8 @@ export function createSubmitDocumentTool(
           materialRef,
           visibleMarkdown: document.visibleMarkdown,
           ...(repairs.length ? { repairs } : {}),
+          // What the host records as left out, as it reads the ids.
+          ...(excluded?.length ? { excluded } : {}),
         },
         materialRef,
         materialKind:

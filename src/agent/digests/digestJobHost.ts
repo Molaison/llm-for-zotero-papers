@@ -749,7 +749,7 @@ export async function runDigestParts(params: {
         )
         .join(
           ", ",
-        )}. Use a paper in a synthesis only where its content bears on the request; never stretch one in by analogy. If its content does not bear on the request, leave it out with task_update excluded:[{ taskId:'<the review or answer part>', targetIds:['item:N'], reason:'<one sentence>' }] before you submit, and name it by title with that reason in the output, without a citation. When the user asked for every paper, keep its result and flag the mismatch instead.`,
+        )}. Use a paper in a synthesis only where its content bears on the request; never stretch one in by analogy. If its content does not bear on the request, leave it out with excluded:[{ targetIds:['item:N'], reason:'<one sentence>' }] in submit_document, or in task_update with the answer part's taskId, and name it by title with that reason in the output, without a citation. When the user asked for every paper, keep its result and flag the mismatch instead.`,
     );
   return {
     ...(digests.length || allFailures.length

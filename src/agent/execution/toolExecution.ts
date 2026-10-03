@@ -31,6 +31,7 @@ import {
 import {
   openDeclaredOutcomes,
   papersAlreadyWritten,
+  type OutcomeDocumentExclusion,
   type OutcomeEvidence,
 } from "../loop/outcomes";
 import { canonicalJson } from "../services/libraryMutation/canonicalJson";
@@ -218,6 +219,30 @@ export type ToolExecution = {
 };
 
 /**
+ * The papers a material-producing call's validated input leaves out
+ * (submit_document's `excluded`), with their reasons; none for a call that
+ * names none.
+ */
+function documentExclusionsOf(input: unknown): OutcomeDocumentExclusion[] {
+  const named = (input as { excluded?: unknown } | null | undefined)?.excluded;
+  if (!Array.isArray(named)) return [];
+  return named.flatMap((entry) => {
+    const { targetIds, reason } = (entry || {}) as {
+      targetIds?: unknown;
+      reason?: unknown;
+    };
+    const targets = Array.isArray(targetIds)
+      ? targetIds.filter(
+          (target): target is string => typeof target === "string",
+        )
+      : [];
+    return targets.length && typeof reason === "string" && reason.trim()
+      ? [{ targets, reason: reason.trim() }]
+      : [];
+  });
+}
+
+/**
  * The outcome evidence one executed call carries: the papers it read, each
  * receipt, the material it finalized, and a write the user declined.
  */
@@ -256,11 +281,13 @@ async function outcomeEvidenceOf(params: {
   }
   if (toolResult.materialRef) {
     // The part the call named, the document's kind and the papers it cites
-    // decide which part the material completes and which of its papers.
+    // decide which part the material completes and which of its papers; the
+    // papers it leaves out are recorded on that part.
     const named = (params.input as { taskId?: unknown } | null | undefined)
       ?.taskId;
     const taskId =
       typeof named === "string" && named.trim() ? named.trim() : undefined;
+    const excluded = documentExclusionsOf(params.input);
     const citedTargets = [
       ...new Set(
         (toolResult.materialCitedSources || []).flatMap((source) =>
@@ -279,6 +306,7 @@ async function outcomeEvidenceOf(params: {
         : {}),
       // Known for every material, so an empty list means it cites nothing.
       citedTargets,
+      ...(excluded.length ? { excluded } : {}),
     });
   }
   if (

@@ -121,7 +121,7 @@ describe("literature-review skill", function () {
     for (const rule of [
       "Include every paper whose content bears on the question, whatever its field.",
       "a relevance of none is a signal, not the decision",
-      "list each paper you leave out under `excluded` on the review part with a one-sentence reason",
+      "List each paper you leave out under `excluded` in `submit_document` (or `task_update` for an answer without a document), with a one-sentence reason",
       "Never leave a paper out because its text could not be read; name it as not read.",
       "every paper keeps its summary in Paper summaries; flag one that does not fit the question instead of dropping it",
       "name it by title with that reason in Scope and method, without a citation: a citation means the review uses the paper",

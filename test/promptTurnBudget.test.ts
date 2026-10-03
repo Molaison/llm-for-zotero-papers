@@ -18,12 +18,14 @@ import {
  * agent tool consolidation), so moving always-on rules into per-turn guidance
  * cannot silently grow a turn. The global and collection caps were raised on
  * purpose by the workflow sentence that asks for a digest part when the work
- * needs one result per paper (274 characters, 2026-10-02).
+ * needs one result per paper (274 characters, 2026-10-02), and again by
+ * submit_document's excluded list, which records the papers a document
+ * leaves out (214 tool characters, 2026-10-02).
  */
 const TURN_BUDGETS: Record<string, number> = {
-  global: 34_936,
+  global: 35_150,
   paper: 34_764,
-  collection: 35_034,
+  collection: 35_248,
 };
 
 const TURNS: Record<string, Record<string, unknown>> = {

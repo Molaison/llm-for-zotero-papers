@@ -333,7 +333,7 @@ describe("agent resource context plan", function () {
     // An unrelated paper is left out with its reason, not stretched in.
     assert.equal(
       text.split(
-        "leave out one that does not, never stretch it in by analogy, list it under task_update excluded with the reason, and name it by title without a citation.",
+        "leave out one that does not, never stretch it in by analogy, list it under excluded (submit_document or task_update) with the reason, and name it by title without a citation.",
       ).length - 1,
       2,
       "both scopes say how to leave an unrelated paper out",

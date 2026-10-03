@@ -30,9 +30,11 @@ import {
 } from "../src/modules/contextPanel/taskProgress/store";
 import {
   OUTCOME_REASONS,
+  applyOutcomeEvidence,
   decideRunEnd,
   settleOutcomes,
 } from "../src/agent/loop/outcomes";
+import { executionCheckpointEvent } from "../src/agent/execution/checkpointEvents";
 import { DIGEST_FAILURE_REASONS } from "../src/agent/digests/paperDigestWorker";
 import { initI18n, t } from "../src/utils/i18n";
 import {
@@ -2084,6 +2086,71 @@ describe("task progress view of an outcome ledger", function () {
       assert.equal(
         detailOf(row),
         "Excluded: Off the question: (Author 2, 2020), (Author 3, 2020), (Author 4, 2020), (Author 5, 2020), (Author 6, 2020) and 1 more · Excluded: A methods note: (Author 8, 2020)",
+      );
+    });
+
+    it("replays the papers a submitted document left out as its part's Excluded line", function () {
+      seedScope();
+      const declared = outcomeCheckpoint([
+        outcomeTask("review", {
+          description: "Write the literature review",
+          effect: "artifact",
+          targets: items(3),
+        }),
+      ]);
+      // submit_document named the part and left item:3 out.
+      const delivered = applyOutcomeEvidence(
+        declared,
+        {
+          kind: "material",
+          materialRef: {
+            documentId: "doc-1",
+            documentVersion: 1,
+            contentHash: "sha256:doc-1",
+          },
+          taskId: "review",
+          citedTargets: items(2),
+          excluded: [{ targets: ["3"], reason: "Off the question" }],
+        },
+        3,
+      ).checkpoint;
+      const events: AgentRunEventRecord[] = [
+        executionCheckpointEvent(undefined, declared),
+        executionCheckpointEvent(declared, settled(delivered.tasks)),
+      ].map((payload, index) => ({
+        runId: "run-x",
+        seq: index + 1,
+        eventType: payload.type,
+        payload,
+        createdAt: index + 1,
+      }));
+      assert.equal(events[1].payload.type, "execution_checkpoint_delta");
+      hydrateTaskProgress(
+        KEY,
+        buildTaskProgressHistory(
+          [
+            { role: "user", text: "Review these papers", timestamp: 1 },
+            {
+              role: "assistant",
+              text: "Done.",
+              timestamp: 2,
+              runMode: "agent",
+              agentRunId: "run-x",
+            },
+          ],
+          new Map([["run-x", events]]),
+          1,
+        ),
+      );
+      const harness = track(mount({}, { resolvePaperLabel: label }));
+      harness.view.flush();
+      assert.equal(pill(harness).textContent, "Completed");
+      const [row] = rows(openSteps(harness));
+      assert.equal(labelOf(row), "Write the literature review");
+      assert.equal(pillOf(row), "Done");
+      assert.equal(
+        detailOf(row),
+        "Excluded: Off the question: (Author 3, 2020)",
       );
     });
 

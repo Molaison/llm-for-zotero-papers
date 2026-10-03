@@ -18,7 +18,13 @@ import type { AgentPendingReadActivity } from "../src/agent/context/resourceCont
 import type { MaterialRef } from "../src/agent/documents/materialRef";
 import type { AgentToolResultHandleRecord } from "../src/agent/store/toolResultHandles";
 import type { OutcomeEffect } from "../src/agent/execution/types";
-import type { OutcomeEvidence } from "../src/agent/loop/outcomes";
+import {
+  applyOutcomeEvidence,
+  declareOutcomes,
+  OUTCOME_REASONS,
+  type OutcomeEvidence,
+} from "../src/agent/loop/outcomes";
+import { createEmptyExecutionCheckpoint } from "../src/agent/execution/checkpoint";
 import type {
   AgentEvent,
   AgentModelCapabilities,
@@ -986,6 +992,90 @@ describe("agent tool execution collaborator", function () {
         },
       ]);
     } finally {
+      restoreDb();
+    }
+  });
+
+  it("lands the papers a submitted document leaves out on the part it names, and echoes them to the model", async function () {
+    const restoreDb = installMockDb();
+    const restoreDocuments = installAgentStoreSqlite();
+    try {
+      await initPlanDocumentStore();
+      const registry = new AgentToolRegistry(createTestActionContractService());
+      // A document without citations formats none.
+      registry.register(
+        createSubmitDocumentTool({
+          formatStructuredCitations: () => ({
+            styleId: "apa",
+            styleTitle: "APA",
+            locale: "en-US",
+            clusters: [],
+            bibliographyEntries: [],
+          }),
+        } as unknown as ZoteroGateway),
+      );
+      const harness = await createHarness(registry);
+      harness.request.executionCheckpoint = declareOutcomes(
+        createEmptyExecutionCheckpoint(harness.request.executionContext!, 1),
+        [
+          {
+            taskId: "review",
+            description: "Write the review",
+            effect: "artifact",
+            targets: ["item:5", "item:6", "item:7"],
+          },
+        ],
+        2,
+      );
+      harness.deps.recordOutcomeEvidence = async (evidence) => {
+        harness.request.executionCheckpoint = applyOutcomeEvidence(
+          harness.request.executionCheckpoint!,
+          evidence,
+          3,
+        ).checkpoint;
+      };
+      const reason = "An economics paper; it does not address drift";
+      const toolExecution = createToolExecution(harness.deps);
+      await toolExecution.executeToolWorkflow(
+        {
+          id: "call-submit",
+          name: "submit_document",
+          arguments: {
+            taskId: "review",
+            excluded: [{ targetIds: ["7"], reason }],
+            documentKind: "report",
+            integrityPolicy: "authored",
+            title: "Drift",
+            markdown: "# Drift\n\nOne paper is left out.",
+            citations: [],
+            quotes: [],
+            assets: [],
+            groundingReviewed: "passed",
+            groundingIssues: [],
+          },
+        },
+        1,
+        { modelCallId: "call-submit" },
+      );
+      const result = harness.events.find(
+        (event) => event.type === "tool_result",
+      ) as Extract<AgentEvent, { type: "tool_result" }> | undefined;
+      assert.isTrue(result?.ok, JSON.stringify(result?.content));
+      assert.deepEqual(
+        (result!.content as { excluded?: unknown }).excluded,
+        [{ targetIds: ["item:7"], reason }],
+        "the model reads back what the host records",
+      );
+      const [part] = harness.request.executionCheckpoint!.tasks;
+      assert.equal(part.taskId, "run-collaborator:task:review");
+      assert.equal(part.status, "completed");
+      assert.lengthOf(part.materialRefs, 1);
+      assert.deepEqual(part.excludedTargets, [{ targets: ["item:7"], reason }]);
+      assert.deepEqual(part.exceptions, [
+        { targets: ["item:5", "item:6"], reason: OUTCOME_REASONS.notCovered },
+      ]);
+    } finally {
+      restoreDocuments();
       restoreDb();
     }
   });

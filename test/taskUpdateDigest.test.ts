@@ -990,11 +990,10 @@ describe("task_update runs a declared digest part", function () {
       .digestNote as string;
     assert.include(note, "Judged unrelated to the request: Drift A (item:5).");
     assert.notInclude(note, "item:6");
-    assert.include(note, "task_update excluded:");
     // A relevance of none is a signal: the model decides, and says so by title.
     assert.include(
       note,
-      "If its content does not bear on the request, leave it out with task_update excluded:",
+      "If its content does not bear on the request, leave it out with excluded:[{ targetIds:['item:N'], reason:'<one sentence>' }] in submit_document, or in task_update with the answer part's taskId,",
     );
     assert.include(
       note,
