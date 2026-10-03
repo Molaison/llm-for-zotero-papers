@@ -924,6 +924,48 @@ describe("task_update runs a declared digest part", function () {
     }
   });
 
+  it("names the papers judged unrelated and how to leave them out, and says nothing when none is", async function () {
+    const harness = createHarness(
+      scriptedDigests(async (chat) =>
+        chat.prompt.includes("Title: Drift A")
+          ? reply("It measures household income, not drift.", {
+              facets: [],
+              relevance: { level: "none", reason: "An economics paper." },
+            })
+          : reply("Cells drift slowly.", {
+              facets: [],
+              relevance: { level: "direct", reason: "It measures drift." },
+            }),
+      ),
+      [5, 6],
+    );
+    const outcome = await runCall(harness, "call-unrelated", {
+      tasks: [SUMMARIZE],
+    });
+    const note = (outcome.toolResult.content as Record<string, any>)
+      .digestNote as string;
+    assert.include(note, "Judged unrelated to the request: Drift A (item:5).");
+    assert.notInclude(note, "item:6");
+    assert.include(note, "task_update excluded:");
+    assert.include(note, "When the user asked for every paper");
+
+    const related = createHarness(
+      scriptedDigests(async () =>
+        reply("Cells drift slowly.", {
+          facets: [],
+          relevance: { level: "partial", reason: "It touches drift." },
+        }),
+      ),
+      [5],
+    );
+    const quiet = await runCall(related, "call-related", {
+      tasks: [SUMMARIZE],
+    });
+    assert.isUndefined(
+      (quiet.toolResult.content as Record<string, any>).digestNote,
+    );
+  });
+
   it("treats a schema 1 record in the handle store as a miss and leaves it untouched", async function () {
     const conversation = 975_800;
     const oldDigest = {

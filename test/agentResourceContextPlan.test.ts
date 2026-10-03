@@ -330,6 +330,14 @@ describe("agent resource context plan", function () {
       2,
       "both the collection and the tag scope say membership is not relevance",
     );
+    // An unrelated paper is left out with its reason, not stretched in.
+    assert.equal(
+      text.split(
+        "leave out one that does not, never stretch it in by analogy, and list it under task_update excluded with the reason.",
+      ).length - 1,
+      2,
+      "both scopes say how to leave an unrelated paper out",
+    );
   });
 
   it("diffs added, removed, changed, and unchanged resources", function () {

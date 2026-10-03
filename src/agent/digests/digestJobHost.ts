@@ -704,6 +704,26 @@ export async function runDigestParts(params: {
         finalFailures.length === 1 ? "Its digest" : "Their digests"
       } already failed after ${DIGEST_MAX_FAILURE_RETRIES} retries, so the failure is final with the reason given. Read such a paper with paper_read mode:'overview' if the work needs it, or name it as not read.`,
     );
+  // A paper judged unrelated is the model's to keep or leave out; the note
+  // names how to leave it out, at the moment the model decides.
+  const unrelated = [
+    ...new Map(
+      digests
+        .filter((digest) => digest.relevance?.level === "none")
+        .map((digest) => [digest.itemId, digest]),
+    ).values(),
+  ];
+  if (unrelated.length)
+    notes.push(
+      `Judged unrelated to the request: ${unrelated
+        .map(
+          (digest) =>
+            `${titleOf(digest.itemId) || digest.title || `Item ${digest.itemId}`} (item:${digest.itemId})`,
+        )
+        .join(
+          ", ",
+        )}. Use a paper in a synthesis only where its content bears on the request; never stretch one in by analogy. Leave each such paper out with task_update excluded:[{ taskId:'<the review or answer part>', targetIds:['item:N'], reason:'<one sentence>' }] before you submit, and name it with that reason in the output. When the user asked for every paper, keep its result and flag the mismatch instead.`,
+    );
   return {
     ...(digests.length || allFailures.length
       ? {
