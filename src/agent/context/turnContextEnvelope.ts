@@ -444,7 +444,7 @@ export function renderTurnContextEnvelopeForModel(
 
 /** How the agent works over the whole library when nothing is attached. */
 export const WHOLE_LIBRARY_SCOPE_RULE =
-  "Nothing is attached, so you choose the papers: search with library_retrieve first, choose the ones that bear on the question, then declare the digest or read part with their targetIds, not in your first step. Only a write part may use scope:true here; if the user asks for every paper, list their ids with library_search.";
+  "Nothing is attached, so you choose the papers: search with library_retrieve first and choose the ones that bear on the question from its results, without opening candidates with paper_read; then declare a digest part with their targetIds, not in your first step, and the host reads them. Only a write part may use scope:true here; only when the user explicitly asks for every paper in the library, list their ids with library_search.";
 
 /**
  * "Paper scope: Drift — 212 papers, 180 with full text": how large the

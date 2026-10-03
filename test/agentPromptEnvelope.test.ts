@@ -714,6 +714,15 @@ describe("agent prompt envelope paper scope", function () {
       "Only a write part may use scope:true",
     );
     assert.include(WHOLE_LIBRARY_SCOPE_RULE, "library_search");
+    // It chooses from the search results; the host reads the chosen papers.
+    assert.include(
+      WHOLE_LIBRARY_SCOPE_RULE,
+      "without opening candidates with paper_read",
+    );
+    assert.include(
+      WHOLE_LIBRARY_SCOPE_RULE,
+      "only when the user explicitly asks for every paper in the library",
+    );
   });
 
   it("gives the whole-library rule only when nothing is attached", async function () {

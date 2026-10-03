@@ -229,7 +229,7 @@ const NO_SCOPE_PAPERS =
  * attached: the agent chooses the papers, so it searches before it names them.
  */
 function wholeLibraryScopeNote(local: string, count: number): string {
-  return `Nothing is attached, so scope:true on task ${local} would cover the whole library (${count} ${count === 1 ? "paper" : "papers"}). Search with library_retrieve first, choose the papers that bear on the question, and declare the part with their targetIds. If the user asked for every paper in the library, list their ids with library_search and name them.`;
+  return `Nothing is attached, so scope:true on task ${local} would cover the whole library (${count} ${count === 1 ? "paper" : "papers"}). Search with library_retrieve first, choose from its results the papers that bear on the question, and declare the part with their targetIds. List every paper's id with library_search only when the user explicitly asked for every paper in the library.`;
 }
 const NO_STATUS =
   "task_update takes no status: the host marks parts done from the tools' results. Declare parts in tasks, and list one that cannot be done under skipped, blocked or cancelled with the reason.";

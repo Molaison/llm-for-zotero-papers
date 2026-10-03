@@ -1179,6 +1179,11 @@ describe("task_update with nothing attached: the agent names its papers", functi
     assert.include(error.message, "library_retrieve first");
     assert.include(error.message, "their targetIds");
     assert.include(error.message, "library_search");
+    // Listing every id is offered only for an explicit every-paper request.
+    assert.include(
+      error.message,
+      "only when the user explicitly asked for every paper in the library",
+    );
   }
 
   it("refuses scope:true on a new read, digest, artifact or reasoning part, naming the library's size and the search to run first", function () {
