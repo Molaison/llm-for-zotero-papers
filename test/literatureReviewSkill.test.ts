@@ -73,14 +73,12 @@ describe("literature-review skill", function () {
       "do not also declare a read part over the same papers",
     );
     assert.include(text, "do not read those papers with `paper_read` first");
-    assert.include(text, "write from the digests the host returned");
-    assert.match(
-      text,
-      /`paper_read\(\{ mode:'targeted'[^\n]*only to verify a decisive cross-paper claim/,
-    );
+    assert.include(text, "write from the results the host returned");
+    // A digested paper is read again only by a targeted read: a decisive
+    // claim, a contradiction, or a gap its result names; never in full.
     assert.include(
       text,
-      "never re-read a paper whose digest succeeded in overview or full mode",
+      "Read a digested paper again only with `paper_read({ mode:'targeted', query:'...' })`: to verify a decisive cross-paper claim, test an apparent contradiction, or close a gap its result names that the review needs; never re-read it in overview or full mode.",
     );
     // A paper the host could not digest twice is read, not left unread.
     assert.include(
@@ -89,6 +87,54 @@ describe("literature-review skill", function () {
     );
     assert.notInclude(text, "a paper that still fails is named as not read");
     assert.include(text, "same `taskId` and no description");
+  });
+
+  it("asks the digest for the review question's per-paper result", function () {
+    const text = skill.instruction;
+    assert.include(
+      text,
+      `{ taskId:'papers', description:'For the review question "<question>": summarize each paper and judge how it bears on the question', expectedEffect:'digest', scope:true }`,
+    );
+    assert.include(
+      text,
+      "The host then analyzes each paper itself inside that call and returns the results",
+    );
+    assert.notInclude(text, "returns the summaries");
+    assert.include(
+      text,
+      "a relevance line when the description names a question, facets, verified quotes with section labels, gaps",
+    );
+  });
+
+  it("treats a folder as the source boundary and lets the agent select papers by content, with reasons", function () {
+    const text = skill.instruction;
+    assert.include(
+      text,
+      "A selected folder, tag or paper set is the source boundary: each paper in it is a candidate, and none is relevant only because it is there.",
+    );
+    assert.notInclude(text, "evidence pool, not as a sample");
+    // Select sits between Read and Write.
+    assert.match(
+      text,
+      /3\. \*\*Read\.\*\*[\s\S]*4\. \*\*Select\.\*\*[\s\S]*5\. \*\*Write\.\*\*[\s\S]*6\. \*\*Save\.\*\*/,
+    );
+    for (const rule of [
+      "Include every paper whose content bears on the question, whatever its field.",
+      "a relevance of none is a signal, not the decision",
+      "list each paper you leave out under `excluded` on the review part with a one-sentence reason",
+      "Never leave a paper out because its text could not be read; name it as not read.",
+      "every paper keeps its summary in Paper summaries; flag one that does not fit the question instead of dropping it",
+      "In Scope and method, name each paper you left out and the reason.",
+      "In narrative and scoping reviews, include papers by their relevance to the question and name each excluded paper with its reason.",
+      "in other reviews, name each excluded paper with its reason",
+    ]) {
+      assert.include(text, rule, rule);
+    }
+    assert.notInclude(text, "they are not eligibility criteria");
+    assert.notInclude(
+      text,
+      "exclusion accounting to systematic-review requests",
+    );
   });
 
   it("puts the per-paper summaries into the submitted document", function () {
@@ -108,6 +154,17 @@ describe("compare-papers skill", function () {
       BUILTIN_SKILL_FILES["compare-papers.md"],
     ).instruction;
     assert.include(text, "expectedEffect:'digest'");
-    assert.include(text, "build the comparison from the returned digests");
+    // The digest description names the dimensions; the facets come back
+    // with those labels and become the comparison's rows.
+    assert.include(text, "whose description names the comparison dimensions");
+    assert.include(
+      text,
+      "Each result returns facets with those labels; they become the comparison's rows.",
+    );
+    assert.include(
+      text,
+      "state a commonality only where the facets of each paper support it",
+    );
+    assert.notInclude(text, "returned digests");
   });
 });

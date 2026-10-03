@@ -45,8 +45,9 @@ describe("direct Agent model tool surface", function () {
 
     // Includes concrete figure selectors, the native image-embedding contract
     // and task_update. Each cap is the next whole thousand above the measured
-    // payload: 22,766 tool characters and 31,121 with the fixed prompt
-    // (2026-10-02, after task_update took excluded, replaces and reason).
+    // payload: 22,939 tool characters and 31,568 with the fixed prompt
+    // (2026-10-02, after task_update named excluded and replaces and the
+    // workflow asked for a digest part per per-paper result).
     assert.isAtMost(serializedToolCharacters, 23_000);
     assert.isAtMost(
       rendered.inventory.fixedPrompt.length + serializedToolCharacters,

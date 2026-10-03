@@ -793,7 +793,7 @@ function pageInstruction(
   if (page.targets.some((target) => job?.digested.has(target)))
     return [
       `Make ${noun} ${quotedList(changes)} for these papers now, from the host's digest of each paper: the task_update result that returned it, or context_read source:'tool_result' with the paper's digest handle.`,
-      "The host has already summarized these papers, so do not open their text again.",
+      "The host has already analyzed these papers, so do not open their text again.",
       `One write call can take every paper of this page. ${next}`,
     ].join(" ");
   return [

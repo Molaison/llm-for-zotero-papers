@@ -610,6 +610,18 @@ describe("agent prompt envelope direct workflow", function () {
     assert.include(await directWorkflowBlock(), DECLARE_PARTS);
   });
 
+  it("asks for a digest part whose description states the per-paper result", async function () {
+    const DIGEST_PART =
+      "When the work needs one result for each of several papers (a summary, extracted fields, relevance to a question, support or challenge for an idea), declare a digest part whose description states that per-paper result; the host runs it on each paper and returns the results.";
+    const block = await directWorkflowBlock();
+    assert.include(block, DIGEST_PART);
+    // It follows the sentence that introduces task_update.
+    assert.isAbove(
+      block.indexOf(DIGEST_PART),
+      block.indexOf("declare each part with task_update"),
+    );
+  });
+
   it("keeps the receipt sentence out of the Codex client's instructions", function () {
     const codexManifest = buildZoteroEnvironmentManifest({
       scope: { kind: "global", libraryID: 1, conversationKey: 1 } as never,

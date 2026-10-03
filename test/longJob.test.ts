@@ -1191,6 +1191,13 @@ describe("long job", function () {
         `Make the change “${NOTE_ALL}” for these papers now`,
       );
       assert.include(text, "digest");
+      // Task-neutral: a digest answers its part's description, which need
+      // not be a summary.
+      assert.include(
+        text,
+        "The host has already analyzed these papers, so do not open their text again.",
+      );
+      assert.notInclude(text, "summarized");
       // A paper whose digest failed is still read for its note.
       const failed = applyOutcomeEvidence(
         declareOutcomes(

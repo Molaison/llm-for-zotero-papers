@@ -399,8 +399,10 @@ describe("user skill bootstrap upgrades", function () {
   for (const [name, version] of [
     ["compare-papers", 7],
     ["compare-papers", 9],
+    ["compare-papers", 10],
     ["evidence-based-qa", 8],
     ["literature-review", 11],
+    ["literature-review", 12],
   ] as const) {
     for (const mode of ["tracked", "untracked-native", "customized"] as const) {
       it(`preserves upgrade ownership for ${name} (${mode})`, async function () {
@@ -603,6 +605,7 @@ describe("user skill bootstrap upgrades", function () {
     "evidence-based-qa-v10",
     "compare-papers-v7",
     "compare-papers-v9",
+    "compare-papers-v10",
     "write-note-v16",
     "analyze-figures-v9",
     "analyze-figures-v10",
@@ -610,6 +613,7 @@ describe("user skill bootstrap upgrades", function () {
     "import-cited-reference-v4",
     "literature-review-v10",
     "literature-review-v11",
+    "literature-review-v12",
     "library-analysis-v4",
     // The simplified texts main shipped at the same version numbers
     // (ad2c0fec) before the tool consolidation merged.

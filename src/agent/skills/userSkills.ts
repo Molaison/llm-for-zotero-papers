@@ -225,6 +225,10 @@ const BUILTIN_BOOTSTRAP_RAW_HASHES: Partial<
     // canonical copy carrying its native `name:` line.
     "l93iop",
     "jop719",
+    // v10, the text v11's dimension-named digest replaces, as shipped and
+    // as the canonical copy carrying its native `name:` line.
+    "1mp6wjc",
+    "1a6j60s",
   ],
   "analyze-figures.md": [
     "msvqtf",
@@ -289,6 +293,10 @@ const BUILTIN_BOOTSTRAP_RAW_HASHES: Partial<
     // canonical copy carrying its native `name:` line.
     "1hrhlxd",
     "3mijhi",
+    // v12, the text v13's question-led digest and Select step replace, as
+    // shipped and as the canonical copy carrying its native `name:` line.
+    "mujbgx",
+    "18cssl2",
   ],
   "import-cited-reference.md": [
     "19bomz1",
@@ -319,6 +327,8 @@ const BUILTIN_BOOTSTRAP_BODY_HASHES: Partial<
     "8zlow4",
     // v9, the body v10's digest part extends.
     "1s8bw97",
+    // v10, the body v11's dimension-named digest replaces.
+    "dds2si",
   ],
   "evidence-based-qa.md": [
     "41yh3d",

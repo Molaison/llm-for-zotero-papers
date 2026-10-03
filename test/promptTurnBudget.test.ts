@@ -16,12 +16,14 @@ import {
  * the three common turn shapes, with the bundled skill inventory installed. The
  * caps are what this same measurement gives at ff8eaf7e (the commit before the
  * agent tool consolidation), so moving always-on rules into per-turn guidance
- * cannot silently grow a turn.
+ * cannot silently grow a turn. The global and collection caps were raised on
+ * purpose by the workflow sentence that asks for a digest part when the work
+ * needs one result per paper (274 characters, 2026-10-02).
  */
 const TURN_BUDGETS: Record<string, number> = {
-  global: 34_662,
+  global: 34_936,
   paper: 34_764,
-  collection: 34_760,
+  collection: 35_034,
 };
 
 const TURNS: Record<string, Record<string, unknown>> = {

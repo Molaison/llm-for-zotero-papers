@@ -6,6 +6,7 @@ import {
 import {
   applyOutcomeEvidence,
   declareOutcomes,
+  excludeOutcomeTargets,
 } from "../src/agent/loop/outcomes";
 import { renderExecutionCheckpointBlock } from "../src/agent/model/messageBuilder";
 import { ToolInputRejection } from "../src/agent/tools/execution/failure";
@@ -173,6 +174,76 @@ describe("ordinary ExecutionCheckpoint", function () {
     assert.include(
       rendered,
       "\nLong job to resume: “Save a note on each paper” 1 of 3 done. The 2 papers left, in order: 8, 9.",
+    );
+  });
+
+  it("names a part's excluded papers with the reason, and a replaced part's successor and reason", function () {
+    const declared = declareOutcomes(
+      createEmptyExecutionCheckpoint(executionContext, 10),
+      [
+        {
+          taskId: "papers",
+          description: "Summarize each paper",
+          effect: "digest",
+          targets: ["item:7", "item:8", "item:12"],
+        },
+        {
+          taskId: "review",
+          description: "Write the review",
+          effect: "artifact",
+          targets: ["item:7", "item:8", "item:12"],
+        },
+      ],
+      20,
+    );
+    const replaced = declareOutcomes(
+      declared,
+      [
+        {
+          taskId: "papers-2",
+          description: "Judge how each paper bears on path integration",
+          effect: "digest",
+          targets: ["item:7", "item:8", "item:12"],
+          replaces: "papers",
+          reason: "The user narrowed the question",
+        },
+      ],
+      30,
+    );
+    const { checkpoint } = excludeOutcomeTargets(
+      replaced,
+      [
+        {
+          taskId: "review",
+          targets: ["12"],
+          reason: "Its content is on happiness scales, not navigation",
+        },
+      ],
+      40,
+    );
+    const rendered = renderExecutionCheckpointBlock(
+      resolvedAgentRequest({
+        conversationKey: 41,
+        mode: "agent",
+        userText: "continue",
+        libraryID: 1,
+        executionContext,
+        executionCheckpoint: checkpoint,
+      }),
+    );
+    assert.include(
+      rendered,
+      '"status":"replaced by papers-2: The user narrowed the question"',
+    );
+    assert.notInclude(rendered, '"status":"cancelled"');
+    assert.include(
+      rendered,
+      '"excluded":["item:12 — Its content is on happiness scales, not navigation"]',
+    );
+    assert.equal(
+      rendered.split('"excluded"').length - 1,
+      1,
+      "only the part that excluded papers lists them",
     );
   });
 });
@@ -343,7 +414,7 @@ describe("task_update ordinary declarations", function () {
     assert.instanceOf(error, ToolInputRejection);
     assert.equal(
       error.message,
-      "Give each new task an expectedEffect: read, artifact, mutation, reasoning, or digest (one host-made summary per paper).",
+      "Give each new task an expectedEffect: read, artifact, mutation, reasoning, or digest (one host-made result per paper).",
     );
     assert.lengthOf(published, 0);
     assert.isUndefined(ctx.request.executionCheckpoint);

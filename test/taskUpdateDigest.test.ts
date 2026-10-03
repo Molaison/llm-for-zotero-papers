@@ -658,6 +658,10 @@ describe("task_update runs a declared digest part", function () {
     ]);
     assert.include(answer.digestNote, "final");
     assert.include(answer.digestNote, "Drift C");
+    // Task-neutral: a digest answers the part's description, not only a
+    // summary request.
+    assert.include(answer.digestNote, "or name it as not read.");
+    assert.notInclude(answer.digestNote, "summar");
     const part = harness.request.executionCheckpoint!.tasks[0];
     assert.deepEqual(part.exceptions, [
       { targets: ["item:7"], reason: "No readable text" },

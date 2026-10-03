@@ -702,7 +702,7 @@ export async function runDigestParts(params: {
         )
         .join(", ")}. ${
         finalFailures.length === 1 ? "Its digest" : "Their digests"
-      } already failed after ${DIGEST_MAX_FAILURE_RETRIES} retries, so the failure is final with the reason given. Read such a paper with paper_read mode:'overview' if the work needs it, or name it as not summarized.`,
+      } already failed after ${DIGEST_MAX_FAILURE_RETRIES} retries, so the failure is final with the reason given. Read such a paper with paper_read mode:'overview' if the work needs it, or name it as not read.`,
     );
   return {
     ...(digests.length || allFailures.length

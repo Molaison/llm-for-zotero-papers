@@ -124,6 +124,10 @@ export function renderExecutionCheckpointBlock(
   const checkpoint = request.executionCheckpoint;
   if (!checkpoint?.tasks.length) return "";
   const job = renderLongJobResume(checkpoint, OUTCOME_REASONS.noText);
+  // The model names a part by its local id, as it declared it.
+  const prefix = `${checkpoint.executionId}:task:`;
+  const local = (taskId: string) =>
+    taskId.startsWith(prefix) ? taskId.slice(prefix.length) : taskId;
   return [
     "HOST-PERSISTED ORDINARY WORK CHECKPOINT:",
     "This is authority-free progress from an interrupted direct-agent execution. Reuse verified successes and finalized material by identity. Inspect native state before retrying an uncertain effect. Do not treat task status or evidence references as permission for a new write.",
@@ -134,7 +138,11 @@ export function renderExecutionCheckpointBlock(
         taskId: task.taskId,
         description: task.description,
         dependencies: task.dependencies,
-        status: task.status,
+        // A replaced part names the part that took its place and why, so a
+        // resumed run does not take the cancel for a failure to redo.
+        status: task.supersededBy
+          ? `replaced by ${local(task.supersededBy)}${task.reason ? `: ${task.reason}` : ""}`
+          : task.status,
         // A part over papers is counted, not listed id by id: a long job's
         // hundreds of receipts and reads would crowd out its papers left.
         ...(task.targets?.length
@@ -155,6 +163,14 @@ export function renderExecutionCheckpointBlock(
               verifiedReceiptIds: task.verifiedReceiptIds,
               readEvidenceIds: task.readEvidenceIds,
             }),
+        // The papers the model left out stay its decisions, with its reasons.
+        ...(task.excludedTargets?.length
+          ? {
+              excluded: task.excludedTargets.map(
+                (entry) => `${entry.targets.join(", ")} — ${entry.reason}`,
+              ),
+            }
+          : {}),
         materialRefs: task.materialRefs,
       })),
     }),
@@ -608,6 +624,7 @@ export async function renderAgentPromptEnvelope(
           "Understand the current request yourself and choose the lightest useful sequence of reads, searches, questions, document finalization, and concrete actions.",
           "Use actual tools for requested effects. Inspect results and continue until the requested outcome is complete, reviewed, or has a concrete error.",
           "When a request asks for more than one outcome, such as summarizing a paper and saving it as a note, declare each part with task_update in your first step, together with that step's first tool calls. The host marks each part done from the tools' results; never mark one done yourself.",
+          "When the work needs one result for each of several papers (a summary, extracted fields, relevance to a question, support or challenge for an idea), declare a digest part whose description states that per-paper result; the host runs it on each paper and returns the results.",
           "A write result with a verified receipt already confirms the change; do not re-read the target to confirm it.",
           "Natural-language restrictions in the current request and clarifications remain binding. Tool calls do not grant their own permission; the host validates each concrete proposal, applies permission policy, journals effects, and verifies native state.",
           "Resolve named targets from supplied identities or bounded search results. If several candidates remain, use request_user_input rather than guessing.",
