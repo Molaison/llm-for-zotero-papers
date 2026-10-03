@@ -1583,8 +1583,11 @@
     transform 0.15s;
 }
 
+/* A pressed toggle (Task progress) keeps the hover look, as the code block's
+ * wrap toggle does. */
 .llm-standalone-nav-toggle:hover,
-.llm-standalone-title-action:hover {
+.llm-standalone-title-action:hover,
+.llm-standalone-title-action[aria-pressed="true"] {
   background: var(--fill-quinary);
   color: var(--fill-primary);
 }
@@ -1650,6 +1653,11 @@
 .llm-standalone-icon-clear::before {
   mask-image: url("icons/action-clear.svg");
   -webkit-mask-image: url("icons/action-clear.svg");
+}
+
+.llm-standalone-icon-task-progress::before {
+  mask-image: url("icons/action-task-progress.svg");
+  -webkit-mask-image: url("icons/action-task-progress.svg");
 }
 
 .llm-standalone-icon-exit::before {
@@ -2936,6 +2944,7 @@
   gap: calc(var(--llm-standalone-chrome-gap) / 2);
 }
 
+.llm-standalone-content-title-actions .llm-standalone-icon-task-progress,
 .llm-standalone-content-title-actions .llm-standalone-icon-export,
 .llm-standalone-content-title-actions .llm-standalone-icon-clear {
   width: calc(24px + var(--llm-standalone-chrome-gap));

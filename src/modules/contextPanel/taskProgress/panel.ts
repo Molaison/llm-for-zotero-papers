@@ -7,6 +7,12 @@
  * conversation's run working, and a request that ends while its run is still
  * live settles it (completed, failed or cancelled) from what the turn left,
  * so the row never spins after its request is gone.
+ *
+ * And the standalone window's button (`toggleButton.ts`): a click shows or
+ * hides the row for the conversation the panel shows. The choice belongs to
+ * that panel and that conversation, in memory only: a new run in the
+ * conversation leaves it as it is, and the panel showing another
+ * conversation drops it, back to the automatic rule.
  */
 import {
   listTaskPaperScope,
@@ -41,6 +47,7 @@ import {
   taskReadInDepth,
   taskTurnIndexFor,
 } from "./store";
+import { applyTaskProgressToggleState } from "./toggleButton";
 import {
   mountTaskProgressView,
   type TaskProgressView,
@@ -50,6 +57,7 @@ import {
   resolveTaskProgressTurnScope,
   shouldShowTaskProgress,
   type TaskProgressTurnContexts,
+  type TaskProgressUserChoice,
 } from "./visibility";
 
 type MountedPanel = {
@@ -57,9 +65,47 @@ type MountedPanel = {
   /** The row the view is bound to; a rebuilt panel has a new one. */
   row: HTMLElement;
   conversationKey: number | null;
+  /** The row can show in the conversation and mode shown (`toggleApplies`). */
+  toggleApplies: boolean;
 };
 
 const panels = new Map<Element, MountedPanel>();
+
+/**
+ * The user's choice per panel body, for one conversation. Keyed by the body,
+ * not the mounted view, so a panel rebuilt for the same conversation keeps
+ * it; a closed window's body is collected with its entry.
+ */
+const userChoices = new WeakMap<
+  Element,
+  { conversationKey: number; choice: TaskProgressUserChoice }
+>();
+
+/** The standalone window's button, per panel body it drives. */
+const toggleButtons = new WeakMap<Element, HTMLButtonElement>();
+
+/** The choice for the conversation shown; another one drops it. */
+function userChoiceFor(
+  body: Element,
+  conversationKey: number,
+): TaskProgressUserChoice | undefined {
+  const stored = userChoices.get(body);
+  if (!stored) return undefined;
+  if (stored.conversationKey === conversationKey) return stored.choice;
+  userChoices.delete(body);
+  return undefined;
+}
+
+/** Whether the row can show at all: a conversation, not WebChat or a note. */
+function toggleApplies(input: TaskProgressViewInput): boolean {
+  const { conversationKind, isWebChat, isNoteSession } = input.visibility;
+  return (
+    Boolean(input.conversationKey) &&
+    (conversationKind === "global" || conversationKind === "paper") &&
+    !isWebChat &&
+    !isNoteSession
+  );
+}
 
 /**
  * What the context bar holds for a conversation: the papers, folders and tags
@@ -272,6 +318,7 @@ function resolvePanelInput(body: Element): TaskProgressViewInput | null {
     libraryID,
     basePaperItemId,
   });
+  const userChoice = userChoiceFor(body, conversationKey);
   const visibility = {
     conversationKind,
     isWebChat,
@@ -279,6 +326,7 @@ function resolvePanelInput(body: Element): TaskProgressViewInput | null {
     collectionCount: scope.collectionCount,
     tagCount: scope.tagCount,
     paperCount: scope.paperCount,
+    ...(userChoice ? { userChoice } : {}),
   };
   const record = getTaskProgress(conversationKey);
   if (
@@ -382,6 +430,7 @@ export function mountTaskProgressPanel(body: Element): TaskProgressView | null {
     view: null as never,
     row,
     conversationKey: null,
+    toggleApplies: false,
   };
   mounted.view = mountTaskProgressView({
     doc: body.ownerDocument as Document,
@@ -397,6 +446,9 @@ export function mountTaskProgressPanel(body: Element): TaskProgressView | null {
         (win || globalThis).clearTimeout(handle as number),
       now: () => win?.performance?.now?.() ?? Date.now(),
       resolveMineru: resolveMineruHint,
+      // The row came or went without a sync (a run's steps, a paper read in
+      // depth): the button follows.
+      onVisibilityChange: () => paintTaskProgressToggle(body),
       navigateToCitation: (card) => {
         const key = mounted.conversationKey;
         const navigated =
@@ -450,7 +502,59 @@ export function syncTaskProgressPanel(body: Element): void {
   const input = resolvePanelInput(body);
   if (!input) return;
   mounted.conversationKey = input.conversationKey;
+  mounted.toggleApplies = toggleApplies(input);
   view.setInput(input);
+  paintTaskProgressToggle(body);
+}
+
+/**
+ * The button's click: hide the row if it shows (by either rule), show it
+ * otherwise, for the conversation the panel shows. The row moves as for any
+ * change made in the conversation on screen.
+ */
+export function toggleTaskProgressPanel(body: Element): void {
+  const mounted = panels.get(body);
+  const conversationKey = mounted?.conversationKey;
+  if (!mounted || !conversationKey || !mounted.toggleApplies) return;
+  userChoices.set(body, {
+    conversationKey,
+    choice: mounted.view.isVisible() ? "hidden" : "shown",
+  });
+  syncTaskProgressPanel(body);
+}
+
+/**
+ * Let the standalone window's button drive this panel body's row, and keep
+ * it pressed while the row shows. Returns the unbinding, for the window's
+ * close (before the panel's own teardown).
+ */
+export function bindTaskProgressToggle(
+  body: Element,
+  button: HTMLButtonElement,
+): () => void {
+  const onClick = (event: Event) => {
+    event.preventDefault?.();
+    toggleTaskProgressPanel(body);
+  };
+  button.addEventListener("click", onClick);
+  toggleButtons.set(body, button);
+  paintTaskProgressToggle(body);
+  return () => {
+    button.removeEventListener("click", onClick);
+    if (toggleButtons.get(body) === button) toggleButtons.delete(body);
+  };
+}
+
+function paintTaskProgressToggle(body: Element): void {
+  const button = toggleButtons.get(body);
+  // A closed window's button is never seen again.
+  if (!button || isGone(body)) return;
+  const mounted = panels.get(body);
+  const applies = Boolean(mounted?.toggleApplies);
+  applyTaskProgressToggleState(button, {
+    applies,
+    shown: applies && Boolean(mounted?.view.isVisible()),
+  });
 }
 
 /**
@@ -503,6 +607,8 @@ export function disposeTaskProgressPanel(body: Element): void {
   if (!mounted) return;
   mounted.view.dispose();
   panels.delete(body);
+  // No panel, nothing to show or hide.
+  paintTaskProgressToggle(body);
 }
 
 /** Mounted panels and the conversations they show (workflow harness). */

@@ -59,6 +59,8 @@ import {
   resetSessionTokens,
 } from "./chat";
 import { renderShortcuts } from "./shortcuts";
+import { bindTaskProgressToggle } from "./taskProgress/panel";
+import { createTaskProgressToggleButton } from "./taskProgress/toggleButton";
 import { createElement, HTML_NS } from "../../utils/domHelpers";
 import { t } from "../../utils/i18n";
 import {
@@ -693,6 +695,7 @@ export function openStandaloneChat(options?: {
   let cleanupStandaloneVerticalResize: (() => void) | null = null;
   let cleanupStandaloneSidebarResize: (() => void) | null = null;
   let cleanupStandaloneSidebarFlyout: (() => void) | null = null;
+  let unbindStandaloneTaskProgressToggle: (() => void) | null = null;
   let enforceStandaloneMinimumSize: (() => void) | null = null;
 
   const initWindow = () => {
@@ -1069,6 +1072,10 @@ export function openStandaloneChat(options?: {
       ) as HTMLDivElement;
       contentTitleBarSpacer.className = "llm-standalone-content-title-actions";
 
+      // Shows or hides the Task progress row for the conversation on screen;
+      // bound to the chat panel below, once the content area exists.
+      const iconTaskProgress = createTaskProgressToggleButton(doc);
+
       const iconExport = doc.createElementNS(
         HTML_NS,
         "button",
@@ -1088,12 +1095,16 @@ export function openStandaloneChat(options?: {
       iconClear.type = "button";
       iconClear.title = t("Delete conversation");
       iconClear.setAttribute("aria-label", t("Delete conversation"));
-      contentTitleBarSpacer.append(iconExport, iconClear);
+      contentTitleBarSpacer.append(iconTaskProgress, iconExport, iconClear);
       contentTitleBar.append(contentTitleText, contentTitleBarSpacer);
 
       const contentArea = doc.createElementNS(HTML_NS, "div") as HTMLDivElement;
       contentArea.className = "llm-standalone-content";
       contentArea.dataset.standalone = "true";
+      unbindStandaloneTaskProgressToggle = bindTaskProgressToggle(
+        contentArea,
+        iconTaskProgress,
+      );
 
       contentWrapper.append(tabRow, contentTitleBar, contentArea);
       lowerArea.append(sidebar, contentWrapper);
@@ -4289,6 +4300,9 @@ export function openStandaloneChat(options?: {
 
   const cleanupWindow = () => {
     cancelled = true;
+    // Before the panel's teardown below, which would repaint the button.
+    unbindStandaloneTaskProgressToggle?.();
+    unbindStandaloneTaskProgressToggle = null;
     disposeHistoryActivity?.();
     disposeHistoryActivity = null;
     unsubscribeStandalonePendingDeletions?.();

@@ -18,7 +18,8 @@
  * a layout (unit tests), every change settles at once.
  *
  * The row itself is there only when it has something to show
- * (`visibility.ts`). When it comes or goes in the conversation on screen it
+ * (`visibility.ts`), or when the user showed it with the standalone window's
+ * button (`panel.ts`). When it comes or goes in the conversation on screen it
  * lowers from under the header, or rises back, like a curtain: the card sits
  * in a curtain whose height moves between 0 and the card's, while the card
  * slides by its own height inside it, clipped at the curtain's top edge. The
@@ -955,6 +956,8 @@ export type TaskProgressViewDeps = {
   layout?: TaskProgressLayout;
   /** A paper's "(creator, year)" label; defaults to reading it from Zotero. */
   resolvePaperLabel?: (itemId: number) => string | null;
+  /** The row came or went (its target; it may still be moving). */
+  onVisibilityChange?: (visible: boolean) => void;
 };
 
 export type TaskProgressLayout = {
@@ -1058,6 +1061,8 @@ export function mountTaskProgressView(params: {
   };
   let open = false;
   let visible = false;
+  /** The visibility last told to `onVisibilityChange`; null before the first. */
+  let toldVisible: boolean | null = null;
   let disposed = false;
   let paintTimer: unknown = null;
   let lastPaint = -Infinity;
@@ -1140,6 +1145,7 @@ export function mountTaskProgressView(params: {
         taskReadInDepth(current)),
     composerReady: input.composerReady !== false,
     runLive: isTaskRunLive(current),
+    userChoice: input.visibility.userChoice,
   });
   /** The previous paint's frame; null before the first. */
   let lastFrame: TaskProgressRowFrame | null = null;
@@ -2016,6 +2022,10 @@ export function mountTaskProgressView(params: {
       row.setAttribute("aria-label", ariaLabel);
     // The row rises with an open drawer in it, rolled up once the row is up.
     if (placeRow) moveCurtain(target, animated);
+    if (toldVisible !== visible) {
+      toldVisible = visible;
+      deps.onVisibilityChange?.(visible);
+    }
     if (!visible) return;
     if (current && current.collapseSeq !== seenCollapseSeq) {
       seenCollapseSeq = current.collapseSeq;

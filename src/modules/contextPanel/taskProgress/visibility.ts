@@ -11,8 +11,11 @@
  * Codex's own checklist, or the outcomes a run declares (a long job's paged
  * parts among them), live or finished, rebuilt from history after a
  * restart. A plain question over the whole library that reads no paper in
- * depth adds nothing to show. The row never shows in WebChat or in a note
- * chat. Everything here is pure.
+ * depth adds nothing to show. In the standalone window the user can show or
+ * hide the row for the conversation on screen; that choice beats the rule
+ * above until the window shows another conversation. The row never shows in
+ * WebChat or in a note chat, whatever the user chose. Everything here is
+ * pure.
  */
 import type { TaskPaperScopeContexts } from "../../../agent/context/taskPaperScopeListing";
 import type {
@@ -23,6 +26,9 @@ import type {
 
 /** A paper chat shows the row from this many papers (its own included). */
 export const TASK_PROGRESS_PAPER_THRESHOLD = 5;
+
+/** What the user asked of the row with the standalone window's button. */
+export type TaskProgressUserChoice = "shown" | "hidden";
 
 export type TaskProgressVisibilityInput = {
   conversationKind: "global" | "paper" | "";
@@ -42,6 +48,11 @@ export type TaskProgressVisibilityInput = {
    * papers it reads are what the row has to show, steps or not.
    */
   readInDepth?: boolean;
+  /**
+   * The user showed or hid the row for this conversation in this window;
+   * absent, the rule above decides.
+   */
+  userChoice?: TaskProgressUserChoice;
 };
 
 /**
@@ -67,6 +78,7 @@ export function shouldShowTaskProgress(
   if (input.isWebChat || input.isNoteSession) return false;
   if (input.conversationKind !== "global" && input.conversationKind !== "paper")
     return false;
+  if (input.userChoice) return input.userChoice === "shown";
   return (
     input.planSeen ||
     taskProgressContextApplies(input) ||
@@ -87,15 +99,18 @@ export type TaskProgressRowFrame = {
   composerReady: boolean;
   /** A run was working, answering or waiting on the user. */
   runLive: boolean;
+  /** The user's choice for the row, if any (`userChoice`). */
+  userChoice?: TaskProgressUserChoice;
 };
 
 /**
  * Whether the row lowers or raises with motion. Only a change made in the
- * conversation on screen moves: the user adding or removing context, or a
- * live run declaring its steps. Everything else puts the row in its state at
- * once: a mount, a conversation switch, a mode change, and the conversation's
- * own state arriving as it loads (its context bar set up from history, its
- * steps rebuilt from history, its record cleared).
+ * conversation on screen moves: the user adding or removing context, the
+ * user showing or hiding the row, or a live run declaring its steps.
+ * Everything else puts the row in its state at once: a mount, a conversation
+ * switch, a mode change, and the conversation's own state arriving as it
+ * loads (its context bar set up from history, its steps rebuilt from
+ * history, its record cleared).
  */
 export function shouldAnimateTaskProgressRow(
   previous: TaskProgressRowFrame | null,
@@ -103,6 +118,7 @@ export function shouldAnimateTaskProgressRow(
 ): boolean {
   if (!previous || previous.identity !== next.identity) return false;
   if (previous.shown === next.shown) return false;
+  if (previous.userChoice !== next.userChoice) return true;
   if (
     previous.contextApplies !== next.contextApplies &&
     !previous.composerReady

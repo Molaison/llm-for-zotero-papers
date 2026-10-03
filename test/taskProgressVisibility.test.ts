@@ -94,6 +94,48 @@ describe("task progress visibility", function () {
     });
   }
 
+  it("follows the user's choice over the automatic rule", function () {
+    // Shown: even a library chat with nothing added and no run.
+    assert.isTrue(
+      shouldShowTaskProgress({ ...base, ...library, userChoice: "shown" }),
+    );
+    assert.isTrue(shouldShowTaskProgress({ ...base, userChoice: "shown" }));
+    // Hidden: even with a folder, a run's steps and a paper read in depth.
+    assert.isFalse(
+      shouldShowTaskProgress({
+        ...base,
+        ...library,
+        collectionCount: 1,
+        planSeen: true,
+        readInDepth: true,
+        userChoice: "hidden",
+      }),
+    );
+    assert.isFalse(
+      shouldShowTaskProgress({
+        ...base,
+        paperCount: 9,
+        planSeen: true,
+        userChoice: "hidden",
+      }),
+    );
+  });
+
+  it("never shows the row in WebChat, a note chat or no conversation, whatever the user chose", function () {
+    for (const patch of [
+      { isWebChat: true },
+      { isNoteSession: true },
+      { ...library, isWebChat: true },
+      { ...library, isNoteSession: true },
+      { conversationKind: "" as const },
+    ]) {
+      assert.isFalse(
+        shouldShowTaskProgress({ ...base, ...patch, userChoice: "shown" }),
+        JSON.stringify(patch),
+      );
+    }
+  });
+
   it("lowers a library chat's row at the first paper, folder or tag, whatever else is added", function () {
     for (const added of [
       { paperCount: 1 },
@@ -239,5 +281,52 @@ describe("task progress row motion", function () {
     const contextGone = { ...steps, contextApplies: false };
     assert.isTrue(contextGone.shown, "the steps keep it shown");
     assert.isFalse(shouldAnimateTaskProgressRow(steps, contextGone));
+  });
+
+  it("lowers and raises the row when the user shows or hides it", function () {
+    const shownByUser: TaskProgressRowFrame = {
+      ...empty,
+      shown: true,
+      userChoice: "shown",
+    };
+    assert.isTrue(shouldAnimateTaskProgressRow(empty, shownByUser), "shown");
+    assert.isTrue(
+      shouldAnimateTaskProgressRow(shownByUser, {
+        ...empty,
+        userChoice: "hidden",
+      }),
+      "hidden",
+    );
+    // A row the automatic rule showed, hidden by the user.
+    assert.isTrue(
+      shouldAnimateTaskProgressRow(withPaper, {
+        ...withPaper,
+        shown: false,
+        userChoice: "hidden",
+      }),
+    );
+    // The user's click moves the row even while the context bar is still
+    // set up from history, or as steps arrive from history.
+    assert.isTrue(
+      shouldAnimateTaskProgressRow(
+        { ...empty, composerReady: false },
+        { ...withPaper, composerReady: false, userChoice: "shown" },
+      ),
+    );
+    assert.isTrue(
+      shouldAnimateTaskProgressRow(empty, {
+        ...shownByUser,
+        runSteps: true,
+      }),
+    );
+  });
+
+  it("puts the row in its state at once when another conversation drops the choice", function () {
+    assert.isFalse(
+      shouldAnimateTaskProgressRow(
+        { ...empty, shown: true, userChoice: "shown" },
+        { ...empty, identity: "8\u0000global\u0000false\u0000false" },
+      ),
+    );
   });
 });

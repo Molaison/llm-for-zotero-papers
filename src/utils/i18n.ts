@@ -1249,6 +1249,8 @@ const zhCN: Record<string, string> = {
   "Task progress details": "任务进度详情",
   "Drag to resize Task progress": "拖动以调整任务进度的高度",
   "Resize Task progress": "调整任务进度的高度",
+  "Show task progress": "显示任务进度",
+  "Hide task progress": "隐藏任务进度",
   "Reads are recorded in Agent mode. This list shows the papers in scope.":
     "阅读记录仅在 Agent 模式下生成。此列表显示范围内的论文。",
   "Reads are recorded in Agent mode.": "阅读记录仅在 Agent 模式下生成。",

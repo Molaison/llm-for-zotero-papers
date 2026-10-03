@@ -28,6 +28,7 @@ import {
   markTaskWaiting,
   setTaskOutcomes,
   setTaskScope,
+  taskReadInDepth,
 } from "../src/modules/contextPanel/taskProgress/store";
 import {
   OUTCOME_REASONS,
@@ -3510,7 +3511,11 @@ describe("task progress curtain", function () {
    */
   function mountCurtain(
     input: TaskProgressViewInput = libraryInput(),
-    options: { curtainMs?: number; layout?: false } = {},
+    options: {
+      curtainMs?: number;
+      layout?: false;
+      onVisibilityChange?: (visible: boolean) => void;
+    } = {},
   ) {
     const timers = new Map<number, { callback: () => void; ms: number }>();
     let handle = 0;
@@ -3571,6 +3576,7 @@ describe("task progress curtain", function () {
         clearTimeout: (id) => timers.delete(id as number),
         now: () => 0,
         layout: options.layout === false ? undefined : layout,
+        onVisibilityChange: options.onVisibilityChange,
       },
     });
     views.push(view);
@@ -3868,5 +3874,117 @@ describe("task progress curtain", function () {
     tp.context({ paperCount: 0 });
     tp.resizeCurtain();
     assert.equal(tp.chatResized(), 3);
+  });
+
+  describe("the user's choice", function () {
+    const chosen = (
+      userChoice: "shown" | "hidden" | undefined,
+      contexts: { paperCount?: number; collectionCount?: number } = {},
+    ): TaskProgressViewInput => {
+      const input = libraryInput(contexts);
+      return { ...input, visibility: { ...input.visibility, userChoice } };
+    };
+
+    it("lowers the row the user asked for in an empty Library chat, with no record, and lists nothing", function () {
+      const tp = mountCurtain();
+      assert.isNull(getTaskProgress(KEY), "no record yet");
+      tp.view.setInput(chosen("shown"));
+      assert.isTrue(tp.view.isVisible());
+      assert.equal(tp.state(), "opening", "the user's click moves the row");
+      tp.settleByTimer();
+      assert.equal(tp.state(), "open");
+      assert.isFalse(hidden(tp.row));
+      tp.row.dispatchFakeEvent("click");
+      assert.isTrue(tp.view.isOpen(), "the drawer opens");
+      assert.lengthOf(tp.drawer.findAllByClass("llm-task-paper"), 0);
+      assert.isTrue(
+        hidden(tp.drawer.findByClass("llm-task-progress-steps")!),
+        "no steps",
+      );
+      assert.equal(tp.view.renderedRowCount(), 0);
+    });
+
+    it("raises a row the automatic rule showed when the user hides it", function () {
+      const tp = mountCurtain(libraryInput({ collectionCount: 1 }));
+      assert.equal(tp.state(), "open");
+      tp.view.setInput(chosen("hidden", { collectionCount: 1 }));
+      assert.isFalse(tp.view.isVisible());
+      assert.equal(tp.state(), "closing");
+      tp.settleByTimer();
+      assert.equal(tp.state(), "closed");
+      assert.isTrue(hidden(tp.row));
+    });
+
+    it("keeps a row the user hid when a run reads a paper in depth or declares its steps", function () {
+      const tp = mountCurtain(chosen("hidden"));
+      beginTaskRun(KEY, { runId: "run-a" });
+      applyTaskPaperUpdate(
+        KEY,
+        {
+          version: 1,
+          callId: "read-1",
+          runId: "run-a",
+          toolName: "paper_read",
+          papers: [
+            {
+              key: "1:1",
+              libraryID: 1,
+              itemId: 1,
+              title: "Paper 1",
+              state: "read",
+            },
+          ],
+          reads: [
+            {
+              key: "1:1",
+              callId: "read-1",
+              toolName: "paper_read",
+              granularity: "full",
+              method: "full",
+            },
+          ],
+        },
+        "run-a",
+      );
+      tp.view.flush();
+      assert.isTrue(taskReadInDepth(getTaskProgress(KEY)), "read in depth");
+      assert.isFalse(tp.view.isVisible());
+      assert.equal(tp.state(), "closed");
+      beginTaskAction(KEY, { runId: "action-1", title: "Auto Tag" });
+      tp.view.flush();
+      assert.isTrue(getTaskProgress(KEY)!.planSeen, "the run had steps");
+      assert.isFalse(tp.view.isVisible());
+      assert.equal(tp.state(), "closed");
+      assert.isTrue(hidden(tp.row));
+      // Without the choice the same record shows the row.
+      tp.view.setInput(chosen(undefined));
+      assert.isTrue(tp.view.isVisible());
+    });
+
+    it("keeps a row the user showed when the last context goes", function () {
+      const tp = mountCurtain(chosen("shown", { paperCount: 1 }));
+      tp.view.setInput(chosen("shown"));
+      assert.equal(tp.state(), "open");
+      assert.isTrue(tp.view.isVisible());
+    });
+
+    it("says when the row comes and goes, once per change", function () {
+      const seen: boolean[] = [];
+      const tp = mountCurtain(libraryInput(), {
+        onVisibilityChange: (visible) => seen.push(visible),
+      });
+      assert.deepEqual(seen, [false], "the first paint");
+      tp.view.flush();
+      assert.deepEqual(seen, [false], "a repaint that changes nothing");
+      tp.context({ paperCount: 1 });
+      tp.context({ paperCount: 2 });
+      assert.deepEqual(seen, [false, true]);
+      // A store change alone, with no new input, shows it too.
+      tp.view.setInput(chosen(undefined));
+      assert.deepEqual(seen, [false, true, false]);
+      beginTaskAction(KEY, { runId: "action-1", title: "Auto Tag" });
+      tp.view.flush();
+      assert.deepEqual(seen, [false, true, false, true]);
+    });
   });
 });
