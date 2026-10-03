@@ -21,6 +21,7 @@ import type {
   ExecutionCheckpoint,
   ExecutionCheckpointTask,
 } from "../src/agent/types";
+import type { TaskPaperScopeSet } from "../src/agent/context/taskPaperScopeListing";
 import { resolvedAgentRequest } from "./helpers/resolvedAgentRequest";
 
 /**
@@ -62,13 +63,13 @@ function input(args: unknown) {
 function update(
   checkpoint: ExecutionCheckpoint,
   args: unknown,
-  options: { now?: number; userText?: string } = {},
+  options: { now?: number; userText?: string; scope?: TaskPaperScopeSet } = {},
 ) {
   return applyOrdinaryTaskUpdates(
     checkpoint,
     input(args),
     options.now ?? 30,
-    SCOPE,
+    options.scope ?? SCOPE,
     options.userText,
   );
 }
@@ -1148,5 +1149,167 @@ describe("task_update: the question a digest part serves", function () {
       excluded: 1,
       scope: true,
     });
+  });
+});
+
+describe("task_update with nothing attached: the agent names its papers", function () {
+  /** A Library chat with an empty context bar: the scope is the library. */
+  const LIBRARY: TaskPaperScopeSet = {
+    wholeLibrary: true,
+    itemIds: Array.from({ length: 16 }, (_, index) => 101 + index),
+    withText: 15,
+  };
+  const inLibrary = (
+    checkpoint: ExecutionCheckpoint,
+    args: unknown,
+    options: { now?: number } = {},
+  ) => update(checkpoint, args, { ...options, scope: LIBRARY });
+  const answer = {
+    taskId: "answer",
+    description: "Answer which papers test drift",
+    expectedEffect: "reasoning",
+    scope: true,
+  };
+
+  function assertScopeNote(error: ToolInputRejection, local: string) {
+    assert.include(
+      error.message,
+      `Nothing is attached, so scope:true on task ${local} would cover the whole library (16 papers).`,
+    );
+    assert.include(error.message, "library_retrieve first");
+    assert.include(error.message, "their targetIds");
+    assert.include(error.message, "library_search");
+  }
+
+  it("refuses scope:true on a new read, digest, artifact or reasoning part, naming the library's size and the search to run first", function () {
+    for (const part of [readAll, summaries, review, answer]) {
+      const ledger = empty();
+      const before = structuredClone(ledger);
+      assertScopeNote(
+        refusal(() => inLibrary(ledger, { tasks: [part] })),
+        part.taskId,
+      );
+      assert.deepEqual(
+        ledger,
+        before,
+        `${part.taskId}: the ledger is as it was`,
+      );
+    }
+  });
+
+  it("refuses the whole call: the other parts it declares are not declared", function () {
+    const ledger = update(empty(), {
+      tasks: [{ ...review, scope: undefined }],
+    }).checkpoint;
+    const before = structuredClone(ledger);
+    assertScopeNote(
+      refusal(() =>
+        inLibrary(ledger, {
+          tasks: [notes, { ...summaries, targetIds: undefined }],
+          skipped: [{ taskId: "review", reason: "Not needed" }],
+        }),
+      ),
+      "summaries",
+    );
+    assert.deepEqual(ledger, before);
+  });
+
+  it("keeps scope:true on a write part, which acts on the whole library", function () {
+    const declared = inLibrary(empty(), { tasks: [notes] }).checkpoint;
+    const part = find(declared, "notes");
+    assert.equal(part.effect, "mutation");
+    assert.isTrue(part.scope);
+    assert.lengthOf(part.targets || [], 16);
+    // A part a write capability makes a write takes it too.
+    const tagged = inLibrary(empty(), {
+      tasks: [
+        {
+          taskId: "tag",
+          description: "Tag every paper read",
+          expectedEffect: "read",
+          expectedCapability: "zotero.tags",
+          scope: true,
+        },
+      ],
+    }).checkpoint;
+    assert.equal(find(tagged, "tag").effect, "mutation");
+    assert.isTrue(find(tagged, "tag").scope);
+  });
+
+  it("takes a part that names its papers with targetIds, with or without scope:true beside them", function () {
+    const declared = inLibrary(empty(), {
+      tasks: [
+        { ...summaries, scope: undefined, targetIds: ["103", "item:107"] },
+        { ...review, targetIds: ["103"] },
+      ],
+    });
+    assert.deepEqual(declared.digestParts, [
+      { taskId: taskId("summaries"), targets: ["item:103", "item:107"] },
+    ]);
+    assert.deepEqual(find(declared.checkpoint, "summaries").targets, [
+      "item:103",
+      "item:107",
+    ]);
+    assert.isUndefined(find(declared.checkpoint, "summaries").scope);
+    assert.deepEqual(find(declared.checkpoint, "review").targets, ["item:103"]);
+    assert.isUndefined(find(declared.checkpoint, "review").scope);
+  });
+
+  it("refuses scope:true as an in-place change and on a replacement", function () {
+    const declared = inLibrary(empty(), {
+      tasks: [{ ...readAll, scope: undefined, targetIds: ["103"] }],
+    }).checkpoint;
+    assertScopeNote(
+      refusal(() =>
+        inLibrary(declared, { tasks: [{ taskId: "read-all", scope: true }] }),
+      ),
+      "read-all",
+    );
+    assertScopeNote(
+      refusal(() =>
+        inLibrary(declared, {
+          tasks: [
+            {
+              ...readAll,
+              taskId: "read-all-2",
+              replaces: "read-all",
+              reason: "The question needs every paper",
+            },
+          ],
+        }),
+      ),
+      "read-all-2",
+    );
+  });
+
+  it("leaves a part declared over the whole scope before as it is when it is repeated", function () {
+    // A part from a run saved before the rule, which froze the library's
+    // papers: the same papers, frozen as a scope that is not the library's.
+    const legacy = update(
+      empty(),
+      { tasks: [readAll] },
+      { scope: { ...LIBRARY, wholeLibrary: false } },
+    ).checkpoint;
+    assert.lengthOf(find(legacy, "read-all").targets || [], 16);
+    const repeated = inLibrary(legacy, { tasks: [readAll] });
+    assert.isTrue(repeated.ignored);
+    assert.strictEqual(repeated.checkpoint, legacy);
+  });
+
+  it("takes scope:true for every effect when context is attached, as before", function () {
+    const declared = update(empty(), {
+      tasks: [readAll, summaries, review, answer],
+    });
+    for (const local of ["read-all", "summaries", "review", "answer"]) {
+      const part = find(declared.checkpoint, local);
+      assert.deepEqual(part.targets, ["item:5", "item:6", "item:7"], local);
+      assert.isTrue(part.scope, local);
+    }
+    assert.deepEqual(declared.digestParts, [
+      {
+        taskId: taskId("summaries"),
+        targets: ["item:5", "item:6", "item:7"],
+      },
+    ]);
   });
 });

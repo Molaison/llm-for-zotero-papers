@@ -1259,6 +1259,8 @@ const zhCN: Record<string, string> = {
   "{read} of {total} read": "已读 {read}/{total}",
   "Answering…": "正在回答…",
   "{count} cited": "引用 {count}",
+  "{count} read in depth": "精读 {count}",
+  "{count} found": "检索到 {count}",
   "{count} matched": "匹配 {count}",
   "{count} read": "已读 {count}",
   "Preparing the scope…": "正在准备范围…",

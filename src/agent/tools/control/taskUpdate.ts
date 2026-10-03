@@ -130,7 +130,7 @@ const EXCLUSION_SCHEMA = {
 const EXPECTED_EFFECT_REQUIRED =
   "Give each new task an expectedEffect: read, artifact, mutation, reasoning, or digest (one host-made result per paper).";
 const DIGEST_NEEDS_PAPERS =
-  "A digest part names the papers it digests: targetIds, or scope:true for the whole Paper scope.";
+  "A digest part names the papers it digests: targetIds, or scope:true for the attached papers.";
 /** The most papers one digest part may name. */
 export const DIGEST_MAX_PAPERS_PER_PART = 200;
 function digestTooLarge(count: number): string {
@@ -142,7 +142,7 @@ function notIdsNote(values: readonly string[]): string {
     .map((value) => JSON.stringify(value))
     .join(
       ", ",
-    )}. Find the papers' ids with library_search, or use scope:true for the whole Paper scope.`;
+    )}. Find the papers' ids with library_search, or use scope:true for the attached papers.`;
 }
 /** An effect as the model names it. */
 function effectName(effect: OutcomeEffect): string {
@@ -224,6 +224,13 @@ function skipRefusedNote(ids: readonly string[]): string {
 }
 const NO_SCOPE_PAPERS =
   "This turn states no paper scope to cover; name the part's papers in targetIds.";
+/**
+ * The note for scope:true on a part that is not a write when nothing is
+ * attached: the agent chooses the papers, so it searches before it names them.
+ */
+function wholeLibraryScopeNote(local: string, count: number): string {
+  return `Nothing is attached, so scope:true on task ${local} would cover the whole library (${count} ${count === 1 ? "paper" : "papers"}). Search with library_retrieve first, choose the papers that bear on the question, and declare the part with their targetIds. If the user asked for every paper in the library, list their ids with library_search and name them.`;
+}
 const NO_STATUS =
   "task_update takes no status: the host marks parts done from the tools' results. Declare parts in tasks, and list one that cannot be done under skipped, blocked or cancelled with the reason.";
 
@@ -442,16 +449,26 @@ function actionCapability(
  * A part that names targetIds and also sets `scope` tracks the papers it
  * named: they say exactly what is meant, so `scope` is ignored rather than
  * the call refused.
+ *
+ * With nothing attached the scope is the whole library, and the agent
+ * chooses the papers a part works on: only a write part, `effect` being the
+ * effect the part takes, may cover the whole library with `scope`.
  */
 function declaredTargets(
   request: TaskDeclaration,
   scopePapers: TaskPaperScopeSet | undefined,
+  effect: OutcomeEffect,
 ): { targets?: string[]; scope?: true } {
   if (!request.scope || request.targetIds?.length) {
     return { targets: request.targetIds };
   }
   if (!scopePapers?.itemIds.length) {
     throw new ToolInputRejection(NO_SCOPE_PAPERS);
+  }
+  if (scopePapers.wholeLibrary && effect !== "mutation") {
+    throw new ToolInputRejection(
+      wholeLibraryScopeNote(request.taskId, scopePapers.itemIds.length),
+    );
   }
   return {
     targets: scopePapers.itemIds.map((itemId) => `item:${itemId}`),
@@ -494,6 +511,17 @@ function outcomeEffect(
   expected: ExpectedEffect | undefined,
 ): OutcomeEffect | undefined {
   return expected === "reasoning" ? "answer" : expected;
+}
+
+/**
+ * The effect a part takes: a write capability makes it a mutation
+ * (`declareOutcomes`), whatever effect it claims.
+ */
+function takenEffect(
+  effect: OutcomeEffect,
+  capability: AgentActionCapability | undefined,
+): OutcomeEffect {
+  return capability && capability !== "zotero.read" ? "mutation" : effect;
 }
 
 /** The most characters of the user's request a digest part keeps. */
@@ -555,8 +583,10 @@ function checkDigestPapers(
  * part otherwise). `changed` lists those parts; a digest part changed runs
  * again. A part with progress is not changed: the model declares a new part
  * that names it in `replaces`, with the reason, and `replaced` lists those.
- * A new effect for a part with progress keeps its own note. A malformed or
- * refused call is an input rejection, and changes nothing.
+ * A new effect for a part with progress keeps its own note. With nothing
+ * attached, only a write part freezes the scope (`declaredTargets`); a
+ * repeat that freezes nothing again is unaffected. A malformed or refused
+ * call is an input rejection, and changes nothing.
  *
  * A digest part declared, changed or declared as a replacement saves the
  * user's request as its `question` (`digestQuestion`); a repeat keeps the
@@ -627,9 +657,7 @@ export function applyOrdinaryTaskUpdates(
       // for word is a repeat, not a new effect.
       const capability = actionCapability(request.expectedCapability);
       const effectiveEffect =
-        requestedEffect && capability && capability !== "zotero.read"
-          ? "mutation"
-          : requestedEffect;
+        requestedEffect && takenEffect(requestedEffect, capability);
       const newEffect =
         prior !== undefined &&
         effectiveEffect !== undefined &&
@@ -668,7 +696,11 @@ export function applyOrdinaryTaskUpdates(
       if (!prior) {
         const effect = requestedEffect;
         if (!effect) throw new ToolInputRejection(EXPECTED_EFFECT_REQUIRED);
-        const { targets, scope } = declaredTargets(request, scopePapers);
+        const { targets, scope } = declaredTargets(
+          request,
+          scopePapers,
+          takenEffect(effect, capability),
+        );
         checkDigestPapers(effect, effectiveEffect, targets);
         if (effect === "digest") digestRuns.push({ taskId });
         declarations.push({
@@ -696,20 +728,27 @@ export function applyOrdinaryTaskUpdates(
         digestRuns.push({ taskId, targetIds: request.targetIds });
         continue;
       }
+      const effect = newEffect ? requestedEffect! : priorEffect;
+      const declaredCapability = newEffect
+        ? capability
+        : capability || prior.capability;
       const { targets, scope } =
         request.targetIds?.length ||
         (request.scope && (reframes || !prior.scope))
-          ? declaredTargets(request, scopePapers)
+          ? declaredTargets(
+              request,
+              scopePapers,
+              takenEffect(effect, declaredCapability),
+            )
           : {
               targets: prior.targets ? [...prior.targets] : undefined,
               scope: prior.scope,
             };
-      const effect = newEffect ? requestedEffect! : priorEffect;
       const declaration: OutcomeDeclaration = {
         taskId,
         description: request.description || prior.description,
         effect,
-        capability: newEffect ? capability : capability || prior.capability,
+        capability: declaredCapability,
         targets,
         ...(scope ? { scope } : {}),
         ...(question ? { question } : {}),

@@ -1046,9 +1046,19 @@ describe("parts over the turn's paper scope in runtime turns", function () {
     scope: true,
   };
 
+  /**
+   * The papers of an attached folder. With nothing attached the agent names
+   * its papers itself (scope:true covers only a write part there), so a part
+   * over the scope is a part over what the user attached.
+   */
   function scope(itemIds: number[], withText: number): TaskPaperScopeSet {
-    return { wholeLibrary: true, itemIds, withText };
+    return { wholeLibrary: false, itemIds, withText };
   }
+  const drift = {
+    selectedCollectionContexts: [
+      { collectionId: 9, name: "Drift", libraryID: 1 },
+    ],
+  };
 
   beforeEach(async function () {
     environment = await installDirectJourneyEnvironment();
@@ -1065,8 +1075,9 @@ describe("parts over the turn's paper scope in runtime turns", function () {
   it("states the scope, freezes it at declaration, and ticks only papers whose text was read", async function () {
     const turn = await runTurn({
       conversationKey,
-      userText: "Read every paper in my library and summarize each",
+      userText: "Read every paper in Drift and summarize each",
       scope: scope([101, 102, 103], 2),
+      attached: drift,
       steps: [
         stepOf(
           declare("declare-1", [readAll]),
@@ -1082,7 +1093,7 @@ describe("parts over the turn's paper scope in runtime turns", function () {
 
     assert.include(
       promptText(turn.prompts[0]),
-      "\nPaper scope: whole library — 3 papers, 2 with full text\n",
+      "\nPaper scope: Drift — 3 papers, 2 with full text\n",
     );
     const declared = checkpoints(turn)[0];
     assert.deepEqual(outcome(declared, "read-all").targets, [
@@ -1177,11 +1188,51 @@ describe("parts over the turn's paper scope in runtime turns", function () {
     );
   });
 
+  it("with nothing attached, refuses a first-step read part over the whole library, and the model is told to search and name its papers", async function () {
+    const turn = await runTurn({
+      conversationKey,
+      userText: "What do my papers say about place-cell drift?",
+      scope: { wholeLibrary: true, itemIds: [101, 102, 103], withText: 2 },
+      steps: [
+        stepOf(declare("declare-1", [readAll])),
+        (messages) => {
+          const text = promptText(messages);
+          assert.include(
+            text,
+            "Nothing is attached, so scope:true on task read-all would cover the whole library (3 papers).",
+          );
+          assert.include(text, "Search with library_retrieve first");
+          return stepOf(
+            declare("declare-2", [
+              { ...readAll, scope: undefined, targetIds: ["101"] },
+            ]),
+            read("read-101", 101),
+          );
+        },
+        finalStep("Paper 101 finds that drift is slow."),
+      ],
+    });
+    assert.include(
+      promptText(turn.prompts[0]),
+      "\nPaper scope: whole library — 3 papers, 2 with full text\n",
+    );
+    const first = checkpoints(turn)[0];
+    assert.deepEqual(
+      outcome(first, "read-all").targets,
+      ["item:101"],
+      "the refused declaration left no part behind",
+    );
+    const ledger = settled(turn);
+    assert.equal(outcome(ledger, "read-all").status, "completed");
+    assert.deepEqual(ledger.end, { state: "completed" });
+  });
+
   it("a part declared after its papers were read takes those reads", async function () {
     const turn = await runTurn({
       conversationKey,
-      userText: "Read every paper in my library",
+      userText: "Read every paper in Drift",
       scope: scope([101, 102], 2),
+      attached: drift,
       steps: [
         stepOf(read("read-101", 101)),
         stepOf(declare("declare-1", [readAll]), read("read-102", 102)),
@@ -1201,8 +1252,9 @@ describe("parts over the turn's paper scope in runtime turns", function () {
   it("an abstract-depth read alone leaves the part open and the answer is corrected once", async function () {
     const turn = await runTurn({
       conversationKey,
-      userText: "Read every paper in my library",
+      userText: "Read every paper in Drift",
       scope: scope([101], 1),
+      attached: drift,
       steps: [
         stepOf(declare("declare-1", [readAll]), read("read-1", 101, "outline")),
         finalStep("I read it."),
@@ -1218,8 +1270,9 @@ describe("parts over the turn's paper scope in runtime turns", function () {
   it("a scope that changes later keeps the frozen papers, through an interruption and 'continue'", async function () {
     const interrupted = await runTurn({
       conversationKey,
-      userText: "Read every paper in my library and summarize each",
+      userText: "Read every paper in Drift and summarize each",
       scope: scope([101, 102], 2),
+      attached: drift,
       steps: [
         stepOf(declare("declare-1", [readAll]), read("read-101", 101)),
         () => {
@@ -1234,8 +1287,9 @@ describe("parts over the turn's paper scope in runtime turns", function () {
     const resumed = await runTurn({
       conversationKey,
       userText: "continue",
-      // A paper joined the scope since the part was declared.
+      // A paper joined the folder since the part was declared.
       scope: scope([101, 102, 104], 3),
+      attached: drift,
       steps: [
         stepOf(declare("declare-2", [readAll]), read("read-102", 102)),
         finalStep("Every paper is summarized."),
@@ -1243,7 +1297,7 @@ describe("parts over the turn's paper scope in runtime turns", function () {
     });
     assert.include(
       promptText(resumed.prompts[0]),
-      "\nPaper scope: whole library — 3 papers, 3 with full text\n",
+      "\nPaper scope: Drift — 3 papers, 3 with full text\n",
     );
     assert.deepEqual(outcome(resumed.initialCheckpoint, "read-all").targets, [
       "item:101",
@@ -1996,9 +2050,15 @@ describe("long jobs in runtime turns", function () {
     it("prices a mixed job, reading each paper and tagging it by its method, as reading", async function () {
       const turn = await runTurn({
         conversationKey,
-        userText: "Read each paper and tag it by its method",
-        scope: library(60),
-        attached: { advanced: { inputTokenCap: 30_000 } as never },
+        userText: "Read each paper in Drift and tag it by its method",
+        // A read part covers the scope only when the user attached it.
+        scope: { ...library(60), wholeLibrary: false },
+        attached: {
+          advanced: { inputTokenCap: 30_000 } as never,
+          selectedCollectionContexts: [
+            { collectionId: 9, name: "Drift", libraryID: 1 },
+          ],
+        },
         steps: declaredOnly([
           {
             taskId: "read-all",
@@ -3578,7 +3638,12 @@ describe("a digest part in runtime turns", function () {
     const turn = await runTurn({
       conversationKey,
       userText: "Summarize all papers for me and write a literature review",
-      scope: { wholeLibrary: true, itemIds: [101, 102, 103], withText: 2 },
+      scope: { wholeLibrary: false, itemIds: [101, 102, 103], withText: 2 },
+      attached: {
+        selectedCollectionContexts: [
+          { collectionId: 9, name: "Drift", libraryID: 1 },
+        ],
+      },
       steps: [
         stepOf(
           declare("declare-digest", [
@@ -3641,7 +3706,12 @@ describe("a digest part in runtime turns", function () {
     const turn = await runTurn({
       conversationKey,
       userText: "Summarize all papers for me and write a literature review",
-      scope: { wholeLibrary: true, itemIds: [101, 102, 103], withText: 2 },
+      scope: { wholeLibrary: false, itemIds: [101, 102, 103], withText: 2 },
+      attached: {
+        selectedCollectionContexts: [
+          { collectionId: 9, name: "Drift", libraryID: 1 },
+        ],
+      },
       steps: [
         stepOf(
           declare("declare-digest", [

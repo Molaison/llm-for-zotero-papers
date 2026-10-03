@@ -80,6 +80,11 @@ describe("literature-review skill", function () {
       text,
       "Read a digested paper again only with `paper_read({ mode:'targeted', query:'...' })`: to verify a decisive cross-paper claim, test an apparent contradiction, or close a gap its result names that the review needs; never re-read it in overview or full mode.",
     );
+    // With nothing attached the agent chooses the papers before naming them.
+    assert.include(
+      text,
+      "With nothing attached, search with `library_retrieve` first and declare the digest part with the chosen papers' `targetIds`.",
+    );
     // A paper with no text is named as not read: no retry, read or search.
     assert.include(
       text,

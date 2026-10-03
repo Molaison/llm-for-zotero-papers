@@ -704,6 +704,16 @@ describe("agent prompt envelope paper scope", function () {
     // The agent sets the scope itself: shortlist, then declare the papers
     // it reads in depth, which is what shows the user its choice.
     assert.include(turn, WHOLE_LIBRARY_SCOPE_RULE);
+    // It searches before it declares the per-paper part, and only a write
+    // part covers the library with scope:true (task_update refuses others).
+    assert.include(WHOLE_LIBRARY_SCOPE_RULE, "library_retrieve first");
+    assert.include(WHOLE_LIBRARY_SCOPE_RULE, "targetIds");
+    assert.include(WHOLE_LIBRARY_SCOPE_RULE, "not in your first step");
+    assert.include(
+      WHOLE_LIBRARY_SCOPE_RULE,
+      "Only a write part may use scope:true",
+    );
+    assert.include(WHOLE_LIBRARY_SCOPE_RULE, "library_search");
   });
 
   it("gives the whole-library rule only when nothing is attached", async function () {

@@ -234,6 +234,8 @@ export type TaskProgressCounts = {
   matched: number;
   read: number;
   cited: number;
+  /** Papers whose text a read took in (`isInDepthRead`), of `matched`. */
+  inDepth: number;
 };
 
 const STATE_RANK: Record<TaskPaperState, number> = {
@@ -244,10 +246,36 @@ const STATE_RANK: Record<TaskPaperState, number> = {
   cited: 4,
 };
 
+/**
+ * A read that took in the paper's text: a digest with an answer, or a
+ * paper_read of the whole text or of its overview or full-text body (not
+ * its metadata, abstract or outline, and not a targeted passage).
+ */
+function isInDepthRead(read: TaskPaperReadEvent): boolean {
+  if (read.granularity === "digest") return Boolean(read.snippet?.trim());
+  if (read.toolName !== "paper_read") return false;
+  return (
+    read.granularity === "full" ||
+    ((read.granularity === "passage" || read.granularity === "section") &&
+      (read.method === "overview" || read.method === "full"))
+  );
+}
+
+/** Whether the turn `turn` (every turn, before any) read `entry` in depth. */
+function readInDepth(
+  entry: TaskPaperLedgerEntry | undefined,
+  turn: number,
+): boolean {
+  if (!entry) return false;
+  const turns = turn ? [entry.turns[turn]] : Object.values(entry.turns || {});
+  return turns.some((record) => record?.reads.some(isInDepthRead));
+}
+
 export function countTaskProgress(
   record: TaskProgressRecord | null,
   rows: TaskProgressPaperRow[] = buildTaskProgressPaperRows(record),
 ): TaskProgressCounts {
+  const turn = summaryTurn(record);
   const counts: TaskProgressCounts = {
     total: Math.max(
       rows.length,
@@ -257,12 +285,15 @@ export function countTaskProgress(
     matched: 0,
     read: 0,
     cited: 0,
+    inDepth: 0,
   };
   for (const row of rows) {
     const rank = STATE_RANK[row.turnState];
     if (rank >= STATE_RANK.matched) counts.matched += 1;
     if (rank >= STATE_RANK.skimmed) counts.read += 1;
     if (rank >= STATE_RANK.cited) counts.cited += 1;
+    if (rank >= STATE_RANK.matched && readInDepth(row.entry, turn))
+      counts.inDepth += 1;
   }
   return counts;
 }
@@ -349,6 +380,9 @@ function papersInScopeText(count: number): string {
  * The row's count text, e.g. "37 of 200 read · 12 cited". A run with a part
  * over every paper of its scope counts those papers on the part's own row,
  * so this names the scope the part froze: "2/4 steps · 212 papers in scope".
+ * With nothing attached, the papers read in depth and those only found are
+ * counted apart, a zero left out: "2/2 steps · 3 read in depth · 15 found ·
+ * 2 cited".
  */
 export function formatTaskProgressCount(
   record: TaskProgressRecord | null,
@@ -385,14 +419,24 @@ export function formatTaskProgressCount(
     const inScope = papersInScopeText(counts.total);
     return stepsText ? `${stepsText} · ${inScope}` : inScope;
   }
-  const readText = format("{read} of {total} read", {
-    read: counts.read,
-    total: counts.total,
-  });
   const parts: string[] = [];
   if (state === "answering") parts.push(t("Answering…"));
   if (stepsText) parts.push(stepsText);
-  parts.push(readText);
+  if (record?.scope?.listing?.wholeLibrary) {
+    // Nothing attached: the agent chose its papers, so the row tells the
+    // papers it read in depth from those its searches only found.
+    const found = counts.matched - counts.inDepth;
+    if (counts.inDepth)
+      parts.push(format("{count} read in depth", { count: counts.inDepth }));
+    if (found) parts.push(format("{count} found", { count: found }));
+  } else {
+    parts.push(
+      format("{read} of {total} read", {
+        read: counts.read,
+        total: counts.total,
+      }),
+    );
+  }
   if (counts.cited)
     parts.push(format("{count} cited", { count: counts.cited }));
   return parts.join(" · ");

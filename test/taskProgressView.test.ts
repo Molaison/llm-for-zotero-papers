@@ -2,6 +2,7 @@ import { assert } from "chai";
 import type { TaskPaperScopeEntry } from "../src/agent/context/taskPaperScopeListing";
 import {
   taskPaperDigestPartLabel,
+  type TaskPaperLedgerDelta,
   type TaskPaperLedgerEntry,
   type TaskPaperReadEvent,
 } from "../src/agent/context/taskPaperLedger";
@@ -3207,6 +3208,240 @@ describe("task progress view of an outcome ledger", function () {
         oldRow.findByClass("llm-plan-task-pill")!.textContent,
         t("Replaced"),
       );
+    });
+  });
+});
+
+describe("task progress row count with nothing attached", function () {
+  const views: TaskProgressView[] = [];
+  afterEach(function () {
+    for (const view of views.splice(0)) view.dispose();
+    clearAllTaskProgress();
+  });
+  function track(harness: Harness): Harness {
+    views.push(harness.view);
+    return harness;
+  }
+
+  /** A Library chat with an empty context bar, as the panel sets it. */
+  function seedWholeLibrary() {
+    setTaskScope(KEY, {
+      signature: "library",
+      libraryID: 1,
+      contexts: {},
+      label: "",
+      listing: {
+        libraryID: 1,
+        wholeLibrary: true,
+        entries: [],
+        totalItems: 0,
+        listedItems: 0,
+        truncated: false,
+      },
+    });
+  }
+
+  /** A paper_read of one paper, at the depth and by the method given. */
+  function paperRead(
+    callId: string,
+    itemId: number,
+    granularity: TaskPaperReadEvent["granularity"],
+    method: string,
+  ): TaskPaperLedgerDelta {
+    return {
+      version: 1,
+      callId,
+      runId: "run-w",
+      toolName: "paper_read",
+      papers: [
+        {
+          key: `1:${itemId}`,
+          libraryID: 1,
+          itemId,
+          title: `Paper ${itemId}`,
+          state: granularity === "full" ? "read" : "skimmed",
+        },
+      ],
+      reads: [
+        {
+          key: `1:${itemId}`,
+          callId,
+          toolName: "paper_read",
+          granularity,
+          method,
+          snippet: "Body text.",
+        },
+      ],
+    };
+  }
+
+  const steps = outcomeCheckpoint([
+    outcomeTask("papers", {
+      description: "Summarize each chosen paper",
+      effect: "digest",
+      status: "completed",
+      targets: ["item:1", "item:2", "item:3"],
+      doneTargets: ["item:1", "item:2", "item:3"],
+    }),
+    outcomeTask("answer", {
+      description: "Answer the question",
+      effect: "answer",
+      status: "completed",
+    }),
+  ]);
+
+  /**
+   * Eighteen papers the search found; digests answer 1-3 and fail on 4; a
+   * paper_read takes in 5's overview and 7's whole text, and only a targeted
+   * passage of 6; the answer cites 1 and 2.
+   */
+  function runOverLibrary(view: TaskProgressView) {
+    beginTaskRun(KEY, { runId: "run-w", turnIndex: 1 });
+    setTaskOutcomes(KEY, "run-w", steps);
+    applyTaskPaperUpdate(
+      KEY,
+      {
+        ...ledgerDelta(
+          "c-search",
+          Array.from(
+            { length: 18 },
+            (_, index): [number, "skimmed", string] => [
+              index + 1,
+              "skimmed",
+              `Hit ${index + 1}.`,
+            ],
+          ),
+          "run-w",
+        ),
+      },
+      "run-w",
+    );
+    view.flush();
+    for (const itemId of [1, 2, 3])
+      applyTaskPaperUpdate(
+        KEY,
+        digestLedgerDelta(`c-digest-${itemId}`, itemId, { runId: "run-w" }),
+        "run-w",
+      );
+    applyTaskPaperUpdate(
+      KEY,
+      digestLedgerDelta("c-digest-4", 4, {
+        runId: "run-w",
+        failure: "No readable text",
+      }),
+      "run-w",
+    );
+    applyTaskPaperUpdate(
+      KEY,
+      paperRead("c-read-5", 5, "passage", "overview"),
+      "run-w",
+    );
+    applyTaskPaperUpdate(
+      KEY,
+      paperRead("c-read-6", 6, "section", "targeted"),
+      "run-w",
+    );
+    applyTaskPaperUpdate(
+      KEY,
+      paperRead("c-read-7", 7, "full", "full"),
+      "run-w",
+    );
+    completeTaskRun(KEY, {
+      runId: "run-w",
+      quoteCitations: [quoteCitation("a", 1), quoteCitation("b", 2)],
+    });
+    view.flush();
+  }
+
+  const library = {
+    visibility: {
+      conversationKind: "global" as const,
+      isWebChat: false,
+      isNoteSession: false,
+      collectionCount: 0,
+      tagCount: 0,
+      paperCount: 0,
+    },
+  };
+
+  it("separates the papers read in depth from those the search only found", function () {
+    seedWholeLibrary();
+    const harness = track(mount(library));
+    beginTaskRun(KEY, { runId: "run-w", turnIndex: 1 });
+    setTaskOutcomes(KEY, "run-w", steps);
+    harness.view.flush();
+    assert.equal(harness.count(), "2/2 steps", "a zero term is dropped");
+    runOverLibrary(harness.view);
+    assert.equal(
+      harness.count(),
+      "2/2 steps · 5 read in depth · 13 found · 2 cited",
+    );
+  });
+
+  it("names only the search's hits before any paper is read in depth, and says Answering…", function () {
+    seedWholeLibrary();
+    const harness = track(mount(library));
+    beginTaskRun(KEY, { runId: "run-w", turnIndex: 1 });
+    setTaskOutcomes(KEY, "run-w", steps);
+    applyTaskPaperUpdate(
+      KEY,
+      ledgerDelta(
+        "c-search",
+        [
+          [1, "skimmed", "Hit."],
+          [2, "matched"],
+        ],
+        "run-w",
+      ),
+      "run-w",
+    );
+    markTaskAnswering(KEY, "run-w");
+    harness.view.flush();
+    assert.equal(harness.count(), "Answering… · 2/2 steps · 2 found");
+  });
+
+  it("counts the latest question only", function () {
+    seedWholeLibrary();
+    const harness = track(mount(library));
+    runOverLibrary(harness.view);
+    beginTaskRun(KEY, { runId: "run-x", turnIndex: 2 });
+    applyTaskPaperUpdate(
+      KEY,
+      ledgerDelta("c-search-2", [[30, "skimmed", "Hit."]], "run-x"),
+      "run-x",
+    );
+    harness.view.flush();
+    assert.equal(harness.count(), "1 found");
+  });
+
+  it("keeps the count of an attached scope as it was", function () {
+    seedScope(20);
+    const harness = track(mount());
+    runOverLibrary(harness.view);
+    assert.equal(harness.count(), "2/2 steps · 18 of 20 read · 2 cited");
+  });
+
+  describe("in Chinese", function () {
+    const globals = globalThis as unknown as { Zotero?: unknown };
+    let previousZotero: unknown;
+    before(function () {
+      previousZotero = globals.Zotero;
+      globals.Zotero = { Prefs: { get: () => "zh-CN" }, locale: "zh-CN" };
+      initI18n();
+    });
+    after(function () {
+      if (previousZotero === undefined) delete globals.Zotero;
+      else globals.Zotero = previousZotero;
+      initI18n();
+    });
+
+    it("translates the in-depth and found terms", function () {
+      for (const value of ["{count} read in depth", "{count} found"])
+        assert.notEqual(t(value), value, value);
+      seedWholeLibrary();
+      const harness = track(mount(library));
+      runOverLibrary(harness.view);
+      assert.equal(harness.count(), "2/2 步 · 精读 5 · 检索到 13 · 引用 2");
     });
   });
 });

@@ -500,7 +500,7 @@ function isInDepthRead(read: {
   if (read.toolName !== "paper_read") return false;
   return (
     read.granularity === "full" ||
-    (read.granularity === "passage" &&
+    ((read.granularity === "passage" || read.granularity === "section") &&
       (read.method === "overview" || read.method === "full"))
   );
 }

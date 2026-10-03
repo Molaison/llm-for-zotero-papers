@@ -604,6 +604,53 @@ describe("task_update runs a declared digest part", function () {
     assert.lengthOf(harness.published, 0, "nothing is declared");
   });
 
+  it("with nothing attached, refuses scope:true before any paper is read, and digests the papers targetIds name", async function () {
+    let calls = 0;
+    const harness = createHarness(
+      scriptedDigests(async () => {
+        calls += 1;
+        return reply("Cells drift slowly.");
+      }),
+    );
+    harness.request.turnScopePapers = {
+      ...harness.request.turnScopePapers!,
+      wholeLibrary: true,
+    };
+    const refused = await runCall(harness, "call-scope", {
+      tasks: [
+        {
+          taskId: "tags",
+          description: "Tag every paper",
+          expectedEffect: "mutation",
+          expectedCapability: "zotero.tags",
+          scope: true,
+        },
+        SUMMARIZE,
+      ],
+    });
+    assert.isFalse(refused.toolResult.ok);
+    const text = JSON.stringify(refused.toolResult.content);
+    assert.include(text, "whole library (3 papers)");
+    assert.include(text, "library_retrieve");
+    assert.equal(calls, 0);
+    assert.lengthOf(harness.published, 0, "the write part is not declared");
+    assert.isEmpty(ledgerDeltas(harness));
+
+    const outcome = await runCall(harness, "call-chosen", {
+      tasks: [{ ...SUMMARIZE, scope: undefined, targetIds: ["5", "6"] }],
+    });
+    assert.isTrue(outcome.toolResult.ok);
+    const answer = outcome.toolResult.content as Record<string, any>;
+    assert.deepEqual(answer.parts, [
+      { taskId: "summaries", status: "completed", done: 2, total: 2 },
+    ]);
+    assert.equal(calls, 2);
+    assert.sameMembers(
+      ledgerDeltas(harness).map((delta) => delta.papers[0].itemId),
+      [5, 6],
+    );
+  });
+
   it("renders more than twelve digests compactly, each naming its handle for the full digest", async function () {
     await withPapers(13, 400, async (itemIds) => {
       const long = `${"Drift is slow and steady across days. ".repeat(20)}END-OF-SUMMARY`;
