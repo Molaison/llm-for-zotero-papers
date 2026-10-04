@@ -1,4 +1,4 @@
-// Run with: MINERU_TEST_URL=http://127.0.0.1:8000 npx tsx scripts/test-mineru-local-live.ts paper.pdf flash
+// Run with: MINERU_TEST_URL=http://127.0.0.1:8000 npx tsx scripts/test-mineru-local-live.ts paper.pdf [tier]
 import { readFile, mkdir, writeFile } from "node:fs/promises";
 import { parsePdfWithMineruLocal } from "../src/utils/mineruClient";
 import { detectMineruLocalService } from "../src/utils/mineruLocalClient";

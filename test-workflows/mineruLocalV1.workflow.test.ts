@@ -12,6 +12,7 @@ import {
 } from "../src/services/mineru/mineruCache";
 import { bindMineruLocalPreferences } from "../src/modules/mineruLocalPreferences";
 import { getMineruLocalOptions } from "../src/utils/mineruConfig";
+import type { MineruLocalService } from "../src/utils/mineruLocalClient";
 import { composeRetrievalCandidateInvalidation } from "../test/helpers/hostSurfaces";
 
 const prefix = "extensions.zotero.llmforzotero.";
@@ -152,12 +153,23 @@ describe("workflow: local MinerU V1", function () {
     const keys = ["mineruLocalTier", "mineruLocalImageAnalysis"];
     const old = keys.map((key) => Zotero.Prefs.get(prefix + key, true));
     try {
+      Zotero.Prefs.set(prefix + "mineruLocalTier", "auto", true);
       let changes = 0;
       const update = bindMineruLocalPreferences(doc, () => changes++);
-      update({ api: "v1", version: "4.0.6", tiers: ["flash"] });
+      const flashOnly: MineruLocalService = {
+        api: "v1",
+        version: "4.0.10",
+        tiers: ["flash"],
+      };
+      update(flashOnly);
       assert.equal(
         doc.getElementById("llmforzotero-mineru-legacy-options")!.style.display,
         "none",
+      );
+      const status = doc.getElementById("llmforzotero-mineru-local-service")!;
+      assert.equal(
+        status.textContent,
+        "MinerU 4.0.10 (V1) · tiers: flash · Auto will use flash (fastest)",
       );
       const tier = doc.getElementById(
         "llmforzotero-mineru-local-tier",
@@ -167,10 +179,41 @@ describe("workflow: local MinerU V1", function () {
       assert.equal(getMineruLocalOptions().tier, "flash");
       assert.equal(changes, 1);
       assert.isTrue((tier.options[2] as HTMLOptionElement).disabled);
+      assert.equal(
+        status.textContent,
+        "MinerU 4.0.10 (V1) · tiers: flash · flash (fastest) will be used",
+      );
+      // A saved tier the server lacks stays saved; the status names the fallback.
+      tier.value = "standard";
+      tier.dispatchEvent(new win.Event("change"));
+      update(flashOnly);
+      assert.equal(getMineruLocalOptions().tier, "standard");
+      assert.equal(tier.value, "standard");
+      assert.equal(
+        status.textContent,
+        "MinerU 4.0.10 (V1) · tiers: flash · standard isn't offered; flash (fastest) will be used",
+      );
+      update({
+        api: "v1",
+        version: "4.0.10",
+        tiers: ["flash", "basic", "standard", "advanced"],
+      });
+      assert.equal(
+        status.textContent,
+        "MinerU 4.0.10 (V1) · tiers: flash, basic, standard, advanced · standard (full models) will be used",
+      );
       update({ api: "legacy", version: "3.4.5" });
       assert.equal(
         doc.getElementById("llmforzotero-mineru-v1-options")!.style.display,
         "none",
+      );
+      assert.equal(status.textContent, "MinerU 3.4.5 (Legacy API)");
+      const shipped = (await Zotero.File.getContentsFromURLAsync(
+        "chrome://llmforzotero/content/preferences.xhtml",
+      )) as string;
+      assert.include(
+        shipped,
+        '<html:option value="auto">Auto (best available)</html:option>',
       );
     } finally {
       keys.forEach((key, index) => {

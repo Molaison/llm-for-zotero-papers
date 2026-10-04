@@ -2,6 +2,8 @@ import { assert } from "chai";
 import {
   detectMineruLocalService,
   parseMineruV1,
+  resolveMineruV1Tier,
+  setMineruV1TimingForTests,
 } from "../src/utils/mineruLocalClient";
 import {
   parsePdfWithMineruLocal,
@@ -75,6 +77,10 @@ describe("MinerU local API compatibility", function () {
     (globalThis as any).IOUtils = {
       read: async () => new TextEncoder().encode("PDF bytes"),
     };
+    setMineruV1TimingForTests({
+      pollDelay: () => 1,
+      downloadRetryDelays: [1, 1],
+    });
     route = (url) => {
       if (url.endsWith("/v1/health")) return json(health);
       if (url.endsWith("/v1/tiers"))
@@ -98,10 +104,14 @@ describe("MinerU local API compatibility", function () {
     };
   });
   afterEach(function () {
+    setMineruV1TimingForTests(null);
     for (const key of Object.keys(original))
       (globalThis as any)[key] = original[key];
   });
-  const parse = (signal?: AbortSignal) =>
+  const parse = (
+    signal?: AbortSignal,
+    report: (m: string) => void = () => {},
+  ) =>
     parseMineruV1({
       baseUrl: base,
       fileName: "test.pdf",
@@ -109,9 +119,28 @@ describe("MinerU local API compatibility", function () {
       service: { api: "v1", version: "4.0.6", tiers: ["standard"] },
       options,
       forceOcr: true,
-      report: () => {},
+      report,
       signal,
     });
+  const deletes = () =>
+    calls.filter(
+      (c) => c.url.endsWith("/jobs/job-1") && c.init.method === "DELETE",
+    ).length;
+  /** Route job creation to "queued" and each status GET through `poll`. */
+  const routeStatus = (
+    poll: (count: number) => Promise<Response> | Response,
+    onDelete: () => Response = () => json({ ...complete, status: "canceled" }),
+  ) => {
+    const normal = route;
+    let count = 0;
+    route = (url, init) => {
+      if (url.endsWith("/parse/jobs"))
+        return json({ ...complete, status: "queued" });
+      if (url.endsWith("/jobs/job-1"))
+        return init.method === "DELETE" ? onDelete() : poll(++count);
+      return normal(url, init);
+    };
+  };
 
   it("detects V1 and supported tiers", async function () {
     assert.deepEqual(await detectMineruLocalService(base, options.apiKey), {
@@ -188,6 +217,101 @@ describe("MinerU local API compatibility", function () {
     );
     assert.include(progress.at(-1), "Done");
   });
+  describe("tier selection", function () {
+    const parseWith = (
+      tier: MineruLocalOptions["tier"],
+      tiers: string[],
+      report: (m: string) => void = () => {},
+    ) =>
+      parseMineruV1({
+        baseUrl: base,
+        fileName: "test.pdf",
+        pdfBytes: new TextEncoder().encode("PDF bytes"),
+        service: { api: "v1", version: "4.0.10", tiers },
+        options: { ...options, tier },
+        forceOcr: false,
+        report,
+      });
+    const jobBody = () =>
+      JSON.parse(
+        calls.find((c) => c.url.endsWith("/parse/jobs"))!.init.body as string,
+      );
+
+    it("parses a flash-only server with Auto by sending tier flash", async function () {
+      const progress: string[] = [];
+      const result = await parseWith("auto", ["flash"], (m) =>
+        progress.push(m),
+      );
+      assert.include(result.mdContent, "Second page.");
+      assert.equal(jobBody().tier, "flash");
+      assert.notInclude(progress.join("\n"), "isn't offered");
+    });
+    it("falls back to an offered tier and says so before uploading", async function () {
+      const progress: string[] = [];
+      await parseWith("standard", ["flash"], (m) => progress.push(m));
+      assert.equal(jobBody().tier, "flash");
+      const notice = progress.indexOf(
+        "standard isn't offered by this MinerU server; using flash",
+      );
+      assert.isAtLeast(notice, 0, progress.join("\n"));
+      assert.isBelow(
+        notice,
+        progress.findIndex((m) =>
+          m.startsWith("Uploading PDF to local MinerU V1"),
+        ),
+      );
+    });
+    it("keeps the fallback visible on the upload, processing and final lines", async function () {
+      routeStatus((count) =>
+        json({ ...complete, status: count === 1 ? "running" : "completed" }),
+      );
+      const progress: string[] = [];
+      await parseWith("standard", ["flash"], (m) => progress.push(m));
+      const lines = progress.join("\n");
+      assert.include(
+        progress.find((m) => m.startsWith("Uploading PDF")),
+        "standard not offered",
+      );
+      assert.include(
+        progress.find((m) => m.startsWith("Waiting for local MinerU")),
+        "standard not offered",
+        lines,
+      );
+      assert.include(
+        progress.find((m) => m.startsWith("Processing on local MinerU")),
+        "standard not offered",
+        lines,
+      );
+      assert.include(progress.at(-1), "files extracted");
+      assert.include(progress.at(-1), "standard not offered");
+    });
+    it("names the plain tier without a fallback note when nothing fell back", async function () {
+      routeStatus((count) =>
+        json({ ...complete, status: count === 1 ? "running" : "completed" }),
+      );
+      const progress: string[] = [];
+      await parseWith("auto", ["flash"], (m) => progress.push(m));
+      const tierLines = progress.filter((m) =>
+        /^(Uploading PDF|Processing on|Waiting for local|Done)/.test(m),
+      );
+      assert.isAtLeast(tierLines.length, 4, progress.join("\n"));
+      for (const line of tierLines) {
+        assert.include(line, "flash", line);
+        assert.notInclude(line, "not offered", line);
+      }
+      assert.include(progress.at(-1), "files extracted; flash)");
+    });
+    for (const [tier, tiers] of [
+      ["auto", ["flash"]],
+      ["auto", ["flash", "basic", "standard", "advanced"]],
+      ["advanced", ["flash", "basic", "standard"]],
+      ["basic", ["basic"]],
+    ] as const)
+      it(`never sends a null tier (${tier} with ${tiers.join("/")})`, async function () {
+        await parseWith(tier, [...tiers]);
+        assert.isString(jobBody().tier);
+      });
+  });
   it("does not send local authentication to a different upload origin", async function () {
     const normal = route;
     route = (url, init) =>
@@ -230,6 +354,8 @@ describe("MinerU local API compatibility", function () {
           : normal(url, init);
       await rejects(parse(), state);
       assert.isFalse(calls.some((c) => c.url.includes("/files/")));
+      // A terminal job needs no cleanup; an unrecognised one is still running.
+      assert.equal(deletes(), state === "unknown" ? 1 : 0);
     });
   it("polls queued and running jobs to completion", async function () {
     this.timeout(10000);
@@ -285,11 +411,175 @@ describe("MinerU local API compatibility", function () {
         url.includes("/parse/jobs") ? json(broken) : normal(url, init);
       await rejects(parse(), "MinerU");
     });
-  it("rejects output download failure", async function () {
+  it("rejects output download failure after bounded retries", async function () {
     const normal = route;
     route = (url, init) =>
       url.includes("/files/") ? json({}, 503) : normal(url, init);
     await rejects(parse(), "download failed: HTTP 503");
+    assert.lengthOf(
+      calls.filter((c) => c.url.includes("/files/")),
+      3,
+    );
+    // The job completed; its result stays on the server for inspection.
+    assert.equal(deletes(), 0);
+  });
+  it("retries a transient result download failure and then succeeds", async function () {
+    const normal = route;
+    let downloads = 0;
+    route = (url, init) =>
+      url.includes("/files/") && ++downloads === 1
+        ? json({}, 502)
+        : normal(url, init);
+    assert.include((await parse()).mdContent, "Second page");
+    assert.equal(downloads, 2);
+  });
+  it("does not retry a result download rejected with HTTP 404", async function () {
+    const normal = route;
+    route = (url, init) =>
+      url.includes("/files/") ? json({}, 404) : normal(url, init);
+    await rejects(parse(), "download failed: HTTP 404");
+    assert.lengthOf(
+      calls.filter((c) => c.url.includes("/files/")),
+      1,
+    );
+  });
+  it("keeps polling when a status request times out while the server loads models", async function () {
+    setMineruV1TimingForTests({ pollDelay: () => 1, requestTimeout: 20 });
+    const progress: string[] = [];
+    routeStatus((count) =>
+      count === 1 ? new Promise<Response>(() => {}) : json(complete),
+    );
+    assert.include(
+      (await parse(undefined, (m) => progress.push(m))).mdContent,
+      "Second page",
+    );
+    assert.isTrue(
+      progress.some((m) =>
+        m.startsWith("Local MinerU is busy and not responding"),
+      ),
+    );
+    assert.equal(deletes(), 0);
+  });
+  for (const transient of [
+    () => {
+      throw new TypeError("fetch failed");
+    },
+    () => json({ error: { message: "Loading models" } }, 503),
+    () => json({}, 429),
+    () => new Response("<html>starting</html>"),
+  ])
+    it("keeps polling through a transient status failure", async function () {
+      routeStatus((count) => (count === 1 ? transient() : json(complete)));
+      assert.include((await parse()).mdContent, "Second page");
+    });
+  it("fails and cancels the job after ten minutes without a status response", async function () {
+    let clock = 0;
+    setMineruV1TimingForTests({ pollDelay: () => 1, now: () => clock });
+    routeStatus(() => {
+      clock += 4 * 60_000;
+      throw new TypeError("fetch failed");
+    });
+    await rejects(parse(), "stopped responding");
+    assert.equal(clock, 12 * 60_000);
+    assert.equal(deletes(), 1);
+  });
+  for (const status of [503, 429])
+    it(`says the server kept returning HTTP ${status} after ten minutes of errors`, async function () {
+      let clock = 0;
+      setMineruV1TimingForTests({ pollDelay: () => 1, now: () => clock });
+      routeStatus(() => {
+        clock += 4 * 60_000;
+        return json({ error: { message: "Loading models" } }, status);
+      });
+      await rejects(
+        parse(),
+        `kept returning errors (HTTP ${status}) for 10 minutes`,
+      );
+      assert.equal(deletes(), 1);
+    });
+  it("resets the no-response window after a successful status response", async function () {
+    let clock = 0;
+    setMineruV1TimingForTests({ pollDelay: () => 1, now: () => clock });
+    routeStatus((count) => {
+      clock += 4 * 60_000;
+      if (count === 5) return json(complete);
+      if (count === 3) return json({ ...complete, status: "running" });
+      throw new TypeError("fetch failed");
+    });
+    assert.include((await parse()).mdContent, "Second page");
+  });
+  it("fails and cancels the job when it exceeds the overall job timeout", async function () {
+    let clock = 0;
+    setMineruV1TimingForTests({ pollDelay: () => 1, now: () => clock });
+    routeStatus(() => {
+      clock += 30 * 60_000;
+      return json({ ...complete, status: "running" });
+    });
+    await rejects(parse(), "timed out");
+    assert.equal(deletes(), 1);
+  });
+  for (const [status, text, deleted] of [
+    [401, "rejected the API key", 0],
+    [403, "rejected the API key", 0],
+    [404, "no longer has this job", 0],
+  ] as const)
+    it(`treats status HTTP ${status} as fatal`, async function () {
+      routeStatus(() => json({ detail: "nope" }, status));
+      await rejects(parse(), text);
+      assert.equal(
+        calls.filter(
+          (c) => c.url.endsWith("/jobs/job-1") && c.init.method !== "DELETE",
+        ).length,
+        1,
+      );
+      assert.equal(deletes(), deleted);
+    });
+  it("cancels promptly while waiting to retry an unresponsive server", async function () {
+    setMineruV1TimingForTests({ pollDelay: () => 60_000 });
+    const controller = new AbortController();
+    routeStatus(() => {
+      throw new TypeError("fetch failed");
+    });
+    // The first status GET happens after one poll delay; abort mid-wait.
+    const started = Date.now();
+    setTimeout(() => controller.abort(), 20);
+    try {
+      await parse(controller.signal);
+      assert.fail("Expected cancellation");
+    } catch (error) {
+      assert.instanceOf(error, MineruCancelledError);
+    }
+    assert.isBelow(Date.now() - started, 2000);
+    assert.equal(deletes(), 1);
+  });
+  it("cancels promptly while a status request is hanging", async function () {
+    const controller = new AbortController();
+    routeStatus(() => {
+      setTimeout(() => controller.abort(), 10);
+      return new Promise<Response>(() => {});
+    });
+    try {
+      await parse(controller.signal);
+      assert.fail("Expected cancellation");
+    } catch (error) {
+      assert.instanceOf(error, MineruCancelledError);
+    }
+    assert.equal(deletes(), 1);
+  });
+  it("reports the original failure when the cleanup DELETE fails", async function () {
+    let clock = 0;
+    setMineruV1TimingForTests({ pollDelay: () => 1, now: () => clock });
+    routeStatus(
+      () => {
+        clock += 11 * 60_000;
+        throw new TypeError("fetch failed");
+      },
+      () => {
+        throw new TypeError("fetch failed");
+      },
+    );
+    await rejects(parse(), "stopped responding");
+    assert.equal(deletes(), 1);
   });
   it("preserves high effort, image analysis and the external VLM URL on legacy servers", async function () {
     let body: FormData;
@@ -325,6 +615,7 @@ describe("MinerU local API compatibility", function () {
       await rejects(testMineruConnection("cloud-key"), `HTTP ${status}`);
       assert.isEmpty(calls);
     });
+  // Unknown states and status HTTP 429 are transient; see mineruCloudClient.test.ts.
   for (const scenario of ["failed", "denied", "pending-done"] as const) {
     it(`reports cloud ${scenario} through the public parsing workflow`, async function () {
       this.timeout(10000);
@@ -385,11 +676,7 @@ describe("MinerU local API compatibility", function () {
         const last = messages.at(-1)!;
         assert.include(
           last,
-          scenario === "failed"
-            ? "Bad PDF at [URL]"
-            : scenario === "denied"
-              ? "HTTP 403"
-              : "unsupported status",
+          scenario === "failed" ? "Bad PDF at [URL]" : "HTTP 403",
         );
         assert.notInclude(last, "secret=xyz");
       }
@@ -416,6 +703,30 @@ describe("MinerU local API compatibility", function () {
       "invalid connection-test response",
     );
   });
+});
+
+describe("MinerU V1 tier resolution", function () {
+  const all = ["flash", "basic", "standard", "advanced"];
+  for (const [requested, offered, tier, fallbackFrom] of [
+    ["auto", ["flash"], "flash", undefined],
+    ["auto", ["flash", "basic"], "basic", undefined],
+    ["auto", all, "standard", undefined],
+    ["auto", ["advanced"], "advanced", undefined],
+    ["standard", ["flash"], "flash", "standard"],
+    ["advanced", ["flash", "basic", "standard"], "standard", "advanced"],
+    ["basic", ["standard", "advanced"], "standard", "basic"],
+    ["flash", ["basic", "advanced"], "basic", "flash"],
+    ["flash", ["flash"], "flash", undefined],
+    ["advanced", all, "advanced", undefined],
+    ["basic", ["flash", "basic"], "basic", undefined],
+  ] as const)
+    it(`resolves ${requested} with [${offered.join(", ")}] to ${tier}`, function () {
+      const resolved = resolveMineruV1Tier(requested, [...offered]);
+      assert.deepEqual(
+        resolved,
+        fallbackFrom ? { tier, fallbackFrom } : { tier },
+      );
+    });
 });
 
 describe("MinerU V1 result conversion", function () {
@@ -457,6 +768,49 @@ describe("MinerU V1 result conversion", function () {
     );
     assert.equal(content.at(-1).page_idx, 201);
     assert.include(merged.mdContent, "images/chunk-002/images/figure.png");
+  });
+  it("maps MinerU 4.0.10 equation and page-furniture blocks to their own types", function () {
+    const structured = structuredClone(mineruV1StructuredFixture) as any;
+    structured.pages[0].blocks.push(
+      {
+        type: "equation",
+        content: "E=mc^2",
+        image_source: "images/figure.png",
+      },
+      { type: "equation", content: "a+b" },
+      { type: "header", content: "Journal of Tests" },
+      { type: "footer", content: "Copyright" },
+      { type: "page_number", content: "1" },
+      { type: "page_footnote", content: "1 Corresponding author." },
+      { type: "aside_text", content: "arXiv:2601.00001" },
+    );
+    const result = normalizeMineruV1Zip(createMineruV1Zip(structured));
+    const content = JSON.parse(
+      new TextDecoder().decode(
+        result.files.find((f) => f.relativePath === "content_list.json")!.data,
+      ),
+    );
+    const byText = (text: string) =>
+      content.find((entry: any) => entry.text === text);
+    assert.deepInclude(byText("E=mc^2"), {
+      type: "equation",
+      img_path: "images/figure.png",
+    });
+    assert.equal(byText("a+b").type, "equation");
+    assert.notProperty(byText("a+b"), "img_path");
+    assert.equal(byText("x=1").type, "equation");
+    for (const [text, type] of [
+      ["Journal of Tests", "header"],
+      ["Copyright", "footer"],
+      ["1", "page_number"],
+      ["1 Corresponding author.", "page_footnote"],
+      ["arXiv:2601.00001", "aside_text"],
+    ])
+      assert.equal(byText(text).type, type);
+    assert.equal(byText("A reproducible extraction.").type, "text");
+    // Page furniture never opens a section or counts as a figure.
+    const manifest = buildManifest(result.mdContent, content, 2);
+    assert.lengthOf(manifest.sections[0].figures, 1);
   });
   it("rejects missing referenced images", function () {
     const broken = structuredClone(mineruV1StructuredFixture);

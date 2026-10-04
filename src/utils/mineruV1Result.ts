@@ -5,6 +5,15 @@ import {
 import type { MineruContentListEntry } from "./mineruZip";
 
 type RecordValue = Record<string, unknown>;
+// Page furniture keeps its own type so running headers and page numbers never
+// read as body text; cache consumers ignore types they do not handle.
+const PAGE_FURNITURE_TYPES = new Set([
+  "header",
+  "footer",
+  "page_number",
+  "page_footnote",
+  "aside_text",
+]);
 function record(value: unknown): RecordValue {
   if (!value || typeof value !== "object" || Array.isArray(value))
     throw new Error("Invalid MinerU V1 structured content");
@@ -116,9 +125,14 @@ export function normalizeMineruV1Zip(bytes: Uint8Array) {
         entry.table_body = text;
         entry.table_caption = annotations(block.captions);
         entry.table_footnote = annotations(block.footnotes);
-      } else if (block.type === "equation_interline") {
+      } else if (
+        block.type === "equation" ||
+        block.type === "equation_interline"
+      ) {
         entry.type = "equation";
-        entry.img_path = imagePath;
+        if (imagePath) entry.img_path = imagePath;
+      } else if (PAGE_FURNITURE_TYPES.has(block.type)) {
+        entry.type = block.type;
       }
       contentList.push(entry);
     }

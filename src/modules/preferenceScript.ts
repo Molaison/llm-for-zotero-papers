@@ -5817,6 +5817,8 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
         );
         mineruTestStatus.style.color = "green";
       } catch (error) {
+        // A failed test must not leave the last detected server on screen.
+        if (mode === "local") updateMineruLocalOptions();
         mineruTestStatus.textContent = `\u2717 ${(error as Error).message}`;
         mineruTestStatus.style.color = "red";
       } finally {

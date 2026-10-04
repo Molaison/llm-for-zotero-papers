@@ -12,8 +12,12 @@ Start the MinerU API service separately, then enter its base URL in Zotero.
 Use **Test Connection** to identify the API and show its available settings.
 A successful connection test does not perform PDF parsing.
 
-For MinerU 4, select a quality tier or use the server default.
-Flash requires an explicit selection when it is the server's only tier.
+For MinerU 4, select a quality tier or use Auto.
+Auto uses the best tier the server offers: standard, then basic, then flash.
+A selected tier that the server does not offer falls back to the closest offered tier, and the parse progress says so.
+The plugin always sends an explicit tier, so a Flash-only server works with Auto.
+Test Connection lists the offered tiers and the tier the next parse will use.
+Each parse detects the service again, so a server restarted with other tiers needs no settings change.
 Configure external VLM engines on the MinerU 4 service.
 For MinerU 3, select a backend and optionally set hybrid effort, image analysis, and an HTTP-client VLM server URL.
 Hybrid image analysis requires high effort.
@@ -71,18 +75,21 @@ ZOTERO_PLUGIN_ZOTERO_BIN_PATH=/Applications/Zotero.app/Contents/MacOS/zotero \
   LLM_FOR_ZOTERO_TEST_ENTRIES=test-live-mineru npm run test:workflow
 ```
 
-This test creates a two-page PDF with an image inside the disposable profile.
+This test runs once with Flash selected and once with Auto, against the Flash-only server.
+Each run creates a two-page PDF with an image inside the disposable profile.
 It checks the real service, uploads the PDF, polls the job, downloads its output, and publishes the cache.
 It verifies both pages and the image metadata through native Zotero storage.
-The test saves `mineru-live-evidence.json` in the disposable data directory.
+The test saves `mineru-live-evidence-flash.json` and `mineru-live-evidence-auto.json` in the disposable data directory.
 Flash can load OCR resources for scanned or sparse PDFs, so prepare the service's required models before testing those inputs.
 
 For a separate client check with your own local test PDF:
 
 ```sh
 MINERU_TEST_URL=http://127.0.0.1:18746 \
-  npx tsx scripts/test-mineru-local-live.ts /path/to/test.pdf flash
+  npx tsx scripts/test-mineru-local-live.ts /path/to/test.pdf auto
 ```
+
+The tier argument is optional and defaults to `auto`.
 
 The script saves a summary in `.scaffold/mineru-validation/live-result.json`.
 Set `MINERU_TEST_API_KEY` only if your local service requires authentication.
