@@ -325,12 +325,7 @@ describe("MinerU local API compatibility", function () {
       await rejects(testMineruConnection("cloud-key"), `HTTP ${status}`);
       assert.isEmpty(calls);
     });
-  for (const scenario of [
-    "failed",
-    "unknown",
-    "denied",
-    "pending-done",
-  ] as const) {
+  for (const scenario of ["failed", "denied", "pending-done"] as const) {
     it(`reports cloud ${scenario} through the public parsing workflow`, async function () {
       this.timeout(10000);
       let polls = 0;
@@ -400,23 +395,6 @@ describe("MinerU local API compatibility", function () {
       }
     });
   }
-  it("propagates polling quota failures so the batch queue can pause", async function () {
-    this.timeout(6000);
-    (globalThis as any).Zotero.HTTP = {
-      request: async (method: string) => ({
-        status: method === "POST" ? 200 : 429,
-        responseText: JSON.stringify({
-          code: 0,
-          data: { batch_id: "batch", file_urls: ["fixture://storage/upload"] },
-        }),
-      }),
-    };
-    route = () => new Response(null, { status: 200 });
-    await rejects(
-      parsePdfWithMineruCloud("paper.pdf", "key"),
-      "rate limited (HTTP 429)",
-    );
-  });
   it("rejects cloud business errors even when HTTP succeeds", async function () {
     (globalThis as any).Zotero.HTTP = {
       request: async () => ({

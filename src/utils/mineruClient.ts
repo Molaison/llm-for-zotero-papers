@@ -49,6 +49,34 @@ const CLOUD_LONG_ACTIVE_POLL_AFTER_MS = 30 * 60 * 1000;
 const CLOUD_NO_STATUS_TIMEOUT_MS = 10 * 60 * 1000;
 const CLOUD_PRE_PROCESSING_TIMEOUT_MS = 30 * 60 * 1000;
 const REQUEST_TIMEOUT_MS = 60000;
+// A status-poll HTTP 429 is a short rate limit, not the daily quota.
+const CLOUD_RATE_LIMIT_MAX_POLL_INTERVAL_MS = 60 * 1000;
+const CLOUD_ZIP_RETRY_DELAYS_MS = [5000, 15000] as const;
+// Matches the curl transport's --max-time; a large ZIP can legitimately be slow.
+const CLOUD_ZIP_FETCH_TIMEOUT_MS = 300_000;
+// MinerU cloud status codes that retrying cannot fix: token error, token
+// expired, task not found, no permission for the task.
+const MINERU_CLOUD_TERMINAL_CODES = new Set([
+  "A0202",
+  "A0211",
+  "-60012",
+  "-60013",
+]);
+const MINERU_CLOUD_DAILY_LIMIT_CODE = "-60018";
+// cdn-mineru.openxlab.org.cn's TLS certificate expired on 2026-10-02, so every
+// transport fails there; the same result objects live in the OSS bucket that
+// uploads already use. Exact host mapping only: never rewrite other hosts.
+const MINERU_ZIP_HOST_FALLBACKS: Readonly<Record<string, string>> = {
+  "cdn-mineru.openxlab.org.cn": "mineru.oss-cn-shanghai.aliyuncs.com",
+};
+const CURL_EXIT_MEANINGS: Readonly<Record<number, string>> = {
+  6: "could not resolve host",
+  7: "could not connect",
+  22: "HTTP error",
+  28: "timed out",
+  35: "TLS handshake failed",
+  60: "certificate problem",
+};
 // Local /file_parse is synchronous and exposes no separate job status; rely on
 // explicit abort/pause rather than guessing whether an open request is stuck.
 const LOCAL_PARSE_TIMEOUT_MS = 0;
@@ -101,9 +129,17 @@ type MineruCloudPollDecisionInput = {
 
 type LocalFileParseGateRelease = () => void;
 
+type MineruCloudTimingForTests = {
+  now: () => number;
+  pollSleepMs: (ms: number) => number;
+  zipRetryDelaysMs: readonly number[];
+};
+
 let localFileParseGateHeld = false;
 let localFileParseGateQueue: Array<() => void> = [];
 let localBusyRetryDelaysOverrideForTests: readonly number[] | null = null;
+let cloudTimingOverrideForTests: Partial<MineruCloudTimingForTests> | null =
+  null;
 
 export class MineruRateLimitError extends Error {
   constructor(message: string) {
@@ -187,6 +223,8 @@ type BinaryDownloadAttempt = {
   contentType: string | null;
   byteLength: number | null;
   error: string | null;
+  host?: string;
+  exitCode?: number | null;
 };
 
 type BinaryDownloadResult = {
@@ -197,6 +235,12 @@ type BinaryDownloadResult = {
 type CurlDownloadResult = {
   bytes: Uint8Array | null;
   attempt: BinaryDownloadAttempt;
+};
+
+type CurlDownloadOutcome = {
+  bytes: Uint8Array | null;
+  exitCode: number | null;
+  error: string | null;
 };
 
 type MineruZipExtractionResult =
@@ -308,6 +352,30 @@ export function setMineruLocalBusyRetryDelaysForTests(
   localBusyRetryDelaysOverrideForTests = delays;
 }
 
+export function setMineruCloudTimingForTests(
+  overrides: Partial<MineruCloudTimingForTests> | null,
+): void {
+  cloudTimingOverrideForTests = overrides;
+}
+
+export function describeMineruCurlExitForTests(exitCode: number): string {
+  return describeCurlExit(exitCode);
+}
+
+function cloudNow(): number {
+  return cloudTimingOverrideForTests?.now?.() ?? Date.now();
+}
+
+function cloudPollSleepMs(ms: number): number {
+  return cloudTimingOverrideForTests?.pollSleepMs?.(ms) ?? ms;
+}
+
+function getCloudZipRetryDelaysMs(): readonly number[] {
+  return (
+    cloudTimingOverrideForTests?.zipRetryDelaysMs ?? CLOUD_ZIP_RETRY_DELAYS_MS
+  );
+}
+
 export function resetMineruLocalFileParseGateForTests(): void {
   localFileParseGateHeld = false;
   localFileParseGateQueue = [];
@@ -338,7 +406,63 @@ async function httpJson(
   return { status: xhr.status, data };
 }
 
-async function downloadViaCurl(url: string): Promise<Uint8Array | null> {
+function describeCurlExit(exitCode: number): string {
+  if (exitCode < 0) return "did not run or timed out";
+  const meaning = CURL_EXIT_MEANINGS[exitCode];
+  return meaning ? `exit ${exitCode} ${meaning}` : `exit ${exitCode}`;
+}
+
+function getUrlHost(url: string): string {
+  try {
+    return new URL(url).host || "unknown host";
+  } catch {
+    return "unknown host";
+  }
+}
+
+/** Keep hosts but drop paths and signed query strings from error text. */
+function redactDownloadError(text: string): string {
+  return text
+    .replace(/[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]+/gi, (match) => getUrlHost(match))
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 200);
+}
+
+function describeDownloadError(error: unknown, fallback: string): string {
+  const value = error as {
+    message?: unknown;
+    cause?: { code?: unknown };
+  } | null;
+  const message =
+    typeof value?.message === "string" && value.message.trim()
+      ? value.message
+      : fallback;
+  // Node-style fetch hides TLS failures such as CERT_HAS_EXPIRED in the cause.
+  const code = typeof value?.cause?.code === "string" ? value.cause.code : "";
+  return redactDownloadError(
+    code && !message.includes(code) ? `${message} (${code})` : message,
+  );
+}
+
+function getMineruZipFallbackUrl(url: string): string | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  const host = Object.prototype.hasOwnProperty.call(
+    MINERU_ZIP_HOST_FALLBACKS,
+    parsed.hostname,
+  )
+    ? MINERU_ZIP_HOST_FALLBACKS[parsed.hostname]
+    : undefined;
+  if (!host || parsed.port || parsed.username || parsed.password) return null;
+  return `https://${host}${parsed.pathname}${parsed.search}`;
+}
+
+async function downloadViaCurl(url: string): Promise<CurlDownloadOutcome> {
   // Use system curl to download binary data, bypassing Firefox ESR's TLS stack
   // which cannot connect to Alibaba Cloud OSS.
   try {
@@ -355,7 +479,8 @@ async function downloadViaCurl(url: string): Promise<Uint8Array | null> {
     const Ci = (
       globalThis as { Components?: { interfaces?: Record<string, unknown> } }
     ).Components?.interfaces;
-    if (!Cc || !Ci) return null;
+    if (!Cc || !Ci)
+      return { bytes: null, exitCode: null, error: "curl unavailable" };
 
     const dirService = (
       Cc["@mozilla.org/file/directory_service;1"] as unknown as {
@@ -367,7 +492,7 @@ async function downloadViaCurl(url: string): Promise<Uint8Array | null> {
     const tempDir = dirService?.get?.("TmpD", Ci.nsIFile as unknown);
     if (!tempDir?.path) {
       appLogger.warn("MinerU download [curl]: cannot resolve temp directory");
-      return null;
+      return { bytes: null, exitCode: null, error: "no temp directory" };
     }
 
     const outPath = `${tempDir.path}${tempDir.path.includes("\\") ? "\\" : "/"}mineru_dl_${Date.now()}.bin`;
@@ -385,7 +510,7 @@ async function downloadViaCurl(url: string): Promise<Uint8Array | null> {
 
     if (exitCode !== 0) {
       appLogger.warn(`MinerU download [curl]: failed exit=${exitCode}`);
-      return null;
+      return { bytes: null, exitCode, error: describeCurlExit(exitCode) };
     }
 
     appLogger.debug("MinerU download [curl]: success");
@@ -404,24 +529,35 @@ async function downloadViaCurl(url: string): Promise<Uint8Array | null> {
         } catch {
           /* ignore */
         }
-        return data instanceof Uint8Array
-          ? data
-          : new Uint8Array(data as ArrayBuffer);
+        return {
+          bytes:
+            data instanceof Uint8Array
+              ? data
+              : new Uint8Array(data as ArrayBuffer),
+          exitCode,
+          error: null,
+        };
       }
       const osFile = getOSFile();
       if (osFile?.read) {
         const data = await osFile.read(outPath);
-        return data instanceof Uint8Array
-          ? data
-          : new Uint8Array(data as ArrayBuffer);
+        return {
+          bytes:
+            data instanceof Uint8Array
+              ? data
+              : new Uint8Array(data as ArrayBuffer),
+          exitCode,
+          error: null,
+        };
       }
     } catch {
       /* ignore */
     }
-    return null;
+    return { bytes: null, exitCode, error: "could not read curl output" };
   } catch (e) {
-    appLogger.warn(`MinerU download [curl] threw: ${(e as Error).message}`);
-    return null;
+    const error = describeDownloadError(e, "curl failed");
+    appLogger.warn(`MinerU download [curl] threw: ${error}`);
+    return { bytes: null, exitCode: null, error };
   }
 }
 
@@ -474,13 +610,27 @@ function getFinalDownloadAttempt(
   return result.attempts[result.attempts.length - 1];
 }
 
-function buildDownloadFailureMessage(result: BinaryDownloadResult): string {
-  const attempt = getFinalDownloadAttempt(result);
-  if (!attempt) return "Failed to download ZIP result";
-  if (attempt.status !== null) {
-    return `Failed to download ZIP result: HTTP ${attempt.status} via ${attempt.transport}`;
+/** List every transport tried on each host; hosts only, never signed URLs. */
+function buildDownloadFailureMessage(
+  result: BinaryDownloadResult,
+  tries = 1,
+): string {
+  if (!result.attempts.length) return "Failed to download ZIP result";
+  const byHost = new Map<string, string[]>();
+  for (const attempt of result.attempts) {
+    const host = attempt.host ?? "unknown host";
+    const outcome =
+      attempt.error ??
+      (attempt.status !== null ? `HTTP ${attempt.status}` : "failed");
+    const entries = byHost.get(host) ?? [];
+    entries.push(`${attempt.transport}: ${outcome}`);
+    byHost.set(host, entries);
   }
-  return `Failed to download ZIP result via ${attempt.transport}`;
+  const groups = Array.from(
+    byHost,
+    ([host, entries]) => `${host} — ${entries.join("; ")}`,
+  );
+  return `Failed to download ZIP result${tries > 1 ? ` after ${tries} tries` : ""} (${groups.join(" | ")})`;
 }
 
 function logMineruZipFailure(
@@ -500,7 +650,9 @@ function logMineruZipFailure(
     firstBytesHex: zipInspection?.firstBytesHex ?? null,
     attempts: download.attempts.map((attempt) => ({
       transport: attempt.transport,
+      host: attempt.host ?? null,
       status: attempt.status,
+      exitCode: attempt.exitCode ?? null,
       contentType: attempt.contentType,
       byteLength: attempt.byteLength,
       error: attempt.error,
@@ -518,31 +670,78 @@ function logMineruZipFailure(
 async function downloadViaCurlWithMetadata(
   url: string,
 ): Promise<CurlDownloadResult> {
-  const bytes = await downloadViaCurl(url);
+  const outcome = await downloadViaCurl(url);
   return {
-    bytes,
+    bytes: outcome.bytes,
     attempt: {
       transport: "curl",
+      host: getUrlHost(url),
       status: null,
+      exitCode: outcome.exitCode,
       contentType: null,
-      byteLength: bytes?.length ?? null,
-      error: bytes ? null : "curl download failed",
+      byteLength: outcome.bytes?.length ?? null,
+      error: outcome.bytes ? null : (outcome.error ?? "curl download failed"),
     },
   };
 }
 
-async function httpGetBinary(url: string): Promise<BinaryDownloadResult> {
+/** GET the whole body with fetch, bounded by a timeout and the caller's signal. */
+async function fetchBinaryWithTimeout(
+  url: string,
+  signal?: AbortSignal,
+): Promise<{ response: Response; bytes: Uint8Array | null }> {
+  throwIfAborted(signal);
+  const AbortCtrl = getAbortControllerCtor();
+  const controller = AbortCtrl ? new AbortCtrl() : null;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: () => void = () => {};
+  const interrupted = new Promise<never>((_resolve, reject) => {
+    onAbort = () => {
+      controller?.abort();
+      reject(new MineruCancelledError());
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    timer = setTimeout(() => {
+      controller?.abort();
+      reject(new Error("timed out"));
+    }, CLOUD_ZIP_FETCH_TIMEOUT_MS);
+  });
+  try {
+    return await Promise.race([
+      (async () => {
+        const response = await getFetch()(
+          url,
+          controller ? { signal: controller.signal } : {},
+        );
+        if (!response.ok) return { response, bytes: null };
+        return {
+          response,
+          bytes: new Uint8Array(await response.arrayBuffer()),
+        };
+      })(),
+      interrupted,
+    ]);
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", onAbort);
+  }
+}
+
+async function httpGetBinary(
+  url: string,
+  signal?: AbortSignal,
+): Promise<BinaryDownloadResult> {
   const attempts: BinaryDownloadAttempt[] = [];
+  const host = getUrlHost(url);
 
   // Try fetch first (works for cloud storage/CDN URLs with CORS),
   // fall back to Zotero.HTTP.request, then curl.
   try {
-    const fetchFn = ztoolkit.getGlobal("fetch") as typeof fetch;
-    const resp = await fetchFn(url);
-    if (resp.ok) {
-      const bytes = new Uint8Array(await resp.arrayBuffer());
+    const { response: resp, bytes } = await fetchBinaryWithTimeout(url, signal);
+    if (bytes) {
       attempts.push({
         transport: "fetch",
+        host,
         status: resp.status,
         contentType: resp.headers.get("content-type"),
         byteLength: bytes.length,
@@ -552,21 +751,26 @@ async function httpGetBinary(url: string): Promise<BinaryDownloadResult> {
     }
     attempts.push({
       transport: "fetch",
+      host,
       status: resp.status,
       contentType: resp.headers.get("content-type"),
       byteLength: null,
       error: `HTTP ${resp.status}`,
     });
   } catch (e) {
+    if (e instanceof MineruCancelledError || signal?.aborted)
+      throw new MineruCancelledError();
     attempts.push({
       transport: "fetch",
+      host,
       status: null,
       contentType: null,
       byteLength: null,
-      error: (e as Error).message || "fetch failed",
+      error: describeDownloadError(e, "fetch failed"),
     });
   }
 
+  throwIfAborted(signal);
   try {
     const xhr = await Zotero.HTTP.request("GET", url, {
       responseType: "arraybuffer",
@@ -578,6 +782,7 @@ async function httpGetBinary(url: string): Promise<BinaryDownloadResult> {
       const bytes = new Uint8Array(xhr.response as ArrayBuffer);
       attempts.push({
         transport: "zotero-http",
+        host,
         status: xhr.status,
         contentType: getResponseHeader(xhr, "Content-Type"),
         byteLength: bytes.length,
@@ -587,6 +792,7 @@ async function httpGetBinary(url: string): Promise<BinaryDownloadResult> {
     }
     attempts.push({
       transport: "zotero-http",
+      host,
       status: xhr.status,
       contentType: getResponseHeader(xhr, "Content-Type"),
       byteLength: null,
@@ -595,14 +801,16 @@ async function httpGetBinary(url: string): Promise<BinaryDownloadResult> {
   } catch (e) {
     attempts.push({
       transport: "zotero-http",
+      host,
       status: null,
       contentType: null,
       byteLength: null,
-      error: (e as Error).message || "Zotero.HTTP failed",
+      error: describeDownloadError(e, "Zotero.HTTP failed"),
     });
   }
 
   // Attempt 3: curl (bypasses Firefox ESR TLS issues with Alibaba Cloud OSS)
+  throwIfAborted(signal);
   const curlResult = await downloadViaCurlWithMetadata(url);
   attempts.push(curlResult.attempt);
   return {
@@ -666,31 +874,56 @@ function extractMineruZipBytes(
 async function downloadAndExtractZip(
   zipUrl: string,
   report: (s: string) => void,
+  signal?: AbortSignal,
 ): Promise<MineruZipExtractionResult> {
   report(t("Downloading results…"));
-  const downloadResult = await httpGetBinary(zipUrl);
-  if (!downloadResult.bytes) {
-    return {
-      ok: false,
-      message: buildDownloadFailureMessage(downloadResult),
-      download: downloadResult,
-    };
+  const fallbackUrl = getMineruZipFallbackUrl(zipUrl);
+  const urls = fallbackUrl ? [zipUrl, fallbackUrl] : [zipUrl];
+  const retryDelaysMs = getCloudZipRetryDelaysMs();
+  let lastRound: BinaryDownloadResult = { bytes: null, attempts: [] };
+  for (let round = 0; round <= retryDelaysMs.length; round++) {
+    if (round > 0) {
+      const delayMs = retryDelaysMs[round - 1];
+      report(
+        `Retrying ZIP download in ${Math.round(delayMs / 1000)}s (attempt ${round + 1}/${retryDelaysMs.length + 1})…`,
+      );
+      await sleep(delayMs, signal);
+    }
+    lastRound = { bytes: null, attempts: [] };
+    let invalidZip: Extract<MineruZipExtractionResult, { ok: false }> | null =
+      null;
+    for (const url of urls) {
+      throwIfAborted(signal);
+      const downloadResult = await raceAbort(
+        httpGetBinary(url, signal),
+        signal,
+      );
+      lastRound.attempts.push(...downloadResult.attempts);
+      if (!downloadResult.bytes) continue;
+      const extracted = extractMineruZipBytes(downloadResult.bytes, report);
+      if (extracted.ok) {
+        return {
+          ok: true,
+          mdContent: extracted.mdContent,
+          files: extracted.files,
+        };
+      }
+      // Bytes that are not a ZIP (e.g. a CDN error page) may still have a
+      // valid copy on the fallback host.
+      invalidZip ??= {
+        ok: false,
+        message: extracted.message,
+        download: downloadResult,
+        zipInspection: extracted.zipInspection,
+      };
+    }
+    // Retrying only helps when no host returned any bytes.
+    if (invalidZip) return invalidZip;
   }
-
-  const extracted = extractMineruZipBytes(downloadResult.bytes, report);
-  if (!extracted.ok) {
-    return {
-      ok: false,
-      message: extracted.message,
-      download: downloadResult,
-      zipInspection: extracted.zipInspection,
-    };
-  }
-
   return {
-    ok: true,
-    mdContent: extracted.mdContent,
-    files: extracted.files,
+    ok: false,
+    message: buildDownloadFailureMessage(lastRound, retryDelaysMs.length + 1),
+    download: lastRound,
   };
 }
 
@@ -1680,13 +1913,16 @@ async function parsePdfViaUpload(
   }
 
   report(t("Waiting for MinerU to start…"));
-  const pollStartMs = Date.now();
+  const pollStartMs = cloudNow();
   let lastStatusAtMs: number | null = null;
   let activeStartedAtMs: number | null = null;
+  let rateLimitDelayMs = 0;
+  // Transient poll failures only `continue`; lastStatusAtMs advances on a
+  // recognised state alone, so the no-status timeout bounds persistent errors.
   while (true) {
     const waitDecision = getMineruCloudPollDecision({
       state: null,
-      nowMs: Date.now(),
+      nowMs: cloudNow(),
       pollStartMs,
       lastStatusAtMs,
       activeStartedAtMs,
@@ -1700,43 +1936,93 @@ async function parsePdfViaUpload(
       return null;
     }
 
-    await sleep(waitDecision.pollIntervalMs, signal);
-    const pollTimeMs = Date.now();
+    await sleep(
+      cloudPollSleepMs(Math.max(waitDecision.pollIntervalMs, rateLimitDelayMs)),
+      signal,
+    );
+    const pollTimeMs = cloudNow();
     const elapsed = Math.round((pollTimeMs - pollStartMs) / 1000);
 
-    const pollResult = await httpJson(
-      "GET",
-      `${getMineruApiBase()}/extract-results/batch/${batchId}`,
-      getMineruAuthHeaders(apiKey),
-    );
-
-    if (pollResult.status === 429)
-      throw new MineruRateLimitError(
-        "MinerU status request rate limited (HTTP 429)",
+    let pollResult: { status: number; data: unknown };
+    try {
+      pollResult = await raceAbort(
+        httpJson(
+          "GET",
+          `${getMineruApiBase()}/extract-results/batch/${batchId}`,
+          getMineruAuthHeaders(apiKey),
+        ),
+        signal,
       );
-    if ([401, 403, 404].includes(pollResult.status)) {
+    } catch (error) {
+      throwIfAborted(signal);
+      appLogger.debug(
+        `MinerU: poll request failed: ${describeDownloadError(error, "request failed")}`,
+      );
+      report(`MinerU status temporarily unavailable; retrying… (${elapsed}s)`);
+      continue;
+    }
+
+    const cloudError = pollResult.data as {
+      code?: number | string | null;
+      msg?: string;
+    } | null;
+    const errorCode = cloudError?.code;
+    // The body's daily-limit code wins over the HTTP status, including a 429.
+    if (
+      errorCode !== undefined &&
+      errorCode !== null &&
+      String(errorCode).trim() === MINERU_CLOUD_DAILY_LIMIT_CODE
+    ) {
+      const detail = mineruErrorDetail(cloudError);
+      throw new MineruRateLimitError(
+        `MinerU daily parsing limit reached (${MINERU_CLOUD_DAILY_LIMIT_CODE})${detail ? `: ${detail}` : ""}`,
+      );
+    }
+    // A status 429 is a short rate limit; the daily quota surfaces as -60018
+    // or a batch-creation 429. Back off instead of pausing the queue.
+    if (pollResult.status === 429) {
+      rateLimitDelayMs = Math.min(
+        Math.max(rateLimitDelayMs, waitDecision.pollIntervalMs) * 2,
+        CLOUD_RATE_LIMIT_MAX_POLL_INTERVAL_MS,
+      );
+      report(
+        `MinerU status requests are rate limited; retrying in ${Math.round(rateLimitDelayMs / 1000)}s… (${elapsed}s)`,
+      );
+      continue;
+    }
+    rateLimitDelayMs = 0;
+    if ([401, 403].includes(pollResult.status)) {
       report(
         `MinerU status request failed: HTTP ${pollResult.status}${mineruErrorDetail(pollResult.data) ? `: ${mineruErrorDetail(pollResult.data)}` : ""}`,
       );
       return null;
     }
+
+    if (
+      errorCode !== undefined &&
+      errorCode !== null &&
+      String(errorCode).trim() !== "0"
+    ) {
+      const codeKey = String(errorCode).trim();
+      const detail = mineruErrorDetail(cloudError);
+      if (MINERU_CLOUD_TERMINAL_CODES.has(codeKey)) {
+        report(
+          `MinerU status request failed (${codeKey})${detail ? `: ${detail}` : ""}`,
+        );
+        return null;
+      }
+      appLogger.debug(`MinerU: poll code ${codeKey}; retrying`);
+      report(
+        `MinerU status temporarily unavailable (${codeKey})${detail ? `: ${detail}` : ""}; retrying… (${elapsed}s)`,
+      );
+      continue;
+    }
     if (pollResult.status < 200 || pollResult.status >= 300) {
       report(
-        `MinerU status temporarily unavailable: HTTP ${pollResult.status}`,
+        `MinerU status temporarily unavailable: HTTP ${pollResult.status}; retrying… (${elapsed}s)`,
       );
       appLogger.debug(`MinerU: poll HTTP ${pollResult.status}`);
       continue;
-    }
-
-    const cloudError = pollResult.data as {
-      code?: number;
-      msg?: string;
-    } | null;
-    if (cloudError?.code !== undefined && cloudError.code !== 0) {
-      report(
-        `MinerU status request failed (${cloudError.code})${mineruErrorDetail(cloudError) ? `: ${mineruErrorDetail(cloudError)}` : ""}`,
-      );
-      return null;
     }
     const pollData = pollResult.data as {
       data?: {
@@ -1772,8 +2058,12 @@ async function parsePdfViaUpload(
         "failed",
       ].includes(state)
     ) {
-      report(`MinerU returned an unsupported status: ${state.slice(0, 60)}`);
-      return null;
+      // Not a recognised status: keep waiting without advancing lastStatusAtMs.
+      appLogger.warn(`MinerU: cloud poll returned unrecognised state`);
+      report(
+        `MinerU returned an unrecognised status (${state.slice(0, 60)}); still waiting… (${elapsed}s)`,
+      );
+      continue;
     }
     if (!state) {
       appLogger.warn("MinerU: cloud poll response has empty state");
@@ -1796,6 +2086,7 @@ async function parsePdfViaUpload(
       const extracted = await downloadAndExtractZip(
         extractResult.full_zip_url,
         report,
+        signal,
       );
       if (extracted.ok) {
         report(
