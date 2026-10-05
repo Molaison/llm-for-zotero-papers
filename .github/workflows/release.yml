@@ -103,7 +103,8 @@ jobs:
 
           保留单篇论文固定对话、首次 PDF 上传、四模型/思考强度和短标题命名。
           远端记录按钮需要配套服务端 history 接口；当前服务端仍未上线，真实读取尚待隔离验收。
-          本 Release 不部署生产服务，不包含 API key、生产配置或用户论文。Zotero 暂仍采用手动更新。
+          本 Release 不部署生产服务，不包含 API key、生产配置或用户论文。
+          papers.11 起启用 Zotero 自动更新，仅从本 fork 获取新版。旧版本首次需手动安装一次，之后自动检查更新。
           EOF
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --prerelease --notes-file "$RUNNER_TEMP/papers-notes.md"
           echo "Published https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG" >> "$GITHUB_STEP_SUMMARY"

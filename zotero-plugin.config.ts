@@ -26,7 +26,7 @@ export default defineConfig({
     "https://github.com/{{owner}}/{{repo}}/releases/download/v{{version}}/{{xpiName}}.xpi",
 
   build: {
-    // Keep the explicit manifest; bootstrap disables this custom add-on's auto-updates.
+    // Keep the explicit manifest so updates stay on the papers fork.
     makeManifest: { enable: false },
     assets: ["addon/**/*.*"],
     define: {

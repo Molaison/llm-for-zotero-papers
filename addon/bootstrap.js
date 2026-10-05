@@ -10,12 +10,12 @@ var chromeHandle;
 function install(data, reason) {}
 
 async function startup({ id, version, resourceURI, rootURI }, reason) {
-  // Zotero requires update_url; keep this custom build on manual updates instead.
+  // This add-on updates only from the papers fork's manifest.
   const { AddonManager } = parseInt(Zotero.version, 10) >= 8
     ? ChromeUtils.importESModule("resource://gre/modules/AddonManager.sys.mjs")
     : ChromeUtils.import("resource://gre/modules/AddonManager.jsm");
   const self = await AddonManager.getAddonByID(id);
-  self.applyBackgroundUpdates = AddonManager.AUTOUPDATE_DISABLE;
+  self.applyBackgroundUpdates = AddonManager.AUTOUPDATE_ENABLE;
 
   var aomStartup = Components.classes[
     "@mozilla.org/addons/addon-manager-startup;1"

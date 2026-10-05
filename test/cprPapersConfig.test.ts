@@ -1,4 +1,6 @@
 import { assert } from "chai";
+import { readFileSync } from "node:fs";
+import { runInNewContext } from "node:vm";
 import { config } from "../package.json";
 import { getModelProviderGroups, getLastUsedModelEntryId, setModelProviderGroups } from "../src/utils/modelProviders";
 import { CPR_PAPERS_API_BASE, CPR_PAPERS_MODEL, CPR_PAPERS_MODELS, normalizeCprPapersTarget } from "../src/utils/cprPapers";
@@ -14,6 +16,33 @@ describe("CPR papers public configuration", function () {
     globalThis.Zotero = {Prefs: {get: (key: string) => prefs.get(key), set: (key: string, value: unknown) => prefs.set(key, value)}} as unknown as typeof Zotero;
   });
   afterEach(function () { globalThis.Zotero = original; });
+  it("enables this add-on's updates from the papers fork on Zotero 7 and 8", async function () {
+    const manifest = JSON.parse(readFileSync(new URL("../addon/manifest.json", import.meta.url), "utf8"));
+    assert.equal(manifest.applications.zotero.update_url,
+      "https://github.com/Molaison/llm-for-zotero-papers/releases/download/release/update-beta.json");
+    const bootstrap = readFileSync(new URL("../addon/bootstrap.js", import.meta.url), "utf8");
+    for (const version of ["7.0", "8.0"]) {
+      const self = {applyBackgroundUpdates: 0};
+      let imported = "";
+      const exports = {AddonManager: {AUTOUPDATE_ENABLE: 2, getAddonByID: async (id: string) => {
+        assert.equal(id, config.addonID); return self;
+      }}};
+      const context = {
+        Zotero: {version, __addonInstance__: {hooks: {onStartup: async () => {}}}},
+        ChromeUtils: {
+          import: (path: string) => {imported = path; return exports;},
+          importESModule: (path: string) => {imported = path; return exports;},
+        },
+        Components: {classes: {"@mozilla.org/addons/addon-manager-startup;1": {
+          getService: () => ({registerChrome: () => ({})}),
+        }}, interfaces: {amIAddonManagerStartup: {}}},
+        Services: {io: {newURI: (value: string) => value}, scriptloader: {loadSubScript: () => {}}},
+      };
+      await runInNewContext(bootstrap + "\nstartup({id: '" + config.addonID + "', rootURI: 'file:///addon/'}, 0)", context);
+      assert.equal(self.applyBackgroundUpdates, 2);
+      assert.equal(imported.endsWith(version.startsWith("7") ? "AddonManager.jsm" : "AddonManager.sys.mjs"), true);
+    }
+  });
   it("installs and selects the public Responses profile without embedding a key", function () {
     const groups = getModelProviderGroups();
     const papers = groups.find(g => g.models.some(m => m.model === CPR_PAPERS_MODEL));
