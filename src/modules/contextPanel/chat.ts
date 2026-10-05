@@ -6840,6 +6840,7 @@ export async function retryLatestAssistantResponse(
       inputMode: effectiveRequestConfig.advanced?.inputMode,
       contextCache: contextPlan.contextCache,
       requestScope: createProviderRequestScope(conversationKey),
+      cprPaperItemId: resolveConversationBaseItem(item)?.id,
     };
     const { finalPrepared, systemMessages, workflowTestIntercepted } =
       await prepareFinalContextPlanChatRequest({
@@ -9851,6 +9852,7 @@ export async function sendQuestion(
       inputMode: effectiveRequestConfig.advanced?.inputMode,
       contextCache: contextPlan.contextCache,
       requestScope: createProviderRequestScope(conversationKey),
+      cprPaperItemId: resolveConversationBaseItem(item)?.id,
     };
     const { finalPrepared, systemMessages, workflowTestIntercepted } =
       await prepareFinalContextPlanChatRequest({

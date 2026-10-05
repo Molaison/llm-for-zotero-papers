@@ -1,7 +1,7 @@
 {
   "name": "llm-for-zotero",
   "type": "module",
-  "version": "3.9.9",
+  "version": "3.9.9-papers.10",
   "description": "AI research agent rooted in your Zotero library",
   "config": {
     "addonName": "llm-for-zotero",
@@ -12,13 +12,13 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/yilewang/llm-for-zotero.git"
+    "url": "git+https://github.com/Molaison/llm-for-zotero-papers.git"
   },
   "author": "Yile Wang",
   "bugs": {
-    "url": "https://github.com/yilewang/llm-for-zotero/issues"
+    "url": "https://github.com/Molaison/llm-for-zotero-papers/issues"
   },
-  "homepage": "https://github.com/yilewang/llm-for-zotero#readme",
+  "homepage": "https://github.com/Molaison/llm-for-zotero-papers",
   "license": "AGPL-3.0-or-later",
   "scripts": {
     "start": "zotero-plugin serve",

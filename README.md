@@ -1,4 +1,27 @@
-# llm-for-zotero: A Research Agent System for your Zotero Library
+# llm-for-zotero papers
+
+这是 [yilewang/llm-for-zotero](https://github.com/yilewang/llm-for-zotero) 的 CPR / ChatGPT Web papers 定制版，保留原 AGPL-3.0 许可证和上游署名。
+
+## 安装与当前状态
+
+从本仓库的 [Releases](https://github.com/Molaison/llm-for-zotero-papers/releases) 下载版本号含 `papers` 的 `llm-for-zotero.xpi`，在 Zotero 的“工具 → 插件 → 从文件安装”中安装，然后重启 Zotero。保留已有插件 ID、偏好与本地聊天，不要同时安装上游普通版。
+
+- 在普通 Chat 模式使用预置的 CPR papers 配置，并填写你自己的专用 API key。密钥、生产配置、用户 PDF 和聊天记录不在本仓库内。
+- 同篇论文按 DOI 或 PDF SHA256 绑定固定的远端对话，首次上传 PDF，已登记后的请求不重传。支持四个 papers 模型及相应思考强度，会话名优先使用论文短标题。
+- “远端记录”按钮以只读窗口显示历史，不覆盖本地记录。**它需要服务端 history 接口；当前配套服务端仍是未上线候选，不能把按钮存在当成已经可用。**
+- GitHub Actions 自动构建并发布预发布版本。Zotero 后台自动更新目前仍关闭，需手动安装新 XPI；更新地址已指向本 fork，不再指向上游发行版。
+
+## 自动发布
+
+将 `package.json` 和 `package-lock.json` 的版本一并更新为新的 `3.9.9-papers.N`，提交到本仓库默认分支 `codex/papers`。`Release Papers` 会运行 papers 定向测试和完整构建/类型检查，再创建对应的 `v3.9.9-papers.N` 标签、GitHub 预发布与更新清单。也支持推送相匹配的版本标签或手动触发工作流。已经发布的版本不覆盖；修复需使用新版本号。
+
+本工作流仅发布插件，不部署 CPR、QA pool、浏览器或数据库。远端历史候选仍须独立浏览器验收及明确的生产上线窗口。
+
+以下保留上游功能介绍；上游文档中的能力不代表都已适配 CPR papers 通道。
+
+---
+
+# Upstream: A Research Agent System for your Zotero Library
 
 [![zotero target version](https://img.shields.io/badge/Zotero-7-green?style=flat-square&logo=zotero&logoColor=CC2936)](https://www.zotero.org)
 [![zotero target version](https://img.shields.io/badge/Zotero-8-green?style=flat-square&logo=zotero&logoColor=CC2936)](https://www.zotero.org)

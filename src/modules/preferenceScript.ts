@@ -90,6 +90,8 @@ import {
   type ProviderProtocol,
 } from "../utils/providerProtocol";
 import {
+  isCprPapersProviderTarget,
+  runCprPapersModelAccessTest,
   runProviderConnectionTest,
   runProviderSettingsChecks,
   runCodexAppServerConnectionTest,
@@ -2545,6 +2547,34 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
 
             const fetchFn = ztoolkit.getGlobal("fetch") as typeof fetch;
             const requestScope = createProviderRequestScope();
+            // The papers route needs a paper_id for inference, so an anonymous
+            // "Say OK" request is refused. Its configuration is verified with
+            // GET /v1/models instead: key and model entitlement only, no
+            // inference, and nothing is created on the server.
+            if (
+              isCprPapersProviderTarget({
+                apiBase,
+                modelName,
+                protocol: providerProtocol,
+              })
+            ) {
+              const papers = await runCprPapersModelAccessTest({
+                requestScope,
+                fetchFn,
+                authMode,
+                apiBase,
+                apiKey,
+                modelName,
+              });
+              statusLine.textContent =
+                `${t("✓ API 鉴权/模型权限已验证，未执行论文推理")}\n` +
+                `${t("Model: ")}${modelName} — ${t("server model list: ")}${papers.modelCount}\n` +
+                t(
+                  "papers 模型只响应带 paper_id 的请求：没有论文时无法测试推理，因此自定义参数未校验。",
+                );
+              statusLine.style.color = "green";
+              return;
+            }
             const result = await runProviderConnectionTest({
               requestScope,
               fetchFn,

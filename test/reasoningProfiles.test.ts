@@ -11,13 +11,13 @@ import {
 import { buildReasoningPayload } from "../src/utils/llmClient";
 
 describe("reasoningProfiles", function () {
+  const levels = (provider: any, model: string) =>
+    getRuntimeReasoningOptionsForModel(provider, model).map((o) => o.level);
   describe("provider vocabularies match the published APIs", function () {
     // Each level id is the value the provider documents, so the menu, the
     // editor and the request all say the same word. Sources: DeepSeek thinking
     // mode guide, OpenAI reasoning guide + model pages, xAI reasoning guide,
     // Claude effort docs. Checked 2026-09-09.
-    const levels = (provider: any, model: string) =>
-      getRuntimeReasoningOptionsForModel(provider, model).map((o) => o.level);
 
     it("DeepSeek V4 offers none/low/high/max, the efforts the API accepts", function () {
       for (const model of ["deepseek-v4-pro", "deepseek-v4-flash"]) {
@@ -269,6 +269,54 @@ describe("reasoningProfiles", function () {
       assert.deepEqual(
         gpt53Codex.map((option) => option.level),
         ["low", "medium", "high", "xhigh"],
+      );
+    });
+  });
+
+  describe("CPR papers aliases", function () {
+    // The four aliases the papers route offers, each with its own ladder.
+    it("gives each canonical papers alias its own effort ladder and default", function () {
+      assert.deepEqual(levels("openai", "papers/gpt-5.6-sol"), [
+        "high",
+        "medium",
+        "xhigh",
+      ]);
+      assert.equal(
+        getReasoningDefaultLevelForModel("openai", "papers/gpt-5.6-sol"),
+        "high",
+      );
+      assert.deepEqual(levels("openai", "papers/gpt-5.6-sol-instant"), ["low"]);
+      assert.equal(
+        getReasoningDefaultLevelForModel(
+          "openai",
+          "papers/gpt-5.6-sol-instant",
+        ),
+        "low",
+      );
+      for (const model of ["papers/gpt-5.6-pro", "papers/gpt-6-pro"]) {
+        assert.deepEqual(levels("openai", model), ["max"], model);
+        assert.equal(
+          getReasoningDefaultLevelForModel("openai", model),
+          "max",
+          model,
+        );
+      }
+    });
+
+    it("does not transfer the papers ladders onto the plain model names", function () {
+      // The plain ids are different deployments with their own documented
+      // ladder; only the canonical `papers/...` alias carries the papers table.
+      assert.deepEqual(levels("openai", "gpt-5.6-sol"), [
+        "none",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+      ]);
+      assert.equal(
+        getReasoningDefaultLevelForModel("openai", "papers/gpt-5.6-sol"),
+        "high",
       );
     });
   });

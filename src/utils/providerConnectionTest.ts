@@ -1,4 +1,9 @@
-import { usesMaxCompletionTokens } from "./apiHelpers";
+import { resolveEndpoint, usesMaxCompletionTokens } from "./apiHelpers";
+import {
+  CPR_PAPERS_API_BASE,
+  isCprPapersModel,
+  normalizeCprPapersTarget,
+} from "./cprPapers";
 import {
   isRecord,
   normalizeProfileOverride,
@@ -465,6 +470,87 @@ export async function runCodexDirectConnectionTest(
       inferenceError: error instanceof Error ? error.message : String(error),
     };
   }
+}
+
+/** `/v1/models` is the one endpoint the papers route serves without a paper. */
+const MODELS_ENDPOINT = "/v1/models";
+
+/**
+ * The papers route rejects anonymous inference: `/v1/responses` requires
+ * `paper_id` and `paper_operation`, so the usual "Say OK" probe comes back
+ * 400 paper_id_required. Configuration can still be checked without a paper,
+ * because `GET /v1/models` only needs the API key.
+ *
+ * Only the frozen papers aliases are exempt. Another model served from the
+ * same CPR URL would still be reached by the ordinary Responses probe, so
+ * neither the URL nor a papers-shaped name alone may switch the check.
+ */
+export function isCprPapersProviderTarget(params: {
+  apiBase: string;
+  modelName: string;
+  protocol: ProviderProtocol;
+}): boolean {
+  return (
+    (params.protocol === "responses_api" ||
+      params.protocol === "codex_responses") &&
+    isCprPapersModel(params.modelName) &&
+    normalizeCprPapersTarget(params.apiBase) === CPR_PAPERS_API_BASE
+  );
+}
+
+/**
+ * Verify the papers API key and model entitlement by listing models.
+ *
+ * Deliberately sends no inference request and creates no paper, thread, or
+ * upload: it must not be mistaken for a successful paper turn.
+ */
+export async function runCprPapersModelAccessTest(params: {
+  requestScope?: ProviderRequestScope;
+  fetchFn: typeof fetch;
+  authMode: ModelProviderAuthMode;
+  apiBase: string;
+  apiKey: string;
+  modelName: string;
+}): Promise<{ modelCount: number }> {
+  const apiBase = params.apiBase
+    .trim()
+    .replace(/\/responses$/, "")
+    .replace(/\/+$/, "");
+  if (!apiBase) throw new Error("API URL is required");
+  const modelName = params.modelName.trim();
+  const response = await sendProviderRequest({
+    url: resolveEndpoint(apiBase, MODELS_ENDPOINT),
+    scope: params.requestScope ?? createProviderRequestScope(),
+    fetchFn: params.fetchFn,
+    init: {
+      method: "GET",
+      headers: buildProviderAuthHeaders({
+        protocol: "responses_api",
+        apiKey: params.apiKey,
+        authMode: params.authMode,
+      }),
+    },
+  });
+  if (!response.ok) {
+    throw new Error(
+      `HTTP ${response.status}: ${(await response.text()).slice(0, 300)}`,
+    );
+  }
+  const payload = (await response.json()) as { data?: Array<{ id?: unknown }> };
+  const ids = (Array.isArray(payload?.data) ? payload.data : [])
+    .map((entry) => (typeof entry?.id === "string" ? entry.id.trim() : ""))
+    .filter(Boolean);
+  if (!ids.length)
+    throw new Error(
+      "GET /v1/models listed no models; the papers model was not verified.",
+    );
+  if (!ids.includes(modelName))
+    throw new Error(
+      `${modelName} is not in the server model list (${ids.length} listed: ${ids
+        .slice(0, 5)
+        .join(", ")}); the papers model was not verified.`,
+    );
+  return { modelCount: ids.length };
 }
 
 export async function runProviderConnectionTest(params: {

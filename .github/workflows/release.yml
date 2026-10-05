@@ -1,19 +1,29 @@
-name: Release Plugin
+name: Release Papers
 
 on:
   push:
+    branches:
+      - "codex/papers"
+    paths:
+      - "package.json"
+      - ".github/workflows/release.yml"
     tags:
-      - "v*"
+      - "v*-papers.*"
+  workflow_dispatch:
 
 permissions:
   contents: write
 
+concurrency:
+  group: papers-release
+  cancel-in-progress: false
+
 jobs:
-  # No test gate here on purpose. Tests run on every push to main via ci.yml,
-  # which is where a red suite should be noticed and fixed. Publishing must not
-  # be blocked by them -- a flaky test is not a reason a release cannot ship.
   release:
+    if: github.repository == 'Molaison/llm-for-zotero-papers'
     runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
       - name: Checkout
@@ -21,19 +31,79 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Resolve version and avoid overwriting published releases
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(jq -r .version package.json)
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-papers\.[0-9]+$ ]]
+          tag="v$version"
+          if [[ "$GITHUB_REF_TYPE" == tag && "$GITHUB_REF_NAME" != "$tag" ]]; then
+            echo "::error::Tag does not match package.json"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          existing=$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate --jq ".[] | select(.tag_name == \"$tag\" and .draft == false) | .html_url")
+          if [[ -n "$existing" ]]; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "Already published: $existing" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Setup Node
+        if: steps.version.outputs.publish == 'true'
         uses: actions/setup-node@v4
         with:
-          node-version: "24"
+          node-version: "22"
           cache: "npm"
 
       - name: Install deps
+        if: steps.version.outputs.publish == 'true'
         run: npm ci
 
+      - name: Test papers contracts
+        if: steps.version.outputs.publish == 'true'
+        run: node --import tsx node_modules/mocha/bin/mocha.js --require ./test/register.cjs test/cprPapersConfig.test.ts test/cprPapersRegistry.test.ts test/cprPaperHistoryDialog.test.ts
+
       - name: Build
+        if: steps.version.outputs.publish == 'true'
         run: npm run build
 
+      - name: Check fork update target and pin release tag
+        if: steps.version.outputs.publish == 'true'
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -e --arg url "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/llm-for-zotero.xpi" \
+            '.addons["zotero-llm@github.com.yilewang"].updates[0].update_link == $url' .scaffold/build/update-beta.json
+          if git rev-parse --verify "refs/tags/$TAG" >/dev/null 2>&1; then
+            test "$(git rev-parse "$TAG^{commit}")" = "$GITHUB_SHA"
+          else
+            git tag "$TAG" "$GITHUB_SHA"
+            git push origin "refs/tags/$TAG"
+          fi
+
       - name: Publish release assets
+        if: steps.version.outputs.publish == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: npm run release -- --yes
+
+      - name: Mark candidate limitations
+        if: steps.version.outputs.publish == 'true'
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          cat > "$RUNNER_TEMP/papers-notes.md" <<'EOF'
+          CPR / ChatGPT Web papers 定制版。下载 llm-for-zotero.xpi 后从 Zotero 插件管理器安装。
+
+          保留单篇论文固定对话、首次 PDF 上传、四模型/思考强度和短标题命名。
+          远端记录按钮需要配套服务端 history 接口；当前服务端仍未上线，真实读取尚待隔离验收。
+          本 Release 不部署生产服务，不包含 API key、生产配置或用户论文。Zotero 暂仍采用手动更新。
+          EOF
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --prerelease --notes-file "$RUNNER_TEMP/papers-notes.md"
+          echo "Published https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG" >> "$GITHUB_STEP_SUMMARY"

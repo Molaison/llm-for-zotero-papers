@@ -1,5 +1,8 @@
 import { assert } from "chai";
+import { CPR_PAPERS_MODELS } from "../src/utils/cprPapers";
 import {
+  isCprPapersProviderTarget,
+  runCprPapersModelAccessTest,
   runProviderConnectionTest,
   runProviderSettingsChecks,
 } from "../src/utils/providerConnectionTest";
@@ -383,5 +386,180 @@ describe("provider request contract across product entry points", function () {
   it("OpenCode Responses support does not enable unsupported file uploads", function () {
     assert.isFalse(providerSupportsFileUploads(base));
     assert.isTrue(providerSupportsFileUploads("https://api.openai.com/v1"));
+  });
+});
+
+describe("papers provider configuration test", function () {
+  const papersBase = "https://cpr.molaisonz.dpdns.org/v1";
+  const papersModel = "papers/gpt-5.6-sol";
+  let calls: Array<{ url: string; method: string; authorization: string | null }>;
+  let listStatus: number;
+  let modelIds: string[];
+  let fetchFn: typeof fetch;
+
+  beforeEach(function () {
+    calls = [];
+    listStatus = 200;
+    modelIds = [papersModel];
+    fetchFn = (async (url: string, init: RequestInit = {}) => {
+      calls.push({
+        url: String(url),
+        method: String(init.method || "GET"),
+        authorization: new Headers(init.headers).get("authorization"),
+      });
+      if (String(url).endsWith("/models")) {
+        if (listStatus !== 200)
+          return new Response(
+            JSON.stringify({ error: { code: "unauthorized" } }),
+            { status: listStatus },
+          );
+        return new Response(
+          JSON.stringify({
+            object: "list",
+            data: modelIds.map((id) => ({ id, object: "model" })),
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(
+        JSON.stringify({ status: "completed", output_text: "OK" }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }) as unknown as typeof fetch;
+  });
+
+  async function rejects(task: Promise<unknown>, message: RegExp) {
+    let failure: unknown;
+    try {
+      await task;
+    } catch (error) {
+      failure = error;
+    }
+    assert.match(String(failure), message);
+  }
+
+  it("verifies the key and model with one GET and sends no inference request", async function () {
+    const result = await runCprPapersModelAccessTest({
+      fetchFn,
+      authMode: "api_key",
+      apiBase: papersBase,
+      apiKey: "test-key",
+      modelName: papersModel,
+    });
+    assert.equal(result.modelCount, 1);
+    assert.lengthOf(calls, 1);
+    assert.equal(calls[0].method, "GET");
+    assert.equal(calls[0].url, "https://cpr.molaisonz.dpdns.org/v1/models");
+    assert.equal(calls[0].authorization, "Bearer test-key");
+  });
+
+  it("checks every canonical papers alias with one GET and no inference request", async function () {
+    for (const model of CPR_PAPERS_MODELS) {
+      calls = [];
+      modelIds = [model];
+      assert.isTrue(
+        isCprPapersProviderTarget({
+          apiBase: papersBase,
+          modelName: model,
+          protocol: "responses_api",
+        }),
+        model,
+      );
+      const result = await runCprPapersModelAccessTest({
+        fetchFn,
+        authMode: "api_key",
+        apiBase: papersBase,
+        apiKey: "test-key",
+        modelName: model,
+      });
+      assert.equal(result.modelCount, 1, model);
+      assert.deepEqual(
+        calls.map((call) => [call.method, call.url]),
+        [["GET", "https://cpr.molaisonz.dpdns.org/v1/models"]],
+        model,
+      );
+    }
+  });
+
+  it("fails when the server does not offer the selected model", async function () {
+    modelIds = ["gpt-5.6-sol"];
+    await rejects(
+      runCprPapersModelAccessTest({
+        fetchFn,
+        authMode: "api_key",
+        apiBase: papersBase,
+        apiKey: "test-key",
+        modelName: papersModel,
+      }),
+      /not in the server model list/,
+    );
+  });
+
+  it("fails when the key is rejected", async function () {
+    listStatus = 401;
+    await rejects(
+      runCprPapersModelAccessTest({
+        fetchFn,
+        authMode: "api_key",
+        apiBase: papersBase,
+        apiKey: "bad-key",
+        modelName: papersModel,
+      }),
+      /HTTP 401/,
+    );
+  });
+
+  it("leaves the POST inference contract of other Responses providers alone", async function () {
+    assert.isFalse(
+      isCprPapersProviderTarget({
+        apiBase: "https://api.openai.com/v1",
+        modelName: "gpt-5.6-sol",
+        protocol: "responses_api",
+      }),
+    );
+    assert.isTrue(
+      isCprPapersProviderTarget({
+        apiBase: papersBase,
+        modelName: papersModel,
+        protocol: "responses_api",
+      }),
+    );
+    const result = await runProviderConnectionTest({
+      fetchFn,
+      protocol: "responses_api",
+      authMode: "api_key",
+      apiBase: "https://api.openai.com/v1",
+      apiKey: "test-key",
+      modelName: "gpt-5.6-sol",
+    });
+    assert.equal(result.reply, "OK");
+    assert.lengthOf(calls, 1);
+    assert.equal(calls[0].method, "POST");
+    assert.equal(calls[0].url, "https://api.openai.com/v1/responses");
+  });
+
+  it("keeps the ordinary Responses probe for a non-papers model on the CPR URL", async function () {
+    for (const modelName of ["gpt-5.6-sol", "papers/gpt-5.6-sol-extra"]) {
+      assert.isFalse(
+        isCprPapersProviderTarget({
+          apiBase: papersBase,
+          modelName,
+          protocol: "responses_api",
+        }),
+        modelName,
+      );
+    }
+    const result = await runProviderConnectionTest({
+      fetchFn,
+      protocol: "responses_api",
+      authMode: "api_key",
+      apiBase: papersBase,
+      apiKey: "test-key",
+      modelName: "gpt-5.6-sol",
+    });
+    assert.equal(result.reply, "OK");
+    assert.lengthOf(calls, 1);
+    assert.equal(calls[0].method, "POST");
+    assert.equal(calls[0].url, "https://cpr.molaisonz.dpdns.org/v1/responses");
   });
 });

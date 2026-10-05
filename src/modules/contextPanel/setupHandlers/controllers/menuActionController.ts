@@ -62,6 +62,8 @@ type MenuActionControllerDeps = {
   exportBtn: HTMLButtonElement | null;
   popoutBtn: HTMLButtonElement | null;
   settingsBtn: HTMLButtonElement | null;
+  remoteHistoryBtn: HTMLButtonElement | null;
+  openRemotePaperHistory: () => void;
   preferencesPaneId: string;
   getItem: () => Zotero.Item | null;
   getResponseMenuTarget: () => ResponseMenuTarget;
@@ -728,6 +730,23 @@ export function attachMenuActionController(
       return;
     }
     positionMenuBelowButton(deps.body, exportMenu, exportBtn);
+  });
+
+  deps.remoteHistoryBtn?.addEventListener("click", (e: Event) => {
+    e.preventDefault();
+    e.stopPropagation();
+    // Loading disables the button; the flow also refuses a second request.
+    if (deps.remoteHistoryBtn?.disabled) return;
+    deps.closeRetryModelMenu();
+    deps.closeSlashMenu();
+    deps.closeResponseMenu();
+    deps.closePromptMenu();
+    deps.closeHistoryNewMenu();
+    deps.closeHistoryMenu();
+    deps.closeExportMenu();
+    void Promise.resolve(deps.openRemotePaperHistory()).catch((error) => {
+      deps.logError("LLM: failed to open remote paper history", error);
+    });
   });
 
   deps.popoutBtn?.addEventListener("click", (e: Event) => {

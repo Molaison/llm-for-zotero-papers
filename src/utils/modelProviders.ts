@@ -1,4 +1,9 @@
 import { config } from "../../package.json";
+import {
+  CPR_PAPERS_API_BASE,
+  CPR_PAPERS_MODELS,
+  isCprPapersModel,
+} from "./cprPapers";
 import { DEFAULT_TEMPERATURE } from "./llmDefaults";
 import {
   normalizeMaxTokens,
@@ -876,8 +881,67 @@ function ensureModelProviderGroups(): ModelProviderGroup[] {
   return migrateLegacyModelProviderGroups();
 }
 
+/** The table the four-model extension was applied from. */
+const CPR_PAPERS_MODELS_VERSION_PREF_KEY = "cprPapersModelsVersion";
+const CPR_PAPERS_MODELS_VERSION = "4";
+
+/** The dedicated public papers group: every row is a canonical papers alias. */
+function isCprPapersGroup(group: ModelProviderGroup): boolean {
+  return group.authMode === "api_key"
+    && group.models.length > 0
+    && group.models.every((row) => isCprPapersModel(row.model));
+}
+
+/**
+ * Widen the dedicated papers group to the whole frozen alias table.
+ *
+ * Rows the user already has keep their id and settings, so the key, the stored
+ * selection, and any per-row configuration survive; only missing aliases are
+ * appended. Idempotent, and it never creates the group: a user who deleted it
+ * has said so.
+ */
+function extendCprPapersGroup(papers: ModelProviderGroup): void {
+  for (const model of CPR_PAPERS_MODELS) {
+    if (papers.models.some((row) => row.model === model)) continue;
+    papers.models.push(createProviderModelEntry(model, undefined, "responses_api"));
+  }
+}
+
 export function getModelProviderGroups(): ModelProviderGroup[] {
-  return ensureModelProviderGroups();
+  const groups = ensureModelProviderGroups();
+  if (getStringPref("cprPapersPublicConfigured") !== "1") {
+    let papers = groups.find(isCprPapersGroup);
+    if (!papers) {
+      papers = {
+        id: createId("provider"), apiBase: CPR_PAPERS_API_BASE, apiKey: "",
+        authMode: "api_key", providerProtocol: "responses_api",
+        models: CPR_PAPERS_MODELS.map((model) => createProviderModelEntry(model, undefined, "responses_api")),
+      };
+      groups.unshift(papers);
+    } else {
+      papers.apiBase = CPR_PAPERS_API_BASE;
+      papers.providerProtocol = "responses_api";
+      papers.models = papers.models.map((row) => ({...row, providerProtocol: "responses_api"}));
+      extendCprPapersGroup(papers);
+    }
+    storeModelProviderGroups(groups);
+    setPref(LAST_USED_MODEL_ENTRY_ID_PREF_KEY, papers.models[0].id);
+    setPref("cprPapersPublicConfigured", "1");
+    setPref(CPR_PAPERS_MODELS_VERSION_PREF_KEY, CPR_PAPERS_MODELS_VERSION);
+    return groups;
+  }
+  // Installed already: extend the dedicated group once from the frozen table.
+  // A group the user deleted stays deleted, and running this twice is a no-op.
+  const papers = groups.find(isCprPapersGroup);
+  if (
+    papers &&
+    getStringPref(CPR_PAPERS_MODELS_VERSION_PREF_KEY) !== CPR_PAPERS_MODELS_VERSION
+  ) {
+    extendCprPapersGroup(papers);
+    storeModelProviderGroups(groups);
+    setPref(CPR_PAPERS_MODELS_VERSION_PREF_KEY, CPR_PAPERS_MODELS_VERSION);
+  }
+  return groups;
 }
 
 /** Consume the one-time notice emitted after resetting stored caps to Auto. */

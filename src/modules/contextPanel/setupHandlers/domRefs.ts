@@ -17,6 +17,7 @@ export type PanelDomRefs = {
   popoutBtn: HTMLButtonElement | null;
   settingsBtn: HTMLButtonElement | null;
   exportBtn: HTMLButtonElement | null;
+  remoteHistoryBtn: HTMLButtonElement | null;
   clearBtn: HTMLButtonElement | null;
   titleStatic: HTMLDivElement | null;
   historyBar: HTMLDivElement | null;
@@ -135,6 +136,9 @@ export function getPanelDomRefs(body: Element): PanelDomRefs {
       "#llm-settings",
     ) as HTMLButtonElement | null,
     exportBtn: body.querySelector("#llm-export") as HTMLButtonElement | null,
+    remoteHistoryBtn: body.querySelector(
+      "#llm-remote-history",
+    ) as HTMLButtonElement | null,
     clearBtn: body.querySelector("#llm-clear") as HTMLButtonElement | null,
     titleStatic: body.querySelector(
       "#llm-title-static",

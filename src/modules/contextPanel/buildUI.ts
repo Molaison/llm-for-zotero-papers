@@ -1,4 +1,4 @@
-import { createElement } from "../../utils/domHelpers";
+import { createElement, el } from "../../utils/domHelpers";
 import { t } from "../../utils/i18n";
 import { createDockedPanelTitle } from "./dockedPanelTitle";
 import {
@@ -246,7 +246,28 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
     title: t("Delete conversation"),
   });
   clearBtn.setAttribute("aria-label", t("Delete conversation"));
-  headerActions.append(popoutBtn, settingsBtn, exportBtn, clearBtn);
+  // Read-only view of the remote papers conversation. Shown only for a papers
+  // chat bound to one paper; header spacing keeps it narrow.
+  const remoteHistoryBtn = el(
+    doc,
+    "button",
+    "padding:0 8px;height:28px;min-width:28px;border:none;background:transparent;" +
+      "cursor:pointer;font-size:var(--llm-fs-11,11px);color:inherit;white-space:nowrap;",
+    t("Remote"),
+  ) as HTMLButtonElement;
+  remoteHistoryBtn.id = "llm-remote-history";
+  remoteHistoryBtn.type = "button";
+  remoteHistoryBtn.className = "llm-btn-icon llm-remote-history-btn";
+  remoteHistoryBtn.title = t("Fetch remote record");
+  remoteHistoryBtn.setAttribute("aria-label", t("Fetch remote record"));
+  remoteHistoryBtn.style.display = "none";
+  headerActions.append(
+    popoutBtn,
+    settingsBtn,
+    remoteHistoryBtn,
+    exportBtn,
+    clearBtn,
+  );
   headerTop.appendChild(headerActions);
   if (body.closest(".llm-dedicated-chat-pane")) {
     header.appendChild(createDockedPanelTitle(body));

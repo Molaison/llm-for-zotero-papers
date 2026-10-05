@@ -4,6 +4,7 @@
  * Provides streaming and non-streaming API calls to OpenAI-compatible endpoints.
  */
 
+import { fetchCprPaperHistory, isCprPapersModel, prepareCprPaperRequest } from "./cprPapers";
 import { appLogger } from "../core/logging";
 import { config } from "../../package.json";
 import { DEFAULT_SYSTEM_PROMPT } from "./llmDefaults";
@@ -157,6 +158,7 @@ export type ChatFileAttachment = {
 };
 
 export type ChatParams = {
+  cprPaperItemId?: number;
   prompt: string;
   context?: string;
   history?: ChatMessage[];
@@ -1544,6 +1546,12 @@ export function estimateAvailableContextBudget(params: {
 /** Get fetch function from Zotero global */
 function getFetch(): typeof fetch {
   return ztoolkit.getGlobal("fetch") as typeof fetch;
+}
+
+export function loadCprPaperHistory(
+  params: Omit<Parameters<typeof fetchCprPaperHistory>[0], "fetchFn" | "readBytes">,
+) {
+  return fetchCprPaperHistory({...params, fetchFn: getFetch(), readBytes: readLocalFileBytes});
 }
 
 function normalizeStreamText(value: unknown): string {
@@ -4268,6 +4276,7 @@ async function callNativeProtocol(params: {
  * Call LLM API (non-streaming)
  */
 export async function callLLM(params: ChatParams): Promise<ModelTurnOutcome> {
+  if (isCprPapersModel(params.model || "")) return callLLMStream(params, () => {});
   const requestScope = params.requestScope ?? createProviderRequestScope();
   params = { ...params, requestScope };
   await preflightRequestModelCapabilities(params);
@@ -4425,6 +4434,24 @@ export async function callLLMStream(
   onReasoning?: (event: ReasoningEvent) => void,
   onUsage?: (usage: UsageStats) => void,
 ): Promise<ModelTurnOutcome> {
+  if (isCprPapersModel(params.model || "")) {
+    if (!params.apiBase || !params.apiKey) throw new Error("请配置 CPR API 地址和密钥。");
+    const paperRequest = await prepareCprPaperRequest({
+      itemId: params.cprPaperItemId, apiBase: params.apiBase, apiKey: params.apiKey,
+      model: params.model, reasoning: params.reasoning,
+      fetchFn: getFetch(), signal: params.signal,
+      prompt: params.prompt, readBytes: readLocalFileBytes,
+    });
+    const response = await getFetch()(resolveEndpoint(params.apiBase, "/v1/responses"), {
+      method: "POST", headers: {"Content-Type": "application/json", Authorization: `Bearer ${params.apiKey}`},
+      body: JSON.stringify(paperRequest.payload), signal: params.signal,
+    });
+    if (!response.ok) throw new Error(`CPR papers HTTP ${response.status}: ${(await response.text()).slice(0, 600)}`);
+    if (!response.body) throw new Error("CPR papers 未返回事件流；未自动重发。");
+    const outcome = await parseResponsesStream(response.body, onDelta, onReasoning, onUsage, { requireCompleted: true });
+    if (outcome.completion.status === "complete") paperRequest.accept();
+    return outcome;
+  }
   const requestScope = params.requestScope ?? createProviderRequestScope();
   params = { ...params, requestScope };
   await preflightRequestModelCapabilities(params);
@@ -4841,6 +4868,7 @@ export async function parseResponsesStream(
   onDelta: (delta: string) => void,
   onReasoning?: (event: ReasoningEvent) => void,
   onUsage?: (usage: UsageStats) => void,
+  options: { requireCompleted?: boolean } = {},
 ): Promise<ModelTurnOutcome> {
   const reader = body.getReader() as ReadableStreamDefaultReader<Uint8Array>;
   const decoder = new TextDecoder("utf-8");
@@ -4859,6 +4887,8 @@ export async function parseResponsesStream(
   let sawSummaryFinal = false;
   let sawDetailsFinal = false;
   let responseId: string | undefined;
+  let sawCompleted = false;
+  let streamFailure: string | undefined;
 
   const normalizeReasoningText = (value: unknown): string => {
     if (typeof value === "string") return value;
@@ -5055,6 +5085,7 @@ export async function parseResponsesStream(
         try {
           const parsed = JSON.parse(data) as {
             type?: string;
+            error?: { message?: string };
             delta?: unknown;
             text?: unknown;
             summary?: unknown;
@@ -5074,6 +5105,7 @@ export async function parseResponsesStream(
             };
             response?: {
               id?: string;
+              error?: { message?: string };
               status?: string;
               incomplete_details?: { reason?: string } | null;
               output_text?: unknown;
@@ -5094,6 +5126,9 @@ export async function parseResponsesStream(
             responseId = parsed.response.id;
           }
 
+          if (eventType === "response.failed" || eventType === "error") {
+            streamFailure = parsed.response?.error?.message || parsed.error?.message || "CPR 请求失败";
+          }
           if (eventType === "response.incomplete") {
             completion = normalizeProviderCompletion(
               parsed.response?.incomplete_details?.reason,
@@ -5286,6 +5321,7 @@ export async function parseResponsesStream(
           }
 
           if (eventType === "response.completed") {
+            sawCompleted = !parsed.response?.status || parsed.response.status === "completed";
             completion = COMPLETE_MODEL_TURN;
             emitAnswer(
               parsed.response?.output_text ??
@@ -5341,6 +5377,9 @@ export async function parseResponsesStream(
     reader.releaseLock();
   }
 
+  if (options.requireCompleted && (streamFailure || !sawCompleted)) {
+    throw new Error(streamFailure || "CPR 连接在 response.completed 前结束；未标记 PDF 已上传，未自动重发。");
+  }
   return modelTurnOutcome(
     fullText,
     completion,

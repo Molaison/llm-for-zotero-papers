@@ -125,6 +125,12 @@ import {
   getAttachmentTypeLabel,
 } from "./textUtils";
 import { sanitizeText } from "../../utils/textSanitization";
+import {
+  createCprPaperHistoryController,
+  shouldOfferCprPaperHistory,
+  showCprPaperHistoryDialog,
+  type CprPaperHistoryRequest,
+} from "./cprPaperHistoryDialog";
 import { normalizeSelectedTextSource } from "../../services/context/normalizers";
 import { resolveSelectedTextAnchors } from "./selectedTextAnchors";
 import {
@@ -318,7 +324,7 @@ import type {
   SelectedTextContext,
 } from "./types";
 import type { ReasoningLevel as LLMReasoningLevel } from "../../utils/llmClient";
-import { isReasoningLevelActive } from "../../utils/llmClient";
+import { isReasoningLevelActive, loadCprPaperHistory } from "../../utils/llmClient";
 import type { ReasoningConfig as LLMReasoningConfig } from "../../utils/llmClient";
 import {
   browseAllItemCandidates,
@@ -725,6 +731,7 @@ export function setupHandlers(
     popoutBtn,
     settingsBtn,
     exportBtn,
+    remoteHistoryBtn,
     clearBtn,
     titleStatic,
     historyBar,
@@ -891,6 +898,113 @@ export function setupHandlers(
   let isQueuedFollowUpSendAvailable: () => boolean = () => false;
   let queueFollowUpInput: (text: string) => void = () => {};
 
+  // ---- Remote papers history (read-only) ----------------------------------
+  // The header button reuses the conversation's own transport settings and its
+  // request slot, so fetching remote history can never race a send.
+  let remoteHistoryBusy = false;
+  const resolveRemoteHistoryContext = (): {
+    visible: boolean;
+    request: CprPaperHistoryRequest | null;
+  } => {
+    try {
+      const target = item;
+      const profile = target ? getSelectedProfile() : null;
+      const model = (
+        profile?.model ||
+        getSelectedModelInfo().currentModel ||
+        ""
+      ).trim();
+      const paperItemId = target
+        ? resolveConversationBaseItem(target)?.id ?? null
+        : null;
+      const visible = Boolean(target) && !resolveActiveNoteSession(target) &&
+        getCurrentRuntimeMode() === "chat" && shouldOfferCprPaperHistory({
+        conversationSystem: getConversationSystem(),
+        model,
+        paperItemId,
+      });
+      return {
+        visible,
+        request:
+          visible && profile?.apiBase
+            ? {
+                itemId: paperItemId as number,
+                apiBase: profile.apiBase,
+                apiKey: profile.apiKey || "",
+                model,
+              }
+            : null,
+      };
+    } catch {
+      // Model selection can still be resolving during the first sync.
+      return { visible: false, request: null };
+    }
+  };
+
+  const syncRemoteHistoryButton = () => {
+    if (!remoteHistoryBtn) return;
+    const { visible } = resolveRemoteHistoryContext();
+    const activeKey = item ? getConversationKey(item) : null;
+    const conversationBusy =
+      activeKey !== null && isRequestPending(activeKey);
+    remoteHistoryBtn.style.display = visible ? "" : "none";
+    // Disabled while this conversation is already sending or fetching, so a
+    // click can never queue a second request for the same conversation.
+    remoteHistoryBtn.disabled =
+      !visible || remoteHistoryBusy || conversationBusy;
+  };
+
+  const remoteHistoryController = createCprPaperHistoryController({
+    begin: () => {
+      const { request } = resolveRemoteHistoryContext();
+      const targetItem = item;
+      if (!request || !targetItem) return null;
+      const started = beginPanelRequest(
+        body,
+        targetItem,
+        t("Fetching remote record…"),
+      );
+      if (!started) return null;
+      const lease = capturePanelOperationLease(body);
+      const targetPaperId = request.itemId;
+      return {
+        request,
+        signal: started.signal,
+        // A late answer is dropped once this panel shows a different paper.
+        isCurrent: () => {
+          const current = resolveRemoteHistoryContext().request;
+          return isPanelOperationLeaseCurrent(lease) &&
+            current?.itemId === targetPaperId &&
+            current.model === request.model && current.apiBase === request.apiBase &&
+            current.apiKey === request.apiKey;
+        },
+        finish: () =>
+          finishPanelRequest(
+            body,
+            targetItem,
+            started.conversationKey,
+            started.requestId,
+          ),
+      };
+    },
+    loadHistory: (params) => loadCprPaperHistory(params),
+    showHistory: (history) => {
+      const doc = body.ownerDocument;
+      if (doc) showCprPaperHistoryDialog(doc, history);
+    },
+    setBusy: (busy) => {
+      remoteHistoryBusy = busy;
+      syncRemoteHistoryButton();
+    },
+    setStatusMessage: (message, level) => {
+      if (status) setStatus(status, message, level);
+    },
+    logError: (message, error) => {
+      appLogger.debug(message, error);
+    },
+  });
+  const openRemotePaperHistory = () => remoteHistoryController.open();
+
   const syncRequestUiForCurrentConversation = () => {
     const activeConversationKey = item ? getConversationKey(item) : null;
     const isWebChatActive = isWebChatModeActive();
@@ -911,6 +1025,7 @@ export function setupHandlers(
         !item || (isCurrentConversationPending && isWebChatActive);
     }
     renderQueuedFollowUpInputs();
+    syncRemoteHistoryButton();
   };
 
   // buildUI() wipes body.textContent whenever onAsyncRender fires (item
@@ -1243,6 +1358,7 @@ export function setupHandlers(
   let syncFooterPermissionControl = () => Promise.resolve();
   let disposeFooterPermissionControl: (() => void) | null = null;
   const updateRuntimeModeButton = () => {
+    syncRemoteHistoryButton();
     void syncFooterPermissionControl();
     if (!runtimeModeBtn) return;
     const indicator = runtimeModeBtn.querySelector(
@@ -2240,6 +2356,8 @@ export function setupHandlers(
     exportBtn,
     popoutBtn,
     settingsBtn,
+    remoteHistoryBtn,
+    openRemotePaperHistory,
     preferencesPaneId: PREFERENCES_PANE_ID,
     getItem: () => item,
     getResponseMenuTarget: () => responseMenuTarget,
@@ -4962,6 +5080,8 @@ export function setupHandlers(
 
   updateModelButton = (onlyIfChanged = false) => {
     if (!item || !modelBtn) return;
+    // A model change can add or remove the remote-history button.
+    syncRemoteHistoryButton();
     const { choices, currentModel, currentModelDisplay, currentModelHint } =
       getSelectedModelInfo();
     const modelLabel = `${currentModelDisplay || currentModel || "default"}`;

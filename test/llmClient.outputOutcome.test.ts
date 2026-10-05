@@ -203,3 +203,26 @@ describe("output cap rejection recovery", function () {
     );
   });
 });
+
+
+describe("CPR papers terminal acceptance", function () {
+  it("rejects a failed or truncated stream instead of accepting the PDF", async function () {
+    for (const events of [
+      [{type: "response.failed", response: {error: {message: "PDF upload failed"}}}],
+      [{type: "response.output_text.delta", delta: "Partial"}],
+    ]) {
+      let error: unknown;
+      try { await parseResponsesStream(makeSseStream(events), () => {}, undefined, undefined, {requireCompleted: true}); }
+      catch (caught) { error = caught; }
+      assert.instanceOf(error, Error);
+    }
+  });
+  it("accepts a completed response", async function () {
+    const result = await parseResponsesStream(makeSseStream([
+      {type: "response.output_text.delta", delta: "PDF read"},
+      {type: "response.completed", response: {status: "completed"}},
+    ]), () => {}, undefined, undefined, {requireCompleted: true});
+    assert.equal(result.text, "PDF read");
+    assert.equal(result.completion.status, "complete");
+  });
+});
