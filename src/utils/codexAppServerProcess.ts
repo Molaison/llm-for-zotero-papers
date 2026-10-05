@@ -12,6 +12,7 @@ import { getRuntimePlatformInfo } from "./runtimePlatform";
 import { getReasoningDefaultLevelForModel } from "./reasoningProfiles";
 import { extractContextCacheUsage } from "../contextCache/manager";
 import { appLogger } from "../core/logging";
+import { registerAppQuitBlocker } from "./appQuitBlocker";
 import {
   LocalDocumentPathStreamRedactor,
   redactAllRememberedLocalDocumentPathsFromTerminalText,
@@ -2607,6 +2608,27 @@ export async function resolveCodexBinary(
 
 // Per-auth-mode singleton processes
 const processCache = new Map<string, Promise<CodexAppServerProcess>>();
+let unregisterQuitBlocker: (() => void) | null = null;
+
+/**
+ * Stops every cached app-server. Quitting skips onShutdown, so the first spawn
+ * registers this for quit too; otherwise the process outlives Zotero (or, on a
+ * plugin update, keeps running under the old plugin until Zotero exits).
+ */
+export async function destroyAllCachedCodexAppServerProcesses(): Promise<void> {
+  unregisterQuitBlocker?.();
+  unregisterQuitBlocker = null;
+  const pending = [...processCache.values()];
+  processCache.clear();
+  await Promise.all(
+    pending.map((promise) =>
+      promise.then(
+        (proc) => proc.destroyAndWait().catch(() => undefined),
+        () => undefined,
+      ),
+    ),
+  );
+}
 
 function buildProcessCacheKey(
   cacheKey: string,
@@ -2650,6 +2672,13 @@ export async function getOrCreateCodexAppServerProcess(
   if (existing) {
     return existing;
   }
+  unregisterQuitBlocker ??= registerAppQuitBlocker(
+    "LLM for Zotero: stop codex app-server",
+    async () => {
+      unregisterQuitBlocker = null;
+      await destroyAllCachedCodexAppServerProcesses();
+    },
+  );
   const promise = CodexAppServerProcess.spawn(options);
   promise.then((proc) => {
     proc.onClose(() => {

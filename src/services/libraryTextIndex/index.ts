@@ -15,7 +15,9 @@ import {
   closeLibraryTextIndexDb,
   deleteLibraryTextIndexDatabaseFiles,
   isLibraryTextIndexClosedError,
+  refuseLibraryTextIndexOpensForQuit,
 } from "./db";
+import { registerAppQuitBlocker } from "../../utils/appQuitBlocker";
 import { libraryTextIndexScheduler, type SchedulerEnv } from "./scheduler";
 import { createUserIdleTracker, type UserIdleTracker } from "./userIdle";
 import {
@@ -105,6 +107,7 @@ let idleTracker: UserIdleTracker | null = null;
 let restoreEnv: Partial<SchedulerEnv> | null = null;
 /** The last start's overrides, so a clear restarts the index the same way. */
 let lastEnvOverride: Partial<SchedulerEnv> = {};
+let unregisterQuitBlocker: (() => void) | null = null;
 
 /**
  * Starts the background fill. Deferred startup work: it never opens a
@@ -119,6 +122,16 @@ export async function startLibraryTextIndex(
 ): Promise<void> {
   if (idleTracker) await stopLibraryTextIndex();
   lastEnvOverride = envOverride;
+  // Quitting skips onShutdown, and Zotero's exit waits for the index's
+  // connection: stop the background work and close it here instead.
+  unregisterQuitBlocker = registerAppQuitBlocker(
+    "LLM for Zotero: stop the library text index",
+    async () => {
+      unregisterQuitBlocker = null;
+      refuseLibraryTextIndexOpensForQuit();
+      await stopLibraryTextIndex();
+    },
+  );
   const scheduler = libraryTextIndexScheduler as unknown as {
     env: SchedulerEnv;
   };
@@ -159,6 +172,8 @@ export async function startLibraryTextIndex(
 }
 
 export async function stopLibraryTextIndex(): Promise<void> {
+  unregisterQuitBlocker?.();
+  unregisterQuitBlocker = null;
   unsubscribeChanges?.();
   unsubscribeChanges = null;
   unsubscribeContexts?.();

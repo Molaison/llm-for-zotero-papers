@@ -33,6 +33,8 @@ let testOverride: LibraryTextIndexDb | null = null;
 let openPromise: Promise<LibraryTextIndexDb | null> | null = null;
 /** True while the files are being deleted; opens are refused meanwhile. */
 let deletingFiles = false;
+/** Set when Zotero quits: a late search or job must not open a new handle. */
+let quitting = false;
 
 const SCHEMA_SQL = [
   `CREATE TABLE IF NOT EXISTS index_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
@@ -147,7 +149,7 @@ export function setLibraryTextIndexDbForTests(
 export async function openLibraryTextIndexDb(): Promise<LibraryTextIndexDb | null> {
   // A connection opened mid-delete would keep writing to an unlinked file,
   // and SQLite's shared cache would make the next open of the path read-only.
-  if (deletingFiles) return null;
+  if (deletingFiles || quitting) return null;
   if (testOverride) {
     await ensureLibraryTextIndexSchema(testOverride);
     return testOverride;
@@ -194,6 +196,19 @@ export async function openLibraryTextIndexDb(): Promise<LibraryTextIndexDb | nul
     }
   })();
   return openPromise;
+}
+
+/**
+ * Refuses every later open for the rest of this session. Zotero's exit waits
+ * for each open Sqlite connection, so a handle opened after the quit-time
+ * close would hold the process alive until AsyncShutdown force-kills it.
+ */
+export function refuseLibraryTextIndexOpensForQuit(): void {
+  quitting = true;
+}
+
+export function resetLibraryTextIndexQuitForTests(): void {
+  quitting = false;
 }
 
 export async function closeLibraryTextIndexDb(): Promise<void> {

@@ -604,6 +604,13 @@ async function onShutdown(): Promise<void> {
     /* ignore if module not loaded */
   }
   try {
+    const { destroyAllCachedCodexAppServerProcesses } =
+      await import("./utils/codexAppServerProcess");
+    await destroyAllCachedCodexAppServerProcesses();
+  } catch (error) {
+    appLogger.debug("LLM: codex app-server shutdown skipped", error);
+  }
+  try {
     const { shutdownAgentSubsystem } = require("./agent");
     shutdownAgentSubsystem();
   } catch {
