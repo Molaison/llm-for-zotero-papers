@@ -140,7 +140,6 @@ import { sanitizeText } from "../../utils/textSanitization";
 import {
   createCprPaperHistoryController,
   shouldOfferCprPaperHistory,
-  showCprPaperHistoryDialog,
   type CprPaperHistoryRequest,
 } from "./cprPaperHistoryDialog";
 import { normalizeSelectedTextSource } from "../../services/context/normalizers";
@@ -190,6 +189,7 @@ import type { ModelProfileOverride } from "../../modelCapabilities";
 import {
   sendQuestion,
   refreshChat,
+  replaceCurrentPaperChat,
   syncUserContextAlignmentWidths,
   getConversationKey,
   ensureConversationLoaded,
@@ -913,7 +913,7 @@ export function setupHandlers(
   let isQueuedFollowUpSendAvailable: () => boolean = () => false;
   let queueFollowUpInput: (text: string) => void = () => {};
 
-  // ---- Remote papers history (read-only) ----------------------------------
+  // ---- Remote papers conversation synchronization ------------------------
   // The header button reuses the conversation's own transport settings and its
   // request slot, so fetching remote history can never race a send.
   let remoteHistoryBusy = false;
@@ -983,22 +983,28 @@ export function setupHandlers(
       const started = beginPanelRequest(
         body,
         targetItem,
-        t("Fetching remote record…"),
+        t("Syncing remote conversation…"),
       );
       if (!started) return null;
       const lease = capturePanelOperationLease(body);
       const targetPaperId = request.itemId;
+      const expectedGeneration = getConversationWriteGeneration(started.conversationKey);
+      const isCurrent = () => {
+        const current = resolveRemoteHistoryContext().request;
+        return !started.signal.aborted && isPanelOperationLeaseCurrent(lease) &&
+          getConversationKey(targetItem) === started.conversationKey &&
+          current?.itemId === targetPaperId &&
+          current.model === request.model && current.apiBase === request.apiBase &&
+          current.apiKey === request.apiKey;
+      };
       return {
         request,
         signal: started.signal,
-        // A late answer is dropped once this panel shows a different paper.
-        isCurrent: () => {
-          const current = resolveRemoteHistoryContext().request;
-          return isPanelOperationLeaseCurrent(lease) &&
-            current?.itemId === targetPaperId &&
-            current.model === request.model && current.apiBase === request.apiBase &&
-            current.apiKey === request.apiKey;
-        },
+        isCurrent,
+        applyHistory: (history) => replaceCurrentPaperChat({
+          body, item: targetItem, conversationKey: started.conversationKey,
+          expectedGeneration, messages: history.messages, isCurrent,
+        }),
         finish: () =>
           finishPanelRequest(
             body,
@@ -1009,10 +1015,6 @@ export function setupHandlers(
       };
     },
     loadHistory: (params) => loadCprPaperHistory(params),
-    showHistory: (history) => {
-      const doc = body.ownerDocument;
-      if (doc) showCprPaperHistoryDialog(doc, history);
-    },
     setBusy: (busy) => {
       remoteHistoryBusy = busy;
       syncRemoteHistoryButton();

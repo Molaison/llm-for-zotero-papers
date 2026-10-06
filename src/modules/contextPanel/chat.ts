@@ -29,6 +29,7 @@ import {
 } from "../../utils/i18n";
 import {
   appendMessage as appendStoredMessage,
+  replaceConversationMessages as replaceStoredConversationMessages,
   clearConversation as clearStoredConversation,
   pruneConversation,
   updateLatestUserMessage as updateStoredLatestUserMessage,
@@ -2282,6 +2283,35 @@ function toPanelMessage(message: StoredChatMessage): Message {
     webchatCompletionReason: message.webchatCompletionReason,
     quoteCitations: message.quoteCitations,
   };
+}
+
+/** Reload a durable remote snapshot without restoring or changing compose context. */
+export async function replaceCurrentPaperChat(params: {
+  body: Element;
+  item: Zotero.Item;
+  conversationKey: number;
+  expectedGeneration: number;
+  messages: Array<{ role: "user" | "assistant"; text: string; created_at: number | null }>;
+  isCurrent: () => boolean;
+}): Promise<void> {
+  const { body, item, conversationKey, expectedGeneration, isCurrent } = params;
+  if (!isCurrent() || getConversationKey(item) !== conversationKey) return;
+  const scope = buildConversationRegistryScopeForItem(item, conversationKey, "upstream");
+  const validation = scope ? await getConversationScopeValidationDetails(scope) : null;
+  if (!validation?.valid) throw new Error("The original paper conversation scope is unavailable");
+  const stored = await replaceStoredConversationMessages(
+    conversationKey,
+    params.messages.map((message) => ({
+      role: message.role, text: message.text, timestamp: message.created_at,
+    })),
+    { expectedGeneration, isCurrent },
+  );
+  if (!isCurrent()) return;
+  chatHistory.set(conversationKey, stored.map(toPanelMessage));
+  loadedConversationKeys.add(conversationKey);
+  blockedConversationLoadKeys.delete(conversationKey);
+  // Rendering the chat alone leaves the live draft, attachments and model controls intact.
+  refreshChat(body, item);
 }
 
 export async function ensureConversationLoaded(

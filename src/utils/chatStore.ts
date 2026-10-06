@@ -2529,6 +2529,89 @@ export async function forkUpstreamConversationMessages(params: {
   );
 }
 
+/** Replace only a live conversation's message snapshot; keep its catalog and provider identity. */
+export async function replaceConversationMessages(
+  conversationKey: number,
+  messages: Array<Pick<StoredChatMessage, "role" | "text"> & { timestamp: number | null }>,
+  options: { expectedGeneration: number; isCurrent: () => boolean },
+): Promise<StoredChatMessage[]> {
+  const key = normalizeConversationKey(conversationKey);
+  if (!key || !isUpstreamStoreConversationKey(key)) {
+    throw new Error("A current upstream conversation is required");
+  }
+  const assertCurrent = () => {
+    if (
+      !options.isCurrent() ||
+      areConversationWritesFrozen(key) ||
+      pendingDeletionStore.isConversationPendingDeletion(key) ||
+      !isConversationWriteGenerationCurrent(key, options.expectedGeneration)
+    ) {
+      throw new DOMException("Conversation synchronization was superseded", "AbortError");
+    }
+  };
+  return withConversationWriteLock(key, async () => {
+    assertCurrent();
+    const stored = await Zotero.DB.executeTransaction(async () => {
+      const selector = await resolveRepairingMessageConversationSelector(key, {
+        destructive: true,
+      });
+      const scope = selector.registered;
+      if (
+        !scope?.valid || !scope.conversationID || scope.system !== "upstream" ||
+        scope.profileSignature !== getCurrentProfileSignature()
+      ) {
+        throw new Error("The original conversation scope is unavailable");
+      }
+      const identity = await resolveUpstreamAppendIdentity(key, scope.instanceID || undefined);
+      await assertUpstreamForkSourceLive({
+        conversationKey: key,
+        instanceID: identity.instanceID || undefined,
+        conversationID: scope.conversationID,
+      });
+      const previous = (await Zotero.DB.queryAsync(
+        `SELECT timestamp FROM ${CHAT_MESSAGES_TABLE}
+         WHERE ${selector.whereSql}
+         ORDER BY ${storedMessageDisplayOrderSql()} LIMIT 1`,
+        selector.params,
+      )) as Array<{ timestamp: number }>;
+      const firstTimed = messages.findIndex((message) =>
+        message.timestamp !== null && Number.isFinite(message.timestamp) && message.timestamp > 0,
+      );
+      // Preserve native order even when timestamps are absent, equal or out of order.
+      // A timestamp-free repeat reuses the persisted starting time.
+      const start = firstTimed >= 0
+        ? Math.max(1, Math.floor(messages[firstTimed].timestamp!) - firstTimed)
+        : Number(previous[0]?.timestamp) || Date.now();
+      let timestamp = start - 1;
+      assertCurrent();
+      await Zotero.DB.queryAsync(
+        `DELETE FROM ${CHAT_MESSAGES_TABLE} WHERE ${selector.whereSql}`,
+        selector.params,
+      );
+      for (const message of messages) {
+        timestamp = Math.max(
+          timestamp + 1,
+          message.timestamp !== null && Number.isFinite(message.timestamp)
+            ? Math.floor(message.timestamp) : timestamp + 1,
+        );
+        await Zotero.DB.queryAsync(
+          `INSERT INTO ${CHAT_MESSAGES_TABLE}
+           (conversation_id, conversation_instance_id, conversation_key, role, text, timestamp, run_mode)
+           VALUES (?, ?, ?, ?, ?, ?, 'chat')`,
+          [scope.conversationID, identity.instanceID, key, message.role, message.text, timestamp],
+        );
+      }
+      await clearOwnerAttachmentRefsInTransaction("conversation", key);
+      await refreshUpstreamConversationCatalogSummary(key);
+      const rows = await loadConversation(key, Math.max(1, messages.length));
+      assertCurrent();
+      return rows;
+    });
+    await refreshUpstreamConversationSearchIndex(key);
+    return stored;
+  });
+}
+
 export async function appendMessage(
   conversationKey: number,
   message: StoredChatMessage,

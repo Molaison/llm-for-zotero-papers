@@ -65,7 +65,7 @@ jobs:
 
       - name: Test papers contracts
         if: steps.version.outputs.publish == 'true'
-        run: node --import tsx node_modules/mocha/bin/mocha.js --require ./test/register.cjs test/cprPapersConfig.test.ts test/cprPapersRegistry.test.ts test/cprPaperHistoryDialog.test.ts
+        run: node --import tsx node_modules/mocha/bin/mocha.js --require ./test/register.cjs test/cprPapersConfig.test.ts test/cprPapersRegistry.test.ts test/cprPaperHistoryDialog.test.ts test/chatStore.cprSnapshot.test.ts
 
       - name: Build
         if: steps.version.outputs.publish == 'true'
@@ -93,7 +93,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: npm run release -- --yes
 
-      - name: Mark candidate limitations
+      - name: Write release notes
         if: steps.version.outputs.publish == 'true'
         env:
           TAG: ${{ steps.version.outputs.tag }}
@@ -102,7 +102,8 @@ jobs:
           CPR / ChatGPT Web papers 定制版。下载 llm-for-zotero.xpi 后从 Zotero 插件管理器安装。
 
           保留单篇论文固定对话、首次 PDF 上传、四模型/思考强度和短标题命名。
-          远端记录按钮需要配套服务端 history 接口；当前服务端仍未上线，真实读取尚待隔离验收。
+          同步远端对话会用远端已保存问答替换当前聊天，并保留输入框草稿；同步后可继续在原论文会话中提问。
+          配套 history 服务已启用，无需重新上传 PDF 或创建新的远端对话。
           本 Release 不部署生产服务，不包含 API key、生产配置或用户论文。
           papers.11 起启用 Zotero 自动更新，仅从本 fork 获取新版。旧版本首次需手动安装一次，之后自动检查更新。
           EOF

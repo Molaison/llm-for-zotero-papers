@@ -1,14 +1,11 @@
 import { assert } from "chai";
 import {
   createCprPaperHistoryController,
-  formatCprHistoryTimestamp,
   shouldOfferCprPaperHistory,
-  showCprPaperHistoryDialog,
   type CprPaperHistoryAttempt,
   type CprPaperHistoryControllerDeps,
 } from "../src/modules/contextPanel/cprPaperHistoryDialog";
 import type { CprPaperHistory } from "../src/utils/cprPapers";
-import { FakeElement } from "./helpers/fakeDom";
 
 const PAPER_ID = 4242;
 const history: CprPaperHistory = {
@@ -21,21 +18,6 @@ const history: CprPaperHistory = {
     { id: "m2", role: "assistant", text: "plain answer", created_at: null },
   ],
 };
-
-function createFakeDoc() {
-  const body = new FakeElement("div");
-  const doc = {
-    body,
-    documentElement: body,
-    defaultView: null,
-    createElement: (tagName: string) => new FakeElement(tagName),
-    createElementNS: (_namespace: string, tagName: string) =>
-      new FakeElement(tagName),
-    addEventListener: () => {},
-    removeEventListener: () => {},
-  } as unknown as Document;
-  return { doc, body };
-}
 
 type Harness = {
   deps: CprPaperHistoryControllerDeps;
@@ -69,6 +51,7 @@ function createHarness(
       finish: () => {
         finishCount += 1;
       },
+      applyHistory: async (value) => { shown.push(value); },
       ...attemptOverrides,
     }),
     loadHistory: (params) => {
@@ -84,9 +67,6 @@ function createHarness(
         resolveLoad = resolve;
         rejectLoad = reject;
       });
-    },
-    showHistory: (value) => {
-      shown.push(value);
     },
     setBusy: () => {},
     setStatusMessage: (message, level) => {
@@ -160,60 +140,6 @@ describe("CPR remote paper history button visibility", function () {
     );
   });
 
-  it("shows a time only when the server sent a usable timestamp", function () {
-    assert.equal(formatCprHistoryTimestamp(null), "");
-    assert.equal(formatCprHistoryTimestamp(undefined), "");
-    assert.equal(formatCprHistoryTimestamp(0), "");
-    assert.equal(formatCprHistoryTimestamp(-5), "");
-    assert.notEqual(formatCprHistoryTimestamp(1_700_000_000), "");
-    assert.equal(
-      formatCprHistoryTimestamp(1_700_000_000_000),
-      new Date(1_700_000_000_000).toLocaleString(),
-    );
-  });
-});
-
-describe("CPR remote paper history dialog", function () {
-  it("renders remote text as text and keeps the original conversation link", function () {
-    const { doc, body } = createFakeDoc();
-    showCprPaperHistoryDialog(doc, history);
-
-    const dialog = body.findByClass("llm-remote-history-dialog");
-    assert.isNotNull(dialog);
-    assert.equal(dialog!.findByClass("llm-modal-title")?.textContent, history.title);
-    const link = dialog!.findAllByTag("a")[0];
-    assert.equal(link.getAttribute("href"), history.conversation_url);
-    assert.equal(link.getAttribute("target"), "_blank");
-
-    const rows = dialog!.findAllByClass("llm-remote-history-message");
-    assert.equal(rows.length, 2);
-    assert.equal(rows[0].dataset.role, "user");
-    assert.equal(rows[1].dataset.role, "assistant");
-    // Untrusted remote text never becomes markup.
-    assert.equal(
-      rows[0].findByClass("llm-remote-history-message-text")?.textContent,
-      history.messages[0].text,
-    );
-    assert.equal(
-      rows[0].findByClass("llm-remote-history-message-text")?.innerHTML,
-      "",
-    );
-
-    dialog!.findByClass("llm-modal-cancel")!.dispatchFakeEvent("click");
-    assert.equal(body.findAllByClass("llm-remote-history-overlay").length, 0);
-  });
-
-  it("replaces the open dialog instead of stacking a second one", function () {
-    const { doc, body } = createFakeDoc();
-    showCprPaperHistoryDialog(doc, history);
-    showCprPaperHistoryDialog(doc, { ...history, title: "Second" });
-    const overlays = body.findAllByClass("llm-remote-history-overlay");
-    assert.equal(overlays.length, 1);
-    assert.equal(
-      overlays[0].findByClass("llm-modal-title")?.textContent,
-      "Second",
-    );
-  });
 });
 
 describe("CPR remote paper history flow", function () {
@@ -296,6 +222,45 @@ describe("CPR remote paper history flow", function () {
     harness.setNext(history);
     await run;
     assert.isEmpty(harness.shown);
+    assert.isEmpty(harness.statuses);
+    assert.equal(harness.finished(), 1);
+  });
+});
+
+describe("CPR remote snapshot apply lifecycle", function () {
+  it("keeps the request slot busy until asynchronous persistence finishes", async function () {
+    let complete!: () => void;
+    const applying = new Promise<void>(resolve => { complete = resolve; });
+    const harness = createHarness({ applyHistory: () => applying });
+    harness.setNext(history);
+    const controller = createCprPaperHistoryController(harness.deps);
+    const pending = controller.open();
+    await Promise.resolve();
+    assert.isTrue(controller.isBusy());
+    assert.equal(harness.finished(), 0);
+    assert.isEmpty(harness.statuses);
+    complete();
+    await pending;
+    assert.equal(harness.finished(), 1);
+    assert.equal(harness.statuses.at(-1)?.level, "ready");
+  });
+
+  it("reports a persistence failure without reporting synchronization success", async function () {
+    const harness = createHarness({ applyHistory: async () => { throw new Error("Snapshot transaction failed"); } });
+    harness.setNext(history);
+    await createCprPaperHistoryController(harness.deps).open();
+    assert.deepEqual(harness.statuses, [{ message: "Snapshot transaction failed", level: "error" }]);
+    assert.equal(harness.finished(), 1);
+  });
+
+  it("does not update status on a panel or model superseded during apply", async function () {
+    let current = true;
+    const harness = createHarness({
+      isCurrent: () => current,
+      applyHistory: async () => { current = false; },
+    });
+    harness.setNext(history);
+    await createCprPaperHistoryController(harness.deps).open();
     assert.isEmpty(harness.statuses);
     assert.equal(harness.finished(), 1);
   });

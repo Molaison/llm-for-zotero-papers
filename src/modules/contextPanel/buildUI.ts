@@ -324,10 +324,10 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
     {
       id: "llm-remote-history",
       type: "button",
-      title: t("Fetch remote record"),
+      title: t("Sync remote conversation"),
     },
   );
-  remoteHistoryBtn.setAttribute("aria-label", t("Fetch remote record"));
+  remoteHistoryBtn.setAttribute("aria-label", t("Sync remote conversation"));
   remoteHistoryBtn.style.display = "none";
   headerActions.append(
     popoutBtn,
