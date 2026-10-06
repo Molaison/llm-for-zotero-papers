@@ -355,8 +355,8 @@ describe("runtime system control layout", function () {
     const standaloneSource = source(
       "src/modules/contextPanel/standaloneWindow.ts",
     );
-    const deleteButtonRule = extractCssRule(css, ".llm-clear-btn");
-    const deleteIconRule = extractCssRule(css, ".llm-clear-btn::before");
+    const deleteButtonRule = cssRulesFor(css, ".llm-clear-btn").join("\n");
+    const deleteIconRule = cssRulesFor(css, ".llm-clear-btn::before").join("\n");
 
     assert.include(sidebarSource, "llm-btn-icon llm-clear-btn");
     assert.include(sidebarSource, 'title: t("Delete conversation")');

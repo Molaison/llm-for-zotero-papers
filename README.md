@@ -2,6 +2,8 @@
 
 这是 [yilewang/llm-for-zotero](https://github.com/yilewang/llm-for-zotero) 的 CPR / ChatGPT Web papers 定制版，保留原 AGPL-3.0 许可证和上游署名。
 
+`3.9.10-papers.13` 修复窄侧栏的聊天顶部重叠：“远端记录”改为云端历史图标，悬停显示说明；按钮压缩后仍放不下时，右侧操作按钮换行，拉宽后自动恢复单行。
+
 `3.9.10-papers.12` 已合入上游 main 截至 2026-10-05 的 [52c1604e](https://github.com/yilewang/llm-for-zotero/commit/52c1604e178012f62db6529c63ec9178ac0cf4e8)，包括文献库索引与检索、Paper / Library 聊天切换、任务进度和额度显示，以及启动、退出和后台请求修复。CPR papers 的固定对话、按需 PDF 上传与 fork 自动更新继续保留。
 
 ## 安装与当前状态

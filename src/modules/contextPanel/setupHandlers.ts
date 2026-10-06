@@ -962,7 +962,13 @@ export function setupHandlers(
     const activeKey = item ? getConversationKey(item) : null;
     const conversationBusy =
       activeKey !== null && isRequestPending(activeKey);
-    remoteHistoryBtn.style.display = visible ? "" : "none";
+    const display = visible ? "" : "none";
+    if (remoteHistoryBtn.style.display !== display) {
+      remoteHistoryBtn.style.display = display;
+      updateHeaderSpacing(
+        headerTop?.querySelector<HTMLElement>(".llm-header-nav-row") || headerTop,
+      );
+    }
     // Disabled while this conversation is already sending or fetching, so a
     // click can never queue a second request for the same conversation.
     remoteHistoryBtn.disabled =

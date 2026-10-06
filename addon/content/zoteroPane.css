@@ -394,6 +394,15 @@
   padding: 0 2px 6px;
 }
 
+.llm-header-nav-row.llm-header-nav-wrapped {
+  grid-template-columns: minmax(0, 1fr);
+  row-gap: 4px;
+}
+
+.llm-header-nav-wrapped .llm-header-actions {
+  justify-self: end;
+}
+
 :root:not([data-llm-pane-view="stacked"])
   .llm-dedicated-chat-pane
   .llm-header-nav-row {
@@ -1269,7 +1278,8 @@
   background: var(--fill-quinary);
 }
 
-.llm-clear-btn {
+.llm-clear-btn,
+.llm-remote-history-btn {
   width: 28px;
   min-width: 28px;
   height: 28px;
@@ -1278,7 +1288,8 @@
   font-size: 0;
 }
 
-.llm-clear-btn::before {
+.llm-clear-btn::before,
+.llm-remote-history-btn::before {
   content: "";
   display: block;
   width: 16px;
@@ -1293,6 +1304,11 @@
   -webkit-mask-position: center;
   -webkit-mask-size: contain;
   pointer-events: none;
+}
+
+.llm-remote-history-btn::before {
+  mask-image: url("icons/action-remote-history.svg");
+  -webkit-mask-image: url("icons/action-remote-history.svg");
 }
 
 /* Runtime spacing stays unchanged until the header actually runs out of room. */
