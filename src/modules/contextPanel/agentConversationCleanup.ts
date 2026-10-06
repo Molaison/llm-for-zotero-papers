@@ -20,8 +20,9 @@ import {
   JOURNAL_STEPS_TABLE,
 } from "../../agent/store/changeJournal";
 import { clearAgentRuntimeTraceState } from "./agentState";
-import { clearPlanConversationRowsInTransaction } from "../../agent/plans/store";
-import { clearResearchConversationRowsInTransaction } from "../../agent/research/store";
+import { clearTaskProgress } from "./taskProgress/store";
+import { clearDormantPlanRowsInTransaction } from "../../agent/store/dormantPlanTables";
+import { clearDormantResearchRowsInTransaction } from "../../agent/store/dormantResearchTables";
 import { clearPlanDocumentConversationRowsInTransaction } from "../../agent/documents/store";
 
 export type AgentConversationCleanupDeps = {
@@ -78,6 +79,10 @@ export async function clearPersistedAgentConversationRowsInTransaction(
   conversationKey: number,
 ): Promise<void> {
   const key = Math.floor(Number(conversationKey));
+  // Every store's local row purge (conversation and turn deletion, edit
+  // truncation, the WebChat startup sweep) passes here: the Task progress
+  // built from these rows goes too, and is rebuilt from what remains.
+  if (Number.isFinite(key) && key > 0) clearTaskProgress(key);
   const db = getAgentDb();
   if (!db || !Number.isFinite(key) || key <= 0) return;
 
@@ -157,11 +162,11 @@ export async function clearPersistedAgentConversationRowsInTransaction(
      WHERE scope_key = ? OR origin_conversation_key = ?`,
     [`conversation:${key}`, key],
   );
-  await clearPlanConversationRowsInTransaction(key).catch((error) => {
+  await clearDormantPlanRowsInTransaction(key).catch((error) => {
     if (/no such table|no table/i.test(String(error))) return;
     throw error;
   });
-  await clearResearchConversationRowsInTransaction(key).catch((error) => {
+  await clearDormantResearchRowsInTransaction(key).catch((error) => {
     if (/no such table|no table/i.test(String(error))) return;
     throw error;
   });
@@ -203,6 +208,7 @@ export async function clearAgentConversationState(
   conversationKey: number,
 ): Promise<void> {
   clearRememberedLocalDocumentPaths(conversationKey);
+  clearTaskProgress(conversationKey);
   let firstError: unknown;
   const capture = async (task: () => Promise<void>): Promise<void> => {
     try {

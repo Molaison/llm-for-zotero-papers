@@ -17,7 +17,7 @@ describe("shared Codex catalog selection", function () {
     );
   });
 
-  it("builds ordered catalog choices with a default-bearing Auto label", function () {
+  it("builds ordered catalog choices named by level alone", function () {
     const choices = buildCodexReasoningChoices({
       efforts: [
         { value: "low", description: "Fast" },
@@ -25,15 +25,13 @@ describe("shared Codex catalog selection", function () {
         { value: "max", description: "Deep" },
         { value: "ultra", description: "Excluded" },
       ],
-      defaultEffort: "max",
       excludedEfforts: ["ULTRA"],
-      showDefaultInAutoLabel: true,
     });
 
     assert.deepEqual(choices, [
-      { value: "auto", label: "Auto (Max)" },
-      { value: "low", label: "Low", description: "Fast" },
-      { value: "max", label: "Max", description: "Deep" },
+      { value: "auto", label: "Auto" },
+      { value: "low", label: "Low" },
+      { value: "max", label: "Max" },
     ]);
     assert.equal(reconcileCodexReasoningChoice("MAX", choices), "max");
     assert.equal(reconcileCodexReasoningChoice("ultra", choices), "auto");

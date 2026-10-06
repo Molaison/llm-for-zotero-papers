@@ -1,5 +1,3 @@
-import { classifiedFixture } from "./helpers/semanticIntent";
-import { semanticFixture } from "./helpers/semanticIntent";
 import { assert } from "chai";
 import {
   buildTurnPaperKey,
@@ -8,7 +6,6 @@ import {
 } from "../src/agent/context/turnPaperScope";
 import { resolveAgentRuntimeRequest } from "../src/agent/context/resolvedAgentRequest";
 import { buildVisibleTurnContextBlock } from "../src/agent/context/turnContextEnvelope";
-import { resolveDefaultTargets } from "../src/agent/tools/read/pdfToolUtils";
 import type { AgentRuntimeRequestInput } from "../src/agent/types";
 import type { PaperContextRef } from "../src/shared/types";
 
@@ -363,155 +360,6 @@ describe("TurnPaperScope", function () {
       assert.include(incompleteBatch.message, "missing a local document");
     }
   });
-
-  it("applies this-paper, added-paper, and these-paper defaults from the same scope", function () {
-    const gateway = {
-      listPaperContexts: () => {
-        throw new Error("resolved requests must not reconstruct tool scope");
-      },
-      resolvePaperContextTarget: (selector: {
-        itemId?: number;
-        contextItemId?: number;
-      }) =>
-        [activePaper, addedPaper].find(
-          (paper) =>
-            paper.itemId === selector.itemId &&
-            paper.contextItemId === selector.contextItemId,
-        ) || null,
-    } as never;
-    const targets = (paperTargetIntent: "active" | "added" | "all_visible") => {
-      const request = resolveAgentRuntimeRequest(
-        input({
-          userText: "same wording",
-          classifiedIntent: classifiedFixture({ paperTargetIntent }),
-        }),
-      );
-      return resolveDefaultTargets(
-        undefined,
-        undefined,
-        { request },
-        gateway,
-        8,
-      ).map((paper) => paper.itemId);
-    };
-
-    assert.deepEqual(targets("active"), [10]);
-    assert.deepEqual(targets("added"), [20]);
-    assert.deepEqual(targets("all_visible"), [10, 20]);
-    assert.deepEqual(targets("all_visible"), [10, 20]);
-  });
-
-  it("uses only the shared paper-set intent, including when the wording conflicts", function () {
-    const gateway = {
-      listPaperContexts: () => {
-        throw new Error("resolved requests must not reconstruct tool scope");
-      },
-      resolvePaperContextTarget: (selector: {
-        itemId?: number;
-        contextItemId?: number;
-      }) =>
-        [activePaper, addedPaper].find(
-          (paper) =>
-            paper.itemId === selector.itemId &&
-            paper.contextItemId === selector.contextItemId,
-        ) || null,
-    } as never;
-    const targets = (
-      paperTargetIntent:
-        | "active"
-        | "added"
-        | "all_visible"
-        | "unspecified"
-        | undefined,
-      retrievalIntent: "enumerate" | "verify" | "summarize" | "none" = "none",
-      userText = "比较这些论文",
-      overrides: Partial<AgentRuntimeRequestInput> = {},
-    ) => {
-      const request = resolveAgentRuntimeRequest(
-        input({
-          userText,
-          classifiedIntent: {
-            semantic: semanticFixture(),
-            retrievalIntent,
-            ...(paperTargetIntent ? { paperTargetIntent } : {}),
-            wantedSections: [],
-            actionIntents: [],
-          },
-          ...overrides,
-        }),
-      );
-      return resolveDefaultTargets(
-        undefined,
-        undefined,
-        { request },
-        gateway,
-        8,
-      ).map((paper) => paper.itemId);
-    };
-
-    assert.deepEqual(targets("all_visible"), [10, 20]);
-    assert.deepEqual(targets("active"), [10]);
-    assert.deepEqual(targets("added"), [20]);
-    assert.deepEqual(targets("unspecified"), [10]);
-    assert.deepEqual(targets(undefined, "summarize"), []);
-    assert.deepEqual(
-      targets("all_visible", "none", "比较这些论文", {
-        selectedPaperContexts: [activePaper, activePaper, addedPaper],
-      }),
-      [10, 20],
-    );
-    assert.deepEqual(
-      targets("active", "none", "this paper", {
-        conversationKind: "global",
-        activeItemId: undefined,
-        activePaperContext: undefined,
-        selectedPaperContexts: [addedPaper],
-      }),
-      [],
-    );
-    assert.deepEqual(
-      targets("added", "none", "已添加的论文", {
-        conversationKind: "global",
-        activeItemId: undefined,
-        activePaperContext: undefined,
-        selectedPaperContexts: [activePaper, addedPaper],
-      }),
-      [10, 20],
-    );
-
-    const explicitRequest = resolveAgentRuntimeRequest(
-      input({
-        classifiedIntent: {
-          semantic: semanticFixture(),
-          retrievalIntent: "summarize",
-          paperTargetIntent: "all_visible",
-          wantedSections: [],
-          actionIntents: [],
-        },
-      }),
-    );
-    assert.deepEqual(
-      resolveDefaultTargets(
-        undefined,
-        [{ paperContext: addedPaper }],
-        { request: explicitRequest },
-        gateway,
-        8,
-      ).map((paper) => paper.itemId),
-      [20],
-    );
-    assert.deepEqual(
-      resolveDefaultTargets(
-        undefined,
-        undefined,
-        { request: explicitRequest },
-        gateway,
-        1,
-      ).map((paper) => paper.itemId),
-      [10],
-    );
-  });
-
   it("creates independent immutable-by-type snapshots for successive turns", function () {
     const first = resolveAgentRuntimeRequest(input()).turnPaperScope;
     const second = resolveAgentRuntimeRequest(

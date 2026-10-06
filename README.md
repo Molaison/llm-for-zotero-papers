@@ -2,6 +2,8 @@
 
 这是 [yilewang/llm-for-zotero](https://github.com/yilewang/llm-for-zotero) 的 CPR / ChatGPT Web papers 定制版，保留原 AGPL-3.0 许可证和上游署名。
 
+`3.9.10-papers.12` 已合入上游 main 截至 2026-10-05 的 [52c1604e](https://github.com/yilewang/llm-for-zotero/commit/52c1604e178012f62db6529c63ec9178ac0cf4e8)，包括文献库索引与检索、Paper / Library 聊天切换、任务进度和额度显示，以及启动、退出和后台请求修复。CPR papers 的固定对话、按需 PDF 上传与 fork 自动更新继续保留。
+
 ## 安装与当前状态
 
 从本仓库的 [Releases](https://github.com/Molaison/llm-for-zotero-papers/releases) 下载版本号含 `papers` 的 `llm-for-zotero.xpi`，在 Zotero 的“工具 → 插件 → 从文件安装”中安装，然后重启 Zotero。保留已有插件 ID、偏好与本地聊天，不要同时安装上游普通版。
@@ -13,7 +15,7 @@
 
 ## 自动发布
 
-将 `package.json` 和 `package-lock.json` 的版本一并更新为新的 `3.9.9-papers.N`，提交到本仓库默认分支 `codex/papers`。`Release Papers` 会运行 papers 定向测试和完整构建/类型检查，再创建对应的 `v3.9.9-papers.N` 标签、GitHub 预发布与更新清单。也支持推送相匹配的版本标签或手动触发工作流。已经发布的版本不覆盖；修复需使用新版本号。
+将 `package.json` 和 `package-lock.json` 的版本一并更新为新的 `3.9.10-papers.N`，提交到本仓库默认分支 `codex/papers`。`Release Papers` 会运行 papers 定向测试和完整构建/类型检查，再创建对应的 `v3.9.10-papers.N` 标签、GitHub 预发布与更新清单。也支持推送相匹配的版本标签或手动触发工作流。已经发布的版本不覆盖；修复需使用新版本号。
 
 本工作流仅发布插件，不部署 CPR、QA pool、浏览器或数据库。远端历史候选仍须独立浏览器验收及明确的生产上线窗口。
 
@@ -281,10 +283,10 @@ Agent Mode is disabled by default. Enable it in `Preferences`, then toggle
 `Agent (beta)` in the context bar.
 
 It can read and search your library, draft notes, update metadata or tags with
-confirmation, and undo recent write actions in the same session.
+confirmation, and undo recent write actions from the conversation.
 
 When enabled, the LLM can act on your Zotero library with read tools, write
-tools, confirmation cards, and session undo.
+tools, confirmation cards, and undo.
 
 Long agent runs are cache-aware. The plugin keeps stable Zotero context and
 previously read evidence separate from the changing chat transcript, tracks which
@@ -293,15 +295,18 @@ turns when the model context fills up. This lets follow-up questions reuse
 grounded evidence when it is still relevant, while still asking the agent to read
 again when the needed source or coverage layer is missing.
 
-| Tool area                | Examples                                                                                                                                          |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Library and PDF reading  | Search items and collections, read metadata, read papers, search paper passages, render PDF pages, inspect attachments                            |
-| Scholarly discovery      | Search CrossRef and Semantic Scholar for metadata, recommendations, references, and citations                                                     |
-| General web research     | Search the current public web with Tavily, read relevant pages, and show source links with the answer                                             |
-| Library writes           | Apply tags, update metadata, move items, manage collections, manage attachments, merge duplicates, trash items, import identifiers or local files |
-| Notes                    | Edit the active Zotero note or create a new note in plain text, Markdown, or HTML                                                                 |
-| Filesystem and scripting | Read/write allowed local files, run analysis commands, or execute Zotero JavaScript with write confirmations                                      |
-| Safety                   | Undo the most recent write action in the conversation, with the last 10 entries kept per session                                                  |
+| Tool area                | Tools                                                                                                                                              | What they do                                                                                                                                                                      |
+| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Library and PDF reading  | `library_search`, `library_read`, `library_retrieve`, `paper_read`, `read_attachment`, `context_read`                                              | Search items and collections, read metadata, read papers, search paper passages, render PDF pages, inspect attachments and the chat context                                       |
+| Scholarly discovery      | `literature_search`, `literature_review`                                                                                                           | Search OpenAlex, arXiv, and Europe PMC for papers, recommendations, references, and citations (metadata lookup via CrossRef and Semantic Scholar), then present ranked candidates |
+| General web research     | `web_search`, `web_read`                                                                                                                           | Search the current public web with Tavily, read relevant pages, and show source links with the answer (only when a Tavily key is set)                                             |
+| Library writes           | `library_update`, `library_import`, `library_delete`, `annotate_pdf`                                                                               | Apply tags, update metadata, move items, manage collections and attachments, merge duplicates, trash items, import identifiers or local files, highlight PDF passages             |
+| Citations and settings   | `library_cite`, `library_settings`                                                                                                                 | Format citations and bibliographies with Zotero's citation engine, and read or change the Zotero preferences the agent may touch                                                  |
+| Notes and documents      | `note_write`, `note_write_batch`, `submit_document`                                                                                                | Create, append to, or edit Zotero notes, write one note on each of many items, and finalize longer documents                                                                      |
+| Filesystem and scripting | `file_io`, `run_command`, `zotero_script`                                                                                                          | Read/write local files, run analysis commands, or execute Zotero JavaScript with write confirmations                                                                              |
+| Skills and questions     | `load_skill`, `request_user_input`                                                                                                                 | Load a skill's instructions when the task needs them, and ask you a question when a choice is ambiguous                                                                           |
+| Plans                    | `update_plan`, `amend_plan`, `prepare_plan_execution`, `task_update`, `research_update`, `approve_research_expansion`, `approve_research_mutation` | Draft a plan for your approval, then track and report its execution                                                                                                               |
+| Safety                   | `undo`                                                                                                                                             | Undo recorded write actions from the conversation's durable change history, one at a time or several newest-first                                                                 |
 
 The design philosophy is simple: read tools are unrestricted; write tools stay
 reviewable and undoable.
@@ -358,24 +363,24 @@ reviews, note writing, and cited-reference import.
   <img src="./assets/skills.png" alt="Screenshot of the Skills management portal" width="512" />
 </p>
 
-Skills are customizable guidance files that shape how Agent Mode approaches
-different types of requests. When your message matches a skill's trigger
-patterns, the skill's instructions are injected into the agent prompt.
+Skills are customizable guidance files that shape how Agent Mode approaches different types of requests.
+The agent sees only each skill's name and description at the start of a turn.
+There is no automatic pre-selection step: the agent calls `load_skill` to read a skill's full instructions when it decides the task needs them.
+Choosing a skill with `/` applies it directly, and an approved plan keeps the exact skill versions it was approved with.
 
 > Skills require **Agent Mode**. They have no effect in standard chat mode.
 
 Built-in skills:
 
-| Skill                    | What it guides the agent to do                                      |
-| ------------------------ | ------------------------------------------------------------------- |
-| `simple-paper-qa`        | Answer general questions about a paper efficiently                  |
-| `evidence-based-qa`      | Find specific methods, results, or evidence with targeted retrieval |
-| `analyze-figures`        | Interpret figures and tables using MinerU-extracted images          |
-| `compare-papers`         | Compare multiple papers using batched reads and focused retrieval   |
-| `library-analysis`       | Summarize or analyze your entire library without context overflow   |
-| `literature-review`      | Conduct a structured literature review                              |
-| `write-note`             | Write Zotero notes or Markdown notes in configured local folders    |
-| `import-cited-reference` | Import papers cited in the current PDF into Zotero                  |
+| Skill                    | What it guides the agent to do                                    |
+| ------------------------ | ----------------------------------------------------------------- |
+| `evidence-based-qa`      | Retrieve missing evidence for specific paper questions            |
+| `analyze-figures`        | Interpret figures and tables using MinerU-extracted images        |
+| `compare-papers`         | Compare multiple papers using batched reads and focused retrieval |
+| `library-analysis`       | Summarize or analyze your entire library without context overflow |
+| `literature-review`      | Conduct a structured literature review                            |
+| `write-note`             | Write Zotero notes or Markdown notes in configured local folders  |
+| `import-cited-reference` | Import papers cited in the current PDF into Zotero                |
 
 To create a custom skill, open the **Standalone Window**, click the **Skills**
 icon, choose **"+ New skill"**, edit the skill file, and save. Skills are stored
@@ -387,7 +392,7 @@ as Markdown files in `{ZoteroDataDir}/llm-for-zotero/skills/`.
 
 Agent Mode can search the current public web with [Tavily](https://www.tavily.com/) and read the most relevant returned pages when search-result snippets are not enough.
 Use it for current facts, official documentation, news, finance, product information, and other general-web evidence.
-Scholarly discovery remains separate: the agent uses CrossRef and Semantic Scholar for research literature, and it can combine both kinds of search when a question needs academic and general-web sources.
+Scholarly discovery remains separate: the agent searches OpenAlex, arXiv, and Europe PMC (with CrossRef and Semantic Scholar for metadata lookup), and it can combine both kinds of search when a question needs academic and general-web sources.
 
 To enable general web search:
 
@@ -902,6 +907,6 @@ Use ordinary `tools/call` requests; no Zotero chat, private turn token, or addit
 Specify `libraryID` for predictable targeting, or omit it to resolve the currently selected library once for that call.
 Invalid arguments, unavailable targets, native read-only restrictions, and execution or verification failures remain errors.
 Writes retain durable recovery records and native Zotero verification; preserve returned action IDs for recovery.
-Standalone `undo_last_action` requires `actionId`, and `revert_changes` requires `actionIds` (which cannot be combined with `count`).
+Standalone clients recover through the `undo` tool: pass `actionId` to undo one action, or `actionIds` to revert several (which cannot be combined with `count`).
 Do not blindly repeat a write after a timeout or uncertain outcome: inspect native state and the returned recovery information first.
 This interface does not promise exactly-once execution across repeated HTTP requests.

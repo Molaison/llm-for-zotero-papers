@@ -107,7 +107,7 @@ describe("deepseek-flash rename", function () {
 
   it("lets deepseek-flash take images, which the docs list as supported", function () {
     assert.isFalse(isTextOnlyModel("deepseek-flash"));
-    // deepseek-v4-pro has no vision, and the reasoner is text-only.
-    assert.isTrue(isTextOnlyModel("deepseek-reasoner"));
+    // Input defaults apply to the family without a per-version allowlist.
+    assert.isFalse(isTextOnlyModel("deepseek-reasoner"));
   });
 });

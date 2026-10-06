@@ -2,10 +2,6 @@ import { assert } from "chai";
 import { ZoteroGateway } from "../src/agent/services/zoteroGateway";
 import { createCiteExportTool } from "../src/agent/tools/read/citeExport";
 import { createLibrarySettingsTool } from "../src/agent/tools/write/librarySettings";
-import {
-  PLAN_AUTHOR_DATE_STYLE_ID,
-  resolvePlanDocumentCitationPreference,
-} from "../src/agent/documents/citationPreference";
 import { navigatePlanDocumentCitationSource } from "../src/modules/contextPanel/planDocumentPresentation";
 
 /**
@@ -224,56 +220,6 @@ describe("citations, export and settings", function () {
       assert.equal(formatted, 1);
       assert.equal(result.output, "Smith, J. (2024).");
     });
-
-    it("falls back from a note-style Quick Copy preference to concise author-date citations", function () {
-      install({
-        Styles: {
-          get: (id: string) =>
-            id === "chicago-note"
-              ? { class: "note", categories: "note" }
-              : id === PLAN_AUTHOR_DATE_STYLE_ID
-                ? { class: "in-text", categories: "author-date" }
-                : null,
-          getVisible: () => [
-            { styleID: PLAN_AUTHOR_DATE_STYLE_ID, title: "APA 7th edition" },
-          ],
-        },
-        Prefs: {
-          get: (key: string) =>
-            key === "export.quickCopy.setting"
-              ? "bibliography=chicago-note"
-              : key === "export.quickCopy.locale"
-                ? "en-US"
-                : undefined,
-        },
-      });
-      const result = resolvePlanDocumentCitationPreference(new ZoteroGateway());
-      assert.equal(result.styleId, PLAN_AUTHOR_DATE_STYLE_ID);
-      assert.equal(result.styleTitle, "APA 7th edition");
-    });
-
-    it("keeps an author-date Quick Copy preference for Plan documents", function () {
-      install({
-        Styles: {
-          get: (id: string) =>
-            id === "custom-author-date"
-              ? { class: "in-text", categories: "author-date" }
-              : null,
-          getVisible: () => [
-            { styleID: "custom-author-date", title: "Custom author-date" },
-          ],
-        },
-        Prefs: {
-          get: (key: string) =>
-            key === "export.quickCopy.setting"
-              ? "bibliography=custom-author-date"
-              : undefined,
-        },
-      });
-      const result = resolvePlanDocumentCitationPreference(new ZoteroGateway());
-      assert.equal(result.styleId, "custom-author-date");
-    });
-
     it("navigates an inline Plan citation through Zotero's library pane", async function () {
       let selected: number[] = [];
       let selectedTab = "";

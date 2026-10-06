@@ -1,5 +1,4 @@
 import { appLogger } from "../../core/logging";
-import type { SemanticDecisions } from "../model/semanticDecisions";
 import {
   ensureAttachmentBlobFromPath,
   persistAttachmentBlob,
@@ -99,13 +98,20 @@ type PreparePdfFileParams = ResolvePdfTargetInput & {
   request: AgentRuntimeRequest;
 };
 
+/** Which figures or tables a figure read targets, resolved from the call. */
+export type PdfFigureSelection = {
+  labels: string[];
+  includeSupplementary: boolean;
+  kind: "figures" | "tables" | "both";
+};
+
 export type SourcePdfFigureExtractionParams = ResolvePdfTargetInput & {
   request: AgentRuntimeRequest;
   paperContext?: PaperContextRef;
   figureCacheDir: string;
   mineruCacheDir?: string;
   query: string;
-  selection: NonNullable<SemanticDecisions["figures"]>;
+  selection: PdfFigureSelection;
   pages?: number[];
   dpi?: number;
 };
@@ -1823,53 +1829,6 @@ export class PdfPageService {
       throw new Error("pdftohtml is not available for source-PDF geometry");
     }
     return { target, pages };
-  }
-
-  async getPageCountForTarget(
-    params: ResolvePdfTargetInput & {
-      request: AgentRuntimeRequest;
-    },
-  ): Promise<number> {
-    const savedTabId = getLastKnownSelectedTabId();
-    try {
-      const target = await this.resolveTarget(params);
-      if (target.source !== "library" || !target.contextItemId) {
-        throw new Error(
-          "Page-count inspection is currently supported for Zotero library PDFs.",
-        );
-      }
-      const reader = await openReaderForItem(target.contextItemId, {
-        pageIndex: 0,
-        pageLabel: "1",
-      });
-      if (!reader) {
-        throw new Error(
-          "Could not open the Zotero PDF reader for this attachment",
-        );
-      }
-      const app = await waitForPdfDocument(reader);
-      const pdfDocument = unwrapWrappedJsObject(
-        app?.pdfDocument as { numPages?: number } | null | undefined,
-      );
-      const rawCount = Number(
-        (pdfDocument && (pdfDocument as { numPages?: number }).numPages) ??
-          (app as { pdfDocument?: { numPages?: number } })?.pdfDocument
-            ?.numPages ??
-          0,
-      );
-      if (!Number.isFinite(rawCount) || rawCount <= 0) {
-        throw new Error("Could not determine the total number of PDF pages");
-      }
-      return Math.floor(rawCount);
-    } finally {
-      restoreNonReaderTab(savedTabId);
-    }
-  }
-
-  getUserExplicitPageSelection(
-    request: AgentRuntimeRequest,
-  ): ParsedPageSelection | null {
-    return parsePageSelectionValue(request.classifiedIntent?.semantic?.pages);
   }
 
   getActivePageIndex(): number | null {

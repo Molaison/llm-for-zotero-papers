@@ -26,7 +26,6 @@ export type AgentSkill = {
   version: number;
   contexts: SkillContextKind[];
   activation: SkillActivationMode;
-  supersedes: string[];
   instruction: string;
   /** Set at load time by userSkills.ts based on filename + content comparison. */
   source: "system" | "customized" | "personal";
@@ -81,7 +80,8 @@ function parseSkillActivation(raw: string): SkillActivationMode {
  * - `name: <string>`        — human-readable name (falls back to id)
  * - `contexts: <context>[,<context>]` — request contexts where the skill is valid
  * - `activation: auto|manual|both` — whether the skill can activate automatically
- * - `supersedes: <id>[,<id>]` — automatic skills this workflow replaces
+ *
+ * Unknown keys (including the retired `supersedes:`) are ignored.
  */
 export function parseSkill(raw: string): AgentSkill {
   const lines = raw.split("\n");
@@ -110,7 +110,6 @@ export function parseSkill(raw: string): AgentSkill {
   let version = 0;
   let contexts: SkillContextKind[] = ["any"];
   let activation: SkillActivationMode = "auto";
-  let supersedes: string[] = [];
 
   for (const line of fmLines) {
     const idMatch = line.match(/^id:\s*(.+)$/);
@@ -143,18 +142,6 @@ export function parseSkill(raw: string): AgentSkill {
       activation = parseSkillActivation(activationMatch[1]);
       continue;
     }
-    const supersedesMatch = line.match(/^supersedes:\s*(.+)$/);
-    if (supersedesMatch) {
-      supersedes = Array.from(
-        new Set(
-          supersedesMatch[1]
-            .split(",")
-            .map((value) => value.trim())
-            .filter(Boolean),
-        ),
-      );
-      continue;
-    }
   }
   if (id === "unknown" && name) {
     id = name;
@@ -169,7 +156,6 @@ export function parseSkill(raw: string): AgentSkill {
     version,
     contexts,
     activation,
-    supersedes,
     instruction,
     source: "personal",
   };

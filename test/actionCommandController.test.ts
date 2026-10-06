@@ -370,8 +370,6 @@ function createControllerHarness(
     isClaudeConversationSystem:
       options.isClaudeConversationSystem || (() => false),
     getCurrentRuntimeMode: () => "chat",
-    activatePlanMode: () => undefined,
-    isPlanAvailable: () => false,
     setCurrentRuntimeMode: () => {
       runtimeSwitches += 1;
     },
@@ -609,30 +607,6 @@ describe("actionCommandController", function () {
     );
   });
 
-  it("uses the shared action-card visual hierarchy for progress", function () {
-    const doc = new FakeDocument();
-    const body = doc.createElement("div");
-    const chatBox = doc.createElement("div");
-    body.appendChild(chatBox);
-    const lifecycle = createActionCommandLifecycle({
-      body: body as unknown as Element,
-      actionHitlPanel: null,
-      chatBox: chatBox as unknown as HTMLDivElement,
-      syncHasActionCardAttr: () => undefined,
-    });
-
-    const progress = lifecycle.createActionProgressIndicator("apply_tags");
-    const card = chatBox.querySelector(".llm-action-progress-card");
-
-    assert.equal(
-      card?.querySelector(".llm-plan-status")?.textContent,
-      "Working",
-    );
-    assert.exists(card?.querySelector(".llm-plan-title"));
-    assert.include(card?.className || "", "llm-plan-container");
-    progress.remove();
-  });
-
   it("replaces an approved action HITL card with a working state", async function () {
     const doc = new FakeDocument();
     const body = doc.createElement("div");
@@ -773,8 +747,6 @@ describe("actionCommandController", function () {
       isWebChatMode: () => false,
       isClaudeConversationSystem: () => false,
       getCurrentRuntimeMode: () => "chat",
-      activatePlanMode: () => undefined,
-      isPlanAvailable: () => false,
       setCurrentRuntimeMode: () => {
         runtimeSwitches += 1;
       },

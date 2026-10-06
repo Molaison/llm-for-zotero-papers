@@ -3,7 +3,6 @@ import {
   buildQuoteSourceIndex,
   finalizeAssistantQuoteCitations,
 } from "../src/services/quotes/quoteCitations";
-import { buildFindControllerQuoteQueries } from "../src/services/quotes/quoteTextSearch";
 
 const SOURCE_LABEL = "(Synthetic et al., 2026)";
 const CONTEXT_ITEM_ID = 1001;
@@ -148,12 +147,5 @@ describe("artificial quote corpus exact-grounding behavior", function () {
 
     assert.notInclude(finalized.markdown, "[[quote:");
     assert.isEmpty(finalized.quoteCitations);
-  });
-
-  it("builds one complete FindController query from math and list-heavy text", function () {
-    const quote =
-      "He can be modeled as $a = \\alpha + c$; the ratio $\\mathbf{b} = B/A$ stays positive.";
-
-    assert.deepEqual(buildFindControllerQuoteQueries(quote), [quote]);
   });
 });

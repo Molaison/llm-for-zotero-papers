@@ -21,6 +21,10 @@ describe("citationLabelParser", function () {
       ["(王, 2021)", "王, 2021"],
       ["(Paper 123)", "Paper 123"],
       [
+        "(Synthetic longitudinal neural coding experiment, n.d.)",
+        "Synthetic longitudinal neural coding experiment, n.d.",
+      ],
+      [
         "(Attachment X, attachment under Smith, 2020)",
         "Attachment X, attachment under Smith, 2020",
       ],

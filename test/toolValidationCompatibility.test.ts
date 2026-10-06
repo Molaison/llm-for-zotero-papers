@@ -1,5 +1,8 @@
 import { assert } from "chai";
-import { createQueryLibraryTool } from "../src/agent/tools/read/queryLibrary";
+import { createLibrarySearchTool } from "../src/agent/tools/read/librarySearch";
+import { createLibraryReadTool } from "../src/agent/tools/read/libraryRead";
+import { createSubmitDocumentTool } from "../src/agent/tools/control/submitDocument";
+import { DirectDocumentFinalizer } from "../src/agent/documents/directFinalization";
 import { createFileIOTool } from "../src/agent/tools/write/fileIO";
 import type { AgentToolContext } from "../src/agent/types";
 import { createMalformedToolArgumentsDiagnostic } from "../src/agent/toolArgumentDiagnostics";
@@ -17,8 +20,8 @@ const baseContext: AgentToolContext = {
 };
 
 describe("tool validation compatibility", function () {
-  it("normalizes canonical and legacy query_library shapes", function () {
-    const tool = createQueryLibraryTool({} as never);
+  it("normalizes canonical and legacy library_search shapes", function () {
+    const tool = createLibrarySearchTool({} as never);
 
     const itemSearch = tool.validate({
       entity: "items",
@@ -122,8 +125,8 @@ describe("tool validation compatibility", function () {
     assert.equal(legacyCollectionTree.value.view, "tree");
   });
 
-  it("keeps query_library validation strict outside known legacy shapes", function () {
-    const tool = createQueryLibraryTool({} as never);
+  it("keeps library_search validation strict outside known legacy shapes", function () {
+    const tool = createLibrarySearchTool({} as never);
 
     const missingSearchText = tool.validate({
       entity: "items",
@@ -132,6 +135,9 @@ describe("tool validation compatibility", function () {
     assert.isFalse(missingSearchText.ok);
     if (!missingSearchText.ok) {
       assert.include(missingSearchText.error, "text is required");
+      // Live runs sent filters without text to list a collection, three
+      // times in a row; the rejection names the mode that does that.
+      assert.include(missingSearchText.error, "mode:'list' with filters");
     }
 
     const badCollectionMode = tool.validate({
@@ -149,6 +155,95 @@ describe("tool validation compatibility", function () {
       assert.include(missingShape.error, "entity and mode are required");
       assert.include(missingShape.error, "{ entity:'items', mode:'search'");
     }
+  });
+
+  it("points a rejected tags section at what works and ignores a stray materialOutputId", function () {
+    const read = createLibraryReadTool({} as never);
+    const tags = read.validate({ itemIds: [1], sections: ["tags"] });
+    assert.isFalse(tags.ok);
+    if (!tags.ok) {
+      assert.include(tags.error, "library_search with include:['tags']");
+    }
+    const other = read.validate({ itemIds: [1], sections: ["bogus"] });
+    assert.isFalse(other.ok);
+    if (!other.ok) assert.notInclude(other.error, "include:['tags']");
+    // Workflow material outputs are gone: the schema no longer offers the
+    // field, and a stale call that still sends it submits the final document.
+    const submit = createSubmitDocumentTool({} as never);
+    assert.notProperty(
+      (submit.spec.inputSchema as { properties: object }).properties,
+      "materialOutputId",
+    );
+    const parsed = submit.validate({
+      materialOutputId: "review-draft",
+      title: "Review",
+      markdown: "# Review\n\nText.",
+      citations: [],
+      quotes: [],
+      assets: [],
+      groundingReviewed: "passed",
+      groundingIssues: [],
+    });
+    assert.isTrue(parsed.ok, parsed.ok ? "" : parsed.error);
+    if (parsed.ok) assert.notProperty(parsed.value, "materialOutputId");
+    assert.notInclude(
+      submit.guidance?.instruction || "",
+      "materialOutputId",
+      "the guidance does not describe the removed field",
+    );
+  });
+
+  it("submit_document carries taskId to the call input but never into the finalized document", async function () {
+    const submit = createSubmitDocumentTool({} as never);
+    assert.property(
+      (submit.spec.inputSchema as { properties: object }).properties,
+      "taskId",
+    );
+    const parsed = submit.validate({
+      taskId: "  review  ",
+      documentKind: "literature_review",
+      title: "Review",
+      markdown: "# Review\n\nText.",
+      citations: [],
+      quotes: [],
+      assets: [],
+      groundingReviewed: "passed",
+      groundingIssues: [],
+    });
+    assert.isTrue(parsed.ok, parsed.ok ? "" : parsed.error);
+    if (!parsed.ok) return;
+    assert.equal(parsed.value.taskId, "review");
+    const original = DirectDocumentFinalizer.prototype.finalize;
+    const inputs: unknown[] = [];
+    DirectDocumentFinalizer.prototype.finalize = async function (params) {
+      inputs.push(params.input);
+      return {
+        document: {
+          version: 2,
+          documentId: "doc-1",
+          documentVersion: 1,
+          contentHash: "sha256:doc",
+          documentKind: "literature_review",
+          title: "Review",
+          visibleMarkdown: "# Review\n\nText.",
+          citationBundle: { clusters: [] },
+        },
+        outbox: {},
+        repairs: [],
+      } as never;
+    };
+    try {
+      const output = (await submit.execute(parsed.value, {
+        ...baseContext,
+        runId: "run-1",
+      })) as { materialRef?: { documentId: string } };
+      assert.equal(output.materialRef?.documentId, "doc-1");
+    } finally {
+      DirectDocumentFinalizer.prototype.finalize = original;
+    }
+    assert.lengthOf(inputs, 1);
+    assert.notProperty(inputs[0], "taskId");
+    assert.equal((inputs[0] as { title: string }).title, "Review");
   });
 
   it("normalizes file_io canonical and deprecated alias shapes", async function () {

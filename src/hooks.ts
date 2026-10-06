@@ -1,6 +1,7 @@
 import { appLogger } from "./core/logging";
 import { initLocale } from "./utils/locale";
 import { initI18n } from "./utils/i18n";
+import { initializeModelCapabilityRegistry } from "./modelCapabilities";
 import { registerPrefsScripts } from "./modules/preferenceScript";
 import { config, PREFERENCES_PANE_ID } from "./modules/contextPanel/constants";
 import {
@@ -323,6 +324,14 @@ function scheduleMineruAutoWatchRegistration(): void {
   });
 }
 
+function scheduleLibraryTextIndexStartup(): void {
+  runDeferredStartupTask("library text index", async () => {
+    const { startLibraryTextIndex } =
+      await import("./services/libraryTextIndex");
+    await startLibraryTextIndex();
+  });
+}
+
 function scheduleModelCapabilityRefresh(): void {
   if (__env__ === "test") return;
   runDeferredStartupTask("model capability registry", async () => {
@@ -358,6 +367,7 @@ function scheduleDeferredStartupWork(
   scheduleAttachmentMaintenance();
   scheduleWebChatRelayRegistration();
   scheduleMineruAutoWatchRegistration();
+  scheduleLibraryTextIndexStartup();
   scheduleModelCapabilityRefresh();
 }
 
@@ -392,6 +402,11 @@ async function onStartup() {
   initLocale();
   initI18n();
   initFontScale();
+
+  await measureStartupPhase(
+    "model capability cache",
+    initializeModelCapabilityRegistry,
+  );
 
   const conversationStoreReadiness =
     await initializeConversationStoresForStartup();
@@ -554,6 +569,13 @@ async function onShutdown(): Promise<void> {
   dedicatedChatPaneDisposers.clear();
   zoteroChangeDispatcher.unregisterNativeObserver();
   await zoteroChangeDispatcher.flush();
+  try {
+    const { stopLibraryTextIndex } =
+      await import("./services/libraryTextIndex");
+    await stopLibraryTextIndex();
+  } catch (error) {
+    appLogger.debug("LLM index: shutdown skipped", error);
+  }
   unregisterPaperConversationRestoreNotifications();
   await shutdownPaperRestoreSelections();
   disposePendingDeletionSubsystem();
@@ -580,6 +602,13 @@ async function onShutdown(): Promise<void> {
     stopAutoWatch();
   } catch {
     /* ignore if module not loaded */
+  }
+  try {
+    const { destroyAllCachedCodexAppServerProcesses } =
+      await import("./utils/codexAppServerProcess");
+    await destroyAllCachedCodexAppServerProcesses();
+  } catch (error) {
+    appLogger.debug("LLM: codex app-server shutdown skipped", error);
   }
   try {
     const { shutdownAgentSubsystem } = require("./agent");

@@ -295,16 +295,9 @@ export function getCodexDirectReasoningChoices(
   model: string,
 ): CodexReasoningChoice[] {
   const catalogModel = getCodexDirectCatalogModel(model);
-  if (!catalogModel) {
-    return buildCodexReasoningChoices({
-      efforts: [],
-      showDefaultInAutoLabel: true,
-    });
-  }
+  if (!catalogModel) return buildCodexReasoningChoices({ efforts: [] });
   return buildCodexReasoningChoices({
     efforts: catalogModel.supportedReasoningEfforts,
-    defaultEffort: catalogModel.defaultReasoningEffort,
-    showDefaultInAutoLabel: true,
   });
 }
 

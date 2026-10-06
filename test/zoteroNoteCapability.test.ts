@@ -402,7 +402,7 @@ describe("note capability", function () {
         isAttachment: () => true,
         isPDFAttachment: () => true,
         attachmentContentType: "application/pdf",
-        getAnnotations: () => [10, 11, 12],
+        getAnnotations: () => [10, 11, 12].map((id) => items.get(id)),
       } as unknown as Record<string, unknown>);
       items.set(10, {
         id: 10,
@@ -449,7 +449,7 @@ describe("note capability", function () {
         isAttachment: () => true,
         isPDFAttachment: () => true,
         attachmentContentType: "application/pdf",
-        getAnnotations: () => [10],
+        getAnnotations: () => [items.get(10)],
       } as unknown as Record<string, unknown>);
       items.set(10, {
         id: 10,
@@ -592,12 +592,29 @@ describe("note capability", function () {
     });
 
     it("answers an empty query without touching the library", async function () {
-      installSearch("throws");
+      let searches = 0;
+      let enumerations = 0;
+      installZotero({
+        Search: class {
+          constructor() {
+            searches += 1;
+            throw new Error("Unexpected search");
+          }
+        },
+        Items: {
+          getAll: async () => {
+            enumerations += 1;
+            return [];
+          },
+        },
+      });
       const results = await capability().searchAllNotes({
         libraryID: 1,
         query: "   ",
       });
       assert.deepEqual(results, []);
+      assert.equal(searches, 0);
+      assert.equal(enumerations, 0);
     });
   });
 
@@ -613,6 +630,12 @@ describe("note capability", function () {
         html: "<p>second</p>",
         title: "Second",
       });
+      const { item: child } = makeNote({
+        id: 5,
+        parentID: 1,
+        html: "<p>child</p>",
+        title: "Child",
+      });
       const paper = {
         id: 1,
         libraryID: 1,
@@ -620,7 +643,7 @@ describe("note capability", function () {
         isRegularItem: () => true,
         isAttachment: () => false,
         getAttachments: () => [],
-        getNotes: () => [],
+        getNotes: () => [5],
         getDisplayTitle: () => "A paper",
         getField: (name: string) => (name === "title" ? "A paper" : ""),
         getCollections: () => [],
@@ -632,6 +655,7 @@ describe("note capability", function () {
           get: (id: number) => items.get(id) || null,
           getAll: async () => [
             paper as unknown as Record<string, unknown>,
+            child as unknown as Record<string, unknown>,
             first as unknown as Record<string, unknown>,
             second as unknown as Record<string, unknown>,
           ],
@@ -647,6 +671,7 @@ describe("note capability", function () {
       assert.equal(listed.totalCount, 2, "the total ignores the page limit");
       assert.lengthOf(listed.notes, 1);
       assert.equal(listed.notes[0].itemType, "note");
+      assert.equal(listed.notes[0].itemId, 3);
     });
 
     it("refuses a listing with no library", async function () {

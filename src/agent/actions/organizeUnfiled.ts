@@ -292,8 +292,9 @@ export const organizeUnfiledAction: AgentAction<
       }
 
       const mutateResult = await callTool(
-        "move_to_collection",
+        "library_update",
         {
+          kind: "collections",
           action: "add",
           id: getPagedOperationId("organize_unfiled", page, {
             pageSize: options.pageSize,
@@ -452,7 +453,7 @@ async function loadFreshUnfiledItems(
   }
 
   const queryResult = await callTool(
-    "query_library",
+    "library_search",
     {
       entity: "items",
       mode: "list",
@@ -493,7 +494,7 @@ async function loadFreshCollections(
   }
 
   const collectionsResult = await callTool(
-    "query_library",
+    "library_search",
     { entity: "collections", mode: "list" },
     ctx,
     "Loading collections",

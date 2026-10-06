@@ -1,4 +1,5 @@
 import type { ActionProposal } from "../../authorization/types";
+import type { TaskPaperDocumentCitation } from "../../context/taskPaperLedger";
 import {
   readFlatMaterialRef,
   type MaterialRef,
@@ -11,7 +12,6 @@ import type {
   AgentPendingAction,
   AgentToolArtifact,
   AgentToolCall,
-  AgentToolContinuationCheckpoint,
   AgentToolDefinition,
   AgentToolEffect,
   AgentToolExecutionOutput,
@@ -170,12 +170,11 @@ export function normalizeExecutionOutput(
   artifacts?: AgentToolArtifact[];
   effect?: AgentToolEffect;
   actionEvidence?: AgentActionEvidence[];
-  continuationCheckpoint?: AgentToolContinuationCheckpoint;
   materialRef?: MaterialRef;
   materialKind?: string;
   materialTitle?: string;
+  materialCitedSources?: TaskPaperDocumentCitation[];
   batchItems?: AgentBatchItemOutcome[];
-  researchJobId?: string;
 } {
   if (value && typeof value === "object" && !Array.isArray(value)) {
     const record = value as {
@@ -183,12 +182,11 @@ export function normalizeExecutionOutput(
       artifacts?: unknown;
       effect?: unknown;
       actionEvidence?: unknown;
-      continuationCheckpoint?: unknown;
       materialRef?: unknown;
       materialKind?: unknown;
       materialTitle?: unknown;
+      materialCitedSources?: unknown;
       batchItems?: unknown;
-      researchJobId?: unknown;
     };
     if (Object.prototype.hasOwnProperty.call(record, "content")) {
       return {
@@ -205,16 +203,6 @@ export function normalizeExecutionOutput(
         actionEvidence: Array.isArray(record.actionEvidence)
           ? (record.actionEvidence as AgentActionEvidence[])
           : undefined,
-        continuationCheckpoint:
-          record.continuationCheckpoint &&
-          typeof record.continuationCheckpoint === "object" &&
-          !Array.isArray(record.continuationCheckpoint) &&
-          typeof (record.continuationCheckpoint as Record<string, unknown>)
-            .reason === "string" &&
-          typeof (record.continuationCheckpoint as Record<string, unknown>)
-            .instruction === "string"
-            ? (record.continuationCheckpoint as AgentToolContinuationCheckpoint)
-            : undefined,
         materialRef: readMaterialRef(record.materialRef),
         materialKind:
           typeof record.materialKind === "string"
@@ -224,13 +212,12 @@ export function normalizeExecutionOutput(
           typeof record.materialTitle === "string"
             ? record.materialTitle
             : undefined,
+        materialCitedSources: Array.isArray(record.materialCitedSources)
+          ? (record.materialCitedSources as TaskPaperDocumentCitation[])
+          : undefined,
         batchItems: Array.isArray(record.batchItems)
           ? (record.batchItems as AgentBatchItemOutcome[])
           : undefined,
-        researchJobId:
-          typeof record.researchJobId === "string"
-            ? record.researchJobId
-            : undefined,
       };
     }
   }

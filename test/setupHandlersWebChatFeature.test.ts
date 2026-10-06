@@ -173,6 +173,26 @@ describe("setupHandlers WebChat feature", function () {
       );
     });
 
+    it("paints every dot it shows, from one poll", async function () {
+      // The Independent tab and the Stacked chip each carry a dot.
+      const tab = dot();
+      const chip = dot();
+      await withTimerLog(async (log) => {
+        const feature = createFeature({
+          probeRelayConnection: async () => true,
+        });
+        feature.startConnectionCheck(tab, chip);
+        assert.lengthOf(log.started, 1, "one poll serves both dots");
+        await settle();
+      });
+      for (const target of [tab, chip]) {
+        assert.strictEqual(
+          target.className,
+          "llm-webchat-dot llm-webchat-dot-connected",
+        );
+      }
+    });
+
     it("paints the dot grey when the relay cannot be reached", async function () {
       const feature = createFeature({
         probeRelayConnection: async () => {

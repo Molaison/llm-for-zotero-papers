@@ -4,19 +4,16 @@ import { callTool } from "../src/agent/actions/executor";
 import { resolvedAgentRequest } from "./helpers/resolvedAgentRequest";
 
 describe("conversational built-in action boundary", function () {
-  it("retains Plan preparation, cancellation, and durable grant checkpointing through child writes", async function () {
+  it("retains the turn's request, cancellation, and run through child writes", async function () {
     const abort = new AbortController();
-    const checkpoint = async () => undefined;
     const original = {
       request: resolvedAgentRequest({
         conversationKey: 41,
         mode: "agent",
-        userText: "Prepare a plan to tag papers",
-        planContext: { phase: "planning" } as any,
+        userText: "Tag these papers",
       }),
       runId: "current-turn",
       signal: abort.signal,
-      checkpointActionProgress: checkpoint,
     } as any;
     let received: any, options: any;
     const registry = {
@@ -36,13 +33,9 @@ describe("conversational built-in action boundary", function () {
       confirmationMode: "automatic",
     });
     await callTool("apply_tags", { itemId: 1 }, ctx);
-    assert.deepEqual(
-      received.request.planContext,
-      original.request.planContext,
-      "Child writes must see the read-only Plan preparation boundary",
-    );
+    assert.equal(received.request.conversationKey, 41);
+    assert.equal(received.request.userText, "Tag these papers");
     assert.equal(received.signal, abort.signal);
-    assert.equal(received.checkpointActionProgress, checkpoint);
     assert.equal(received.runId, "current-turn");
     assert.equal(
       options.callerKind,

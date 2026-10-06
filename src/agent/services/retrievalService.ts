@@ -17,6 +17,7 @@ import {
   formatPaperSourceLabel,
 } from "../../services/paperContent/paperAttribution";
 import type { PaperContextRef } from "../../shared/types";
+import { renderSectionLabel } from "../../shared/libraryChatEvidencePolicy";
 import { PdfService } from "./pdfService";
 import type { ModelProfileOverride } from "../../modelCapabilities";
 
@@ -71,7 +72,6 @@ export function buildEvidenceCacheKey(params: {
   sectionIds: readonly string[];
   source: Awaited<ReturnType<PdfService["ensurePaperContext"]>>;
   embeddingKey: string;
-  purpose?: string;
   quotePolicy?: string;
 }): EvidenceCacheKey {
   const fingerprints = [
@@ -94,7 +94,6 @@ export function buildEvidenceCacheKey(params: {
     params.perPaperTopK,
     [...params.sectionIds].sort(),
     params.embeddingKey,
-    params.purpose,
     params.quotePolicy,
     fingerprints.length
       ? fingerprints
@@ -122,7 +121,6 @@ export class RetrievalService {
     question: string;
     queryVariants?: string[];
     queryPlan?: RetrievalQueryPlan;
-    intent?: import("../types").ClassifiedTurnIntent;
     model?: string;
     apiBase?: string;
     apiKey?: string;
@@ -173,9 +171,7 @@ export class RetrievalService {
           .join("\n");
       }),
     });
-    queryPlan.retrievalPurpose = params.intent?.semantic?.retrievalPurpose;
-    queryPlan.quoteAnchorPolicy =
-      params.intent?.retrievalIntent === "verify" ? "verified" : "none";
+    queryPlan.quoteAnchorPolicy = "none";
     // The planner's similarity key strips operators and truncates long input.
     // Evidence reuse must retain the complete query that selected these facts.
     const queryCacheKey = JSON.stringify([
@@ -217,7 +213,6 @@ export class RetrievalService {
         sectionIds,
         source: pdfContext,
         embeddingKey,
-        purpose: queryPlan.retrievalPurpose,
         quotePolicy: queryPlan.quoteAnchorPolicy,
       });
       const cached = this.evidenceCache.get(cacheKey);
@@ -258,7 +253,11 @@ export class RetrievalService {
       const paperResults: RetrievalResult[] = candidates.map((candidate) => ({
         paperContext,
         chunkIndex: candidate.chunkIndex,
-        sectionLabel: candidate.sectionLabel,
+        sectionLabel: renderSectionLabel(
+          candidate.sectionLabel,
+          candidate.enclosingSection,
+          candidate.title,
+        ),
         sectionPath: candidate.sectionPath,
         chunkKind: candidate.chunkKind,
         citationLabel: formatPaperCitationLabel(paperContext),

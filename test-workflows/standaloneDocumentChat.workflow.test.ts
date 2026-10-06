@@ -18,7 +18,7 @@ async function withPrefs<T>(
   for (const [key, value] of Object.entries(prefs)) {
     const fullKey = `${PREF_PREFIX}.${key}`;
     previous.set(fullKey, Zotero.Prefs.get(fullKey, true));
-    Zotero.Prefs.set(fullKey, value, true);
+    Zotero.Prefs.set(fullKey, value as string | number | boolean, true);
   }
   try {
     return await task();
@@ -27,7 +27,7 @@ async function withPrefs<T>(
       if (value === undefined) {
         Zotero.Prefs.clear?.(fullKey, true);
       } else {
-        Zotero.Prefs.set(fullKey, value, true);
+        Zotero.Prefs.set(fullKey, value as string | number | boolean, true);
       }
     }
   }
@@ -175,7 +175,7 @@ describe("workflow: standalone document chat", function () {
     );
     assert.deepEqual(
       expanded.titleActionLabels,
-      ["Export", "Delete conversation"],
+      ["Show task progress", "Export", "Delete conversation"],
       diagnosticsMessage(expanded),
     );
     assert.isDefined(expanded.alignment, diagnosticsMessage(expanded));
@@ -272,7 +272,7 @@ describe("workflow: standalone document chat", function () {
     );
     for (const node of Array.from(
       doc.querySelectorAll(".llm-standalone-tab-row-leading button"),
-    )) {
+    ) as Element[]) {
       const control = node as HTMLElement;
       const rect = control.getBoundingClientRect();
       if (!rect.width || !rect.height) continue;

@@ -7,6 +7,7 @@ import type {
 import {
   estimateAvailableContextBudget,
   callEmbeddings,
+  getResolvedEmbeddingConfig,
   resolveSemanticSearchState,
 } from "../../utils/llmClient";
 import { estimateTextTokens } from "../../utils/modelInputCap";
@@ -65,9 +66,10 @@ import {
   type LibraryChatReadStrategyDiagnostics,
 } from "../../shared/libraryChatReadStrategy";
 import {
-  compareEvidenceCandidatesForQuestion,
+  compareEvidenceCandidatesForSections,
   isBodyEvidenceSection,
 } from "../../shared/libraryChatEvidencePolicy";
+import { createSectionIntent } from "../../services/retrieval/sectionIntent";
 import {
   readDocumentsExhaustively,
   type ExhaustiveBatchAnalyzer,
@@ -77,6 +79,21 @@ import { resolveFullReadPaperTargets } from "../../shared/fullReadTargetResolver
 import { resolveNormalChatFigureInputs } from "./normalChatFigureInputs";
 import { renderSelectedTextPageFallbackContext } from "../../services/context/selectedTextAnchorFormatting";
 import { createZoteroMetadataResolver } from "../../services/zoteroMetadata/resolver";
+
+/**
+ * Which part of papers a plain-chat question asks about, in any language:
+ * its English cue words, else its retrieval embedding compared with section
+ * examples, which are embedded once per embedding model.
+ */
+const sectionIntent = createSectionIntent((texts) => callEmbeddings(texts));
+
+function embeddingModelKey(): string {
+  try {
+    return getResolvedEmbeddingConfig().cacheKey;
+  } catch {
+    return "";
+  }
+}
 
 // ── Cross-turn retrieval cache ──────────────────────────────────────────────
 // Caches chunk candidates returned by buildPaperRetrievalCandidates so that
@@ -600,6 +617,11 @@ async function resolveCollectionScopePapers(params: {
     params.question,
     params.queryPlan,
   );
+  // Papers the user removed from the task in Task progress.
+  const excludedItemIds = new Set<number>([
+    ...collectionContexts.flatMap((context) => context.excludedItemIds || []),
+    ...tagContexts.flatMap((context) => context.excludedItemIds || []),
+  ]);
   const candidates: CollectionPaperCandidate[] = [];
   const scopeLines: string[] = [];
   const manifestSeenPaperKeys = new Set<string>();
@@ -617,6 +639,7 @@ async function resolveCollectionScopePapers(params: {
     const itemIds = collection ? collectCollectionItemIds(collectionId) : [];
     let collectionPaperCount = 0;
     for (const itemId of itemIds) {
+      if (excludedItemIds.has(itemId)) continue;
       const item = Zotero.Items.get(itemId);
       if (!item?.isRegularItem?.()) continue;
       const paperContext = buildPaperRefFromRegularItem(item);
@@ -654,6 +677,7 @@ async function resolveCollectionScopePapers(params: {
     const items = await collectTagContextItems(tagContext);
     let tagPaperCount = 0;
     for (const item of items) {
+      if (excludedItemIds.has(Number(item.id))) continue;
       const paperContext = buildPaperRefFromRegularItem(item);
       if (!paperContext) continue;
       tagPaperCount += 1;
@@ -1220,10 +1244,15 @@ export async function assembleRetrievedMultiPaperContext(params: {
     list.push(candidate);
     candidatesByPaper.set(candidate.paperKey, list);
   }
+  const wantedSections = await sectionIntent.wantedSections({
+    question,
+    questionEmbedding: precomputedQueryEmbedding,
+    modelKey: precomputedQueryEmbedding ? embeddingModelKey() : "",
+  });
   for (const list of candidatesByPaper.values()) {
     list.sort(
-      compareEvidenceCandidatesForQuestion(
-        question,
+      compareEvidenceCandidatesForSections(
+        wantedSections,
         (candidate) => relevanceByCandidate.get(candidateKey(candidate)) || 0,
       ),
     );

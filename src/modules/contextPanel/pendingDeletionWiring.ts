@@ -1,7 +1,9 @@
 import { appLogger } from "../../core/logging";
 import {
   configurePendingDeletionFinalizers,
+  pendingDeletionStore,
   setPendingDeletionStoreLogger,
+  type PendingDeletionEvent,
 } from "../../core/conversations/pendingDeletionStore";
 import {
   finalizeQueuedConversationDeletion,
@@ -28,6 +30,7 @@ import {
   invalidateClaudeConversationSessionWithinWriteLock,
 } from "../../claudeCode/runtime";
 import { clearConversationOwnedRuntimeState } from "./state";
+import { clearTaskProgress } from "./taskProgress/store";
 import { sweepOrphanedAgentTraceExports } from "../../agent/store/traceStore";
 import { onBackgroundCleanupNeeded } from "../../core/maintenance/backgroundCleanupSignals";
 
@@ -286,9 +289,30 @@ export async function flushPendingDeletionMaintenanceForTests(): Promise<void> {
   await slowSweep;
 }
 
+/**
+ * A queued deletion (conversation or turn) hides the conversation now, so
+ * its Task progress record goes now too; Undo rebuilds it from history.
+ * A dropped intent leaves the conversation alive and its record alone.
+ */
+export function clearTaskProgressOnPendingDeletion(
+  event: PendingDeletionEvent,
+): void {
+  if (event.dropped) return;
+  if (
+    event.type !== "queued" &&
+    event.type !== "committing" &&
+    event.type !== "local-deleted" &&
+    event.type !== "quarantined"
+  ) {
+    return;
+  }
+  clearTaskProgress(event.entry.conversationKey);
+}
+
 export function configurePendingDeletionSubsystem(): void {
   if (configured) return;
   configured = true;
+  pendingDeletionStore.subscribe(clearTaskProgressOnPendingDeletion);
   void initRecentlyDeletedConversationTombstones().catch((err) =>
     safeWarn("LLM: durable deletion tombstone load failed", err),
   );

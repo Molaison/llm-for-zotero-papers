@@ -45,7 +45,11 @@ describe("workflow: custom endpoint reasoning defaults", function () {
     await api.reset();
     try {
       for (const [key, value] of Object.entries(settings))
-        Zotero.Prefs.set(prefix + key, value, true);
+        Zotero.Prefs.set(
+          prefix + key,
+          value as string | number | boolean,
+          true,
+        );
       fixture = await api.createPaperWithPdfFixture({
         title: "Reasoning default",
         pdfTitle: "Reasoning PDF",
@@ -58,13 +62,15 @@ describe("workflow: custom endpoint reasoning defaults", function () {
       const button = body.querySelector<HTMLButtonElement>(
         "#llm-reasoning-toggle",
       )!;
-      assert.include(button.dataset.reasoningLabel, "Auto");
+      assert.equal(button.dataset.reasoningLabel, "Auto");
       button.click();
       const rows = Array.from(
         body.querySelectorAll<HTMLButtonElement>(
           "#llm-reasoning-menu .llm-reasoning-option",
         ),
-      );
+      ) as HTMLButtonElement[];
+      // Each row is the level name alone, with no description beside it.
+      assert.equal(rows[0]?.textContent, "✓ Auto");
       assert.isFalse(rows.some((row) => /off/i.test(row.textContent || "")));
       const max = rows.find((row) =>
         /^max$/i.test((row.textContent || "").trim()),

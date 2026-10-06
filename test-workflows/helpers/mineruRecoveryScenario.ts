@@ -1,3 +1,4 @@
+import { mineruLegacyHealth } from "../../test/helpers/mineruLegacyHealth";
 import { composeRetrievalCandidateInvalidation } from "../../test/helpers/hostSurfaces";
 import { assert } from "chai";
 import { unzipSync } from "fflate";
@@ -69,6 +70,8 @@ async function run(record: RecoveryRecord, stop: boolean) {
       if (name !== "fetch") return getGlobal.call(this, name);
       return async (url: string, init?: RequestInit) => {
         const uri = String(url);
+        const health = mineruLegacyHealth(uri);
+        if (health) return health;
         if (init?.method === "PUT") {
           assert.include(uri, "mineru-recovery.invalid");
           record.uploads.push(active);

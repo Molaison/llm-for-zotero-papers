@@ -4,7 +4,6 @@ import { RetrievalService } from "../src/agent/services/retrievalService";
 import { isPaperEvidenceFrontierEligible } from "../src/agent/context/paperEvidenceFrontier";
 import type { AgentToolContext, AgentToolDefinition } from "../src/agent/types";
 import type { PdfContext } from "../src/services/paperContent/types";
-import { classifiedFixture } from "./helpers/semanticIntent";
 import {
   buildFixturePdfContext,
   restoreTestGlobals,
@@ -75,7 +74,6 @@ const paper = {
 function toolContext(): AgentToolContext {
   return {
     request: {
-      classifiedIntent: classifiedFixture(),
       conversationKey: 77,
       mode: "agent",
       conversationKind: "paper",
@@ -437,6 +435,7 @@ describe("paper_read outline mode and section ids", function () {
       { mode: "targeted", query, sectionIds: [sectionId] },
       tool,
     )) as TargetedResult;
+    assert.isNotEmpty(filtered.papers[0].passages);
     for (const passage of filtered.papers[0].passages) {
       assert.match(
         passage.sectionPath || "",

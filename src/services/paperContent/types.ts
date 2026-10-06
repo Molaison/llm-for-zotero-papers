@@ -58,6 +58,13 @@ export type PdfChunkMeta = {
   sectionPath?: string;
   /** Markdown heading depth of the enclosing section: `#` → 1, `##` → 2. */
   sectionLevel?: number;
+  /**
+   * The standard section the chunk lies in, as its heading reads
+   * (`Materials and methods` for a chunk under its `Data analysis`
+   * subsection). Absent in front matter, back matter, and text that follows
+   * an introduction without a Results heading.
+   */
+  enclosingSection?: string;
   chunkKind: PdfChunkKind;
   /**
    * Where {@link chunkKind} came from: `manifest` when the section heading
@@ -125,6 +132,8 @@ export type PaperContextCandidate = {
   sectionIndex?: number;
   /** Heading chain down to the chunk, e.g. `2 Algorithm › 2.1 Weak form`. */
   sectionPath?: string;
+  /** The standard section the chunk lies in; see `PdfChunkMeta`. */
+  enclosingSection?: string;
   chunkKind?: PdfChunkKind;
   anchorText?: string;
   leadingNoiseRemoved?: boolean;

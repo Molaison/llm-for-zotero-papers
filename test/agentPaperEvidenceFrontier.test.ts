@@ -421,7 +421,7 @@ describe("PaperEvidenceFrontier", function () {
 });
 
 describe("PaperEvidenceFrontier stop guidance by requested coverage", function () {
-  it("tells a targeted question to answer now when a repeated read adds nothing", async function () {
+  it("lets the agent choose a missing passage after an unchanged read", async function () {
     const frontier = new PaperEvidenceFrontier();
     const input = { mode: "targeted", query: "cross-day decoding" };
     const first = await frontier.processResult({
@@ -438,15 +438,15 @@ describe("PaperEvidenceFrontier stop guidance by requested coverage", function (
     assert.equal(reused?.frontier, "unchanged");
     assert.equal(
       (reused?.content as any).paperEvidenceProgress.recommendation,
-      "answer_now",
+      "name_a_specific_missing_dimension",
     );
     assert.include(
       (reused?.content as any).paperEvidenceProgress.reason,
-      "read one unread section by sectionId from the outline",
+      "choose another passage or section",
     );
   });
 
-  it("tells a targeted question to answer once the read budget is used even when text is new", async function () {
+  it("does not force an answer when a read count is reached", async function () {
     const frontier = new PaperEvidenceFrontier();
     await frontier.processResult({
       input: { mode: "targeted", query: "one" },
@@ -461,52 +461,12 @@ describe("PaperEvidenceFrontier stop guidance by requested coverage", function (
     assert.equal(second.frontier, "advanced");
     assert.equal(
       (second.content as any).paperEvidenceProgress.recommendation,
-      "answer_now",
+      "answer_or_self_check",
     );
     assert.equal(
       (second.content as any).paperEvidenceProgress.readsThisTurn,
       2,
     );
     assert.equal((second.content as any).paperEvidenceProgress.readBudget, 2);
-  });
-
-  it("derives stop guidance from the requested read mode", async function () {
-    const frontier = new PaperEvidenceFrontier();
-    const input = { mode: "targeted", query: "method" };
-    await frontier.processResult({
-      input,
-      toolCallId: "first",
-      content: { results: [passage({ chunkIndex: 4 })] },
-    });
-    const reused = await frontier.readCached({ input, toolCallId: "second" });
-    assert.equal(
-      (reused?.content as any).paperEvidenceProgress.recommendation,
-      "answer_now",
-    );
-  });
-});
-
-describe("PaperEvidenceFrontier inside plan execution", function () {
-  it("tells the model to continue the plan instead of chat stop guidance", async function () {
-    const { PaperEvidenceFrontier } =
-      await import("../src/agent/context/paperEvidenceFrontier");
-    const frontier = new PaperEvidenceFrontier({ planExecuting: true });
-    const processed = await frontier.processResult({
-      input: { mode: "overview", targets: [{ itemId: 1 }] },
-      content: {
-        mode: "overview",
-        results: [
-          {
-            text: "Body text of the paper.",
-            paperContext: { itemId: 1, contextItemId: 2 },
-            sourceFingerprint: "fp",
-          },
-        ],
-      },
-      toolCallId: "call-1",
-    });
-    const progress = (processed.content as any).paperEvidenceProgress;
-    assert.equal(progress.recommendation, "continue_plan");
-    assert.notMatch(progress.reason, /answer/i);
   });
 });

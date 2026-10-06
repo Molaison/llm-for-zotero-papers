@@ -1,40 +1,25 @@
 ---
 id: compare-papers
 description: Compare selected papers or collection papers by theme, methodology, or findings
-version: 7
+version: 11
 contexts: paper-set,library-corpus
 activation: auto
 ---
 
-<!--
-  SKILL: Compare Papers
+## Compare papers
 
-  This skill activates when you ask to compare multiple papers
-  (e.g., "compare these two papers", "what are the differences?").
+Organize the comparison around the user's question and dimensions that distinguish the papers.
+Use comparable definitions, populations, datasets, measurements, and study conditions; explain when reported results cannot be compared directly.
+Connect agreements and disagreements to their evidence and limitations rather than listing independent summaries.
 
-  You can customize:
-  - Comparison dimensions: change what aspects are compared
-  - Reading depth: adjust how deeply each paper is read
-  - Output format: modify the comparison structure
+For three or more papers, declare a digest part first (`task_update` with `expectedEffect:'digest'` over the papers) whose description names the comparison dimensions, for example "For each paper, report: question, species or system, method, main finding".
+Each result returns facets with those labels; they become the comparison's rows.
+Read further only for a dimension the results leave open.
+When the user asks what the papers have in common, state a commonality only where the facets of each paper support it.
 
-  Your changes are preserved across plugin updates.
-  To reset to default, delete this file — it will be recreated on next restart.
--->
+Reuse supplied paper text and the selected-paper evidence ledger.
+Read further only for a missing comparison dimension or an important uncertainty, batching explicit paper `targets` when useful.
+For a collection or library corpus, use scoped `library_retrieve` and its paper ledger before close-reading identified papers.
 
-## Comparing Multiple Papers — targeted first when the dimension is known
-
-Use Zotero paper tools as resources, not a ritual. Batch selected papers in `targets`.
-
-A selected Zotero collection/folder is also a valid comparison corpus. In collection/library chat, never rely on the active-reader paper as an implicit target. If explicit paper targets are not already selected, first use `library_retrieve` scoped to the selected collection/library to map the comparison evidence, then call `paper_read` only with explicit `targets` when close reading is needed.
-For bounded selected or collection-scoped comparison pools, overview is the answer style, not the read depth.
-Prefer body-evidence coverage and the returned paper synthesis digest before writing the comparison.
-
-- If the user names a comparison dimension such as methods, results, limitations, theory, data, or figures, start with one batched targeted read:
-  `paper_read({ mode:'targeted', query:'methods methodology method section', targets:[...] })`
-- If the corpus is a selected collection/folder and the dimension is known, prefer one scoped `library_retrieve({ query:'methods methodology method section', intent:'summarize', depth:'evidence' })` before selecting explicit paper targets for deeper comparison.
-- For broad requests like "compare these papers" with no dimension, use bounded evidence coverage first: `library_retrieve({ query:'compare these papers', intent:'summarize', depth:'evidence' })` for collection/library chat, or the selected-paper evidence ledger when it is already supplied.
-  Then synthesize from the paper digest and snippets.
-- For method-section requests, do not call overview first unless the targeted result is clearly insufficient.
-- Apply the system citation contract to paper-specific claims and any direct quotations.
-  Keep the comparison readable and use only high-signal evidence that supports a concrete contrast.
-- Stop after the evidence ledger covers the selected papers at the needed depth, or explicitly report the coverage frontier. Make follow-up `paper_read({ mode:'targeted', ... })` calls only for concrete missing dimensions or papers that the ledger marks as insufficient.
+A concise comparison still needs evidence at the requested depth.
+Preserve the coverage frontier, identify papers or dimensions that remain unsupported, and distinguish body evidence from metadata or abstracts.

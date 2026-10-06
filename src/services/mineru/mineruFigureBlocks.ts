@@ -1,17 +1,7 @@
 import { parseDocumentReferences } from "../../shared/documentReferences";
 
-export type MineruContentListEntry = {
-  type: string;
-  text?: string;
-  text_level?: number;
-  page_idx?: number;
-  img_path?: string;
-  image_caption?: string[];
-  image_footnote?: string[];
-  table_body?: string;
-  table_caption?: string[];
-  table_footnote?: string[];
-};
+import type { MineruContentListEntry } from "../../utils/mineruZip";
+export type { MineruContentListEntry } from "../../utils/mineruZip";
 
 export type MineruFigureBlockKind = "figure" | "table" | "image" | "mixed";
 

@@ -42,7 +42,7 @@ export async function undoNoteChange(
     );
   const args = { actionId: card.actionId };
   const prepared = await registry.prepareExecution(
-    { id: `undo:${card.actionId}`, name: "undo_last_action", arguments: args },
+    { id: `undo:${card.actionId}`, name: "undo", arguments: args },
     {
       request: resolveAgentRuntimeRequest({
         conversationKey: card.conversationKey,
@@ -61,7 +61,7 @@ export async function undoNoteChange(
         sourceToolName: "note_change",
         sourceActionId: card.actionId,
         sourceMode: "approval",
-        approvedCallDigest: buildActionCallDigest("undo_last_action", args),
+        approvedCallDigest: buildActionCallDigest("undo", args),
       },
       executeWithLock: (task) =>
         withConversationWriteLock(card.conversationKey, task),

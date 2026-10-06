@@ -185,6 +185,8 @@ export type CollectionContextRef = {
   collectionId: number;
   name: string;
   libraryID: number;
+  /** Papers of this folder the user removed from the task (Task progress). */
+  excludedItemIds?: number[];
 };
 
 /** A Zotero tag or tag scope selected as context scope. */
@@ -194,6 +196,8 @@ export type TagContextRef = {
   normalizedName?: string;
   scope?: "allTagged" | "untagged";
   includeAutomatic?: boolean;
+  /** Papers with this tag the user removed from the task (Task progress). */
+  excludedItemIds?: number[];
 };
 
 export type ActiveNoteSession = {

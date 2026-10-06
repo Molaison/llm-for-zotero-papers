@@ -366,6 +366,202 @@ describe("permanent conversation key ledger", function () {
     ).run(2200, "conversation-upgraded");
   });
 
+  describe("catalog-driven trigger reconciliation", function () {
+    async function createFencedTables(zotero: any): Promise<void> {
+      await zotero.DB.queryAsync(
+        `CREATE TABLE reconcile_catalog (
+          conversation_key INTEGER PRIMARY KEY,
+          conversation_id TEXT NOT NULL
+        )`,
+      );
+      await zotero.DB.queryAsync(
+        `CREATE TABLE reconcile_messages (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          conversation_key INTEGER NOT NULL,
+          text TEXT
+        )`,
+      );
+      await zotero.DB.queryAsync(
+        `CREATE TABLE llm_for_zotero_agent_memory (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          conversation_key INTEGER NOT NULL,
+          created_at INTEGER NOT NULL
+        )`,
+      );
+      await zotero.DB.queryAsync(
+        `CREATE TABLE llm_for_zotero_agent_runs (
+          run_id TEXT PRIMARY KEY,
+          conversation_key INTEGER NOT NULL
+        )`,
+      );
+      await zotero.DB.queryAsync(
+        `CREATE TABLE llm_for_zotero_agent_run_events (
+          run_id TEXT NOT NULL,
+          seq INTEGER NOT NULL
+        )`,
+      );
+      await zotero.DB.queryAsync(
+        `CREATE TABLE llm_for_zotero_attachment_refs (
+          owner_type TEXT NOT NULL,
+          owner_id INTEGER NOT NULL,
+          blob_hash TEXT NOT NULL,
+          PRIMARY KEY(owner_type, owner_id, blob_hash)
+        )`,
+      );
+    }
+
+    async function installAll(): Promise<void> {
+      await installConversationKeyLedgerCatalogTriggers(["reconcile_catalog"]);
+      await installConversationKeyLedgerMessageTriggers({
+        messageTable: "reconcile_messages",
+      });
+      await installConversationKeyLedgerAgentTriggers();
+    }
+
+    function recordTriggerDdl(zotero: any): {
+      creates: string[];
+      drops: string[];
+    } {
+      const queryAsync = zotero.DB.queryAsync;
+      const recorded = { creates: [] as string[], drops: [] as string[] };
+      zotero.DB.queryAsync = async (sql: string, params?: unknown[]) => {
+        const create = /CREATE TRIGGER IF NOT EXISTS\s+(\w+)/i.exec(sql);
+        if (create) recorded.creates.push(create[1]);
+        const drop = /DROP TRIGGER IF EXISTS\s+(\w+)/i.exec(sql);
+        if (drop) recorded.drops.push(drop[1]);
+        return queryAsync(sql, params);
+      };
+      return recorded;
+    }
+
+    function installedTriggerNames(): string[] {
+      return (
+        db
+          .prepare(`SELECT name FROM sqlite_master WHERE type = 'trigger'`)
+          .all() as Array<{ name: string }>
+      ).map((row) => row.name);
+    }
+
+    it("issues no trigger DDL when every current trigger is already installed", async function () {
+      await initConversationKeyLedgerStore();
+      const zotero = globalScope.Zotero as any;
+      await createFencedTables(zotero);
+      await installAll();
+      const before = installedTriggerNames().sort();
+
+      const recorded = recordTriggerDdl(zotero);
+      await installAll();
+
+      assert.deepEqual(recorded.creates, []);
+      assert.deepEqual(recorded.drops, []);
+      assert.deepEqual(installedTriggerNames().sort(), before);
+      assert.include(before, "reconcile_catalog_conversation_fence_v2_insert");
+      assert.include(before, "reconcile_messages_conversation_fence_v2_update");
+      assert.include(before, "llm_for_zotero_agent_memory_retired_key_insert");
+      assert.include(
+        before,
+        "llm_for_zotero_agent_run_events_conversation_fence_v2_insert",
+      );
+      assert.include(
+        before,
+        "llm_for_zotero_attachment_refs_conversation_fence_v2_insert",
+      );
+
+      await zotero.DB.executeTransaction(() =>
+        ensureConversationKeyLedgerEntryInTransaction({
+          conversationKey: 5100,
+          instanceID: "instance-reconcile",
+          conversationID: "conversation-reconcile",
+          system: "upstream",
+          kind: "global",
+          profileSignature: "profile-test",
+          libraryID: 1,
+          issuedAt: 1,
+        }),
+      );
+      await zotero.DB.executeTransaction(() =>
+        retireConversationKeyInTransaction({
+          conversationKey: 5100,
+          instanceID: "instance-reconcile",
+        }),
+      );
+      assert.throws(
+        () =>
+          db
+            .prepare(
+              `INSERT INTO reconcile_messages (conversation_key, text) VALUES (?, ?)`,
+            )
+            .run(5100, "late"),
+        /conversation key is permanently retired/,
+      );
+      assert.throws(
+        () =>
+          db
+            .prepare(
+              `INSERT INTO llm_for_zotero_agent_memory (conversation_key, created_at) VALUES (?, ?)`,
+            )
+            .run(5100, 1),
+        /conversation key is permanently retired/,
+      );
+    });
+
+    it("recreates only a missing current trigger and drops only a present legacy one", async function () {
+      await initConversationKeyLedgerStore();
+      const zotero = globalScope.Zotero as any;
+      await createFencedTables(zotero);
+      await installAll();
+      db.exec(`DROP TRIGGER reconcile_messages_conversation_fence_v2_update`);
+      db.exec(
+        `CREATE TRIGGER reconcile_catalog_conversation_key_ledger_insert
+         BEFORE INSERT ON reconcile_catalog
+         BEGIN SELECT RAISE(ABORT, 'conversation key is not issued and live'); END`,
+      );
+
+      const recorded = recordTriggerDdl(zotero);
+      await installAll();
+
+      assert.deepEqual(recorded.creates, [
+        "reconcile_messages_conversation_fence_v2_update",
+      ]);
+      assert.deepEqual(recorded.drops, [
+        "reconcile_catalog_conversation_key_ledger_insert",
+      ]);
+      const names = installedTriggerNames();
+      assert.include(names, "reconcile_messages_conversation_fence_v2_update");
+      assert.notInclude(
+        names,
+        "reconcile_catalog_conversation_key_ledger_insert",
+      );
+    });
+
+    it("falls back to unconditional DDL when the trigger catalog is unreadable", async function () {
+      await initConversationKeyLedgerStore();
+      const zotero = globalScope.Zotero as any;
+      await createFencedTables(zotero);
+      const queryAsync = zotero.DB.queryAsync;
+      zotero.DB.queryAsync = async (sql: string, params?: unknown[]) => {
+        if (/sqlite_master/i.test(sql)) throw new Error("no catalog");
+        return queryAsync(sql, params);
+      };
+      const recorded = recordTriggerDdl(zotero);
+      await installAll();
+
+      assert.sameMembers(recorded.creates, [
+        "reconcile_catalog_conversation_fence_v2_insert",
+        "reconcile_catalog_conversation_fence_v2_update",
+        "reconcile_messages_conversation_fence_v2_insert",
+        "reconcile_messages_conversation_fence_v2_update",
+      ]);
+      // Every legacy name for both tables is dropped unconditionally; the
+      // agent installer still returns early without the table catalog.
+      assert.lengthOf(recorded.drops, 20);
+      assert.notInclude(
+        installedTriggerNames(),
+        "llm_for_zotero_agent_memory_retired_key_insert",
+      );
+    });
+  });
+
   it("restarts cleanly when a tombstone already has a real ledger witness", async function () {
     await initConversationKeyLedgerStore();
     const zotero = globalScope.Zotero as any;

@@ -49,7 +49,7 @@ function changeValue(
 }
 
 async function assertIconLoads(win: Window, icon: Element, asset: string) {
-  const style = win.getComputedStyle(icon);
+  const style = win.getComputedStyle(icon)!;
   const image =
     style.backgroundImage !== "none" ? style.backgroundImage : style.maskImage;
   assert.include(image, asset, "native CSS resolves the bundled asset");
@@ -101,9 +101,7 @@ describe("workflow: explicit provider selection", function () {
         {
           id: "workflow-webchat-icon",
           authMode: "webchat",
-          apiBase: "",
-          apiKey: "",
-          providerProtocol: "webchat_bridge",
+          providerProtocol: "web_sync",
           models: ["chatgpt.com", "chat.deepseek.com"].map((model, index) => ({
             id: `workflow-webchat-model-${index}`,
             model,
@@ -158,7 +156,7 @@ describe("workflow: explicit provider selection", function () {
       )!;
       assert.isOk(webchatIcon, "mixed WebChat keeps its generic icon");
       assert.equal(
-        win.getComputedStyle(webchatIcon).maskImage,
+        win.getComputedStyle(webchatIcon)!.maskImage,
         "none",
         "WebChat artwork retains its colors",
       );

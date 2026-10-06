@@ -5,10 +5,17 @@ import {
   nativeQuestionAnswers,
 } from "../../codexAppServer/nativeQuestions";
 import { createCoalescedFrameScheduler } from "./setupHandlers/controllers/uiSchedulingController";
+import { syncTaskProgressPanel } from "./taskProgress/panel";
 import {
-  disposePlanProgress,
-  renderPlanProgress,
-} from "./agentTrace/planProgressView";
+  applyTaskPaperUpdate,
+  beginTaskRun,
+  completeTaskRun,
+  markTaskAnswering,
+  setTaskChecklist,
+  taskTurnIndexFor,
+} from "./taskProgress/store";
+import { codexPlanTaskSteps } from "./taskProgress/codexPlan";
+import { paperLedgerUpdateFromMcpActivity } from "../../agent/context/taskPaperLedgerRecorder";
 import { createProviderRequestScope } from "../../utils/providerTransport";
 import { renderMarkdownForNote } from "../../utils/markdown";
 import { HTML_NS } from "../../utils/domHelpers";
@@ -248,13 +255,12 @@ import {
   activeContextPanelStateSync,
   getCancelledRequestId,
   getPendingRequestId,
-  getLivePlanExecution,
-  recordLivePlanExecution,
   getAbortController,
   getConversationWriteGeneration,
   isConversationWriteGenerationCurrent,
   areConversationWritesFrozen,
   finishRequest,
+  isRequestActive,
   isRequestOwner,
   nextRequestId,
   isRequestPending,
@@ -370,9 +376,7 @@ import {
   validateLoadedConversationQuoteMessages,
 } from "./quoteValidation/scheduling";
 import { applyStableAnimationPhase } from "./stableAnimationPhase";
-import type { AgentActionContract } from "../../agent/contracts/types";
 import { stripReceiptStatusForDisplay } from "../../agent/contracts/actionEvaluation";
-import { planExecutionCoordinator } from "../../agent/plans/coordinator";
 import { renderRenderedMarkdownInto } from "./renderedMarkdown";
 import { disposeStreamingMarkdown } from "./streamingMarkdown";
 import { getWebSourceAnchorsFromTrace } from "../../webAccess/attribution";
@@ -1741,11 +1745,9 @@ async function publishPersistedPlanDocumentIfPresent(params: {
   });
   if (!document) return;
   await announceFinalizedMaterialForRun(params.agentRunId, document);
-  // Delivery may complete the final durable Plan task, and it is also what
-  // announces the finalized material. Refresh this conversation's views once
-  // both are durable, so progress cards reload the committed ledger and the
-  // trace paints the material row, without rebuilding unrelated chats that
-  // the user may be reading.
+  // Delivery is what announces the finalized material. Refresh this
+  // conversation's views once it is durable, so the trace paints the material
+  // row, without rebuilding unrelated chats that the user may be reading.
   refreshActiveConversationPanels(params.conversationKey);
 }
 
@@ -2847,64 +2849,12 @@ function getPanelRequestUI(body: Element): PanelRequestUI {
 function syncInlineActionCardAttr(body: Element): void {
   const panelRoot = body.querySelector("#llm-main") as HTMLElement | null;
   if (!panelRoot) return;
-  const hasCard = Boolean(
-    body.querySelector(".llm-action-inline-card, .llm-action-progress-card"),
-  );
+  const hasCard = Boolean(body.querySelector(".llm-action-inline-card"));
   if (hasCard) {
     panelRoot.dataset.hasActionCard = "true";
   } else {
     delete panelRoot.dataset.hasActionCard;
   }
-}
-
-function latestAssistantMessage(conversationKey: number): Message | undefined {
-  const history = chatHistory.get(conversationKey) || [];
-  for (let index = history.length - 1; index >= 0; index--) {
-    if (history[index].role === "assistant") return history[index];
-  }
-  return undefined;
-}
-
-/** Progress belongs to the live request, never to a historical assistant trace. */
-function syncFloatingPlanProgress(
-  chatBox: HTMLElement,
-  conversationKey: number,
-): void {
-  const binding = getLivePlanExecution(conversationKey);
-  const latestMessage = binding && latestAssistantMessage(conversationKey);
-  const message =
-    latestMessage?.agentRunId === binding?.runId && latestMessage?.streaming
-      ? latestMessage
-      : undefined;
-  const cards = Array.from(
-    chatBox.querySelectorAll(".llm-plan-container-execution"),
-  ).filter(Boolean) as HTMLElement[];
-  const current =
-    binding && message
-      ? cards.find(
-          (card) =>
-            card.dataset.llmPlanExecutionId === binding.ledger.executionId &&
-            card.dataset.llmPlanRequestId === `${binding.requestId}` &&
-            card.dataset.llmPlanRunId === binding.runId,
-        )
-      : undefined;
-  for (const card of cards) {
-    if (card !== current) disposePlanProgress(card);
-  }
-  if (!binding || !message) return;
-  const progress = renderPlanProgress(
-    chatBox.ownerDocument,
-    binding.ledger,
-    message.pendingAgentTraceEvents || getCachedAgentRunEvents(binding.runId),
-    current,
-  );
-  if (progress.dataset.llmPlanRequestId !== `${binding.requestId}`)
-    progress.dataset.llmPlanRequestId = `${binding.requestId}`;
-  if (progress.dataset.llmPlanRunId !== binding.runId)
-    progress.dataset.llmPlanRunId = binding.runId;
-  if (!progress.classList.contains("llm-plan-progress-floating"))
-    progress.classList.add("llm-plan-progress-floating");
-  if (progress.parentElement !== chatBox) chatBox.appendChild(progress);
 }
 
 function findNativeMcpActionCard(
@@ -3298,39 +3248,16 @@ function notifyProviderDispatch(
   ownershipLease?: PanelOperationLease | null,
   callback?: () => void,
 ): boolean {
-  if (ownershipLease && !isPanelOperationLeaseCurrent(ownershipLease)) {
-    return false;
+  // The request is dispatched for its own conversation whether or not this
+  // panel still shows it; only the composer write belongs to the panel.
+  const panelIsCurrent =
+    (!ownershipLease || isPanelOperationLeaseCurrent(ownershipLease)) &&
+    requireCurrentPanelOwnership(body, item, "provider-dispatch");
+  if (panelIsCurrent && ui.inputBox) {
+    ui.inputBox.disabled = isPanelWebChatMode(body);
   }
-  if (!requireCurrentPanelOwnership(body, item, "provider-dispatch")) {
-    return false;
-  }
-  if (ui.inputBox) ui.inputBox.disabled = isPanelWebChatMode(body);
   callback?.();
   return true;
-}
-
-function createOwnershipFencedProviderDispatch(params: {
-  body: Element;
-  item: Zotero.Item;
-  lease: PanelOperationLease;
-  callback?: () => void;
-}): () => void {
-  return () => {
-    if (
-      !isPanelOperationLeaseCurrent(params.lease) ||
-      !requireCurrentPanelOwnership(
-        params.body,
-        params.item,
-        "agent-provider-dispatch",
-      )
-    ) {
-      getAbortController(getConversationKey(params.item))?.abort();
-      const error = new Error("Panel ownership changed before dispatch");
-      error.name = "AbortError";
-      throw error;
-    }
-    params.callback?.();
-  };
 }
 
 function getPanelBodyConversationKey(
@@ -3435,8 +3362,6 @@ function syncRequestUIForConversation(
     primaryBody,
     primaryItem,
     (body) => {
-      const box = body.querySelector<HTMLElement>("#llm-chat-box");
-      if (box) syncFloatingPlanProgress(box, conversationKey);
       activeContextPanelStateSync.get(body)?.();
     },
   );
@@ -3738,9 +3663,6 @@ type CodexNativeTurnCallbacks = Pick<
   | "onItemStarted"
   | "onItemCompleted"
   | "onPlanUpdated"
-  | "onPlanDelta"
-  | "onPlanArtifact"
-  | "onPlanExecutionUpdated"
   | "onMcpToolActivity"
   | "onHostEvent"
   | "onMcpSetupWarning"
@@ -3770,11 +3692,7 @@ function buildCodexNativeTurnCallbacks(ctx: {
   handleUsage: (usage: UsageStats) => void;
   conversationKey: number;
   conversationGeneration: number;
-  planContext?: import("../../agent/plans/types").PlanRuntimeContext;
-  actionContract?: AgentActionContract;
-  classifiedIntent?: import("../../agent/types").ClassifiedTurnIntent;
   skillRoutingReceipt?: import("../../agent/types").AgentRuntimeRequest["skillRoutingReceipt"];
-  actionPreparation?: import("../../agent/contracts/actionPreparation").ActionPreparation;
 }): CodexNativeTurnCallbacks {
   const {
     body,
@@ -3786,22 +3704,29 @@ function buildCodexNativeTurnCallbacks(ctx: {
     handleReasoning,
     handleUsage,
   } = ctx;
-  const executionRequestId = getPendingRequestId(ctx.conversationKey);
   const isLive = () =>
     !areConversationWritesFrozen(ctx.conversationKey) &&
     isConversationWriteGenerationCurrent(
       ctx.conversationKey,
       ctx.conversationGeneration,
     );
-  if (ctx.planContext)
-    codexActivityTrace?.appendPlanEvent({
-      type: "provider_event",
-      providerType: "codex_plan_context",
-      payload: {
-        planContext: ctx.planContext,
-        actionContract: ctx.actionContract,
-      },
+  // The Task progress row follows this turn: working now, answering at the
+  // first streamed text, and each MCP read's paper ledger delta as it lands.
+  {
+    const history = chatHistory.get(ctx.conversationKey) || [];
+    const position = history.indexOf(assistantMessage);
+    const asked = position >= 0 ? history.slice(0, position) : history;
+    const question = asked
+      .filter((message) => message.role === "user" && !message.compactMarker)
+      .pop();
+    beginTaskRun(ctx.conversationKey, {
+      runId: assistantMessage.agentRunId,
+      turnIndex: taskTurnIndexFor(asked),
+      text: question?.text,
     });
+  }
+  const noteAnswering = () =>
+    markTaskAnswering(ctx.conversationKey, assistantMessage.agentRunId);
   return {
     eventJournal: createAgentRunEventJournal({
       conversationKey: ctx.conversationKey,
@@ -3815,10 +3740,13 @@ function buildCodexNativeTurnCallbacks(ctx: {
       setStatusSafely(`Codex skill activated: ${skillId}`, "sending");
     },
     onDelta: (delta) => {
-      if (isLive()) handleDelta(delta);
+      if (!isLive()) return;
+      noteAnswering();
+      handleDelta(delta);
     },
     onAgentMessageDelta: (event) => {
       if (!isLive()) return;
+      noteAnswering();
       if (!codexActivityTrace?.appendAgentMessageDelta(event)) {
         handleDelta(event.delta);
       }
@@ -3848,84 +3776,40 @@ function buildCodexNativeTurnCallbacks(ctx: {
         setStatusSafely(`Codex: ${itemType} completed`, "sending");
       }
     },
-    onPlanDelta: (event) => {
-      if (isLive()) handleDelta(event.delta);
-    },
-    onPlanArtifact: (artifact) => {
-      if (!isLive()) return;
-      flushResponseStream("event");
-      codexActivityTrace?.appendPlanEvent({
-        type:
-          artifact.status === "awaiting_approval"
-            ? "plan_ready"
-            : "plan_updated",
-        artifact,
-      });
-    },
     onPlanUpdated: (event) => {
       if (!isLive()) return;
+      // Codex's plan is the run's steps in Task progress; the trace keeps it
+      // as a persisted event and renders no row for it.
       codexActivityTrace?.appendNativePlanProgress(event.steps);
-    },
-    onPlanExecutionUpdated: (ledger) => {
-      if (!isLive()) return;
-      if (assistantMessage.agentRunId)
-        recordLivePlanExecution(
-          ctx.conversationKey,
-          executionRequestId,
-          assistantMessage.agentRunId,
-          ledger,
-        );
-      flushResponseStream("event");
-      codexActivityTrace?.appendPlanEvent({
-        type: "plan_execution_updated",
-        ledger,
-      });
+      if (assistantMessage.agentRunId) {
+        setTaskChecklist(ctx.conversationKey, {
+          source: "codex",
+          runId: assistantMessage.agentRunId,
+          steps: codexPlanTaskSteps(event.steps),
+        });
+      }
     },
     onHostEvent: (event) => {
       if (!isLive()) return;
       flushResponseStream("event");
-      codexActivityTrace?.appendPlanEvent(event);
+      codexActivityTrace?.appendHostEvent(event);
     },
     onMcpToolActivity: (event) => {
       if (!isLive()) return;
       flushResponseStream("event");
       codexActivityTrace?.noteMcpToolActivity(event);
+      const ledgerUpdate = paperLedgerUpdateFromMcpActivity(event);
+      if (ledgerUpdate) {
+        applyTaskPaperUpdate(
+          ctx.conversationKey,
+          ledgerUpdate.delta,
+          assistantMessage.agentRunId,
+        );
+      }
       assistantMessage.quoteCitations = mergeQuoteCitations(
         assistantMessage.quoteCitations,
         event.quoteCitations,
       );
-      if (event.phase === "completed" && event.ok) {
-        void (async () => {
-          // The row says which research job it advanced; the panel never asks
-          // which tool ran.
-          if (event.researchJobId && ctx.planContext?.phase === "executing") {
-            const { loadResearchJobForExecution } =
-              await import("../../agent/research/store");
-            const job = await loadResearchJobForExecution(
-              ctx.planContext.executionId,
-            );
-            if (job) {
-              codexActivityTrace?.appendPlanEvent({
-                type: "plan_research_progress",
-                progress: {
-                  researchJobId: job.researchJobId,
-                  executionId: job.executionId,
-                  parentTaskId: job.parentTaskId,
-                  stage: job.activeStage,
-                  totalItems: job.totalItems,
-                  screenedItems: job.screenedItems,
-                  candidateItems: job.candidateItems,
-                  deepReadCompleted: job.deepReadCompleted,
-                  deepReadPlanned: job.deepReadPlanned,
-                  coverageStatus: job.coverageStatus,
-                },
-              });
-            }
-          }
-        })().catch((error) =>
-          appLogger.warn("LLM: Failed to synchronize MCP plan state", error),
-        );
-      }
       const label =
         sanitizeText(event.toolLabel || "").trim() ||
         sanitizeText(event.toolName || "")
@@ -3985,63 +3869,6 @@ function buildCodexNativeTurnCallbacks(ctx: {
 
 export const buildCodexNativeTurnCallbacksForTests =
   buildCodexNativeTurnCallbacks;
-
-async function finalizeCodexPlanExecution(params: {
-  planContext?: import("../../agent/plans/types").PlanRuntimeContext;
-  answer: string;
-  assistantMessage: Message;
-  trace: ReturnType<typeof createCodexNativeActivityTraceController> | null;
-}): Promise<void> {
-  if (params.planContext?.phase !== "executing") return;
-  const { loadLatestPlanDocumentForExecution } =
-    await import("../../agent/documents/store");
-  const document = await loadLatestPlanDocumentForExecution(
-    params.planContext.executionId,
-  );
-  if (document) {
-    params.assistantMessage.text = document.visibleMarkdown;
-    params.assistantMessage.documentId = document.documentId;
-    params.assistantMessage.planDocumentId = document.documentId;
-    return;
-  }
-  const { loadPlanExecutionLedger } = await import("../../agent/plans/store");
-  let ledger = await loadPlanExecutionLedger(params.planContext.executionId);
-  const active = ledger?.tasks.find(
-    (task) => task.taskId === ledger?.activeTaskId,
-  );
-  const otherRequiredComplete = ledger?.tasks
-    .filter(
-      (task) => task.kind === "required_step" && task.taskId !== active?.taskId,
-    )
-    .every((task) => task.status === "completed" || task.status === "skipped");
-  if (active?.expectedEffect === "reasoning" && otherRequiredComplete) {
-    ledger = await planExecutionCoordinator.attachEvidence({
-      version: 1,
-      evidenceId: `${ledger!.executionId}:${active.taskId}:reasoning:codex-final`,
-      executionId: ledger!.executionId,
-      taskId: active.taskId,
-      kind: "reasoning_assertion",
-      verified: true,
-      summary: sanitizeText(params.answer).slice(0, 2000),
-      reference: `codex:${params.assistantMessage.agentRunId || params.assistantMessage.timestamp}:final`,
-      createdAt: Date.now(),
-    });
-    ledger = await planExecutionCoordinator.requestTransition({
-      executionId: ledger.executionId,
-      taskId: active.taskId,
-      toStatus: "completed",
-      requestedBy: "codex",
-      reason: "Bounded final reasoning assertion",
-    });
-    params.trace?.appendPlanEvent({
-      type: "plan_execution_updated",
-      ledger,
-    });
-  }
-  await planExecutionCoordinator.assertCanFinalize(
-    params.planContext.executionId,
-  );
-}
 
 function createPanelUpdateHelpers(
   body: Element,
@@ -4801,11 +4628,6 @@ export function disposeChatRendering(body: Element): void {
     if (view.answer) disposeStreamingMarkdown(view.answer);
   }
   mountedAssistantViews.delete(box);
-  for (const root of Array.from(
-    box.querySelectorAll<HTMLElement>(".llm-plan-container-execution"),
-  )) {
-    if (root) disposePlanProgress(root as HTMLElement);
-  }
 }
 
 function waitForUiStep(): Promise<void> {
@@ -5886,10 +5708,7 @@ export async function editLatestUserMessageAndRetry(
     }
   }
   const requestIsActive = () =>
-    requestId === undefined ||
-    (isRequestOwner(conversationKey, requestId) &&
-      getCancelledRequestId(conversationKey) < requestId &&
-      !getAbortController(conversationKey)?.signal.aborted);
+    requestId === undefined || isRequestActive(conversationKey, requestId);
   if (!requestIsActive()) return "stale";
   // Retry must act on the state the user SEES: complete any pending turn
   // deletion first so the hidden turn cannot be the retry target. finalize is
@@ -6278,12 +6097,10 @@ export async function retryLatestAssistantResponse(
     finishPanelRequest(body, item, initialConversationKey, thisRequestId);
     return;
   }
-  const requestIsActive = () =>
-    isRequestOwner(conversationKey, thisRequestId) &&
-    getCancelledRequestId(conversationKey) < thisRequestId &&
-    !getAbortController(conversationKey)?.signal.aborted &&
-    isPanelOperationLeaseCurrent(ownershipLease) &&
-    requireCurrentPanelOwnership(body, item, "retry-response-continuation");
+  // Switching the panel to another conversation never stops the retry; the
+  // entry gate above already required ownership, and rendering is keyed by
+  // conversation from here on.
+  const requestIsActive = () => isRequestActive(conversationKey, thisRequestId);
   const releaseRequest = () => {
     if (!finishPanelRequest(body, item, conversationKey, thisRequestId)) {
       return false;
@@ -6340,30 +6157,6 @@ export async function retryLatestAssistantResponse(
   const conversationGeneration = getConversationWriteGeneration(
     getConversationKey(item),
   );
-  const retryTraceEvents =
-    retryPair.assistantMessage.pendingAgentTraceEvents ||
-    (retryPair.assistantMessage.agentRunId
-      ? (await getAgentRunTrace(retryPair.assistantMessage.agentRunId)).events
-      : []);
-  const retryPlanEvent = retryTraceEvents
-    .map((event) => event.payload)
-    .find(
-      (event) =>
-        event.type === "provider_event" &&
-        event.providerType === "codex_plan_context",
-    );
-  const retryPlanContext =
-    retryPlanEvent?.type === "provider_event"
-      ? (retryPlanEvent.payload?.planContext as
-          | import("../../agent/plans/types").PlanRuntimeContext
-          | undefined)
-      : undefined;
-  const retryActionContract =
-    retryPlanEvent?.type === "provider_event"
-      ? (retryPlanEvent.payload?.actionContract as
-          | AgentActionContract
-          | undefined)
-      : undefined;
 
   const assistantMessage = retryPair.assistantMessage;
   let codexActivityTrace: CodexNativeActivityTraceController | null = null;
@@ -6991,25 +6784,14 @@ export async function retryLatestAssistantResponse(
               handleUsage,
               conversationKey,
               conversationGeneration,
-              planContext: retryPlanContext,
-              actionContract: retryActionContract,
             }),
           });
           assistantMessage.agentRunId = result.agentRunId;
           if (result.documentId) {
             assistantMessage.documentId = result.documentId;
           }
-          await finalizeCodexPlanExecution({
-            planContext: retryPlanContext,
-            answer: result.text,
-            assistantMessage,
-            trace: codexActivityTrace,
-          });
           return {
-            text:
-              retryPlanContext?.phase === "planning"
-                ? "The plan is ready for review."
-                : result.text,
+            text: result.text,
             completion: { status: "complete" as const },
           };
         })()
@@ -7068,6 +6850,12 @@ export async function retryLatestAssistantResponse(
       conversationKey,
     });
     codexActivityTrace?.finish(assistantMessage.text);
+    if (codexActivityTrace) {
+      completeTaskRun(conversationKey, {
+        runId: assistantMessage.agentRunId,
+        quoteCitations: assistantMessage.quoteCitations,
+      });
+    }
     await codexActivityTrace?.persist(conversationKey, conversationGeneration);
     assistantMessage.timestamp = Date.now();
     assistantMessage.modelName = effectiveRequestConfig.model;
@@ -7397,10 +7185,7 @@ export async function editUserTurnAndRetry(opts: {
     }
   }
   const requestIsActive = () =>
-    requestId === undefined ||
-    (isRequestOwner(conversationKey, requestId) &&
-      getCancelledRequestId(conversationKey) < requestId &&
-      !getAbortController(conversationKey)?.signal.aborted);
+    requestId === undefined || isRequestActive(conversationKey, requestId);
   if (!requestIsActive()) return false;
   // Edit acts on the state the user SEES: complete any pending turn deletion
   // first. history stays RAW below on purpose — truncation after the edited
@@ -7879,7 +7664,6 @@ export type BuildAgentRuntimeRequestParams = {
   forcedSkillIds?: string[];
   effectiveRequestConfig: EffectiveRequestConfig;
   history: ChatMessage[];
-  planContext?: import("../../agent/plans/types").PlanRuntimeContext;
 };
 
 function buildActiveNoteRuntimeContext(
@@ -8233,39 +8017,11 @@ async function buildAgentRuntimeRequest(
     // is temporarily unavailable.
   }
   const conversationInstanceID = registeredConversation?.instanceID;
-  const executingPlan =
-    params.planContext?.phase === "executing"
-      ? await import("../../agent/plans/store").then(async (store) => {
-          const ledger = await store.loadPlanExecutionLedger(
-            params.planContext?.phase === "executing"
-              ? params.planContext.executionId
-              : "",
-          );
-          const artifact = ledger
-            ? await store.loadPlanArtifact(ledger.planId, ledger.revision)
-            : null;
-          if (!ledger || !artifact || artifact.digest !== ledger.planDigest) {
-            throw new Error("The approved plan grant could not be verified");
-          }
-          return { ledger, artifact };
-        })
-      : null;
-  const priorPlanArtifact =
-    params.planContext?.phase === "planning" && params.planContext.revision > 1
-      ? await import("../../agent/plans/store").then((store) =>
-          store.loadPlanArtifact(
-            params.planContext!.planId,
-            params.planContext!.revision - 1,
-          ),
-        )
-      : null;
   return {
     conversationKey: params.conversationKey,
     conversationGeneration: params.conversationGeneration,
     mode: "agent",
     userText: params.userText,
-    planContext: params.planContext,
-    actionContract: executingPlan?.artifact.actionContract,
     conversationKind,
     activeItemId: activeNoteSession?.noteId || baseItem?.id,
     activePaperContext: activePaperContext
@@ -8341,9 +8097,6 @@ async function buildAgentRuntimeRequest(
       claudeHistoryLength: params.history.length,
       notesDirectoryConfig: getNotesDirectoryConfig() || undefined,
       conversationInstanceID,
-      planExecutionLedger: executingPlan?.ledger,
-      approvedPlanContract: executingPlan?.artifact.contract,
-      priorPlanArtifact,
     },
   };
 }
@@ -8627,15 +8380,12 @@ async function retryLatestAgentResponse(
       ),
     );
   }
-  if (!isOwnershipCurrent("retry-agent-response-load")) return true;
+  const retryIsActive = () =>
+    requestId === undefined ||
+    isRequestActive(getConversationKey(item), requestId);
+  if (!retryIsActive()) return true;
   await initAgentSubsystem();
-  if (!isOwnershipCurrent("retry-agent-response-runtime")) return true;
-  const guardedProviderDispatch = createOwnershipFencedProviderDispatch({
-    body,
-    item,
-    lease: ownershipLease!,
-    callback: onProviderDispatch,
-  });
+  if (!retryIsActive()) return true;
   await retryAgentTurn(
     body,
     item,
@@ -8657,7 +8407,7 @@ async function retryLatestAgentResponse(
       ownershipLease,
     ),
     requestId,
-    guardedProviderDispatch,
+    onProviderDispatch,
     activePaperContextOverride,
   );
   return true;
@@ -8703,7 +8453,6 @@ async function sendAgentQuestion(opts: {
   forcedSkillIds?: string[];
   pdfUploadSystemMessages?: string[];
   conversationSystem?: ConversationSystem;
-  planContext?: import("../../agent/plans/types").PlanRuntimeContext;
 }): Promise<void> {
   const ownershipLease = capturePanelOperationLease(opts.body);
   const isOwnershipCurrent = (operation: string) =>
@@ -8714,20 +8463,16 @@ async function sendAgentQuestion(opts: {
     );
   if (!isOwnershipCurrent("send-agent-question")) return;
   const conversationKey = getConversationKey(opts.item);
-  if (
-    opts.requestId !== undefined &&
-    (!isRequestOwner(conversationKey, opts.requestId) ||
-      getCancelledRequestId(conversationKey) >= opts.requestId ||
-      Boolean(getAbortController(conversationKey)?.signal.aborted))
-  ) {
-    return;
-  }
+  const requestIsStillActive = () =>
+    opts.requestId === undefined ||
+    isRequestActive(conversationKey, opts.requestId);
+  if (!requestIsStillActive()) return;
   const safeConversationScope = await validateConversationScopeForItem({
     item: opts.item,
     conversationKey,
     conversationSystem: opts.conversationSystem,
   });
-  if (!isOwnershipCurrent("send-agent-question-scope")) return;
+  if (!requestIsStillActive()) return;
   if (!safeConversationScope) {
     const ui = getPanelRequestUI(opts.body);
     const helpers = createPanelUpdateHelpers(
@@ -8743,23 +8488,9 @@ async function sendAgentQuestion(opts: {
     return;
   }
   await initAgentSubsystem();
-  if (!isOwnershipCurrent("send-agent-question-runtime")) return;
-  if (
-    opts.requestId !== undefined &&
-    (!isRequestOwner(conversationKey, opts.requestId) ||
-      getCancelledRequestId(conversationKey) >= opts.requestId ||
-      Boolean(getAbortController(conversationKey)?.signal.aborted))
-  ) {
-    return;
-  }
-  const guardedProviderDispatch = createOwnershipFencedProviderDispatch({
-    body: opts.body,
-    item: opts.item,
-    lease: ownershipLease!,
-    callback: opts.onProviderDispatch,
-  });
+  if (!requestIsStillActive()) return;
   await sendAgentTurn(
-    { ...opts, onProviderDispatch: guardedProviderDispatch },
+    opts,
     buildAgentEngineDeps(
       opts.item,
       opts.conversationSystem,
@@ -8821,12 +8552,11 @@ export async function sendQuestion(
     if (!claimed) return;
     thisRequestId = claimed.requestId;
   }
+  // Switching the panel to another conversation never stops the request
+  // (#481): only the user's cancel does. The entry gate above required
+  // ownership; rendering is keyed by conversation from here on.
   const requestIsActive = (conversationKey: number) =>
-    isRequestOwner(conversationKey, thisRequestId) &&
-    getCancelledRequestId(conversationKey) < thisRequestId &&
-    !getAbortController(conversationKey)?.signal.aborted &&
-    isPanelOperationLeaseCurrent(ownershipLease) &&
-    requireCurrentPanelOwnership(body, item, "send-question-continuation");
+    isRequestActive(conversationKey, thisRequestId);
   const finishBeforeDispatch = () => {
     if (!claimedHere) return false;
     const currentConversationKey = getConversationKey(item);
@@ -8941,7 +8671,6 @@ export async function sendQuestion(
         forcedSkillIds: opts.forcedSkillIds,
         pdfUploadSystemMessages: opts.pdfUploadSystemMessages,
         conversationSystem: effectiveConversationSystem,
-        planContext: opts.planContext,
         requestId: thisRequestId,
         onProviderDispatch: opts.onProviderDispatch,
       });
@@ -9926,7 +9655,6 @@ export async function sendQuestion(
             localDocuments,
             screenshots: allSendImages,
             forcedSkillIds: opts.forcedSkillIds,
-            planContext: opts.planContext,
             effectiveRequestConfig,
             history: llmHistory,
           });
@@ -9936,7 +9664,6 @@ export async function sendQuestion(
           });
         })
       : undefined;
-    const codexPlanActionContract = codexExecutionRequest?.actionContract;
     if (await stopInactiveRequest()) return;
     if (
       !notifyProviderDispatch(
@@ -9995,11 +9722,7 @@ export async function sendQuestion(
               handleUsage,
               conversationKey,
               conversationGeneration,
-              planContext: opts.planContext,
-              actionContract: codexPlanActionContract,
-              classifiedIntent: codexExecutionRequest?.classifiedIntent,
               skillRoutingReceipt: codexExecutionRequest?.skillRoutingReceipt,
-              actionPreparation: codexExecutionRequest?.actionPreparation,
             }),
           });
           assistantMessage.agentRunId = result.agentRunId;
@@ -10007,10 +9730,7 @@ export async function sendQuestion(
             assistantMessage.documentId = result.documentId;
           }
           return {
-            text:
-              opts.planContext?.phase === "planning"
-                ? "The plan is ready for review."
-                : result.text,
+            text: result.text,
             completion: { status: "complete" as const },
           };
         })()
@@ -10023,15 +9743,6 @@ export async function sendQuestion(
           onReasoning: handleReasoning,
           onUsage: handleUsage,
         });
-    if (isCodexNativeTurn) {
-      await finalizeCodexPlanExecution({
-        planContext: opts.planContext,
-        answer: modelOutcome.text,
-        assistantMessage,
-        trace: codexActivityTrace,
-      });
-    }
-
     if (
       getCancelledRequestId(conversationKey) >= thisRequestId ||
       Boolean(getAbortController(conversationKey)?.signal.aborted)
@@ -10069,6 +9780,12 @@ export async function sendQuestion(
       conversationKey,
     });
     codexActivityTrace?.finish(assistantMessage.text);
+    if (codexActivityTrace) {
+      completeTaskRun(conversationKey, {
+        runId: assistantMessage.agentRunId,
+        quoteCitations: assistantMessage.quoteCitations,
+      });
+    }
     assistantMessage.runMode = isCodexNativeTurn
       ? "agent"
       : effectiveRuntimeMode;
@@ -10425,7 +10142,6 @@ function updateMountedAssistantViews(
     )
       return false;
   }
-  let hasAgentTrace = false;
   for (const message of messages) {
     const view = views.get(message)!;
     const events = message.agentRunId
@@ -10433,7 +10149,6 @@ function updateMountedAssistantViews(
       : message.pendingAgentTraceEvents || [];
     let interleaved = false;
     if (view.trace) {
-      hasAgentTrace = true;
       const trace = renderAgentTrace({
         doc: box.ownerDocument,
         panelItem: item,
@@ -10442,8 +10157,6 @@ function updateMountedAssistantViews(
         events,
         previous: view.trace,
         actionSummaryHost: view.actionSummaryHost,
-        allowPlanRecovery:
-          message === latestAssistantMessage(getConversationKey(item)),
         onInterleavedText: () => {
           interleaved = true;
         },
@@ -10492,7 +10205,6 @@ function updateMountedAssistantViews(
     }
     if (view.answer) view.answer.hidden = interleaved;
   }
-  if (hasAgentTrace) syncFloatingPlanProgress(box, getConversationKey(item));
   scheduleChatScrollReconciliation(getConversationKey(item), box);
   return true;
 }
@@ -10629,14 +10341,13 @@ export function refreshChat(
       );
       if (panelRoot) panelRoot.dataset.startPageActive = "true";
     } else {
-      const isStandalone =
-        panelRoot?.dataset?.standalone === "true" ||
-        (body as HTMLElement).dataset?.standalone === "true";
       const isNoteEditing = !!resolveActiveNoteSession(item);
       if (isNoteEditing) {
         chatBox.innerHTML = getNoteEditingStartPageHtml();
         if (panelRoot) panelRoot.dataset.startPageActive = "true";
-      } else if (isStandalone && isGlobalConversation) {
+      } else if (isGlobalConversation) {
+        // Library chat has one start page on every surface; the paper page
+        // tells the user their paper is pre-loaded, which is false here.
         chatBox.innerHTML = getStandaloneLibraryChatStartPageHtml();
         if (panelRoot) panelRoot.dataset.startPageActive = "true";
       } else {
@@ -10661,11 +10372,6 @@ export function refreshChat(
     }
   }
   if (!useTargetedRerender) {
-    for (const root of Array.from(
-      chatBox.querySelectorAll<HTMLElement>(".llm-plan-container-execution"),
-    )) {
-      if (root) disposePlanProgress(root as HTMLElement);
-    }
     for (const view of mountedAssistantViews.get(chatBox)?.values() || []) {
       if (view.trace) disposeAgentTrace(view.trace);
       if (view.answer) disposeStreamingMarkdown(view.answer);
@@ -11583,7 +11289,6 @@ export function refreshChat(
               panelItem: item,
               message: msg,
               userMessage: previousUserMessage,
-              allowPlanRecovery: index === latestAssistantIndex,
               events: traceEvents,
               actionSummaryHost,
               onTraceMissing:
@@ -12204,7 +11909,7 @@ export function refreshChat(
     }
   }
 
-  syncFloatingPlanProgress(chatBox, conversationKey);
+  syncTaskProgressPanel(body);
   syncUserContextAlignmentWidths(body);
   syncConversationTurnNavigator(body, history, {
     conversationKey,

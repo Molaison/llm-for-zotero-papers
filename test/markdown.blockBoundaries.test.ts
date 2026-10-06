@@ -73,15 +73,6 @@ describe("normalizeBlockBoundaries", function () {
       assert.include(result, "text\n\n### Section");
     });
 
-    it("does not split ## inside inline math context without space", function () {
-      const input = "The value $x ## y$ is computed";
-      const result = normalizeBlockBoundaries(input);
-      // No space before ## in "$x ##", but there IS a space after $x
-      // The regex matches $x + space + ## — this is acceptable because
-      // ## in non-code non-math inline text is almost always a header
-      assert.ok(result);
-    });
-
     it("does not split # inside a pipe table cell", function () {
       const input = "| Condition | # of Switches | Description |";
       const result = normalizeBlockBoundaries(input);

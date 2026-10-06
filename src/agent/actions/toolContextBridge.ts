@@ -78,7 +78,6 @@ export function buildActionExecutionContext(params: {
     llm: buildActionLlmConfig(context),
     requestContext: {
       actionEntryPoint: request.actionEntryPoint || "conversation",
-      classifiedIntent: request.classifiedIntent,
       mode: request.conversationKind === "paper" ? "paper" : "library",
       activeItemId: request.activeItemId,
       selectedPaperContexts: [...getTurnPapersWithRoles(request, ["selected"])],
@@ -87,8 +86,6 @@ export function buildActionExecutionContext(params: {
       ],
       selectedCollectionContexts: [...request.turnPaperScope.collections],
       selectedTagContexts: [...request.turnPaperScope.tags],
-      actionContract: request.actionContract,
-      actionProgress: request.actionProgress,
     },
     signal: context.signal,
   };

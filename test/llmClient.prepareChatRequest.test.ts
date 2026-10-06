@@ -13,6 +13,10 @@ import {
 } from "../src/codexAuth/modelCatalog";
 import { CODEX_DIRECT_RESPONSES_URL } from "../src/codexAuth/auth";
 import { CORE_RESEARCH_CONTRACT } from "../src/shared/instructionContracts";
+import {
+  publishModelCapabilityCatalog,
+  resetModelCapabilityStateForTests,
+} from "../src/modelCapabilities";
 
 describe("llmClient prepareChatRequest", function () {
   const originalZotero = globalThis.Zotero;
@@ -556,8 +560,12 @@ describe("llmClient prepareChatRequest", function () {
     assert.include(JSON.stringify(prepared.messages), "image_url");
   });
 
-  it("strips image content from known DeepSeek text models in automatic mode", function () {
-    for (const model of ["deepseek-chat", "deepseek-reasoner"]) {
+  it("keeps image content for existing and new DeepSeek models in automatic mode", function () {
+    for (const model of [
+      "deepseek-chat",
+      "deepseek-reasoner",
+      "deepseek-future-model",
+    ]) {
       const prepared = prepareChatRequest({
         prompt: "Describe this image.",
         images: ["data:image/png;base64,AAAA"],
@@ -567,8 +575,42 @@ describe("llmClient prepareChatRequest", function () {
 
       const lastMessage = prepared.messages[prepared.messages.length - 1];
       assert.equal(lastMessage.role, "user");
-      assert.isString(lastMessage.content, model);
-      assert.notInclude(JSON.stringify(prepared.messages), "image_url", model);
+      assert.isArray(lastMessage.content, model);
+      assert.include(
+        JSON.stringify(prepared.messages),
+        "data:image/png;base64,AAAA",
+        model,
+      );
+    }
+  });
+
+  it("omits images when the provider explicitly reports no image support", function () {
+    const identity = {
+      model: "deepseek-future-model",
+      apiBase: "https://api.deepseek.com/v1",
+      protocol: "openai_chat_compat",
+      authMode: "api_key",
+    };
+    try {
+      publishModelCapabilityCatalog(identity, [
+        {
+          id: identity.model,
+          source: "live",
+          inputs: { image: false },
+        },
+      ]);
+      const prepared = prepareChatRequest({
+        prompt: "Describe this image.",
+        images: ["data:image/png;base64,AAAA"],
+        model: identity.model,
+        apiBase: identity.apiBase,
+        providerProtocol: "openai_chat_compat",
+        authMode: "api_key",
+      });
+      assert.isString(prepared.messages[prepared.messages.length - 1].content);
+      assert.notInclude(JSON.stringify(prepared.messages), "image_url");
+    } finally {
+      resetModelCapabilityStateForTests();
     }
   });
 

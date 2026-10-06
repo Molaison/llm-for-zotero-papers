@@ -10,8 +10,6 @@ import type { UtilityLLMParams } from "../../utils/utilityLLM";
 import type { ZoteroGateway } from "../services/zoteroGateway";
 import type { AgentToolRegistry } from "../tools/registry";
 import type {
-  AgentActionContract,
-  AgentActionProgressLedger,
   AgentConfirmationResolution,
   AgentJournalActionScope,
   AgentPendingAction,
@@ -67,15 +65,12 @@ export type ActionCheckpoint = {
 
 export type ActionRequestContext = {
   actionEntryPoint?: "action_ui" | "conversation";
-  classifiedIntent?: import("../types").ClassifiedTurnIntent;
   mode?: "paper" | "library";
   activeItemId?: number;
   selectedPaperContexts?: PaperContextRef[];
   fullTextPaperContexts?: PaperContextRef[];
   selectedCollectionContexts?: CollectionContextRef[];
   selectedTagContexts?: TagContextRef[];
-  actionContract?: AgentActionContract;
-  actionProgress?: AgentActionProgressLedger;
 };
 
 export type ActionExecutionContext = {
@@ -90,7 +85,7 @@ export type ActionExecutionContext = {
    * `buildToolContext` used to hard-code `0` here, so every tool an action
    * invoked wrote its undo entry and its journal row under conversation 0 —
    * a key nothing ever queries. A batch job's changes were therefore
-   * unrecoverable by both `undo_last_action` and `revert_changes`, while the
+   * unrecoverable by `undo` (single or multi-revert), while the
    * confirmation card promised the run "can be reverted".
    */
   conversationKey?: number;

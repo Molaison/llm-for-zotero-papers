@@ -1,4 +1,5 @@
 import { assert } from "chai";
+import { config } from "../package.json";
 import {
   resetProviderSessionIdCacheForTests,
   resolveProviderSessionId,
@@ -48,11 +49,16 @@ describe("provider session id", function () {
   });
 
   it("reveals nothing about the conversation it belongs to", async function () {
+    prefs.set(
+      `${config.prefsPrefix}.providerSessionSalt`,
+      "test-install-salt-0123456789",
+    );
     const id = await resolveProviderSessionId(4242);
     // The id leaves the machine on every request, so it must not carry the
     // conversation key, the library, or anything derived from them in the
     // clear. A salted digest is opaque; the key itself would not be.
-    assert.notInclude(id, "4242");
+    // Independently calculated SHA-256 prefix for this fixed salt and key.
+    assert.equal(id, "81af5cbc6298f617ff478ad62f19bf41");
     assert.match(id, /^[0-9a-f]{32}$/);
   });
 

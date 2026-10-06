@@ -1,4 +1,3 @@
-import { classifiedFixture } from "./helpers/semanticIntent";
 import { assert } from "chai";
 import { AgentRuntime } from "../src/agent/runtime";
 import { AgentToolRegistry } from "../src/agent/tools/registry";
@@ -164,7 +163,6 @@ describe("self-contained agent tool", function () {
     mode: "agent",
     userText: "Run the self-contained demo tool",
     metadata: { testDemoTool: true },
-    classifiedIntent: classifiedFixture(),
     libraryID: 1,
     model: "gpt-4o-mini",
     apiBase: "https://api.openai.com/v1/chat/completions",

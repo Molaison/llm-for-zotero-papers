@@ -411,7 +411,7 @@ export async function readAgentConversationAnswer(
   );
   if (!message)
     throw new Error(
-      "No assistant answer with this messageId exists in the current conversation. Use conversation_read to find the exact source.",
+      "No assistant answer with this messageId exists in the current conversation. Use context_read source:'conversation' to find the exact source.",
     );
   return stringifyTranscriptContent(message.content);
 }
@@ -473,6 +473,27 @@ export async function replaceAgentTranscriptSegment(
   transcriptByKey.set(key, normalized);
   hydratedKeys.add(key);
   return persistence === "persisted" ? "persisted" : "memory_only";
+}
+
+/**
+ * Replaces a segment only while the store still holds the messages of
+ * `expected`, the segment as its writer last saw it; otherwise the write is
+ * skipped, so a writer whose view another has since written over never
+ * drops what that one wrote. The caller holds the conversation's write lock,
+ * so nothing writes between the check and the write.
+ */
+export async function replaceAgentTranscriptSegmentIfUnchanged(
+  expected: AgentTranscriptSegment,
+  next: AgentTranscriptSegment,
+): Promise<AgentTranscriptWriteResult> {
+  const stored = await loadAgentTranscriptSegment({
+    conversationKey: next.conversationKey,
+    compatibilityKey: next.compatibilityKey,
+  });
+  return stableJson(stored.messages) ===
+    stableJson(normalizeMessages(expected.messages))
+    ? replaceAgentTranscriptSegment(next)
+    : "skipped";
 }
 
 export async function appendAgentTranscriptMessages(params: {

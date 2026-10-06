@@ -13,6 +13,9 @@ import {
   type AgentStageEvent,
 } from "../../../agent/stageEvents";
 import { saveAgentRunTraceSnapshot } from "../../../agent/store/traceStore";
+import type { TaskPaperLedgerDelta } from "../../../agent/context/taskPaperLedger";
+import { paperLedgerUpdateFromMcpActivity } from "../../../agent/context/taskPaperLedgerRecorder";
+import { CODEX_PLAN_CHECKLIST_ITEM_ID } from "../taskProgress/codexPlan";
 import type {
   AgentConfirmationResolution,
   AgentEvent,
@@ -77,14 +80,14 @@ type CodexNativeMcpToolActivityEvent = {
   artifacts?: AgentToolArtifact[];
   actionReceipts?: import("../../../agent/contracts/types").AgentActionReceipt[];
   workCategory?: AgentWorkCategory;
-  /** The research job this call advanced, as its own result declared it. */
-  researchJobId?: string;
   /**
    * The native item this MCP request belongs to, as the Codex client paired
    * them inside the turn. Two identity spaces describe one call; this is the
    * key that joins them, so the panel merges on a fact instead of a clock.
    */
   correlationId?: string;
+  /** What a successful read call read from each paper, for Task progress. */
+  paperLedgerDelta?: TaskPaperLedgerDelta;
 };
 
 type CodexToolActivityEventPayload = Extract<
@@ -218,6 +221,8 @@ export function createCodexNativeActivityTraceController(
   const toolEventIndexes = new Map<string, number>();
   const stageEventIndexes = new Map<string, number>();
   const mcpRequestToolItemIds = new Map<string, string>();
+  /** MCP requests whose paper ledger update this trace already holds. */
+  const mcpPaperLedgerRequestIds = new Set<string>();
   const activatedSkillIds = new Set<string>();
   const progressCoalescers = new Map<string, BlockStreamCoalescer>();
   let seq = 0;
@@ -655,6 +660,16 @@ export function createCodexNativeActivityTraceController(
     if (requestId && updatedItemId) {
       mcpRequestToolItemIds.set(requestId, updatedItemId);
     }
+    // The read's ledger update rides beside its row, once per request, so the
+    // live trace and the snapshot the store keeps both carry it.
+    const ledgerUpdate = paperLedgerUpdateFromMcpActivity(event);
+    const ledgerKey = requestId || itemId;
+    if (ledgerUpdate && !mcpPaperLedgerRequestIds.has(ledgerKey)) {
+      mcpPaperLedgerRequestIds.add(ledgerKey);
+      events.push(createEvent(ledgerUpdate));
+      sync();
+      return;
+    }
     if (updatedItemId) sync();
   };
 
@@ -722,51 +737,10 @@ export function createCodexNativeActivityTraceController(
     }
   };
 
-  const appendPlanEvent = (event: AgentEvent): void => {
-    if (event.type === "provider_event") {
-      events.push(createEvent(event));
-      sync();
-      return;
-    }
-    if (event.type === "plan_scope_amended") {
-      events.push(createEvent(event));
-      sync();
-      return;
-    }
-    if (event.type === "plan_research_progress") {
-      const priorIndex = events.findIndex(
-        (entry) =>
-          entry.payload.type === "plan_research_progress" &&
-          entry.payload.progress.researchJobId === event.progress.researchJobId,
-      );
-      const record = createEvent(event);
-      if (priorIndex >= 0) events[priorIndex] = record;
-      else events.push(record);
-      sync();
-      return;
-    }
-    if (
-      event.type !== "plan_updated" &&
-      event.type !== "plan_ready" &&
-      event.type !== "plan_execution_updated"
-    ) {
-      return;
-    }
-    const eventPlanId =
-      event.type === "plan_execution_updated"
-        ? event.ledger.planId
-        : event.artifact.planId;
-    const priorIndex = events.findIndex(
-      (entry) =>
-        ((entry.payload.type === "plan_updated" ||
-          entry.payload.type === "plan_ready") &&
-          entry.payload.artifact.planId === eventPlanId) ||
-        (entry.payload.type === "plan_execution_updated" &&
-          entry.payload.ledger.planId === eventPlanId),
-    );
-    const record = createEvent(event);
-    if (priorIndex >= 0) events[priorIndex] = record;
-    else events.push(record);
+  /** A host event the turn published: its provider events join the trace. */
+  const appendHostEvent = (event: AgentEvent): void => {
+    if (event.type !== "provider_event") return;
+    events.push(createEvent(event));
     sync();
   };
 
@@ -810,24 +784,49 @@ export function createCodexNativeActivityTraceController(
       });
     },
     appendAgentMessageDelta,
-    appendPlanEvent,
+    appendHostEvent,
+    /**
+     * Keep Codex's own checklist as the run's one plan event. It is
+     * persisted with the run for Task progress (live and reopened) and never
+     * renders as a trace row.
+     */
     appendNativePlanProgress: (
       steps: Array<{ content: string; status?: string }>,
     ) => {
-      const changed = upsertProgressText(
-        "codex-plan-checklist",
-        steps
+      if (!boundMessage) return;
+      const clean = steps
+        .map((step) => ({
+          content: sanitizeText(step.content || "").trim(),
+          ...(step.status ? { status: sanitizeText(step.status).trim() } : {}),
+        }))
+        .filter((step) => step.content);
+      if (!clean.length) return;
+      const payload: AgentEvent = {
+        type: "codex_progress",
+        itemId: CODEX_PLAN_CHECKLIST_ITEM_ID,
+        // The text form older builds read; the steps are what Task progress reads.
+        text: clean
           .map(
             (step) =>
               `${step.status === "completed" ? "✓" : "•"} ${step.content}`,
           )
           .join("\n"),
-        "replace",
-        steps.every((step) => step.status === "completed")
+        status: clean.every((step) => step.status === "completed")
           ? "completed"
           : "running",
-      );
-      if (changed) sync();
+        steps: clean,
+      };
+      const index = progressEventIndexes.get(CODEX_PLAN_CHECKLIST_ITEM_ID);
+      const existing = index === undefined ? undefined : events[index];
+      if (existing) {
+        if (JSON.stringify(existing.payload) === JSON.stringify(payload))
+          return;
+        events[index!] = { ...existing, payload };
+      } else {
+        progressEventIndexes.set(CODEX_PLAN_CHECKLIST_ITEM_ID, events.length);
+        events.push(createEvent(payload));
+      }
+      sync();
     },
     appendItemStatus,
     finish,

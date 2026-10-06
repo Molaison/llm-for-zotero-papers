@@ -446,7 +446,7 @@ describe("multi-operation durable mutation recovery", function () {
       service: mutationService as never,
       operations: [{ type: "create_collection", name: "Created" }],
       context,
-      facadeToolName: "manage_collections",
+      facadeToolName: "library_update",
     });
 
     const action = [...db.actions.values()][0];

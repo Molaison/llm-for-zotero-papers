@@ -240,7 +240,7 @@ describe("zotero_script receipt verification", function () {
     if (!input.ok) throw new Error("unreachable");
     const prepared = await service.prepare(tool, input.value, context);
     const result = await tool.execute(input.value, context);
-    const receipts = await service.finalize(undefined, prepared, {
+    const receipts = await service.finalize(prepared, {
       ok: true,
       effect: result.effect,
       content: result.content,

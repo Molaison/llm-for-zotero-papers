@@ -3,6 +3,9 @@ import type { ConversationSystem, QuoteCitation } from "../../shared/types";
 import type { WorkflowTestFinalRequestSnapshot } from "./workflowTestHooks";
 import type { RuntimeConversationSystem } from "./runtimeSystemControls";
 import type { resolveRetrievalQueryPlan } from "../../services/retrieval/retrievalQueryPlan";
+import type { RetrievalTimingReport } from "../../services/retrieval/retrievalTiming";
+import type { LibraryTextIndexStatus } from "../../services/libraryTextIndex/scheduler";
+import type { LibraryRetrieveResult } from "../../agent/services/libraryRetrieveService";
 
 export type WorkflowTestFixture = {
   parentItemId: number;
@@ -437,8 +440,58 @@ export type WorkflowTestCrossPaperHistoryIsolationResult = {
   paperBMessageRowsAfter: number;
 };
 
+export type WorkflowTestConversationHistoryTexts = {
+  memory: Array<{ role: string; text: string }>;
+  stored: Array<{ role: string; text: string }>;
+};
+
+/**
+ * One library retrieval run by the workflow bench: wall-clock time, the
+ * phase report the service recorded, and what came back.
+ */
+export type LibraryRetrieveBenchResult = {
+  elapsedMs: number;
+  timing: RetrievalTimingReport | null;
+  paperItemIds: number[];
+  snippetItemIds: number[];
+  snippetTexts: string[];
+  snippetCount: number;
+  warnings: string[];
+  queryCoverage: LibraryRetrieveResult["resourcePool"]["queryCoverage"];
+};
+
 export type WorkflowTestApi = {
   planRetrievalQuery: typeof resolveRetrievalQueryPlan;
+  libraryRetrieveBench: (input: {
+    query: string;
+    collectionIds?: number[];
+    depth?: "evidence" | "verify";
+    intent?: "enumerate" | "verify" | "summarize";
+  }) => Promise<LibraryRetrieveBenchResult>;
+  getRecentRetrievalTimings: (limit?: number) => RetrievalTimingReport[];
+  // Library text index status for the user library.
+  libraryTextIndexStatus: () => Promise<LibraryTextIndexStatus>;
+  // Overrides the user-idle signal that gates the prefetch lane (null = real).
+  setLibraryTextIndexUserIdle: (idle: boolean | null) => Promise<void>;
+  // Forces user idle so prefetch drains, then waits until nothing is runnable.
+  waitForLibraryTextIndexIdle: (timeoutMs: number) => Promise<boolean>;
+  // The plugin's own index instances (a test bundle's imports are separate
+  // module copies with their own scheduler and connection).
+  libraryTextIndexCoverage: (
+    attachmentIds: number[],
+  ) => Promise<{ indexed: number[]; missing: number[]; failed: number[] }>;
+  forgetLibraryTextIndexDocuments: (attachmentIds: number[]) => Promise<void>;
+  reconcileLibraryTextIndex: () => Promise<{
+    enqueued: number;
+    removed: number;
+    stale: number;
+    skippedForBudget: number;
+  }>;
+  // Loads one attachment's text through the question path (fires write-through).
+  loadPaperContextForTest: (attachmentId: number) => Promise<void>;
+  // Drops every loaded paper text and retrieval candidate so the next
+  // retrieval starts as if no paper had been read this session.
+  clearPaperTextCacheForBench: () => Promise<void>;
   checkProviderConversationTransport: (params: {
     conversationKey: number;
     model: string;
@@ -474,7 +527,7 @@ export type WorkflowTestApi = {
   enableLiveAgentSending: () => void;
   createPaperWithPdfFixture: (input: {
     title: string;
-    pdfTitle: string;
+    pdfTitle?: string;
     pages?: string[];
   }) => Promise<WorkflowTestFixture>;
   trashWorkflowItem: (itemId: number) => Promise<void>;
@@ -524,7 +577,6 @@ export type WorkflowTestApi = {
   }) => Promise<WorkflowTestStandaloneNoteFixture>;
   renderPanelForItem: (itemId: number) => Promise<WorkflowTestPanel>;
   refreshActiveConversationPanels: (conversationKey?: number) => void;
-  exerciseNativePlanReview: typeof import("./nativePlanReviewReplay").exerciseNativePlanReview;
   exerciseNativeQuestionReview: (
     panelId: string,
   ) => ReturnType<
@@ -544,6 +596,36 @@ export type WorkflowTestApi = {
   }) => ReturnType<
     typeof import("./agentDeliveryReplay").exerciseAgentDeliveryReplay
   >;
+  /** A long job over a folder's papers; only the model is scripted. */
+  exerciseLongJobReplay: (input: {
+    panelId: string;
+    collection: import("../../shared/types").CollectionContextRef;
+    papers: Array<{ itemId: number; title: string }>;
+    inputTokenCap: number;
+  }) => ReturnType<typeof import("./longJobReplay").exerciseLongJobReplay>;
+  /**
+   * A note job over a folder's papers, stopped midway, the agent's state
+   * reloaded as at startup, then "continue"; only the model is scripted.
+   */
+  exerciseLongJobNoteResume: (input: {
+    panelId: string;
+    collection: import("../../shared/types").CollectionContextRef;
+    papers: Array<{ itemId: number; title: string }>;
+    inputTokenCap: number;
+    stopAfterNotes: number;
+  }) => ReturnType<typeof import("./longJobReplay").exerciseLongJobNoteResume>;
+  /**
+   * A note job whose one note_write_batch is stopped while it writes, the
+   * agent's state reloaded as at startup, then "continue"; only the model is
+   * scripted.
+   */
+  exerciseLongJobBatchStop: (input: {
+    panelId: string;
+    collection: import("../../shared/types").CollectionContextRef;
+    papers: Array<{ itemId: number; title: string }>;
+    inputTokenCap: number;
+    stopAfterNotes: number;
+  }) => ReturnType<typeof import("./longJobReplay").exerciseLongJobBatchStop>;
   exerciseStreamingReplay: (input: {
     panelId: string;
     historyTurns: number;
@@ -575,6 +657,111 @@ export type WorkflowTestApi = {
     turnIndex: number;
     chunks: number;
   }) => Promise<import("./chatMemoryReplay").ChatModeTurnResult>;
+  startTaskProgressReplay: (
+    input: {
+      /** A synthetic panel; otherwise the visible native panel of `surface`. */
+      panelId?: string;
+      surface?: "embedded" | "standalone";
+    } & import("./streamingReplay").TaskProgressReplayInput,
+  ) => Promise<import("./streamingReplay").TaskProgressReplayHandle>;
+  /** A built-in action through the production runner, scripted. */
+  startTaskProgressAction: (input: {
+    panelId?: string;
+    surface?: "embedded" | "standalone";
+    actionName: string;
+  }) => Promise<import("./taskProgressReplay").TaskProgressActionHandle>;
+  /** A native Codex turn through the production callbacks. */
+  startCodexTaskProgressReplay: (input: {
+    panelId?: string;
+    surface?: "embedded" | "standalone";
+    user: Partial<import("./types").Message>;
+  }) => Promise<import("./taskProgressReplay").CodexTaskProgressReplayHandle>;
+  /** Store turns (messages and run traces) in the panel's conversation. */
+  seedTaskProgressConversation: (input: {
+    panelId?: string;
+    surface?: "embedded" | "standalone";
+    turns: import("./taskProgressReplay").TaskProgressStoredTurn[];
+  }) => Promise<{ conversationKey: number; runIds: string[] }>;
+  /** Drop the record and loaded messages, then show the conversation again. */
+  reopenTaskProgressConversation: (input: {
+    panelId?: string;
+    surface?: "embedded" | "standalone";
+  }) => Promise<void>;
+  /** Fill a panel's context bar (papers, folders, tags) and redraw it. */
+  setTaskProgressComposerContexts: (input: {
+    panelId?: string;
+    surface?: "embedded" | "standalone";
+    paperContexts?: import("../../shared/types").PaperContextRef[];
+    collectionContexts?: import("../../shared/types").CollectionContextRef[];
+    tagContexts?: import("../../shared/types").TagContextRef[];
+  }) => Promise<void>;
+  /** A panel's context bar: its papers, folder exclusions and chip labels. */
+  readTaskProgressComposerContexts: (input: {
+    panelId?: string;
+    surface?: "embedded" | "standalone";
+  }) => Promise<{
+    paperItemIds: number[];
+    collections: Array<{ collectionId: number; excludedItemIds: number[] }>;
+    chipLabels: string[];
+  }>;
+  /** Repaint every mounted Task progress view now. */
+  flushTaskProgress: () => void;
+  /** Every mounted Task progress panel, and whether its window or element is gone. */
+  listTaskProgressPanels: () => Array<{
+    conversationKey: number | null;
+    gone: boolean;
+    documentURI: string;
+  }>;
+  getTaskProgressSnapshot: (conversationKey: number) => {
+    runState: string;
+    turnIndex: number;
+    label: string;
+    scopeKeys: string[];
+    listingLoaded: boolean;
+    planSeen: boolean;
+    hydrated: boolean;
+    checklist: {
+      source: "action" | "codex" | "outcomes";
+      title: string;
+      steps: Array<{
+        label: string;
+        status: string;
+        detail?: string;
+        /** Set on a step that is a run's outcome (a declared part). */
+        outcome?: import("./taskProgress/store").TaskProgressOutcomeStep;
+      }>;
+      outcome?: string;
+      detail?: string;
+      /** How the run that owns an outcomes checklist ended. */
+      end?: string;
+    } | null;
+    paperStates: Record<string, string>;
+    /** The questions and actions the drawer's history keeps, oldest first. */
+    questions: Array<{
+      turn: number;
+      runId?: string;
+      text?: string;
+      title?: string;
+      checklistSource?: "action" | "codex" | "outcomes";
+    }>;
+    /** Each paper row's reads over every turn, by `libraryID:itemId`. */
+    paperRows: Record<
+      string,
+      {
+        state: string;
+        title?: string;
+        reads: Array<{
+          turnIndex?: number;
+          toolName: string;
+          granularity: string;
+          method?: string;
+          label?: string;
+          snippet?: string;
+          whyMatched?: string;
+        }>;
+      }
+    >;
+  } | null;
   exerciseNativeStreamingReplay: (input: {
     surface: "embedded" | "standalone";
     historyTurns: number;
@@ -604,27 +791,6 @@ export type WorkflowTestApi = {
   exerciseDuplicatePanelSetup: (
     panelId: string,
   ) => Promise<WorkflowTestDuplicatePanelSetupDiagnostics>;
-  exerciseRebuiltPanelPlanApproval: (panelId: string) => Promise<{
-    sendsAfterApproval: number;
-    queuedAfterApproval: number;
-    sendsAfterDispose: number;
-  }>;
-  /** Approve a reviewable plan the way the review card does and start its execution. */
-  approvePlanForExecution: (input: {
-    planId: string;
-    revision: number;
-    expectedDigest?: string;
-  }) => Promise<{
-    executionId: string;
-    planDigest: string;
-    activeTaskId?: string;
-    provider: "original" | "codex" | "claude";
-  }>;
-  /** Flight 0: the research quality report and run timings for one execution. */
-  researchFlightReport: (input: { executionId: string }) => Promise<{
-    report: import("../../agent/research/flightReport").ResearchFlightReport;
-    rendered: string;
-  }>;
   exercisePanelDraftStateRefresh: (
     panelId: string,
     text: string,
@@ -703,7 +869,6 @@ export type WorkflowTestApi = {
       priorResults?: import("../../agent/types").AgentToolResult[];
       documentId?: string;
       userText?: string;
-      actionContract?: import("../../agent/types").AgentActionContract;
     },
   ) => HTMLElement | null;
   renderPendingActionForPanel: (
@@ -744,6 +909,10 @@ export type WorkflowTestApi = {
   startNewStandaloneConversation: () => Promise<WorkflowTestStandaloneDiagnostics>;
   clickStandaloneReasoningOption: (label: string) => Promise<void>;
   getLastFinalRequest: () => WorkflowTestFinalRequestSnapshot | null;
+  /** Test-only read of a conversation's turns, in memory and as stored. */
+  getConversationHistoryTexts: (
+    conversationKey: number,
+  ) => Promise<WorkflowTestConversationHistoryTexts>;
   seedStandaloneUserMessage: (
     text: string,
   ) => Promise<WorkflowTestStandaloneDiagnostics>;

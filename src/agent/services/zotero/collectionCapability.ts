@@ -19,6 +19,7 @@ import {
   orderedGatewayPaperIds,
   orderedIndexIds,
   pageIds,
+  planSearchConditions,
   validateSearchConditions,
 } from "./internal/libraryIndex";
 import { normalizeText } from "./internal/normalize";
@@ -478,7 +479,7 @@ export class CollectionCapability {
    * to top level.
    *
    * The matrix declared collection update and reparent allowed and nothing
-   * implemented them, so `collection_update` could only create and delete --
+   * implemented them, so the collection tool could only create and delete --
    * a typo in a folder name meant deleting it and rebuilding it, losing the
    * id every filed item referenced.
    */
@@ -1189,15 +1190,12 @@ export class CollectionCapability {
         // A condition that will not come off must not block the save.
       }
     }
-    if (params.joinMode) {
-      search.addCondition("joinMode", params.joinMode, "");
-    }
-    for (const entry of params.conditions) {
+    for (const step of planSearchConditions(params)) {
       search.addCondition(
-        entry.mode ? `${entry.condition}/${entry.mode}` : entry.condition,
-        entry.operator,
-        entry.value === undefined ? "" : entry.value,
-        entry.required,
+        step.condition,
+        step.operator,
+        step.value,
+        step.required,
       );
     }
     await search.saveTx();

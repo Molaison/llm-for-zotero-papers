@@ -80,12 +80,20 @@ declare namespace _ZoteroTypes {
       "mineruCloudModel": string;
       "mineruLocalApiBase": string;
       "mineruLocalBackend": string;
+      "mineruLocalTier": string;
+      "mineruLocalEffort": string;
+      "mineruLocalImageAnalysis": boolean;
+      "mineruLocalServerUrl": string;
+      "mineruLocalApiKey": string;
       "mineruForceOcr": boolean;
       "mineruAutoWatchCollections": string;
       "mineruGlobalAutoParse": boolean;
       "mineruSyncEnabled": boolean;
       "mineruMaxAutoPages": number;
       "mineruExcludePatterns": string;
+      "libraryTextIndexEnabled": boolean;
+      "libraryTextIndexVectors": boolean;
+      "libraryTextIndexBudgetMB": number;
     };
   }
 }

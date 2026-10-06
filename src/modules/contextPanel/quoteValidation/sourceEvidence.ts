@@ -7,6 +7,7 @@
  * reading of the caches.
  */
 import { appLogger } from "../../../core/logging";
+import { paragraphCitationIds } from "../../../services/quotes/paragraphCitations";
 import type { AgentRuntimeRequestInput as AgentRuntimeRequest } from "../../../agent/types";
 import {
   getActiveReaderForSelectedTab,
@@ -18,7 +19,10 @@ import {
   ensureNoteTextCached,
   ensurePDFTextCached,
 } from "../../../services/paperContent/pdfContext";
-import type { QuoteSourceText } from "../../../services/quotes/quoteCitations";
+import {
+  hasVerifiedQuoteLocation,
+  type QuoteSourceText,
+} from "../../../services/quotes/quoteCitations";
 import { normalizePaperContextRefs } from "../../../services/context/normalizers";
 import type { QuoteCitation } from "../../../shared/types";
 import { t } from "../../../utils/i18n";
@@ -327,7 +331,9 @@ export function assistantMarkdownNeedsBackgroundQuoteSearch(
   quoteCitations: QuoteCitation[] | undefined,
 ): boolean {
   const knownIds = new Set(
-    (quoteCitations || []).map((citation) => citation.id),
+    (quoteCitations || [])
+      .filter(hasVerifiedQuoteLocation)
+      .map((citation) => citation.id),
   );
   let hasUnresolvedAnchor = false;
   const withoutResolvedAnchors = (markdown || "").replace(
@@ -383,13 +389,7 @@ export function shouldRequireBodyEvidenceQuoteSearch(params: {
     params.runtimeRequest?.selectedTagContexts?.length ||
     countQuoteScopedPapers(params.pairedUserMessage, params.runtimeRequest) > 1,
   );
-  if (!hasScopedPool) return false;
-  if (
-    params.runtimeRequest?.classifiedIntent?.semantic?.reading.source ===
-    "metadata"
-  )
-    return false;
-  return true;
+  return hasScopedPool;
 }
 
 export type AssistantQuoteFinalizationOptions = {
@@ -441,6 +441,7 @@ export function registeredQuoteCitationsForReview(
       (match) => match[1],
     ),
   );
+  for (const id of paragraphCitationIds(markdown)) anchoredIds.add(id);
   return (quoteCitations || []).filter(
     (citation) =>
       anchoredIds.has(citation.id) ||

@@ -8,7 +8,6 @@ import { ActionContractService } from "../src/agent/contracts/actionContract";
 import { initAgentChangeJournal } from "../src/agent/store/changeJournal";
 import { AgentToolRegistry } from "../src/agent/tools/registry";
 import type { AgentToolContext } from "../src/agent/types";
-import type { PlanEffectSpecification } from "../src/agent/plans/types";
 import { ChangeJournalTestDb } from "./helpers/changeJournalTestDb";
 
 function directContext(): AgentToolContext {
@@ -96,6 +95,67 @@ describe("direct-agent execution boundary", function () {
     assert.equal(prepared.kind, "result");
   });
 
+  it("refuses an effect that no agent turn, connected runtime or host action owns", async function () {
+    globalThis.Zotero = {
+      DB: new ChangeJournalTestDb(),
+      Prefs: { get: () => "yolo" },
+      debug: () => undefined,
+    } as never;
+    await initAgentChangeJournal();
+    const registry = new AgentToolRegistry(
+      new ActionContractService({} as never),
+    );
+    let writes = 0;
+    registry.register({
+      effectOperations: ["apply_tags"],
+      spec: {
+        name: "ownerless_tag",
+        description: "fixture",
+        inputSchema: { type: "object" },
+        executionClass: "external_effect",
+        requiresConfirmation: false,
+      },
+      validate: (input) => ({ ok: true, value: input }),
+      describeAction: () => [
+        {
+          id: "apply_tags:41",
+          proofDomain: "zotero_state",
+          capability: "zotero.tags",
+          operation: "apply_tags",
+          source: "zotero_native",
+          requestedTargets: ["item:41"],
+          destinationCollectionIds: [],
+        },
+      ],
+      planInvocation: () =>
+        stateChangeInvocationPlan({
+          domains: ["zotero_library"],
+          effects: ["modify"],
+          targets: ["item:41"],
+          reason: "Apply the concrete tag change.",
+        }),
+      execute: async () => {
+        writes += 1;
+        return { content: { ok: true }, effect: "applied" as const };
+      },
+    });
+    const context = directContext();
+    // No execution context: the call comes from no agent turn.
+    delete (context.request as { executionContext?: unknown }).executionContext;
+    const prepared = await registry.prepareExecution(
+      { id: "ownerless", name: "ownerless_tag", arguments: {} },
+      context,
+      { callerKind: "model" },
+    );
+    assert.equal(prepared.kind, "result");
+    if (prepared.kind !== "result") return;
+    assert.isFalse(prepared.execution.result.ok);
+    assert.equal(writes, 0);
+    const error = JSON.stringify(prepared.execution.result.content);
+    assert.include(error, "no agent turn, connected runtime or host action");
+    assert.notInclude(error, "contract");
+  });
+
   it("executes a typed Auto write without semantic or contract state and journals exact authority", async function () {
     const db = new ChangeJournalTestDb();
     globalThis.Zotero = {
@@ -161,9 +221,6 @@ describe("direct-agent execution boundary", function () {
     const preparedGrant = JSON.parse(String(observations[0].extra_json));
     assert.equal(preparedGrant.grant.authority, "auto_policy");
     assert.equal(preparedGrant.proposal.targetLibraryIDs[0], 1);
-    assert.isUndefined((directContext().request as any).actionProgress);
-    assert.isUndefined((directContext().request as any).actionContract);
-    assert.isUndefined((directContext().request as any).classifiedIntent);
   });
 
   it("audits an external write by summary, never by copying its post-image", async function () {
@@ -401,178 +458,4 @@ describe("direct-agent execution boundary", function () {
     assert.equal(prepared.kind, "result");
     assert.equal(writes, 1);
   });
-
-  for (const scenario of [
-    {
-      label: "executes",
-      target: "item:41",
-      review: "default" as const,
-      delegated: false,
-      expectedKind: "result" as const,
-      expectedOk: true,
-    },
-    {
-      label: "blocks",
-      target: "item:99",
-      review: "default" as const,
-      delegated: false,
-      expectedKind: "result" as const,
-      expectedOk: false,
-    },
-    {
-      label: "reviews",
-      target: "item:41",
-      review: "review" as const,
-      delegated: false,
-      expectedKind: "confirmation" as const,
-      expectedOk: false,
-    },
-    {
-      label: "blocks delegated",
-      target: "item:99",
-      review: "default" as const,
-      delegated: true,
-      expectedKind: "result" as const,
-      expectedOk: false,
-    },
-  ]) {
-    it(`${scenario.label} a v5 Plan call by its frozen concrete effect`, async function () {
-      const db = new ChangeJournalTestDb();
-      globalThis.Zotero = {
-        DB: db,
-        Prefs: { get: () => "auto" },
-        Items: { get: () => ({ libraryID: 1 }) },
-        Collections: { get: () => null },
-        debug: () => undefined,
-      } as never;
-      await initAgentChangeJournal();
-      const specification: PlanEffectSpecification = {
-        version: 1,
-        constraints: [],
-        effects: [
-          {
-            effectId: "effect-tag",
-            approval: "initial",
-            review: scenario.review,
-            operation: "apply_tags",
-            targets: [
-              {
-                domain: "zotero",
-                libraryID: 1,
-                targetIds: ["item:41"],
-                scopeDigest: "sha256:scope",
-              },
-            ],
-            targetBindings: [],
-            parameters: { tags: ["reviewed"] },
-            restrictions: [],
-            dependsOnEffectIds: [],
-            materialBindings: [],
-          },
-        ],
-        deferredEffects: [],
-      };
-      const context = directContext();
-      context.request.planContext = {
-        phase: "executing",
-        planId: "plan-1",
-        revision: 1,
-        executionId: "execution-plan-1",
-        approvedDigest: "sha256:plan",
-        activeTaskId: "task-1",
-        provider: "original",
-      };
-      context.request.executionContext = {
-        ...context.request.executionContext!,
-        executionId: "execution-plan-1",
-        permissionOwner: "approved_plan",
-        approvedPlanBinding: {
-          planId: "plan-1",
-          revision: 1,
-          approvedDigest: "sha256:plan",
-        },
-      };
-      if (scenario.delegated) {
-        context.authorization = {
-          kind: "external_runtime",
-          standalone: false,
-        };
-      }
-      context.loadApprovedPlanEffectContext = async () => ({
-        specification,
-        activeEffectIds: ["effect-tag"],
-        resolvedMaterials: [],
-        resolvedTargetBindings: {},
-      });
-      let writes = 0;
-      const registry = new AgentToolRegistry(
-        new ActionContractService({} as never),
-      );
-      registry.register({
-        effectOperations: ["apply_tags"],
-        spec: {
-          name: "planned_tag",
-          description: "fixture",
-          inputSchema: { type: "object" },
-          executionClass: "external_effect",
-          requiresConfirmation: false,
-        },
-        validate: (input) => ({ ok: true, value: input }),
-        describeAction: () => [
-          {
-            id: `apply_tags:${scenario.target}`,
-            proofDomain: "zotero_state",
-            capability: "zotero.tags",
-            operation: "apply_tags",
-            source: "zotero_native",
-            parameters: { tags: ["reviewed"] },
-            requestedTargets: [scenario.target],
-            destinationCollectionIds: [],
-          },
-        ],
-        planInvocation: () =>
-          stateChangeInvocationPlan({
-            domains: ["zotero_library"],
-            effects: ["modify"],
-            targets: [scenario.target],
-            reason: "Apply the approved tag change.",
-          }),
-        execute: async () => {
-          writes += 1;
-          return { content: { changed: true }, effect: "applied" };
-        },
-      });
-
-      const result = await registry.prepareExecution(
-        { id: "call-plan", name: "planned_tag", arguments: {} },
-        context,
-      );
-      assert.equal(result.kind, scenario.expectedKind);
-      if (result.kind === "confirmation") {
-        assert.equal(writes, 0);
-        return;
-      }
-      if (result.kind !== "result") return;
-      assert.equal(result.execution.result.ok, scenario.expectedOk);
-      assert.equal(writes, scenario.expectedOk ? 1 : 0);
-      if (scenario.expectedOk) {
-        const observation = [...db.observations.values()].find(
-          (entry) => entry.event === "original_authorization_prepared",
-        );
-        const preparedGrant = JSON.parse(
-          String(observation?.extra_json || "{}"),
-        );
-        assert.deepEqual(preparedGrant.grant.planEffectIds, ["effect-tag"]);
-        assert.equal(preparedGrant.grant.authority, "plan_approval");
-      }
-      if (!scenario.expectedOk) {
-        assert.include(
-          String(
-            (result.execution.result.content as { error?: string }).error || "",
-          ),
-          "outside",
-        );
-      }
-    });
-  }
 });

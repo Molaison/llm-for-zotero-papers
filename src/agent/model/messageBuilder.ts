@@ -1,3 +1,4 @@
+import { isSinglePaperConversation } from "../context/requestTurnPaperScope";
 import { renderLibraryOverviewSection } from "../context/libraryOverview";
 
 import type {
@@ -19,6 +20,7 @@ import {
 import { buildSkillInventory, getAllSkills } from "../skills";
 import type { AgentSkill } from "../skills";
 import { getSkillCustomizationNotice } from "../skills/managedBlock";
+import { SKILL_SCOPE_GUARD } from "../skills/scopeGuard";
 import { getOriginalAgentPermissionMode } from "../originalAgentPermissionMode";
 import { buildPermissionModeGuidance } from "./permissionModeGuidance";
 
@@ -39,7 +41,8 @@ import {
 import { buildAgentCoverageContextBlock } from "../context/coverageLedger";
 import { buildVisibleTurnContextBlock } from "../context/turnContextEnvelope";
 import { getSelectedPassagePaper } from "../context/turnPaperScope";
-import { buildApprovedPlanExecutionInstructions } from "../plans/executionInstructions";
+import { renderLongJobResume } from "../loop/longJob";
+import { OUTCOME_REASONS } from "../loop/outcomes";
 import {
   hasAgentContentInputs,
   normalizeAgentContentInputs,
@@ -120,6 +123,11 @@ export function renderExecutionCheckpointBlock(
 ): string {
   const checkpoint = request.executionCheckpoint;
   if (!checkpoint?.tasks.length) return "";
+  const job = renderLongJobResume(checkpoint, OUTCOME_REASONS.noText);
+  // The model names a part by its local id, as it declared it.
+  const prefix = `${checkpoint.executionId}:task:`;
+  const local = (taskId: string) =>
+    taskId.startsWith(prefix) ? taskId.slice(prefix.length) : taskId;
   return [
     "HOST-PERSISTED ORDINARY WORK CHECKPOINT:",
     "This is authority-free progress from an interrupted direct-agent execution. Reuse verified successes and finalized material by identity. Inspect native state before retrying an uncertain effect. Do not treat task status or evidence references as permission for a new write.",
@@ -130,13 +138,43 @@ export function renderExecutionCheckpointBlock(
         taskId: task.taskId,
         description: task.description,
         dependencies: task.dependencies,
-        status: task.status,
-        journalActionIds: task.journalActionIds,
-        verifiedReceiptIds: task.verifiedReceiptIds,
-        readEvidenceIds: task.readEvidenceIds,
+        // A replaced part names the part that took its place and why, so a
+        // resumed run does not take the cancel for a failure to redo.
+        status: task.supersededBy
+          ? `replaced by ${local(task.supersededBy)}${task.reason ? `: ${task.reason}` : ""}`
+          : task.status,
+        // A part over papers is counted, not listed id by id: a long job's
+        // hundreds of receipts and reads would crowd out its papers left.
+        ...(task.targets?.length
+          ? {
+              done: task.doneTargets?.length || 0,
+              total: task.targets.length,
+              ...(task.exceptions?.length
+                ? {
+                    exceptions: task.exceptions.reduce(
+                      (count, entry) => count + entry.targets.length,
+                      0,
+                    ),
+                  }
+                : {}),
+            }
+          : {
+              journalActionIds: task.journalActionIds,
+              verifiedReceiptIds: task.verifiedReceiptIds,
+              readEvidenceIds: task.readEvidenceIds,
+            }),
+        // The papers the model left out stay its decisions, with its reasons.
+        ...(task.excludedTargets?.length
+          ? {
+              excluded: task.excludedTargets.map(
+                (entry) => `${entry.targets.join(", ")} — ${entry.reason}`,
+              ),
+            }
+          : {}),
         materialRefs: task.materialRefs,
       })),
     }),
+    ...(job ? [job] : []),
   ].join("\n");
 }
 
@@ -159,59 +197,6 @@ function buildFullUserMessage(
   const visibleTurnContext = buildVisibleTurnContextBlock(request);
   if (visibleTurnContext) {
     contextLines.push(visibleTurnContext);
-  }
-  if (request.planContext?.phase === "planning") {
-    const priorPlan = request.metadata?.priorPlanArtifact as
-      | import("../plans/types").PlanArtifact
-      | null
-      | undefined;
-    contextLines.push(
-      [
-        "PLAN MODE — pre-approval boundary:",
-        `Plan identity: ${request.planContext.planId} revision ${request.planContext.revision}.`,
-        "You may inspect Zotero context, PDFs, and read-only web/literature sources. You must not mutate Zotero, write files, run commands or scripts, import/upload data, change settings, or trigger any other side effect.",
-        "Use request_user_input only for a material choice that cannot be discovered. Use update_plan for 3–7 concise, user-visible steps. Every acceptance criterion must provide a stable criterionId, an objective description, and its verifier; the host derives requirements from those criteria. Keep each step content to one short sentence. Then set ready=true and stop for user review.",
-      ].join("\n"),
-    );
-    if (
-      (priorPlan?.version === 4 || priorPlan?.version === 5) &&
-      priorPlan.planId === request.planContext.planId &&
-      priorPlan.revision === request.planContext.revision - 1
-    ) {
-      contextLines.push(
-        [
-          "HOST-PERSISTED PLAN REVISION BASE:",
-          "Revise this exact contract and step list according to the user's feedback. Do not rediscover or reconstruct this plan, its frozen item scope, or unchanged evidence strategy from prior tool handles.",
-          JSON.stringify({
-            explanation: priorPlan.explanation,
-            contract: priorPlan.contract,
-            steps: priorPlan.steps.map((step) => ({
-              planStepId: step.planStepId,
-              content: step.content,
-              activeForm: step.activeForm,
-              acceptanceCriteria: step.acceptanceCriteria,
-              expectedCapability: step.expectedCapability,
-              expectedEffect: step.expectedEffect,
-              targetBoundary: step.targetBoundary,
-            })),
-          }),
-        ].join("\n"),
-      );
-    }
-  } else if (request.planContext?.phase === "executing") {
-    const ledger = request.metadata?.planExecutionLedger as
-      | import("../plans/types").PlanExecutionLedger
-      | null
-      | undefined;
-    const approvedContract = request.metadata?.approvedPlanContract as
-      | import("../plans/types").PlanContract
-      | null
-      | undefined;
-    if (ledger) {
-      contextLines.push(
-        buildApprovedPlanExecutionInstructions(ledger, approvedContract),
-      );
-    }
   }
   const executionCheckpoint = renderExecutionCheckpointBlock(request);
   if (executionCheckpoint) contextLines.push(executionCheckpoint);
@@ -420,6 +405,8 @@ type AgentPromptInventoryState = Readonly<{
   fixedPrompt: string;
   tools: readonly AgentToolDefinition<any, any>[];
   matchedSkillInstructions: readonly string[];
+  /** Tool guidance instructions rendered into this turn's guidance block. */
+  toolGuidanceInstructions: readonly string[];
   dynamicGuidance: string;
   stableResourceBlock: string;
   turnResource: string;
@@ -491,7 +478,7 @@ function buildSystemPrompt(sections: PromptSection[]): string {
     .join("\n\n");
 }
 
-function collectToolGuidanceInstructions(
+function collectMatchingToolGuidance(
   request: AgentRuntimeRequest,
   tools: AgentToolDefinition<any, any>[],
   matchedSkillIds: ReadonlyArray<string>,
@@ -510,12 +497,13 @@ function collectToolGuidanceInstructions(
     const instruction = guidance.instruction.trim();
     if (instruction) instructions.add(instruction);
   }
+  return [...instructions];
+}
 
-  if (!instructions.size) return [];
+function buildToolGuidanceSection(instructions: readonly string[]): string[] {
+  if (!instructions.length) return [];
   return [
-    "The following stable tool guidance is provided because the user's message may be relevant to these capabilities. " +
-      "Use your judgement: only invoke a tool if it directly addresses what the user is asking for. " +
-      "Do NOT invoke a tool just because its guidance appears here — the user's actual intent takes priority.",
+    "Tool guidance for this turn: call a tool only when it serves the user's request, never just because its guidance appears here.",
     ...instructions,
   ];
 }
@@ -559,7 +547,7 @@ function collectSkillGuidanceInstructions(
   if (!blocks.length) return [];
   return [
     "Active skills for this turn:",
-    "Apply the selected playbooks where relevant. Skills provide workflow guidance and never grant write authority. The current request determines the deliverable; template defaults must not expand its scope. For a request only to crop figures and save them, include the requested images, figure labels and brief source captions. Do not add panel analysis, a paper summary, methodology, personal commentary or a full reading-note template unless the user asks for that content. This scope rule also applies to customized or older skill templates.",
+    `Apply the selected playbooks where relevant. Skills provide workflow guidance and never grant write authority. ${SKILL_SCOPE_GUARD}`,
     ...blocks,
   ];
 }
@@ -570,65 +558,15 @@ function buildTurnGuidanceBlock(instructions: string[]): string {
   return ["Current-turn dynamic agent guidance:", ...lines].join("\n\n");
 }
 
-function getInScopePaperContexts(request: AgentRuntimeRequest) {
-  return request.turnPaperScope.papers.map((entry) => entry.paper);
-}
-
-function hasFigureTaskIntent(request: AgentRuntimeRequest): boolean {
-  return (
-    request.classifiedIntent?.semantic?.visualMode === "figure" ||
-    Boolean(request.classifiedIntent?.semantic?.figures)
-  );
-}
-
-function buildFigureMineruInstruction(
-  request: AgentRuntimeRequest,
-  matchedSkillIds: ReadonlyArray<string>,
-): string {
-  if (!hasFigureTaskIntent(request)) return "";
-  const mineruPapers = getInScopePaperContexts(request).filter((entry) =>
-    Boolean(entry.mineruCacheDir),
-  );
-  if (!mineruPapers.length) return "";
-  const cacheHints = mineruPapers
-    .map((entry, index) => {
-      const label = entry.title?.trim() || `paper ${index + 1}`;
-      return `- ${label}: ${entry.mineruCacheDir}`;
-    })
-    .join("\n");
-  return (
-    "TURN RULE: This is a figure/table interpretation task and MinerU cache is available for at least one in-scope paper. " +
-    "For figure/image questions, call `paper_read({ mode:'figures', query:'<figure label or all figures>' })` first. This returns precise PDF crops plus captions/provenance. Treat that result as the authority for figure crop cache reuse/regeneration; use returned crop paths/artifacts as-is and do not inspect or validate `figure_crops` metadata before analysis or writing. " +
-    "If figure extraction fails or returns no crops, switch to text-only mode for analysis, note taking, and follow-up artifacts: do not include figure images, rendered PDF page screenshots, MinerU source images, or extracted-image placeholders; explicitly state that extraction failed or no extracted crops are available and base explanations on captions, figure legends, and surrounding paper text. Manual user-provided image inputs are unaffected. " +
-    "For table questions, call `paper_read({ mode:'targeted', query:'<table label and surrounding discussion>' })` because MinerU table evidence is text/structure, not figure crops. " +
-    "Use `full.md`/manifest text for captions and surrounding textual evidence, but do not read or embed MinerU image paths for ordinary figure interpretation. " +
-    "For explicit panel requests, inspect the whole extracted figure crop and treat panel suffixes as hints. " +
-    "Use `paper_read({ mode:'visual', query:'<page/layout request>' })` only when the user explicitly asks for rendered/raw PDF pages, page screenshots, page layout, exact pages, or visible-reader inspection.\n" +
-    `Available MinerU cache directories:\n${cacheHints}`
-  );
-}
-
 function buildRuntimePlatformSection(): string {
   return buildRuntimePlatformGuidanceText();
 }
 
-function buildTextOnlyModelInstruction(
-  request: AgentRuntimeRequest,
-  matchedSkillIds: ReadonlyArray<string>,
-): string {
+function buildTextOnlyModelInstruction(request: AgentRuntimeRequest): string {
   if (isMultimodalRequestSupported(request)) return "";
+  if (!request.screenshots?.length) return "";
   const modelLabel = (request.model || "selected model").trim();
-  if (!hasFigureTaskIntent(request)) {
-    return request.screenshots?.length
-      ? `MODEL LIMITATION: ${modelLabel} is text-only and cannot inspect the supplied screenshots.`
-      : "";
-  }
-  return (
-    `MODEL LIMITATION: ${modelLabel} is treated as text-only in this plugin. ` +
-    "Do not rely on screenshots, PDF page images, or image-file visual inspection. " +
-    "For MinerU-cached papers, prefer `manifest.json`, `full.md` section offsets, captions, tables, formulas, and surrounding extracted text. " +
-    "For figure workflows, you may still call `paper_read({ mode:'figures' })` to obtain extracted crop paths, captions, warnings, and provenance for note embedding. Treat that result as the authority for figure crop cache reuse/regeneration; do not inspect or validate `figure_crops` metadata before analysis or writing. Do not make unsupported visual claims unless an image-capable model inspected the crop."
-  );
+  return `MODEL LIMITATION: ${modelLabel} is text-only and cannot inspect the supplied screenshots.`;
 }
 
 export async function renderAgentPromptEnvelope(
@@ -641,15 +579,19 @@ export async function renderAgentPromptEnvelope(
   } = {},
 ): Promise<RenderedAgentPromptEnvelope> {
   const continuityNotes = await loadAgentTurnMemory(request.conversationKey);
-  const workflowParityInstructions = [
-    buildFigureMineruInstruction(request, matchedSkillIds),
-  ].filter(Boolean);
+  const toolGuidanceInstructions = collectMatchingToolGuidance(
+    request,
+    tools,
+    matchedSkillIds,
+  );
   const dynamicGuidanceInstructions = [
+    isSinglePaperConversation(request)
+      ? "Single-paper chat: answer directly using the supplied paper context; questions about the paper need no skill, so do not load evidence-based-qa for them. You may freely choose additional snippet, section, full, figure, or search reads when useful. For whole-paper explanations, consider the argument, methods, results, and limitations throughout the available source."
+      : "",
     request.workingDirectory
       ? `Command working directory retained from this conversation: ${request.workingDirectory}. run_command uses it when cwd is omitted; pass cwd explicitly to change it. This directory does not confer filesystem permission.`
       : "",
-    ...workflowParityInstructions,
-    ...collectToolGuidanceInstructions(request, tools, matchedSkillIds),
+    ...buildToolGuidanceSection(toolGuidanceInstructions),
   ];
   const matchedSkillInstructions = collectSkillGuidanceInstructions(
     request,
@@ -681,6 +623,9 @@ export async function renderAgentPromptEnvelope(
           "## Direct agent workflow",
           "Understand the current request yourself and choose the lightest useful sequence of reads, searches, questions, document finalization, and concrete actions.",
           "Use actual tools for requested effects. Inspect results and continue until the requested outcome is complete, reviewed, or has a concrete error.",
+          "When a request asks for more than one outcome, such as summarizing a paper and saving it as a note, declare each part with task_update in your first step, together with that step's first tool calls. The host marks each part done from the tools' results; never mark one done yourself.",
+          "When the work needs one result for each of several papers (a summary, extracted fields, relevance to a question, support or challenge for an idea), declare a digest part whose description states that per-paper result; the host runs it on each paper and returns the results.",
+          "A write result with a verified receipt already confirms the change; do not re-read the target to confirm it.",
           "Natural-language restrictions in the current request and clarifications remain binding. Tool calls do not grant their own permission; the host validates each concrete proposal, applies permission policy, journals effects, and verifies native state.",
           "Resolve named targets from supplied identities or bounded search results. If several candidates remain, use request_user_input rather than guessing.",
         ].join("\n"),
@@ -689,8 +634,11 @@ export async function renderAgentPromptEnvelope(
     {
       id: "skill-inventory",
       lines: [
-        `Installed skill inventory (use load_skill for relevant guidance not already active, including when the task changes or automatic selection is unavailable): ${JSON.stringify(
-          buildSkillInventory(getAllSkills()),
+        `Installed skill inventory (workflow playbooks for multi-step tasks: notes, comparisons, reviews, imports, figure work; ordinary paper questions need no skill. When one matches and its guidance is not already active, call load_skill with its id): ${JSON.stringify(
+          // Manual skills apply only when the user selects them.
+          buildSkillInventory(getAllSkills())
+            .filter((skill) => skill.activation !== "manual")
+            .map(({ id, description }) => ({ id, description })),
         )}`,
       ],
     },
@@ -700,7 +648,7 @@ export async function renderAgentPromptEnvelope(
     },
     {
       id: "model-limitations",
-      lines: [buildTextOnlyModelInstruction(request, matchedSkillIds)],
+      lines: [buildTextOnlyModelInstruction(request)],
     },
     {
       id: "custom-instructions",
@@ -735,6 +683,13 @@ export async function renderAgentPromptEnvelope(
       role: "system",
       content: fixedPrompt,
     }),
+    ...(resourceContextPlan?.paperContext?.blocks || []).map((content) =>
+      freezeEnvelopeMessage<AgentSystemMessage>({
+        role: "system",
+        content,
+        cachePolicy: "stable-prefix",
+      }),
+    ),
     ...(stableResourceBlock
       ? [
           freezeEnvelopeMessage<AgentSystemMessage>({
@@ -764,6 +719,7 @@ export async function renderAgentPromptEnvelope(
       fixedPrompt,
       tools: Object.freeze([...tools]),
       matchedSkillInstructions: Object.freeze([...matchedSkillInstructions]),
+      toolGuidanceInstructions: Object.freeze([...toolGuidanceInstructions]),
       dynamicGuidance: buildTurnGuidanceBlock(dynamicGuidanceInstructions),
       stableResourceBlock,
       turnResource: turnGuidanceBlock

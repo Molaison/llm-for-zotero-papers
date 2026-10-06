@@ -22,15 +22,6 @@ export type NotesDirectoryConfig = {
   nickname: string;
 };
 
-/**
- * Path information attached to note-writing requests. This is purely
- * informational: it never overrides the path the agent chooses. Its only
- * enforcement consumer is run_command's channel rule, which redirects
- * Markdown note writes to file_io (same paths, same content — just the
- * tool that carries undo and overwrite confirmation).
- */
-export type NotesDirectoryWritePolicy = NotesDirectoryConfig;
-
 function getPrefs(): ZoteroPrefsLike | null {
   return (
     (
@@ -134,43 +125,4 @@ export function buildNotesDirectoryConfigSection(): string {
     );
   }
   return lines.join("\n");
-}
-
-function normalizeForComparison(value: string): string {
-  return value.replace(/\\/g, "/").replace(/\/+$/g, "");
-}
-
-export function isLocalPathInsideOrEqual(
-  path: string,
-  directory: string,
-): boolean {
-  const normalizedPath = normalizeForComparison(path);
-  const normalizedDirectory = normalizeForComparison(directory);
-  return (
-    normalizedPath === normalizedDirectory ||
-    normalizedPath.startsWith(`${normalizedDirectory}/`)
-  );
-}
-
-function readStringField(record: Record<string, unknown>, key: string): string {
-  const value = record[key];
-  return typeof value === "string" ? value.trim() : "";
-}
-
-export function parseNotesDirectoryWritePolicy(
-  value: unknown,
-): NotesDirectoryWritePolicy | null {
-  if (!value || typeof value !== "object") return null;
-  const record = value as Record<string, unknown>;
-  const directoryPath = readStringField(record, "directoryPath");
-  const defaultTargetPath = readStringField(record, "defaultTargetPath");
-  if (!directoryPath || !defaultTargetPath) return null;
-  return {
-    directoryPath,
-    defaultFolder: readStringField(record, "defaultFolder"),
-    defaultTargetPath,
-    attachmentsFolder: readStringField(record, "attachmentsFolder"),
-    attachmentsPath: readStringField(record, "attachmentsPath"),
-    nickname: readStringField(record, "nickname"),
-  };
 }

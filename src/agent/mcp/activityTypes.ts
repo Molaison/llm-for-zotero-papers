@@ -1,9 +1,10 @@
 import type { QuoteCitation } from "../../shared/types";
 import type { AgentActionReceipt } from "../contracts/types";
+import type { TaskPaperLedgerDelta } from "../context/taskPaperLedger";
 import type {
   TrustedReadObservation,
   VerifiedReadSource,
-} from "../plans/types";
+} from "../context/readObservationTypes";
 import type { AgentToolArtifact, AgentWorkCategory } from "../types";
 
 export type ZoteroMcpToolActivityEvent = {
@@ -20,12 +21,6 @@ export type ZoteroMcpToolActivityEvent = {
   artifacts?: AgentToolArtifact[];
   actionReceipts?: AgentActionReceipt[];
   workCategory?: AgentWorkCategory;
-  /**
-   * The research job this call advanced, as the tool's own result declared
-   * it. A bridge shows the reader that progress from this field instead of
-   * recognising the research tool by its name.
-   */
-  researchJobId?: string;
   mutability?: "read" | "write";
   profileSignature?: string;
   conversationKey?: number;
@@ -34,5 +29,10 @@ export type ZoteroMcpToolActivityEvent = {
   quoteCitations?: QuoteCitation[];
   verifiedReadSources?: VerifiedReadSource[];
   readObservations?: readonly TrustedReadObservation[];
+  /**
+   * What this successful read call read from each paper, for the Task
+   * progress view. Set only on a completed call inside a conversation.
+   */
+  paperLedgerDelta?: TaskPaperLedgerDelta;
   timestamp: number;
 };

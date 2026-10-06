@@ -64,6 +64,15 @@ describe("MinerU preferences", function () {
     assert.include(preferences, 'aria-label="Custom page limit"');
   });
 
+  it("labels the MinerU 4 Auto tier as the best available tier", function () {
+    assert.include(
+      preferences,
+      '<html:option value="auto">Auto (best available)</html:option>',
+    );
+    assert.notInclude(preferences, "Server default");
+    assert.include(i18n, '"Auto (best available)": "自动（最佳可用）"');
+  });
+
   it("renders a shared force OCR option for MinerU parsing", function () {
     assert.include(preferences, 'for="__addonRef__-mineru-force-ocr"');
     assert.include(preferences, 'id="__addonRef__-mineru-force-ocr"');

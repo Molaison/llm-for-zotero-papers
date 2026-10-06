@@ -1,9 +1,5 @@
 import "./hostSurfaceBootstrap";
-import {
-  semanticContractFixture,
-  classifiedFixture,
-  semanticResponseFixture,
-} from "../test/helpers/semanticIntent";
+import { resolvedAgentRequest } from "../test/helpers/resolvedAgentRequest";
 import { assert } from "chai";
 import { AgentToolRegistry } from "../src/agent/tools/registry";
 import { ActionContractService } from "../src/agent/contracts/actionContract";
@@ -13,7 +9,8 @@ import {
   getOriginalAgentPermissionMode,
   setOriginalAgentPermissionMode,
 } from "../src/agent/originalAgentPermissionMode";
-import type { AgentActionContract, AgentToolContext } from "../src/agent/types";
+import { createAgentExecutionContext } from "../src/agent/execution/context";
+import type { AgentToolContext } from "../src/agent/types";
 
 describe("workflow: native source-note copy", function () {
   this.timeout(60000);
@@ -25,7 +22,7 @@ describe("workflow: native source-note copy", function () {
     source.setNote("<h1>Original note</h1>");
     await source.saveTx();
     const destination = new Zotero.Collection();
-    destination.libraryID = source.libraryID;
+    (destination as { libraryID: number }).libraryID = source.libraryID;
     destination.name = "Native copy destination";
     await destination.saveTx();
     let copied: Zotero.Item | undefined;
@@ -45,7 +42,7 @@ describe("workflow: native source-note copy", function () {
         `<p><strong>Original provenance</strong></p><p><strong>Model response:</strong> original-model</p><div><h1>Original note</h1><p>The paper&#039;s preserved paragraph: &amp;lt;literal&amp;gt; and variable_name.</p><img data-attachment-key="${image.key}" alt="Fixture figure"></div><hr><p>Written by LLM-for-Zotero.</p>`,
       );
       await source.saveTx();
-      await source.reload(undefined, true);
+      await source.reload(undefined as never, true);
       const originalHtml = source.getNote();
       await initAgentChangeJournal();
       setOriginalAgentPermissionMode("auto");
@@ -54,33 +51,19 @@ describe("workflow: native source-note copy", function () {
       registry.register(
         (Zotero as any).LLMForZotero.api.agent.getToolDefinition("note_write"),
       );
-      const contract: AgentActionContract = semanticContractFixture({
-        version: 3,
-        id: "native-copy",
-        hardConstraints: [],
-        writeDisposition: "required",
-        interpretationSource: "semantic",
-        obligations: [
-          {
-            id: "copy",
-            operation: "note_create",
-            proofDomain: "zotero_state",
-            capability: "zotero.notes",
-            coverage: "one",
-            targetKind: "items",
-            parameters: { noteMode: "create" },
-          },
-        ],
+      const request = resolvedAgentRequest({
+        conversationKey: source.id,
+        mode: "agent",
+        userText: `Create one standalone copy of note ${source.id}`,
+        libraryID: source.libraryID,
       });
+      // An ordinary agent turn: the in-plugin agent owns permission.
+      request.executionContext = createAgentExecutionContext(
+        request,
+        "native-copy",
+      );
       const context: AgentToolContext = {
-        request: {
-          conversationKey: source.id,
-          mode: "agent",
-          userText: `Create one standalone copy of note ${source.id}`,
-          libraryID: source.libraryID,
-          actionContract: contract,
-          actionProgress: contracts.createProgress(contract),
-        },
+        request,
         item: null,
         modelName: "workflow",
         currentAnswerText: "",
@@ -115,7 +98,7 @@ describe("workflow: native source-note copy", function () {
         .filter((item) => item.isNote());
       assert.lengthOf(created, 1);
       copied = created[0];
-      await copied.reload(undefined, true);
+      await copied.reload(undefined as never, true);
       assert.isFalse(Boolean(copied.parentID));
       const images = copied.getAttachments().map((id) => Zotero.Items.get(id));
       assert.lengthOf(images, 1);
@@ -132,21 +115,6 @@ describe("workflow: native source-note copy", function () {
         1,
       );
       const copiedBefore = copied.getNote();
-      const editContract: AgentActionContract = {
-        ...contract,
-        id: "native-encoded-note-edit",
-        obligations: [
-          {
-            id: "edit",
-            operation: "note_edit",
-            proofDomain: "zotero_state",
-            capability: "zotero.notes",
-            coverage: "one",
-            targetKind: "items",
-            parameters: { noteMode: "edit", targetNoteId: copied.id },
-          },
-        ],
-      };
       const edit = await registry.prepareExecution(
         {
           id: "edit",
@@ -164,8 +132,6 @@ describe("workflow: native source-note copy", function () {
           request: {
             ...context.request,
             userText: `In note ${copied.id}, replace only "preserved paragraph" with "reviewed paragraph". Keep all other content.`,
-            actionContract: editContract,
-            actionProgress: contracts.createProgress(editContract),
           },
         },
       );
@@ -179,7 +145,7 @@ describe("workflow: native source-note copy", function () {
       const applied = edit;
       assert.equal(applied.kind, "result");
       if (applied.kind !== "result") return;
-      await copied.reload(undefined, true);
+      await copied.reload(undefined as never, true);
       assert.equal(
         copied.getNote(),
         copiedBefore.replace("preserved paragraph", "reviewed paragraph"),

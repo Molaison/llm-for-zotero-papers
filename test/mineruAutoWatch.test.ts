@@ -1,3 +1,4 @@
+import { mineruLegacyHealth } from "./helpers/mineruLegacyHealth";
 import {
   createPdfFixture,
   createPdfWithHiddenPageCount,
@@ -123,7 +124,9 @@ function setupZotero(
   (globalThis as unknown as { ztoolkit: unknown }).ztoolkit = {
     getGlobal: (name: string) => {
       if (name === "AbortController") return AbortController;
-      if (name === "fetch") return globalThis.fetch;
+      if (name === "fetch")
+        return async (url: string, init: RequestInit) =>
+          mineruLegacyHealth(String(url)) ?? globalThis.fetch(url, init);
       return undefined;
     },
     log: () => {},

@@ -5,6 +5,7 @@ import {
   configureModelCapabilityRuntime,
   ensureModelCapabilities,
   getModelCapabilities,
+  getModelReasoningChoices,
   getDiscoveredModels,
   refreshModelCapabilityRegistry,
   refreshModelCatalog,
@@ -92,6 +93,33 @@ describe("model capability service", function () {
         omitTemperature: true,
       },
     );
+  });
+
+  it("labels the reasoning menu's first choice plainly as Auto", function () {
+    const capabilities = getModelCapabilities({
+      provider: "local",
+      model: "profiled-local",
+      profileOverride: {
+        forModel: "profiled-local",
+        reasoning: {
+          kind: "select",
+          defaultOptionId: "none",
+          options: [
+            {
+              id: "none",
+              label: "Disabled",
+              controls: { body: { think: false } },
+            },
+          ],
+        },
+      },
+    });
+
+    assert.deepEqual(getModelReasoningChoices(capabilities)[0], {
+      level: "auto",
+      label: "Auto",
+      enabled: true,
+    });
   });
 
   it("applies controls for an explicit disabled option named none", function () {

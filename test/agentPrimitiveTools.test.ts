@@ -2,33 +2,24 @@ import { noteHtmlMatches } from "../src/utils/noteHtml";
 import { renderRawNoteHtml } from "../src/services/notes/noteRendering";
 import { composeRetrievalCandidateInvalidation } from "./helpers/hostSurfaces";
 import { nativeNoteGateway } from "./helpers/nativeNoteGateway";
-import { actionContractFixture } from "./helpers/semanticIntent";
 import { ActionContractService } from "../src/agent/contracts/actionContract";
-import {
-  actionFixture,
-  classifiedFixture,
-  semanticFixture,
-} from "./helpers/semanticIntent";
 import { assert } from "chai";
 import { buildAgentInitialMessages as buildAgentInitialMessagesResolved } from "../src/agent/model/messageBuilder";
 import { EDITABLE_ARTICLE_METADATA_FIELDS } from "../src/agent/services/zoteroGateway";
 import { AgentToolRegistry } from "../src/agent/tools/registry";
 import { PdfService } from "../src/agent/services/pdfService";
 import { RetrievalService } from "../src/agent/services/retrievalService";
-import { createQueryLibraryTool } from "../src/agent/tools/read/queryLibrary";
-import { createReadLibraryTool } from "../src/agent/tools/read/readLibrary";
-import { createReadPaperTool } from "../src/agent/tools/read/readPaper";
-import { createSearchPaperTool } from "../src/agent/tools/read/searchPaper";
+import { createLibrarySearchTool } from "../src/agent/tools/read/librarySearch";
+import { createLibraryReadTool } from "../src/agent/tools/read/libraryRead";
+import { createPaperReadTool } from "../src/agent/tools/read/paperRead";
 import { getPagedOperationId } from "../src/agent/actions/pagedWorkflow";
 import { createFileIOTool } from "../src/agent/tools/write/fileIO";
-import { createBuiltInToolRegistry } from "../src/agent/tools";
-import { createEditCurrentNoteTool } from "../src/agent/tools/write/editCurrentNote";
+import { createNoteWriteTool } from "../src/agent/tools/write/noteWrite";
 import { createApplyTagsTool } from "../src/agent/tools/write/applyTags";
 import { createUpdateMetadataTool } from "../src/agent/tools/write/updateMetadata";
 import { createRunCommandTool } from "../src/agent/tools/write/runCommand";
 import { createZoteroScriptTool } from "../src/agent/tools/write/zoteroScript";
 import { createReadAttachmentTool } from "../src/agent/tools/read/readAttachment";
-import { createViewPdfPagesTool } from "../src/agent/tools/read/viewPdfPages";
 import { getNotesDirectoryConfig } from "../src/utils/notesDirectoryConfig";
 import type {
   AgentModelMessage,
@@ -200,6 +191,16 @@ class FakePdfService extends PdfService {
   }
 }
 
+/** Former read_paper(pdf, gateway) construction, now the paper_read facade. */
+function readPaperViaPaperRead(pdfService: PdfService, zoteroGateway: unknown) {
+  return createPaperReadTool(
+    pdfService,
+    new RetrievalService(pdfService),
+    {} as never,
+    zoteroGateway as never,
+  );
+}
+
 const globalScope = globalThis as typeof globalThis & {
   Zotero?: Record<string, unknown>;
 };
@@ -251,7 +252,7 @@ describe("primitive agent tools", function () {
     globalScope.Zotero = originalZotero;
   });
 
-  it("does not infer library scope or figure work from a forced skill when semantic intent requests chat", async function () {
+  it("does not infer library scope or figure work from a forced skill", async function () {
     const messages = await buildAgentInitialMessages(
       {
         conversationKey: 43_799,
@@ -261,7 +262,6 @@ describe("primitive agent tools", function () {
         model: "gpt-4o",
         libraryID: 1,
         forcedSkillIds: ["analyze-figures"],
-        classifiedIntent: classifiedFixture(),
       },
       [],
       ["analyze-figures"],
@@ -273,8 +273,8 @@ describe("primitive agent tools", function () {
     );
     assert.notInclude(text, "This is a figure/table interpretation task");
   });
-  it("query_library searches items and enriches requested fields", async function () {
-    const tool = createQueryLibraryTool({
+  it("library_search searches items and enriches requested fields", async function () {
+    const tool = createLibrarySearchTool({
       resolveLibraryID: () => 1,
       searchAllLibraryItems: async () =>
         ({
@@ -387,8 +387,8 @@ describe("primitive agent tools", function () {
     assert.notProperty(compactFirst, "metadata");
   });
 
-  it("query_library lists libraries without requiring an active library", async function () {
-    const tool = createQueryLibraryTool({
+  it("library_search lists libraries without requiring an active library", async function () {
+    const tool = createLibrarySearchTool({
       resolveLibraryID: () => 0,
       listAllLibraries: () => [
         { libraryID: 1, name: "My Library", editable: true },
@@ -410,9 +410,9 @@ describe("primitive agent tools", function () {
     );
   });
 
-  it("query_library related mode resolves the active paper from reader context", async function () {
+  it("library_search related mode resolves the active paper from reader context", async function () {
     let receivedReferenceItemId = 0;
-    const tool = createQueryLibraryTool({
+    const tool = createLibrarySearchTool({
       resolveLibraryID: () => 1,
       listPaperContexts: () => [
         {
@@ -489,9 +489,9 @@ describe("primitive agent tools", function () {
     assert.lengthOf((result as { results: unknown[] }).results, 1);
   });
 
-  it("query_library related mode refuses active-paper fallback in library chat", async function () {
+  it("library_search related mode refuses active-paper fallback in library chat", async function () {
     let relatedSearchCalled = false;
-    const tool = createQueryLibraryTool({
+    const tool = createLibrarySearchTool({
       resolveLibraryID: () => 1,
       listPaperContexts: () => [],
       getActivePaperContext: () => ({
@@ -553,12 +553,12 @@ describe("primitive agent tools", function () {
     assert.equal(relatedSearchCalled, false);
   });
 
-  it("read_library returns item state keyed by itemId", async function () {
+  it("library_read returns item state keyed by itemId", async function () {
     const fakeItem = {
       id: 7,
       getDisplayTitle: () => "Paper Seven",
     } as any;
-    const tool = createReadLibraryTool({
+    const tool = createLibraryReadTool({
       listPaperContexts: () => [],
       getItemCollectionIds: (itemId: number) => (itemId === 7 ? [12] : []),
       getPaperTargetsByItemIds: () => [
@@ -637,13 +637,13 @@ describe("primitive agent tools", function () {
     ]);
   });
 
-  it("read_library does not use active reader fallback in collection-scoped library chat", async function () {
+  it("library_read does not use active reader fallback in collection-scoped library chat", async function () {
     let requestedTargets: number[] = [];
     const fakeItem = {
       id: 99,
       getDisplayTitle: () => "Chandra Paper",
     } as any;
-    const tool = createReadLibraryTool({
+    const tool = createLibraryReadTool({
       listPaperContexts: () => [],
       getItemCollectionIds: (itemId: number) => (itemId === 7 ? [12] : []),
       getPaperTargetsByItemIds: (itemIds: number[]) => {
@@ -683,12 +683,12 @@ describe("primitive agent tools", function () {
     );
   });
 
-  it("read_library keeps explicit item IDs in collection-scoped library chat", async function () {
+  it("library_read keeps explicit item IDs in collection-scoped library chat", async function () {
     const fakeItem = {
       id: 7,
       getDisplayTitle: () => "Collection Paper",
     } as any;
-    const tool = createReadLibraryTool({
+    const tool = createLibraryReadTool({
       listPaperContexts: () => [],
       getItemCollectionIds: (itemId: number) => (itemId === 7 ? [12] : []),
       getPaperTargetsByItemIds: () => [],
@@ -782,11 +782,15 @@ describe("primitive agent tools", function () {
     const systemText =
       typeof messages[0]?.content === "string" ? messages[0].content : "";
     assert.include(systemText, "literature_search");
-    assert.include(systemText, "library_search");
-    assert.include(systemText, "library_retrieve");
-    assert.include(systemText, "library_read");
-    assert.include(systemText, "paper_read");
-    assert.include(systemText, "workflow:'answer'");
+    // Zotero reading and library routing lives in paper_read and
+    // library_retrieve guidance; the fixed persona only points at it.
+    assert.include(
+      systemText,
+      "Tool descriptions and guidance are the source of truth for how to read papers and search the library.",
+    );
+    assert.notInclude(systemText, "paperEvidenceProgress");
+    // Discovery-versus-import rules live in literature_search guidance.
+    assert.notInclude(systemText, "workflow:'answer'");
     assert.include(systemText, "web_search");
     assert.include(systemText, "web_read");
     assert.include(systemText, "Use actual tools for requested effects");
@@ -837,7 +841,11 @@ describe("primitive agent tools", function () {
       resourceText,
       "Ground final content claims in library_retrieve snippets or paper_read results.",
     );
-    assert.include(resourceText, "plan a batch workflow");
+    // The host runs a digest on each paper; the model no longer writes
+    // digests itself.
+    assert.include(resourceText, "declare a digest part with task_update");
+    assert.notInclude(resourceText, "plan a batch workflow");
+    assert.notInclude(resourceText, "create compact per-paper digests");
     assert.include(userText, "User request:\nCompare the papers");
   });
 
@@ -1149,16 +1157,6 @@ describe("primitive agent tools", function () {
       request: {
         ...baseContext.request,
         conversationKey: 43_006,
-        metadata: {
-          fileNoteWritePolicy: {
-            directoryPath: "/tmp/obsidian-vault",
-            defaultFolder: "Zotero Notes",
-            defaultTargetPath: "/tmp/obsidian-vault/Zotero Notes",
-            attachmentsFolder: "Zotero Notes/imgs",
-            attachmentsPath: "/tmp/obsidian-vault/Zotero Notes/imgs",
-            nickname: "Obsidian",
-          },
-        },
       },
     };
 
@@ -1214,16 +1212,6 @@ describe("primitive agent tools", function () {
       request: {
         ...baseContext.request,
         conversationKey: 43_016,
-        metadata: {
-          fileNoteWritePolicy: {
-            directoryPath: "/tmp/obsidian-vault",
-            defaultFolder: "Zotero Notes",
-            defaultTargetPath: "/tmp/obsidian-vault/Zotero Notes",
-            attachmentsFolder: "Zotero Notes/imgs",
-            attachmentsPath: "/tmp/obsidian-vault/Zotero Notes/imgs",
-            nickname: "Obsidian",
-          },
-        },
       },
     };
 
@@ -1249,199 +1237,6 @@ describe("primitive agent tools", function () {
         fileContent.get("/tmp/elsewhere/custom-note.md"),
         "Note outside the configured notes directory.",
       );
-    } finally {
-      (globalThis as { IOUtils?: unknown }).IOUtils = originalIOUtils;
-    }
-  });
-
-  it("file_io does not police partial compound figure Markdown notes at write time", async function () {
-    const tool = createFileIOTool();
-    const encoder = new TextEncoder();
-    const writes: string[] = [];
-    const writtenBytes = new Map<string, Uint8Array>();
-    const originalIOUtils = (globalThis as { IOUtils?: unknown }).IOUtils;
-    const manifestPath = "/tmp/llm-for-zotero-mineru/77/manifest.json";
-    const manifest = {
-      sections: [],
-      totalChars: 0,
-      allFigures: [
-        {
-          label: "Figure 2a",
-          baseLabel: "Figure 2",
-          path: "images/fig2a.png",
-          caption: "Figure 2a. Attractor architecture.",
-          section: "Decision making",
-        },
-        {
-          label: "Figure 2b",
-          baseLabel: "Figure 2",
-          path: "images/fig2b.png",
-          caption: "Figure 2b. Integrate-and-fire architecture.",
-          section: "Decision making",
-        },
-        {
-          label: "Figure 2c",
-          baseLabel: "Figure 2",
-          path: "images/fig2c.png",
-          caption: "Figure 2c. Energy landscape.",
-          section: "Decision making",
-        },
-      ],
-      allTables: [],
-    };
-    (globalThis as { IOUtils?: unknown }).IOUtils = {
-      exists: async (path: string) => path === manifestPath,
-      read: async (path: string) => {
-        if (writtenBytes.has(path)) return writtenBytes.get(path)!;
-        if (path !== manifestPath) throw new Error(`Unexpected read: ${path}`);
-        return encoder.encode(JSON.stringify(manifest));
-      },
-      write: async (path: string, bytes: Uint8Array) => {
-        writes.push(path);
-        writtenBytes.set(path, bytes);
-      },
-      makeDirectory: async () => undefined,
-    };
-    const paperContext: PaperContextRef = {
-      itemId: 76,
-      contextItemId: 77,
-      title: "Stochastic Dynamics",
-      firstCreator: "Rolls",
-      year: "2012",
-      mineruCacheDir: "/tmp/llm-for-zotero-mineru/77",
-    };
-    const context: AgentToolContext = {
-      ...baseContext,
-      request: {
-        ...baseContext.request,
-        conversationKey: 43_008,
-        userText: "write a note about figure 1 and figure 2",
-        fullTextPaperContexts: [paperContext],
-      },
-    };
-
-    try {
-      const write = tool.validate({
-        action: "write",
-        filePath: "/tmp/obsidian-vault/Zotero Notes/figures.md",
-        content: [
-          "![Figure 2. Attractor-network decision-making](imgs/paper/figure-2.jpg)",
-          "",
-          "## Figure 2 - Attractor-network decision-making",
-          "",
-          "Panel 2a illustrates an attractor architecture.",
-          "",
-          "Panel 2b shows the integrate-and-fire network architecture.",
-          "",
-          "Panel 2c gives the energy-landscape interpretation.",
-        ].join("\n"),
-      });
-      assert.isTrue(write.ok);
-      if (!write.ok) return;
-
-      const result = (await tool.execute(write.value, context))
-        .content as Record<string, unknown>;
-
-      assert.deepInclude(result, {
-        action: "write",
-        filePath: "/tmp/obsidian-vault/Zotero Notes/figures.md",
-      });
-      assert.notProperty(result, "error");
-      assert.deepEqual(writes, ["/tmp/obsidian-vault/Zotero Notes/figures.md"]);
-    } finally {
-      (globalThis as { IOUtils?: unknown }).IOUtils = originalIOUtils;
-    }
-  });
-
-  it("file_io does not police captionless MinerU image blocks at write time", async function () {
-    const tool = createFileIOTool();
-    const encoder = new TextEncoder();
-    const writes: string[] = [];
-    const originalIOUtils = (globalThis as { IOUtils?: unknown }).IOUtils;
-    const cacheDir = "/tmp/llm-for-zotero-mineru/88";
-    const fullMdPath = `${cacheDir}/full.md`;
-    const contentListPath = `${cacheDir}/content_list.json`;
-    const fullMd = [
-      "# Results",
-      "A captionless compound figure appears below.",
-      "",
-      "![](images/a.jpg)",
-      "",
-      "![](images/b.jpg)",
-      "",
-      "![](images/c.jpg)",
-      "",
-      "The text resumes.",
-    ].join("\n");
-    const contentList = [
-      { type: "text", text_level: 1, text: "Results", page_idx: 0 },
-      { type: "image", img_path: "images/a.jpg", page_idx: 1 },
-      { type: "image", img_path: "images/b.jpg", page_idx: 1 },
-      { type: "image", img_path: "images/c.jpg", page_idx: 1 },
-    ];
-    const writtenBytes = new Map<string, Uint8Array>();
-    (globalThis as { IOUtils?: unknown }).IOUtils = {
-      exists: async (path: string) =>
-        [
-          cacheDir,
-          fullMdPath,
-          contentListPath,
-          `${cacheDir}/images/a.jpg`,
-          `${cacheDir}/images/b.jpg`,
-          `${cacheDir}/images/c.jpg`,
-        ].includes(path),
-      read: async (path: string) => {
-        if (writtenBytes.has(path)) return writtenBytes.get(path)!;
-        if (path === fullMdPath) return encoder.encode(fullMd);
-        if (path === contentListPath) {
-          return encoder.encode(JSON.stringify(contentList));
-        }
-        throw new Error(`Unexpected read: ${path}`);
-      },
-      getChildren: async (path: string) =>
-        path === cacheDir ? [contentListPath] : [],
-      write: async (path: string, bytes: Uint8Array) => {
-        writes.push(path);
-        writtenBytes.set(path, bytes);
-      },
-      makeDirectory: async () => undefined,
-    };
-    const paperContext: PaperContextRef = {
-      itemId: 87,
-      contextItemId: 88,
-      title: "Captionless Blocks",
-      mineruCacheDir: cacheDir,
-    };
-    const context: AgentToolContext = {
-      ...baseContext,
-      request: {
-        ...baseContext.request,
-        conversationKey: 43_011,
-        userText: "write a note with this compound figure",
-        fullTextPaperContexts: [paperContext],
-      },
-    };
-
-    try {
-      const write = tool.validate({
-        action: "write",
-        filePath: "/tmp/obsidian-vault/Zotero Notes/captionless.md",
-        content: [
-          `![Only one panel](file:///${cacheDir}/images/a.jpg)`,
-          "",
-          "This note discusses the compound figure.",
-        ].join("\n"),
-      });
-      assert.isTrue(write.ok);
-      if (!write.ok) return;
-
-      const result = (await tool.execute(write.value, context))
-        .content as Record<string, unknown>;
-
-      assert.notProperty(result, "error");
-      assert.deepEqual(writes, [
-        "/tmp/obsidian-vault/Zotero Notes/captionless.md",
-      ]);
     } finally {
       (globalThis as { IOUtils?: unknown }).IOUtils = originalIOUtils;
     }
@@ -1590,247 +1385,142 @@ describe("primitive agent tools", function () {
     }
   });
 
-  it("write tools do not import figure crop cache policing guards", async function () {
-    const { readFile } = await import("node:fs/promises");
-    const writeToolPaths = [
-      "src/agent/tools/write/editCurrentNote.ts",
-      "src/agent/tools/write/fileIO.ts",
-    ];
-    for (const filePath of writeToolPaths) {
-      const source = await readFile(filePath, "utf-8");
-      assert.isAbove(
-        source.split("\n").length,
-        100,
-        `${filePath} was read but looks empty; the scan would pass vacuously`,
-      );
-      assert.notInclude(source, "validateMineruFigureBlockEmbedsForCacheDirs");
-      assert.notInclude(source, "mineruFigureBlockCache");
-    }
-  });
-
-  it("file_io allows Markdown notes that embed the extracted PDF figure crop", async function () {
+  it("file_io writes figure Markdown verbatim without inspecting MinerU caches", async function () {
     const tool = createFileIOTool();
-    const encoder = new TextEncoder();
-    const fileContent = new Map<string, string>();
-    const originalIOUtils = (globalThis as { IOUtils?: unknown }).IOUtils;
+    const files = new Map<string, Uint8Array>();
+    const destination = "/tmp/obsidian-vault/Zotero Notes/figures.md";
     const cacheDir = "/tmp/llm-for-zotero-mineru/77";
-    const manifestPath = `${cacheDir}/manifest.json`;
-    const cropCachePath = `${cacheDir}/figure_crops/figure_geometry.json`;
-    const cropPath = `${cacheDir}/figure_crops/crops/figure-2.png`;
-    const manifest = {
-      sections: [],
-      totalChars: 0,
-      allFigures: [
-        {
-          label: "Figure 2a",
-          baseLabel: "Figure 2",
-          path: "images/fig2a.png",
-          caption: "Figure 2a. Attractor architecture.",
-          section: "Decision making",
-        },
-        {
-          label: "Figure 2b",
-          baseLabel: "Figure 2",
-          path: "images/fig2b.png",
-          caption: "Figure 2b. Integrate-and-fire architecture.",
-          section: "Decision making",
-        },
-        {
-          label: "Figure 2c",
-          baseLabel: "Figure 2",
-          path: "images/fig2c.png",
-          caption: "Figure 2c. Energy landscape.",
-          section: "Decision making",
-        },
-      ],
-      allTables: [],
-    };
-    const paperContext: PaperContextRef = {
-      itemId: 76,
-      contextItemId: 77,
-      title: "Stochastic Dynamics",
-      firstCreator: "Rolls",
-      year: "2012",
-      mineruCacheDir: cacheDir,
-    };
-    const cropCache = {
-      version: TEST_PDF_FIGURE_CROP_CACHE_VERSION,
-      attachmentId: 77,
-      manifestHash: cropManifestHashForTest(manifest),
-      pdfFingerprint: cropPdfFingerprintForTest(paperContext),
-      renderScale: 1.8,
-      algorithmVersion: TEST_PDF_FIGURE_CROP_ALGORITHM_VERSION,
-      generatedAt: 1,
-      entries: [
-        {
-          id: "figure-2",
-          label: "Figure 2",
-          baseLabel: "Figure 2",
-          pageNumber: 4,
-          cropPath,
-          captionText: "Figure 2. Attractor-network decision-making.",
-          rect: { pageIndex: 3, x: 10, y: 10, width: 200, height: 160 },
-          confidence: 0.95,
-          source: "caption_bounded_region",
-          warnings: [],
-          mineruImagePaths: [
-            `${cacheDir}/images/fig2a.png`,
-            `${cacheDir}/images/fig2b.png`,
-            `${cacheDir}/images/fig2c.png`,
-          ],
-        },
-      ],
-    };
+    let cacheAccesses = 0;
+    const originalIOUtils = (globalThis as { IOUtils?: unknown }).IOUtils;
     (globalThis as { IOUtils?: unknown }).IOUtils = {
-      exists: async (path: string) =>
-        path === manifestPath || path === cropCachePath,
+      exists: async (path: string) => {
+        if (path.startsWith(cacheDir)) cacheAccesses += 1;
+        return files.has(path);
+      },
       read: async (path: string) => {
-        if (fileContent.has(path)) {
-          return encoder.encode(fileContent.get(path) || "");
-        }
-        if (path === manifestPath)
-          return encoder.encode(JSON.stringify(manifest));
-        if (path === cropCachePath) {
-          return encoder.encode(JSON.stringify(cropCache));
-        }
+        if (files.has(path)) return files.get(path)!;
+        cacheAccesses += 1;
         throw new Error(`Unexpected read: ${path}`);
       },
+      getChildren: async () => {
+        cacheAccesses += 1;
+        return [];
+      },
       write: async (path: string, bytes: Uint8Array) => {
-        fileContent.set(path, new TextDecoder().decode(bytes));
+        files.set(path, bytes);
       },
       makeDirectory: async () => undefined,
     };
     const context: AgentToolContext = {
       ...baseContext,
-      request: {
+      request: resolvedAgentRequest({
         ...baseContext.request,
         conversationKey: 43_009,
         userText: "write a note about figure 2",
-        fullTextPaperContexts: [paperContext],
-      },
+        fullTextPaperContexts: [
+          {
+            itemId: 76,
+            contextItemId: 77,
+            title: "Stochastic Dynamics",
+            mineruCacheDir: cacheDir,
+          },
+        ],
+      }),
     };
-
     try {
-      const content = [
-        `![Figure 2. Attractor-network decision-making](${cropPath})`,
-        "",
-        "## Figure 2 - Attractor-network decision-making",
-        "",
-        "Panel 2a illustrates an attractor architecture.",
-        "Panel 2b shows the integrate-and-fire network architecture.",
-        "Panel 2c gives the energy-landscape interpretation.",
-      ].join("\n");
+      const content = `![Figure 2](${cacheDir}/figure_crops/crops/figure-2.png)
+
+Figure 2 explains the attractor-network interpretation.`;
       const write = tool.validate({
         action: "write",
-        filePath: "/tmp/obsidian-vault/Zotero Notes/figures.md",
+        filePath: destination,
         content,
       });
-      assert.isTrue(write.ok);
-      if (!write.ok) return;
-
+      if (!write.ok) throw new Error(write.error);
       const result = (await tool.execute(write.value, context))
         .content as Record<string, unknown>;
-
+      assert.deepInclude(result, { action: "write", filePath: destination });
       assert.notProperty(result, "error");
-      assert.equal(
-        fileContent.get("/tmp/obsidian-vault/Zotero Notes/figures.md"),
-        content,
+      assert.deepEqual([...files.keys()], [destination]);
+      assert.deepEqual(
+        files.get(destination),
+        new TextEncoder().encode(content),
       );
+      assert.equal(cacheAccesses, 0);
     } finally {
       (globalThis as { IOUtils?: unknown }).IOUtils = originalIOUtils;
     }
   });
 
-  it("file_io does not police explicit panel-only Markdown notes", async function () {
-    const tool = createFileIOTool();
-    const encoder = new TextEncoder();
-    const fileContent = new Map<string, string>();
+  it("note_write saves figure Markdown without inspecting MinerU caches", async function () {
+    let replacedContent = "";
+    let saves = 0;
+    const tool = createNoteWriteTool(
+      nativeNoteGateway({
+        getActiveNoteSnapshot: activeDraftNoteSnapshot,
+        onNativeSave: async ({ content }: { content: string }) => {
+          replacedContent = content;
+          saves += 1;
+        },
+        restoreNoteHtml: async () => {},
+      } as never),
+    );
     const originalIOUtils = (globalThis as { IOUtils?: unknown }).IOUtils;
-    const manifestPath = "/tmp/llm-for-zotero-mineru/77/manifest.json";
-    const manifest = {
-      sections: [],
-      totalChars: 0,
-      allFigures: [
-        {
-          label: "Figure 2a",
-          baseLabel: "Figure 2",
-          path: "images/fig2a.png",
-          caption: "Figure 2a. Attractor architecture.",
-          section: "Decision making",
-        },
-        {
-          label: "Figure 2b",
-          baseLabel: "Figure 2",
-          path: "images/fig2b.png",
-          caption: "Figure 2b. Integrate-and-fire architecture.",
-          section: "Decision making",
-        },
-        {
-          label: "Figure 2c",
-          baseLabel: "Figure 2",
-          path: "images/fig2c.png",
-          caption: "Figure 2c. Energy landscape.",
-          section: "Decision making",
-        },
-      ],
-      allTables: [],
-    };
+    let cacheAccesses = 0;
     (globalThis as { IOUtils?: unknown }).IOUtils = {
-      exists: async (path: string) => path === manifestPath,
-      read: async (path: string) => {
-        if (fileContent.has(path)) {
-          return encoder.encode(fileContent.get(path) || "");
-        }
-        if (path !== manifestPath) throw new Error(`Unexpected read: ${path}`);
-        return encoder.encode(JSON.stringify(manifest));
+      read: async () => {
+        cacheAccesses += 1;
+        throw new Error("Unexpected cache read");
       },
-      write: async (path: string, bytes: Uint8Array) => {
-        fileContent.set(path, new TextDecoder().decode(bytes));
+      exists: async () => {
+        cacheAccesses += 1;
+        return false;
       },
-      makeDirectory: async () => undefined,
-    };
-    const paperContext: PaperContextRef = {
-      itemId: 76,
-      contextItemId: 77,
-      title: "Stochastic Dynamics",
-      firstCreator: "Rolls",
-      year: "2012",
-      mineruCacheDir: "/tmp/llm-for-zotero-mineru/77",
+      getChildren: async () => {
+        cacheAccesses += 1;
+        return [];
+      },
     };
     const context: AgentToolContext = {
       ...baseContext,
-      request: {
+      request: resolvedAgentRequest({
         ...baseContext.request,
-        conversationKey: 43_010,
-        userText: "write a note about Figure 2b",
-        fullTextPaperContexts: [paperContext],
-      },
+        conversationKey: 43_013,
+        userText: "write a note about Figure 2",
+        activeNoteContext: {
+          noteId: 55,
+          title: "Draft Note",
+          noteKind: "standalone",
+          noteText: "Original body",
+        },
+        fullTextPaperContexts: [
+          {
+            itemId: 90,
+            contextItemId: 90,
+            title: "Stochastic Dynamics",
+            mineruCacheDir: "/tmp/llm-for-zotero-mineru/90",
+          },
+        ],
+      }),
     };
-
     try {
-      const content = [
-        "![Figure 2b. Integrate-and-fire architecture](imgs/paper/figure-2b.png)",
-        "",
-        "## Figure 2b - Integrate-and-fire architecture",
-        "",
-        "Panel 2b shows the integrate-and-fire network architecture.",
-      ].join("\n");
-      const write = tool.validate({
-        action: "write",
-        filePath: "/tmp/obsidian-vault/Zotero Notes/figure-2b.md",
-        content,
-      });
-      assert.isTrue(write.ok);
-      if (!write.ok) return;
+      const content = `![Figure 2c](images/fig2c.png)
 
-      const result = (await tool.execute(write.value, context))
+Figure 2 explains the attractor-network interpretation.`;
+      const input = tool.validate({ content });
+      if (!input.ok) throw new Error(input.error);
+      const result = (await tool.execute(input.value, context))
         .content as Record<string, unknown>;
-
-      assert.notProperty(result, "error");
-      assert.equal(
-        fileContent.get("/tmp/obsidian-vault/Zotero Notes/figure-2b.md"),
-        content,
+      assert.deepInclude(result, {
+        status: "updated",
+        noteId: 55,
+        title: "Draft Note",
+      });
+      assert.isTrue(
+        noteHtmlMatches(replacedContent, renderRawNoteHtml(content)),
       );
+      assert.equal(saves, 1);
+      assert.equal(cacheAccesses, 0);
     } finally {
       (globalThis as { IOUtils?: unknown }).IOUtils = originalIOUtils;
     }
@@ -1891,16 +1581,6 @@ describe("primitive agent tools", function () {
       request: {
         ...baseContext.request,
         conversationKey: 43_007,
-        metadata: {
-          fileNoteWritePolicy: {
-            directoryPath: "/tmp/obsidian-vault",
-            defaultFolder: "Zotero Notes",
-            defaultTargetPath: "/tmp/obsidian-vault/Zotero Notes",
-            attachmentsFolder: "Zotero Notes/imgs",
-            attachmentsPath: "/tmp/obsidian-vault/Zotero Notes/imgs",
-            nickname: "Obsidian",
-          },
-        },
       },
     };
 
@@ -2150,89 +1830,6 @@ describe("primitive agent tools", function () {
     assert.equal(commandField.value, command);
     assert.equal(commandField.language, "sh");
   });
-
-  it("run_command refuses obvious Markdown note writes into configured note destinations", async function () {
-    const tool = createRunCommandTool();
-    const existingPaths = new Set<string>();
-    let executed = false;
-    const originalIOUtils = (globalThis as { IOUtils?: unknown }).IOUtils;
-    const originalChromeUtils = (globalThis as { ChromeUtils?: unknown })
-      .ChromeUtils;
-    (globalThis as { IOUtils?: unknown }).IOUtils = {
-      exists: async (path: string) => existingPaths.has(path),
-    };
-    (globalThis as { ChromeUtils?: unknown }).ChromeUtils = {
-      importESModule: () => ({
-        Subprocess: {
-          call: async () => {
-            executed = true;
-            throw new Error("run_command should not execute note writes");
-          },
-        },
-      }),
-    };
-    const context: AgentToolContext = {
-      ...baseContext,
-      request: {
-        ...baseContext.request,
-        conversationKey: 43_015,
-        metadata: {
-          ...(baseContext.request.metadata || {}),
-          fileNoteWritePolicy: {
-            directoryPath: "/tmp/obsidian-vault",
-            defaultFolder: "Zotero Notes",
-            defaultTargetPath: "/tmp/obsidian-vault/Zotero Notes",
-            attachmentsFolder: "assets",
-            attachmentsPath: "/tmp/obsidian-vault/assets",
-            nickname: "vault",
-          },
-        },
-      },
-    };
-
-    try {
-      const refusedCommands = [
-        'printf "note" > "/tmp/obsidian-vault/Zotero Notes/figure.md"',
-        'printf "note" >> "/tmp/obsidian-vault/Zotero Notes/figure.md"',
-        'printf "note" | tee "/tmp/obsidian-vault/Zotero Notes/figure.md"',
-        'cp "/tmp/source.md" "/tmp/obsidian-vault/Zotero Notes/figure.md"',
-        'mv "/tmp/source.md" "/tmp/obsidian-vault/Zotero Notes/figure.md"',
-        'cd "/tmp/obsidian-vault/Zotero Notes" && printf "note" > figure.md',
-        'cd "/tmp/obsidian-vault/Zotero Notes"; printf "note" > figure.md',
-        '(cd "/tmp/obsidian-vault/Zotero Notes" && printf "note" > figure.md)',
-      ];
-      for (const command of refusedCommands) {
-        const validated = tool.validate({ command });
-        assert.isTrue(validated.ok, command);
-        if (!validated.ok) return;
-        const plan = await tool.planInvocation?.(validated.value, context);
-        assert.equal(plan?.impact, "prohibited", command);
-        const result = (
-          await tool.execute({ ...validated.value, allowUnsafe: true }, context)
-        ).content as Record<string, unknown>;
-        assert.equal(result.exitCode, -1, command);
-        assert.include(String(result.stderr || ""), "Refusing run_command");
-        assert.include(String(result.stderr || ""), "file_io");
-      }
-
-      const unrelated = tool.validate({
-        command: 'printf "note" > "/tmp/not-a-note.md"',
-      });
-      assert.isTrue(unrelated.ok);
-      if (!unrelated.ok) return;
-      const unrelatedPlan = await tool.planInvocation?.(
-        unrelated.value,
-        context,
-      );
-      assert.equal(unrelatedPlan?.impact, "state_change");
-      assert.isFalse(executed);
-    } finally {
-      (globalThis as { IOUtils?: unknown }).IOUtils = originalIOUtils;
-      (globalThis as { ChromeUtils?: unknown }).ChromeUtils =
-        originalChromeUtils;
-    }
-  });
-
   it("run_command and file_io independently plan their concrete writes", async function () {
     const commandTool = createRunCommandTool();
     const fileTool = createFileIOTool();
@@ -2311,7 +1908,7 @@ describe("primitive agent tools", function () {
     }
   });
 
-  it("read_paper returns citation and source labels", async function () {
+  it("paper_read overview returns citation and source labels", async function () {
     const paperContext: PaperContextRef = {
       itemId: 30,
       contextItemId: 31,
@@ -2319,14 +1916,15 @@ describe("primitive agent tools", function () {
       firstCreator: "Nguyen",
       year: "2023",
     };
-    const tool = createReadPaperTool(
+    const tool = readPaperViaPaperRead(
       new FakePdfService(
         makePdfContext(["Abstract text.", "Introduction text."]),
       ),
       { resolvePaperContextTarget: () => paperContext } as never,
     );
     const validated = tool.validate({
-      target: { paperContext },
+      mode: "overview",
+      target: { itemId: 30, contextItemId: 31 },
     });
     assert.isTrue(validated.ok);
     if (!validated.ok) return;
@@ -2338,7 +1936,7 @@ describe("primitive agent tools", function () {
     assert.equal(first.sourceLabel, "(Nguyen, 2023)");
   });
 
-  it("read_paper resolves explicit item and attachment IDs", async function () {
+  it("paper_read overview resolves explicit item and attachment IDs", async function () {
     const hydrated: PaperContextRef = {
       itemId: 30,
       contextItemId: 31,
@@ -2346,7 +1944,7 @@ describe("primitive agent tools", function () {
       firstCreator: "Nguyen",
       year: "2023",
     };
-    const tool = createReadPaperTool(
+    const tool = readPaperViaPaperRead(
       new FakePdfService(makePdfContext(["Abstract text."])),
       {
         resolvePaperContextTarget: () => hydrated,
@@ -2354,6 +1952,7 @@ describe("primitive agent tools", function () {
       } as never,
     );
     const validated = tool.validate({
+      mode: "overview",
       target: { itemId: 30, contextItemId: 31 },
     });
     assert.isTrue(validated.ok);
@@ -2366,12 +1965,12 @@ describe("primitive agent tools", function () {
     assert.equal(first.sourceLabel, "(Nguyen, 2023)");
   });
 
-  it("read_paper resolves multiple explicit item and attachment ID targets", async function () {
+  it("paper_read overview resolves multiple explicit item and attachment ID targets", async function () {
     const contexts: Record<number, PaperContextRef> = {
       31: { itemId: 30, contextItemId: 31, title: "Paper A" },
       41: { itemId: 40, contextItemId: 41, title: "Paper B" },
     };
-    const tool = createReadPaperTool(
+    const tool = readPaperViaPaperRead(
       new FakePdfService(makePdfContext(["Abstract text."])),
       {
         resolvePaperContextTarget: ({
@@ -2383,6 +1982,7 @@ describe("primitive agent tools", function () {
       } as never,
     );
     const validated = tool.validate({
+      mode: "overview",
       targets: [
         { itemId: 30, contextItemId: 31 },
         { itemId: 40, contextItemId: 41 },
@@ -2398,40 +1998,58 @@ describe("primitive agent tools", function () {
     assert.deepEqual(paperContexts, [contexts[31], contexts[41]]);
   });
 
-  it("read_paper resolves chunk reads from explicit item and attachment IDs", async function () {
+  it("paper_read reads a section picked from its outline", async function () {
     const hydrated: PaperContextRef = {
       itemId: 30,
       contextItemId: 31,
       title: "Chunk Paper",
     };
-    const tool = createReadPaperTool(
-      new FakePdfService(makePdfContext(["Abstract text.", "Method text."])),
-      {
-        resolvePaperContextTarget: () => hydrated,
-        listPaperContexts: () => [],
-      } as never,
+    const context = makePdfContext(["Abstract text.", "Method text."]);
+    context.chunkMeta = context.chunkMeta!.map((meta, index) => ({
+      ...meta,
+      sectionIndex: index,
+      sectionLabel: index ? "Methods" : "Abstract",
+    }));
+    const tool = readPaperViaPaperRead(new FakePdfService(context), {
+      resolvePaperContextTarget: () => hydrated,
+      listPaperContexts: () => [],
+    } as never);
+    const target = { itemId: 30, contextItemId: 31 };
+    const outlineInput = tool.validate({ mode: "outline", target });
+    assert.isTrue(outlineInput.ok);
+    if (!outlineInput.ok) return;
+    const outline = (await tool.execute(outlineInput.value, baseContext)) as {
+      papers: Array<{
+        outline: { sections: Array<{ sectionId: string; title: string }> };
+      }>;
+    };
+    const methods = outline.papers[0].outline.sections.find(
+      (section) => section.title === "Methods",
     );
+    assert.exists(methods);
+
     const validated = tool.validate({
-      target: { itemId: 30, contextItemId: 31 },
-      chunkIndexes: [1],
+      mode: "targeted",
+      target,
+      query: "method",
+      sectionIds: [methods!.sectionId],
     });
     assert.isTrue(validated.ok);
     if (!validated.ok) return;
-
     const result = await tool.execute(validated.value, baseContext);
-    const first = (result as { results: Array<Record<string, unknown>> })
-      .results[0];
-    assert.equal(first.text, "Method text.");
-    assert.deepEqual(first.paperContext, hydrated);
+    const texts = (
+      result as { results: Array<Record<string, unknown>> }
+    ).results.map((entry) => entry.text);
+    assert.deepEqual(texts, ["Method text."]);
   });
 
-  it("read_paper does not fall back to ambient paper context for invalid explicit targets", async function () {
+  it("paper_read overview does not fall back to ambient paper context for invalid explicit targets", async function () {
     const ambient: PaperContextRef = {
       itemId: 99,
       contextItemId: 199,
       title: "Ambient Paper",
     };
-    const tool = createReadPaperTool(
+    const tool = readPaperViaPaperRead(
       new FakePdfService(makePdfContext(["Ambient abstract."])),
       {
         resolvePaperContextTarget: () => null,
@@ -2439,6 +2057,7 @@ describe("primitive agent tools", function () {
       } as never,
     );
     const validated = tool.validate({
+      mode: "overview",
       target: { itemId: 30, contextItemId: 31 },
     });
     assert.isTrue(validated.ok);
@@ -2461,7 +2080,7 @@ describe("primitive agent tools", function () {
     }
   });
 
-  it("search_paper returns citation and source labels", async function () {
+  it("paper_read targeted returns citation and source labels", async function () {
     const paperContext: PaperContextRef = {
       itemId: 40,
       contextItemId: 41,
@@ -2491,12 +2110,18 @@ describe("primitive agent tools", function () {
           },
         ] as never,
     );
-    const tool = createSearchPaperTool(retrievalService, pdfService, {
-      resolvePaperContextTarget: () => paperContext,
-    } as never);
+    const tool = createPaperReadTool(
+      pdfService,
+      retrievalService,
+      {} as never,
+      {
+        resolvePaperContextTarget: () => paperContext,
+      } as never,
+    );
     const validated = tool.validate({
-      target: { paperContext },
-      question: "evidence",
+      mode: "targeted",
+      target: { itemId: 40, contextItemId: 41 },
+      query: "evidence",
     });
     assert.isTrue(validated.ok);
     if (!validated.ok) return;
@@ -2507,32 +2132,8 @@ describe("primitive agent tools", function () {
     assert.equal(first.citationLabel, "Rivera, 2024");
     assert.equal(first.sourceLabel, "(Rivera, 2024)");
   });
-
-  it("adds direct-card guidance for write tool requests", async function () {
-    const registry = createBuiltInToolRegistry({
-      zoteroGateway: {} as never,
-      pdfService: {} as never,
-      pdfPageService: {} as never,
-      retrievalService: {} as never,
-    });
-    const messages = await buildAgentInitialMessages(
-      {
-        conversationKey: 2,
-        mode: "agent",
-        userText: "can you help me tag these papers?",
-        classifiedIntent: actionFixture("apply_tags"),
-      },
-      registry.listToolDefinitions(),
-      [],
-    );
-    const turnText = messageText(messages[messages.length - 1]);
-    assert.include(turnText, "library_update");
-    assert.include(turnText, "collection membership");
-    assert.include(turnText, "confirmation card is the deliverable");
-  });
-
-  it("edit_current_note confirms and updates the active note", async function () {
-    const tool = createEditCurrentNoteTool(
+  it("note_write confirms and updates the active note", async function () {
+    const tool = createNoteWriteTool(
       nativeNoteGateway({
         getActiveNoteSnapshot: () => ({
           noteId: 55,
@@ -2571,7 +2172,7 @@ describe("primitive agent tools", function () {
       },
     };
 
-    // edit_current_note is always available (supports both edit and create modes)
+    // note_write is always available (supports both edit and create modes)
     assert.isTrue(tool.isAvailable?.(baseContext.request) !== false);
     assert.isTrue(tool.isAvailable?.(noteRequest) !== false);
 
@@ -2645,9 +2246,9 @@ describe("primitive agent tools", function () {
     });
   });
 
-  it("edit_current_note applies patches to the explicit target note", function () {
+  it("note_write applies patches to the explicit target note", function () {
     const requestedNoteIds: Array<number | undefined> = [];
-    const tool = createEditCurrentNoteTool({
+    const tool = createNoteWriteTool({
       getActiveNoteSnapshot: ({ noteId }: { noteId?: number }) => {
         requestedNoteIds.push(noteId);
         return noteId === 77
@@ -2691,1117 +2292,8 @@ describe("primitive agent tools", function () {
     assert.equal(validated.value.noteId, 77);
   });
 
-  it("edit_current_note does not police incomplete MinerU figure-block embeds before mutation", async function () {
-    let replacedContent = "";
-    const tool = createEditCurrentNoteTool(
-      nativeNoteGateway({
-        getActiveNoteSnapshot: () => ({
-          noteId: 55,
-          title: "Draft Note",
-          html: "<p>Original body</p>",
-          text: "Original body",
-          libraryID: 1,
-          noteKind: "standalone",
-        }),
-        onNativeSave: async ({ content }: { content: string }) => {
-          replacedContent = content;
-          return {
-            noteId: 55,
-            title: "Draft Note",
-            previousHtml: "<p>Original body</p>",
-            previousText: "Original body",
-            nextText: content,
-          };
-        },
-        restoreNoteHtml: async () => {},
-      } as never),
-    );
-    const encoder = new TextEncoder();
-    const originalIOUtils = (globalThis as { IOUtils?: unknown }).IOUtils;
-    const cacheDir = "/tmp/llm-for-zotero-mineru/90";
-    const contentListPath = `${cacheDir}/paper_content_list.json`;
-    const fullMd = [
-      "## Decision making",
-      "",
-      "![](images/fig2a.png)",
-      "",
-      "![](images/fig2b.png)",
-      "",
-      "![](images/fig2c.png)",
-      "",
-      "Figure 2. Attractor network for probabilistic decision-making.",
-    ].join("\n");
-    (globalThis as { IOUtils?: unknown }).IOUtils = {
-      read: async (path: string) => {
-        if (path === `${cacheDir}/full.md`) return encoder.encode(fullMd);
-        if (path === contentListPath) {
-          return encoder.encode(
-            JSON.stringify([
-              {
-                type: "image",
-                img_path: "images/fig2a.png",
-                image_caption: ["Figure 2. Attractor network."],
-              },
-              { type: "image", img_path: "images/fig2b.png" },
-              { type: "image", img_path: "images/fig2c.png" },
-            ]),
-          );
-        }
-        throw new Error(`Unexpected read: ${path}`);
-      },
-      getChildren: async (path: string) =>
-        path === cacheDir ? [contentListPath] : [],
-    };
-    const context: AgentToolContext = {
-      ...baseContext,
-      request: {
-        ...baseContext.request,
-        conversationKey: 43_013,
-        userText: "write a note about Figure 2",
-        activeNoteContext: {
-          noteId: 55,
-          title: "Draft Note",
-          noteKind: "standalone" as const,
-          noteText: "Original body",
-        },
-        fullTextPaperContexts: [
-          {
-            itemId: 90,
-            contextItemId: 90,
-            title: "Stochastic Dynamics",
-            mineruCacheDir: cacheDir,
-          },
-        ],
-      },
-    };
-
-    try {
-      const validated = tool.validate({
-        content: [
-          "![Figure 2c](images/fig2c.png)",
-          "",
-          "Figure 2 explains the attractor-network interpretation.",
-        ].join("\n"),
-      });
-      assert.isTrue(validated.ok);
-      if (!validated.ok) return;
-
-      const result = (await tool.execute(validated.value, context))
-        .content as Record<string, unknown>;
-
-      assert.deepInclude(result, {
-        status: "updated",
-        noteId: 55,
-        title: "Draft Note",
-      });
-      assert.isTrue(
-        noteHtmlMatches(
-          replacedContent,
-          renderRawNoteHtml(
-            [
-              "![Figure 2c](images/fig2c.png)",
-              "",
-              "Figure 2 explains the attractor-network interpretation.",
-            ].join("\n"),
-          ),
-        ),
-      );
-    } finally {
-      (globalThis as { IOUtils?: unknown }).IOUtils = originalIOUtils;
-    }
-  });
-
-  it("edit_current_note does not police explicit figure notes without extracted crop embeds", async function () {
-    let replacedContent = "";
-    const tool = createEditCurrentNoteTool(
-      nativeNoteGateway({
-        getActiveNoteSnapshot: () => ({
-          noteId: 55,
-          title: "Draft Note",
-          html: "<p>Original body</p>",
-          text: "Original body",
-          libraryID: 1,
-          noteKind: "standalone",
-        }),
-        onNativeSave: async ({ content }: { content: string }) => {
-          replacedContent = content;
-          return {
-            noteId: 55,
-            title: "Draft Note",
-            previousHtml: "<p>Original body</p>",
-            previousText: "Original body",
-            nextText: content,
-          };
-        },
-        restoreNoteHtml: async () => {},
-      } as never),
-    );
-    const encoder = new TextEncoder();
-    const originalIOUtils = (globalThis as { IOUtils?: unknown }).IOUtils;
-    const cacheDir = "/tmp/llm-for-zotero-mineru/92";
-    const contentListPath = `${cacheDir}/paper_content_list.json`;
-    const fullMd = [
-      "## Neural networks",
-      "",
-      "![](images/fig1a.png)",
-      "",
-      "![](images/fig1b.png)",
-      "",
-      "![](images/fig1cd.png)",
-      "",
-      "Fig. 1. Neural networks.",
-    ].join("\n");
-    (globalThis as { IOUtils?: unknown }).IOUtils = {
-      read: async (path: string) => {
-        if (path === `${cacheDir}/full.md`) return encoder.encode(fullMd);
-        if (path === contentListPath) {
-          return encoder.encode(
-            JSON.stringify([
-              {
-                type: "image",
-                img_path: "images/fig1a.png",
-                image_caption: ["A"],
-              },
-              {
-                type: "image",
-                img_path: "images/fig1b.png",
-                image_caption: ["B"],
-              },
-              {
-                type: "image",
-                img_path: "images/fig1cd.png",
-                image_caption: ["C", "D"],
-              },
-            ]),
-          );
-        }
-        throw new Error(`Unexpected read: ${path}`);
-      },
-      getChildren: async (path: string) =>
-        path === cacheDir ? [contentListPath] : [],
-    };
-    const context: AgentToolContext = {
-      ...baseContext,
-      request: {
-        ...baseContext.request,
-        conversationKey: 43_014,
-        userText: "help me write a note about Figure 1 and save it to my note",
-        activeNoteContext: {
-          noteId: 55,
-          title: "Draft Note",
-          noteKind: "standalone" as const,
-          noteText: "Original body",
-        },
-        fullTextPaperContexts: [
-          {
-            itemId: 91,
-            contextItemId: 92,
-            title: "A theory for how sensorimotor skills are learned",
-            mineruCacheDir: cacheDir,
-          },
-        ],
-      },
-    };
-
-    try {
-      const validated = tool.validate({
-        content: [
-          "## Figure 1 - Neural networks",
-          "",
-          "Figure 1 explains the stability-plasticity problem through four panels.",
-        ].join("\n"),
-      });
-      assert.isTrue(validated.ok);
-      if (!validated.ok) return;
-
-      const result = (await tool.execute(validated.value, context))
-        .content as Record<string, unknown>;
-
-      assert.deepInclude(result, {
-        status: "updated",
-        noteId: 55,
-        title: "Draft Note",
-      });
-      assert.isTrue(
-        noteHtmlMatches(
-          replacedContent,
-          renderRawNoteHtml(
-            [
-              "## Figure 1 - Neural networks",
-              "",
-              "Figure 1 explains the stability-plasticity problem through four panels.",
-            ].join("\n"),
-          ),
-        ),
-      );
-    } finally {
-      (globalThis as { IOUtils?: unknown }).IOUtils = originalIOUtils;
-    }
-  });
-
-  it("edit_current_note allows extracted PDF figure crop embeds", async function () {
-    let replacedContent = "";
-    const tool = createEditCurrentNoteTool(
-      nativeNoteGateway({
-        getActiveNoteSnapshot: activeDraftNoteSnapshot,
-        onNativeSave: async ({ content }: { content: string }) => {
-          replacedContent = content;
-          return {
-            noteId: 55,
-            title: "Draft Note",
-            previousHtml: "<p>Original body</p>",
-            previousText: "Original body",
-            nextText: content,
-          };
-        },
-        restoreNoteHtml: async () => {},
-      } as never),
-    );
-    const encoder = new TextEncoder();
-    const originalIOUtils = (globalThis as { IOUtils?: unknown }).IOUtils;
-    const cacheDir = "/tmp/llm-for-zotero-mineru/91";
-    const contentListPath = `${cacheDir}/paper_content_list.json`;
-    const cropCachePath = `${cacheDir}/figure_crops/figure_geometry.json`;
-    const cropPath = `${cacheDir}/figure_crops/crops/figure-2.png`;
-    const fullMd = [
-      "![](images/fig2a.png)",
-      "",
-      "![](images/fig2b.png)",
-      "",
-      "![](images/fig2c.png)",
-      "",
-      "Figure 2. Attractor network for probabilistic decision-making.",
-    ].join("\n");
-    const paperContext: PaperContextRef = {
-      itemId: 91,
-      contextItemId: 91,
-      title: "Stochastic Dynamics",
-      mineruCacheDir: cacheDir,
-    };
-    const cropCache = {
-      version: TEST_PDF_FIGURE_CROP_CACHE_VERSION,
-      attachmentId: 91,
-      manifestHash: cropManifestHashForTest(null),
-      pdfFingerprint: cropPdfFingerprintForTest(paperContext),
-      renderScale: 1.8,
-      algorithmVersion: TEST_PDF_FIGURE_CROP_ALGORITHM_VERSION,
-      generatedAt: 1,
-      entries: [
-        {
-          id: "figure-2",
-          label: "Figure 2",
-          baseLabel: "Figure 2",
-          pageNumber: 2,
-          cropPath,
-          captionText: "Figure 2. Attractor network.",
-          rect: { pageIndex: 1, x: 10, y: 10, width: 200, height: 160 },
-          confidence: 0.95,
-          source: "caption_bounded_region",
-          warnings: [],
-          mineruImagePaths: [
-            `${cacheDir}/images/fig2a.png`,
-            `${cacheDir}/images/fig2b.png`,
-            `${cacheDir}/images/fig2c.png`,
-          ],
-        },
-      ],
-    };
-    (globalThis as { IOUtils?: unknown }).IOUtils = {
-      read: async (path: string) => {
-        if (path === `${cacheDir}/full.md`) return encoder.encode(fullMd);
-        if (path === cropCachePath) {
-          return encoder.encode(JSON.stringify(cropCache));
-        }
-        if (path === contentListPath) {
-          return encoder.encode(
-            JSON.stringify([
-              {
-                type: "image",
-                img_path: "images/fig2a.png",
-                image_caption: ["Figure 2. Attractor network."],
-              },
-              { type: "image", img_path: "images/fig2b.png" },
-              { type: "image", img_path: "images/fig2c.png" },
-            ]),
-          );
-        }
-        throw new Error(`Unexpected read: ${path}`);
-      },
-      getChildren: async (path: string) =>
-        path === cacheDir ? [contentListPath] : [],
-    };
-    const context: AgentToolContext = {
-      ...baseContext,
-      request: {
-        ...baseContext.request,
-        conversationKey: 43_014,
-        userText: "write a note about Figure 2",
-        fullTextPaperContexts: [paperContext],
-      },
-    };
-
-    try {
-      const content = [
-        `![Figure 2](${cropPath})`,
-        "",
-        "Figure 2 explains the attractor-network interpretation.",
-      ].join("\n");
-      const validated = tool.validate({ content });
-      assert.isTrue(validated.ok);
-      if (!validated.ok) return;
-
-      const result = (await tool.execute(validated.value, context))
-        .content as Record<string, unknown>;
-
-      assert.deepInclude(result, {
-        status: "updated",
-        noteId: 55,
-        title: "Draft Note",
-      });
-      assert.isTrue(
-        noteHtmlMatches(replacedContent, renderRawNoteHtml(content)),
-      );
-    } finally {
-      (globalThis as { IOUtils?: unknown }).IOUtils = originalIOUtils;
-    }
-  });
-
-  it("edit_current_note does not reject all-figures notes when figure crop metadata is missing", async function () {
-    let replacedContent = "";
-    const tool = createEditCurrentNoteTool(
-      nativeNoteGateway({
-        getActiveNoteSnapshot: activeDraftNoteSnapshot,
-        onNativeSave: async ({ content }: { content: string }) => {
-          replacedContent = content;
-          return {
-            noteId: 55,
-            title: "Draft Note",
-            previousHtml: "<p>Original body</p>",
-            previousText: "Original body",
-            nextText: content,
-          };
-        },
-        restoreNoteHtml: async () => {},
-      } as never),
-    );
-    const encoder = new TextEncoder();
-    const originalIOUtils = (globalThis as { IOUtils?: unknown }).IOUtils;
-    const cacheDir = "/tmp/llm-for-zotero-mineru/92";
-    const contentListPath = `${cacheDir}/paper_content_list.json`;
-    const fullMd = [
-      "Figure 1. First figure.",
-      "",
-      "Figure 2. Second figure.",
-    ].join("\n");
-    (globalThis as { IOUtils?: unknown }).IOUtils = {
-      read: async (path: string) => {
-        if (path === `${cacheDir}/full.md`) return encoder.encode(fullMd);
-        if (path === contentListPath) {
-          return encoder.encode(
-            JSON.stringify([
-              {
-                type: "image",
-                img_path: "images/fig1.png",
-                image_caption: ["Figure 1. First figure."],
-              },
-              {
-                type: "image",
-                img_path: "images/fig2.png",
-                image_caption: ["Figure 2. Second figure."],
-              },
-            ]),
-          );
-        }
-        throw new Error(`Unexpected read: ${path}`);
-      },
-      getChildren: async (path: string) =>
-        path === cacheDir ? [contentListPath] : [],
-    };
-    const context: AgentToolContext = {
-      ...baseContext,
-      request: {
-        ...baseContext.request,
-        conversationKey: 43_015,
-        userText:
-          "help me explain all figures in this paper and save it into my note",
-        fullTextPaperContexts: [
-          {
-            itemId: 92,
-            contextItemId: 92,
-            title: "Missing Figure Metadata",
-            mineruCacheDir: cacheDir,
-          },
-        ],
-      },
-    };
-
-    try {
-      const content = [
-        "# All Figures",
-        "",
-        "This note summarizes the available figures.",
-      ].join("\n");
-      const validated = tool.validate({ content });
-      assert.isTrue(validated.ok);
-      if (!validated.ok) return;
-
-      const result = (await tool.execute(validated.value, context))
-        .content as Record<string, unknown>;
-
-      assert.deepInclude(result, {
-        status: "updated",
-        noteId: 55,
-        title: "Draft Note",
-      });
-      assert.isTrue(
-        noteHtmlMatches(replacedContent, renderRawNoteHtml(content)),
-      );
-    } finally {
-      (globalThis as { IOUtils?: unknown }).IOUtils = originalIOUtils;
-    }
-  });
-
-  it("edit_current_note allows explicit text-only all-figures notes when extraction failed", async function () {
-    let replacedContent = "";
-    const tool = createEditCurrentNoteTool(
-      nativeNoteGateway({
-        getActiveNoteSnapshot: activeDraftNoteSnapshot,
-        onNativeSave: async ({ content }: { content: string }) => {
-          replacedContent = content;
-          return {
-            noteId: 55,
-            title: "Draft Note",
-            previousHtml: "<p>Original body</p>",
-            previousText: "Original body",
-            nextText: content,
-          };
-        },
-        restoreNoteHtml: async () => {},
-      } as never),
-    );
-    const encoder = new TextEncoder();
-    const originalIOUtils = (globalThis as { IOUtils?: unknown }).IOUtils;
-    const cacheDir = "/tmp/llm-for-zotero-mineru/95";
-    const contentListPath = `${cacheDir}/paper_content_list.json`;
-    const fullMd = [
-      "Figure 1. First figure.",
-      "",
-      "Figure 2. Second figure.",
-    ].join("\n");
-    (globalThis as { IOUtils?: unknown }).IOUtils = {
-      read: async (path: string) => {
-        if (path === `${cacheDir}/full.md`) return encoder.encode(fullMd);
-        if (path === contentListPath) {
-          return encoder.encode(
-            JSON.stringify([
-              {
-                type: "image",
-                img_path: "images/fig1.png",
-                image_caption: ["Figure 1. First figure."],
-              },
-              {
-                type: "image",
-                img_path: "images/fig2.png",
-                image_caption: ["Figure 2. Second figure."],
-              },
-            ]),
-          );
-        }
-        throw new Error(`Unexpected read: ${path}`);
-      },
-      getChildren: async (path: string) =>
-        path === cacheDir ? [contentListPath] : [],
-    };
-    const context: AgentToolContext = {
-      ...baseContext,
-      request: {
-        ...baseContext.request,
-        conversationKey: 43_095,
-        userText:
-          "help me explain all figures in this paper and save it into my note",
-        fullTextPaperContexts: [
-          {
-            itemId: 95,
-            contextItemId: 95,
-            title: "Text-only Figure Note",
-            mineruCacheDir: cacheDir,
-          },
-        ],
-      },
-    };
-
-    try {
-      const content = [
-        "# All Figures",
-        "",
-        "Figure images are not embedded because source-PDF figure extraction failed and no extracted PDF crops are available.",
-        "This is a text-only figure explanation based on captions, figure legends, and surrounding paper text.",
-        "",
-        "## Figure 1",
-        "",
-        "Figure 1 shows the first result.",
-        "",
-        "## Figure 2",
-        "",
-        "Figure 2 shows the second result.",
-      ].join("\n");
-      const validated = tool.validate({ content });
-      assert.isTrue(validated.ok);
-      if (!validated.ok) return;
-
-      const result = (await tool.execute(validated.value, context))
-        .content as Record<string, unknown>;
-
-      assert.deepInclude(result, {
-        status: "updated",
-        noteId: 55,
-        title: "Draft Note",
-      });
-      assert.isTrue(
-        noteHtmlMatches(replacedContent, renderRawNoteHtml(content)),
-      );
-    } finally {
-      (globalThis as { IOUtils?: unknown }).IOUtils = originalIOUtils;
-    }
-  });
-
-  it("edit_current_note allows no-image-crop all-figures notes when extraction failed", async function () {
-    let replacedContent = "";
-    const tool = createEditCurrentNoteTool(
-      nativeNoteGateway({
-        getActiveNoteSnapshot: activeDraftNoteSnapshot,
-        onNativeSave: async ({ content }: { content: string }) => {
-          replacedContent = content;
-          return {
-            noteId: 55,
-            title: "Draft Note",
-            previousHtml: "<p>Original body</p>",
-            previousText: "Original body",
-            nextText: content,
-          };
-        },
-        restoreNoteHtml: async () => {},
-      } as never),
-    );
-    const encoder = new TextEncoder();
-    const originalIOUtils = (globalThis as { IOUtils?: unknown }).IOUtils;
-    const cacheDir = "/tmp/llm-for-zotero-mineru/96";
-    const contentListPath = `${cacheDir}/paper_content_list.json`;
-    const fullMd = [
-      "Figure 1. First figure.",
-      "",
-      "Figure 2. Second figure.",
-    ].join("\n");
-    (globalThis as { IOUtils?: unknown }).IOUtils = {
-      read: async (path: string) => {
-        if (path === `${cacheDir}/full.md`) return encoder.encode(fullMd);
-        if (path === contentListPath) {
-          return encoder.encode(
-            JSON.stringify([
-              {
-                type: "image",
-                img_path: "images/fig1.png",
-                image_caption: ["Figure 1. First figure."],
-              },
-              {
-                type: "image",
-                img_path: "images/fig2.png",
-                image_caption: ["Figure 2. Second figure."],
-              },
-            ]),
-          );
-        }
-        throw new Error(`Unexpected read: ${path}`);
-      },
-      getChildren: async (path: string) =>
-        path === cacheDir ? [contentListPath] : [],
-    };
-    const context: AgentToolContext = {
-      ...baseContext,
-      request: {
-        ...baseContext.request,
-        conversationKey: 43_096,
-        userText:
-          "help me explain all figures in this paper and save it into my note",
-        fullTextPaperContexts: [
-          {
-            itemId: 96,
-            contextItemId: 96,
-            title: "No Image Crop Figure Note",
-            mineruCacheDir: cacheDir,
-          },
-        ],
-      },
-    };
-
-    try {
-      const content = [
-        "# Figure Explanations",
-        "",
-        "Figure extraction from the PDF failed (HTTP 404), so no image crops are embedded.",
-        "All explanations are based on the MinerU-parsed captions, figure legends, and surrounding paper text.",
-        "",
-        "## Figure 1",
-        "",
-        "Figure 1 shows the first result.",
-        "",
-        "## Figure 2",
-        "",
-        "Figure 2 shows the second result.",
-      ].join("\n");
-      const validated = tool.validate({ content });
-      assert.isTrue(validated.ok);
-      if (!validated.ok) return;
-
-      const result = (await tool.execute(validated.value, context))
-        .content as Record<string, unknown>;
-
-      assert.deepInclude(result, {
-        status: "updated",
-        noteId: 55,
-        title: "Draft Note",
-      });
-      assert.isTrue(
-        noteHtmlMatches(replacedContent, renderRawNoteHtml(content)),
-      );
-    } finally {
-      (globalThis as { IOUtils?: unknown }).IOUtils = originalIOUtils;
-    }
-  });
-
-  it("edit_current_note does not reject all-figures notes when figure crop metadata is stale", async function () {
-    let replacedContent = "";
-    const tool = createEditCurrentNoteTool(
-      nativeNoteGateway({
-        getActiveNoteSnapshot: activeDraftNoteSnapshot,
-        onNativeSave: async ({ content }: { content: string }) => {
-          replacedContent = content;
-          return {
-            noteId: 55,
-            title: "Draft Note",
-            previousHtml: "<p>Original body</p>",
-            previousText: "Original body",
-            nextText: content,
-          };
-        },
-        restoreNoteHtml: async () => {},
-      } as never),
-    );
-    const encoder = new TextEncoder();
-    const originalIOUtils = (globalThis as { IOUtils?: unknown }).IOUtils;
-    const cacheDir = "/tmp/llm-for-zotero-mineru/94";
-    const contentListPath = `${cacheDir}/paper_content_list.json`;
-    const cropCachePath = `${cacheDir}/figure_crops/figure_geometry.json`;
-    const fullMd = [
-      "Figure 1. First figure.",
-      "",
-      "Figure 2. Second figure.",
-    ].join("\n");
-    const cropCache = {
-      version: TEST_PDF_FIGURE_CROP_CACHE_VERSION,
-      attachmentId: 94,
-      manifestHash: "stale-manifest",
-      pdfFingerprint: "stale-pdf",
-      renderScale: 1.8,
-      algorithmVersion: TEST_PDF_FIGURE_CROP_ALGORITHM_VERSION,
-      generatedAt: 1,
-      missingFigures: [
-        {
-          label: "Figure 2",
-          baseLabel: "Figure 2",
-          status: "no_confident_candidate",
-        },
-      ],
-      entries: [],
-    };
-    (globalThis as { IOUtils?: unknown }).IOUtils = {
-      read: async (path: string) => {
-        if (path === `${cacheDir}/full.md`) return encoder.encode(fullMd);
-        if (path === cropCachePath) {
-          return encoder.encode(JSON.stringify(cropCache));
-        }
-        if (path === contentListPath) {
-          return encoder.encode(
-            JSON.stringify([
-              {
-                type: "image",
-                img_path: "images/fig1.png",
-                image_caption: ["Figure 1. First figure."],
-              },
-              {
-                type: "image",
-                img_path: "images/fig2.png",
-                image_caption: ["Figure 2. Second figure."],
-              },
-            ]),
-          );
-        }
-        throw new Error(`Unexpected read: ${path}`);
-      },
-      getChildren: async (path: string) =>
-        path === cacheDir ? [contentListPath] : [],
-    };
-    const context: AgentToolContext = {
-      ...baseContext,
-      request: {
-        ...baseContext.request,
-        conversationKey: 43_016,
-        userText:
-          "help me explain all figures in this paper and save it into my note",
-        fullTextPaperContexts: [
-          {
-            itemId: 94,
-            contextItemId: 94,
-            title: "Stale Figure Metadata",
-            mineruCacheDir: cacheDir,
-          },
-        ],
-      },
-    };
-
-    try {
-      const content = [
-        "# All Figures",
-        "",
-        "This note summarizes the available figures.",
-      ].join("\n");
-      const validated = tool.validate({ content });
-      assert.isTrue(validated.ok);
-      if (!validated.ok) return;
-
-      const result = (await tool.execute(validated.value, context))
-        .content as Record<string, unknown>;
-
-      assert.deepInclude(result, {
-        status: "updated",
-        noteId: 55,
-        title: "Draft Note",
-      });
-      assert.isTrue(
-        noteHtmlMatches(replacedContent, renderRawNoteHtml(content)),
-      );
-    } finally {
-      (globalThis as { IOUtils?: unknown }).IOUtils = originalIOUtils;
-    }
-  });
-
-  it("edit_current_note accepts all-figures crop embeds when only paper title metadata drifted", async function () {
-    let replacedContent = "";
-    const tool = createEditCurrentNoteTool(
-      nativeNoteGateway({
-        getActiveNoteSnapshot: activeDraftNoteSnapshot,
-        onNativeSave: async ({ content }: { content: string }) => {
-          replacedContent = content;
-          return {
-            noteId: 55,
-            title: "Draft Note",
-            previousHtml: "<p>Original body</p>",
-            previousText: "Original body",
-            nextText: content,
-          };
-        },
-        restoreNoteHtml: async () => {},
-      } as never),
-    );
-    const encoder = new TextEncoder();
-    const originalIOUtils = (globalThis as { IOUtils?: unknown }).IOUtils;
-    const cacheDir = "/tmp/llm-for-zotero-mineru/97";
-    const contentListPath = `${cacheDir}/paper_content_list.json`;
-    const cropCachePath = `${cacheDir}/figure_crops/figure_geometry.json`;
-    const cropPath1 = `${cacheDir}/figure_crops/crops/figure-1.png`;
-    const cropPath2 = `${cacheDir}/figure_crops/crops/figure-2.png`;
-    const fullMd = [
-      "Figure 1. First figure.",
-      "",
-      "Figure 2. Second figure.",
-    ].join("\n");
-    const extractionPaperContext: PaperContextRef = {
-      itemId: 97,
-      contextItemId: 97,
-      title: "Extraction-Time Figure Paper",
-      attachmentTitle: "paper.pdf",
-      mineruCacheDir: cacheDir,
-    };
-    const writePaperContext: PaperContextRef = {
-      itemId: 97,
-      contextItemId: 97,
-      title: "Current Request Figure Paper",
-      mineruCacheDir: cacheDir,
-    };
-    const cropCache = {
-      version: TEST_PDF_FIGURE_CROP_CACHE_VERSION,
-      attachmentId: 97,
-      manifestHash: cropManifestHashForTest(null),
-      pdfFingerprint: cropPdfFingerprintForTest(extractionPaperContext),
-      renderScale: 1.8,
-      algorithmVersion: TEST_PDF_FIGURE_CROP_ALGORITHM_VERSION,
-      generatedAt: 1,
-      expectedFigures: [
-        {
-          label: "Figure 1",
-          baseLabel: "Figure 1",
-          pageNumber: 2,
-          status: "ok",
-          cropPath: cropPath1,
-        },
-        {
-          label: "Figure 2",
-          baseLabel: "Figure 2",
-          pageNumber: 3,
-          status: "ok",
-          cropPath: cropPath2,
-        },
-      ],
-      missingFigures: [],
-      entries: [
-        {
-          id: "figure-1",
-          label: "Figure 1",
-          baseLabel: "Figure 1",
-          pageNumber: 2,
-          cropPath: cropPath1,
-          rect: { left: 10, top: 10, width: 200, height: 160 },
-          confidence: 0.95,
-          source: "caption-bounded-region",
-          warnings: [],
-          mineruImagePaths: [],
-        },
-        {
-          id: "figure-2",
-          label: "Figure 2",
-          baseLabel: "Figure 2",
-          pageNumber: 3,
-          cropPath: cropPath2,
-          rect: { left: 20, top: 20, width: 220, height: 170 },
-          confidence: 0.94,
-          source: "caption-bounded-region",
-          warnings: [],
-          mineruImagePaths: [],
-        },
-      ],
-    };
-    (globalThis as { IOUtils?: unknown }).IOUtils = {
-      read: async (path: string) => {
-        if (path === `${cacheDir}/full.md`) return encoder.encode(fullMd);
-        if (path === cropCachePath) {
-          return encoder.encode(JSON.stringify(cropCache));
-        }
-        if (path === contentListPath) {
-          return encoder.encode(
-            JSON.stringify([
-              {
-                type: "image",
-                img_path: "images/fig1.png",
-                image_caption: ["Figure 1. First figure."],
-              },
-              {
-                type: "image",
-                img_path: "images/fig2.png",
-                image_caption: ["Figure 2. Second figure."],
-              },
-            ]),
-          );
-        }
-        throw new Error(`Unexpected read: ${path}`);
-      },
-      getChildren: async (path: string) =>
-        path === cacheDir ? [contentListPath] : [],
-    };
-    const context: AgentToolContext = {
-      ...baseContext,
-      request: {
-        ...baseContext.request,
-        conversationKey: 43_097,
-        userText:
-          "help me explain all figures in this paper and save it into my note",
-        fullTextPaperContexts: [writePaperContext],
-      },
-    };
-
-    try {
-      const content = [
-        "# All Figures",
-        "",
-        `![Figure 1](${cropPath1})`,
-        "",
-        "Figure 1 shows the first result.",
-        "",
-        `![Figure 2](${cropPath2})`,
-        "",
-        "Figure 2 shows the second result.",
-      ].join("\n");
-      const validated = tool.validate({ content });
-      assert.isTrue(validated.ok);
-      if (!validated.ok) return;
-
-      const result = (await tool.execute(validated.value, context))
-        .content as Record<string, unknown>;
-
-      assert.deepInclude(result, {
-        status: "updated",
-        noteId: 55,
-        title: "Draft Note",
-      });
-      assert.isTrue(
-        noteHtmlMatches(replacedContent, renderRawNoteHtml(content)),
-      );
-    } finally {
-      (globalThis as { IOUtils?: unknown }).IOUtils = originalIOUtils;
-    }
-  });
-
-  it("edit_current_note does not reject all-figures notes when expected crops are missing", async function () {
-    let replacedContent = "";
-    const tool = createEditCurrentNoteTool(
-      nativeNoteGateway({
-        getActiveNoteSnapshot: activeDraftNoteSnapshot,
-        onNativeSave: async ({ content }: { content: string }) => {
-          replacedContent = content;
-          return {
-            noteId: 55,
-            title: "Draft Note",
-            previousHtml: "<p>Original body</p>",
-            previousText: "Original body",
-            nextText: content,
-          };
-        },
-        restoreNoteHtml: async () => {},
-      } as never),
-    );
-    const encoder = new TextEncoder();
-    const originalIOUtils = (globalThis as { IOUtils?: unknown }).IOUtils;
-    const cacheDir = "/tmp/llm-for-zotero-mineru/93";
-    const contentListPath = `${cacheDir}/paper_content_list.json`;
-    const cropCachePath = `${cacheDir}/figure_crops/figure_geometry.json`;
-    const cropPath = `${cacheDir}/figure_crops/crops/figure-1.png`;
-    const fullMd = [
-      "Figure 1. First figure.",
-      "",
-      "Figure 2. Second figure.",
-    ].join("\n");
-    const paperContext: PaperContextRef = {
-      itemId: 93,
-      contextItemId: 93,
-      title: "Cross-page Figures",
-      mineruCacheDir: cacheDir,
-    };
-    const cropCache = {
-      version: TEST_PDF_FIGURE_CROP_CACHE_VERSION,
-      attachmentId: 93,
-      manifestHash: cropManifestHashForTest(null),
-      pdfFingerprint: cropPdfFingerprintForTest(paperContext),
-      renderScale: 1.8,
-      algorithmVersion: TEST_PDF_FIGURE_CROP_ALGORITHM_VERSION,
-      generatedAt: 1,
-      expectedFigures: [
-        {
-          label: "Figure 1",
-          baseLabel: "Figure 1",
-          pageNumber: 2,
-          captionPageNumber: 2,
-          status: "ok",
-          cropPath,
-        },
-        {
-          label: "Figure 2",
-          baseLabel: "Figure 2",
-          pageNumber: 4,
-          captionPageNumber: 5,
-          status: "no_confident_candidate",
-        },
-      ],
-      missingFigures: [
-        {
-          label: "Figure 2",
-          baseLabel: "Figure 2",
-          pageNumber: 4,
-          captionPageNumber: 5,
-          status: "no_confident_candidate",
-        },
-      ],
-      entries: [
-        {
-          id: "figure-1",
-          label: "Figure 1",
-          baseLabel: "Figure 1",
-          pageNumber: 2,
-          cropPath,
-          rect: { left: 10, top: 10, width: 200, height: 160 },
-          confidence: 0.95,
-          source: "pdf-image-object",
-          warnings: [],
-          mineruImagePaths: [],
-        },
-      ],
-    };
-    (globalThis as { IOUtils?: unknown }).IOUtils = {
-      read: async (path: string) => {
-        if (path === `${cacheDir}/full.md`) return encoder.encode(fullMd);
-        if (path === cropCachePath) {
-          return encoder.encode(JSON.stringify(cropCache));
-        }
-        if (path === contentListPath) {
-          return encoder.encode(
-            JSON.stringify([
-              {
-                type: "image",
-                img_path: "images/fig1.png",
-                image_caption: ["Figure 1. First figure."],
-              },
-              {
-                type: "image",
-                img_path: "images/fig2.png",
-                image_caption: ["Figure 2. Second figure."],
-              },
-            ]),
-          );
-        }
-        throw new Error(`Unexpected read: ${path}`);
-      },
-      getChildren: async (path: string) =>
-        path === cacheDir ? [contentListPath] : [],
-    };
-    const context: AgentToolContext = {
-      ...baseContext,
-      request: {
-        ...baseContext.request,
-        conversationKey: 43_014,
-        userText:
-          "help me explain all figures in this paper and save it into my note",
-        fullTextPaperContexts: [paperContext],
-      },
-    };
-
-    try {
-      const content = [
-        "# All Figures",
-        "",
-        `![Figure 1](${cropPath})`,
-        "",
-        "Figure 1 is available.",
-      ].join("\n");
-      const validated = tool.validate({ content });
-      assert.isTrue(validated.ok);
-      if (!validated.ok) return;
-
-      const result = (await tool.execute(validated.value, context))
-        .content as Record<string, unknown>;
-
-      assert.deepInclude(result, {
-        status: "updated",
-        noteId: 55,
-        title: "Draft Note",
-      });
-      assert.isTrue(
-        noteHtmlMatches(replacedContent, renderRawNoteHtml(content)),
-      );
-    } finally {
-      (globalThis as { IOUtils?: unknown }).IOUtils = originalIOUtils;
-    }
-  });
-
-  it("edit_current_note compares HTML as Markdown but preserves the approved HTML payload", async function () {
-    const tool = createEditCurrentNoteTool(
+  it("note_write compares HTML as Markdown but preserves the approved HTML payload", async function () {
+    const tool = createNoteWriteTool(
       nativeNoteGateway({
         getActiveNoteSnapshot: () => ({
           noteId: 55,
@@ -3928,7 +2420,17 @@ env.log('updated');
         ...baseContext,
         request: {
           ...baseContext.request,
-          actionContract: actionContractFixture("zotero_script_execute"),
+          // An ordinary agent turn: the in-plugin agent owns permission.
+          executionContext: {
+            version: 1,
+            executionId: "script-run",
+            conversationKey: 42,
+            conversationGeneration: 0,
+            chatLibraryID: 1,
+            permissionOwner: "original_agent",
+            workspaceSnapshot: { selectedPapers: [], selectedCollections: [] },
+            configuredAccess: { libraryIDs: [1], outputDirectories: [] },
+          },
         },
       },
     );
@@ -4093,10 +2595,7 @@ await note.saveTx();
   });
 
   it("does not promise an approval step that read tools never perform", function () {
-    const tools = [
-      createReadAttachmentTool({} as never, {} as never),
-      createViewPdfPagesTool({} as never, {} as never),
-    ];
+    const tools = [createReadAttachmentTool({} as never, {} as never)];
     for (const tool of tools) {
       const name = tool.spec.name;
       assert.notProperty(tool.spec, "requiresConfirmation", `${name} flag`);
@@ -4105,5 +2604,21 @@ await note.saveTx();
       assert.notProperty(summaries, "onPending", `${name} onPending`);
       assert.notProperty(summaries, "onApproved", `${name} onApproved`);
     }
+  });
+
+  it("paper_read does not require confirmation for a targeted read", async function () {
+    const tool = createPaperReadTool(
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+    );
+    assert.notProperty(tool.spec, "requiresConfirmation");
+    const validated = tool.validate({ mode: "targeted", query: "method" });
+    assert.isTrue(validated.ok);
+    if (!validated.ok) return;
+    assert.isFalse(
+      await tool.shouldRequireConfirmation!(validated.value, baseContext),
+    );
   });
 });

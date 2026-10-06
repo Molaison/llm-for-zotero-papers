@@ -93,7 +93,10 @@ export type AgentSearchCondition = {
    * with `phrase` or `regexp`. Zotero spells this `condition/mode`.
    */
   mode?: string;
-  /** Zotero's per-condition `required` flag. */
+  /**
+   * Keep this clause mandatory under joinMode `any`. Forwarded as Zotero's
+   * `required` flag on 7-9 and expressed as a condition group on 10.
+   */
   required?: boolean;
 };
 

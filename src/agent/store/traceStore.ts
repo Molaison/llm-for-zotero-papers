@@ -21,6 +21,19 @@ import type {
   AgentRunStatus,
 } from "../types";
 import { getMaintenanceQueryOptions } from "../../core/logging";
+import type { RunEventRow } from "./runEventWriter";
+import {
+  buildToolResultPreview,
+  isTruncatedToolResultContent,
+  PERSISTED_TOOL_RESULT_MAX_BYTES,
+  type TruncatedToolResultContent,
+} from "./truncatedToolResult";
+
+export {
+  isTruncatedToolResultContent,
+  PERSISTED_TOOL_RESULT_MAX_BYTES,
+  type TruncatedToolResultContent,
+};
 
 const AGENT_RUNS_TABLE = "llm_for_zotero_agent_runs";
 const AGENT_RUN_EVENTS_TABLE = "llm_for_zotero_agent_run_events";
@@ -595,22 +608,87 @@ export async function listAgentRunsForConversation(
   return limit === undefined ? runs : runs.reverse();
 }
 
+/**
+ * The form an event is persisted in. A successful tool result whose content
+ * serializes above `PERSISTED_TOOL_RESULT_MAX_BYTES` and that names the
+ * handle holding it is stored as a marker naming that handle, with a bounded
+ * preview the trace row reads (`buildToolResultPreview`); a result
+ * carrying action receipts is stored whole, since its receipts and content
+ * are the record of a write. Every other event is stored as it is.
+ */
+export function compactRunEventForPersistence(event: AgentEvent): AgentEvent {
+  if (event.type !== "tool_result" || !event.ok || event.actionReceipts?.length)
+    return event;
+  if (!event.toolResultHandle) return event;
+  const bytes = JSON.stringify(event.content ?? null).length;
+  if (bytes <= PERSISTED_TOOL_RESULT_MAX_BYTES) return event;
+  const preview = buildToolResultPreview(event.content);
+  const content: TruncatedToolResultContent = {
+    truncated: true,
+    handle: event.toolResultHandle,
+    bytes,
+    ...(preview !== undefined ? { preview } : {}),
+  };
+  return { ...event, content };
+}
+
+function isRunRetired(runId: string): boolean {
+  const conversationKey = runConversationKeys.get(runId);
+  return Boolean(
+    conversationKey && isConversationKeyRetiredInMemory(conversationKey),
+  );
+}
+
+/**
+ * Inserts one event row. `event` is compacted here unless the caller passes
+ * it already compacted (`compacted`), as a batch does before its transaction.
+ */
+async function insertAgentRunEvent(
+  runId: string,
+  seq: number,
+  event: AgentEvent,
+  createdAt: number,
+  compacted = false,
+): Promise<void> {
+  const persisted = compacted ? event : compactRunEventForPersistence(event);
+  await Zotero.DB.queryAsync(
+    `INSERT INTO ${AGENT_RUN_EVENTS_TABLE}
+      (run_id, seq, event_type, payload_json, created_at)
+     VALUES (?, ?, ?, ?, ?)`,
+    [runId, seq, persisted.type, JSON.stringify(persisted), createdAt],
+  );
+}
+
 export async function appendAgentRunEvent(
   runId: string,
   seq: number,
   event: AgentEvent,
   createdAt = Date.now(),
 ): Promise<void> {
-  const conversationKey = runConversationKeys.get(runId);
-  if (conversationKey && isConversationKeyRetiredInMemory(conversationKey)) {
-    return;
-  }
-  await Zotero.DB.queryAsync(
-    `INSERT INTO ${AGENT_RUN_EVENTS_TABLE}
-      (run_id, seq, event_type, payload_json, created_at)
-     VALUES (?, ?, ?, ?, ?)`,
-    [runId, seq, event.type, JSON.stringify(event), createdAt],
-  );
+  if (isRunRetired(runId)) return;
+  await insertAgentRunEvent(runId, seq, event, createdAt);
+  scheduleAgentRunTraceExport(runId);
+}
+
+/**
+ * Appends a batch of a run's events in one transaction, one row each, in the
+ * order given; the trace export is scheduled once for the batch. A big
+ * result's marker and preview are built before the transaction opens, so the
+ * transaction only inserts rows.
+ */
+export async function appendAgentRunEvents(
+  runId: string,
+  rows: readonly RunEventRow[],
+): Promise<void> {
+  if (!rows.length || isRunRetired(runId)) return;
+  const compacted = rows.map((row) => ({
+    ...row,
+    event: compactRunEventForPersistence(row.event),
+  }));
+  await Zotero.DB.executeTransaction(async () => {
+    for (const row of compacted)
+      await insertAgentRunEvent(runId, row.seq, row.event, row.createdAt, true);
+  });
   scheduleAgentRunTraceExport(runId);
 }
 
@@ -732,10 +810,68 @@ export async function listAgentRunEvents(
   return out;
 }
 
-export async function getAgentRunTrace(runId: string): Promise<{
-  run: AgentRunRecord | null;
-  events: AgentRunEventRecord[];
-}> {
+/**
+ * Several runs' events of the given types, in one read: run order is the
+ * caller's, events within a run by sequence. For a view that rebuilds a
+ * conversation-wide summary from a few event kinds (Task progress).
+ */
+export async function listAgentRunEventsForRuns(
+  runIds: readonly string[],
+  eventTypes: readonly string[],
+): Promise<AgentRunEventRecord[]> {
+  const ids = [...new Set(runIds.map((id) => id.trim()).filter(Boolean))];
+  const types = [...new Set(eventTypes)];
+  if (!ids.length || !types.length) return [];
+  const out: AgentRunEventRecord[] = [];
+  // Bounded IN lists keep each statement well under SQLite's variable cap.
+  for (let start = 0; start < ids.length; start += 200) {
+    const chunk = ids.slice(start, start + 200);
+    const rows = (await Zotero.DB.queryAsync(
+      `SELECT run_id AS runId,
+              seq,
+              payload_json AS payloadJson,
+              created_at AS createdAt
+       FROM ${AGENT_RUN_EVENTS_TABLE}
+       WHERE run_id IN (${chunk.map(() => "?").join(", ")})
+         AND event_type IN (${types.map(() => "?").join(", ")})
+       ORDER BY run_id, seq ASC, id ASC`,
+      [...chunk, ...types],
+    )) as
+      | Array<{
+          runId?: unknown;
+          seq?: unknown;
+          payloadJson?: unknown;
+          createdAt?: unknown;
+        }>
+      | undefined;
+    for (const row of rows || []) {
+      if (typeof row.runId !== "string") continue;
+      const seq = Number(row.seq);
+      const createdAt = Number(row.createdAt);
+      if (!Number.isFinite(seq) || !Number.isFinite(createdAt)) continue;
+      let payload: AgentEvent | null = null;
+      try {
+        payload = JSON.parse(String(row.payloadJson || "")) as AgentEvent;
+      } catch (_error) {
+        payload = null;
+      }
+      if (!payload || typeof payload.type !== "string") continue;
+      out.push({
+        runId: row.runId,
+        seq: Math.floor(seq),
+        eventType: payload.type,
+        payload,
+        createdAt: Math.floor(createdAt),
+      });
+    }
+  }
+  return out;
+}
+
+/** A run's row, without its events. */
+export async function getAgentRunRecord(
+  runId: string,
+): Promise<AgentRunRecord | null> {
   const rows = (await Zotero.DB.queryAsync(
     `SELECT run_id AS runId,
             conversation_key AS conversationKey,
@@ -750,7 +886,14 @@ export async function getAgentRunTrace(runId: string): Promise<{
      LIMIT 1`,
     [runId],
   )) as AgentRunRow[] | undefined;
-  const run = toAgentRunRecord(rows?.[0]);
+  return toAgentRunRecord(rows?.[0]);
+}
+
+export async function getAgentRunTrace(runId: string): Promise<{
+  run: AgentRunRecord | null;
+  events: AgentRunEventRecord[];
+}> {
+  const run = await getAgentRunRecord(runId);
   return {
     run,
     events: await listAgentRunEvents(runId),

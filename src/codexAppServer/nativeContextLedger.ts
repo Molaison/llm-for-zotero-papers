@@ -4,16 +4,10 @@ import {
   areConversationWritesFrozen,
   isConversationWriteGenerationCurrent,
 } from "../shared/conversationWriteFence";
+import { SINGLE_PAPER_READ_TOOL_NAMES } from "../agent/context/toolNames";
 
 const MAX_LEDGER_ENTRIES = 12;
 const MAX_RENDERED_LEDGER_ENTRIES = 8;
-const READ_TOOL_NAMES = new Set([
-  "paper_read",
-  "read_paper",
-  "search_paper",
-  "view_pdf_pages",
-  "read_attachment",
-]);
 
 type NativeContextLedgerScope = {
   profileSignature?: string;
@@ -196,25 +190,6 @@ function buildReadDetail(toolName: string, args: unknown): string | undefined {
     }
     return pieces.join(", ");
   }
-  if (toolName === "search_paper") {
-    const question = normalizeText(record.question, 120);
-    return question ? `question="${question}"` : undefined;
-  }
-  if (toolName === "read_paper" && Array.isArray(record.chunkIndexes)) {
-    const chunks = record.chunkIndexes
-      .map((value) => normalizePositiveInt(value))
-      .filter(Boolean)
-      .join(", ");
-    return chunks ? `chunks=${chunks}` : undefined;
-  }
-  if (toolName === "view_pdf_pages") {
-    if (record.capture === true) return "captured current page";
-    if (Array.isArray(record.pages) && record.pages.length) {
-      return `pages=${record.pages.join(", ")}`;
-    }
-    const question = normalizeText(record.question, 120);
-    return question ? `question="${question}"` : undefined;
-  }
   if (toolName === "read_attachment") {
     return record.attachFile === true ? "attached full file" : undefined;
   }
@@ -285,7 +260,9 @@ function buildToolEntries(params: {
     });
     return entry ? [entry] : [];
   }
-  if (!READ_TOOL_NAMES.has(params.event.toolName)) return [];
+  // Events come only from the MCP server, which never exposes a retired
+  // primitive, so facade names are the whole vocabulary here.
+  if (!SINGLE_PAPER_READ_TOOL_NAMES.has(params.event.toolName)) return [];
   const detail = buildReadDetail(params.event.toolName, params.event.arguments);
   const targets = extractTargets(params.event.arguments, params.scope);
   const effectiveTargets = targets.length

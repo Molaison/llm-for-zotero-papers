@@ -61,9 +61,9 @@ describe("workflow: question card readability", function () {
           card.style.maxWidth = "none";
           root.style.setProperty("--llm-font-scale", `${scale}`);
           await Zotero.Promise.delay(450);
-          for (const option of card.querySelectorAll<HTMLElement>(
-            ".llm-planning-question-option",
-          )) {
+          for (const option of Array.from(
+            card.querySelectorAll<HTMLElement>(".llm-planning-question-option"),
+          ) as HTMLElement[]) {
             const bounds = option.getBoundingClientRect();
             const copy = option
               .querySelector<HTMLElement>(".llm-planning-question-option-copy")!
@@ -71,7 +71,7 @@ describe("workflow: question card readability", function () {
             assert.isAtLeast(
               copy.top,
               bounds.top + 4,
-              `choice top padding at ${width}px: ${JSON.stringify({ bounds: bounds.toJSON(), copy: copy.toJSON(), height: doc.defaultView!.getComputedStyle(option).height })}`,
+              `choice top padding at ${width}px: ${JSON.stringify({ bounds: bounds.toJSON(), copy: copy.toJSON(), height: doc.defaultView!.getComputedStyle(option)!.height })}`,
             );
             assert.isAtMost(
               copy.bottom,
@@ -85,7 +85,7 @@ describe("workflow: question card readability", function () {
             );
             const markerStyle = doc.defaultView!.getComputedStyle(
               option.querySelector(".llm-planning-question-option-marker")!,
-            );
+            )!;
             assert.isAbove(
               parseFloat(markerStyle.borderTopWidth),
               0,
@@ -114,7 +114,7 @@ describe("workflow: question card readability", function () {
           assert.equal(
             doc.defaultView!.getComputedStyle(
               card.querySelector(".llm-planning-question-prompt")!,
-            ).textTransform,
+            )!.textTransform,
             "none",
           );
         }

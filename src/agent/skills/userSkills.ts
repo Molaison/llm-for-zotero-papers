@@ -69,7 +69,8 @@ function setBodyHashes(hashes: Record<string, string>): void {
 }
 
 // ---------------------------------------------------------------------------
-// Obsolete skill files (consolidated into write-note.md)
+// Obsolete skill files (note skills consolidated into write-note.md;
+// simple-paper-qa retired in favour of evidence-based-qa)
 // ---------------------------------------------------------------------------
 
 // Each entry carries the filename plus hashes of the exact raw file contents we
@@ -126,6 +127,37 @@ const OBSOLETE_SKILL_FILES: ReadonlyArray<{
     filename: "note-template.md",
     bootstrapRawHashes: ["128vd1c", "m675pz", "v55hyg"],
   },
+  // simple-paper-qa was retired in favour of evidence-based-qa; ordinary
+  // paper questions need no skill. Hashes cover every
+  // committed version of the file (v1-v10).
+  {
+    filename: "simple-paper-qa.md",
+    bootstrapRawHashes: [
+      "gfjvxt",
+      "1w32fwi",
+      "x02wmo",
+      "tz1pi3",
+      "1r2ban6",
+      "1yqxw4",
+      "14ok99f",
+      "2vt80m",
+      "14c21tp",
+      "1vf0uap",
+      "326eei",
+      "e821k0",
+      "168pnq0",
+      "19icn0l",
+      "en8n9t",
+      "1181x3a",
+      "19mtsg3",
+      "a3hatz",
+      "yu43tj",
+      "12lfm6n",
+      "1620eqd",
+      "13ehjz6",
+      "1o0or48",
+    ],
+  },
 ];
 
 const OBSOLETE_SKILL_FILENAMES = new Set(
@@ -138,7 +170,19 @@ const OBSOLETE_SKILL_IDS = new Set([
   "note-from-paper",
   "note-editing",
   "note-template",
+  "simple-paper-qa",
 ]);
+
+/**
+ * Retired built-ins whose surviving copy (Step 1 keeps only customized or
+ * unknown copies) still loads, as a personal skill under its own id, so a
+ * user's edits never vanish silently. The note skills consolidated into
+ * write-note stay skipped: write-note owns that workflow.
+ */
+const RETIRED_SKILL_IDS_KEPT_AS_PERSONAL = new Set(["simple-paper-qa"]);
+
+/** Obsolete IDs already reported by loadUserSkills; each is logged once. */
+const loggedObsoleteSkillIds = new Set<string>();
 
 // Exact raw-content hashes for prior shipped versions of built-ins whose
 // version increased in this release. On the first run with hash tracking, we
@@ -147,7 +191,20 @@ const OBSOLETE_SKILL_IDS = new Set([
 const BUILTIN_BOOTSTRAP_RAW_HASHES: Partial<
   Record<string, ReadonlyArray<string>>
 > = {
-  "library-analysis.md": ["ftq8b2"],
+  "library-analysis.md": [
+    "ftq8b2",
+    "qttubn",
+    "i2f8xa",
+    // Released texts the list missed, from each release tag's copy
+    // (v3.7.12, v3.8.5, v3.8.6, v3.8.11 and v3.8.24).
+    "1gboxxt",
+    "1dibsu3",
+    "1fmb4jm",
+    "19974y5",
+    "1c3awl3",
+    // v4, which named the synthesis digest the sized views omit (v5).
+    "1fqhql1",
+  ],
   "compare-papers.md": [
     "i0j6yq",
     "1yreksb",
@@ -159,9 +216,29 @@ const BUILTIN_BOOTSTRAP_RAW_HASHES: Partial<
     "1w3ytrp",
     "1krlubq",
     "6upxur",
+    "qs8z4b",
+    "ulypcf",
+    // Both parallel v8 texts (main and the tool-consolidation branch).
+    "jch7ho",
+    "11c76b5",
+    // v9, the text v10's digest part extends, as shipped and as the
+    // canonical copy carrying its native `name:` line.
+    "l93iop",
+    "jop719",
+    // v10, the text v11's dimension-named digest replaces, as shipped and
+    // as the canonical copy carrying its native `name:` line.
+    "1mp6wjc",
+    "1a6j60s",
   ],
-  "analyze-figures.md": ["msvqtf", "17o1bpl"],
-  "simple-paper-qa.md": ["yu43tj", "1r2ban6", "1181x3a"],
+  "analyze-figures.md": [
+    "msvqtf",
+    "17o1bpl",
+    "gdr4uu",
+    "1kjl8up",
+    "e0ebpu",
+    "z5uzar",
+    "1u0n8ze",
+  ],
   "evidence-based-qa.md": [
     "en0khz",
     "vyeyap",
@@ -173,10 +250,62 @@ const BUILTIN_BOOTSTRAP_RAW_HASHES: Partial<
     "1k39b46",
     "1xglfq0",
     "qdqcm0",
+    "90zxig",
+    "5iibf",
+    "1qkh4mt",
+    "14eowou",
+    "1l2klni",
+    "37vjex",
   ],
-  "write-note.md": ["172xn8t", "nvca0f"],
-  "literature-review.md": ["kbrknh", "nxpr5d", "1cnjf9i", "3tk61l"],
-  "import-cited-reference.md": ["19bomz1"],
+  "write-note.md": [
+    "172xn8t",
+    "nvca0f",
+    "17lvl1z",
+    "u1ej3e",
+    "1c1s5yg",
+    "1cfk2wb",
+    "3m65z4",
+  ],
+  "literature-review.md": [
+    "kbrknh",
+    "nxpr5d",
+    "1cnjf9i",
+    "3tk61l",
+    "1ptwzpw",
+    "pefrjt",
+    "fptven",
+    "10fqwsh",
+    // Released texts the list missed, from each release tag's copy
+    // (v3.7.18 to v3.9.5).
+    "1gbl57m",
+    "n96aqu",
+    "w18p0a",
+    "1dbaw6y",
+    "1ymizha",
+    "1mwckog",
+    "au1hm1",
+    "y7vpt5",
+    "q3t63g",
+    "fjgktb",
+    // v10, the investigation-loop text the ordinary v11 replaces.
+    "liv5sv",
+    // v11, the text v12's digest parts replace, as shipped and as the
+    // canonical copy carrying its native `name:` line.
+    "1hrhlxd",
+    "3mijhi",
+    // v12, the text v13's question-led digest and Select step replace, as
+    // shipped and as the canonical copy carrying its native `name:` line.
+    "mujbgx",
+    "18cssl2",
+  ],
+  "import-cited-reference.md": [
+    "19bomz1",
+    "e9tjej",
+    "145es7h",
+    "1j1qzbc",
+    "1sx03p9",
+    "1mtgn5u",
+  ],
 };
 
 const BUILTIN_BOOTSTRAP_BODY_HASHES: Partial<
@@ -192,6 +321,14 @@ const BUILTIN_BOOTSTRAP_BODY_HASHES: Partial<
     "6r67g8",
     "1j5fq18",
     "1t8gyg9",
+    "7cp6rj",
+    // Both parallel v8 bodies (main and the tool-consolidation branch).
+    "1eveisf",
+    "8zlow4",
+    // v9, the body v10's digest part extends.
+    "1s8bw97",
+    // v10, the body v11's dimension-named digest replaces.
+    "dds2si",
   ],
   "evidence-based-qa.md": [
     "41yh3d",
@@ -202,6 +339,9 @@ const BUILTIN_BOOTSTRAP_BODY_HASHES: Partial<
     "bgr2hf",
     "zjwar9",
     "49orr",
+    "13yvvl6",
+    "1l4p1x2",
+    "u49rr3",
   ],
 };
 
@@ -215,7 +355,7 @@ const BUILTIN_FRONTMATTER_PATCH_OPTIONS: Partial<
     historicalContexts: ["single-paper,paper-set"],
   },
   "analyze-figures.md": {
-    historicalContexts: ["single-paper"],
+    historicalContexts: ["single-paper", "single-paper,visual-input"],
   },
 };
 
@@ -498,11 +638,14 @@ export async function initUserSkills(): Promise<void> {
   await migrateLegacyFlatSkills(io, seeded);
 
   // ── Step 1: Remove obsolete canonical skill files ───────────────────────
-  // Old note skills were consolidated into write-note.md. Delete only if:
+  // Old note skills were consolidated into write-note.md and simple-paper-qa
+  // was retired in favour of evidence-based-qa. Delete only if:
   //   (a) we have a stored hash proving the file is unmodified, OR
   //   (b) bootstrap — no stored hash (pre-hash install) AND the raw file
   //       still matches a known shipped fingerprint.
-  // Any other content is preserved as a personal skill.
+  // Any other content stays on disk. loadUserSkills loads a surviving
+  // simple-paper-qa as a personal skill under its own id; surviving old note
+  // skills are kept on disk but not loaded (write-note owns that workflow).
   if (io.read && io.remove) {
     for (const { filename: file, bootstrapRawHashes } of OBSOLETE_SKILL_FILES) {
       try {
@@ -548,9 +691,9 @@ export async function initUserSkills(): Promise<void> {
                 : ""),
           );
         } else {
-          // Customized or unknown legacy copy → keep as personal skill
+          // Customized or unknown legacy copy → keep it on disk
           seeded.delete(file);
-          appLogger.debug(`[llm-for-zotero] Kept ${file} as personal skill`);
+          appLogger.debug(`[llm-for-zotero] Kept customized ${file} on disk`);
         }
       } catch (err) {
         appLogger.warn(
@@ -759,10 +902,16 @@ export async function loadUserSkills(): Promise<AgentSkill[]> {
         OBSOLETE_SKILL_FILENAMES.has(filename) ||
         OBSOLETE_SKILL_IDS.has(skill.id)
       ) {
-        appLogger.debug(
-          `[llm-for-zotero] Skipping obsolete preserved skill file: ${filePath}`,
-        );
-        continue;
+        const keptAsPersonal = RETIRED_SKILL_IDS_KEPT_AS_PERSONAL.has(skill.id);
+        if (!loggedObsoleteSkillIds.has(skill.id)) {
+          loggedObsoleteSkillIds.add(skill.id);
+          appLogger.info(
+            keptAsPersonal
+              ? `[llm-for-zotero] Loaded customized copy of retired skill ${skill.id} as a personal skill: ${filePath}`
+              : `[llm-for-zotero] Skipped retired skill ${skill.id} left in profile: ${filePath}`,
+          );
+        }
+        if (!keptAsPersonal) continue;
       }
 
       if (skill.id === "unknown" || !skill.instruction.trim()) {
@@ -861,10 +1010,9 @@ activation: auto
   Custom skill template.
 
   - name/id/description: shown in the "/" slash menu and native skill pickers
-  - description: the multilingual semantic router uses this to decide relevance
+  - description: the agent reads this in the skill inventory to decide when to load the skill
   - contexts: any, single-paper, paper-set, library-corpus, note, or visual-input
   - activation: auto, manual, or both
-  - supersedes: optional comma-separated skill IDs this workflow replaces
   - version: increment when you make significant changes
 
   The text below is injected into the agent's current-turn guidance when

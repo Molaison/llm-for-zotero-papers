@@ -54,6 +54,8 @@ type CachedCall = {
   unavailable: boolean;
   references: PaperEvidenceReference[];
   failOpenContent?: Record<string, unknown>;
+  /** The call whose result this is. */
+  sourceToolCallId: string;
 };
 
 export type PaperEvidenceResult = {
@@ -61,6 +63,8 @@ export type PaperEvidenceResult = {
   frontier: PaperEvidenceProgress["frontier"];
   originalContent?: unknown;
   toolResultHandle?: string;
+  /** For a reused identical call: the call whose result it reuses. */
+  sourceToolCallId?: string;
 };
 
 type ProcessParams = {
@@ -448,22 +452,8 @@ function progressFor(params: {
   cumulativeOccurrenceCount: number;
   stopPolicy: ReadStopPolicy;
   readsThisTurn: number;
-  planExecuting: boolean;
 }): PaperEvidenceProgress {
-  const { stopPolicy, planExecuting, ...progress } = params;
-  if (planExecuting) {
-    // An approved plan owns reading: the manifest decides what to read next
-    // and the host completes the reading task from durable records. Chat
-    // stop guidance ("answer now") would be a second, contradicting owner.
-    return {
-      ...progress,
-      recommendation: "continue_plan",
-      reason:
-        progress.frontier === "unavailable"
-          ? "This source delivered no readable text; record what the manifest allows for it and continue the approved plan."
-          : "Continue the approved plan: persist this group with research_update before reading the next manifest group.",
-    };
-  }
+  const { stopPolicy, ...progress } = params;
   const guidance = resolveReadStopGuidance(stopPolicy, {
     frontier: params.frontier,
     readsThisTurn: params.readsThisTurn,
@@ -482,17 +472,7 @@ export class PaperEvidenceFrontier {
   private readonly seenOccurrences = new Map<string, StoredOccurrence>();
   private readonly occurrencesByContentHash = new Map<string, Set<string>>();
   private readonly cachedCalls = new Map<string, CachedCall>();
-  private readonly planExecuting: boolean;
   private readsThisTurn = 0;
-
-  constructor(
-    options: {
-      /** True while an approved plan executes; reads then never stop the turn. */
-      planExecuting?: boolean;
-    } = {},
-  ) {
-    this.planExecuting = options.planExecuting === true;
-  }
 
   async readCached(
     params: CacheLookupParams,
@@ -505,6 +485,7 @@ export class PaperEvidenceFrontier {
     this.readsThisTurn += 1;
     if (cached.failOpenContent) {
       return {
+        sourceToolCallId: cached.sourceToolCallId,
         frontier: "advanced",
         content: {
           ...cached.failOpenContent,
@@ -536,9 +517,9 @@ export class PaperEvidenceFrontier {
       cumulativeOccurrenceCount: this.seenOccurrences.size,
       stopPolicy: stopPolicyForReadMode(paperReadMode(params.input)),
       readsThisTurn: this.readsThisTurn,
-      planExecuting: this.planExecuting,
     });
     return {
+      sourceToolCallId: cached.sourceToolCallId,
       frontier,
       content: {
         mode: paperReadMode(params.input),
@@ -663,7 +644,6 @@ export class PaperEvidenceFrontier {
       cumulativeOccurrenceCount: this.seenOccurrences.size,
       stopPolicy: stopPolicyForReadMode(mode),
       readsThisTurn: this.readsThisTurn,
-      planExecuting: this.planExecuting,
     });
     const references = [...newReferences, ...repeatedReferences];
     const processedContent = {
@@ -692,6 +672,7 @@ export class PaperEvidenceFrontier {
         ...(hasUnidentifiedEvidence
           ? { failOpenContent: processedContent }
           : {}),
+        sourceToolCallId: params.toolCallId,
       },
     );
     return {

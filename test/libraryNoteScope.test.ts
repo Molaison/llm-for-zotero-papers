@@ -1,11 +1,11 @@
 import { assert } from "chai";
-import { createQueryLibraryTool } from "../src/agent/tools/read/queryLibrary";
+import { createLibrarySearchTool } from "../src/agent/tools/read/librarySearch";
 
 describe("note discovery collection scope", function () {
   for (const mode of ["list", "search"] as const) {
     it(`passes exact collection scope to the native ${mode} owner`, async function () {
       let received: Record<string, unknown> | undefined;
-      const tool = createQueryLibraryTool({
+      const tool = createLibrarySearchTool({
         listStandaloneNotes: async (params: Record<string, unknown>) => {
           received = params;
           return { notes: [], totalCount: 0 };

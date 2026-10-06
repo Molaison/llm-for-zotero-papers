@@ -29,14 +29,6 @@ export type RetrievalQueryPlan = {
   notes: string[];
   readIntent: DocumentReadIntent;
   references: QueryReference[];
-  retrievalPurpose?:
-    | "factual"
-    | "conceptual"
-    | "methodological"
-    | "comparative"
-    | "citation"
-    | "visual"
-    | "general";
   quoteAnchorPolicy?: "none" | "verified";
   fullReadTargets?: import("../../shared/fullReadTargetResolver").FullReadTargetSelection;
 };

@@ -191,6 +191,17 @@ export function validateSearchConditions(
       });
       continue;
     }
+    // Zotero 10's group markers are placed by `planSearchConditions`, which
+    // needs them balanced. A stray marker from the model would silently
+    // restructure the query, so the flag stays the only way to ask for one.
+    if (name === "groupStart" || name === "groupEnd") {
+      errors.push({
+        condition: name,
+        reason:
+          "Condition groups are built for you: mark a clause isRequired under joinMode 'any' instead of passing groupStart/groupEnd.",
+      });
+      continue;
+    }
     const declared = registry.get(name);
     if (!declared) {
       errors.push({
@@ -210,6 +221,101 @@ export function validateSearchConditions(
     }
   }
   return errors;
+}
+
+/** One `addCondition` call, in the order the calls must be made. */
+export type PlannedSearchCondition = {
+  condition: string;
+  operator: string;
+  value: string | number;
+  required?: boolean;
+};
+
+/**
+ * Zotero 10 removed the per-condition `required` flag (`addCondition` throws
+ * on it and the column is gone) in favour of nested condition groups
+ * delimited by `groupStart`/`groupEnd`. Zotero 7-9 have the flag and no
+ * markers, so the marker's presence in the condition registry is the test.
+ */
+export function zoteroSupportsConditionGroups(): boolean {
+  const registry = (
+    Zotero as unknown as {
+      SearchConditions?: { get?: (name: string) => unknown };
+    }
+  ).SearchConditions;
+  try {
+    return Boolean(registry?.get?.("groupStart"));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Turns the agent's conditions into the `addCondition` calls that mean the
+ * same thing on every supported Zotero.
+ *
+ * On Zotero 7-9 a `required` clause under joinMode `any` is ANDed while the
+ * rest are ORed: `req1 AND req2 AND (opt1 OR opt2)`. Zotero 10 expresses
+ * exactly that as a top-level `all` search whose optional clauses sit in a
+ * nested `any` group. Under joinMode `all` the flag never changed anything,
+ * so it is dropped there rather than forwarded to an API that rejects it.
+ */
+export function planSearchConditions(params: {
+  conditions: AgentSearchCondition[];
+  joinMode?: "all" | "any";
+  includeTrashed?: boolean;
+  supportsConditionGroups?: boolean;
+}): PlannedSearchCondition[] {
+  const supportsGroups =
+    params.supportsConditionGroups ?? zoteroSupportsConditionGroups();
+  const clause = (entry: AgentSearchCondition): PlannedSearchCondition => ({
+    condition: entry.mode
+      ? `${entry.condition}/${entry.mode}`
+      : entry.condition,
+    operator: entry.operator,
+    value: entry.value === undefined ? "" : entry.value,
+  });
+  const plan: PlannedSearchCondition[] = [];
+  const joinMode =
+    params.joinMode === "any" || params.joinMode === "all"
+      ? params.joinMode
+      : undefined;
+  const required = params.conditions.filter((entry) => entry.required);
+  const optional = params.conditions.filter((entry) => !entry.required);
+  const grouped = supportsGroups && joinMode === "any" && required.length > 0;
+
+  if (grouped) {
+    plan.push({ condition: "joinMode", operator: "all", value: "" });
+  } else if (joinMode) {
+    plan.push({ condition: "joinMode", operator: joinMode, value: "" });
+  }
+  // Zotero excludes trashed items unless told otherwise, so listing the
+  // trash was impossible without this -- which in turn made restore
+  // unusable, because nothing could enumerate what was in there.
+  if (params.includeTrashed) {
+    plan.push({ condition: "deleted", operator: "true", value: "" });
+  }
+
+  if (!supportsGroups) {
+    for (const entry of params.conditions) {
+      plan.push(
+        entry.required ? { ...clause(entry), required: true } : clause(entry),
+      );
+    }
+    return plan;
+  }
+  if (!grouped) {
+    for (const entry of params.conditions) plan.push(clause(entry));
+    return plan;
+  }
+  for (const entry of required) plan.push(clause(entry));
+  if (optional.length) {
+    plan.push({ condition: "groupStart", operator: "true", value: "" });
+    plan.push({ condition: "joinMode", operator: "any", value: "" });
+    for (const entry of optional) plan.push(clause(entry));
+    plan.push({ condition: "groupEnd", operator: "true", value: "" });
+  }
+  return plan;
 }
 
 /**

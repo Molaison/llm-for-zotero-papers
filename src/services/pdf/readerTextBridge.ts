@@ -33,6 +33,8 @@ export type PdfQuoteCertificate = {
   pageLabel?: string;
   sourceMatchText: string;
   sourceMatchKind: "exact" | "normalized-span";
+  /** What was established, independently of formatting normalization. */
+  verificationMode?: "complete-quote" | "inline-math-locator";
   sourceMatchPageOccurrence: number;
 };
 

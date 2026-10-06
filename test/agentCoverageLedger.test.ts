@@ -8,6 +8,13 @@ import {
   hydrateAgentCoverageLedger,
 } from "../src/agent/context/coverageLedger";
 import { buildAgentResourceContextPlan } from "../src/agent/context/resourceContextPlan";
+import {
+  isRawPdfRetrievalTool,
+  isCatalogToolName,
+  isPaperEvidenceToolName,
+  RETIRED_TOOL_HINTS,
+  PAPER_RETRIEVAL_TOOL_NAMES,
+} from "../src/agent/context/toolNames";
 import { buildAgentInitialMessages } from "../src/agent/model/messageBuilder";
 import type {
   AgentModelMessage,
@@ -198,8 +205,9 @@ describe("agent coverage ledger", function () {
       timestamp: 3,
     });
     const visualEntries = buildAgentCoverageEntriesForActivity({
-      toolName: "view_pdf_pages",
+      toolName: "paper_read",
       input: {
+        mode: "visual",
         target: { paperContext: req.turnPaperScope.papers[0]?.paper },
         pages: [3],
       },
@@ -308,6 +316,38 @@ describe("agent coverage ledger", function () {
     );
   });
 
+  it("records a visual paper_read redirect that carries no pages or artifacts", async function () {
+    // A `use_figures_mode` redirect has neither `pages` nor artifacts. Hashing
+    // `undefined` used to throw "can't access property length" inside
+    // commitAgentCoverageActivities, which failed the whole turn after the
+    // model had already streamed its answer.
+    const req = request();
+    await commitAgentCoverageActivities({
+      conversationKey: req.conversationKey,
+      activities: [
+        {
+          toolName: "paper_read",
+          input: { mode: "visual", query: "dataset statistics" },
+          content: {
+            mode: "visual",
+            status: "use_figures_mode",
+            backend: "pdf_figure_extraction",
+            query: "dataset statistics",
+            paperContext: req.turnPaperScope.papers[0]?.paper,
+            guidance: "Call paper_read({ mode:'figures' }).",
+          },
+          request: req,
+          timestamp: 7,
+        },
+      ],
+    });
+    const block = buildAgentCoverageContextBlock({
+      conversationKey: req.conversationKey,
+      request: req,
+    });
+    assert.include(block, "Known coverage from prior agent reads:");
+  });
+
   it("persists, hydrates, renders, and clears conversation coverage", async function () {
     const { rows, restore } = installCoverageMockDb();
     try {
@@ -409,5 +449,40 @@ describe("agent coverage ledger", function () {
     assert.include(userText, "Known coverage from prior agent reads");
     assert.include(userText, "source=zotero_metadata");
     assert.notInclude(stableText, "Known coverage from prior agent reads");
+  });
+});
+
+describe("agent tool names", function () {
+  it("classifies paper_read activity as raw PDF retrieval and ignores retired names", function () {
+    assert.isTrue(isRawPdfRetrievalTool("paper_read"));
+    assert.isFalse(isRawPdfRetrievalTool("read_paper"));
+  });
+
+  it("holds only facade names; retired names live in the hint table", function () {
+    assert.sameMembers(
+      [...PAPER_RETRIEVAL_TOOL_NAMES],
+      ["paper_read", "read_attachment", "library_read", "library_retrieve"],
+    );
+    for (const name of Object.keys(RETIRED_TOOL_HINTS)) {
+      assert.isFalse(PAPER_RETRIEVAL_TOOL_NAMES.has(name), name);
+      assert.isFalse(isPaperEvidenceToolName(name), name);
+      assert.isFalse(isCatalogToolName(name), name);
+    }
+  });
+
+  it("retired names are not evidence: stored reads contribute no coverage", function () {
+    for (const toolName of ["read_paper", "search_paper", "view_pdf_pages"]) {
+      assert.deepEqual(
+        buildAgentCoverageEntriesForActivity({
+          toolName,
+          input: { pages: [3] },
+          content: { pages: [{ pageLabel: "3", text: "figure page" }] },
+          request: request({}),
+          timestamp: 1,
+        }),
+        [],
+        toolName,
+      );
+    }
   });
 });

@@ -122,15 +122,17 @@ describe("action layout lifetime", function () {
     layout();
     assert.equal(fixture.modelBtn.textContent, "Example model");
     assert.equal(fixture.reasoningBtn.textContent, "High");
-    assert.equal(fixture.sendBtn.textContent, "Send");
-    assert.equal(fixture.cancelBtn.textContent, "Cancel");
+    assert.equal(fixture.sendBtn.textContent, "");
+    assert.equal(fixture.cancelBtn.textContent, "");
+    assert.equal(fixture.sendBtn.title, "Send");
+    assert.equal(fixture.cancelBtn.title, "Cancel");
     assert.equal(fixture.panelRoot.dataset.llmActionLayoutMode, "full");
 
     fixture.setWidth(40);
     layout();
     assert.equal(fixture.modelBtn.textContent, "");
-    assert.equal(fixture.sendBtn.textContent, "↑");
-    assert.equal(fixture.cancelBtn.textContent, "X");
+    assert.equal(fixture.sendBtn.textContent, "");
+    assert.equal(fixture.cancelBtn.textContent, "");
 
     fixture.setWidth(0);
     layout();

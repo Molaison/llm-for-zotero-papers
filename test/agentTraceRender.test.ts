@@ -1,8 +1,3 @@
-import {
-  renderPlanProgress,
-  disposePlanProgress,
-  isFloatingPlanExecutionStatus,
-} from "../src/modules/contextPanel/agentTrace/planProgressView";
 import { assert } from "chai";
 import { createApplyTagsTool } from "../src/agent/tools/write/applyTags";
 import { createFileIOTool } from "../src/agent/tools/write/fileIO";
@@ -23,6 +18,9 @@ import {
   renderPendingActionCard,
   selectToolResultTraceCards,
 } from "../src/modules/contextPanel/agentTrace/render";
+import { buildToolResultTraceInfo } from "../src/modules/contextPanel/agentTrace/toolResultTraceInfo";
+import { compactRunEventForPersistence } from "../src/agent/store/traceStore";
+import { bigPaperReadOverview } from "./helpers/bigPaperReadResult";
 import { buildNoteChangeResultCards } from "../src/agent/tools/write/noteChangePresentation";
 import { buildClaudeMcpToolActivityEvent } from "../src/agent/externalBackendBridge";
 import { buildCodexNativeEffectActivityEvent } from "../src/codexAppServer/nativeClient";
@@ -533,13 +531,13 @@ describe("native host authority trace", function () {
     assert.notInclude(collectFakeText(next), "Loading agent activity");
     assert.lengthOf(next.findAllByClass("llm-agent-activity-details"), 1);
   });
-  it("retains semantic events instead of discarding them as non-Plan events", function () {
+  it("retains the semantic provider events a turn publishes as host events", function () {
     const message: any = { role: "assistant", text: "", timestamp: 1 };
     const trace = createCodexNativeActivityTraceControllerForTests(
       message,
       () => {},
     );
-    trace.appendPlanEvent({
+    trace.appendHostEvent({
       type: "provider_event",
       providerType: "agent_semantic_intent",
       payload: { intent: { id: "intent-1" } },
@@ -1045,6 +1043,11 @@ describe("agentTrace render", function () {
       "Checkpointed agent segment 1; continuing",
       "Continuing agent (segment 2, 6/32)",
       "Continuing agent (segment 2, 7/32)",
+      "Continuing agent (round 8)",
+      // A long job's page progress shows in the live status, not each round
+      // in the trace.
+      "Continuing agent (page 2 · 7 of 30)",
+      "Continuing agent (page 2 · 8 of 30)",
       "Reading the methods section",
     ];
     const events: AgentRunEventRecord[] = statusTexts.map((text, index) => ({
@@ -1117,46 +1120,216 @@ describe("agentTrace render", function () {
     }
   });
 
-  it("uses the established Plan button shape and centered label for Resume execution", function () {
-    const trace = renderAgentTrace({
-      doc: fakeDocument,
-      message: { role: "assistant", text: "", timestamp: 1, runMode: "agent" },
-      allowPlanRecovery: true,
-      events: [
-        {
-          runId: "interrupted-plan",
-          seq: 1,
-          eventType: "plan_execution_updated",
-          createdAt: 1,
-          payload: {
-            type: "plan_execution_updated",
-            ledger: {
-              executionId: "interrupted-plan",
-              status: "interrupted",
-              tasks: [],
-            } as any,
-          },
-        },
+  describe("old plan cards", function () {
+    const planTask = (index: number, status: string, content: string) => ({
+      version: 2,
+      taskId: `old-execution:task-${index}`,
+      executionId: "old-execution",
+      planStepId: `step-${index}`,
+      kind: "required_step",
+      content,
+      activeForm: `${content} now`,
+      acceptanceCriteria: [],
+      expectedEffect: "reasoning",
+      obligationIds: [],
+      status,
+      attemptCount: status === "pending" ? 0 : 1,
+      evidenceIds: [],
+      failureReasons: [],
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    const proposal = {
+      version: 1,
+      planId: "old-plan",
+      revision: 2,
+      digest: "sha256:old-plan",
+      provider: "original",
+      conversationKey: 1,
+      status: "awaiting_approval",
+      explanation: "Compare how the two cohorts drift.",
+      steps: [
+        { planStepId: "step-1", content: "Read both papers" },
+        { planStepId: "step-2", content: "Write the comparison" },
       ],
-    }) as unknown as FakeElement;
-    const recovery = trace.findByClass("llm-plan-recovery-card");
-    assert.exists(recovery);
-    assert.include(
-      collectFakeText(recovery),
-      "Plan execution was interrupted.",
-    );
-    assert.equal(
-      recovery?.findByClass("llm-plan-action-label-full")?.textContent,
-      "Resume execution",
-    );
-    const css = readFileSync("addon/content/zoteroPane.css", "utf8");
-    const rule =
-      css.match(
-        /\.llm-plan-recovery-card \.llm-plan-action\s*\{[^}]*\}/,
-      )?.[0] || "";
-    assert.include(rule, "appearance: none");
-    assert.include(rule, "align-items: center");
-    assert.include(rule, "justify-content: center");
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const execution = (status: string, tasks: unknown[]) => ({
+      version: 2,
+      executionId: "old-execution",
+      planId: "old-plan",
+      revision: 2,
+      planDigest: "sha256:old-plan",
+      conversationKey: 1,
+      attempt: 1,
+      provider: "original",
+      status,
+      tasks,
+      createdAt: 1,
+      updatedAt: 2,
+    });
+    const record = (seq: number, payload: unknown): AgentRunEventRecord => ({
+      runId: "old-plan-run",
+      seq,
+      eventType: (payload as { type: string }).type,
+      createdAt: seq,
+      payload: payload as never,
+    });
+    const render = (
+      events: AgentRunEventRecord[],
+      onInterleavedText?: () => void,
+    ) =>
+      renderAgentTrace({
+        doc: fakeDocument,
+        message: {
+          role: "assistant",
+          text: "The plan is ready for review.",
+          timestamp: 1,
+          runMode: "agent",
+        },
+        events,
+        onInterleavedText,
+        // The latest message once offered Resume; plan mode is retired.
+        ...({ allowPlanRecovery: true } as object),
+      }) as unknown as FakeElement;
+    const statusOf = (card: FakeElement | null) =>
+      card?.findByClass("llm-plan-status")?.textContent;
+
+    it("shows a proposal's steps from its own event, read-only", function () {
+      let textHidden = false;
+      const trace = render(
+        [record(1, { type: "plan_ready", artifact: proposal })],
+        () => {
+          textHidden = true;
+        },
+      );
+      const card = trace.findByClass("llm-plan-container");
+      assert.exists(card);
+      assert.equal(card?.dataset.llmPlanId, "old-plan");
+      assert.equal(card?.findByClass("llm-plan-title")?.textContent, "Plan");
+      assert.equal(
+        card?.findByClass("llm-plan-version")?.textContent,
+        "Revision 2",
+      );
+      assert.equal(statusOf(card), "Proposed");
+      const markdown = card?.findByClass("llm-plan-markdown")?.innerHTML || "";
+      assert.include(markdown, "Read both papers");
+      assert.include(markdown, "Write the comparison");
+      assert.lengthOf(card!.findAllByTag("button"), 0, "no plan control");
+      assert.lengthOf(card!.findAllByTag("textarea"), 0);
+      assert.isTrue(textHidden, "the card is the planning turn's answer");
+    });
+
+    it("shows how an execution ended, with each step, and offers no Resume", function () {
+      let textHidden = false;
+      const trace = render(
+        [
+          record(1, { type: "plan_ready", artifact: proposal }),
+          record(2, {
+            type: "plan_execution_updated",
+            ledger: execution("interrupted", [
+              planTask(1, "completed", "Read both papers"),
+              planTask(2, "interrupted", "Write the comparison"),
+              planTask(3, "pending", "Save it as a note"),
+            ]),
+          }),
+        ],
+        () => {
+          textHidden = true;
+        },
+      );
+      assert.isNull(trace.findByClass("llm-plan-recovery-card"));
+      const card = trace.findByClass("llm-plan-container");
+      assert.exists(card);
+      assert.equal(statusOf(card), "Interrupted");
+      const rows = card!.findAllByClass("llm-plan-task");
+      assert.deepEqual(
+        rows.map((row) => row.findByClass("llm-plan-task-label")?.textContent),
+        ["Read both papers", "Write the comparison", "Save it as a note"],
+      );
+      assert.deepEqual(
+        rows.map((row) => row.className),
+        [
+          "llm-plan-task llm-plan-task-completed",
+          "llm-plan-task llm-plan-task-interrupted",
+          "llm-plan-task llm-plan-task-pending",
+        ],
+      );
+      assert.isNull(
+        card!.findByClass("llm-plan-markdown"),
+        "the executed steps replace the proposal text",
+      );
+      assert.lengthOf(card!.findAllByTag("button"), 0, "no plan control");
+      assert.notInclude(collectFakeText(trace), "Resume");
+      assert.isFalse(textHidden, "an execution turn keeps its own answer");
+    });
+
+    it("says a run that stopped mid-plan did not finish, and never shows a step as still running", function () {
+      const trace = render([
+        record(1, {
+          type: "plan_execution_updated",
+          ledger: execution("running", [
+            planTask(1, "completed", "Read both papers"),
+            planTask(2, "in_progress", "Write the comparison"),
+          ]),
+        }),
+      ]);
+      const card = trace.findByClass("llm-plan-container");
+      assert.equal(statusOf(card), "Not finished");
+      assert.deepEqual(
+        card!.findAllByClass("llm-plan-task").map((row) => row.className),
+        [
+          "llm-plan-task llm-plan-task-completed",
+          "llm-plan-task llm-plan-task-interrupted",
+        ],
+      );
+    });
+
+    it("tells how the plan ended from the run's last execution report", function () {
+      const trace = render([
+        record(1, {
+          type: "plan_execution_updated",
+          ledger: execution("running", [
+            planTask(1, "in_progress", "Read both papers"),
+          ]),
+        }),
+        record(2, {
+          type: "plan_execution_updated",
+          ledger: execution("completed", [
+            planTask(1, "completed", "Read both papers"),
+          ]),
+        }),
+      ]);
+      const card = trace.findByClass("llm-plan-container");
+      assert.equal(statusOf(card), "Completed");
+      assert.deepEqual(
+        card!.findAllByClass("llm-plan-task").map((row) => row.className),
+        ["llm-plan-task llm-plan-task-completed"],
+      );
+    });
+
+    for (const [status, label] of [
+      ["completed", "Completed"],
+      ["completed_with_exceptions", "Completed with exceptions"],
+      ["failed", "Failed"],
+      ["cancelled", "Cancelled"],
+      ["superseded", "Superseded"],
+      ["blocked", "Blocked"],
+      ["waiting_for_user", "Not finished"],
+    ]) {
+      it(`labels an execution that ended ${status} "${label}"`, function () {
+        const trace = render([
+          record(1, {
+            type: "plan_execution_updated",
+            ledger: execution(status, [
+              planTask(1, "completed", "Read both papers"),
+            ]),
+          }),
+        ]);
+        assert.equal(statusOf(trace.findByClass("llm-plan-container")), label);
+      });
+    }
   });
 
   it("projects authoritative work categories without inferring from tool names", function () {
@@ -1264,7 +1437,7 @@ describe("agentTrace render", function () {
   it("phase-anchors every reconstructed continuous progress animation", function () {
     const css = readFileSync("addon/content/zoteroPane.css", "utf8");
     const relevantSelector =
-      /(?:llm-at-(?:row-)?planning|llm-text-shimmer|llm-typing-dot|llm-plan-progress-trigger-dot|llm-plan-task-badge-in_progress|llm-compact-marker-pending)/;
+      /(?:llm-at-(?:row-)?planning|llm-text-shimmer|llm-typing-dot|llm-task-progress-ring|llm-plan-task-badge-in_progress|llm-compact-marker-pending)/;
     const infiniteRules = Array.from(
       css.matchAll(/animation:[^;]*\binfinite\b[^;]*;/g),
     ).flatMap((match) => {
@@ -1286,15 +1459,6 @@ describe("agentTrace render", function () {
       );
     }
   });
-
-  it("floats only starting or running Plan execution states", function () {
-    assert.isTrue(isFloatingPlanExecutionStatus("running"));
-    assert.isFalse(isFloatingPlanExecutionStatus("interrupted"));
-    assert.isFalse(isFloatingPlanExecutionStatus("waiting_for_user"));
-    assert.isFalse(isFloatingPlanExecutionStatus("completed"));
-    assert.isFalse(isFloatingPlanExecutionStatus("failed"));
-  });
-
   it("formats compact Codex-style activity durations", function () {
     assert.equal(formatAgentActivityDuration(250), "1s");
     assert.equal(formatAgentActivityDuration(259_000), "4m 19s");
@@ -2060,274 +2224,6 @@ describe("agentTrace render", function () {
     );
     assert.isNull(executing.findByClass("llm-at-planning-drive"));
   });
-
-  it("renders execution progress as a compact accessible pill with the full ledger in a popover", function () {
-    const makeTask = (
-      id: string,
-      status: "completed" | "in_progress" | "pending",
-      content: string,
-    ) => ({
-      version: 1 as const,
-      taskId: id,
-      executionId: "execution-pill",
-      planStepId: id,
-      kind: "required_step" as const,
-      content,
-      activeForm: status === "in_progress" ? "Drafting the brief" : content,
-      acceptanceCriteria: [`${content} is complete`],
-      expectedEffect: "artifact" as const,
-      obligationIds: [],
-      status,
-      attemptCount: status === "pending" ? 0 : 1,
-      evidenceIds: status === "completed" ? [`evidence-${id}`] : [],
-      failureReasons: [],
-      createdAt: 1,
-      updatedAt: 2,
-    });
-    const events: AgentRunEventRecord[] = [
-      {
-        runId: "run-plan-pill",
-        seq: 1,
-        eventType: "plan_execution_updated",
-        payload: {
-          type: "plan_execution_updated",
-          ledger: {
-            version: 1,
-            executionId: "execution-pill",
-            planId: "plan-pill",
-            revision: 1,
-            planDigest: "digest",
-            conversationKey: 1,
-            attempt: 1,
-            provider: "original",
-            grant: {
-              version: 1,
-              planId: "plan-pill",
-              revision: 1,
-              planDigest: "digest",
-              conversationKey: 1,
-              conversationGeneration: 1,
-              approvedAt: 1,
-            },
-            status: "running",
-            activeTaskId: "step-2",
-            tasks: [
-              makeTask("step-1", "completed", "Search the library"),
-              makeTask("step-2", "in_progress", "Draft the document"),
-              makeTask("step-3", "pending", "Finalize references"),
-            ],
-            evidence: [],
-            startedAt: 1,
-            updatedAt: 2,
-          },
-        },
-        createdAt: 2,
-      },
-    ];
-
-    const trace = renderAgentTrace({
-      doc: fakeDocument,
-      message: { role: "assistant", text: "", timestamp: 2, streaming: true },
-      events,
-    }) as unknown as FakeElement;
-    assert.isNull(
-      trace.findByClass("llm-plan-container-execution"),
-      "even stale streaming history cannot mount progress",
-    );
-    const root = renderPlanProgress(
-      fakeDocument,
-      (events[0].payload as any).ledger,
-      events,
-    ) as unknown as FakeElement;
-    const trigger = root?.findByClass("llm-plan-progress-trigger");
-    const popover = root?.findByClass("llm-plan-progress-popover");
-
-    assert.exists(root);
-    assert.equal(root?.dataset.llmPlanExecutionId, "execution-pill");
-    assert.equal(root?.dataset.llmPlanExecutionStatus, "running");
-    assert.include(collectFakeText(trigger), "Task progress");
-    assert.include(collectFakeText(trigger), "1/3");
-    assert.notInclude(collectFakeText(trigger), "Drafting the brief");
-    assert.include(collectFakeText(popover), "Drafting the brief");
-    assert.include(collectFakeText(popover), "Search the library");
-    assert.include(collectFakeText(popover), "Finalize references");
-    assert.equal(trigger?.attributes["aria-expanded"], "false");
-    assert.include(
-      trigger?.attributes["aria-label"] || "",
-      "1 of 3 required steps complete",
-    );
-    assert.exists(popover?.findByClass("llm-plan-task-list"));
-    const progress = popover?.findByClass("llm-plan-progress");
-    assert.equal(progress?.attributes.role, "progressbar");
-    assert.equal(progress?.attributes["aria-valuemin"], "0");
-    assert.equal(progress?.attributes["aria-valuemax"], "3");
-    assert.equal(progress?.attributes["aria-valuenow"], "1");
-    assert.notInclude(collectFakeText(progress), "steps complete");
-
-    root?.dispatchFakeEvent("mouseenter");
-    assert.isTrue(root?.classList.contains("llm-plan-progress-hover"));
-    root?.dispatchFakeEvent("mouseleave");
-    assert.isFalse(root?.classList.contains("llm-plan-progress-hover"));
-
-    trigger?.dispatchFakeEvent("click");
-    assert.isTrue(root?.classList.contains("llm-plan-progress-open"));
-    assert.equal(trigger?.attributes["aria-expanded"], "true");
-    assert.include(trigger?.attributes["aria-label"] || "", "Hide");
-    trigger?.dispatchFakeEvent("click");
-    assert.isFalse(root?.classList.contains("llm-plan-progress-open"));
-  });
-
-  it("keeps clicked task progress open across live execution rerenders", function () {
-    const renderProgress = (
-      status: "running" | "completed",
-      updatedAt: number,
-      previous?: FakeElement,
-    ) =>
-      (() => {
-        const events: AgentRunEventRecord[] = [
-          {
-            runId: "run-stable-progress",
-            seq: updatedAt,
-            eventType: "plan_execution_updated",
-            payload: {
-              type: "plan_execution_updated",
-              ledger: {
-                version: 1,
-                executionId: "execution-stable-progress",
-                planId: "plan-stable-progress",
-                revision: 1,
-                planDigest: "digest",
-                conversationKey: 1,
-                attempt: 1,
-                provider: "original",
-                grant: {
-                  version: 1,
-                  planId: "plan-stable-progress",
-                  revision: 1,
-                  planDigest: "digest",
-                  conversationKey: 1,
-                  conversationGeneration: 1,
-                  approvedAt: 1,
-                },
-                status,
-                activeTaskId: status === "running" ? "step-1" : undefined,
-                tasks: [
-                  {
-                    version: 1,
-                    taskId: "step-1",
-                    executionId: "execution-stable-progress",
-                    planStepId: "step-1",
-                    kind: "required_step",
-                    content: "Draft the document",
-                    activeForm: "Drafting the document",
-                    acceptanceCriteria: ["The document is complete"],
-                    expectedEffect: "artifact",
-                    obligationIds: [],
-                    status: status === "running" ? "in_progress" : "completed",
-                    attemptCount: 1,
-                    evidenceIds:
-                      status === "completed" ? ["evidence-step-1"] : [],
-                    failureReasons: [],
-                    createdAt: 1,
-                    updatedAt,
-                  },
-                ],
-                evidence: [],
-                startedAt: 1,
-                completedAt: status === "completed" ? updatedAt : undefined,
-                updatedAt,
-              },
-            },
-            createdAt: updatedAt,
-          },
-        ];
-        const trace = renderAgentTrace({
-          doc: fakeDocument,
-          message: {
-            role: "assistant",
-            text: "",
-            timestamp: updatedAt,
-            streaming: status === "running",
-          },
-          events,
-        }) as unknown as FakeElement;
-        assert.isNull(trace.findByClass("llm-plan-container-execution"));
-        return renderPlanProgress(
-          fakeDocument,
-          (events[0].payload as any).ledger,
-          events,
-          previous as unknown as HTMLElement,
-        ) as unknown as FakeElement;
-      })();
-
-    const first = renderProgress("running", 2);
-    const firstRoot = first.findByClass("llm-plan-container-execution");
-    firstRoot
-      ?.findByClass("llm-plan-progress-trigger")
-      ?.dispatchFakeEvent("click");
-    assert.isTrue(firstRoot?.classList.contains("llm-plan-progress-open"));
-
-    const updated = renderProgress("running", 3, first);
-    const updatedRoot = updated.findByClass("llm-plan-container-execution");
-    const updatedTrigger = updatedRoot?.findByClass(
-      "llm-plan-progress-trigger",
-    );
-    assert.isTrue(updatedRoot?.classList.contains("llm-plan-progress-open"));
-    assert.equal(updatedTrigger?.attributes["aria-expanded"], "true");
-    assert.include(updatedTrigger?.attributes["aria-label"] || "", "Hide");
-
-    disposePlanProgress(updated as unknown as HTMLElement);
-    assert.isNull(updated.parentElement);
-    const restarted = renderProgress("running", 5);
-    const restartedRoot = restarted.findByClass("llm-plan-container-execution");
-    assert.isFalse(restartedRoot?.classList.contains("llm-plan-progress-open"));
-  });
-
-  it("disposes progress observers and listeners when its live owner unmounts", function () {
-    let observers = 0;
-    const listeners = new Set<EventListener>();
-    const doc = {
-      ...fakeDocument,
-      defaultView: {
-        ResizeObserver: class {
-          observe() {
-            observers++;
-          }
-          disconnect() {
-            observers--;
-          }
-        },
-        addEventListener(_type: string, listener: EventListener) {
-          listeners.add(listener);
-        },
-        removeEventListener(_type: string, listener: EventListener) {
-          listeners.delete(listener);
-        },
-      },
-    } as unknown as Document;
-    const root = renderPlanProgress(
-      doc,
-      {
-        executionId: "dispose",
-        planId: "dispose",
-        revision: 1,
-        status: "running",
-        createdAt: 1,
-        updatedAt: 1,
-        tasks: [],
-      } as any,
-      [],
-    ) as unknown as FakeElement;
-    const trigger = root.findByClass("llm-plan-progress-trigger")!;
-    assert.equal(observers, 1);
-    assert.equal(listeners.size, 1);
-    disposePlanProgress(root as unknown as HTMLElement);
-    trigger.dispatchFakeEvent("click");
-    assert.equal(observers, 0);
-    assert.equal(listeners.size, 0);
-    assert.equal(trigger.attributes["aria-expanded"], "false");
-  });
-
   for (const status of [
     "pending",
     "running",
@@ -2365,6 +2261,7 @@ describe("agentTrace render", function () {
       }) as unknown as FakeElement;
       assert.isNull(trace.findByClass("llm-plan-container-execution"));
       assert.isNull(trace.findByClass("llm-plan-progress-trigger"));
+      assert.isNull(trace.findByClass("llm-task-progress-steps"));
     });
   }
 
@@ -2725,6 +2622,56 @@ describe("agentTrace render", function () {
     assert.deepEqual(
       message.pendingAgentTraceEvents.map((e: any) => e.eventType),
       ["codex_progress"],
+    );
+  });
+
+  it("renders no trace row for Codex's plan checklist, which Task progress shows", function () {
+    const message: any = {
+      role: "assistant",
+      text: "",
+      timestamp: 1,
+      runMode: "agent",
+      modelProviderLabel: "Codex",
+    };
+    const controller = createCodexNativeActivityTraceControllerForTests(
+      message,
+      () => {},
+    );
+    controller.appendNativePlanProgress([
+      { content: "Inspect the scope", status: "completed" },
+      { content: "Compare the methods", status: "in_progress" },
+    ]);
+    const events = message.pendingAgentTraceEvents as AgentRunEventRecord[];
+    assert.lengthOf(events, 1, "the plan is kept for history");
+    const { items } = buildAgentTraceDisplayItems(events, null, message);
+    const texts = flattenTraceItems(items).map((item) => JSON.stringify(item));
+    assert.isFalse(
+      texts.some((text) => text.includes("Compare the methods")),
+      "no checklist row in the trace",
+    );
+    // A run stored by an older build renders no row either.
+    const legacy = buildAgentTraceDisplayItems(
+      [
+        {
+          runId: "legacy",
+          seq: 1,
+          eventType: "codex_progress",
+          payload: {
+            type: "codex_progress",
+            itemId: "codex-plan-checklist",
+            text: "✓ Inspect the scope\n• Compare the methods",
+            status: "running",
+          },
+          createdAt: 1,
+        },
+      ],
+      null,
+      message,
+    );
+    assert.isFalse(
+      flattenTraceItems(legacy.items).some((item) =>
+        JSON.stringify(item).includes("Compare the methods"),
+      ),
     );
   });
 
@@ -8711,6 +8658,173 @@ describe("agentTrace render", function () {
     assert.deepEqual(inlineTexts, [intermediateText]);
   });
 
+  it("shows text committed before a tool call once, in the answer, after the final", function () {
+    const summaries =
+      "## Per-paper summaries\n\n**1. Smith (2021)**\n\nDrift grows with time.\n\n**2. Lee (2022)**\n\nDecoding stays stable.\n\n";
+    const review = "## Review\n\nBoth papers agree.";
+    const finalText = `${summaries}${review}`;
+    const runId = "run-committed-segment";
+    const events: AgentRunEventRecord[] = [
+      {
+        runId,
+        seq: 1,
+        eventType: "message_delta",
+        payload: { type: "message_delta", text: summaries },
+        createdAt: 1,
+      },
+      {
+        runId,
+        seq: 2,
+        eventType: "tool_call",
+        payload: {
+          type: "tool_call",
+          callId: "call-1",
+          name: "read_paper",
+          args: { operation: "full_text" },
+        },
+        createdAt: 2,
+      },
+      {
+        runId,
+        seq: 3,
+        eventType: "tool_result",
+        payload: {
+          type: "tool_result",
+          callId: "call-1",
+          name: "read_paper",
+          ok: true,
+          content: { text: "paper text" },
+        },
+        createdAt: 3,
+      },
+      {
+        runId,
+        seq: 4,
+        eventType: "message_delta",
+        payload: { type: "message_delta", text: review },
+        createdAt: 4,
+      },
+      {
+        runId,
+        seq: 5,
+        eventType: "final",
+        payload: { type: "final", text: finalText },
+        createdAt: 5,
+      },
+    ];
+
+    const { items, isInterleaved } = buildAgentTraceDisplayItems(events, null, {
+      role: "assistant",
+      text: finalText,
+      timestamp: 1,
+      runMode: "agent",
+      modelProviderLabel: "OpenAI",
+    });
+    const inlineTexts = items
+      .filter(
+        (
+          item,
+        ): item is Extract<(typeof items)[number], { type: "inline_text" }> =>
+          item.type === "inline_text",
+      )
+      .map((item) => item.text.trim());
+
+    assert.isBoolean(isInterleaved);
+    assert.notInclude(inlineTexts, summaries.trim());
+    assert.notInclude(inlineTexts, review.trim());
+    assert.deepEqual(inlineTexts, []);
+  });
+
+  it("shows text committed before a tool call once while the answer streams", function () {
+    const summaries =
+      "## Per-paper summaries\n\n**1. Smith (2021)**\n\nDrift grows with time.\n\n**2. Lee (2022)**\n\nDecoding stays stable.\n\n";
+    const partial = "## Review\n\nBoth";
+    const runId = "run-committed-segment-streaming";
+    const beforeAnswer: AgentRunEventRecord[] = [
+      {
+        runId,
+        seq: 1,
+        eventType: "message_delta",
+        payload: { type: "message_delta", text: summaries },
+        createdAt: 1,
+      },
+      {
+        runId,
+        seq: 2,
+        eventType: "tool_call",
+        payload: {
+          type: "tool_call",
+          callId: "call-1",
+          name: "read_paper",
+          args: { operation: "full_text" },
+        },
+        createdAt: 2,
+      },
+      {
+        runId,
+        seq: 3,
+        eventType: "tool_result",
+        payload: {
+          type: "tool_result",
+          callId: "call-1",
+          name: "read_paper",
+          ok: true,
+          content: { text: "paper text" },
+        },
+        createdAt: 3,
+      },
+    ];
+    const inlineTextsOf = (
+      items: ReturnType<typeof buildAgentTraceDisplayItems>["items"],
+    ) =>
+      items
+        .filter(
+          (
+            item,
+          ): item is Extract<(typeof items)[number], { type: "inline_text" }> =>
+            item.type === "inline_text",
+        )
+        .map((item) => item.text.trim());
+
+    // Before the answer continues, the trace carries the kept text in place
+    // of the bubble.
+    const waiting = buildAgentTraceDisplayItems(beforeAnswer, null, {
+      role: "assistant",
+      text: summaries,
+      timestamp: 1,
+      runMode: "agent",
+      modelProviderLabel: "OpenAI",
+      streaming: true,
+    });
+    assert.isTrue(waiting.inlineTextReplacesAssistantText);
+    assert.deepEqual(inlineTextsOf(waiting.items), [summaries.trim()]);
+
+    // Once the answer continues, the bubble shows it and the trace does not.
+    const streaming = buildAgentTraceDisplayItems(
+      [
+        ...beforeAnswer,
+        {
+          runId,
+          seq: 4,
+          eventType: "message_delta",
+          payload: { type: "message_delta", text: partial },
+          createdAt: 4,
+        },
+      ],
+      null,
+      {
+        role: "assistant",
+        text: `${summaries}${partial}`,
+        timestamp: 1,
+        runMode: "agent",
+        modelProviderLabel: "OpenAI",
+        streaming: true,
+      },
+    );
+    assert.isFalse(streaming.inlineTextReplacesAssistantText);
+    assert.deepEqual(inlineTextsOf(streaming.items), []);
+  });
+
   it("joins streamed interleaved text across hidden provider events", function () {
     const sentence =
       "Now let me find the Obsidian vault location and look for any existing note for this paper.";
@@ -9972,7 +10086,7 @@ describe("agent trace stage grouping", function () {
       event(seq + 1, {
         type: "tool_result",
         callId,
-        name: "apply_tags",
+        name: "library_update",
         ok: true,
         actionReceipts: receipts,
         content: { tagged: 1 },
@@ -9982,7 +10096,7 @@ describe("agent trace stage grouping", function () {
     ];
 
     const tagPresentation = {
-      apply_tags: {
+      library_update: {
         label: "Apply Tags",
         summaries: { onSuccess: "Tags applied" },
       },
@@ -12198,5 +12312,217 @@ describe("action card row detail wiring", function () {
     assert.equal(headerPill.textContent, "Saved");
     assert.isTrue(node.findByClass("llm-agent-action-row")!.open);
     assert.exists(node.findByClass("llm-spy-detail"));
+  });
+});
+
+describe("tool results stored by handle", function () {
+  const truncated = {
+    type: "tool_result" as const,
+    callId: "call-big",
+    name: "paper_read",
+    ok: true,
+    actionReceipts: [],
+    toolResultHandle: "trh_abc",
+    content: { truncated: true, handle: "trh_abc", bytes: 1_300_000 },
+  };
+
+  it("reports the result's size, its handle and the preview the marker kept", function () {
+    const info = buildToolResultTraceInfo({
+      ...truncated,
+      content: { ...truncated.content, preview: { mode: "overview" } },
+    });
+    assert.deepEqual(
+      info?.details.map((detail) => detail.label),
+      ["Result size", "Stored by handle", "Result preview"],
+    );
+    assert.include(info!.details[2].value, '"mode": "overview"');
+  });
+
+  it("reports the result's size and its handle, and no preview when the marker kept none", function () {
+    const info = buildToolResultTraceInfo(truncated);
+    assert.deepEqual(
+      info?.details.map((detail) => [detail.label, detail.value]),
+      [
+        ["Result size", "1,300,000 chars"],
+        ["Stored by handle", "trh_abc"],
+      ],
+    );
+  });
+
+  it("summarizes a reloaded paper read from its preview exactly as it did live", function () {
+    const live = {
+      type: "tool_result" as const,
+      callId: "call-overview",
+      name: "paper_read",
+      ok: true,
+      actionReceipts: [],
+      toolResultHandle: "trh_overview",
+      content: bigPaperReadOverview(),
+    };
+    const reloaded = compactRunEventForPersistence(live);
+    const trace = (result: typeof live | typeof reloaded) =>
+      withToolPresentationsReturning(
+        { paper_read: paperReadPresentation() },
+        () =>
+          traceRowTexts(
+            buildAgentTraceDisplayItems(
+              [
+                {
+                  runId: "run-1",
+                  seq: 1,
+                  eventType: "tool_call",
+                  payload: {
+                    type: "tool_call",
+                    callId: "call-overview",
+                    name: "paper_read",
+                    args: { mode: "overview" },
+                  },
+                  createdAt: 1,
+                },
+                {
+                  runId: "run-1",
+                  seq: 2,
+                  eventType: "tool_result",
+                  payload: result,
+                  createdAt: 2,
+                },
+              ],
+              null,
+            ).items,
+          ),
+      );
+    const liveRows = trace(live);
+    assert.isTrue(
+      liveRows.some((text) => text.startsWith("Read paper overviews from")),
+      liveRows.join(" | "),
+    );
+    assert.deepEqual(trace(reloaded), liveRows);
+  });
+
+  it("projects a persisted trace with a stored result and a gap in its sequence", function () {
+    const events: AgentRunEventRecord[] = [
+      {
+        runId: "run-1",
+        seq: 1,
+        eventType: "tool_call",
+        payload: {
+          type: "tool_call",
+          callId: "call-big",
+          name: "paper_read",
+          args: { mode: "full" },
+        },
+        createdAt: 1,
+      },
+      // Rows 2-4 were a lost delta buffer.
+      {
+        runId: "run-1",
+        seq: 5,
+        eventType: "tool_result",
+        payload: truncated,
+        createdAt: 5,
+      },
+      {
+        runId: "run-1",
+        seq: 6,
+        eventType: "final",
+        payload: { type: "final", text: "Done." },
+        createdAt: 6,
+      },
+    ];
+    const { items } = buildAgentTraceDisplayItems(events, null);
+    assert.isNotEmpty(items);
+    assert.notInclude(JSON.stringify(items), "Result preview");
+  });
+});
+
+describe("text kept before a document", function () {
+  const documentId = "run-kept:document:1";
+  const KEPT =
+    "## Per-paper summaries\n\n**1. Smith (2021)** Drift grows with time.";
+  const DOCUMENT = "# Review\n\nBoth papers agree that drift grows.";
+
+  const keptEvents = (): AgentRunEventRecord[] =>
+    [
+      { type: "message_delta", text: KEPT },
+      {
+        type: "tool_call",
+        callId: "submit-1",
+        name: "submit_document",
+        args: { title: "Review" },
+      },
+      {
+        type: "tool_result",
+        callId: "submit-1",
+        name: "submit_document",
+        ok: true,
+        actionReceipts: [],
+        content: { documentId, visibleMarkdown: DOCUMENT },
+      },
+      {
+        type: "material_finalized",
+        callId: "submit-1",
+        materialRef: {
+          documentId,
+          documentVersion: 1,
+          contentHash: "sha256:kept",
+        },
+        materialTitle: "Review",
+      },
+      { type: "final", text: `${KEPT}\n\n${DOCUMENT}` },
+    ].map((payload, index) => ({
+      runId: "run-kept",
+      seq: index + 1,
+      eventType: payload.type,
+      createdAt: index + 1,
+      payload: payload as AgentEvent,
+    })) as AgentRunEventRecord[];
+
+  const render = (text: string) => {
+    let hidden = false;
+    const trace = renderAgentTrace({
+      doc: fakeDocument,
+      message: {
+        role: "assistant",
+        text,
+        timestamp: 1,
+        runMode: "agent",
+        agentRunId: "run-kept",
+        documentId,
+        streaming: false,
+      },
+      events: keptEvents(),
+      onInterleavedText: () => {
+        hidden = true;
+      },
+    }) as unknown as FakeElement;
+    return { trace, hidden };
+  };
+
+  it("shows the text written before the document above its card", function () {
+    const { trace, hidden } = render(`${KEPT}\n\n${DOCUMENT}`);
+    const lead = trace.findByClass("llm-plan-document-lead");
+    assert.exists(lead, "the kept text stays visible");
+    const shown = `${lead!.textContent}${lead!.innerHTML}`;
+    assert.include(shown, "Drift grows with time.");
+    assert.notInclude(shown, "Both papers agree");
+    const order = trace.children.map((child) => child.className);
+    const leadIndex = order.findIndex((name) =>
+      name.includes("llm-plan-document-lead"),
+    );
+    const cardIndex = order.findIndex((name) =>
+      name.includes("llm-plan-document-card"),
+    );
+    assert.isAtLeast(cardIndex, 0);
+    assert.isBelow(leadIndex, cardIndex, "the kept text sits above the card");
+    // The answer bubble would repeat the document; the card delivers it.
+    assert.isTrue(hidden);
+    disposeAgentTrace(trace as unknown as HTMLElement);
+  });
+
+  it("shows no lead when the message is the document alone", function () {
+    const { trace, hidden } = render(DOCUMENT);
+    assert.isNull(trace.findByClass("llm-plan-document-lead"));
+    assert.isTrue(hidden);
+    disposeAgentTrace(trace as unknown as HTMLElement);
   });
 });

@@ -3,7 +3,6 @@ import {
   filterMineruItemsForSearch,
   getMineruManagerActionLabels,
   getMineruParentDisplayStatus,
-  shouldShowMineruManagerItem,
   type MineruParentStatusChild,
 } from "../src/modules/mineruManagerScript";
 import type { MineruItemEntry } from "../src/modules/mineruBatchProcessor";
@@ -103,35 +102,6 @@ describe("mineruManagerScript", function () {
     it("does not match manual or automatic tags", function () {
       assert.deepEqual(filterMineruItemsForSearch(items, "stable"), []);
       assert.deepEqual(filterMineruItemsForSearch(items, "Replay"), [items[0]]);
-    });
-  });
-
-  describe("shouldShowMineruManagerItem", function () {
-    it("shows uncached rows skipped by parsing filters", function () {
-      assert.isTrue(
-        shouldShowMineruManagerItem({
-          excluded: true,
-          availability: "missing",
-        }),
-      );
-    });
-
-    it("keeps cached skipped rows visible for cache management", function () {
-      assert.isTrue(
-        shouldShowMineruManagerItem({
-          excluded: true,
-          availability: "local",
-        }),
-      );
-    });
-
-    it("keeps normal uncached rows visible", function () {
-      assert.isTrue(
-        shouldShowMineruManagerItem({
-          excluded: false,
-          availability: "missing",
-        }),
-      );
     });
   });
 

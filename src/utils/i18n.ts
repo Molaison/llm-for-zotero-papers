@@ -54,6 +54,7 @@ const zhCN: Record<string, string> = {
   "You": "你",
   "Assistant": "助手",
   "Note chat": "笔记对话",
+  "Chat mode": "对话模式",
   "New chat": "新对话",
   "Search history": "搜索历史记录",
   Skills: "技能",
@@ -74,6 +75,22 @@ const zhCN: Record<string, string> = {
   Clear: "清除",
   "Clear all": "全部清除",
   "Context cleared": "上下文已清除",
+  "Account balance": "账户余额",
+  "API key allowance remaining": "API 密钥剩余额度",
+  "Codex account quota": "Codex 账户额度",
+  "Claude Code account quota": "Claude Code 账户额度",
+  "GLM Coding Plan quota": "GLM 编程套餐额度",
+  "Kimi Code quota": "Kimi Code 额度",
+  "MiniMax Token Plan quota": "MiniMax Token Plan 额度",
+  "OpenCode Go quota": "OpenCode Go 额度",
+  "Rolling window": "滚动周期",
+  Weekly: "每周",
+  Monthly: "每月",
+  "Shows the most-used quota window": "显示使用比例最高的额度周期",
+  "Quota window": "额度周期",
+  Resets: "重置时间",
+  "Last checked": "上次查询",
+  "Click to refresh": "点击刷新",
   "No context to clear": "没有可清除的上下文",
   "Add Items as Context to LLM-for-Zotero":
     "将条目作为上下文添加到 LLM-for-Zotero",
@@ -408,8 +425,8 @@ const zhCN: Record<string, string> = {
     "所有外部写入（包括创建新笔记）在执行前都会显示以供审核。读取操作无需审核。",
   "Reads, ordinary writes and recoverable changes run automatically. Other actions receive model review; confirmation is requested only for unclear intent, excessive risk, or unavailable review.":
     "读取、常规写入和可恢复更改会自动执行。其他操作由模型审核；仅在意图不明确、风险过高或审核不可用时请求确认。",
-  "The Original Agent acts without permission prompts or approval-model calls, including ambiguous or dangerous actions. Explicit restrictions, requested review workflows, execution integrity and required paper selection remain enforced. Claude Code, Codex, and external MCP callers keep their own permission controls.":
-    "原生 Agent 执行操作时不会请求权限确认或调用审批模型，包括有歧义或危险的操作。明确限制、用户要求的审核流程、执行完整性及必要的论文选择仍然有效。Claude Code、Codex 和外部 MCP 调用方保留各自的权限控制。",
+  "The Original Agent acts without permission prompts or approval-model calls, including ambiguous or dangerous actions. Requested review workflows, execution integrity and the paper selection card for discovered papers remain enforced. Claude Code, Codex, and external MCP callers keep their own permission controls.":
+    "原生 Agent 执行操作时不会请求权限确认或调用审批模型，包括有歧义或危险的操作。用户要求的审核流程、执行完整性及所发现论文的选择卡片仍然有效。Claude Code、Codex 和外部 MCP 调用方保留各自的权限控制。",
   "This setting controls every Original Agent action, including Zotero changes, local files, commands, scripts, and network tools. Claude Code and Codex keep their own independent native permission profiles. Reversible Original Agent changes are recorded and can be reverted from Agent history.":
     "此设置控制原生 Agent 的所有操作，包括 Zotero 更改、本地文件、命令、脚本和网络工具。Claude Code 和 Codex 保留各自独立的原生权限配置。原生 Agent 的可撤销更改会被记录，并可从 Agent 历史记录中撤销。",
   "Tavily Web Search": "Tavily 网页搜索",
@@ -437,6 +454,10 @@ const zhCN: Record<string, string> = {
     "Tavily 暂时不可用。请稍后重试。",
   "View web sources": "查看网页来源",
   "Web sources": "网页来源",
+  "Supporting passages": "支持段落",
+  "Quote {number}": "引文 {number}",
+  "{number} Quote": "{number} 条引文",
+  "{number} Quotes": "{number} 条引文",
   "Open web source": "打开网页来源",
   "MinerU PDF Parsing": "MinerU PDF 解析",
   "Extract high-quality structured text from PDFs with preserved math formulas, tables, and figures. MinerU dramatically improves how the AI understands your papers.":
@@ -517,6 +538,33 @@ const zhCN: Record<string, string> = {
   "Uploading PDF…": "正在上传 PDF…",
   "Uploading to local server… (%s MB)": "正在上传到本地服务…（%s MB）",
   "Upload failed: HTTP %s to %s": "上传失败：HTTP %s 到 %s",
+  "✓ Service reachable; PDF parsing has not been tested":
+    "✓ 服务可访问；尚未测试 PDF 解析",
+  "Legacy API": "旧版 API",
+  "Test Connection detects the local API and available options.":
+    "测试连接会识别本地 API 和可用选项。",
+  "Backend (MinerU 2/3)": "后端模型（MinerU 2/3）",
+  "Quality tier (MinerU 4)": "解析档位（MinerU 4）",
+  "Hybrid effort (MinerU 3.3+)": "混合模型精度（MinerU 3.3+）",
+  "Auto (best available)": "自动（最佳可用）",
+  "tiers: %s": "档位：%s",
+  "Auto will use %s": "自动将使用 %s",
+  "%s will be used": "将使用 %s",
+  "%s isn't offered; %s will be used": "服务器未提供 %s；将使用 %s",
+  fastest: "最快",
+  "lightweight models": "轻量模型",
+  "full models": "完整模型",
+  "highest quality": "最高质量",
+  "VLM server URL (HTTP-client backends)": "VLM 服务器地址（HTTP-client 后端）",
+  "Local service API key (optional)": "本地服务 API 密钥（可选）",
+  "Analyze images and charts (VLM or hybrid high effort)":
+    "分析图片和图表（VLM 或高精度混合模型）",
+  "Start a local MinerU API server separately. Test Connection detects its API; it does not parse a PDF.":
+    "请先单独启动本地 MinerU API 服务。测试连接会识别 API，但不会解析 PDF。",
+  "Legacy servers can keep parsing after Pause. Restart the server to stop that work.":
+    "旧版服务可能在暂停后继续解析。如需停止，请重启服务。",
+  "For MinerU 4, configure the VLM server on the MinerU service. Pause requests job cancellation.":
+    "MinerU 4 的 VLM 服务器需在服务端配置。暂停会请求取消任务。",
   "Waiting for MinerU to start…": "正在等待 MinerU 开始处理…",
   "Waiting for MinerU to start… (%ss)": "正在等待 MinerU 开始处理…（%s 秒）",
   "Waiting for MinerU upload to be accepted… (%ss)":
@@ -762,6 +810,27 @@ const zhCN: Record<string, string> = {
   "Semantic Search": "语义搜索",
   "Uses vector embeddings for meaning-aware search. When disabled, only keyword matching (BM25) is used.":
     "使用向量嵌入进行语义搜索。禁用后仅使用关键词匹配（BM25）。",
+  "Library index": "文献库索引",
+  "Keep a local full-text index of your library so library-wide questions answer from the index instead of re-reading PDFs. Fills from the questions you ask and, while Zotero is idle, in the background.":
+    "在本地保存文献库的全文索引，使针对整个文献库的问题直接从索引中作答，而无需重新读取 PDF。索引会随你的提问逐步填充，并在 Zotero 空闲时于后台补全。",
+  "Index size limit (MB)": "索引大小上限（MB）",
+  "Least-recently-searched papers are dropped from the index above this size.":
+    "超过此大小时，最久未被检索的论文会从索引中移除。",
+  "Rebuild index": "重建索引",
+  "Clear index": "清除索引",
+  "Clear library index": "清除文献库索引",
+  "This deletes the local index database and all embedding files. Your library and PDFs are not touched. Library questions will be slower until the index refills.":
+    "这将删除本地索引数据库和所有嵌入文件。你的文献库和 PDF 不受影响。在索引重新填充之前，文献库问答会变慢。",
+  "Index is off": "索引已关闭",
+  "Indexed {indexed} of {eligible} papers":
+    "已索引 {indexed}/{eligible} 篇论文",
+  "{count} queued": "{count} 篇待处理",
+  "{count} could not be indexed": "{count} 篇无法索引",
+  "{used} of {budget}": "{used} / {budget}",
+  "Building…": "正在构建…",
+  "Working…": "处理中…",
+  "Could not clear the index. Close other programs that may be using it and try again.":
+    "无法清除索引。请关闭可能正在使用它的其他程序后重试。",
   English: "英语",
   "中文 (简体)": "中文（简体）",
   Off: "关",
@@ -1183,6 +1252,153 @@ const zhCN: Record<string, string> = {
   "Your conversations, notes and papers are not touched, and this cannot be undone.":
     "你的对话、笔记和论文不会受到影响，此操作无法撤销。",
 
+  // ── Task progress ───────────────────────────────────────────────────────
+  "Task progress": "任务进度",
+  "Task progress details": "任务进度详情",
+  "Drag to resize Task progress": "拖动以调整任务进度的高度",
+  "Resize Task progress": "调整任务进度的高度",
+  "Show task progress": "显示任务进度",
+  "Hide task progress": "隐藏任务进度",
+  "Reads are recorded in Agent mode. This list shows the papers in scope.":
+    "阅读记录仅在 Agent 模式下生成。此列表显示范围内的论文。",
+  "Reads are recorded in Agent mode.": "阅读记录仅在 Agent 模式下生成。",
+  Steps: "步骤",
+  "Papers in scope": "范围内的论文",
+  "{done}/{total} steps": "{done}/{total} 步",
+  "{count} papers in scope": "范围内 {count} 篇论文",
+  "{read} of {total} read": "已读 {read}/{total}",
+  "Answering…": "正在回答…",
+  "{count} cited": "引用 {count}",
+  "{count} read in depth": "精读 {count}",
+  "{count} found": "检索到 {count}",
+  "{count} matched": "匹配 {count}",
+  "{count} read": "已读 {count}",
+  "Preparing the scope…": "正在准备范围…",
+  "Whole library": "整个文献库",
+  "and {count} more": "以及另外 {count} 篇",
+  "and {count} more reads": "以及另外 {count} 次阅读",
+  "Question {number}": "第 {number} 个问题",
+  "Papers ({count})": "论文（{count}）",
+  "Cited in answer": "回答中的引用",
+  "Cited in document": "文档中的引用",
+  "Listed in scope; not read for this question.": "在范围内；本问题未阅读。",
+  "Matched by title or abstract; text not opened.":
+    "按标题或摘要匹配；未打开正文。",
+  "Retrieve Library": "检索文献库",
+  "Search Library": "搜索文献库",
+  "Search Paper": "搜索论文",
+  "Query Library": "查询文献库",
+  "Read Library": "读取文献库",
+  "Read Paper": "阅读论文",
+  "Read Attachment": "读取附件",
+  "View PDF Pages": "查看 PDF 页面",
+  "Title/abstract match": "标题/摘要匹配",
+  Abstract: "摘要",
+  Outline: "大纲",
+  Section: "章节",
+  Passage: "段落",
+  "Full text": "全文",
+  Page: "页面",
+  "PDF text": "PDF 文本",
+  "No text": "无文本",
+  "title/abstract": "标题/摘要",
+  "1 passage": "1 段",
+  Summary: "总结",
+  "Summary failed": "总结失败",
+  // A digest part's block on a paper row: its failure, relevance and stance.
+  "{label} failed": "{label}：失败",
+  "Directly relevant": "直接相关",
+  "Partly relevant": "部分相关",
+  "Not relevant": "不相关",
+  "Relevance unclear": "相关性不明",
+  Supports: "支持",
+  Challenges: "质疑",
+  Mixed: "立场不一",
+  "Stance unclear": "立场不明",
+  "{count} passages": "{count} 段",
+  outline: "大纲",
+  abstract: "摘要",
+  "cited {count}": "引用 {count}",
+  listed: "已列出",
+  matched: "已匹配",
+  skimmed: "已略读",
+  read: "已阅读",
+  cited: "已引用",
+  Starting: "正在开始",
+  "In progress": "进行中",
+  "Needs input": "需要输入",
+  Interrupted: "已中断",
+  Completed: "已完成",
+  "Completed with exceptions": "已完成（有例外）",
+  Blocked: "已阻塞",
+  Superseded: "已被取代",
+  "Supporting step": "辅助步骤",
+  "Needs your decision": "需要你的决定",
+  "Partly done": "部分完成",
+  "{done} of {total} done": "已完成 {done}/{total}",
+  "{count} not done": "{count} 项未完成",
+  "{done} of {total}": "{done}/{total}",
+  // A part's reason line: papers it left out, or the part that replaced it.
+  "Excluded: {reason}": "已排除：{reason}",
+  "Replaced: {reason}": "已替换：{reason}",
+  Replaced: "已替换",
+  "Say “continue” to resume.": "回复“继续”即可恢复。",
+  // The reasons the host writes into a run's outcome ledger (OUTCOME_REASONS).
+  "A skipped, blocked, or cancelled task needs the reason.":
+    "跳过、阻塞或取消的任务需要说明原因。",
+  "The change could not be verified; check the current state before retrying.":
+    "无法验证此更改；请先检查当前状态再重试。",
+  "You declined this change.": "你拒绝了此更改。",
+  "Not applied": "未应用",
+  "Not done before the answer.": "回答前未完成。",
+  "The change was not applied.": "此更改未应用。",
+  "No readable text": "无可读文本",
+  // Why a host paper digest failed (DIGEST_FAILURE_REASONS).
+  "The model did not return a usable result": "模型未返回可用的结果",
+  "The model returned an empty answer": "模型返回的回答为空",
+  "The model call timed out": "模型调用超时",
+  "The model call failed": "模型调用失败",
+  "No model is configured for paper analysis": "未配置用于分析论文的模型",
+  "The model has no safe reasoning setting for paper analysis":
+    "分析论文的模型没有可安全使用的推理设置",
+  "Too little text to analyze": "文本太少，无法分析",
+  "The analysis could not be prepared": "无法准备分析",
+  // The same reasons as rows saved before schema 2 name them.
+  "The model did not return a usable summary": "模型未返回可用的总结",
+  "The model returned an empty summary": "模型返回的总结为空",
+  "The summary call timed out": "生成总结超时",
+  "The summary call failed": "生成总结失败",
+  "No model is configured for summaries": "未配置用于生成总结的模型",
+  "The summary model has no safe reasoning setting":
+    "生成总结的模型没有可安全使用的推理设置",
+  "Too little text to summarize": "文本太少，无法生成总结",
+  "Not a paper": "不是论文",
+  "The paper text could not be read": "无法读取论文正文",
+  "The summary could not be prepared": "无法准备总结",
+  "Not covered by the delivered content": "交付的内容未涵盖",
+  Done: "完成",
+  "Done when:": "完成条件：",
+  Revision: "修订",
+  "Required task completion": "必需任务完成度",
+  "1 paper in scope": "范围内 1 篇论文",
+  "1 excluded": "已排除 1 篇",
+  "{count} excluded": "已排除 {count} 篇",
+  "Remove from this task": "从本任务中移除",
+  Source: "原文",
+  "Open this passage in the paper": "在论文中打开这段内容",
+  "Locating this passage…": "正在定位这段内容…",
+  "Jumped to the passage (page {page})": "已跳转到这段内容（第 {page} 页）",
+  "Opened page {page}; couldn't highlight this passage":
+    "已打开第 {page} 页；无法高亮这段内容",
+  "Couldn't find this passage in the PDF; opened page {page}":
+    "在 PDF 中找不到这段内容；已打开第 {page} 页",
+  "Couldn't find this passage in the PDF; opened the paper":
+    "在 PDF 中找不到这段内容；已打开论文",
+  "Opened page {page}": "已打开第 {page} 页",
+  "No PDF for this paper": "这篇论文没有 PDF",
+  "Could not open the paper.": "无法打开论文。",
+  "Opened the paper": "已打开论文",
+
   // ── Language setting ────────────────────────────────────────────────────
   Language: "语言",
   "Auto (follow Zotero)": "自动（跟随 Zotero）",
@@ -1217,6 +1433,11 @@ function getEffectiveLocale(): string {
   }
 }
 
+/** True when the plugin's effective UI locale is Chinese. */
+export function isChineseLocale(): boolean {
+  return getEffectiveLocale().startsWith("zh");
+}
+
 /**
  * Translate an English UI string.
  *
@@ -1227,7 +1448,7 @@ function getEffectiveLocale(): string {
  * Usage:  `button.textContent = t("Start All");`
  */
 export function t(en: string): string {
-  if (getEffectiveLocale().startsWith("zh")) {
+  if (isChineseLocale()) {
     return zhCN[en] ?? en;
   }
   return en;

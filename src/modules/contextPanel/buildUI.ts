@@ -1,6 +1,5 @@
 import { createElement, el } from "../../utils/domHelpers";
 import { t } from "../../utils/i18n";
-import { createDockedPanelTitle } from "./dockedPanelTitle";
 import {
   PREFERENCES_PANE_ID,
   getSelectTextExpandedLabel,
@@ -25,8 +24,14 @@ import {
 } from "./portalScope";
 import { getConversationKey } from "./conversationIdentity";
 import { createRuntimeSystemControls } from "./runtimeSystemControls";
+import {
+  resolveSidebarChatModeToggleState,
+  type SidebarChatModeTab,
+} from "./sidebarChatModeToggle";
+import { createSidebarModeSwitch } from "./sidebarModeSwitch";
 import { buildContextUsagePresentation } from "./textUtils";
 import { createChatLatestButton } from "./chatLatestButton";
+import { createTaskProgressCurtain } from "./taskProgress/view";
 
 function createActionDropdown(doc: Document, spec: ActionDropdownSpec) {
   const slot = createElement(
@@ -158,6 +163,16 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
   historyToggle.style.display = "";
 
   const isStandaloneBody = (body as HTMLElement).dataset?.standalone === "true";
+  // Paper chat or Library chat: the Independent toggle row and the Stacked
+  // chip show the same state.
+  const chatModeToggle = resolveSidebarChatModeToggleState({
+    isGlobalMode: hasItem && isGlobalMode,
+    isNoteSession: Boolean(activeNoteSession),
+    isWebChat: false,
+  });
+  // Runtime systems follow the history button, after a thin divider
+  // (Independent) or the mode chip in its place (Stacked). Both are built;
+  // CSS picks one from the root layout attribute.
   const headerRuntimeControls = createElement(
     doc,
     "div",
@@ -166,27 +181,25 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
       id: "llm-header-runtime-controls",
     },
   );
-
-  // Mode chip: single pill showing current mode
-  const modeSwitchWrap = createElement(doc, "div", "llm-mode-switch", {
-    id: "llm-mode-capsule",
-  });
-  modeSwitchWrap.dataset.mode = hasItem && isGlobalMode ? "global" : "paper";
-
-  const modeChipLabel = activeNoteSession
-    ? t("Note chat")
-    : isGlobalMode
-      ? t("Library chat")
-      : t("Paper chat");
-  const modeChipBtn = createElement(doc, "button", "llm-mode-chip", {
-    id: "llm-mode-chip",
-    type: "button",
-    textContent: modeChipLabel,
-    title: modeChipLabel,
-  });
-  modeChipBtn.setAttribute("aria-label", modeChipLabel);
-
-  modeSwitchWrap.append(modeChipBtn);
+  const runtimeDivider = createElement(
+    doc,
+    "span",
+    "llm-header-runtime-divider",
+  );
+  runtimeDivider.setAttribute("aria-hidden", "true");
+  const modeSwitch = createSidebarModeSwitch(
+    doc,
+    {
+      activeTab: chatModeToggle.activeTab,
+      paperLabel: t(chatModeToggle.paperTabLabel),
+      libraryLabel: t(chatModeToggle.libraryTabLabel),
+      disabled: chatModeToggle.disabled,
+    },
+    {
+      ariaLabel: t("Chat mode"),
+      fitLabels: [t("Paper chat"), t("Library chat"), t("Note chat")],
+    },
+  );
 
   const runtimeSystemControls = createRuntimeSystemControls(doc, {
     groupId: "llm-runtime-system-controls",
@@ -197,12 +210,70 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
       claude_code: "llm-claude-system-toggle",
     },
   });
+  headerRuntimeControls.append(
+    runtimeDivider,
+    modeSwitch,
+    runtimeSystemControls.group,
+  );
 
-  headerRuntimeControls.append(modeSwitchWrap, runtimeSystemControls.group);
+  // Paper chat | Library chat, sharing the standalone window's segmented tabs.
+  const chatModeTabs = createElement(
+    doc,
+    "div",
+    "llm-standalone-tab-group llm-header-mode-tabs",
+    { id: "llm-chat-mode-tabs" },
+  );
+  chatModeTabs.dataset.mode = chatModeToggle.activeTab;
+  const createChatModeTab = (
+    tab: SidebarChatModeTab,
+    id: string,
+    label: string,
+  ): HTMLButtonElement => {
+    const button = createElement(
+      doc,
+      "button",
+      "llm-standalone-tab llm-header-mode-tab",
+      { id, type: "button", title: label },
+    );
+    button.dataset.tab = tab;
+    const labelEl = createElement(doc, "span", "llm-header-mode-tab-label", {
+      textContent: label,
+    });
+    button.appendChild(labelEl);
+    const active = chatModeToggle.activeTab === tab;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", active ? "true" : "false");
+    button.disabled = chatModeToggle.disabled;
+    if (chatModeToggle.disabled) button.setAttribute("aria-disabled", "true");
+    return button;
+  };
+  chatModeTabs.append(
+    createChatModeTab(
+      "paper",
+      "llm-paper-chat-tab",
+      t(chatModeToggle.paperTabLabel),
+    ),
+    createChatModeTab(
+      "library",
+      "llm-library-chat-tab",
+      t(chatModeToggle.libraryTabLabel),
+    ),
+  );
+
+  // Row 1 (Independent): the mode toggle, centered. It is laid out whenever
+  // the history bar is, which CSS keeps always: no code path writes its
+  // display. The Stacked layout drops it for the chip in row 2.
+  const toggleRow = createElement(doc, "div", "llm-header-toggle-row", {
+    id: "llm-header-toggle-row",
+  });
+  toggleRow.append(chatModeTabs);
   historyBar.append(historyNewBtn, historyToggle, headerRuntimeControls);
 
   headerInfo.append(title, historyBar);
-  headerTop.appendChild(headerInfo);
+  // Row 2: new chat, history, and runtime systems on the left, panel actions
+  // on the right.
+  const headerNavRow = createElement(doc, "div", "llm-header-nav-row");
+  headerNavRow.appendChild(headerInfo);
 
   const headerActions = createElement(doc, "div", "llm-header-actions");
   const popoutBtn = createElement(
@@ -268,9 +339,9 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
     exportBtn,
     clearBtn,
   );
-  headerTop.appendChild(headerActions);
+  headerNavRow.appendChild(headerActions);
+  headerTop.append(toggleRow, headerNavRow);
   if (body.closest(".llm-dedicated-chat-pane")) {
-    header.appendChild(createDockedPanelTitle(body));
     title.style.display = "none";
   }
   header.appendChild(headerTop);
@@ -334,7 +405,14 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
   const chatBox = createElement(doc, "div", "llm-messages", {
     id: "llm-chat-box",
   });
-  chatShell.append(chatBox, createChatLatestButton(doc));
+  // The Task progress card sits at the top of the shell: its header row, and
+  // the drawer that unrolls inside the same card. It lowers from under the
+  // header in its curtain once it has something to show, and rises back.
+  chatShell.append(
+    createTaskProgressCurtain(doc),
+    chatBox,
+    createChatLatestButton(doc),
+  );
   if (isStandaloneBody) {
     const chatResizeHandle = createElement(
       doc,
@@ -603,26 +681,6 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
   );
   runtimeModeBtn.append(runtimeModeIndicator, runtimeModeLabel);
   contextPreviews.appendChild(runtimeModeBtn);
-  const planModeChip = createElement(
-    doc,
-    "button",
-    "llm-selected-context llm-paper-context-chip llm-plan-mode-chip",
-    {
-      id: "llm-plan-mode-chip",
-      type: "button",
-      title: t("Cancel Plan mode"),
-    },
-  );
-  planModeChip.style.display = "none";
-  planModeChip.setAttribute("aria-label", t("Cancel Plan mode"));
-  const planModeChipLabel = createElement(
-    doc,
-    "span",
-    "llm-plan-mode-chip-label",
-    { textContent: `${t("Plan")}  ×` },
-  );
-  planModeChip.appendChild(planModeChipLabel);
-  contextPreviews.appendChild(planModeChip);
   const selectedContextList = createElement(
     doc,
     "div",
@@ -961,10 +1019,9 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
   const sendBtn = createElement(
     doc,
     "button",
-    "llm-shortcut-btn llm-action-btn llm-action-btn-primary llm-send-btn",
+    "llm-shortcut-btn llm-action-btn llm-action-btn-primary llm-send-btn llm-action-icon-only",
     {
       id: "llm-send",
-      textContent: t("Send"),
       title: t("Send"),
       disabled: !hasItem,
     },
@@ -972,12 +1029,14 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
   const cancelBtn = createElement(
     doc,
     "button",
-    "llm-shortcut-btn llm-action-btn llm-action-btn-danger llm-send-btn llm-cancel-btn",
+    "llm-shortcut-btn llm-action-btn llm-send-btn llm-cancel-btn llm-action-icon-only",
     {
       id: "llm-cancel",
-      textContent: t("Cancel"),
+      title: t("Cancel"),
     },
   );
+  sendBtn.setAttribute("aria-label", t("Send"));
+  cancelBtn.setAttribute("aria-label", t("Cancel"));
   cancelBtn.style.display = "none";
   const sendSlot = createElement(doc, "div", "llm-action-slot");
   sendSlot.append(sendBtn, cancelBtn);
@@ -1043,6 +1102,12 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
   tokenUsage.dataset.detail = contextUsagePresentation.detail;
   contextUsageControl.append(contextGauge, tokenUsage);
   footerControls.append(permissionControl, contextUsageControl);
+  const providerQuota = createElement(doc, "button", "llm-provider-quota", {
+    id: "llm-provider-quota",
+    type: "button",
+  });
+  providerQuota.style.display = "none";
+  footerControls.append(providerQuota);
   statusBar.append(statusLine, footerControls);
 
   actionsLeft.append(

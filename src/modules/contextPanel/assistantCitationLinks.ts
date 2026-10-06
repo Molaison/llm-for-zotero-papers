@@ -1,3 +1,7 @@
+import { t } from "../../utils/i18n";
+import { createSourcePopover } from "./sourcePopover";
+import { createContextIcon } from "./contextIcons";
+import { PARAGRAPH_CITATION_TOKEN_PATTERN } from "./quoteRenderPlan";
 import { appLogger } from "../../core/logging";
 import { setStatus } from "./textUtils";
 import { sanitizeText } from "../../utils/textSanitization";
@@ -15,6 +19,7 @@ import {
 } from "../../services/context/normalizers";
 import {
   findMatchingTrustedQuoteCitation,
+  hasVerifiedQuoteLocation,
   MIN_NEAR_COMPLETE_QUOTE_SUPPORT_COVERAGE,
   MIN_NEAR_COMPLETE_QUOTE_SUPPORTED_TOKENS,
   normalizeQuoteCitations,
@@ -90,6 +95,11 @@ import {
   renderRenderedMathPreviewInto,
 } from "./renderedMarkdown";
 import type { Message, PaperContextRef, QuoteCitation } from "./types";
+import {
+  buildTaskPaperPassageSearchTexts,
+  taskPaperPassagePageLabel,
+  type TaskPaperPassageTarget,
+} from "./taskProgress/passageSource";
 
 type CitationParagraphJumpNavigation = {
   reader: any;
@@ -341,6 +351,7 @@ export const INLINE_CITATION_SKIP_SELECTOR = [
   ".llm-citation-icon",
   ".llm-quote-citation-anchor",
   ".llm-quote-card",
+  ".llm-paper-source-indicator",
 ].join(", ");
 
 const INLINE_CITATION_PATTERN =
@@ -1691,6 +1702,8 @@ async function attemptCitationParagraphJump(params: {
   preferredFullQuoteText?: string;
   verifiedSourceMatchText?: string;
   verifiedFullSpan?: boolean;
+  /** More wordings of the same passage, tried after the ones above. */
+  fallbackQuoteTexts?: string[];
 }): Promise<ExactQuoteJumpResult> {
   // Source navigation is user-initiated. Raise an existing PDF above standalone
   // chat/document windows too, even if its paragraph cannot be highlighted.
@@ -1704,6 +1717,7 @@ async function attemptCitationParagraphJump(params: {
         params.preferredFullQuoteText,
         params.quoteText,
         params.verifiedSourceMatchText,
+        ...(params.fallbackQuoteTexts || []),
       ]
         .map((value) => sanitizeText(value || "").trim())
         .filter(Boolean),
@@ -3923,6 +3937,282 @@ async function resolveAndNavigateAssistantCitation(params: {
   }
 }
 
+export type TaskPaperPassageNavigationOutcome =
+  /** The passage was found and highlighted. */
+  | "jumped"
+  /** The reader is on the passage's page, without a highlight. */
+  | "page"
+  /** The paper is open; neither the passage nor its page was found. */
+  | "opened"
+  | "no-pdf"
+  | "failed"
+  /** The same passage is already being opened. */
+  | "busy";
+
+const taskPaperPassageNavigationsInFlight = new Set<string>();
+
+/**
+ * A reader just opened has no viewer yet, and navigating it throws. Wait
+ * until its PDF text can be read (which also loads its page labels).
+ */
+async function waitForTaskPaperPassageReader(reader: any): Promise<boolean> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < 8000) {
+    if (reader?._internalReader) break;
+    await new Promise((resolve) => setTimeout(resolve, 40));
+  }
+  if (!reader?._internalReader) return false;
+  await warmPageTextCache(reader).catch(() => null);
+  return true;
+}
+
+function formatStatus(
+  template: string,
+  values: Record<string, string | number>,
+): string {
+  return t(template).replace(/\{(\w+)\}/g, (match, name: string) =>
+    name in values ? String(values[name]) : match,
+  );
+}
+
+/** The PDF a Task progress passage was read from, else the paper's first. */
+function resolveTaskPaperPassagePdf(
+  target: TaskPaperPassageTarget,
+): Zotero.Item | null {
+  for (const id of [target.contextItemId, target.itemId]) {
+    const itemId = Math.floor(Number(id) || 0);
+    if (itemId <= 0) continue;
+    const pdf = getFirstPdfAttachment(Zotero.Items.get(itemId) || null);
+    if (pdf) return pdf;
+  }
+  return null;
+}
+
+/**
+ * Open the paper a Task progress passage came from and show the passage:
+ * the same background verification, reader opening and FindController
+ * highlight a quote card's jump uses, with the paper already known. When the
+ * text is not found, the passage's page (if its label names one) or else the
+ * paper is opened, and the status line says so. A whole-paper ("full") read
+ * opens the paper without a search.
+ */
+export async function navigateToTaskPaperPassage(params: {
+  body: Element;
+  target: TaskPaperPassageTarget;
+  button?: HTMLButtonElement | null;
+}): Promise<TaskPaperPassageNavigationOutcome> {
+  const { target, button } = params;
+  const status = params.body.querySelector("#llm-status") as HTMLElement | null;
+  const report = (
+    text: string,
+    variant: "ready" | "sending" | "error" | "warning",
+  ) => {
+    if (status) setStatus(status, text, variant);
+  };
+  const flightKey = [
+    target.contextItemId || 0,
+    target.itemId,
+    target.label,
+    target.rawSnippet,
+  ].join("\u0000");
+  if (
+    button?.dataset.loading === "true" ||
+    taskPaperPassageNavigationsInFlight.has(flightKey)
+  ) {
+    return "busy";
+  }
+  taskPaperPassageNavigationsInFlight.add(flightKey);
+  const endNavigationActivity = beginQuoteNavigationActivity();
+  if (button) {
+    button.dataset.loading = "true";
+    button.disabled = true;
+  }
+  try {
+    const pdf = resolveTaskPaperPassagePdf(target);
+    if (!pdf) {
+      report(t("No PDF for this paper"), "error");
+      return "no-pdf";
+    }
+    const pdfId = Math.floor(pdf.id);
+    // A whole-paper read has no passage to find: its snippet is only the
+    // paper's opening. Source opens the paper itself, at its first page.
+    if (target.granularity === "full") {
+      const reader = await openReaderForItem(pdfId, { pageIndex: 0 });
+      if (!reader) {
+        report(t("Could not open the paper."), "error");
+        return "failed";
+      }
+      Zotero.getMainWindow()?.focus();
+      report(t("Opened the paper"), "ready");
+      return "page";
+    }
+    const searchTexts = buildTaskPaperPassageSearchTexts(
+      target.cleanedSnippet,
+      target.rawSnippet,
+    );
+    const pageLabel = taskPaperPassagePageLabel(target.label);
+    const displayLabel = target.label || "Task progress passage";
+
+    if (searchTexts.length) {
+      report(t("Locating this passage…"), "sending");
+      let match: {
+        pageIndex: number;
+        pageLabel?: string;
+        quoteText: string;
+        sourceMatchText?: string;
+        sourceMatchPageOccurrence?: number;
+      } | null = null;
+      // The paper is known, so it is the one authoritative candidate: a
+      // passage that only partly aligns (clipped, TeX dropped) still counts.
+      const resolution = await resolveVerifiedQuoteTarget({
+        candidates: [
+          { contextItemId: pdfId, authoritative: true, labelRank: 0 },
+        ],
+        searchTexts,
+        verify: verifyQuoteInCitationCandidate,
+      });
+      if (resolution.status === "resolved") {
+        match = {
+          pageIndex: resolution.pageIndex,
+          quoteText: resolution.quoteText,
+          sourceMatchText: resolution.sourceMatchText,
+          sourceMatchPageOccurrence: resolution.sourceMatchPageOccurrence,
+        };
+      } else if (resolution.status === "unverifiable") {
+        // The background worker could not read the PDF: let the viewer.
+        const candidate = buildCandidateForContextItemId(pdfId);
+        if (candidate) {
+          const opened = await locateQuoteByOpeningCitationCandidates({
+            candidates: [candidate],
+            searchTexts,
+          });
+          match = opened.matches[0] || null;
+        }
+      }
+      if (match) {
+        const reader = await openReaderForItem(pdfId, {
+          pageIndex: match.pageIndex,
+          pageLabel: match.pageLabel,
+        });
+        if (!reader) {
+          report(t("Could not open the paper."), "error");
+          return "failed";
+        }
+        const matchPageLabel =
+          getPageLabelForIndex(reader, match.pageIndex) ||
+          match.pageLabel ||
+          `${match.pageIndex + 1}`;
+        const paragraphJump = await attemptCitationParagraphJump({
+          reader,
+          contextItemId: pdfId,
+          displayCitationLabel: displayLabel,
+          quoteText: match.quoteText,
+          pageIndex: match.pageIndex,
+          pageLabel: matchPageLabel,
+          sourceMatchPageOccurrence: match.sourceMatchPageOccurrence,
+          verifiedSourceMatchText: match.sourceMatchText,
+          // Never `verifiedFullSpan`: it would switch off the page's
+          // largest-unique-partial-span fallback this passage may need.
+          fallbackQuoteTexts: searchTexts,
+        });
+        const jumpedLabel = resolveJumpedPageLabel(
+          reader,
+          paragraphJump,
+          matchPageLabel,
+        );
+        if (paragraphJump.matched) {
+          report(
+            formatStatus("Jumped to the passage (page {page})", {
+              page: jumpedLabel,
+            }),
+            "ready",
+          );
+          return "jumped";
+        }
+        report(
+          formatStatus("Opened page {page}; couldn't highlight this passage", {
+            page: jumpedLabel,
+          }),
+          "warning",
+        );
+        return "page";
+      }
+    }
+
+    // Not found in the whole document's text (or no text to find): open the
+    // paper and, when the label names a page, search that page with the
+    // page-native partial-span fallback before settling for the page alone.
+    const reader = await openReaderForItem(pdfId);
+    if (!reader) {
+      report(t("Could not open the paper."), "error");
+      return "failed";
+    }
+    Zotero.getMainWindow()?.focus();
+    if (pageLabel) {
+      const ready = await waitForTaskPaperPassageReader(reader);
+      const pageIndex = ready
+        ? resolvePageIndexForLabel(reader, pageLabel)
+        : null;
+      if (pageIndex !== null && searchTexts.length) {
+        report(t("Locating this passage…"), "sending");
+        await navigateReaderToPage(reader, pageIndex, pageLabel);
+        const paragraphJump = await attemptCitationParagraphJump({
+          reader,
+          contextItemId: pdfId,
+          displayCitationLabel: displayLabel,
+          quoteText: searchTexts[0],
+          fallbackQuoteTexts: searchTexts.slice(1),
+          pageIndex,
+          pageLabel,
+        });
+        if (paragraphJump.matched) {
+          report(
+            formatStatus("Jumped to the passage (page {page})", {
+              page: resolveJumpedPageLabel(reader, paragraphJump, pageLabel),
+            }),
+            "ready",
+          );
+          return "jumped";
+        }
+      }
+      if (
+        pageIndex !== null &&
+        (await navigateReaderToPage(reader, pageIndex, pageLabel))
+      ) {
+        report(
+          formatStatus(
+            searchTexts.length
+              ? "Couldn't find this passage in the PDF; opened page {page}"
+              : "Opened page {page}",
+            { page: pageLabel },
+          ),
+          searchTexts.length ? "warning" : "ready",
+        );
+        return "page";
+      }
+    }
+    report(
+      t("Couldn't find this passage in the PDF; opened the paper"),
+      "warning",
+    );
+    return "opened";
+  } catch (error) {
+    appLogger.warn("LLM task progress passage navigation failed", {
+      itemId: target.itemId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    report(t("Could not open the paper."), "error");
+    return "failed";
+  } finally {
+    taskPaperPassageNavigationsInFlight.delete(flightKey);
+    endNavigationActivity();
+    if (button) {
+      button.dataset.loading = "false";
+      button.disabled = false;
+    }
+  }
+}
+
 /**
  * Re-resolve page labels for all citation buttons currently in the DOM.
  * Buttons whose quote text already has a cache entry get the cached
@@ -4689,6 +4979,68 @@ function createFallbackQuoteCardElement(params: {
   });
 }
 
+function createParagraphCitationFooter(params: {
+  ownerDoc: Document;
+  body: Element;
+  panelItem: Zotero.Item;
+  candidates: AssistantCitationPaperCandidate[];
+  citations: QuoteCitation[];
+}): HTMLElement {
+  const icon = createContextIcon(
+    params.ownerDoc,
+    "text",
+    "llm-paper-source-icon",
+  );
+  const count = params.ownerDoc.createElement("span");
+  count.className = "llm-paper-source-count";
+  count.textContent = t(
+    params.citations.length === 1 ? "{number} Quote" : "{number} Quotes",
+  ).replace("{number}", String(params.citations.length));
+  const content = params.ownerDoc.createDocumentFragment();
+  content.append(icon, count);
+  const footer = createSourcePopover(params.ownerDoc, {
+    activation: "click",
+    label: `${count.textContent}: ${t("Supporting passages")}`,
+    icon: content,
+    populate: (popover) => {
+      popover.classList.add("llm-paper-source-popover");
+      const title = params.ownerDoc.createElement("div");
+      title.className = "llm-paper-source-title";
+      title.textContent = t("Supporting passages");
+      popover.appendChild(title);
+      for (const [index, citation] of params.citations.entries()) {
+        const row = params.ownerDoc.createElement("div");
+        row.className = "llm-paper-source-passage";
+        const heading = params.ownerDoc.createElement("span");
+        heading.className = "llm-paper-source-heading";
+        heading.textContent = t("Quote {number}").replace(
+          "{number}",
+          String(index + 1),
+        );
+        const sectionLabel = sanitizeText(
+          citation.sourceSectionLabel || "",
+        ).trim();
+        if (sectionLabel) heading.append(` · ${sectionLabel}`);
+        const card = createQuoteCitationAnchorElement({
+          ...params,
+          quoteCitation: citation,
+        });
+        // The passage is already inside a disclosure; show it without another toggle.
+        quoteCardExpansionControls.get(card)?.(true);
+        card.dataset.quoteInteractive = "false";
+        const content = card.querySelector(".llm-quote-card-content");
+        content?.removeAttribute("role");
+        content?.removeAttribute("tabindex");
+        content?.removeAttribute("aria-expanded");
+        row.append(heading, card);
+        popover.appendChild(row);
+      }
+    },
+  });
+  footer.classList.add("llm-paper-source-indicator");
+  return footer;
+}
+
 function createQuoteCitationAnchorElement(params: {
   ownerDoc: Document;
   body: Element;
@@ -4732,6 +5084,10 @@ function createQuoteCitationAnchorElement(params: {
     quoteText: displayText,
     quoteCitationId: params.quoteCitation.id,
     citationContent,
+    status: hasVerifiedQuoteLocation(params.quoteCitation)
+      ? "verified"
+      : "unresolved",
+    interactive: true,
   });
 }
 
@@ -4786,7 +5142,10 @@ function createQuoteRenderOccurrenceElement(params: {
       quoteOccurrenceId: params.occurrence.occurrenceId,
       citationContent,
       quoteContent: params.quoteContent,
-      status: "verified",
+      status: hasVerifiedQuoteLocation(trustedCitation)
+        ? "verified"
+        : "unresolved",
+      interactive: true,
     });
   }
 
@@ -4966,12 +5325,16 @@ export function renderQuoteCitationPlaceholders(params: {
 }): void {
   const display = getMessageQuoteDisplay(params.assistantMessage);
   const plan = buildQuoteRenderPlan(display);
+  const hasParagraphCitation = /LLMPAPERCITE\d+END/.test(
+    params.bubble.textContent || "",
+  );
   QUOTE_RENDER_OCCURRENCE_PATTERN.lastIndex = 0;
   const hasQuoteOccurrence = QUOTE_RENDER_OCCURRENCE_PATTERN.test(
     params.bubble.textContent || "",
   );
   QUOTE_RENDER_OCCURRENCE_PATTERN.lastIndex = 0;
   if (
+    !hasParagraphCitation &&
     !hasQuoteOccurrence &&
     !textContainsQuoteCitationPlaceholder(params.bubble.textContent || "")
   ) {
@@ -5007,7 +5370,11 @@ export function renderQuoteCitationPlaceholders(params: {
       QUOTE_RENDER_OCCURRENCE_PATTERN.lastIndex = 0;
       const hasOccurrence = QUOTE_RENDER_OCCURRENCE_PATTERN.test(text);
       QUOTE_RENDER_OCCURRENCE_PATTERN.lastIndex = 0;
-      if (hasOccurrence || textContainsQuoteCitationPlaceholder(text)) {
+      if (
+        hasOccurrence ||
+        /LLMPAPERCITE\d+END/.test(text) ||
+        textContainsQuoteCitationPlaceholder(text)
+      ) {
         targets.push(textNode);
       }
       return;
@@ -5018,6 +5385,7 @@ export function renderQuoteCitationPlaceholders(params: {
   };
   walk(params.bubble);
 
+  const paragraphSources = new Map<HTMLElement, QuoteCitation[]>();
   for (const textNode of targets) {
     const text = textNode.nodeValue || "";
     QUOTE_RENDER_OCCURRENCE_PATTERN.lastIndex = 0;
@@ -5028,10 +5396,24 @@ export function renderQuoteCitationPlaceholders(params: {
     QUOTE_CITATION_PATTERN.lastIndex = 0;
     const matches = Array.from(text.matchAll(QUOTE_CITATION_PATTERN));
     QUOTE_CITATION_PATTERN.lastIndex = 0;
-    if (!occurrenceMatches.length && !matches.length) continue;
+    const paragraphMatches = Array.from(
+      text.matchAll(PARAGRAPH_CITATION_TOKEN_PATTERN),
+    );
+    if (
+      !occurrenceMatches.length &&
+      !matches.length &&
+      !paragraphMatches.length
+    )
+      continue;
     const fragment = ownerDoc.createDocumentFragment();
     let cursor = 0;
     const allMatches = [
+      ...paragraphMatches.map((match) => ({
+        kind: "paragraph" as const,
+        index: match.index || 0,
+        token: match[0],
+        id: match[1],
+      })),
       ...occurrenceMatches.map((match) => ({
         kind: "occurrence" as const,
         index: match.index || 0,
@@ -5053,7 +5435,20 @@ export function renderQuoteCitationPlaceholders(params: {
           ownerDoc.createTextNode(text.slice(cursor, start)),
         );
       }
-      if (match.kind === "occurrence") {
+      if (match.kind === "paragraph") {
+        const citations = plan.paragraphCitations[Number(match.id)] || [];
+        const container =
+          textNode.parentElement?.closest<HTMLElement>("p, li, td, th") ||
+          textNode.parentElement;
+        if (container && citations.length) {
+          const held = paragraphSources.get(container) || [];
+          const ids = new Set(held.map((citation) => citation.id));
+          paragraphSources.set(container, [
+            ...held,
+            ...citations.filter((citation) => !ids.has(citation.id)),
+          ]);
+        }
+      } else if (match.kind === "occurrence") {
         const occurrence = occurrencesById.get(match.id);
         if (occurrence) {
           fragment.appendChild(
@@ -5096,6 +5491,7 @@ export function renderQuoteCitationPlaceholders(params: {
       parent?.tagName.toLowerCase() === "p" &&
       parent.childNodes.length === 1 &&
       allMatches.length === 1 &&
+      allMatches[0].kind !== "paragraph" &&
       trimmed === allMatches[0].token
     ) {
       parent.replaceWith(fragment);
@@ -5105,6 +5501,17 @@ export function renderQuoteCitationPlaceholders(params: {
         liftQuoteCardsOutOfParagraph(parent);
       }
     }
+  }
+  for (const [container, citations] of paragraphSources) {
+    container.appendChild(
+      createParagraphCitationFooter({
+        ownerDoc,
+        body: params.body,
+        panelItem: params.panelItem,
+        candidates,
+        citations,
+      }),
+    );
   }
 }
 
@@ -5518,6 +5925,10 @@ export function decorateAssistantCitationLinks(params: {
       quoteCitationId: trustedQuoteCitation.id,
       citationContent: citationElement,
       quoteContent: displayedQuoteContent,
+      status: hasVerifiedQuoteLocation(trustedQuoteCitation)
+        ? "verified"
+        : "unresolved",
+      interactive: true,
     });
     const blockquoteParent = blockquote.parentNode;
     if (!blockquoteParent) continue;

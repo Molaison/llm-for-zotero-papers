@@ -1,38 +1,32 @@
+import { PdfService } from "../src/agent/services/pdfService";
 import { AgentRunContinuationSession } from "../src/agent/continuation/runContinuationSession";
-import { loadWorkflowCheckpoint } from "../src/agent/contracts/workflowCheckpoint";
-import {
-  createAgentRun,
-  appendAgentRunEvent,
-} from "../src/agent/store/traceStore";
-import { createRequestUserInputTool } from "../src/agent/tools/plan/requestUserInput";
+import { appendAgentRunEvent } from "../src/agent/store/traceStore";
+import { createRequestUserInputTool } from "../src/agent/tools/control/requestUserInput";
 import {
   bumpConversationWriteGeneration,
   getConversationWriteGeneration,
 } from "../src/shared/conversationWriteFence";
-import { actionFixture } from "./helpers/semanticIntent";
-import { classifiedFixture } from "./helpers/semanticIntent";
-import { semanticContractFixture } from "./helpers/semanticIntent";
-import { semanticFixture } from "./helpers/semanticIntent";
 import { assert } from "chai";
 import { stripNoteHtml } from "../src/utils/noteText";
 import { renderMarkdownForNote } from "../src/utils/markdown";
 import { DatabaseSync } from "node:sqlite";
 import { initPlanDocumentStore } from "../src/agent/documents/store";
-import { initAgentPlanStore } from "../src/agent/plans/store";
-import { initResearchStore } from "../src/agent/research/store";
-import { createDocumentPlan } from "./helpers/documentPlan";
+import {
+  saveStoredPlanExecution,
+  storedPlanExecution,
+} from "./helpers/planStoreDb";
 import type { MaterialRef } from "../src/agent/documents/materialRef";
-import { createSubmitDocumentTool } from "../src/agent/tools/plan/submitPlanDocument";
+import { createSubmitDocumentTool } from "../src/agent/tools/control/submitDocument";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { AgentRuntime } from "../src/agent/runtime";
-import { PlanExecutionRunSession } from "../src/agent/plans/runSession";
 import { clearAgentReadLedger } from "../src/agent/context/resourceContextPlan";
 import { clearAgentCoverageLedger } from "../src/agent/context/coverageLedger";
 import {
   createAgentRunEventJournal,
   getAgentRunTrace,
+  getLatestAgentRunForConversation,
   initAgentTraceStore,
   INTERRUPTED_AGENT_RUN_MARKER,
 } from "../src/agent/store/traceStore";
@@ -51,12 +45,11 @@ import {
 } from "../src/agent/store/toolResultHandles";
 import { AgentToolRegistry } from "../src/agent/tools/registry";
 import { createBuiltInToolRegistry } from "../src/agent/tools";
-import { PlanAmendmentService } from "../src/agent/plans/amendments";
 import {
   ActionContractService,
   describeLibraryMutationActions,
 } from "../src/agent/contracts/actionContract";
-import { createToolResultReadTool } from "../src/agent/tools/read/toolResultRead";
+import { createContextReadTool } from "../src/agent/tools/read/contextRead";
 import { createFileIOTool } from "../src/agent/tools/write/fileIO";
 import { createWebSearchTool } from "../src/agent/tools/read/webSearch";
 import { createPaperReadTool } from "../src/agent/tools/read/paperRead";
@@ -64,9 +57,12 @@ import { TAVILY_API_KEY_PREF } from "../src/webAccess/prefs";
 import type { WebAccessProvider } from "../src/webAccess/types";
 import {
   MAX_AGENT_ROUNDS,
-  MAX_ANSWER_CONTINUATIONS,
   MAX_AGENT_TOOL_CALLS_PER_ROUND,
+  answerContinuationCeiling,
 } from "../src/agent/model/limits";
+import { resolveAgentPromptBudgetLimits } from "../src/agent/context/promptBudget";
+import { resolveOutputReserve } from "../src/utils/outputTokenPolicy";
+import { estimateContextMessagesTokens } from "../src/utils/modelInputCap";
 import {
   BUILTIN_SKILL_FILES,
   parseSkill,
@@ -100,6 +96,11 @@ import {
 } from "./helpers/agentRuntimeMockDb";
 import { createTestActionContractService } from "./helpers/actionContractService";
 import { stateChangeInvocationPlan } from "../src/agent/authorization/invocationPlan";
+import { initDormantPlanTables } from "../src/agent/store/dormantPlanTables";
+import { createTaskUpdateTool } from "../src/agent/tools/control/taskUpdate";
+import { OUTCOME_REASONS } from "../src/agent/loop/outcomes";
+import { ExecutionCheckpointFold } from "../src/agent/execution/checkpointEvents";
+import { isTruncatedToolResultContent } from "../src/agent/store/traceStore";
 
 function registerZeroEffectLibraryUpdate(registry: AgentToolRegistry): void {
   registry.register({
@@ -142,30 +143,6 @@ function registerZeroEffectLibraryUpdate(registry: AgentToolRegistry): void {
       };
     },
   } as never);
-}
-
-function createRequiredMoveActionContractService(): ActionContractService {
-  const service = createTestActionContractService();
-  service.createContract = async () =>
-    semanticContractFixture(
-      semanticContractFixture({
-        version: 3,
-        id: "required-move-contract",
-        writeDisposition: "required",
-        interpretationSource: "classifier",
-        obligations: [
-          {
-            id: "required-move-contract:obligation:0",
-            capability: "zotero.collections",
-            operation: "move_to_collection",
-            proofDomain: "zotero_state",
-            coverage: "all",
-            targetKind: "items",
-          },
-        ],
-      }),
-    );
-  return service;
 }
 
 function commandActionDescriptor(id: string) {
@@ -221,6 +198,138 @@ describe("AgentRuntime", function () {
     clearAgentCoverageLedger();
     clearAgentTranscriptStore();
     clearAgentToolResultHandleStore();
+  });
+
+  it("keeps default paper text across retrieval, follow-ups, and an added paper", async function () {
+    const restore = installMockDb();
+    const originalLoad = PdfService.prototype.ensurePaperContext;
+    const methods =
+      "The protocol tracked the activity of individual neurons across twelve recording sessions in five animals.";
+    const results =
+      "The results demonstrate stable population decoding despite changing individual neuronal responses.";
+    PdfService.prototype.ensurePaperContext = async () =>
+      ({
+        title: "Paper",
+        chunks: [methods, results],
+        chunkMeta: [],
+        fullLength: methods.length + results.length,
+      }) as any;
+    const paper = {
+      libraryID: 1,
+      itemId: 20,
+      contextItemId: 21,
+      title: "Paper",
+      firstCreator: "Kim",
+      year: "2026",
+    };
+    const registry = new AgentToolRegistry();
+    registry.register({
+      spec: {
+        name: "paper_read",
+        description: "Read another snippet",
+        inputSchema: { type: "object" },
+        executionClass: "read",
+        requiresConfirmation: false,
+      },
+      validate: () => ({ ok: true, value: {} }),
+      execute: async () => ({ text: "Additional snippet" }),
+    });
+    let step = 0;
+    const prefixes: string[][] = [];
+    try {
+      const runtime = new AgentRuntime({
+        registry,
+        adapterFactory: () => ({
+          getCapabilities: () => ({
+            streaming: false,
+            toolCalls: true,
+            multimodal: false,
+          }),
+          supportsTools: () => true,
+          runStep: async (params): Promise<AgentModelStep> => {
+            const prefix = params.messages
+              .filter((message) => message.role === "system")
+              .map((message) => String(message.content));
+            prefixes.push(prefix);
+            const source = prefix.find((text) =>
+              text.includes("Paper source data"),
+            )!;
+            assert.include(source, methods);
+            assert.include(source, results);
+            assert.isEmpty(params.request.loadedSkillRecords || []);
+            step++;
+            if (step === 1) {
+              const call = {
+                id: "extra-snippet",
+                name: "paper_read",
+                arguments: { mode: "targeted" },
+              };
+              return {
+                kind: "tool_calls",
+                calls: [call],
+                assistantMessage: {
+                  role: "assistant",
+                  content: "",
+                  tool_calls: [call],
+                },
+              };
+            }
+            const id = /\[passage ([^\]]+)\]/.exec(source)![1];
+            const text = `The protocol used repeated recordings. [[cite:${id}]]`;
+            return {
+              kind: "final",
+              text,
+              assistantMessage: { role: "assistant", content: text },
+            };
+          },
+        }),
+      });
+      const request = {
+        conversationKey: 900459,
+        mode: "agent" as const,
+        libraryID: 1,
+        model: "test",
+        apiBase: "",
+        apiKey: "test",
+        userText: "Explain the paper and inspect another snippet",
+        activePaperContext: paper,
+        conversationKind: "paper" as const,
+      };
+      const outcome = await runtime.runTurn({ request });
+      assert.equal(outcome.kind, "completed");
+      if (outcome.kind === "completed")
+        assert.isNotEmpty(outcome.quoteCitations || []);
+      assert.deepEqual(
+        prefixes[0],
+        prefixes[1],
+        "a targeted read must not change the paper prefix",
+      );
+      await runtime.runTurn({
+        request: { ...request, userText: "Explain the result now" },
+      });
+      assert.deepEqual(
+        prefixes[0],
+        prefixes[2],
+        "a follow-up must retain the source prefix",
+      );
+      await runtime.runTurn({
+        request: {
+          ...request,
+          userText: "Compare the added paper",
+          selectedPaperContexts: [
+            { ...paper, itemId: 30, contextItemId: 31, title: "Added paper" },
+          ],
+        },
+      });
+      assert.equal(
+        prefixes[0][1],
+        prefixes[3][1],
+        "adding context keeps the original paper block intact",
+      );
+    } finally {
+      PdfService.prototype.ensurePaperContext = originalLoad;
+      restore();
+    }
   });
 
   for (const nativeCallback of [false, true]) {
@@ -341,7 +450,6 @@ describe("AgentRuntime", function () {
           }),
         });
         const request: AgentRuntimeRequest = {
-          classifiedIntent: classifiedFixture(),
           conversationKey,
           mode: "agent",
           userText: "Summarize the library result",
@@ -412,62 +520,6 @@ describe("AgentRuntime", function () {
       restore();
     }
   });
-
-  it("preserves prior durable workflow evidence when the main model fails", async function () {
-    const restore = installMockDb();
-    try {
-      const service = createRequiredMoveActionContractService();
-      const contract = await service.createContract({} as never);
-      const progress = service.createProgress(contract);
-      await createAgentRun({
-        runId: "prior-workflow",
-        conversationKey: 998811,
-        mode: "agent",
-        status: "failed",
-        createdAt: 1,
-      });
-      await appendAgentRunEvent("prior-workflow", 1, {
-        type: "provider_event",
-        providerType: "agent_action_contract",
-        payload: { contract, progress },
-      });
-      const runtime = new AgentRuntime({
-        registry: new AgentToolRegistry(service),
-        adapterFactory: () =>
-          new MockAdapter([], {
-            streaming: false,
-            toolCalls: true,
-            multimodal: false,
-          }),
-      });
-      let failed = false;
-      try {
-        await runtime.runTurn({
-          request: {
-            conversationKey: 998811,
-            mode: "agent",
-            userText: "Continue the unfinished workflow",
-            libraryID: 1,
-            model: "test",
-            apiKey: "test",
-            apiBase: "https://example.invalid",
-          },
-        });
-      } catch {
-        failed = true;
-      }
-      assert.isTrue(failed, "The injected interpretation failure must occur");
-      const retained = await loadWorkflowCheckpoint(998811);
-      assert.equal(
-        retained?.contract.id,
-        contract.id,
-        "A failed interpretation must not hide the last durable workflow from the next turn",
-      );
-    } finally {
-      restore();
-    }
-  });
-
   it("durably orders immutable native authority snapshots before finalization", async function () {
     const restore = installMockDb();
     try {
@@ -689,13 +741,6 @@ describe("AgentRuntime", function () {
             model: "test-model",
             apiKey: "test",
             apiBase: "",
-            classifiedIntent: {
-              ...classifiedFixture(),
-              semantic: semanticFixture(),
-              retrievalIntent: "none",
-              wantedSections: [],
-              actionIntents: [],
-            },
           },
           onEvent: (event) => events.push(event),
         });
@@ -741,7 +786,6 @@ describe("AgentRuntime", function () {
       const events: AgentEvent[] = [];
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 1,
           libraryID: 1,
           mode: "agent",
@@ -833,10 +877,6 @@ describe("AgentRuntime", function () {
       try {
         await runtime.runTurn({
           request: {
-            classifiedIntent: classifiedFixture({
-              deliverableIntent: "document",
-              documentKind: "report",
-            }),
             conversationKey: 421,
             libraryID: 1,
             mode: "agent",
@@ -863,11 +903,6 @@ describe("AgentRuntime", function () {
 
   it("finalizes a run row when the provider throws", async function () {
     const restoreDb = installMockDb();
-    const originalInterrupt = PlanExecutionRunSession.prototype.interrupt;
-    const interruptions: string[] = [];
-    PlanExecutionRunSession.prototype.interrupt = async function (reason) {
-      interruptions.push(reason);
-    };
     try {
       const runtime = new AgentRuntime({
         registry: new AgentToolRegistry(),
@@ -888,7 +923,6 @@ describe("AgentRuntime", function () {
       try {
         await runtime.runTurn({
           request: {
-            classifiedIntent: classifiedFixture(),
             conversationKey: 3,
             libraryID: 1,
             mode: "agent",
@@ -905,13 +939,7 @@ describe("AgentRuntime", function () {
       );
       assert.equal(run?.status, "failed");
       assert.equal(run?.finalText, INTERRUPTED_AGENT_RUN_MARKER);
-      assert.lengthOf(
-        interruptions,
-        1,
-        "provider failure must terminalize the active plan session too",
-      );
     } finally {
-      PlanExecutionRunSession.prototype.interrupt = originalInterrupt;
       restoreDb();
     }
   });
@@ -1012,7 +1040,6 @@ describe("AgentRuntime", function () {
       const events: AgentEvent[] = [];
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 393,
           libraryID: 1,
           conversationKind: "paper",
@@ -1042,13 +1069,12 @@ describe("AgentRuntime", function () {
     }
   });
 
-  it("loads semantic skill choices before the first main-model step without creating action authority", async function () {
+  it("loads forced skills before the first main-model step without creating action authority", async function () {
     const restoreDb = installMockDb();
     setUserSkills(
       Object.values(BUILTIN_SKILL_FILES).map((raw) => parseSkill(raw)),
     );
     const events: AgentEvent[] = [];
-    let selected = false;
     let observed = false;
     try {
       const adapter = new MockAdapter([], {
@@ -1057,16 +1083,19 @@ describe("AgentRuntime", function () {
         multimodal: false,
       });
       adapter.runStep = async (params) => {
-        assert.isTrue(selected);
         assert.includeMembers(
           params.request.loadedSkillRecords!.map((skill) => skill.id),
           ["analyze-figures", "write-note"],
         );
-        assert.isUndefined(params.request.classifiedIntent);
-        assert.isUndefined(params.request.actionContract);
         const prompt = JSON.stringify(params);
-        assert.include(prompt, "bundled Python source-PDF extractor");
-        assert.include(prompt, "narrowly scoped note");
+        for (const filename of ["analyze-figures.md", "write-note.md"]) {
+          assert.include(
+            prompt,
+            JSON.stringify(
+              parseSkill(BUILTIN_SKILL_FILES[filename]).instruction,
+            ).slice(1, -1),
+          );
+        }
         assert.includeMembers(
           events.filter((e) => e.type === "status").map((e) => e.text),
           ["Skill activated: analyze-figures", "Skill activated: write-note"],
@@ -1081,20 +1110,17 @@ describe("AgentRuntime", function () {
       const runtime = new AgentRuntime({
         registry: new AgentToolRegistry(),
         adapterFactory: () => adapter,
-        skillSelector: async () => {
-          selected = true;
-          return {
-            status: "selected",
-            skillIds: ["analyze-figures", "write-note"],
-          };
-        },
       });
       await runtime.runTurn({
         request: {
           conversationKey: 90012,
+          selectedCollectionContexts: [
+            { libraryID: 1, collectionId: 3, name: "Research" },
+          ],
           libraryID: 1,
           mode: "agent",
           userText: "Save a crop in a note",
+          forcedSkillIds: ["analyze-figures", "write-note"],
           model: "test",
           apiKey: "test",
           apiBase: "",
@@ -1107,13 +1133,20 @@ describe("AgentRuntime", function () {
         },
       });
       assert.isTrue(observed);
+      assert.isFalse(
+        events.some(
+          (event) =>
+            event.type === "provider_event" &&
+            event.providerType === "agent_skill_selection",
+        ),
+      );
     } finally {
       setUserSkills([]);
       restoreDb();
     }
   });
 
-  it("emits explicitly forced slash skills when automatic routing is unavailable", async function () {
+  it("emits explicitly forced slash skills", async function () {
     const restoreDb = installMockDb();
     setUserSkills(
       Object.values(BUILTIN_SKILL_FILES).map((raw) => parseSkill(raw)),
@@ -1144,7 +1177,6 @@ describe("AgentRuntime", function () {
 
       await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 1,
           libraryID: 1,
           mode: "agent",
@@ -1219,7 +1251,6 @@ describe("AgentRuntime", function () {
 
       await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 2,
           mode: "agent",
           userText: "Hello",
@@ -1393,9 +1424,6 @@ describe("AgentRuntime", function () {
       const events: AgentEvent[] = [];
       const outcomePromise = runtime.runTurn({
         request: {
-          classifiedIntent: actionFixture("note_create", undefined, {
-            noteDestination: "zotero",
-          }),
           conversationKey: 1,
           mode: "agent",
           libraryID: 1,
@@ -1584,7 +1612,6 @@ describe("AgentRuntime", function () {
 
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 1,
           mode: "agent",
           userText: "Explain the figure",
@@ -1723,7 +1750,6 @@ describe("AgentRuntime", function () {
 
       await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 98,
           mode: "agent",
           userText: "inspect the figure",
@@ -1833,7 +1859,6 @@ describe("AgentRuntime", function () {
 
       await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 99,
           mode: "agent",
           userText: "inspect the figure",
@@ -1917,7 +1942,6 @@ describe("AgentRuntime", function () {
       const events: AgentEvent[] = [];
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 1,
           mode: "agent",
           userText: "summarize the paper",
@@ -1937,7 +1961,7 @@ describe("AgentRuntime", function () {
         events.some(
           (event) =>
             event.type === "status" &&
-            event.text === `Continuing agent (5/${MAX_AGENT_ROUNDS})`,
+            event.text === "Continuing agent (round 5)",
         ),
       );
       assert.equal(
@@ -2014,7 +2038,6 @@ describe("AgentRuntime", function () {
 
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 171,
           mode: "agent",
           userText: "read every distinct chunk and synthesize",
@@ -2134,7 +2157,6 @@ describe("AgentRuntime", function () {
         });
         const outcome = await runtime.runTurn({
           request: {
-            classifiedIntent: classifiedFixture(),
             conversationKey: 9010 + failingRounds,
             mode: "agent",
             userText: "Read these papers and answer from their evidence.",
@@ -2210,7 +2232,6 @@ describe("AgentRuntime", function () {
 
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 172,
           mode: "agent",
           userText: "keep reading until done",
@@ -2356,7 +2377,6 @@ describe("AgentRuntime", function () {
 
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 1,
           mode: "agent",
           userText: "summarize the paper",
@@ -2440,7 +2460,6 @@ describe("AgentRuntime", function () {
       try {
         await runtime.runTurn({
           request: {
-            classifiedIntent: classifiedFixture(),
             conversationKey: 2,
             mode: "agent",
             userText: "Read safely",
@@ -2492,7 +2511,6 @@ describe("AgentRuntime", function () {
       const events: AgentEvent[] = [];
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 1,
           mode: "agent",
           userText: "hello",
@@ -2566,7 +2584,6 @@ describe("AgentRuntime", function () {
 
         const outcome = await runtime.runTurn({
           request: {
-            classifiedIntent: classifiedFixture(),
             conversationKey: 1_909,
             mode: "agent",
             userText: "finish this task",
@@ -2646,7 +2663,6 @@ describe("AgentRuntime", function () {
 
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 1_912,
           mode: "agent",
           userText: "write the full review",
@@ -2686,10 +2702,11 @@ describe("AgentRuntime", function () {
     }
   });
 
-  it("bounds answer continuations and delivers what was written", async function () {
+  it("continues a cut-off answer as often as full-size answers fit the budget, and delivers what was written", async function () {
     const restoreDb = installMockDb();
     try {
       let modelSteps = 0;
+      let firstPrompt = 0;
       const runtime = new AgentRuntime({
         registry: new AgentToolRegistry(),
         adapterFactory: () => ({
@@ -2701,6 +2718,8 @@ describe("AgentRuntime", function () {
           supportsTools: () => true,
           async runStep(params: AgentStepParams): Promise<AgentModelStep> {
             modelSteps += 1;
+            if (modelSteps === 1)
+              firstPrompt = estimateContextMessagesTokens(params.messages);
             const chunk = `part ${modelSteps} `;
             await params.onTextDelta?.(chunk);
             return {
@@ -2714,24 +2733,43 @@ describe("AgentRuntime", function () {
         }),
       });
 
+      // A 20,000-token window with 4,000-token answers.
+      const advanced = {
+        inputTokenCap: 20_000,
+        outputTokenLimit: { mode: "custom" as const, tokens: 4_000 },
+      };
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 1_913,
           mode: "agent",
           userText: "write the full review",
           model: "deepseek-chat",
           apiBase: "https://api.deepseek.com/v1",
           apiKey: "test",
-          advanced: { outputTokenLimit: { mode: "auto" } },
+          advanced: advanced as never,
         },
       });
 
-      assert.equal(modelSteps, MAX_ANSWER_CONTINUATIONS + 1);
+      const continuations = answerContinuationCeiling({
+        budgetTokens: resolveAgentPromptBudgetLimits({
+          model: "deepseek-chat",
+          inputTokenCap: advanced.inputTokenCap,
+          apiBase: "https://api.deepseek.com/v1",
+          outputTokenLimit: advanced.outputTokenLimit,
+        }).softLimitTokens,
+        promptTokens: firstPrompt,
+        outputTokens: resolveOutputReserve(
+          advanced.outputTokenLimit,
+          "deepseek-chat",
+          { apiBase: "https://api.deepseek.com/v1" },
+        ),
+      });
+      assert.isBelow(continuations, MAX_AGENT_ROUNDS - 1);
+      assert.equal(modelSteps, continuations + 1);
       assert.equal(outcome.kind, "completed");
       if (outcome.kind === "completed") {
         assert.include(outcome.text, "part 1 part 2 ");
-        assert.include(outcome.text, `part ${MAX_ANSWER_CONTINUATIONS + 1} `);
+        assert.include(outcome.text, `part ${continuations + 1} `);
         assert.include(outcome.text.toLowerCase(), "output limit");
       }
     } finally {
@@ -2798,7 +2836,6 @@ describe("AgentRuntime", function () {
 
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 1_914,
           mode: "agent",
           userText: "look it up",
@@ -2853,7 +2890,6 @@ describe("AgentRuntime", function () {
       });
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 19091,
           mode: "agent",
           userText: "finish this task",
@@ -2896,7 +2932,6 @@ describe("AgentRuntime", function () {
 
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 1_910,
           mode: "agent",
           userText: "finish this task",
@@ -2960,7 +2995,6 @@ describe("AgentRuntime", function () {
       const events: AgentEvent[] = [];
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 7_940_001,
           libraryID: 1,
           mode: "agent",
@@ -3059,7 +3093,6 @@ describe("AgentRuntime", function () {
 
       await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey,
           libraryID: 1,
           mode: "agent",
@@ -3157,7 +3190,6 @@ describe("AgentRuntime", function () {
       const events: AgentEvent[] = [];
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 1,
           mode: "agent",
           userText: "summarize",
@@ -3253,7 +3285,6 @@ describe("AgentRuntime", function () {
       const events: AgentEvent[] = [];
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 1,
           mode: "agent",
           userText: "what is this paper about?",
@@ -3311,67 +3342,633 @@ describe("AgentRuntime", function () {
       restoreDb();
     }
   });
-
-  it("keeps a successful preclassified empty intent authoritative", async function () {
-    const restoreDb = installMockDb();
-    try {
-      let stepIndex = 0;
-      let sawCorrection = false;
-      const runtime = new AgentRuntime({
-        registry: new AgentToolRegistry(),
-        adapterFactory: () => ({
-          getCapabilities: () => ({
-            streaming: true,
-            toolCalls: true,
-            multimodal: false,
-            fileInputs: false,
-            reasoning: true,
-          }),
-          supportsTools: () => true,
-          async runStep(params: AgentStepParams): Promise<AgentModelStep> {
-            stepIndex += 1;
-            sawCorrection ||= params.messages.some(
-              (message) =>
-                message.role === "user" &&
-                typeof message.content === "string" &&
-                message.content.includes("open typed obligation(s)"),
-            );
-            const text = stepIndex === 1 ? "I found it." : "Done.";
-            return {
-              kind: "final",
-              text,
-              assistantMessage: { role: "assistant", content: text },
-            };
-          },
-        }),
+  describe("substantive text streamed before a tool call", function () {
+    // Past the 320-character floor for structured content (answerSegments).
+    const SUMMARIES =
+      "## Per-paper summaries\n\n**1. Smith (2021)**\n\nDrift grows with time across eleven separate recording days, while the population code keeps a stable low-dimensional geometry.\n\n**2. Lee (2022)**\n\nDecoding stays stable while single-neuron tuning drifts, and a fixed linear readout trained on day one still separates the task conditions.\n\n";
+    const REVIEW = "## Review\n\nBoth papers agree.";
+    const capabilities = () => ({
+      streaming: true,
+      toolCalls: true,
+      multimodal: false,
+      fileInputs: false,
+      reasoning: true,
+    });
+    const readContextRegistry = () => {
+      const registry = new AgentToolRegistry();
+      registry.register({
+        spec: {
+          name: "read_context",
+          description: "read",
+          inputSchema: { type: "object" },
+          executionClass: "read",
+          requiresConfirmation: false,
+        },
+        validate: () => ({ ok: true, value: {} }),
+        execute: async () => ({ ok: true }),
       });
-
+      return registry;
+    };
+    const runSummaryTurn = async (runtime: AgentRuntime) => {
+      const events: AgentEvent[] = [];
       const outcome = await runtime.runTurn({
         request: {
           conversationKey: 1,
           mode: "agent",
-          userText:
-            'Move the paper titled "A very long named paper that previously bypassed the action fallback" to the destination.',
-          model: "test-model",
-          apiBase: "",
+          userText: "summarize and review",
+          model: "gpt-5.4",
+          apiBase: "https://api.openai.com/v1/responses",
           apiKey: "test",
-          classifiedIntent: {
-            ...classifiedFixture(),
-            semantic: semanticFixture(),
-            retrievalIntent: "none",
-            wantedSections: [],
-            actionIntents: [],
-          },
+        },
+        onEvent: async (event) => {
+          events.push(event);
         },
       });
-
+      return { outcome, events };
+    };
+    const streamedText = (events: AgentEvent[]) =>
+      events
+        .filter((event) => event.type === "message_delta")
+        .map((event) => (event as { text: string }).text)
+        .join("");
+    const assertCommittedOnce = async (
+      outcome: Awaited<ReturnType<AgentRuntime["runTurn"]>>,
+      events: AgentEvent[],
+      expected: string,
+    ) => {
       assert.equal(outcome.kind, "completed");
       if (outcome.kind !== "completed") return;
-      assert.isFalse(sawCorrection);
-      assert.equal(outcome.text, "I found it.");
-    } finally {
-      restoreDb();
-    }
+      assert.equal(outcome.text, expected);
+      assert.equal(outcome.text.split("## Per-paper summaries").length - 1, 1);
+      assert.isFalse(events.some((event) => event.type === "message_rollback"));
+      const final = events.find((event) => event.type === "final");
+      assert.equal(final && final.type === "final" ? final.text : "", expected);
+      const trace = await getAgentRunTrace(outcome.runId);
+      assert.equal(trace.run?.finalText, expected);
+      assert.equal(
+        streamedText(events),
+        expected,
+        "the stream and the final agree",
+      );
+    };
+
+    it("keeps it in the answer exactly once (adapter tool callback)", async function () {
+      const restoreDb = installMockDb();
+      try {
+        const runtime = new AgentRuntime({
+          registry: readContextRegistry(),
+          adapterFactory: () => ({
+            getCapabilities: capabilities,
+            supportsTools: () => true,
+            async runStep(params: AgentStepParams): Promise<AgentModelStep> {
+              await params.onTextDelta?.(SUMMARIES);
+              await params.onToolCall?.({
+                id: "call-1",
+                name: "read_context",
+                arguments: {},
+              });
+              await params.onTextDelta?.(REVIEW);
+              return {
+                kind: "final",
+                text: REVIEW,
+                assistantMessage: { role: "assistant", content: REVIEW },
+              };
+            },
+          }),
+        });
+        const { outcome, events } = await runSummaryTurn(runtime);
+        await assertCommittedOnce(outcome, events, `${SUMMARIES}${REVIEW}`);
+        const transcript = readPersistedTranscript(restoreDb, 1);
+        // The durable transcript holds the committed text once, in the answer.
+        const answers = transcript.filter((message) =>
+          String(message.content).includes("## Per-paper summaries"),
+        );
+        assert.lengthOf(answers, 1);
+        assert.equal(answers[0]?.role, "assistant");
+        assert.equal(answers[0]?.content, `${SUMMARIES}${REVIEW}`);
+      } finally {
+        restoreDb();
+      }
+    });
+
+    it("keeps it in the answer exactly once (tool_calls step)", async function () {
+      const restoreDb = installMockDb();
+      try {
+        let steps = 0;
+        const runtime = new AgentRuntime({
+          registry: readContextRegistry(),
+          adapterFactory: () => ({
+            getCapabilities: capabilities,
+            supportsTools: () => true,
+            async runStep(params: AgentStepParams): Promise<AgentModelStep> {
+              if (steps++ === 0) {
+                await params.onTextDelta?.(SUMMARIES);
+                const call = {
+                  id: "call-1",
+                  name: "read_context",
+                  arguments: {},
+                };
+                return {
+                  kind: "tool_calls",
+                  calls: [call],
+                  assistantMessage: {
+                    role: "assistant",
+                    content: SUMMARIES,
+                    tool_calls: [call],
+                  },
+                };
+              }
+              await params.onTextDelta?.(REVIEW);
+              return {
+                kind: "final",
+                text: REVIEW,
+                assistantMessage: { role: "assistant", content: REVIEW },
+              };
+            },
+          }),
+        });
+        const { outcome, events } = await runSummaryTurn(runtime);
+        await assertCommittedOnce(outcome, events, `${SUMMARIES}${REVIEW}`);
+      } finally {
+        restoreDb();
+      }
+    });
+
+    it("does not repeat it when the final step echoes it without streaming", async function () {
+      const restoreDb = installMockDb();
+      try {
+        let steps = 0;
+        const runtime = new AgentRuntime({
+          registry: readContextRegistry(),
+          adapterFactory: () => ({
+            getCapabilities: capabilities,
+            supportsTools: () => true,
+            async runStep(params: AgentStepParams): Promise<AgentModelStep> {
+              if (steps++ === 0) {
+                await params.onTextDelta?.(SUMMARIES);
+                const call = {
+                  id: "call-1",
+                  name: "read_context",
+                  arguments: {},
+                };
+                return {
+                  kind: "tool_calls",
+                  calls: [call],
+                  assistantMessage: {
+                    role: "assistant",
+                    content: SUMMARIES,
+                    tool_calls: [call],
+                  },
+                };
+              }
+              return {
+                kind: "final",
+                text: `${SUMMARIES}${REVIEW}`,
+                assistantMessage: {
+                  role: "assistant",
+                  content: `${SUMMARIES}${REVIEW}`,
+                },
+              };
+            },
+          }),
+        });
+        const { outcome, events } = await runSummaryTurn(runtime);
+        await assertCommittedOnce(outcome, events, `${SUMMARIES}${REVIEW}`);
+      } finally {
+        restoreDb();
+      }
+    });
+
+    it("leads a finalized document with it", async function () {
+      const restoreDb = installMockDb();
+      const restoreDocuments = installAgentStoreSqlite();
+      try {
+        await initPlanDocumentStore();
+        const registry = new AgentToolRegistry();
+        registry.register(createSubmitDocumentTool(submitDocumentGateway));
+        const runtime = new AgentRuntime({
+          registry,
+          adapterFactory: () => ({
+            getCapabilities: capabilities,
+            supportsTools: () => true,
+            async runStep(params: AgentStepParams): Promise<AgentModelStep> {
+              await params.onTextDelta?.(SUMMARIES);
+              const call = {
+                id: "submit-document-1",
+                name: "submit_document",
+                arguments: {
+                  documentKind: "guide",
+                  integrityPolicy: "authored",
+                  title: "Representational drift",
+                  markdown: "# Representational drift\n\nA complete guide.",
+                  citations: [],
+                  quotes: [],
+                  assets: [],
+                  groundingReviewed: "passed",
+                  groundingIssues: [],
+                },
+              };
+              return {
+                kind: "tool_calls",
+                calls: [call],
+                assistantMessage: {
+                  role: "assistant",
+                  content: SUMMARIES,
+                  tool_calls: [call],
+                },
+              };
+            },
+          }),
+        });
+        const events: AgentEvent[] = [];
+        const outcome = await runtime.runTurn({
+          request: {
+            conversationKey: 774412,
+            mode: "agent",
+            userText: "Summarize the papers and write a guide",
+            libraryID: 1,
+            model: "test",
+            apiKey: "test",
+            apiBase: "https://example.invalid",
+            metadata: { sourceMessageTimestamp: 100 },
+          },
+          onEvent: (event) => events.push(event),
+        });
+        assert.equal(outcome.kind, "completed");
+        if (outcome.kind !== "completed") return;
+        assert.isFalse(
+          events.some((event) => event.type === "message_rollback"),
+        );
+        assert.isTrue(outcome.text.startsWith(SUMMARIES));
+        assert.include(
+          outcome.text.slice(SUMMARIES.length),
+          "# Representational drift",
+        );
+        assert.equal(
+          outcome.text.split("## Per-paper summaries").length - 1,
+          1,
+        );
+        const final = events.find((event) => event.type === "final");
+        assert.equal(
+          final && final.type === "final" ? final.text : "",
+          outcome.text,
+        );
+      } finally {
+        restoreDocuments();
+        restoreDb();
+      }
+    });
+
+    /** The chat as the stream builds it: deltas appended, rollbacks cut. */
+    const reconstructStream = (events: AgentEvent[]) => {
+      let text = "";
+      for (const event of events) {
+        if (event.type === "message_delta") text += event.text;
+        else if (event.type === "message_rollback")
+          text = text.slice(
+            0,
+            Math.max(0, text.length - (event.length ?? event.text.length)),
+          );
+      }
+      return text;
+    };
+    const readCall = (id: string) => ({
+      id,
+      name: "read_context",
+      arguments: {},
+    });
+    const toolStep = (
+      content: string,
+      calls = [readCall("call-1")],
+    ): AgentModelStep => ({
+      kind: "tool_calls",
+      calls,
+      assistantMessage: { role: "assistant", content, tool_calls: calls },
+    });
+    const finalStep = (text: string): AgentModelStep => ({
+      kind: "final",
+      text,
+      assistantMessage: { role: "assistant", content: text },
+    });
+    const scriptedRuntime = (
+      script: Array<(params: AgentStepParams) => Promise<AgentModelStep>>,
+      registry = readContextRegistry(),
+    ) => {
+      let step = 0;
+      return new AgentRuntime({
+        registry,
+        adapterFactory: () => ({
+          getCapabilities: capabilities,
+          supportsTools: () => true,
+          async runStep(params: AgentStepParams): Promise<AgentModelStep> {
+            const next = script[Math.min(step, script.length - 1)];
+            step += 1;
+            return await next(params);
+          },
+        }),
+      });
+    };
+    const occurrences = (text: string, needle: string) =>
+      text.split(needle).length - 1;
+
+    it("commits a kept truncated answer with the text streamed after it", async function () {
+      const restoreDb = installMockDb();
+      try {
+        const KEPT = "Here is the first part of the answer, which ran out. ";
+        const runtime = scriptedRuntime([
+          async (params) => {
+            await params.onTextDelta?.(KEPT);
+            return {
+              kind: "incomplete",
+              reason: "output_limit",
+              text: KEPT,
+              assistantMessage: { role: "assistant", content: KEPT },
+              recoveryInstruction: "Continue.",
+            };
+          },
+          async (params) => {
+            await params.onTextDelta?.(SUMMARIES);
+            return toolStep(SUMMARIES);
+          },
+          async (params) => {
+            await params.onTextDelta?.(REVIEW);
+            return finalStep(REVIEW);
+          },
+        ]);
+        const { outcome, events } = await runSummaryTurn(runtime);
+        assert.equal(outcome.kind, "completed");
+        if (outcome.kind !== "completed") return;
+        assert.isFalse(
+          events.some((event) => event.type === "message_rollback"),
+        );
+        const final = events.find((event) => event.type === "final");
+        assert.equal(outcome.text, `${KEPT}${SUMMARIES}${REVIEW}`);
+        assert.equal(final?.type === "final" ? final.text : "", outcome.text);
+        assert.equal(reconstructStream(events), outcome.text);
+      } finally {
+        restoreDb();
+      }
+    });
+
+    it("rolls back a lead-in and then the kept truncated answer before it", async function () {
+      const restoreDb = installMockDb();
+      try {
+        const KEPT = "Short kept text. ";
+        const LEAD_IN = "Let me check one more paper.";
+        const runtime = scriptedRuntime([
+          async (params) => {
+            await params.onTextDelta?.(KEPT);
+            return {
+              kind: "incomplete",
+              reason: "output_limit",
+              text: KEPT,
+              assistantMessage: { role: "assistant", content: KEPT },
+              recoveryInstruction: "Continue.",
+            };
+          },
+          async (params) => {
+            await params.onTextDelta?.(LEAD_IN);
+            return toolStep(LEAD_IN);
+          },
+          async (params) => {
+            await params.onTextDelta?.(REVIEW);
+            return finalStep(REVIEW);
+          },
+        ]);
+        const { outcome, events } = await runSummaryTurn(runtime);
+        assert.equal(outcome.kind, "completed");
+        if (outcome.kind !== "completed") return;
+        assert.deepEqual(
+          events
+            .filter((event) => event.type === "message_rollback")
+            .map((event) =>
+              event.type === "message_rollback" ? event.text : "",
+            ),
+          [LEAD_IN, KEPT],
+        );
+        assert.equal(outcome.text, REVIEW);
+        assert.equal(reconstructStream(events), outcome.text);
+      } finally {
+        restoreDb();
+      }
+    });
+
+    it("keeps two committed segments in order, each once", async function () {
+      const restoreDb = installMockDb();
+      try {
+        const MORE = SUMMARIES.replace(
+          "## Per-paper summaries",
+          "## More summaries",
+        );
+        const runtime = scriptedRuntime([
+          async (params) => {
+            await params.onTextDelta?.(SUMMARIES);
+            return toolStep(SUMMARIES);
+          },
+          async (params) => {
+            await params.onTextDelta?.(MORE.trimEnd());
+            return toolStep(MORE.trimEnd(), [readCall("call-2")]);
+          },
+          async (params) => {
+            await params.onTextDelta?.(REVIEW);
+            return finalStep(REVIEW);
+          },
+        ]);
+        const { outcome, events } = await runSummaryTurn(runtime);
+        assert.equal(outcome.kind, "completed");
+        if (outcome.kind !== "completed") return;
+        assert.equal(outcome.text, `${SUMMARIES}${MORE}${REVIEW}`);
+        assert.equal(occurrences(outcome.text, "## Per-paper summaries"), 1);
+        assert.equal(occurrences(outcome.text, "## More summaries"), 1);
+        assert.equal(reconstructStream(events), outcome.text);
+      } finally {
+        restoreDb();
+      }
+    });
+
+    it("drops a whitespace- and citation-shifted echo of the committed text", async function () {
+      const restoreDb = installMockDb();
+      try {
+        const echoed = `${SUMMARIES.replace(/\n\n/g, "\n").replace(
+          "Drift grows with time.",
+          "Drift grows with time. [[cite:c1]]",
+        )}${REVIEW}`;
+        const runtime = scriptedRuntime([
+          async (params) => {
+            await params.onTextDelta?.(SUMMARIES);
+            return toolStep(SUMMARIES);
+          },
+          async () => finalStep(echoed),
+        ]);
+        const { outcome, events } = await runSummaryTurn(runtime);
+        assert.equal(outcome.kind, "completed");
+        if (outcome.kind !== "completed") return;
+        assert.equal(outcome.text, `${SUMMARIES}${REVIEW}`);
+        assert.equal(reconstructStream(events), outcome.text);
+      } finally {
+        restoreDb();
+      }
+    });
+
+    it("tells a restarted model that the committed text already starts the answer", async function () {
+      const restoreDb = installMockDb();
+      try {
+        let restartedInput = "";
+        const calls = Array.from({ length: 9 }, (_, index) =>
+          readCall(`call-${index}`),
+        );
+        const runtime = scriptedRuntime([
+          async (params) => {
+            await params.onTextDelta?.(SUMMARIES);
+            return toolStep(SUMMARIES, calls);
+          },
+          async (params) => {
+            restartedInput = JSON.stringify(params.messages);
+            await params.onTextDelta?.(REVIEW);
+            return finalStep(REVIEW);
+          },
+        ]);
+        const { outcome, events } = await runSummaryTurn(runtime);
+        assert.equal(outcome.kind, "completed");
+        if (outcome.kind !== "completed") return;
+        assert.include(restartedInput, "already starts the answer");
+        assert.include(restartedInput, "## Per-paper summaries");
+        assert.equal(outcome.text, `${SUMMARIES}${REVIEW}`);
+        assert.equal(reconstructStream(events), outcome.text);
+      } finally {
+        restoreDb();
+      }
+    });
+
+    it("leads a failure message with the committed text", async function () {
+      const restoreDb = installMockDb();
+      try {
+        const registry = new AgentToolRegistry();
+        registry.register({
+          spec: {
+            name: "read_context",
+            description: "read",
+            inputSchema: { type: "object" },
+            executionClass: "read",
+            requiresConfirmation: false,
+          },
+          validate: () => ({ ok: true, value: {} }),
+          execute: async () => {
+            throw new Error("read failed");
+          },
+        });
+        let round = 0;
+        const runtime = scriptedRuntime(
+          [
+            async (params) => {
+              round += 1;
+              if (round === 1) {
+                await params.onTextDelta?.(SUMMARIES);
+                return toolStep(SUMMARIES);
+              }
+              return toolStep("", [readCall(`call-${round}`)]);
+            },
+          ],
+          registry,
+        );
+        const { outcome } = await runSummaryTurn(runtime);
+        assert.equal(outcome.kind, "completed");
+        if (outcome.kind !== "completed") return;
+        assert.isTrue(outcome.text.startsWith(SUMMARIES));
+        assert.include(
+          outcome.text,
+          "Agent stopped after repeated tool errors",
+        );
+        assert.equal(occurrences(outcome.text, "## Per-paper summaries"), 1);
+        const trace = await getAgentRunTrace(outcome.runId);
+        assert.equal(trace.run?.finalText, outcome.text);
+      } finally {
+        restoreDb();
+      }
+    });
+
+    it("leads a continuation-limit ending with the committed text", async function () {
+      const restoreDb = installMockDb();
+      try {
+        const PART = "## Review\n\nBoth papers agree that drift";
+        const runtime = scriptedRuntime([
+          async (params) => {
+            await params.onTextDelta?.(SUMMARIES);
+            return toolStep(SUMMARIES);
+          },
+          async (params) => {
+            await params.onTextDelta?.(PART);
+            return {
+              kind: "incomplete",
+              reason: "output_limit",
+              text: PART,
+              assistantMessage: { role: "assistant", content: PART },
+              recoveryInstruction: "Continue.",
+            };
+          },
+        ]);
+        const { outcome, events } = await runSummaryTurn(runtime);
+        assert.equal(outcome.kind, "completed");
+        if (outcome.kind !== "completed") return;
+        assert.isTrue(outcome.text.startsWith(`${SUMMARIES}${PART}`));
+        assert.include(outcome.text, "cut short");
+        assert.equal(occurrences(outcome.text, "## Per-paper summaries"), 1);
+        assert.isTrue(outcome.text.startsWith(reconstructStream(events)));
+      } finally {
+        restoreDb();
+      }
+    });
+
+    it("keeps the committed text in a stopped run's record", async function () {
+      const restoreDb = installMockDb();
+      try {
+        const controller = new AbortController();
+        const registry = new AgentToolRegistry();
+        registry.register({
+          spec: {
+            name: "read_context",
+            description: "read",
+            inputSchema: { type: "object" },
+            executionClass: "read",
+            requiresConfirmation: false,
+          },
+          validate: () => ({ ok: true, value: {} }),
+          execute: async () => {
+            controller.abort();
+            return { ok: true };
+          },
+        });
+        const runtime = scriptedRuntime(
+          [
+            async (params) => {
+              await params.onTextDelta?.(SUMMARIES);
+              return toolStep(SUMMARIES);
+            },
+            async () => finalStep(REVIEW),
+          ],
+          registry,
+        );
+        await runtime
+          .runTurn({
+            request: {
+              conversationKey: 1,
+              mode: "agent",
+              userText: "summarize and review",
+              model: "gpt-5.4",
+              apiBase: "https://api.openai.com/v1/responses",
+              apiKey: "test",
+            },
+            signal: controller.signal,
+            onEvent: async () => undefined,
+          })
+          .catch(() => undefined);
+        const run = await getLatestAgentRunForConversation(1);
+        assert.equal(run?.status, "cancelled");
+        assert.equal(run?.finalText, SUMMARIES);
+      } finally {
+        restoreDb();
+      }
+    });
   });
 
   it("preserves an informational final after permitted exploratory reads", async function () {
@@ -3539,14 +4136,6 @@ describe("AgentRuntime", function () {
           apiBase: "",
           apiKey: "test",
           libraryID: 1,
-          classifiedIntent: {
-            ...classifiedFixture(),
-            semantic: semanticFixture(),
-            retrievalIntent: "targeted",
-            wantedSections: [],
-            writeDisposition: "none",
-            actionIntents: [],
-          },
         },
         onEvent: (event) => {
           events.push(event);
@@ -3621,7 +4210,7 @@ describe("AgentRuntime", function () {
           };
         },
       });
-      registry.register(createToolResultReadTool());
+      registry.register(createContextReadTool());
 
       let step = 0;
       let restoredContent: Record<string, unknown> | undefined;
@@ -3657,7 +4246,11 @@ describe("AgentRuntime", function () {
             if (step === 2) {
               assert.include(
                 params.tools.map((tool) => tool.name),
-                "tool_result_read",
+                "context_read",
+              );
+              assert.isTrue(
+                params.request.metadata?.agentToolResultReadAvailable === true,
+                "the stored paper result is readable by handle",
               );
               const paperMessage = params.messages.find(
                 (message) =>
@@ -3670,8 +4263,9 @@ describe("AgentRuntime", function () {
               assert.match(delivered.toolResultHandle || "", /^trh_/);
               const call = {
                 id: "rehydrate-paper-call",
-                name: "tool_result_read",
+                name: "context_read",
                 arguments: {
+                  source: "tool_result",
                   handle: delivered.toolResultHandle,
                   path: "results",
                   offset: 0,
@@ -3690,7 +4284,7 @@ describe("AgentRuntime", function () {
             }
             const restoredMessage = params.messages.find(
               (message) =>
-                message.role === "tool" && message.name === "tool_result_read",
+                message.role === "tool" && message.name === "context_read",
             );
             assert.equal(restoredMessage?.role, "tool");
             restoredContent = JSON.parse(
@@ -3717,14 +4311,6 @@ describe("AgentRuntime", function () {
           apiBase: "",
           apiKey: "test",
           libraryID: 1,
-          classifiedIntent: {
-            ...classifiedFixture(),
-            semantic: semanticFixture(),
-            retrievalIntent: "targeted",
-            wantedSections: [],
-            writeDisposition: "none",
-            actionIntents: [],
-          },
         },
       });
 
@@ -3852,14 +4438,6 @@ describe("AgentRuntime", function () {
           apiBase: "",
           apiKey: "test",
           libraryID: 1,
-          classifiedIntent: {
-            ...classifiedFixture(),
-            semantic: semanticFixture(),
-            retrievalIntent: "targeted",
-            wantedSections: [],
-            writeDisposition: "none",
-            actionIntents: [],
-          },
         },
         onEvent: (event) => events.push(event),
       });
@@ -3979,14 +4557,6 @@ describe("AgentRuntime", function () {
           apiBase: "",
           apiKey: "test",
           libraryID: 1,
-          classifiedIntent: {
-            ...classifiedFixture(),
-            semantic: semanticFixture(),
-            retrievalIntent: "targeted",
-            wantedSections: [],
-            writeDisposition: "none",
-            actionIntents: [],
-          },
         },
         onEvent: (event) => events.push(event),
       });
@@ -4191,9 +4761,6 @@ describe("AgentRuntime", function () {
 
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: actionFixture("note_create", undefined, {
-            noteDestination: "zotero",
-          }),
           conversationKey: 1,
           mode: "agent",
           libraryID: 1,
@@ -4348,9 +4915,6 @@ describe("AgentRuntime", function () {
 
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: actionFixture("file_write", undefined, {
-            noteDestination: "file",
-          }),
           conversationKey: 1,
           mode: "agent",
           userText: "write this figure note to my Obsidian",
@@ -4449,7 +5013,6 @@ describe("AgentRuntime", function () {
       const events: AgentEvent[] = [];
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 1,
           mode: "agent",
           userText: "summarize the paper",
@@ -4528,7 +5091,6 @@ describe("AgentRuntime", function () {
       const events: AgentEvent[] = [];
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 1,
           mode: "agent",
           userText: "count tokens",
@@ -4621,7 +5183,6 @@ describe("AgentRuntime", function () {
 
       await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 1,
           mode: "agent",
           userText: "count tokens",
@@ -4650,7 +5211,6 @@ describe("AgentRuntime", function () {
     const restoreDb = installMockDb();
     try {
       const request: AgentRuntimeRequest = {
-        classifiedIntent: classifiedFixture(),
         conversationKey: 501,
         mode: "agent",
         userText: "summarize this paper",
@@ -4745,7 +5305,6 @@ describe("AgentRuntime", function () {
       const secondEvents: AgentEvent[] = [];
       await secondRuntime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           ...request,
           userText: "what about the methods?",
         },
@@ -4798,7 +5357,6 @@ describe("AgentRuntime", function () {
       const failedEvents: AgentEvent[] = [];
       await failingRuntime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           ...request,
           conversationKey: 777,
           userText: "this will fail",
@@ -4833,7 +5391,6 @@ describe("AgentRuntime", function () {
       const retryEvents: AgentEvent[] = [];
       await retryRuntime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           ...request,
           conversationKey: 777,
           userText: "retry",
@@ -4896,7 +5453,6 @@ describe("AgentRuntime", function () {
       });
 
       const request: AgentRuntimeRequest = {
-        classifiedIntent: classifiedFixture(),
         conversationKey: 601,
         mode: "agent",
         userText: "read the abstract",
@@ -5003,7 +5559,6 @@ describe("AgentRuntime", function () {
       });
       await secondRuntime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           ...request,
           userText: "use what you read",
         },
@@ -5107,7 +5662,6 @@ describe("AgentRuntime", function () {
       try {
         await runtime.runTurn({
           request: {
-            classifiedIntent: classifiedFixture(),
             conversationKey,
             mode: "agent",
             userText: "persist this before inference",
@@ -5216,7 +5770,6 @@ describe("AgentRuntime", function () {
       });
       const run = runtime.runTurn({
         request: {
-          classifiedIntent: actionFixture("command_execute"),
           conversationKey,
           mode: "agent",
           libraryID: 1,
@@ -5252,7 +5805,6 @@ describe("AgentRuntime", function () {
     const restoreDb = installMockDb();
     try {
       const request: AgentRuntimeRequest = {
-        classifiedIntent: classifiedFixture(),
         conversationKey: 7,
         mode: "agent",
         userText: "remember alpha",
@@ -5261,7 +5813,7 @@ describe("AgentRuntime", function () {
         apiKey: "test",
       };
       const registry = new AgentToolRegistry();
-      registry.register(createToolResultReadTool());
+      registry.register(createContextReadTool());
       const firstRuntime = new AgentRuntime({
         registry,
         adapterFactory: () =>
@@ -5298,6 +5850,7 @@ describe("AgentRuntime", function () {
 
       let secondMessages: AgentModelMessage[] = [];
       let secondToolNames: string[] = [];
+      let secondHandleReadable = false;
       const secondRuntime = new AgentRuntime({
         registry,
         adapterFactory: () => ({
@@ -5312,6 +5865,8 @@ describe("AgentRuntime", function () {
           async runStep(params: AgentStepParams): Promise<AgentModelStep> {
             secondMessages = params.messages;
             secondToolNames = params.tools.map((tool) => tool.name);
+            secondHandleReadable =
+              params.request.metadata?.agentToolResultReadAvailable === true;
             return {
               kind: "final",
               text: "Used it.",
@@ -5325,7 +5880,6 @@ describe("AgentRuntime", function () {
       });
       await secondRuntime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           ...request,
           userText: "what did I ask you to remember?",
         },
@@ -5348,7 +5902,11 @@ describe("AgentRuntime", function () {
       );
       assert.include(serialized, "remember alpha");
       assert.include(serialized, "Alpha is preserved.");
-      assert.include(secondToolNames, "tool_result_read");
+      assert.include(secondToolNames, "context_read");
+      assert.isTrue(
+        secondHandleReadable,
+        "a handle stored in an earlier turn is readable by source:'tool_result'",
+      );
     } finally {
       restoreDb();
     }
@@ -5448,9 +6006,6 @@ describe("AgentRuntime", function () {
       try {
         await firstRuntime.runTurn({
           request: {
-            classifiedIntent: actionFixture("command_execute", undefined, {
-              continuation: "resume",
-            }),
             conversationKey,
             mode: "agent",
             userText: "run the recovery command once",
@@ -5501,9 +6056,6 @@ describe("AgentRuntime", function () {
       });
       await continuedRuntime.runTurn({
         request: {
-          classifiedIntent: actionFixture("command_execute", undefined, {
-            continuation: "resume",
-          }),
           conversationKey,
           mode: "agent",
           userText: "continue",
@@ -5618,9 +6170,6 @@ describe("AgentRuntime", function () {
       try {
         await interruptedRuntime.runTurn({
           request: {
-            classifiedIntent: actionFixture("command_execute", undefined, {
-              continuation: "resume",
-            }),
             conversationKey,
             mode: "agent",
             userText: "run the recovery command to preserve this original goal",
@@ -5681,9 +6230,6 @@ describe("AgentRuntime", function () {
       });
       await continuedRuntime.runTurn({
         request: {
-          classifiedIntent: actionFixture("command_execute", undefined, {
-            continuation: "resume",
-          }),
           conversationKey,
           mode: "agent",
           userText: "continue after the model change",
@@ -5714,7 +6260,6 @@ describe("AgentRuntime", function () {
     const restoreDb = installMockDb();
     try {
       const request: AgentRuntimeRequest = {
-        classifiedIntent: classifiedFixture(),
         conversationKey: 8,
         mode: "agent",
         userText: "seed",
@@ -5793,7 +6338,6 @@ describe("AgentRuntime", function () {
       });
       await seedRuntime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           ...request,
           userText: "seed tool result",
         },
@@ -5824,7 +6368,6 @@ describe("AgentRuntime", function () {
         });
         await runtime.runTurn({
           request: {
-            classifiedIntent: classifiedFixture(),
             ...request,
             userText: `seed ${index}`,
           },
@@ -5845,7 +6388,6 @@ describe("AgentRuntime", function () {
       });
       const compactOutcome = await compactRuntime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           ...request,
           userText: "/compact",
         },
@@ -5889,7 +6431,6 @@ describe("AgentRuntime", function () {
       });
       await followupRuntime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           ...request,
           userText: "continue",
         },
@@ -5939,10 +6480,11 @@ describe("AgentRuntime", function () {
         validate: () => ({ ok: true, value: {} }),
         execute: async () => fullResult,
       });
-      registry.register(createToolResultReadTool());
+      registry.register(createContextReadTool());
 
       let synthesisMessages: AgentModelMessage[] = [];
       const toolNamesByStep: string[][] = [];
+      const handleReadableByStep: boolean[] = [];
       const adapter: AgentModelAdapter = {
         getCapabilities: () => ({
           streaming: false,
@@ -5954,6 +6496,9 @@ describe("AgentRuntime", function () {
         supportsTools: () => true,
         async runStep(params: AgentStepParams): Promise<AgentModelStep> {
           toolNamesByStep.push(params.tools.map((tool) => tool.name));
+          handleReadableByStep.push(
+            params.request.metadata?.agentToolResultReadAvailable === true,
+          );
           if (!synthesisMessages.length) {
             synthesisMessages = params.messages;
             return {
@@ -5996,7 +6541,6 @@ describe("AgentRuntime", function () {
       const events: AgentEvent[] = [];
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 11,
           mode: "agent",
           userText: "list my library",
@@ -6031,8 +6575,11 @@ describe("AgentRuntime", function () {
       assert.lengthOf(modelFacing.results, 120);
       assert.include(JSON.stringify(modelFacing), "A".repeat(200));
       assert.isAtLeast(toolNamesByStep.length, 2);
-      assert.notInclude(toolNamesByStep[0], "tool_result_read");
-      assert.notInclude(toolNamesByStep[1], "tool_result_read");
+      // context_read is always offered; no step may read a handle here.
+      assert.include(toolNamesByStep[0], "context_read");
+      assert.include(toolNamesByStep[1], "context_read");
+      assert.isFalse(handleReadableByStep[0]);
+      assert.isFalse(handleReadableByStep[1]);
     } finally {
       restoreDb();
     }
@@ -6066,7 +6613,7 @@ describe("AgentRuntime", function () {
       };
       registry.register({
         spec: {
-          name: "query_library",
+          name: "library_search",
           description: "query",
           inputSchema: { type: "object" },
           executionClass: "read",
@@ -6075,10 +6622,11 @@ describe("AgentRuntime", function () {
         validate: () => ({ ok: true, value: {} }),
         execute: async () => fullResult,
       });
-      registry.register(createToolResultReadTool());
+      registry.register(createContextReadTool());
 
       let synthesisMessages: AgentModelMessage[] = [];
       const toolNamesByStep: string[][] = [];
+      const handleReadableByStep: boolean[] = [];
       const adapter: AgentModelAdapter = {
         getCapabilities: () => ({
           streaming: false,
@@ -6090,6 +6638,9 @@ describe("AgentRuntime", function () {
         supportsTools: () => true,
         async runStep(params: AgentStepParams): Promise<AgentModelStep> {
           toolNamesByStep.push(params.tools.map((tool) => tool.name));
+          handleReadableByStep.push(
+            params.request.metadata?.agentToolResultReadAvailable === true,
+          );
           if (!synthesisMessages.length) {
             synthesisMessages = params.messages;
             return {
@@ -6097,7 +6648,7 @@ describe("AgentRuntime", function () {
               calls: [
                 {
                   id: "call-library",
-                  name: "query_library",
+                  name: "library_search",
                   arguments: { entity: "items", mode: "list" },
                 },
               ],
@@ -6107,7 +6658,7 @@ describe("AgentRuntime", function () {
                 tool_calls: [
                   {
                     id: "call-library",
-                    name: "query_library",
+                    name: "library_search",
                     arguments: { entity: "items", mode: "list" },
                   },
                 ],
@@ -6132,7 +6683,6 @@ describe("AgentRuntime", function () {
       const events: AgentEvent[] = [];
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 13,
           mode: "agent",
           userText: "list my library",
@@ -6176,11 +6726,15 @@ describe("AgentRuntime", function () {
       );
       assert.equal(checkpoint?.role, "user");
       const checkpointText = String(checkpoint?.content || "");
-      assert.include(checkpointText, "query_library");
+      assert.include(checkpointText, "library_search");
       assert.match(checkpointText, /handle=trh_[a-z0-9]+/i);
       assert.isAtLeast(toolNamesByStep.length, 2);
-      assert.notInclude(toolNamesByStep[0], "tool_result_read");
-      assert.include(toolNamesByStep[1], "tool_result_read");
+      // context_read is always offered; handle reads open once a result
+      // has been stored.
+      assert.include(toolNamesByStep[0], "context_read");
+      assert.include(toolNamesByStep[1], "context_read");
+      assert.isFalse(handleReadableByStep[0]);
+      assert.isTrue(handleReadableByStep[1]);
       assert.notInclude(checkpointText, "A".repeat(200));
     } finally {
       restoreDb();
@@ -6208,7 +6762,7 @@ describe("AgentRuntime", function () {
       };
       registry.register({
         spec: {
-          name: "query_library",
+          name: "library_search",
           description: "query",
           inputSchema: { type: "object" },
           executionClass: "read",
@@ -6217,7 +6771,7 @@ describe("AgentRuntime", function () {
         validate: () => ({ ok: true, value: {} }),
         execute: async () => fullResult,
       });
-      registry.register(createToolResultReadTool());
+      registry.register(createContextReadTool());
 
       let stepIndex = 0;
       let storedHandle = "";
@@ -6229,6 +6783,7 @@ describe("AgentRuntime", function () {
         contentStart?: string;
       }> = [];
       const toolNamesByStep: string[][] = [];
+      const handleReadableByStep: boolean[] = [];
       const adapter: AgentModelAdapter = {
         getCapabilities: () => ({
           streaming: false,
@@ -6241,13 +6796,16 @@ describe("AgentRuntime", function () {
         async runStep(params: AgentStepParams): Promise<AgentModelStep> {
           stepIndex += 1;
           toolNamesByStep.push(params.tools.map((tool) => tool.name));
+          handleReadableByStep.push(
+            params.request.metadata?.agentToolResultReadAvailable === true,
+          );
           if (stepIndex === 1) {
             return {
               kind: "tool_calls",
               calls: [
                 {
                   id: "call-library",
-                  name: "query_library",
+                  name: "library_search",
                   arguments: { entity: "items", mode: "list" },
                 },
               ],
@@ -6257,7 +6815,7 @@ describe("AgentRuntime", function () {
                 tool_calls: [
                   {
                     id: "call-library",
-                    name: "query_library",
+                    name: "library_search",
                     arguments: { entity: "items", mode: "list" },
                   },
                 ],
@@ -6284,8 +6842,9 @@ describe("AgentRuntime", function () {
               calls: [
                 {
                   id: "call-read",
-                  name: "tool_result_read",
+                  name: "context_read",
                   arguments: {
+                    source: "tool_result",
                     handle: storedHandle,
                     path: "results",
                     offset: 50,
@@ -6299,8 +6858,9 @@ describe("AgentRuntime", function () {
                 tool_calls: [
                   {
                     id: "call-read",
-                    name: "tool_result_read",
+                    name: "context_read",
                     arguments: {
+                      source: "tool_result",
                       handle: storedHandle,
                       path: "results",
                       offset: 50,
@@ -6313,7 +6873,7 @@ describe("AgentRuntime", function () {
           }
           readToolMessage = params.messages.find(
             (message) =>
-              message.role === "tool" && message.name === "tool_result_read",
+              message.role === "tool" && message.name === "context_read",
           );
           readToolStepMessages = params.messages.map((message) => ({
             role: message.role,
@@ -6341,7 +6901,6 @@ describe("AgentRuntime", function () {
       });
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 15,
           mode: "agent",
           userText: "list my library, then inspect omitted rows",
@@ -6353,8 +6912,12 @@ describe("AgentRuntime", function () {
       });
 
       assert.equal(outcome.kind, "completed");
-      assert.notInclude(toolNamesByStep[0], "tool_result_read");
-      assert.include(toolNamesByStep[1], "tool_result_read");
+      // context_read is always offered; handle reads open once a result
+      // has been stored.
+      assert.include(toolNamesByStep[0], "context_read");
+      assert.include(toolNamesByStep[1], "context_read");
+      assert.isFalse(handleReadableByStep[0]);
+      assert.isTrue(handleReadableByStep[1]);
       assert.equal(
         readToolMessage?.role,
         "tool",
@@ -6442,7 +7005,7 @@ describe("AgentRuntime", function () {
         validate: () => ({ ok: true, value: {} }),
         execute: async () => fullResult,
       });
-      registry.register(createToolResultReadTool());
+      registry.register(createContextReadTool());
 
       let stepIndex = 0;
       let synthesisMessages: AgentModelMessage[] = [];
@@ -6497,8 +7060,9 @@ describe("AgentRuntime", function () {
             assert.match(storedHandle, /^trh_/);
             const call = {
               id: "call-read-evidence",
-              name: "tool_result_read",
+              name: "context_read",
               arguments: {
+                source: "tool_result",
                 handle: storedHandle,
                 path: "snippets",
                 offset: 0,
@@ -6532,7 +7096,6 @@ describe("AgentRuntime", function () {
       });
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 14,
           mode: "agent",
           userText: "find evidence",
@@ -6545,8 +7108,7 @@ describe("AgentRuntime", function () {
 
       assert.equal(outcome.kind, "completed");
       const toolMessage = synthesisMessages.find(
-        (message) =>
-          message.role === "tool" && message.name === "tool_result_read",
+        (message) => message.role === "tool" && message.name === "context_read",
       );
       assert.equal(toolMessage?.role, "tool");
       const restored = JSON.parse((toolMessage as { content: string }).content);
@@ -6573,7 +7135,7 @@ describe("AgentRuntime", function () {
       const registry = new AgentToolRegistry();
       registry.register({
         spec: {
-          name: "query_library",
+          name: "library_search",
           description: "read",
           inputSchema: { type: "object" },
           executionClass: "read",
@@ -6592,7 +7154,7 @@ describe("AgentRuntime", function () {
           })),
         }),
       });
-      registry.register(createToolResultReadTool());
+      registry.register(createContextReadTool());
       const adapter: AgentModelAdapter = {
         getCapabilities: () => ({
           streaming: false,
@@ -6612,7 +7174,7 @@ describe("AgentRuntime", function () {
             initialMessages = structuredClone(params.messages);
             const call = {
               id: "large-read-call",
-              name: "query_library",
+              name: "library_search",
               arguments: { entity: "items", mode: "list" },
             };
             return {
@@ -6641,7 +7203,6 @@ describe("AgentRuntime", function () {
       });
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 12,
           mode: "agent",
           userText: "current request",
@@ -6676,160 +7237,6 @@ describe("AgentRuntime", function () {
       restoreDb();
     }
   });
-
-  it("checkpoints raw paper text after a durable research batch", async function () {
-    const restoreDb = installMockDb();
-    try {
-      const registry = new AgentToolRegistry();
-      registry.register({
-        spec: {
-          name: "paper_read",
-          description: "read papers",
-          inputSchema: { type: "object" },
-          executionClass: "read",
-          requiresConfirmation: false,
-        },
-        validate: (args) => ({ ok: true, value: args }),
-        execute: async () => ({
-          results: [
-            {
-              identity: "1:AAAA1111",
-              text: `FULL_PAPER_TEXT_SENTINEL ${"P".repeat(20_000)}`,
-            },
-          ],
-        }),
-      });
-      registry.register({
-        spec: {
-          name: "research_update",
-          description: "persist paper understanding",
-          inputSchema: { type: "object" },
-          executionClass: "read",
-          requiresConfirmation: false,
-        },
-        validate: (args) => ({ ok: true, value: args }),
-        execute: async () => ({
-          content: {
-            progress: { totalItems: 30, deepReadCompleted: 1 },
-          },
-          continuationCheckpoint: {
-            reason: "research_batch_durable",
-            instruction:
-              "The completed paper understanding is durable. Continue with the remaining reading manifest.",
-          },
-        }),
-      });
-      registry.register(createToolResultReadTool());
-
-      let stepIndex = 0;
-      let resetCount = 0;
-      let messagesAfterBatch: AgentModelMessage[] = [];
-      const events: AgentEvent[] = [];
-      const runtime = new AgentRuntime({
-        registry,
-        adapterFactory: () => ({
-          getCapabilities: () => ({
-            streaming: false,
-            toolCalls: true,
-            multimodal: false,
-            fileInputs: false,
-            reasoning: true,
-          }),
-          supportsTools: () => true,
-          resetState: () => {
-            resetCount += 1;
-          },
-          async runStep(params: AgentStepParams): Promise<AgentModelStep> {
-            stepIndex += 1;
-            if (stepIndex === 1) {
-              const call = {
-                id: "read-paper-batch",
-                name: "paper_read",
-                arguments: {
-                  mode: "overview",
-                  targets: [{ itemId: 1, contextItemId: 2 }],
-                },
-              };
-              return {
-                kind: "tool_calls",
-                calls: [call],
-                assistantMessage: {
-                  role: "assistant",
-                  content: "",
-                  tool_calls: [call],
-                },
-              };
-            }
-            if (stepIndex === 2) {
-              const call = {
-                id: "record-paper-batch",
-                name: "research_update",
-                arguments: {
-                  operation: "record_papers",
-                  papers: [{ libraryID: 1, itemKey: "AAAA1111" }],
-                },
-              };
-              return {
-                kind: "tool_calls",
-                calls: [call],
-                assistantMessage: {
-                  role: "assistant",
-                  content: "",
-                  tool_calls: [call],
-                },
-              };
-            }
-            messagesAfterBatch = structuredClone(params.messages);
-            return {
-              kind: "final",
-              text: "Durable batch recorded.",
-              assistantMessage: {
-                role: "assistant",
-                content: "Durable batch recorded.",
-              },
-            };
-          },
-        }),
-      });
-
-      const outcome = await runtime.runTurn({
-        request: {
-          classifiedIntent: classifiedFixture(),
-          conversationKey: 1213,
-          mode: "agent",
-          userText: "Read every paper and persist each completed group.",
-          model: "deepseek-v4-pro",
-          apiBase: "https://api.deepseek.com/anthropic",
-          apiKey: "test",
-          advanced: { inputTokenCap: 1_000_000 },
-        },
-        onEvent: (event) => events.push(event),
-      });
-
-      assert.equal(outcome.kind, "completed");
-      assert.equal(resetCount, 1);
-      assert.notInclude(
-        JSON.stringify(messagesAfterBatch),
-        "FULL_PAPER_TEXT_SENTINEL",
-      );
-      assert.include(
-        JSON.stringify(messagesAfterBatch),
-        "Agent semantic continuation checkpoint",
-      );
-      assert.isTrue(
-        events.some(
-          (event) =>
-            event.type === "provider_event" &&
-            event.providerType === "agent_context_budget" &&
-            event.payload?.action === "checkpoint_durable_tool_state" &&
-            event.payload?.reason === "research_batch_durable",
-        ),
-      );
-    } finally {
-      restoreDb();
-    }
-  });
-
   it("does not abort after repeated input rejections", async function () {
     const restoreDb = installMockDb();
     try {
@@ -6910,7 +7317,6 @@ describe("AgentRuntime", function () {
 
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 1219,
           mode: "agent",
           userText: "record",
@@ -6984,7 +7390,6 @@ describe("AgentRuntime", function () {
 
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 1220,
           mode: "agent",
           userText: "record",
@@ -7016,7 +7421,7 @@ describe("AgentRuntime", function () {
         validate: () => ({ ok: true, value: {} }),
         execute: async () => ({ value: "small result" }),
       });
-      registry.register(createToolResultReadTool());
+      registry.register(createContextReadTool());
 
       let stepIndex = 0;
       let resetCount = 0;
@@ -7076,7 +7481,6 @@ describe("AgentRuntime", function () {
 
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 1212,
           mode: "agent",
           userText: "Use the small result.",
@@ -7142,7 +7546,7 @@ describe("AgentRuntime", function () {
           };
         },
       });
-      registry.register(createToolResultReadTool());
+      registry.register(createContextReadTool());
 
       let stepIndex = 0;
       let resetCount = 0;
@@ -7232,7 +7636,6 @@ describe("AgentRuntime", function () {
 
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 1213,
           mode: "agent",
           userText: "Use both small results.",
@@ -7263,7 +7666,6 @@ describe("AgentRuntime", function () {
         );
         const registry = new AgentToolRegistry(
           createTestActionContractService(),
-          new PlanAmendmentService(),
         );
         let writes = 0;
         registry.register({
@@ -7328,7 +7730,6 @@ describe("AgentRuntime", function () {
         const events: AgentEvent[] = [];
         const outcome = await runtime.runTurn({
           request: {
-            classifiedIntent: classifiedFixture(),
             conversationKey: 1,
             mode: "agent",
             libraryID: 1,
@@ -7382,7 +7783,6 @@ describe("AgentRuntime", function () {
               } as unknown as Zotero.Item)
             : null,
         ),
-        new PlanAmendmentService(),
       );
       let requestedWrites = 0;
       let judgmentWrites = 0;
@@ -7488,9 +7888,6 @@ describe("AgentRuntime", function () {
       const events: AgentEvent[] = [];
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: actionFixture("note_create", undefined, {
-            noteDestination: "zotero",
-          }),
           conversationKey: 1,
           mode: "agent",
           libraryID: 1,
@@ -7704,7 +8101,6 @@ describe("web attribution runtime guard", function () {
       const events: AgentEvent[] = [];
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 920,
           mode: "agent",
           userText: "What is current?",
@@ -7771,7 +8167,6 @@ describe("web attribution runtime guard", function () {
       const events: AgentEvent[] = [];
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 921,
           mode: "agent",
           userText: "What is current?",
@@ -7848,7 +8243,6 @@ describe("web attribution runtime guard", function () {
       });
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 922,
           mode: "agent",
           userText: "What is current?",
@@ -7983,7 +8377,6 @@ describe("shallow guard round-limit safety", function () {
       });
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 1,
           mode: "agent",
           userText: "What methods do these papers share?",
@@ -8016,7 +8409,7 @@ describe("shallow guard round-limit safety", function () {
    * legitimate ("they were already in that collection") — the goal is an
    * accurate report, not a failed run.
    */
-  it("does not retry a typed obligation after the user declines it", async function () {
+  it("does not retry a write after the user declines it", async function () {
     const restoreDb = installMockDb();
     try {
       await initAgentChangeJournal();
@@ -8094,7 +8487,6 @@ describe("shallow guard round-limit safety", function () {
       let denials = 0;
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: actionFixture("command_execute"),
           conversationKey: 992,
           mode: "agent",
           userText: "run command after confirmation",
@@ -8262,18 +8654,6 @@ describe("shallow guard round-limit safety", function () {
 
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: {
-            ...actionFixture("apply_tags", { tags: ["reviewed"] }),
-            paperTargetIntent: "all_visible",
-            actionIntents: [
-              {
-                ...actionFixture("apply_tags", { tags: ["reviewed"] })
-                  .actionIntents[0],
-                coverage: "some",
-                targetKind: "papers",
-              },
-            ],
-          },
           conversationKey: 993,
           mode: "agent",
           userText: 'Add the tag "reviewed" to these papers.',
@@ -8305,7 +8685,7 @@ describe("shallow guard round-limit safety", function () {
 });
 
 describe("AgentRuntime evidence stop policy", function () {
-  it("tells a targeted question to answer now after a repeated paper read", async function () {
+  it("allows the model to choose missing evidence after a repeated paper read", async function () {
     const restoreDb = installMockDb();
     const toolMessages: string[] = [];
     let steps = 0;
@@ -8385,11 +8765,6 @@ describe("AgentRuntime evidence stop policy", function () {
           model: "test-model",
           apiKey: "test",
           apiBase: "",
-          classifiedIntent: classifiedFixture({
-            semantic: semanticFixture({
-              reading: { source: "document_text", coverage: "targeted" },
-            }),
-          }),
         },
         onEvent: () => {},
       });
@@ -8400,10 +8775,13 @@ describe("AgentRuntime evidence stop policy", function () {
       ) as {
         paperEvidenceProgress?: { recommendation?: string; reason?: string };
       };
-      assert.equal(last.paperEvidenceProgress?.recommendation, "answer_now");
+      assert.equal(
+        last.paperEvidenceProgress?.recommendation,
+        "name_a_specific_missing_dimension",
+      );
       assert.include(
         last.paperEvidenceProgress?.reason || "",
-        "read one unread section by sectionId from the outline",
+        "choose another passage or section",
       );
     } finally {
       restoreDb();
@@ -8450,7 +8828,6 @@ describe("truncated answer continuation with a non-streaming final step", functi
 
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 1_915,
           mode: "agent",
           userText: "write it",
@@ -8538,13 +8915,6 @@ describe("delegating facade trace labels", function () {
             model: "test-model",
             apiKey: "test",
             apiBase: "",
-            classifiedIntent: {
-              ...classifiedFixture(),
-              semantic: semanticFixture(),
-              retrievalIntent: "none",
-              wantedSections: [],
-              actionIntents: [],
-            },
           },
           onEvent: (event) => events.push(event),
         });
@@ -9468,111 +9838,30 @@ describe("finalized material announcement", function () {
     }
   });
 
-  it("carries the material ref on the final event when a later turn re-adopts the document", async function () {
+  it("says nothing about a stored unfinished plan on the next turn", async function () {
     const installed = installMockDb();
     const restoreStores = installPlanSqlite();
     clearAgentTranscriptStore();
     try {
-      await initAgentPlanStore();
-      await initPlanDocumentStore();
-      await initResearchStore();
-      const conversationKey = 41;
-      const { documentId, materialRef } =
-        await runFinalizingTurn(conversationKey);
-      // Only a plan-executing turn keeps a progress ledger across runs; an
-      // ordinary turn discards any contract it is handed (runtime.ts clears
-      // actionContract/actionProgress/classifiedIntent before the model runs).
-      const plan = await createDocumentPlan(conversationKey);
-
-      const registry = new AgentToolRegistry();
-      registry.register(createSubmitDocumentTool(submitDocumentGateway));
-      const events: AgentEvent[] = [];
-      const secondTurn = new AgentRuntime({
-        registry,
-        adapterFactory: () => ({
-          getCapabilities: () => ({
-            streaming: false,
-            toolCalls: true,
-            multimodal: false,
-          }),
-          supportsTools: () => true,
-          async runStep(): Promise<AgentModelStep> {
-            return {
-              kind: "final",
-              text: "The guide is ready.",
-              assistantMessage: {
-                role: "assistant",
-                content: "The guide is ready.",
-              },
-            };
-          },
-        }),
-      });
-      const intent = classifiedFixture({
-        semantic: semanticFixture({
-          materialOutputs: [
-            {
-              id: "guide",
-              description: "The requested guide",
-              afterActions: [],
-              sourceActionIndexes: [],
-              requiredEvidence: "none",
-            },
-          ],
-        }),
-      });
-      await secondTurn.runTurn({
-        request: {
-          conversationKey,
-          mode: "agent",
-          userText: "Continue the approved plan",
-          libraryID: 1,
-          model: "test",
-          apiKey: "test",
-          apiBase: "https://example.invalid",
-          metadata: { sourceMessageTimestamp: 200 },
-          planContext: {
-            phase: "executing",
-            planId: plan.planId,
-            revision: plan.revision,
-            executionId: plan.executionId,
-            approvedDigest: plan.planDigest,
-            provider: "original",
-          },
-          actionContract: {
-            version: 4,
-            id: "contract:reused",
-            interpretationSource: "semantic",
-            writeDisposition: "none",
-            intent,
-            obligations: [],
-          },
-          actionProgress: {
-            version: 1,
-            contractId: "contract:reused",
-            state: "pending",
-            correctionCount: 0,
-            obligations: [],
-            appliedReceiptKeys: [],
-            materialOutputs: [{ outputId: "guide", ...materialRef }],
-          },
-        },
-        onEvent: (event) => events.push(event),
-      });
-
-      const finalEvent = events.find((event) => event.type === "final") as
-        | Extract<AgentEvent, { type: "final" }>
-        | undefined;
-      assert.equal(
-        finalEvent?.documentId,
-        documentId,
-        "the re-adopted document must name the turn's outcome",
+      await initDormantPlanTables();
+      const conversationKey = 774414;
+      await saveStoredPlanExecution(
+        storedPlanExecution("interrupted", conversationKey),
       );
-      assert.deepEqual(
-        finalEvent?.materialRef,
-        materialRef,
-        "re-adopted material keeps the exact identity turn 1 finalized",
-      );
+
+      for (const text of [
+        "What is the sample size of this study?",
+        "continue",
+      ]) {
+        const next = await runPlainTurn(conversationKey, text, 200);
+        assert.notMatch(
+          next.promptMessages
+            .map((message) => String(message.content))
+            .join("\n"),
+          /Unfinished plan|resume the plan|resume it by saying/i,
+          `plan mode is retired: "${text}" is an ordinary turn`,
+        );
+      }
     } finally {
       restoreStores();
       installed();
@@ -9682,7 +9971,6 @@ describe("agent stage events", function () {
 
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 990_101,
           mode: "agent",
           libraryID: 1,
@@ -9817,7 +10105,6 @@ describe("agent stage events", function () {
       });
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 990_102,
           mode: "agent",
           userText: "Find it",
@@ -9892,7 +10179,6 @@ describe("agent stage events", function () {
       });
       await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 990_103,
           mode: "agent",
           userText: "Do something",
@@ -9998,7 +10284,6 @@ describe("agent stage events", function () {
       });
       await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 990_105,
           mode: "agent",
           libraryID: 1,
@@ -10026,88 +10311,6 @@ describe("agent stage events", function () {
           ["item:failed", "failed"],
         ],
         "a pending item reports no stage rather than a wrong one",
-      );
-    } finally {
-      restoreDb();
-    }
-  });
-
-  it("reports each plan event as a planning stage", async function () {
-    const restoreDb = installMockDb();
-    try {
-      const registry = new AgentToolRegistry(createTestActionContractService());
-      registry.register({
-        spec: {
-          name: "plan_probe",
-          description: "publish plan events",
-          inputSchema: { type: "object" },
-          executionClass: "control",
-          workCategory: "planning",
-        },
-        presentation: { label: "Plan" },
-        validate: (args) => ({ ok: true, value: args as never }),
-        execute: async (_input: unknown, context: any) => {
-          await context.publishPlanEvent?.({
-            type: "plan_updated",
-            artifact: { planId: "p1", revision: 1 } as never,
-          });
-          await context.publishPlanEvent?.({
-            type: "plan_ready",
-            artifact: { planId: "p1", revision: 1 } as never,
-          });
-          await context.publishPlanEvent?.({
-            type: "plan_execution_updated",
-            ledger: { executionId: "e1", tasks: [] } as never,
-          });
-          await context.publishPlanEvent?.({
-            type: "plan_research_progress",
-            progress: { researchJobId: "r1" } as never,
-          });
-          return { content: { ok: true } };
-        },
-      } as never);
-      const events: AgentEvent[] = [];
-      const runtime = new AgentRuntime({
-        registry,
-        adapterFactory: () =>
-          new MockAdapter(
-            [
-              toolCallStep("plan-1", "plan_probe"),
-              {
-                kind: "final",
-                text: "Planned.",
-                assistantMessage: { role: "assistant", content: "Planned." },
-              },
-            ],
-            { streaming: false, toolCalls: true, multimodal: false },
-          ),
-      });
-      await runtime.runTurn({
-        request: {
-          classifiedIntent: classifiedFixture(),
-          conversationKey: 990_104,
-          mode: "agent",
-          userText: "Plan it",
-          model: "test",
-          apiKey: "test",
-          apiBase: "https://example.invalid",
-        },
-        onEvent: (event) => events.push(event),
-      });
-
-      const planning = stageEvents(events).filter(
-        (event) => event.stage === "planning" && !event.callId,
-      );
-      assert.deepEqual(
-        planning.map((event) => event.status),
-        ["started", "completed"],
-        "only a drafted revision and a reviewable plan move the stage",
-      );
-      const types = events.map((event) => event.type);
-      assert.equal(
-        types[types.indexOf("plan_updated") - 1],
-        "agent_stage",
-        "the planning stage precedes the plan event it describes",
       );
     } finally {
       restoreDb();
@@ -10199,7 +10402,6 @@ describe("tool result review delivery", function () {
 
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 991_201,
           mode: "agent",
           libraryID: 1,
@@ -10360,7 +10562,6 @@ describe("tool result review delivery", function () {
 
       const outcome = await runtime.runTurn({
         request: {
-          classifiedIntent: classifiedFixture(),
           conversationKey: 991_202,
           mode: "agent",
           libraryID: 1,
@@ -10421,6 +10622,467 @@ describe("tool result review delivery", function () {
       assert.isNotEmpty(
         noteReceipts || [],
         "the chained write still produces its receipt",
+      );
+    } finally {
+      restoreDb();
+    }
+  });
+});
+
+describe("run event payloads", function () {
+  beforeEach(function () {
+    clearAgentReadLedger();
+    clearAgentCoverageLedger();
+    clearAgentTranscriptStore();
+    clearAgentToolResultHandleStore();
+  });
+
+  const request = (conversationKey: number, userText: string) => ({
+    conversationKey,
+    mode: "agent" as const,
+    userText,
+    model: "test-model",
+    apiBase: "",
+    apiKey: "test",
+    libraryID: 1,
+  });
+
+  function toolStep(
+    calls: Array<{ id: string; name: string; arguments: unknown }>,
+  ): AgentModelStep {
+    return {
+      kind: "tool_calls",
+      calls,
+      assistantMessage: { role: "assistant", content: "", tool_calls: calls },
+    } as AgentModelStep;
+  }
+
+  function finalStep(text: string): AgentModelStep {
+    return {
+      kind: "final",
+      text,
+      assistantMessage: { role: "assistant", content: text },
+    };
+  }
+
+  function scriptedRuntime(
+    registry: AgentToolRegistry,
+    steps: Array<
+      AgentModelStep | ((params: AgentStepParams) => Promise<AgentModelStep>)
+    >,
+    streaming = false,
+  ): AgentRuntime {
+    let index = 0;
+    return new AgentRuntime({
+      registry,
+      adapterFactory: () => ({
+        getCapabilities: () => ({
+          streaming,
+          toolCalls: true,
+          multimodal: false,
+          fileInputs: false,
+          reasoning: true,
+        }),
+        supportsTools: () => true,
+        async runStep(params): Promise<AgentModelStep> {
+          const step = steps[index];
+          index += 1;
+          if (!step) throw new Error(`no scripted step ${index}`);
+          return typeof step === "function" ? step(params) : step;
+        },
+      }),
+    });
+  }
+
+  /** A paper_read whose result cites one passage per paper. */
+  function citingPaperRead(itemIds: number[]): AgentToolRegistry {
+    const registry = new AgentToolRegistry(createTestActionContractService());
+    registry.register(createTaskUpdateTool());
+    registry.register({
+      spec: {
+        name: "paper_read",
+        description: "read papers",
+        inputSchema: { type: "object" },
+        executionClass: "read",
+        requiresConfirmation: false,
+      },
+      validate: (args) => ({ ok: true, value: args }),
+      execute: async () => ({
+        mode: "targeted",
+        results: itemIds.map((itemId) => ({
+          paperContext: { itemId, contextItemId: itemId + 1000 },
+          sourceKind: "paper_text",
+          chunkIndex: 1,
+          text: `Paper ${itemId} reports finding number ${itemId}.`,
+          quoteCitationIds: [`q${itemId}`],
+        })),
+        quoteCitations: itemIds.map((itemId) => ({
+          id: `q${itemId}`,
+          quoteText: `Paper ${itemId} reports finding number ${itemId}.`,
+          citationLabel: `(Author ${itemId}, 2025)`,
+          itemId,
+          contextItemId: itemId + 1000,
+        })),
+      }),
+    });
+    return registry;
+  }
+
+  it("publishes only the citations the final answer uses", async function () {
+    const restoreDb = installMockDb();
+    try {
+      const events: AgentEvent[] = [];
+      const runtime = scriptedRuntime(citingPaperRead([1, 2, 3]), [
+        toolStep([{ id: "read-1", name: "paper_read", arguments: {} }]),
+        finalStep("Paper 1 reports finding number 1 [[quote:q1]]."),
+      ]);
+      const outcome = await runtime.runTurn({
+        request: request(4801, "What does paper 1 find?"),
+        onEvent: (event) => {
+          events.push(event);
+        },
+      });
+      assert.equal(outcome.kind, "completed");
+      const final = events.find((event) => event.type === "final");
+      if (final?.type !== "final") return assert.fail("no final event");
+      assert.deepEqual(
+        (final.quoteCitations || []).map((citation) => citation.id),
+        ["q1"],
+      );
+      if (outcome.kind !== "completed") return;
+      assert.deepEqual(
+        (outcome.quoteCitations || []).map((citation) => citation.id),
+        ["q1"],
+      );
+      // The live tool result still carries every citation it retrieved.
+      const result = events.find((event) => event.type === "tool_result");
+      assert.lengthOf(
+        (result as { content: { quoteCitations: unknown[] } }).content
+          .quoteCitations || [],
+        3,
+      );
+    } finally {
+      restoreDb();
+    }
+  });
+
+  it("publishes no citations when the answer uses none", async function () {
+    const restoreDb = installMockDb();
+    try {
+      const events: AgentEvent[] = [];
+      const runtime = scriptedRuntime(citingPaperRead([1, 2]), [
+        toolStep([{ id: "read-1", name: "paper_read", arguments: {} }]),
+        finalStep("Both papers report findings."),
+      ]);
+      const outcome = await runtime.runTurn({
+        request: request(4802, "What do the papers find?"),
+        onEvent: (event) => {
+          events.push(event);
+        },
+      });
+      const final = events.find((event) => event.type === "final");
+      if (final?.type !== "final") return assert.fail("no final event");
+      assert.isUndefined(final.quoteCitations);
+      if (outcome.kind === "completed")
+        assert.isUndefined(outcome.quoteCitations);
+    } finally {
+      restoreDb();
+    }
+  });
+
+  it("delivers a delta before its row is written, and writes a tool call or final before delivering it", async function () {
+    const restoreDb = installMockDb();
+    try {
+      const delivered: Array<{
+        type: string;
+        seq: number;
+        persisted: boolean;
+      }> = [];
+      const registry = new AgentToolRegistry(createTestActionContractService());
+      registry.register({
+        spec: {
+          name: "paper_read",
+          description: "read",
+          inputSchema: { type: "object" },
+          executionClass: "read",
+          requiresConfirmation: false,
+        },
+        validate: (args) => ({ ok: true, value: args }),
+        execute: async () => ({ text: "A short passage." }),
+      });
+      const runtime = scriptedRuntime(
+        registry,
+        [
+          toolStep([{ id: "read-1", name: "paper_read", arguments: {} }]),
+          async (params) => {
+            await params.onTextDelta?.("Hello ");
+            await params.onTextDelta?.("there ");
+            return finalStep("Hello there world.");
+          },
+        ],
+        true,
+      );
+      const outcome = await runtime.runTurn({
+        request: request(4803, "hello"),
+        onEvent: (event) => {
+          const seq = delivered.length + 1;
+          delivered.push({
+            type: event.type,
+            seq,
+            persisted: restoreDb.events.some((row) => Number(row.seq) === seq),
+          });
+        },
+      });
+      assert.equal(outcome.kind, "completed");
+      const deltas = delivered.filter(
+        (entry) => entry.type === "message_delta",
+      );
+      assert.isNotEmpty(deltas);
+      assert.isTrue(
+        deltas.every((entry) => !entry.persisted),
+        "a delta reaches the panel before its row is written",
+      );
+      for (const type of ["tool_call", "tool_result", "final"]) {
+        const entry = delivered.find((candidate) => candidate.type === type);
+        assert.isTrue(entry?.persisted, `${type} is written before delivery`);
+      }
+      // After the turn, every emitted event is in the store, in order.
+      const runId = String(restoreDb.events[0].runId);
+      const seqs = restoreDb.events
+        .filter((row) => row.runId === runId)
+        .map((row) => Number(row.seq));
+      assert.deepEqual(
+        seqs,
+        Array.from({ length: seqs.length }, (_, index) => index + 1),
+      );
+      assert.isAtLeast(seqs.length, delivered.length);
+    } finally {
+      restoreDb();
+    }
+  });
+
+  it("stores a big tool result by handle in the trace and delivers it whole", async function () {
+    const restoreDb = installMockDb();
+    try {
+      const events: AgentEvent[] = [];
+      const bigText = "p".repeat(40_000);
+      const registry = new AgentToolRegistry(createTestActionContractService());
+      registry.register({
+        spec: {
+          name: "paper_read",
+          description: "read",
+          inputSchema: { type: "object" },
+          executionClass: "read",
+          requiresConfirmation: false,
+        },
+        validate: (args) => ({ ok: true, value: args }),
+        execute: async () => ({ text: bigText }),
+      });
+      const runtime = scriptedRuntime(registry, [
+        toolStep([{ id: "read-big", name: "paper_read", arguments: {} }]),
+        finalStep("Done."),
+      ]);
+      await runtime.runTurn({
+        request: request(4804, "read it"),
+        onEvent: (event) => {
+          events.push(event);
+        },
+      });
+      const live = events.find((event) => event.type === "tool_result");
+      if (live?.type !== "tool_result") return assert.fail("no tool result");
+      assert.match(live.toolResultHandle || "", /^trh_/);
+      assert.include(JSON.stringify(live.content), bigText);
+      const row = restoreDb.events.find(
+        (entry) => entry.eventType === "tool_result",
+      );
+      const persisted = JSON.parse(String(row?.payloadJson)) as {
+        content: unknown;
+        toolResultHandle?: string;
+      };
+      assert.isTrue(isTruncatedToolResultContent(persisted.content));
+      assert.deepInclude(persisted.content as object, {
+        handle: live.toolResultHandle,
+      });
+      const stored = await getAgentToolResultHandle({
+        conversationKey: 4804,
+        handle: live.toolResultHandle!,
+      });
+      assert.include(JSON.stringify(stored?.content), bigText);
+      assert.isBelow(String(row?.payloadJson).length, 2_000);
+    } finally {
+      restoreDb();
+    }
+  });
+
+  it("a targeted artifact part finished by an answer citing two of three papers covers those two", async function () {
+    const restoreDb = installMockDb();
+    try {
+      const events: AgentEvent[] = [];
+      const answer =
+        "Paper 101 reports finding number 101 [[quote:q101]].\n\nPaper 102 reports finding number 102 [[quote:q102]].";
+      const runtime = scriptedRuntime(citingPaperRead([101, 102, 103]), [
+        toolStep([
+          {
+            id: "declare-1",
+            name: "task_update",
+            arguments: {
+              tasks: [
+                {
+                  taskId: "summaries",
+                  description: "Write a summary of each paper",
+                  expectedEffect: "artifact",
+                  targetIds: ["101", "102", "103"],
+                },
+              ],
+            },
+          },
+          { id: "read-1", name: "paper_read", arguments: {} },
+        ]),
+        // The answer delivers the open part itself: no correction.
+        finalStep(answer),
+      ]);
+      const outcome = await runtime.runTurn({
+        request: request(4805, "Summarize each of these three papers"),
+        onEvent: (event) => {
+          events.push(event);
+        },
+      });
+      assert.equal(outcome.kind, "completed");
+      const fold = new ExecutionCheckpointFold();
+      const ledgers = events.flatMap((event) =>
+        event.type === "execution_checkpoint" ||
+        event.type === "execution_checkpoint_delta"
+          ? [fold.apply(event)!]
+          : [],
+      );
+      const ledger = ledgers[ledgers.length - 1];
+      const part = ledger?.tasks.find((task) =>
+        task.taskId.endsWith(":task:summaries"),
+      );
+      assert.exists(part);
+      assert.equal(part!.status, "completed");
+      assert.deepEqual(part!.doneTargets, ["item:101", "item:102"]);
+      assert.deepEqual(part!.exceptions, [
+        { targets: ["item:103"], reason: OUTCOME_REASONS.notCovered },
+      ]);
+      assert.deepEqual(ledger!.end, { state: "completed_with_exceptions" });
+    } finally {
+      restoreDb();
+    }
+  });
+
+  /** Makes the mock store refuse the first `count` inserts of an event type. */
+  function failEventInserts(eventType: string, count = 1): () => number {
+    const zotero = (globalThis as { Zotero?: any }).Zotero;
+    const query = zotero.DB.queryAsync;
+    let refused = 0;
+    zotero.DB.queryAsync = async (sql: string, params: unknown[] = []) => {
+      if (
+        sql.includes("INSERT INTO llm_for_zotero_agent_run_events") &&
+        params[2] === eventType &&
+        refused < count
+      ) {
+        refused += 1;
+        throw new Error("database is locked");
+      }
+      return query(sql, params);
+    };
+    return () => refused;
+  }
+
+  it("publishes the ledger whole again after a batch holding a ledger delta failed to write", async function () {
+    const restoreDb = installMockDb();
+    try {
+      const refused = failEventInserts("execution_checkpoint_delta");
+      const events: AgentEvent[] = [];
+      const answer =
+        "Paper 101 reports finding number 101 [[quote:q101]].\n\nPaper 102 reports finding number 102 [[quote:q102]].";
+      const runtime = scriptedRuntime(citingPaperRead([101, 102]), [
+        toolStep([
+          {
+            id: "declare-1",
+            name: "task_update",
+            arguments: {
+              tasks: [
+                {
+                  taskId: "summaries",
+                  description: "Write a summary of each paper",
+                  expectedEffect: "artifact",
+                  targetIds: ["101", "102"],
+                },
+              ],
+            },
+          },
+          { id: "read-1", name: "paper_read", arguments: {} },
+        ]),
+        finalStep(answer),
+        finalStep(answer),
+      ]);
+      const outcome = await runtime.runTurn({
+        request: request(4806, "Summarize each of these two papers"),
+        onEvent: (event) => {
+          events.push(event);
+        },
+      });
+      assert.equal(outcome.kind, "completed");
+      assert.equal(refused(), 1, "one delta was lost");
+      const live = new ExecutionCheckpointFold();
+      let liveLedger: unknown;
+      for (const event of events) {
+        if (
+          event.type === "execution_checkpoint" ||
+          event.type === "execution_checkpoint_delta"
+        )
+          liveLedger = live.apply(event);
+      }
+      const stored = restoreDb.events
+        .filter(
+          (row) =>
+            row.eventType === "execution_checkpoint" ||
+            row.eventType === "execution_checkpoint_delta",
+        )
+        .sort((left, right) => Number(left.seq) - Number(right.seq))
+        .map((row) => JSON.parse(String(row.payloadJson)) as AgentEvent);
+      assert.isAbove(stored.length, 1, "the ledger changed after the loss");
+      // The first ledger row after the lost delta is whole.
+      const lostSeq = events.findIndex(
+        (event) => event.type === "execution_checkpoint_delta",
+      );
+      assert.isAtLeast(lostSeq, 0);
+      const afterLoss = stored.slice(1);
+      assert.equal(afterLoss[0]?.type, "execution_checkpoint");
+      const fold = new ExecutionCheckpointFold();
+      let storedLedger: unknown;
+      for (const event of stored) storedLedger = fold.apply(event as never);
+      assert.deepEqual(
+        storedLedger,
+        liveLedger,
+        "the stored rows rebuild the ledger the panel saw",
+      );
+    } finally {
+      restoreDb();
+    }
+  });
+
+  it("writes a final event row lost with its batch once more at run end", async function () {
+    const restoreDb = installMockDb();
+    try {
+      const refused = failEventInserts("final");
+      const runtime = scriptedRuntime(citingPaperRead([1]), [
+        finalStep("The answer."),
+      ]);
+      const outcome = await runtime.runTurn({
+        request: request(4807, "Answer briefly"),
+      });
+      assert.equal(outcome.kind, "completed");
+      assert.equal(refused(), 1);
+      const finals = restoreDb.events.filter(
+        (row) => row.eventType === "final",
+      );
+      assert.lengthOf(finals, 1, "the retry wrote the final row");
+      assert.equal(
+        (JSON.parse(String(finals[0].payloadJson)) as { text?: string }).text,
+        "The answer.",
       );
     } finally {
       restoreDb();

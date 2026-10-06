@@ -12,6 +12,7 @@ import {
 } from "../src/shared/conversationWriteFence";
 import {
   USAGE_EVENTS_TABLE,
+  USAGE_UNREPORTED_HEAL_INDEX,
   clearAllUsageEvents,
   countHistoryEstimateUsageEvents,
   deleteUsageEventsForConversation,
@@ -799,13 +800,11 @@ describe("schema creation against a Zotero-shaped connection", function () {
     globalScope.Zotero = originalZotero;
   });
 
-  it("runs the schema pass as a method of the connection, not a loose function", async function () {
-    // Zotero.DBConnection.prototype.executeTransaction reads `this._callbacks`.
-    // A detached reference therefore throws, the table is never created, and
-    // every recorded turn is silently dropped — so the stub insists on `this`.
-    let transactions = 0;
-    const connection = {
-      _callbacks: { begin: [], commit: [] },
+  function zoteroShapedConnection(options: {
+    withTransaction: boolean;
+    onTransaction?: () => void;
+  }): Record<string, unknown> {
+    const connection: Record<string, unknown> = {
       async queryAsync(sql: string, params?: unknown[]) {
         const head = sql.trimStart().slice(0, 6).toUpperCase();
         const stmt = db.prepare(sql);
@@ -816,29 +815,34 @@ describe("schema creation against a Zotero-shaped connection", function () {
         stmt.run(...bound);
         return [];
       },
-      async executeTransaction(
-        this: { _callbacks: unknown },
-        task: () => Promise<void>,
-      ) {
-        if (!this || !this._callbacks) {
-          throw new Error(
-            'can\'t access property "_callbacks", this is undefined',
-          );
-        }
-        transactions += 1;
-        await task();
-      },
     };
+    if (options.withTransaction) {
+      connection.executeTransaction = async (task: () => Promise<void>) => {
+        options.onTransaction?.();
+        await task();
+      };
+    }
+    return connection;
+  }
+
+  function installConnection(connection: Record<string, unknown>): void {
     globalScope.Zotero = {
       ...(originalZotero || {}),
       Libraries: { userLibraryID: 1 },
       debug: () => undefined,
       DB: connection,
     } as unknown as Record<string, unknown>;
+  }
 
-    await initUsageStore();
+  const EXPECTED_INDEXES = [
+    "llm_for_zotero_usage_events_local_date",
+    "llm_for_zotero_usage_events_conversation",
+    "llm_for_zotero_usage_events_mode_date",
+    "llm_for_zotero_usage_events_paper",
+    USAGE_UNREPORTED_HEAL_INDEX,
+  ];
 
-    assert.equal(transactions, 1, "the schema pass runs inside a transaction");
+  function assertSchemaCreated(): void {
     assert.lengthOf(
       db
         .prepare(
@@ -848,6 +852,39 @@ describe("schema creation against a Zotero-shaped connection", function () {
       1,
       "the ledger table must exist after init",
     );
+    const indexes = (
+      db
+        .prepare(
+          `SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = ?`,
+        )
+        .all(USAGE_EVENTS_TABLE) as Array<{ name: string }>
+    ).map((row) => row.name);
+    assert.includeMembers(indexes, EXPECTED_INDEXES);
+  }
+
+  it("builds the schema without holding a Zotero transaction", async function () {
+    // Issue #485: a startup executeTransaction occupies Zotero's single
+    // transaction slot while the library loads, blocking sync and updates on
+    // large libraries. Every schema statement is idempotent and individually
+    // atomic, so the pass must never open one.
+    let transactions = 0;
+    installConnection(
+      zoteroShapedConnection({
+        withTransaction: true,
+        onTransaction: () => {
+          transactions += 1;
+        },
+      }),
+    );
+
+    await initUsageStore();
+
+    assert.equal(
+      transactions,
+      0,
+      "the schema pass must not open a transaction",
+    );
+    assertSchemaCreated();
     assert.isTrue(
       await recordUsageEvent({
         mode: "library",
@@ -856,5 +893,13 @@ describe("schema creation against a Zotero-shaped connection", function () {
       }),
       "a turn recorded straight after init must land",
     );
+  });
+
+  it("builds the schema on a connection with no executeTransaction", async function () {
+    installConnection(zoteroShapedConnection({ withTransaction: false }));
+
+    await initUsageStore();
+
+    assertSchemaCreated();
   });
 });

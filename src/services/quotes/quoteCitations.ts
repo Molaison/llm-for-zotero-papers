@@ -1,3 +1,7 @@
+import {
+  paragraphCitationIds,
+  normalizeParagraphCitations,
+} from "./paragraphCitations";
 import type {
   PaperContextRef,
   QuoteCitation,
@@ -1165,6 +1169,7 @@ export function selectUsedQuoteCitations(input: {
     Array.from(text.matchAll(QUOTE_CITATION_PATTERN)).map((match) => match[1]),
   );
   QUOTE_CITATION_PATTERN.lastIndex = 0;
+  for (const id of paragraphCitationIds(text)) referencedIds.add(id);
   const blockquoteTexts = collectBlockquoteTextsForMatch(text);
   return citations.filter(
     (citation) =>
@@ -1483,6 +1488,25 @@ function filterMetadataQuoteCitations(
 
 function isVerifiedQuoteCitation(citation: QuoteCitation): boolean {
   return Boolean(citation.sourceMatchKind || citation.sourceMatchSource);
+}
+
+/** Retrieval metadata alone is not a verified PDF destination. */
+export function hasVerifiedQuoteLocation(citation: QuoteCitation): boolean {
+  return Boolean(
+    citation.sourceMatchSource === "pdf-page-text" &&
+    citation.sourceMatchText &&
+    citation.sourceFingerprint &&
+    normalizePositiveInt(citation.contextItemId) &&
+    normalizePageHintIndex(citation.pageHintIndex) !== undefined &&
+    normalizeZeroBasedIndex(citation.sourceMatchPageOccurrence) !== undefined &&
+    ["exact", "normalized-span", "selected-text", "ellipsis-segment"].includes(
+      citation.sourceMatchKind || "",
+    ) &&
+    bindQuoteCitationToDisplayedText(
+      citation,
+      citation.displayQuoteText || citation.quoteText,
+    ),
+  );
 }
 
 function filterVerifiedQuoteCitations(
@@ -2742,7 +2766,10 @@ function resolveUniqueDisplayedQuoteAnchorCitation(params: {
     quoteText: displayedQuoteText,
     citationLabel: resolved.source.citationLabel,
     sourceMatchText,
-    sourceMatchKind: resolved.match.matchKind,
+    // The anchor's search strategy can be partial, but the checks above
+    // establish support for the complete displayed passage.
+    sourceMatchKind:
+      resolved.match.matchKind === "exact" ? "exact" : "normalized-span",
     sourceMatchSource:
       resolved.source.sourceMatchSource ||
       (resolved.source.pageHintIndex !== undefined
@@ -2860,6 +2887,7 @@ export type QuoteSecondaryEvidence =
         pageLabel?: string;
         sourceMatchText: string;
         sourceMatchKind?: "exact" | "normalized-span";
+        verificationMode?: "complete-quote" | "inline-math-locator";
         sourceMatchPageOccurrence: number;
       };
     }
@@ -2893,16 +2921,16 @@ type StrongPartialQuoteSource = {
   source: QuoteSourceIndexEntry;
 };
 
-type ExactUnpagedInlineMathQuoteSource = {
+type ExactUnpagedQuoteSource = {
   source: QuoteSourceIndexEntry;
 };
 
-function collectExactUnpagedInlineMathQuoteSources(params: {
+function collectExactUnpagedQuoteSources(params: {
   quoteText: string;
   sourceIndex: QuoteSourceIndex;
-}): ExactUnpagedInlineMathQuoteSource[] {
+}): ExactUnpagedQuoteSource[] {
   const displayed = normalizeDisplayedQuoteForExactBinding(params.quoteText);
-  if (!displayed || !splitQuoteAtPairedInlineMath(displayed.quoteText)) {
+  if (!displayed) {
     return [];
   }
 
@@ -3233,26 +3261,23 @@ export function classifyDisplayedQuoteSource(params: {
   if (quoteCitations.length) {
     return { kind: "matched", quoteCitations };
   }
-  const exactUnpagedInlineMathSources =
-    collectExactUnpagedInlineMathQuoteSources({
-      quoteText,
-      sourceIndex: params.secondarySourceIndex || params.sourceIndex,
-    });
-  if (exactUnpagedInlineMathSources.length) {
+  const exactUnpagedSources = collectExactUnpagedQuoteSources({
+    quoteText,
+    sourceIndex: params.secondarySourceIndex || params.sourceIndex,
+  });
+  if (exactUnpagedSources.length) {
     const quoteKey = buildQuoteSecondaryEvidenceKey(quoteText);
     const evidenceByContextItemId = new Map(
       (params.secondaryEvidence || [])
         .filter((entry) => entry.quoteKey === quoteKey)
         .map((entry) => [entry.contextItemId, entry]),
     );
-    const resolvedEvidence = exactUnpagedInlineMathSources.map(
-      ({ source }) => ({
-        source,
-        evidence: source.contextItemId
-          ? evidenceByContextItemId.get(source.contextItemId)
-          : undefined,
-      }),
-    );
+    const resolvedEvidence = exactUnpagedSources.map(({ source }) => ({
+      source,
+      evidence: source.contextItemId
+        ? evidenceByContextItemId.get(source.contextItemId)
+        : undefined,
+    }));
     if (
       resolvedEvidence.some(
         ({ evidence }) => !evidence || evidence.status === "defer",
@@ -3265,7 +3290,11 @@ export function classifyDisplayedQuoteSource(params: {
         entry,
       ): entry is typeof entry & {
         evidence: Extract<QuoteSecondaryEvidence, { status: "matched" }>;
-      } => entry.evidence?.status === "matched",
+      } =>
+        entry.evidence?.status === "matched" &&
+        (Boolean(splitQuoteAtPairedInlineMath(quoteText)) ||
+          entry.evidence.certificate.verificationMode === "complete-quote" ||
+          entry.evidence.certificate.sourceMatchKind === "exact"),
     );
     if (matched.length > 1) return { kind: "defer" };
     if (matched.length === 1) {
@@ -3287,8 +3316,18 @@ export function classifyDisplayedQuoteSource(params: {
   if (trailingPartialCitation) {
     return { kind: "matched", quoteCitations: [trailingPartialCitation] };
   }
+  const hasCompletePdfCertificate = (params.secondaryEvidence || []).some(
+    (entry) =>
+      entry.quoteKey === buildQuoteSecondaryEvidenceKey(quoteText) &&
+      entry.status === "matched" &&
+      entry.certificate.verificationMode === "complete-quote" &&
+      params.sourceIndex.sources.some(
+        (source) => source.contextItemId === entry.contextItemId,
+      ),
+  );
   if (
     params.sourceEvidenceComplete &&
+    !hasCompletePdfCertificate &&
     hasUniqueAffirmativeHardMismatch({
       quoteText,
       sourceIndex: params.secondarySourceIndex || params.sourceIndex,
@@ -3330,6 +3369,7 @@ export function classifyDisplayedQuoteSource(params: {
       )
       .filter(
         ({ evidence }) =>
+          evidence.certificate.verificationMode === "complete-quote" ||
           evidence.certificate.sourceMatchKind !== "normalized-span",
       );
     if (matched.length > 1) return { kind: "defer" };
@@ -3887,7 +3927,7 @@ export function collectDisplayedQuoteVerificationRequests(params: {
         });
       }
     }
-    for (const exact of collectExactUnpagedInlineMathQuoteSources({
+    for (const exact of collectExactUnpagedQuoteSources({
       quoteText,
       sourceIndex: params.sourceIndex,
     })) {
@@ -3898,7 +3938,9 @@ export function collectDisplayedQuoteVerificationRequests(params: {
         quoteKey,
         quoteText,
         contextItemId,
-        verificationMode: "inline-math-locator",
+        verificationMode: splitQuoteAtPairedInlineMath(quoteText)
+          ? "inline-math-locator"
+          : "complete-quote",
       });
     }
   }
@@ -4271,8 +4313,11 @@ function* finalizeAssistantQuoteCitationSteps(
       sanitizeSourceBackedBlocks: !params.quoteSourceReview,
     },
   );
-  const cleanedMarkdown = cleanupRemovedMetadataQuoteArtifacts(
-    cleanupEmptyCitationParentheticals(finalizedMarkdown),
+  const cleanedMarkdown = normalizeParagraphCitations(
+    cleanupRemovedMetadataQuoteArtifacts(
+      cleanupEmptyCitationParentheticals(finalizedMarkdown),
+    ),
+    new Set(quoteCitations.map((citation) => citation.id)),
   );
   QUOTE_CITATION_PATTERN.lastIndex = 0;
   const referencedCitationIds = new Set(
@@ -4281,6 +4326,8 @@ function* finalizeAssistantQuoteCitationSteps(
     ),
   );
   QUOTE_CITATION_PATTERN.lastIndex = 0;
+  for (const id of paragraphCitationIds(cleanedMarkdown))
+    referencedCitationIds.add(id);
   return {
     markdown: cleanedMarkdown,
     quoteCitations: filterMetadataQuoteCitations(
@@ -4345,7 +4392,8 @@ export function buildQuoteAnchorPromptBlock(
   if (!normalized.length) return [];
   const lines = [
     "Verified quote anchors:",
-    "- Use a quote anchor only when exact wording is useful for the answer; otherwise cite the paper in normal prose.",
+    "- At the end of an explanatory paragraph, use [[cite:ID]] or [[cite:ID1,ID2]] for the exact passages supporting its claims. The app shows a small source footer with the original passages and PDF links. Cite at paragraph boundaries, not after every sentence.",
+    "- Use [[quote:ID]] on its own line only to recommend a passage the reader should read to address the question, or when showing exact wording helps. Avoid displaying the same passage as a card merely because it backs a paragraph.",
     "- When you need to include one of these exact quotes, write only the matching token, e.g. [[quote:Q_x7a2]].",
     "- Do not manually copy the quote or sourceLabel when a quote anchor is available; the app will render the quote and clickable citation.",
     "- Quote text is provenance-locked source text: never translate or paraphrase it to match the user's language.",
@@ -4359,7 +4407,7 @@ export function buildQuoteAnchorPromptBlock(
       `- Quote anchor ${citation.id}:`,
       `  quoteText: ${jsonEscape(truncateForPrompt(citation.quoteText))}`,
       `  sourceLabel: ${jsonEscape(citation.citationLabel)}`,
-      `  To include this quote, write: [[quote:${citation.id}]]`,
+      `  Paragraph support: [[cite:${citation.id}]]. Reading recommendation: [[quote:${citation.id}]].`,
     );
   }
   return lines;

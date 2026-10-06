@@ -24,6 +24,8 @@ export type LiteratureSelection = {
 };
 export type LiteratureReviewInput = {
   selections: LiteratureSelection[];
+  /** The number of papers the user asked for; sets the first batch's size. */
+  count?: number;
   sessionId?: string;
   revision?: number;
   targetCollectionId?: number;
@@ -48,21 +50,38 @@ export type LiteratureDiscoverySession = {
   candidateSetIds: string[];
   papers: Record<string, unknown>[];
   selectedIds: string[];
+  /**
+   * The papers the user chose with the card's Import: the only candidates of
+   * this discovery an import may take.
+   */
+  approvedIds?: string[];
   targetCollectionId?: number;
   destinationLabel?: string;
   shortfallReason?: string;
   outcome: "complete" | "no_more" | "search_failed";
 };
 
-export function resolveLiteratureDiscoveryRequest(
-  request: AgentToolContext["request"],
-): LiteratureDiscoveryRequest {
-  const semantic = request.classifiedIntent?.semantic;
-  return {
-    batchSize: semantic?.requestedCount || 5,
-    mode: semantic?.literatureMode,
-    source: semantic?.literatureSource,
-  };
+/** A discovery shows the number of papers the user asked for, five when unspecified. */
+export const DEFAULT_DISCOVERY_COUNT = 5;
+export const MAX_DISCOVERY_COUNT = 25;
+
+/** A tool call's count: undefined when absent, null when it is not 1–25. */
+export function parseDiscoveryCount(value: unknown): number | undefined | null {
+  if (value === undefined) return undefined;
+  return Number.isSafeInteger(value) &&
+    (value as number) >= 1 &&
+    (value as number) <= MAX_DISCOVERY_COUNT
+    ? (value as number)
+    : null;
+}
+
+/**
+ * The request a discovery opens with. It seeds the turn's one discovery
+ * record, whose handle derives from this seed, so it never varies with a
+ * call: a requested count is applied to the record after it is found.
+ */
+export function resolveLiteratureDiscoveryRequest(): LiteratureDiscoveryRequest {
+  return { batchSize: DEFAULT_DISCOVERY_COUNT };
 }
 
 function assertActive(context: AgentToolContext): void {
@@ -85,13 +104,15 @@ function assertActive(context: AgentToolContext): void {
   }
 }
 
-function sessionSeed(context: AgentToolContext): AgentToolResultHandleRecord {
-  assertActive(context);
+/** The turn's discovery record as first stored; null without a turn to own one. */
+function discoverySeed(
+  context: AgentToolContext,
+): AgentToolResultHandleRecord | null {
   const content: LiteratureDiscoverySession = {
     kind: "literature_discovery",
     runId: context.runId,
     libraryID: context.request.libraryID,
-    request: resolveLiteratureDiscoveryRequest(context.request),
+    request: resolveLiteratureDiscoveryRequest(),
     revision: 0,
     phase: "gathering",
     candidateSetIds: [],
@@ -102,10 +123,15 @@ function sessionSeed(context: AgentToolContext): AgentToolResultHandleRecord {
   return createAgentToolResultHandleRecord({
     conversationKey: context.request.conversationKey,
     toolName: "literature_review",
-    toolCallId: context.runId!,
+    toolCallId: context.runId || "",
     resourceSignature: context.resourceSignature,
     content,
-  })!;
+  });
+}
+
+function sessionSeed(context: AgentToolContext): AgentToolResultHandleRecord {
+  assertActive(context);
+  return discoverySeed(context)!;
 }
 
 /** One turn-scoped record in the existing result store owns all discovery state. */
@@ -137,21 +163,44 @@ async function save(
   await upsertAgentToolResultHandles([record]);
 }
 
+/** Lowercase a DOI and strip `doi:` / resolver-URL prefixes. */
+function normalizeDoi(value: unknown): string {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/^doi:\s*/, "")
+    .replace(/^https?:\/\/(?:dx\.)?doi\.org\//, "")
+    .trim();
+}
+
+/**
+ * Bare, version-free arXiv id from an id, `arXiv:` form or arxiv.org
+ * abs/pdf URL; empty when the value is not an arXiv id. Versions of one
+ * paper share an id, so they match and dedupe as one paper.
+ */
+function normalizeArxivId(value: unknown): string {
+  const id = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/^arxiv:\s*/, "")
+    .replace(
+      /^(?:https?:\/\/)?(?:www\.|export\.)?arxiv\.org\/(?:abs|pdf)\//,
+      "",
+    )
+    .replace(/\.pdf$/, "")
+    .replace(/\/$/, "")
+    .replace(/v\d+$/, "");
+  return /^(?:\d{4}\.\d{4,5}|[a-z-]+(?:\.[a-z-]+)?\/\d{7})$/.test(id) ? id : "";
+}
+
 /** Match identifiers across providers, with normalized title as a metadata fallback. */
 export function literaturePaperIdentities(
   paper: Record<string, unknown>,
 ): string[] {
   const keys: string[] = [];
-  const doi = String(paper.doi || "")
-    .toLowerCase()
-    .replace(/^https?:\/\/(?:dx\.)?doi\.org\//, "")
-    .trim();
+  const doi = normalizeDoi(paper.doi);
   if (doi) keys.push(`doi:${doi}`);
-  const arxiv = String(paper.arxivId || "")
-    .toLowerCase()
-    .replace(/^arxiv:/, "")
-    .replace(/v\d+$/, "")
-    .trim();
+  const arxiv = normalizeArxivId(paper.arxivId);
   if (arxiv) keys.push(`arxiv:${arxiv}`);
   for (const value of [paper.id, paper.sourceUrl]) {
     if (typeof value === "string" && value.trim())
@@ -162,11 +211,95 @@ export function literaturePaperIdentities(
           .replace(/\/$/, ""),
       );
   }
+  // Ids derived from an arXiv DOI or URL follow the provider keys, so the
+  // first key (the stored discoveryPaperId) is unchanged.
+  for (const derived of [
+    doi.match(/^10\.48550\/arxiv\.(.+)$/)?.[1],
+    paper.id,
+    paper.sourceUrl,
+  ]) {
+    const id = normalizeArxivId(derived);
+    if (id && !keys.includes(`arxiv:${id}`)) keys.push(`arxiv:${id}`);
+  }
   const title = String(paper.title || "")
     .toLowerCase()
     .replace(/[^\p{L}\p{N}]/gu, "");
   if (title && !keys.length) keys.push(`title:${title}:${paper.year || ""}`);
   return keys;
+}
+
+/** The keys a library_import identifier, a DOI or arXiv id in any form, names. */
+function importIdentities(identifier: string): string[] {
+  return [
+    ...literaturePaperIdentities({ doi: identifier }),
+    ...literaturePaperIdentities({ arxivId: identifier }),
+  ];
+}
+
+/**
+ * The keys a saved candidate can be imported by: its identities, and the
+ * arXiv id of an arXiv open-access link, which the card itself imports by.
+ */
+function candidateIdentities(paper: unknown): string[] {
+  if (!paper || typeof paper !== "object") return [];
+  const record = paper as Record<string, unknown>;
+  return [
+    ...literaturePaperIdentities(record),
+    ...literaturePaperIdentities({ arxivId: record.openAccessUrl }),
+  ];
+}
+
+/**
+ * Why a library_import of these identifiers must not run: this turn opened
+ * a paper discovery, and they name candidates it saved or showed that the
+ * user did not choose with the card's Import. Discovered papers reach Zotero
+ * only through the paper selection card, in every permission mode, so the
+ * refusal sends the model to the card. Null when no discovery of this turn
+ * holds them.
+ */
+export async function discoveryImportRefusal(
+  identifiers: readonly string[],
+  context: AgentToolContext,
+): Promise<string | null> {
+  const seed = discoverySeed(context);
+  if (!seed) return null;
+  const record = await getAgentToolResultHandle({
+    conversationKey: seed.conversationKey,
+    handle: seed.handle,
+  });
+  const session = record?.content as LiteratureDiscoverySession | undefined;
+  if (!record || session?.kind !== "literature_discovery") return null;
+  const candidates = new Set(session.papers.flatMap(candidateIdentities));
+  for (const handle of session.candidateSetIds) {
+    const saved = await getAgentToolResultHandle({
+      conversationKey: record.conversationKey,
+      handle,
+    });
+    const set = saved?.content as LiteratureCandidateSet | undefined;
+    if (set?.kind !== "literature_candidates" || !Array.isArray(set.results))
+      continue;
+    for (const key of set.results.flatMap(candidateIdentities))
+      candidates.add(key);
+  }
+  const approved = new Set(
+    session.papers
+      .filter((paper) =>
+        (session.approvedIds || []).includes(String(paper.discoveryPaperId)),
+      )
+      .flatMap(candidateIdentities),
+  );
+  const unchosen = identifiers.filter((identifier) => {
+    const keys = importIdentities(identifier);
+    return (
+      keys.some((key) => candidates.has(key)) &&
+      !keys.some((key) => approved.has(key))
+    );
+  });
+  if (!unchosen.length) return null;
+  const named = `${unchosen.join(", ")} ${unchosen.length === 1 ? "is a paper" : "are papers"} this turn's discovery found`;
+  return session.phase === "closed"
+    ? `Nothing was imported: ${named}, and the user did not choose ${unchosen.length === 1 ? "it" : "them"} on its paper selection card. Discovered papers are imported only after the user selects them there.`
+    : `Nothing was imported: ${named}, and discovered papers are imported only after the user selects them on the paper selection card. Call literature_review with sessionId '${record.handle}', revision ${session.revision} and ranked candidateSetId/candidateIndex selections to show them, so the user can choose.`;
 }
 
 export function discoveryContent(record: AgentToolResultHandleRecord) {
@@ -194,6 +327,8 @@ export async function identifyLiteratureCandidates(
   content: Record<string, unknown>,
   context: AgentToolContext,
   reviewRequired: boolean,
+  routeImports = false,
+  count?: number,
 ): Promise<Record<string, unknown>> {
   const results = Array.isArray(content.results) ? content.results : [];
   const discovery = reviewRequired
@@ -219,6 +354,12 @@ export async function identifyLiteratureCandidates(
   if (discovery) {
     if (!discovery.session.candidateSetIds.includes(record.handle))
       discovery.session.candidateSetIds.push(record.handle);
+    // A count asked for before the first batch is shown sets its size.
+    if (count !== undefined && !discovery.session.papers.length)
+      discovery.session.request = {
+        ...discovery.session.request,
+        batchSize: count,
+      };
     await save(discovery.record, context);
   }
   return {
@@ -232,13 +373,28 @@ export async function identifyLiteratureCandidates(
           revision: discovery.session.revision,
           nextStep: discoveryInstruction(discovery.record),
         }
-      : {}),
+      : routeImports
+        ? { nextStep: CANDIDATE_ROUTE }
+        : {}),
   };
 }
 
+/**
+ * A workflow:'answer' search opens no discovery, so its result routes by the
+ * user's request, read when the model picks its next tool: for callers that
+ * can open the card, the explicit-import branch first. A workflow:'review'
+ * search opened a discovery, whose candidates import only through the card
+ * (discoveryImportRefusal), so its next step offers the card alone.
+ */
+const IMPORT_ROUTE =
+  "If the user asked to import or add papers to Zotero without asking to choose them first, skip the selection card: rank these candidates, skip papers already in the library, then call library_import with the DOI or arXiv identifiers of exactly the number the user requested and the requested destination (targetCollectionId; create the collection first only when the user named a new one).";
+const CANDIDATE_ROUTE = `${IMPORT_ROUTE} If they only asked to find or recommend papers, call literature_review with the number they asked for as count (five when unspecified) and that many ranked candidateSetId/candidateIndex selections. Otherwise answer from these results.`;
+
 function discoveryInstruction(record: AgentToolResultHandleRecord): string {
   const s = record.content as LiteratureDiscoverySession;
-  return `Assess titles and abstracts and select ${s.request.batchSize} ${s.papers.length ? "additional " : ""}genuinely relevant papers in ranked order. Respect the user's topic and these constraints: ${JSON.stringify(s.request)}. Assess unused saved candidates first; search further if needed. To expand a provider list, increase its retrieval limit rather than repeating the same bounded request. Call literature_review with sessionId '${record.handle}', revision ${s.revision}, NEW candidateSetId/candidateIndex selections and evidence-based relevance reasons. Do not repeat displayed papers or dump the raw pool. If fewer qualify, explain shortfallReason; use outcome 'no_more' when no further relevant matches were found, or 'search_failed' for a retrieval failure. Empty selections with an explanation are allowed. Never import during discovery or finish with prose instead of the card.`;
+  const select = `titles and abstracts and select ${s.request.batchSize} ${s.papers.length ? "additional " : ""}genuinely relevant papers in ranked order${s.papers.length ? "" : " (pass the number the user asked for as count when it differs)"}. Respect the user's topic and these constraints: ${JSON.stringify(s.request)}. Assess unused saved candidates first; search further if needed. To expand a provider list, increase its retrieval limit rather than repeating the same bounded request.`;
+  const review = `literature_review with sessionId '${record.handle}', revision ${s.revision}, NEW candidateSetId/candidateIndex selections and evidence-based relevance reasons. Do not repeat displayed papers or dump the raw pool. If fewer qualify, explain shortfallReason; use outcome 'no_more' when no further relevant matches were found, or 'search_failed' for a retrieval failure. Empty selections with an explanation are allowed.`;
+  return `Assess ${select} Call ${review} Never import during discovery or finish with prose instead of the card.`;
 }
 
 export async function prepareLiteratureDiscoveryReview(
@@ -263,6 +419,15 @@ export async function prepareLiteratureDiscoveryReview(
   }
   const expectedPhase = session.phase;
   const expectedRevision = session.revision;
+  // The first batch takes the count it was asked for; Find more keeps it.
+  const batchSize =
+    input.count !== undefined && !session.papers.length
+      ? input.count
+      : session.request.batchSize;
+  if (input.count !== undefined && input.count !== batchSize)
+    throw new Error(
+      `This discovery shows batches of ${batchSize} papers; Find more keeps the first batch's size.`,
+    );
   const identities = new Set(session.papers.flatMap(literaturePaperIdentities));
   const selected: Record<string, unknown>[] = [];
   for (const selection of input.selections) {
@@ -312,16 +477,17 @@ export async function prepareLiteratureDiscoveryReview(
     });
   }
   if (
-    selected.length > session.request.batchSize ||
-    (selected.length < session.request.batchSize && !input.shortfallReason)
+    selected.length > batchSize ||
+    (selected.length < batchSize && !input.shortfallReason)
   ) {
     throw new Error(
-      `Review requires ${session.request.batchSize} new ranked papers, not ${selected.length}. Search further or disclose a genuine shortfall.`,
+      `Review requires ${batchSize} new ranked papers, not ${selected.length}. Search further or disclose a genuine shortfall.`,
     );
   }
   assertActive(context);
   if (session.phase !== expectedPhase || session.revision !== expectedRevision)
     throw new Error("The discovery changed while preparing this batch.");
+  session.request = { ...session.request, batchSize };
   session.papers.push(...selected);
   session.selectedIds.push(...selected.map((p) => String(p.discoveryPaperId)));
   session.targetCollectionId = destination.targetCollectionId;
@@ -368,6 +534,12 @@ export async function resolveLiteratureDiscoveryReview(
     session.outcome = "complete";
   } else {
     session.phase = "closed";
+    // Import is the user's choice; only the papers checked with it may be
+    // imported. A selection the card did not send approves nothing.
+    if (actionId === "import")
+      session.approvedIds = Array.isArray(selectedIds)
+        ? [...session.selectedIds]
+        : [];
   }
   await save(record, context);
   return {

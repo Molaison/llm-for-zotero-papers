@@ -1,47 +1,29 @@
 import type { AgentWriteToolDefinition } from "../../types";
 import { stateChangeInvocationPlan } from "../../authorization/invocationPlan";
 import type { ZoteroGateway } from "../../services/zoteroGateway";
+import { resolveHighlightColor } from "../../services/pdfAnnotationGeometry";
+import { resolvePdfHighlight } from "../../../services/pdf/pdfAnnotationResolver";
 import {
-  buildAnnotationSortIndex,
-  mergeRectsByLine,
-  resolveHighlightColor,
-  type PdfRect,
-} from "../../services/pdfAnnotationGeometry";
+  annotationMatchesPayload,
+  type PdfHighlightPayload,
+} from "../../../services/pdf/pdfAnnotationState";
 import { executeExternalMutation } from "../../services/externalMutationCoordinator";
 import { LibraryMutationService } from "../../services/libraryMutationService";
 import { ok, fail, validateObject, normalizePositiveInt } from "../shared";
 
 type AnnotateInput = {
   attachmentId: number;
-  pageIndex: number;
-  rects: PdfRect[];
+  text: string;
+  pageIndex?: number;
+  occurrence?: number;
   color: string;
-  text?: string;
-  comment?: string;
-  pageLabel?: string;
-  charOffset?: number;
-  pageHeightPoints: number;
+  comment: string;
 };
 
-/**
- * Creates a highlight annotation on a PDF attachment.
- *
- * Zotero's write path is headless — `saveFromJSON` touches only the database
- * and the notifier, and Zotero's own PDF-worker import calls it in a loop —
- * so the reader does not need to be open.
- *
- * The contract has several sharp edges that throw rather than degrade, so
- * they are enforced here instead of being discovered at save time:
- *   - `annotationType` must be set FIRST; setting any other annotation field
- *     before it throws.
- *   - the colour is validated against a case-sensitive lowercase hex regex.
- *   - `sortIndex` is format-checked as `NNNNN|NNNNNN|NNNNN`.
- *   - rects are PDF user space, origin bottom-left, y-up, in points — which
- *     is the opposite convention to both of this plugin's geometry producers.
- *     `pdfAnnotationGeometry` converts; this tool takes the converted values.
- */
+/** The model chooses a passage; native PDF text determines its placement. */
 export function createAnnotatePdfTool(
   zoteroGateway: ZoteroGateway,
+  resolveHighlight = resolvePdfHighlight,
 ): AgentWriteToolDefinition<AnnotateInput, unknown> {
   const mutationService = new LibraryMutationService(zoteroGateway);
   return {
@@ -55,6 +37,9 @@ export function createAnnotatePdfTool(
         parameters: {
           targetItemId: input.attachmentId,
           pageIndex: input.pageIndex,
+          expectedText: input.text,
+          annotationComment: input.comment,
+          annotationColor: input.color,
         },
         requestedTargets: [`item:${input.attachmentId}`],
         destinationCollectionIds: [],
@@ -64,11 +49,11 @@ export function createAnnotatePdfTool(
     spec: {
       name: "annotate_pdf",
       description:
-        "Add a highlight annotation with an optional comment to a PDF attachment. Rects must be in PDF user space (origin bottom-left, y increasing upward, in points).",
+        "Highlight an exact quoted passage in a PDF attachment and optionally add a comment. Zotero locates the text and computes the highlight. Supply text from paper_read; no coordinates, scripts, or external PDF utilities are needed. For multiple matches specify pageIndex and occurrence. If native text is unavailable, report the limitation instead of estimating coordinates or using scripts.",
       inputSchema: {
         type: "object",
         additionalProperties: false,
-        required: ["attachmentId", "pageIndex", "rects", "pageHeightPoints"],
+        required: ["attachmentId", "text"],
         properties: {
           attachmentId: {
             type: "number",
@@ -77,18 +62,13 @@ export function createAnnotatePdfTool(
           },
           pageIndex: {
             type: "number",
-            description: "Zero-based page index.",
-          },
-          rects: {
-            type: "array",
-            items: { type: "array", items: { type: "number" } },
             description:
-              "Highlight rectangles as [x1, y1, x2, y2] in PDF points, origin bottom-left. One per line of text.",
+              "Optional zero-based page index restricting the search to that page.",
           },
-          pageHeightPoints: {
+          occurrence: {
             type: "number",
             description:
-              "The page height in points, used to compute the sort index.",
+              "One-based occurrence on the specified page, only to disambiguate repeated text. Requires pageIndex.",
           },
           color: {
             type: "string",
@@ -97,17 +77,12 @@ export function createAnnotatePdfTool(
           },
           text: {
             type: "string",
-            description: "The highlighted text itself.",
+            description:
+              "The complete exact passage to highlight, quoted from the attachment. Line wrapping and PDF hyphenation are handled internally.",
           },
           comment: {
             type: "string",
             description: "A note attached to the highlight.",
-          },
-          pageLabel: { type: "string" },
-          charOffset: {
-            type: "number",
-            description:
-              "Character offset of the highlight within the page text. Affects sidebar ordering only; an approximation is fine.",
           },
         },
       },
@@ -136,22 +111,44 @@ export function createAnnotatePdfTool(
           "attachmentId is required and must be the PDF attachment's item ID, not the parent paper's.",
         );
       }
-      const pageIndex = Number(args.pageIndex);
-      if (!Number.isFinite(pageIndex) || pageIndex < 0) {
-        return fail("pageIndex must be a zero-based page number.");
-      }
-      const pageHeightPoints = Number(args.pageHeightPoints);
-      if (!Number.isFinite(pageHeightPoints) || pageHeightPoints <= 0) {
+      const text = readString(args.text);
+      if (!text)
+        return fail("text must be the complete quoted passage to highlight.");
+      if (
+        Object.keys(args).some(
+          (key) =>
+            ![
+              "attachmentId",
+              "text",
+              "comment",
+              "color",
+              "pageIndex",
+              "occurrence",
+            ].includes(key),
+        )
+      ) {
         return fail(
-          "pageHeightPoints must be the page height in points, used to place the highlight.",
+          "Supply attachmentId and text, with optional comment, color, pageIndex and occurrence. Zotero computes the coordinates; do not supply rects or page dimensions.",
         );
       }
-      const rects = normalizeRects(args.rects);
-      if (!rects.length) {
+      const pageIndex =
+        args.pageIndex === undefined ? undefined : Number(args.pageIndex);
+      if (
+        pageIndex !== undefined &&
+        (!Number.isInteger(pageIndex) || pageIndex < 0)
+      )
+        return fail("pageIndex must be a zero-based integer page number.");
+      const occurrence =
+        args.occurrence === undefined ? undefined : Number(args.occurrence);
+      if (
+        occurrence !== undefined &&
+        (pageIndex === undefined ||
+          !Number.isInteger(occurrence) ||
+          occurrence < 1)
+      )
         return fail(
-          "rects must contain at least one [x1, y1, x2, y2] rectangle in PDF points.",
+          "occurrence must be a one-based integer and requires pageIndex.",
         );
-      }
       const color = resolveHighlightColor(args.color ?? "yellow");
       if (!color) {
         return fail(
@@ -160,21 +157,16 @@ export function createAnnotatePdfTool(
       }
       return ok({
         attachmentId,
-        pageIndex: Math.floor(pageIndex),
-        rects: mergeRectsByLine(rects),
+        pageIndex,
+        occurrence,
         color,
-        text: readString(args.text),
-        comment: readString(args.comment),
-        pageLabel: readString(args.pageLabel),
-        charOffset: normalizePositiveInt(args.charOffset) ?? 0,
-        pageHeightPoints,
+        text,
+        comment: readString(args.comment) || "",
       });
     },
 
     createPendingAction(input) {
-      const summary = input.comment
-        ? `Highlight and comment on page ${input.pageIndex + 1}`
-        : `Highlight on page ${input.pageIndex + 1}`;
+      const summary = `Highlight${input.comment ? " and comment" : ""}${input.pageIndex === undefined ? " in the PDF" : ` on page ${input.pageIndex + 1}`}`;
       return {
         toolName: "annotate_pdf",
         title: "Add a PDF highlight",
@@ -214,7 +206,14 @@ export function createAnnotatePdfTool(
           : undefined;
       const edited =
         data && typeof data.comment === "string" ? data.comment : undefined;
-      return ok(edited === undefined ? input : { ...input, comment: edited });
+      const text =
+        data?.text === undefined ? input.text : readString(data.text);
+      if (!text) return fail("The highlighted quotation cannot be empty.");
+      return ok({
+        ...input,
+        text,
+        comment: edited === undefined ? input.comment : edited.trim(),
+      });
     },
 
     planInvocation() {
@@ -227,38 +226,55 @@ export function createAnnotatePdfTool(
     },
 
     async execute(input, context) {
-      const sortIndex = buildAnnotationSortIndex({
-        pageIndex: input.pageIndex,
-        charOffset: input.charOffset,
-        topY: Math.max(...input.rects.map((rect) => rect[3])),
-        pageHeightPoints: input.pageHeightPoints,
-      });
-
+      const attachment = zoteroGateway.getItem(input.attachmentId);
+      if (!attachment?.isAttachment?.() || !attachment.isPDFAttachment?.()) {
+        throw new Error(
+          `Item ${input.attachmentId} is not a PDF attachment. Use library_read with sections:['attachments'] to find the PDF attachment ID.`,
+        );
+      }
+      const resolved = await resolveHighlight(input, context.signal);
+      if (context.signal?.aborted)
+        throw new Error("Annotation creation was cancelled.");
+      const expectedAnnotation: PdfHighlightPayload = {
+        ...resolved,
+        color: input.color,
+        comment: input.comment,
+      };
+      const existing = attachment
+        .getAnnotations()
+        .find((item) =>
+          annotationMatchesPayload(
+            item,
+            input.attachmentId,
+            expectedAnnotation,
+          ),
+        );
+      if (existing)
+        return {
+          content: {
+            annotationId: existing.id,
+            attachmentId: input.attachmentId,
+            pageIndex: resolved.position.pageIndex,
+            status: "already_exists",
+            expectedAnnotation,
+          },
+          effect: "none" as const,
+        };
       const json: Record<string, unknown> = {
         key: generateAnnotationKey(),
-        // Type first: Zotero throws if any other annotation field is set
-        // before it.
         type: "highlight",
         color: input.color,
-        sortIndex,
-        position: { pageIndex: input.pageIndex, rects: input.rects },
+        text: resolved.text,
+        comment: input.comment,
+        pageLabel: resolved.pageLabel,
+        sortIndex: resolved.sortIndex,
+        position: resolved.position,
       };
-      if (input.text) json.text = input.text;
-      if (input.comment) json.comment = input.comment;
-      if (input.pageLabel) json.pageLabel = input.pageLabel;
-      let attachment: Zotero.Item | null = null;
 
       return executeExternalMutation({
         context,
         toolName: "annotate_pdf",
         plan: async () => {
-          const currentAttachment = zoteroGateway.getItem(input.attachmentId);
-          if (!currentAttachment?.isAttachment?.()) {
-            throw new Error(
-              `Item ${input.attachmentId} is not an attachment. Annotations belong to the PDF attachment, not to the parent paper — use library_read with sections:['attachments'] to find it.`,
-            );
-          }
-          attachment = currentAttachment;
           return {
             operation: "create_pdf_annotation",
             description: "Create a PDF highlight annotation",
@@ -269,9 +285,8 @@ export function createAnnotatePdfTool(
           };
         },
         execute: async () => {
-          if (!attachment) {
-            throw new Error("The annotation target was not prepared");
-          }
+          if (context.signal?.aborted)
+            throw new Error("Annotation creation was cancelled.");
           const saved = await (
             Zotero as unknown as {
               Annotations: {
@@ -298,8 +313,9 @@ export function createAnnotatePdfTool(
           const result = {
             annotationId: annotationId || undefined,
             attachmentId: input.attachmentId,
-            pageIndex: input.pageIndex,
-            rectCount: input.rects.length,
+            pageIndex: resolved.position.pageIndex,
+            rectCount: resolved.position.rects.length,
+            expectedAnnotation,
             status: "created",
           };
           return {
@@ -320,26 +336,6 @@ export function createAnnotatePdfTool(
       });
     },
   };
-}
-
-function normalizeRects(value: unknown): PdfRect[] {
-  if (!Array.isArray(value)) return [];
-  const rects: PdfRect[] = [];
-  for (const entry of value) {
-    if (!Array.isArray(entry) || entry.length !== 4) continue;
-    const nums = entry.map((n) => Number(n));
-    if (nums.some((n) => !Number.isFinite(n))) continue;
-    // Normalize orientation so a caller that swapped the y values still gets
-    // a usable rect rather than an invisible zero-height highlight.
-    const [x1, y1, x2, y2] = nums;
-    rects.push([
-      Math.min(x1, x2),
-      Math.min(y1, y2),
-      Math.max(x1, x2),
-      Math.max(y1, y2),
-    ]);
-  }
-  return rects;
 }
 
 function readString(value: unknown): string | undefined {

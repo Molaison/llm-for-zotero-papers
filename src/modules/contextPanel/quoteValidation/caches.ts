@@ -20,7 +20,7 @@ const MAX_QUOTE_VALIDATION_DECISION_ENTRIES = 1000;
 const MAX_QUOTE_VALIDATION_DECISION_BYTES = 4 * 1024 * 1024;
 const MAX_QUOTE_SOURCE_INDEX_ENTRIES = 64;
 const MAX_QUOTE_SOURCE_INDEX_BYTES = 2 * 1024 * 1024;
-export const QUOTE_VALIDATION_POLICY_VERSION = 12;
+export const QUOTE_VALIDATION_POLICY_VERSION = 13;
 type QuoteValidationDecision = ReturnType<
   typeof finalizeAssistantQuoteCitations
 >;

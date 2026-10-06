@@ -131,14 +131,10 @@ describe("Codex Direct auth and catalog", function () {
     assert.equal(requestedUrl, CODEX_DIRECT_MODELS_URL);
     assert.equal(snapshot.models[0].contextWindow, 200000);
     assert.deepEqual(getCodexDirectReasoningChoices("GPT-CODEX"), [
-      { value: "auto", label: "Auto (Ultra)" },
-      { value: "low", label: "Low", description: "Faster" },
-      { value: "medium", label: "Medium", description: "Balanced" },
-      {
-        value: "ultra",
-        label: "Ultra",
-        description: "Automatic task delegation",
-      },
+      { value: "auto", label: "Auto" },
+      { value: "low", label: "Low" },
+      { value: "medium", label: "Medium" },
+      { value: "ultra", label: "Ultra" },
     ]);
     assert.throws(
       () => assertCodexDirectModelAvailable("saved-missing"),

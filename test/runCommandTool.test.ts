@@ -81,7 +81,7 @@ describe("run_command effect path", function () {
       tool,
       validated("rm -rf /tmp/run-command-target"),
     );
-    const receipts = await service.finalize(undefined, prepared, {
+    const receipts = await service.finalize(prepared, {
       ok: true,
       effect: "applied",
       content: { exitCode: 0, stdout: "" },
@@ -96,7 +96,7 @@ describe("run_command effect path", function () {
 
   it("reports a cancelled command as not_applicable, never as executed", async function () {
     const prepared = await service.prepare(tool, validated("echo cancelled"));
-    const receipts = await service.finalize(undefined, prepared, {
+    const receipts = await service.finalize(prepared, {
       ok: false,
       cancelled: true,
       reason: "The user declined the command.",

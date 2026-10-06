@@ -4,6 +4,7 @@ import {
   buildAgentResourceContextPlan,
   buildAgentResourceSignatureFromSnapshot,
   buildAgentResourceSnapshot,
+  buildAgentStableResourceContextBlock,
   clearAgentReadLedger,
   commitAgentReadActivities,
   diffAgentResourceSnapshots,
@@ -198,6 +199,16 @@ describe("agent resource context plan", function () {
       buildAgentResourceSignatureFromSnapshot(first),
       buildAgentResourceSignatureFromSnapshot(second),
     );
+    assert.notEqual(
+      buildAgentResourceSignatureFromSnapshot(first),
+      buildAgentResourceSignatureFromSnapshot({
+        ...first,
+        resources: {
+          ...first.resources,
+          selectedPapers: first.resources.selectedPapers.slice(0, 1),
+        },
+      }),
+    );
   });
 
   it("includes available sibling attachments as metadata-only lifecycle resources", async function () {
@@ -284,6 +295,51 @@ describe("agent resource context plan", function () {
     assert.notInclude(text, "translation.docx");
   });
 
+  it("offers a digest for any per-paper result in a collection or tag scope, and says membership is not relevance", function () {
+    const text = buildAgentStableResourceContextBlock(
+      request({
+        selectedPaperContexts: [],
+        fullTextPaperContexts: [],
+        selectedCollectionContexts: [
+          { collectionId: 7, libraryID: 1, name: "Folder" },
+        ],
+        selectedTagContexts: [
+          { name: "review", normalizedName: "review", libraryID: 1 },
+        ],
+      }),
+    );
+    for (const scope of ["collection", "tag"]) {
+      assert.include(
+        text,
+        `When the request needs one result per paper (summaries, extracted fields, relevance to a question, support or challenge for an idea), declare a digest part with task_update ({ expectedEffect:'digest', scope:true } for the whole ${scope}, or targetIds for chosen papers) whose description states that per-paper result;`,
+        scope,
+      );
+      assert.include(
+        text,
+        `For a question over a large ${scope}, shortlist with library_retrieve first and digest the shortlist.`,
+        scope,
+      );
+    }
+    // A digest is no longer reserved for a request that names every paper.
+    assert.notInclude(text, "every paper");
+    assert.notInclude(text, "explicitly asks to read, summarize or analyze");
+    assert.equal(
+      text.split(
+        "Membership makes a paper available, not relevant: judge relevance from each paper's content.",
+      ).length - 1,
+      2,
+      "both the collection and the tag scope say membership is not relevance",
+    );
+    // An unrelated paper is left out with its reason, not stretched in.
+    assert.equal(
+      text.split(
+        "leave out one that does not, never stretch it in by analogy, list it under excluded (submit_document or task_update) with the reason, and name it by title without a citation.",
+      ).length - 1,
+      2,
+      "both scopes say how to leave an unrelated paper out",
+    );
+  });
+
   it("diffs added, removed, changed, and unchanged resources", function () {
     const previous = buildAgentResourceSnapshot(
       request({
@@ -322,12 +378,18 @@ describe("agent resource context plan", function () {
 
     assert.include(stableText, "Stable Zotero resource context:");
     assert.include(stableText, "Current Zotero context summary:");
-    assert.include(stableText, "Retrieval-only paper refs:");
+    assert.include(
+      stableText,
+      "Selected paper refs (text coverage is reported in the paper source blocks):",
+    );
     assert.include(stableText, "Baseline Paper");
     assert.include(userText, "Zotero context for this turn:");
     assert.include(userText, "Paper 1:");
     assert.include(userText, 'title="Baseline Paper"');
-    assert.notInclude(userText, "Retrieval-only paper refs:");
+    assert.notInclude(
+      userText,
+      "Selected paper refs (text coverage is reported in the paper source blocks):",
+    );
     assert.include(userText, "User request:\nWhat should I do next?");
   });
 

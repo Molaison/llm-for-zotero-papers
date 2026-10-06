@@ -5,49 +5,58 @@ import {
 } from "../src/agent/actions/batchInteraction";
 
 describe("durable action interaction", function () {
-  it("preserves separate review choices for two actions of the same operation", function () {
-    const request = {
-      actionContract: {
-        obligations: [
-          {
-            id: "edit-a",
-            operation: "note_edit",
-            reviewPreference: "review",
-            parameters: { targetNoteId: 1 },
-          },
-          {
-            id: "edit-b",
-            operation: "note_edit",
-            reviewPreference: "direct",
-            parameters: { targetNoteId: 2 },
-          },
-        ],
-      },
-    } as any;
-    const stored = captureBatchInteraction(request);
-    const resumed = JSON.parse(JSON.stringify(request));
-    resumed.actionContract.obligations.forEach(
-      (entry: any) => (entry.reviewPreference = "default"),
+  it("resumes a job from the entry point it was started from", function () {
+    const stored = captureBatchInteraction({ actionEntryPoint: "action_ui" });
+    assert.deepEqual(stored, {
+      version: 2,
+      entryPoint: "action_ui",
+      preferences: [],
+    });
+    const resumed = restoreBatchInteraction(
+      { actionEntryPoint: "conversation" } as never,
+      JSON.parse(JSON.stringify(stored)),
     );
-    assert.deepEqual(
-      restoreBatchInteraction(resumed, stored).actionContract?.obligations.map(
-        (entry) => entry.reviewPreference,
-      ),
-      ["review", "direct"],
+    assert.equal(resumed.actionEntryPoint, "action_ui");
+  });
+
+  it("reads a job stored with classifier-era review preferences", function () {
+    const stored = {
+      version: 2,
+      entryPoint: "action_ui",
+      intentRevision: 3,
+      preferences: [
+        {
+          obligationId: "a",
+          operation: "apply_tags",
+          reviewPreference: "direct",
+        },
+      ],
+    };
+    assert.equal(
+      restoreBatchInteraction({} as never, stored).actionEntryPoint,
+      "action_ui",
     );
   });
-  it("keeps untrusted legacy checkpoints under review", function () {
-    const request = {
-      actionContract: {
-        obligations: [
-          { id: "a", operation: "apply_tags", reviewPreference: "default" },
-        ],
+
+  it("resumes an untrusted stored interaction as a conversation", function () {
+    for (const stored of [
+      undefined,
+      { version: 1, entryPoint: "action_ui", preferences: [] },
+      { version: 2, entryPoint: "menu", preferences: [] },
+      {
+        version: 2,
+        entryPoint: "action_ui",
+        preferences: [{ obligationId: "a", reviewPreference: "always" }],
       },
-    } as any;
-    assert.equal(
-      restoreBatchInteraction(request, undefined).actionContract?.obligations[0]
-        .reviewPreference,
-      "review",
-    );
+    ]) {
+      assert.equal(
+        restoreBatchInteraction(
+          { actionEntryPoint: "action_ui" } as never,
+          stored,
+        ).actionEntryPoint,
+        "conversation",
+        JSON.stringify(stored),
+      );
+    }
   });
 });

@@ -28,6 +28,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import {
   ensurePDFTextCached,
   buildPaperRetrievalCandidates,
@@ -145,10 +146,24 @@ function readPrefFromFile(contents: string, key: string): unknown {
 
 // ── Filesystem-backed IOUtils with a copy-on-write overlay ───────────────────
 
-function installGlobals(options: Options): {
+/**
+ * Install the read-only filesystem overlay and the mocked `Zotero`,
+ * `IOUtils`, `PathUtils` and `ztoolkit` globals for `dataDir`. Every write the
+ * plugin code makes lands in a temporary overlay directory, never in
+ * `dataDir`. Shared with `library-index-benchmark.ts`.
+ */
+export function installBenchmarkGlobals(
+  dataDir: string,
+  settings: { embeddings?: boolean; prefsPath?: string } = {},
+): {
   overlayDir: string;
   devPref: (key: string) => unknown;
 } {
+  const options = {
+    dataDir,
+    embeddings: settings.embeddings === true,
+    prefsPath: settings.prefsPath,
+  };
   const overlayDir = fs.mkdtempSync(
     path.join(os.tmpdir(), "retrieval-benchmark-"),
   );
@@ -416,7 +431,10 @@ function printQueryTable(
 
 async function main(): Promise<void> {
   const options = parseArgs(process.argv.slice(2));
-  const { overlayDir, devPref } = installGlobals(options);
+  const { overlayDir, devPref } = installBenchmarkGlobals(options.dataDir, {
+    embeddings: options.embeddings,
+    prefsPath: options.prefsPath,
+  });
 
   console.log(
     `data dir: ${options.dataDir} (read-only; writes go to ${overlayDir})`,
@@ -518,7 +536,13 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.message : error);
-  process.exitCode = 1;
-});
+// Run only when invoked directly, so a sibling script can import the globals.
+if (
+  process.argv[1] &&
+  import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href
+) {
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.message : error);
+    process.exitCode = 1;
+  });
+}

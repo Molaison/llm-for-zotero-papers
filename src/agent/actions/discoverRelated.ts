@@ -1,5 +1,4 @@
 import { buildActionCallDigest } from "../authorization/proposal";
-import { innermostToolResult } from "../contracts/toolResultEnvelope";
 import { callTool } from "./executor";
 import { getMetadataField } from "./metadataSnapshot";
 import type { PaperScopedActionProfile } from "./paperScope";
@@ -95,7 +94,7 @@ export const discoverRelatedAction: AgentAction<
     });
 
     const readResult = await callTool(
-      "read_library",
+      "library_read",
       { itemIds: [input.itemId], sections: ["metadata"] },
       ctx,
       `Reading metadata for item ${input.itemId}`,
@@ -162,7 +161,7 @@ export const discoverRelatedAction: AgentAction<
       limit: number,
     ): Promise<FetchModeResult> => {
       const result = await callTool(
-        "search_literature_online",
+        "literature_search",
         {
           mode,
           itemId: input.itemId,
@@ -181,7 +180,7 @@ export const discoverRelatedAction: AgentAction<
         const errMsg =
           errContent && typeof errContent.error === "string"
             ? errContent.error
-            : `search_literature_online failed for mode "${mode}"`;
+            : `literature_search failed for mode "${mode}"`;
         return { rows: [], failed: true, error: errMsg };
       }
       const content = result.content as Record<string, unknown>;
@@ -337,70 +336,21 @@ export const discoverRelatedAction: AgentAction<
     }
 
     // Step 3: HITL paper selection + import (with optional Load more loop)
+    // A conversational run in automatic mode reports what it found: importing
+    // is the user's own call to library_import.
     if (
       ctx.requestContext?.actionEntryPoint === "conversation" &&
-      ctx.confirmationMode === "automatic" &&
-      ctx.requestContext?.classifiedIntent?.semantic?.literature !==
-        "select_then_import"
+      ctx.confirmationMode === "automatic"
     ) {
-      const importIntent = ctx.requestContext?.actionContract?.obligations.find(
-        (entry) => entry.capability === "zotero.import",
-      );
-      if (!importIntent)
-        return {
-          ok: true,
-          output: {
-            seedTitle,
-            discovered: totalDiscovered,
-            imported: 0,
-            papers: rec,
-          },
-        };
-      const count =
-        ctx.requestContext?.classifiedIntent?.semantic?.requestedCount ||
-        initialLimit;
-      const identifiers = [
-        ...new Set(
-          rec
-            .map((paper) => paper.importIdentifier)
-            .filter((id): id is string => Boolean(id)),
-        ),
-      ].slice(0, count);
-      const result = await callTool(
-        "import_identifiers",
-        {
-          identifiers,
-          libraryID: ctx.libraryID,
-          ...(importIntent.parameters?.destinationCollectionId
-            ? {
-                targetCollectionId:
-                  importIntent.parameters.destinationCollectionId,
-              }
-            : {}),
+      return {
+        ok: true,
+        output: {
+          seedTitle,
+          discovered: totalDiscovered,
+          imported: 0,
+          papers: rec,
         },
-        ctx,
-        "Importing the requested related papers",
-      );
-      return result.ok
-        ? {
-            ok: true,
-            output: {
-              seedTitle,
-              discovered: totalDiscovered,
-              imported: Number(
-                innermostToolResult(result.content).importedCount ||
-                  innermostToolResult(result.content).succeeded ||
-                  0,
-              ),
-              papers: rec.slice(0, count),
-            },
-          }
-        : {
-            ok: false,
-            error: String(
-              (result.content as { error?: unknown })?.error || "Import failed",
-            ),
-          };
+      };
     }
 
     ctx.onProgress({
@@ -563,22 +513,22 @@ export const discoverRelatedAction: AgentAction<
       };
     }
 
+    // The inherited approval is bound to this exact call, name included.
+    const importArgs = {
+      kind: "identifiers",
+      identifiers,
+      libraryID: ctx.libraryID,
+    };
     const importResult = await callTool(
-      "import_identifiers",
-      {
-        identifiers,
-        libraryID: ctx.libraryID,
-      },
+      "library_import",
+      importArgs,
       ctx,
       "Importing selected papers",
       {
         sourceToolName: "discover_related",
         sourceActionId: "import",
         sourceMode: "approval",
-        approvedCallDigest: buildActionCallDigest("import_identifiers", {
-          identifiers,
-          libraryID: ctx.libraryID,
-        }),
+        approvedCallDigest: buildActionCallDigest("library_import", importArgs),
       },
     );
 

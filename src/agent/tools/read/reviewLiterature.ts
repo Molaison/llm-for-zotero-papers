@@ -1,5 +1,4 @@
 import { readOnlyInvocationPlan } from "../../authorization/invocationPlan";
-import { isExplicitLiteratureImport } from "../../model/literatureIntent";
 import {
   createSearchLiteratureReviewAction,
   resolveSearchLiteratureReview,
@@ -8,86 +7,110 @@ import {
   type LiteratureReviewInput,
   discoveryContent,
   getLiteratureDiscovery,
+  MAX_DISCOVERY_COUNT,
+  parseDiscoveryCount,
   prepareLiteratureDiscoveryReview,
   resolveLiteratureDiscoveryReview,
 } from "../../services/literatureDiscovery";
 import type { ZoteroGateway } from "../../services/zoteroGateway";
-import type { AgentToolDefinition } from "../../types";
+import type {
+  AgentToolContext,
+  AgentToolDefinition,
+  ToolSpec,
+} from "../../types";
 import { fail, normalizePositiveInt, ok, validateObject } from "../shared";
+
+/** A caller-visibility check asks about this tool by spec. */
+const LITERATURE_REVIEW_SPEC: ToolSpec = {
+  name: "literature_review",
+  description: "Show the selection card for ranked saved candidates.",
+  executionClass: "read",
+  workCategory: "retrieval",
+  inputSchema: {
+    type: "object",
+    additionalProperties: false,
+    required: ["selections"],
+    properties: {
+      selections: {
+        type: "array",
+        minItems: 0,
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["candidateSetId", "candidateIndex", "reason"],
+          properties: {
+            candidateSetId: {
+              type: "string",
+              description:
+                "Exact candidateSetId returned by literature_search in this turn.",
+            },
+            candidateIndex: {
+              type: "integer",
+              minimum: 1,
+              description:
+                "One-based candidateIndex from that saved candidate set.",
+            },
+            reason: {
+              type: "string",
+              description:
+                "Brief relevance explanation grounded in the retrieved title/abstract, not invented findings.",
+            },
+          },
+        },
+      },
+      count: {
+        type: "integer",
+        minimum: 1,
+        maximum: MAX_DISCOVERY_COUNT,
+        description:
+          "Papers the user asked for, five when unspecified. Find more keeps the first batch's size.",
+      },
+      sessionId: {
+        type: "string",
+        description: "Discovery sessionId from search results or Find more.",
+      },
+      revision: {
+        type: "integer",
+        minimum: 0,
+        description:
+          "Current discovery revision from search results or Find more.",
+      },
+      outcome: {
+        type: "string",
+        enum: ["complete", "no_more", "search_failed"],
+        description:
+          "Use no_more for exhausted relevant matches or search_failed for retrieval errors. Explain either in shortfallReason.",
+      },
+      targetCollectionId: {
+        type: "integer",
+        minimum: 1,
+        description:
+          "Requested destination, after resolving its native collection identity. Otherwise use the one scoped collection or the current library.",
+      },
+      shortfallReason: {
+        type: "string",
+        description:
+          "Only when fewer genuinely relevant papers can be found than requested: explain the shortfall. Never pad the shortlist with irrelevant papers.",
+      },
+    },
+  },
+};
+
+/**
+ * Whether this caller can show the paper selection card. MCP never offers
+ * literature_review, so its clients present candidates themselves.
+ */
+export function canShowLiteratureReview(context: AgentToolContext): boolean {
+  return (
+    !context.isToolVisible || context.isToolVisible(LITERATURE_REVIEW_SPEC)
+  );
+}
 
 export function createLiteratureReviewTool(
   gateway: ZoteroGateway,
 ): AgentToolDefinition<LiteratureReviewInput, unknown> {
   return {
-    spec: {
-      name: "literature_review",
-      description:
-        "Show a ranked paper-only import-selection card after literature_search. Select the requested number using saved candidate references and evidence-based relevance reasons. Use this card when the user requests selection or review. Ordinary discovery returns ranked results without importing. Explicit import requests use library_import directly instead.",
-      executionClass: "read",
-      workCategory: "retrieval",
-      inputSchema: {
-        type: "object",
-        additionalProperties: false,
-        required: ["selections"],
-        properties: {
-          selections: {
-            type: "array",
-            minItems: 0,
-            items: {
-              type: "object",
-              additionalProperties: false,
-              required: ["candidateSetId", "candidateIndex", "reason"],
-              properties: {
-                candidateSetId: {
-                  type: "string",
-                  description:
-                    "Exact candidateSetId returned by literature_search in this turn.",
-                },
-                candidateIndex: {
-                  type: "integer",
-                  minimum: 1,
-                  description:
-                    "One-based candidateIndex from that saved candidate set.",
-                },
-                reason: {
-                  type: "string",
-                  description:
-                    "Brief relevance explanation grounded in the retrieved title/abstract, not invented findings.",
-                },
-              },
-            },
-          },
-          sessionId: {
-            type: "string",
-            description:
-              "Discovery sessionId from search results or Find more.",
-          },
-          revision: {
-            type: "integer",
-            minimum: 0,
-            description:
-              "Current discovery revision from search results or Find more.",
-          },
-          outcome: {
-            type: "string",
-            enum: ["complete", "no_more", "search_failed"],
-            description:
-              "Use no_more for exhausted relevant matches or search_failed for retrieval errors. Explain either in shortfallReason.",
-          },
-          targetCollectionId: {
-            type: "integer",
-            minimum: 1,
-            description:
-              "Requested destination, after resolving its native collection identity. Otherwise use the one scoped collection or the current library.",
-          },
-          shortfallReason: {
-            type: "string",
-            description:
-              "Only when fewer genuinely relevant papers can be found than requested: explain the shortfall. Never pad the shortlist with irrelevant papers.",
-          },
-        },
-      },
-    },
+    spec: LITERATURE_REVIEW_SPEC,
     presentation: {
       label: "Review relevant papers",
       summaries: {
@@ -121,6 +144,11 @@ export function createLiteratureReviewTool(
           reason: entry.reason.trim(),
         });
       }
+      const count = parseDiscoveryCount(args.count);
+      if (count === null)
+        return fail(
+          `count must be an integer from 1 to ${MAX_DISCOVERY_COUNT}.`,
+        );
       const targetCollectionId = normalizePositiveInt(args.targetCollectionId);
       if (args.targetCollectionId !== undefined && !targetCollectionId)
         return fail("Invalid targetCollectionId.");
@@ -152,6 +180,7 @@ export function createLiteratureReviewTool(
         return fail("Explain the shortfall or search failure.");
       return ok({
         selections,
+        count,
         sessionId: args.sessionId as string | undefined,
         revision: args.revision as number | undefined,
         outcome: args.outcome as LiteratureReviewInput["outcome"],
@@ -171,10 +200,6 @@ export function createLiteratureReviewTool(
           "Review saved scholarly candidates without changing the library.",
       }),
     execute: async (input, context) => {
-      if (isExplicitLiteratureImport(context.request))
-        throw new Error(
-          "This is an explicit import request. Use library_import for the requested count and destination; do not substitute a discovery card.",
-        );
       const active = await getLiteratureDiscovery(context, true);
       const targetCollectionId =
         active?.session.targetCollectionId ||

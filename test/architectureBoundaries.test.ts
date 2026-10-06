@@ -15,6 +15,13 @@ const require = createRequire(import.meta.url);
 
 type Boundary = { kind: "runtime" | "type"; from: string; to: string };
 
+type SealedExportViolation = {
+  from: string;
+  module: string;
+  export: string;
+  sealed: string;
+};
+
 type CheckResult = {
   unclassifiedDirectories: string[];
   upwardRuntimeEdges: Boundary[];
@@ -22,6 +29,7 @@ type CheckResult = {
   staleObligations: Boundary[];
   upwardTypeWarnings: Boundary[];
   facadeViolations: Array<Boundary & { facade: string }>;
+  sealedExportViolations: SealedExportViolation[];
 };
 
 type Layer = { tier: number; name: string; roots: string[] };
@@ -33,29 +41,48 @@ type Facade = {
   allow: string[];
 };
 
+type SealedExport = {
+  name: string;
+  module: string;
+  exports: string[];
+  importers: string[];
+};
+
 const {
   checkArchitectureBoundaries,
   formatBoundary,
+  formatSealedExportViolation,
   validateLayers,
   validateFacades,
+  validateSealedExports,
   LAYERS,
   FACADES,
-  MIGRATION_OBLIGATIONS,
+  SEALED_EXPORTS,
 } = require("../scripts/check-architecture-boundaries.cjs") as {
   checkArchitectureBoundaries: (
     root?: string,
-    options?: { obligations?: string[]; facades?: Facade[] },
+    options?: {
+      obligations?: string[];
+      facades?: Facade[];
+      sealedExports?: SealedExport[];
+    },
   ) => CheckResult;
   formatBoundary: (boundary: Boundary) => string;
+  formatSealedExportViolation: (violation: SealedExportViolation) => string;
   validateLayers: (layers: Layer[]) => Layer[];
   validateFacades: (facades: Facade[]) => Facade[];
+  validateSealedExports: (entries: SealedExport[]) => SealedExport[];
   LAYERS: Layer[];
   FACADES: Facade[];
-  MIGRATION_OBLIGATIONS: string[];
+  SEALED_EXPORTS: SealedExport[];
 };
 
 function formatted(boundaries: Boundary[]): string[] {
   return boundaries.map((boundary) => formatBoundary(boundary));
+}
+
+function formattedSealed(violations: SealedExportViolation[]): string[] {
+  return violations.map((violation) => formatSealedExportViolation(violation));
 }
 
 function writeFixture(root: string, files: Record<string, string>): void {
@@ -74,15 +101,7 @@ describe("architecture boundaries", function () {
     assert.deepEqual(formatted(result.unexpectedUpwardEdges), []);
     assert.deepEqual(formatted(result.staleObligations), []);
     assert.deepEqual(formatted(result.facadeViolations), []);
-  });
-
-  it("classifies every top-level directory under src", function () {
-    const roots = LAYERS.flatMap((layer) => layer.roots);
-    assert.isAbove(roots.length, 0);
-    assert.include(roots, "src/core/");
-    assert.include(roots, "src/services/");
-    assert.include(roots, "src/agent/");
-    assert.include(roots, "src/modules/");
+    assert.deepEqual(formattedSealed(result.sealedExportViolations), []);
   });
 
   describe("layer table validation", function () {
@@ -121,13 +140,6 @@ describe("architecture boundaries", function () {
         /"services" declares tier 2 at position 1/,
       );
     });
-  });
-
-  it("records the services-to-agent change journal edge as a migration obligation", function () {
-    assert.include(
-      MIGRATION_OBLIGATIONS,
-      "runtime:src/services/zoteroChangeDispatcher.ts -> src/agent/store/changeJournal.ts",
-    );
   });
 
   describe("layer-order rule on a fixture tree", function () {
@@ -426,6 +438,216 @@ describe("architecture boundaries", function () {
         );
       });
     });
+  });
+
+  describe("sealed export rule", function () {
+    let root = "";
+
+    before(function () {
+      root = mkdtempSync(join(tmpdir(), "architecture-sealed-"));
+      writeFixture(root, {
+        // The module may use its own sealed export.
+        "src/agent/store/runs.ts": [
+          "export function finishRun(): void {}",
+          "export function readRun(): string { return 'run'; }",
+          "export const closeAll = () => finishRun();",
+          "",
+        ].join("\n"),
+        // The owner the entry names: allowed.
+        "src/agent/owner.ts": [
+          'import { finishRun } from "./store/runs";',
+          "export const end = () => finishRun();",
+          "",
+        ].join("\n"),
+        // Another export of the same module: allowed.
+        "src/agent/reader.ts": [
+          'import { readRun } from "./store/runs";',
+          "export const read = () => readRun();",
+          "",
+        ].join("\n"),
+        // The edge the rule exists for.
+        "src/agent/intruder.ts": [
+          'import { finishRun } from "./store/runs";',
+          "export const end = () => finishRun();",
+          "",
+        ].join("\n"),
+        // Renaming the binding does not change what was taken.
+        "src/agent/aliased.ts": [
+          'import { finishRun as close } from "./store/runs";',
+          "export const end = () => close();",
+          "",
+        ].join("\n"),
+        // Re-exporting hands the export to files that never import it.
+        "src/agent/reexporter.ts": [
+          'export { finishRun } from "./store/runs";',
+          "",
+        ].join("\n"),
+        // A type-only reach names the export all the same.
+        "src/modules/typeReader.ts": [
+          'import type { finishRun } from "../agent/store/runs";',
+          "export type Finish = typeof finishRun;",
+          "",
+        ].join("\n"),
+        // Taking the module whole carries the sealed export with it.
+        "src/agent/barrel.ts": ['export * from "./store/runs";', ""].join("\n"),
+        "src/agent/namespaced.ts": [
+          'import * as runs from "./store/runs";',
+          "export const read = () => runs.readRun();",
+          "",
+        ].join("\n"),
+        "src/agent/dynamic.ts": [
+          "export async function read() {",
+          '  const runs = await import("./store/runs");',
+          "  return runs.readRun();",
+          "}",
+          "",
+        ].join("\n"),
+      });
+    });
+
+    after(function () {
+      if (root) rmSync(root, { recursive: true, force: true });
+    });
+
+    const sealed: SealedExport = {
+      name: "fixture-runs",
+      module: "src/agent/store/runs.ts",
+      exports: ["finishRun"],
+      importers: ["src/agent/owner.ts"],
+    };
+
+    function violations(entry: SealedExport = sealed): string[] {
+      const result = checkArchitectureBoundaries(root, {
+        obligations: [],
+        sealedExports: [entry],
+      });
+      return formattedSealed(result.sealedExportViolations);
+    }
+
+    it("fails a named import outside the owners", function () {
+      assert.include(
+        violations(),
+        "src/agent/intruder.ts -> src/agent/store/runs.ts#finishRun",
+      );
+    });
+
+    it("fails an aliased import", function () {
+      assert.include(
+        violations(),
+        "src/agent/aliased.ts -> src/agent/store/runs.ts#finishRun",
+      );
+    });
+
+    it("fails a re-export", function () {
+      assert.include(
+        violations(),
+        "src/agent/reexporter.ts -> src/agent/store/runs.ts#finishRun",
+      );
+    });
+
+    it("fails a type-only import of the export", function () {
+      assert.include(
+        violations(),
+        "src/modules/typeReader.ts -> src/agent/store/runs.ts#finishRun",
+      );
+    });
+
+    it("fails taking the module whole", function () {
+      const listed = violations();
+      for (const from of [
+        "src/agent/barrel.ts",
+        "src/agent/namespaced.ts",
+        "src/agent/dynamic.ts",
+      ])
+        assert.include(listed, `${from} -> src/agent/store/runs.ts#*`);
+    });
+
+    it("passes the owners, the module itself, and other exports", function () {
+      const listed = violations();
+      for (const from of [
+        "src/agent/owner.ts",
+        "src/agent/store/runs.ts",
+        "src/agent/reader.ts",
+      ])
+        assert.isFalse(
+          listed.some((entry) => entry.startsWith(`${from} ->`)),
+          `${from} must pass`,
+        );
+    });
+
+    it("passes a file the entry names as an owner", function () {
+      assert.notInclude(
+        violations({
+          ...sealed,
+          importers: [...sealed.importers, "src/agent/intruder.ts"],
+        }),
+        "src/agent/intruder.ts -> src/agent/store/runs.ts#finishRun",
+      );
+    });
+
+    it("reports the sealed entry whose export was taken", function () {
+      const result = checkArchitectureBoundaries(root, {
+        obligations: [],
+        sealedExports: [sealed],
+      });
+      assert.deepEqual(
+        Array.from(
+          new Set(result.sealedExportViolations.map((entry) => entry.sealed)),
+        ),
+        ["fixture-runs"],
+      );
+    });
+
+    describe("sealed export table validation", function () {
+      it("accepts the real table", function () {
+        assert.equal(validateSealedExports(SEALED_EXPORTS), SEALED_EXPORTS);
+      });
+
+      it("rejects an entry that seals no export", function () {
+        assert.throws(
+          () => validateSealedExports([{ ...sealed, exports: [] }]),
+          /"fixture-runs" seals no export/,
+        );
+      });
+
+      it("rejects an export sealed by two entries", function () {
+        assert.throws(
+          () =>
+            validateSealedExports([
+              sealed,
+              { ...sealed, name: "fixture-copy" },
+            ]),
+          /src\/agent\/store\/runs\.ts#finishRun is sealed by more than one entry/,
+        );
+      });
+    });
+  });
+
+  it("lets only the agent loop and the backend bridge finish agent runs", function () {
+    const entry = SEALED_EXPORTS.find((candidate) =>
+      candidate.exports.includes("finishAgentRun"),
+    );
+    assert.isOk(entry, "finishAgentRun must be sealed");
+    assert.equal(entry?.module, "src/agent/store/traceStore.ts");
+    assert.sameMembers(entry?.importers || [], [
+      "src/agent/runtime.ts",
+      "src/agent/externalBackendBridge.ts",
+    ]);
+  });
+
+  it("seals exports of modules and owners that exist", function () {
+    for (const entry of SEALED_EXPORTS) {
+      assert.isTrue(
+        existsSync(entry.module),
+        `${entry.name} seals a module that does not exist: ${entry.module}`,
+      );
+      for (const owner of entry.importers) {
+        assert.isTrue(
+          existsSync(owner),
+          `${entry.name} names an owner that does not exist: ${owner}`,
+        );
+      }
+    }
   });
 
   it("guards the zotero gateway's internals", function () {

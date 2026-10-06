@@ -13,13 +13,10 @@ import type {
 import {
   ActionContractService,
   type PreparedActionExecution,
-  type ScopeValidationFailure,
 } from "../../contracts/actionContract";
 import { prepareActionExecution } from "../../contracts/actionOperationEvidence";
-import { preparationEffectBlock } from "../../contracts/actionPreparation";
 import { getOriginalAgentPermissionMode } from "../../originalAgentPermissionMode";
 import { isAgentChangeJournalAvailable } from "../../store/changeJournal";
-import { matchPlanEffectProposals } from "../../plans/effectAuthorization";
 import { evaluateHostAccess } from "../../authorization/hostAccess";
 import type {
   AgentInvocationPlan,
@@ -33,12 +30,9 @@ export type AssessedInvocation = {
   plan: AgentInvocationPlan;
   preparedAction?: PreparedActionExecution;
   proposal: ActionProposal;
-  scopeFailure: ScopeValidationFailure | null;
   interaction: ActionInteraction;
   authorization: AuthorizationDecision;
   review?: ActionReviewRecord;
-  /** Active v5 effect IDs matched by the host; never model-authored authority. */
-  planEffectIds: readonly string[];
 };
 
 function completePlan(value: unknown): value is AgentInvocationPlan {
@@ -124,10 +118,7 @@ export class InvocationAssessor {
     );
   }
 
-  async assess(
-    input: unknown,
-    concreteWrite = true,
-  ): Promise<AssessedInvocation> {
+  async assess(input: unknown): Promise<AssessedInvocation> {
     const { tool, context, options, contracts } = this;
     const request = context.request;
     const delegated = context.authorization?.kind === "external_runtime";
@@ -171,7 +162,6 @@ export class InvocationAssessor {
       intentBinding: {
         conversationKey: request.conversationKey,
         conversationGeneration: request.conversationGeneration,
-        actionContractId: request.actionContract?.id,
         userText: request.userText,
       },
     });
@@ -184,28 +174,6 @@ export class InvocationAssessor {
         request.actionEntryPoint !== "conversation");
     const directAgent =
       request.executionContext?.permissionOwner === "original_agent";
-    const approvedPlan =
-      request.executionContext?.permissionOwner === "approved_plan" ||
-      request.planContext?.phase === "executing";
-    const approvedEffectContext =
-      effect && approvedPlan
-        ? await context.loadApprovedPlanEffectContext?.()
-        : undefined;
-    const approvedEffectMatch = approvedEffectContext
-      ? matchPlanEffectProposals({
-          ...approvedEffectContext,
-          proposals: preparedAction?.proposals || [],
-        })
-      : undefined;
-    const approvedEffectFailure =
-      approvedEffectMatch?.kind === "outside_approved_effects"
-        ? approvedEffectMatch.reason
-        : effect &&
-            approvedPlan &&
-            !request.actionContract &&
-            !approvedEffectContext
-          ? `Approved Plan execution blocked ${tool.spec.name}: the frozen effect specification is unavailable.`
-          : undefined;
     const hostAccess =
       request.executionContext && delegated
         ? await evaluateHostAccess({
@@ -221,16 +189,17 @@ export class InvocationAssessor {
             (delegated && context.authorization?.standalone)
           ? { kind: "block", reason: hostAccess.reason }
           : { kind: "confirm", reason: hostAccess.reason };
-    const approvedEffectAuthorized = approvedEffectMatch?.kind === "matched";
-    const enforceContract =
+    // Only the in-plugin agent, a connected agent, or a host action may cause
+    // an effect; anything else is refused before it reaches the policy.
+    if (
+      !hostAction &&
       !delegated &&
       !directAgent &&
-      (!hostAction || Boolean(context.journalActionScope));
-    const preparationBlock =
-      hostAction || delegated || directAgent || approvedPlan
-        ? null
-        : preparationEffectBlock(request, plan);
-    if (preparationBlock) throw new Error(preparationBlock);
+      plan.impact !== "read_only"
+    )
+      throw new Error(
+        "This effect was refused: no agent turn, connected runtime or host action owns it.",
+      );
     if (
       effect &&
       (!preparedAction?.hasExplicitAdapter || !preparedAction.proposals.length)
@@ -238,83 +207,22 @@ export class InvocationAssessor {
       throw new Error(
         `External effect blocked for ${tool.spec.name}: no typed action adapter describes its exact operation, capability, proof domain, and targets.`,
       );
-    if (effect && request.planContext?.phase === "planning")
-      throw new Error(
-        `Plan mode blocked ${tool.spec.name}: no effects may run before plan approval.`,
-      );
-    if (
-      effect &&
-      !delegated &&
-      !directAgent &&
-      !approvedPlan &&
-      !hostAction &&
-      contracts &&
-      !request.actionContract
-    )
-      throw new Error(
-        `Mutation blocked for ${tool.spec.name}: no validated action contract exists for this request.`,
-      );
-    if (
-      enforceContract &&
-      request.actionContract &&
-      plan.impact !== "read_only" &&
-      !contracts
-    )
-      throw new Error(
-        `Write blocked: ${tool.spec.name} has no configured Action Contract verifier.`,
-      );
-    const scopeValidated = Boolean(
-      enforceContract &&
-      plan.impact !== "read_only" &&
-      preparedAction &&
-      request.actionContract &&
-      contracts,
-    );
-    const scopeFailure = scopeValidated
-      ? await contracts!.validateScope(
-          request.actionContract!,
-          preparedAction!,
-          {
-            allowPartialCoverage: Boolean(
-              options.checkpointedWorkflow ||
-              request.planContext?.phase === "executing" ||
-              (options.callerKind === "action" && context.journalActionScope),
-            ),
-            concreteWrite: concreteWrite && plan.impact !== "read_only",
-            progress: request.actionProgress,
-          },
-        )
-      : null;
-    if (
-      !scopeFailure &&
-      plan.impact !== "read_only" &&
-      !isAgentChangeJournalAvailable()
-    )
+    if (plan.impact !== "read_only" && !isAgentChangeJournalAvailable())
       throw new Error(
         `${tool.spec.name} was refused because the durable change journal is unavailable. Effects cannot run without restart-safe authorization and recovery.`,
       );
-    const baseInteraction = resolveActionInteraction(
+    const interaction = resolveActionInteraction(
       request,
-      preparedAction?.proposals || [],
       // Native action pages are explicitly requested editing/review workflows.
       // A model's generic review hint cannot override Auto or YOLO permissions.
       Boolean(options.forceConfirmation && options.callerKind === "action"),
     );
-    const interaction =
-      approvedEffectMatch?.kind === "matched"
-        ? {
-            ...baseInteraction,
-            reviewPreference: approvedEffectMatch.reviewPreference,
-          }
-        : baseInteraction;
     if (delegated) proposal.runtime = "external";
-    const directDecision = approvedEffectFailure
-      ? { kind: "block" as const, reason: approvedEffectFailure }
-      : hostAccessAuthorization
-        ? hostAccessAuthorization
-        : delegated
-          ? authorizeExternalAction(proposal)
-          : null;
+    const directDecision = hostAccessAuthorization
+      ? hostAccessAuthorization
+      : delegated
+        ? authorizeExternalAction(proposal)
+        : null;
     const decision = directDecision
       ? { authorization: directDecision }
       : await this.authorizationService.assess(
@@ -323,26 +231,6 @@ export class InvocationAssessor {
             mode: getOriginalAgentPermissionMode(),
             interaction,
             executionContext: request.executionContext,
-            hasApprovedPlanAuthority: Boolean(
-              approvedPlan &&
-              ((scopeValidated && !scopeFailure) || approvedEffectAuthorized),
-            ),
-            constraints:
-              approvedEffectMatch?.kind === "matched"
-                ? approvedEffectMatch.constraints
-                : request.actionContract?.intent?.semantic?.constraints || [],
-            semantic: request.executionContext
-              ? undefined
-              : request.classifiedIntent?.semantic ||
-                request.actionContract?.intent?.semantic,
-            hasMatchingActionIntent:
-              hostAction ||
-              Boolean(
-                scopeValidated &&
-                !scopeFailure &&
-                preparedAction?.proposals.length &&
-                request.actionContract?.obligations.length,
-              ),
           },
           {
             input,
@@ -362,8 +250,7 @@ export class InvocationAssessor {
               })),
             userInstructions: request.customInstructions,
             workspace: request.executionContext?.workspaceSnapshot || null,
-            constraints:
-              request.actionContract?.intent?.semantic?.constraints || [],
+            constraints: [],
           },
           context.signal,
         );
@@ -372,13 +259,8 @@ export class InvocationAssessor {
       plan,
       preparedAction,
       proposal,
-      scopeFailure,
       interaction,
       ...decision,
-      planEffectIds:
-        approvedEffectMatch?.kind === "matched"
-          ? approvedEffectMatch.effectIds
-          : [],
     };
   }
 }

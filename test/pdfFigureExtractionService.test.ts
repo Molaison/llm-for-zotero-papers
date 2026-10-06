@@ -1,5 +1,4 @@
 import { assert } from "chai";
-import { classifiedFixture, semanticFixture } from "./helpers/semanticIntent";
 import { PdfFigureExtractionService } from "../src/agent/services/pdfFigureExtractionService";
 import {
   PDF_FIGURE_CROP_ALGORITHM_VERSION,
@@ -8,8 +7,8 @@ import {
   buildPdfFigureCropPdfFingerprint,
 } from "../src/services/pdf/pdfFigureCropCache";
 import type { AgentToolContext } from "../src/agent/types";
-import { createSubmitDocumentTool } from "../src/agent/tools/plan/submitPlanDocument";
-import { createTrustedReadObservations } from "../src/agent/plans/readObservation";
+import { createSubmitDocumentTool } from "../src/agent/tools/control/submitDocument";
+import { createTrustedReadObservations } from "../src/agent/context/readObservation";
 
 describe("PdfFigureExtractionService", function () {
   const encoder = new TextEncoder();
@@ -201,18 +200,7 @@ describe("PdfFigureExtractionService", function () {
         kind: "figures",
         includeSupplementary: false,
       },
-      context: {
-        ...context,
-        request: {
-          ...context.request,
-          documentOutcomePolicy: {
-            required: true,
-            documentKind: "report",
-            integrityPolicy: "research_grounded",
-            trigger: "document_intent",
-          },
-        },
-      },
+      context,
       paperContexts: [paperContext],
     });
     const asset = result.figures?.[0].documentAsset as Record<string, unknown>;
@@ -252,6 +240,81 @@ describe("PdfFigureExtractionService", function () {
       pageIndex: 1,
       sourceFingerprint: (asset.provenance as Record<string, unknown>)
         .sourceFingerprint,
+    });
+    assert.deepEqual(observations[0].capabilities, ["figure"]);
+  });
+
+  it("observes a standalone PDF's figure under the same identity its document asset names", async function () {
+    // A standalone PDF is an attachment without a parent item: it is its own
+    // bibliographic item, so the paper context names it twice.
+    const standalone = {
+      itemId: 33,
+      contextItemId: 33,
+      title: "Standalone PDF",
+    };
+    const cropPath = "/tmp/zotero/standalone-crops/figure-1-p2.png";
+    files.set(
+      cropPath,
+      Uint8Array.from(
+        Buffer.from(
+          "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a/aYAAAAASUVORK5CYII=",
+          "base64",
+        ),
+      ),
+    );
+    files.set("/tmp/standalone.pdf", encoder.encode("standalone PDF bytes"));
+    const items = new Map([
+      [
+        33,
+        {
+          id: 33,
+          key: "PDF00033",
+          libraryID: 1,
+          isAttachment: () => true,
+          getFilePathAsync: async () => "/tmp/standalone.pdf",
+        },
+      ],
+    ]);
+    globalScope.Zotero = {
+      DataDirectory: { dir: "/tmp/zotero" },
+      Items: { get: (id: number) => items.get(id) },
+    };
+    const result = await new PdfFigureExtractionService({
+      extractFiguresFromSourcePdf: async () => [cachedFigure(cropPath)],
+    } as never).extractFigures({
+      input: { query: "Figure 1" },
+      selection: {
+        labels: ["Figure 1"],
+        kind: "figures",
+        includeSupplementary: false,
+      },
+      context,
+      paperContexts: [standalone],
+    });
+    const provenance = result.figures?.[0].documentAsset?.provenance as Record<
+      string,
+      unknown
+    >;
+    assert.include(provenance, {
+      origin: "extracted",
+      itemKey: "PDF00033",
+      attachmentItemKey: "PDF00033",
+    });
+
+    const observations = await createTrustedReadObservations({
+      toolName: "paper_read",
+      callId: "standalone-figure-read",
+      input: { mode: "figures" },
+      result,
+    });
+
+    assert.lengthOf(observations, 1);
+    assert.deepInclude(observations[0], {
+      libraryID: provenance.libraryID,
+      itemKey: provenance.itemKey,
+      attachmentItemKey: provenance.attachmentItemKey,
+      pageIndex: provenance.pageIndex,
+      sourceFingerprint: provenance.sourceFingerprint,
     });
     assert.deepEqual(observations[0].capabilities, ["figure"]);
   });
@@ -323,12 +386,6 @@ describe("PdfFigureExtractionService", function () {
             ...context.request,
             userText:
               "Export the actual cached Figure 1 into my existing note.",
-            documentOutcomePolicy: {
-              required: true,
-              documentKind: "report",
-              integrityPolicy: "research_grounded",
-              trigger: "document_intent",
-            },
           },
         },
         paperContexts: [paperContext],
@@ -344,12 +401,175 @@ describe("PdfFigureExtractionService", function () {
         result.figures?.map((figure) => figure.cropPath),
         [cropPath],
       );
+      // Either runtime's document can include the figure.
       assert.match(
         result.figures?.[0].documentAsset?.contentHash || "",
         /^sha256:[a-f0-9]{64}$/,
       );
     });
   }
+
+  it("reads and hashes a source PDF once per call when two targets name the same attachment, and not for plain chat", async function () {
+    const cropPath = "/tmp/mineru-paper/figure_crops/crops/figure-1-p2.png";
+    files.set(
+      cropPath,
+      Uint8Array.from(
+        Buffer.from(
+          "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a/aYAAAAASUVORK5CYII=",
+          "base64",
+        ),
+      ),
+    );
+    files.set("/tmp/paper.pdf", encoder.encode("source PDF bytes"));
+    const items = new Map([
+      [11, { id: 11, key: "PAPER001", libraryID: 1 }],
+      [
+        22,
+        {
+          id: 22,
+          key: "PDF00001",
+          libraryID: 1,
+          parentID: 11,
+          getFilePathAsync: async () => "/tmp/paper.pdf",
+        },
+      ],
+    ]);
+    globalScope.Zotero = {
+      DataDirectory: { dir: "/tmp/zotero" },
+      Items: { get: (id: number) => items.get(id) },
+    };
+    const io = globalScope.IOUtils as {
+      read: (path: string) => Promise<Uint8Array>;
+    };
+    const read = io.read;
+    let sourceReads = 0;
+    io.read = async (path: string) => {
+      if (path === "/tmp/paper.pdf") sourceReads++;
+      return read(path);
+    };
+
+    const result = await new PdfFigureExtractionService({
+      extractFiguresFromSourcePdf: async () => [cachedFigure(cropPath)],
+    } as never).extractFigures({
+      input: { query: "Figure 1" },
+      selection: {
+        labels: ["Figure 1"],
+        kind: "figures",
+        includeSupplementary: false,
+      },
+      context,
+      paperContexts: [paperContext, paperContext],
+    });
+
+    assert.equal(sourceReads, 1);
+    const provenances = (result.figures || []).map(
+      (figure) => figure.documentAsset?.provenance,
+    );
+    assert.lengthOf(provenances, 2);
+    assert.match(
+      String(
+        provenances[0]?.origin === "extracted" &&
+          provenances[0].sourceFingerprint,
+      ),
+      /^sha256:[a-f0-9]{64}$/,
+    );
+    assert.deepEqual(provenances[0], provenances[1]);
+
+    // Plain chat publishes no document, so it skips the source hash.
+    const plain = await new PdfFigureExtractionService({
+      extractFiguresFromSourcePdf: async () => [cachedFigure(cropPath)],
+    } as never).extractFigures({
+      input: { query: "Figure 1" },
+      selection: {
+        labels: ["Figure 1"],
+        kind: "figures",
+        includeSupplementary: false,
+      },
+      context,
+      paperContexts: [paperContext],
+      documentAssets: false,
+    });
+    assert.equal(sourceReads, 1);
+    assert.lengthOf(plain.figures || [], 1);
+    assert.isUndefined(plain.figures?.[0].documentAsset);
+  });
+
+  it("keeps a cached figure readable when its source PDF is unavailable", async function () {
+    const cropPath = "/tmp/mineru-paper/figure_crops/crops/figure-1-p2.png";
+    files.set(
+      cropPath,
+      Uint8Array.from(
+        Buffer.from(
+          "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a/aYAAAAASUVORK5CYII=",
+          "base64",
+        ),
+      ),
+    );
+    writeCropCache({
+      version: PDF_FIGURE_CROP_CACHE_VERSION,
+      attachmentId: 22,
+      manifestHash: currentManifestHash(),
+      pdfFingerprint: currentPdfFingerprint(),
+      renderScale: 1.8,
+      algorithmVersion: PDF_FIGURE_CROP_ALGORITHM_VERSION,
+      generatedAt: 1,
+      expectedFigures: [
+        {
+          label: "Figure 1",
+          baseLabel: "Figure 1",
+          pageNumber: 2,
+          status: "ok",
+          cropPath,
+        },
+      ],
+      missingFigures: [],
+      entries: [cachedFigure(cropPath)],
+    });
+    const items = new Map([
+      [11, { id: 11, key: "PAPER001", libraryID: 1 }],
+      [
+        22,
+        {
+          id: 22,
+          key: "PDF00001",
+          libraryID: 1,
+          parentID: 11,
+          getFilePathAsync: async () => false,
+        },
+      ],
+    ]);
+    globalScope.Zotero = {
+      DataDirectory: { dir: "/tmp/zotero" },
+      Items: { get: (id: number) => items.get(id) },
+    };
+
+    const result = await new PdfFigureExtractionService({
+      extractFiguresFromSourcePdf: async () => {
+        throw new Error("source extraction should not run for cached crops");
+      },
+    } as never).extractFigures({
+      input: { query: "Figure 1" },
+      selection: {
+        labels: ["Figure 1"],
+        kind: "figures",
+        includeSupplementary: false,
+      },
+      context,
+      paperContexts: [paperContext],
+    });
+
+    assert.equal(result.status, "ok");
+    assert.deepEqual(
+      result.figures?.map((figure) => figure.cropPath),
+      [cropPath],
+    );
+    assert.isUndefined(result.figures?.[0].documentAsset);
+    assert.isUndefined(result.artifacts?.[0].contentHash);
+    assert.include(
+      result.warnings?.join("\n") || "",
+      "Figures from Figure Paper have no documentAsset, so submit_document cannot include them: The figure source PDF is unavailable",
+    );
+  });
 
   for (const labels of [
     [],
@@ -432,76 +652,6 @@ describe("PdfFigureExtractionService", function () {
       [cropPath],
     );
   });
-
-  it("selects cached figures from semantic intent even when tool prose names another figure", async function () {
-    const figure1CropPath =
-      "/tmp/mineru-paper/figure_crops/crops/figure-1-p2.png";
-    const figure2CropPath =
-      "/tmp/mineru-paper/figure_crops/crops/figure-2-p4.png";
-    files.set(figure1CropPath, encoder.encode("png"));
-    files.set(figure2CropPath, encoder.encode("png"));
-    writeCropCache({
-      version: PDF_FIGURE_CROP_CACHE_VERSION,
-      attachmentId: 22,
-      manifestHash: currentManifestHash(),
-      pdfFingerprint: currentPdfFingerprint(),
-      renderScale: 1.8,
-      algorithmVersion: PDF_FIGURE_CROP_ALGORITHM_VERSION,
-      generatedAt: 1,
-      expectedFigures: [
-        {
-          label: "Figure 1",
-          baseLabel: "Figure 1",
-          pageNumber: 2,
-          status: "ok",
-          cropPath: figure1CropPath,
-        },
-        {
-          label: "Figure 2",
-          baseLabel: "Figure 2",
-          pageNumber: 4,
-          status: "ok",
-          cropPath: figure2CropPath,
-        },
-      ],
-      missingFigures: [],
-      entries: [
-        cachedFigureWithLabel("Figure 1", figure1CropPath),
-        cachedFigureWithLabel("Figure 2", figure2CropPath),
-      ],
-    });
-
-    const result = await new PdfFigureExtractionService({
-      extractFiguresFromSourcePdf: async () => {
-        throw new Error("source extraction should not run for cached crops");
-      },
-    } as never).extractFigures({
-      input: { query: "Show Figure 2 instead" },
-      context: {
-        ...context,
-        request: {
-          ...context.request,
-          classifiedIntent: classifiedFixture({
-            semantic: semanticFixture({
-              figures: {
-                labels: ["Figure 1"],
-                kind: "figures",
-                includeSupplementary: false,
-              },
-            }),
-          }),
-        },
-      },
-      paperContexts: [paperContext],
-    });
-
-    assert.equal(result.status, "ok");
-    assert.deepEqual(
-      result.figures?.map((figure) => figure.label),
-      ["Figure 1"],
-    );
-  });
-
   it("does not reuse a cached crop for a different requested figure", async function () {
     const oldCropPath = "/tmp/mineru-paper/figure_crops/crops/figure-1-p2.png";
     const regeneratedCropPath =

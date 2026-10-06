@@ -5,8 +5,6 @@ import type {
   AgentToolResult,
 } from "../types";
 
-const TOOL_RESULT_READ_TOOL_NAME = "tool_result_read";
-
 export function buildSyntheticToolCall(
   name: string,
   args: unknown,
@@ -41,12 +39,6 @@ export function setToolResultReadAvailability(
     delete metadata.agentToolResultReadAvailable;
   }
   request.metadata = metadata;
-}
-
-export function filterTransientRecoveryTool<T extends { name: string }>(
-  tools: T[],
-): T[] {
-  return tools.filter((tool) => tool.name !== TOOL_RESULT_READ_TOOL_NAME);
 }
 
 function stabilizeProgressValue(value: unknown): unknown {

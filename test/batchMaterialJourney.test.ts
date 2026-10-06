@@ -281,7 +281,7 @@ describe("batch material journey", function () {
       hostBlock(third.prompts, BATCH_HEADER),
       "a batch with every item written is no longer offered for continuing",
     );
-    const undoResult = toolResultFor(third.events, "undo_last_action");
+    const undoResult = toolResultFor(third.events, "undo");
     assert.isTrue(undoResult?.ok);
     assert.equal((undoResult?.content as { status?: string }).status, "undone");
     assert.equal(

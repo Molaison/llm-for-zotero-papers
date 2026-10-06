@@ -388,19 +388,6 @@ export async function loadPlanDocument(
   return { ...document, coverageItems: await loadCoverageItems(documentId) };
 }
 
-export async function loadLatestPlanDocumentForExecution(
-  executionId: string,
-): Promise<PlanDocument | null> {
-  const rows = (await Zotero.DB.queryAsync(
-    `SELECT document_id AS documentId FROM ${PLAN_DOCUMENTS_TABLE}
-     WHERE execution_id = ? ORDER BY created_at DESC LIMIT 1`,
-    [executionId],
-  )) as Array<{ documentId?: unknown }> | undefined;
-  const documentId =
-    typeof rows?.[0]?.documentId === "string" ? rows[0].documentId : "";
-  return documentId ? loadPlanDocument(documentId) : null;
-}
-
 /**
  * Per-item material of a batch: one note body, not a deliverable of its own.
  *
@@ -505,19 +492,6 @@ export async function nextDirectDocumentSequence(
       ? sequence + 1
       : next;
   }, 1);
-}
-
-export async function nextPlanDocumentVersion(params: {
-  planId: string;
-  planRevision: number;
-}): Promise<number> {
-  const rows = (await Zotero.DB.queryAsync(
-    `SELECT COUNT(*) AS maxVersion
-     FROM ${PLAN_DOCUMENTS_TABLE}
-     WHERE plan_id = ? AND plan_revision = ?`,
-    [params.planId, params.planRevision],
-  )) as Array<{ maxVersion?: unknown }>;
-  return Math.max(0, Number(rows?.[0]?.maxVersion || 0)) + 1;
 }
 
 export async function loadPlanDocumentOutbox(

@@ -170,13 +170,18 @@ describe("quoteRenderPlan", function () {
     assert.include(plan.displayMarkdown, "Then it continued.");
   });
 
-  it("marks legacy markdown blockquotes as verified when quote metadata matches", function () {
+  it("marks legacy blockquotes as verified when complete PDF location metadata matches", function () {
     const citation = buildQuoteCitation({
       quoteText: "Verified legacy quote text should keep trusted navigation.",
       citationLabel: "(Ibrahim, 2026)",
       contextItemId: 77,
-      sourceMatchKind: "trusted",
-      sourceMatchSource: "context-text",
+      sourceMatchText:
+        "Verified legacy quote text should keep trusted navigation.",
+      sourceMatchKind: "exact",
+      sourceMatchSource: "pdf-page-text",
+      sourceFingerprint: "pdf:ibrahim",
+      sourceMatchPageOccurrence: 0,
+      pageHintIndex: 0,
     });
     assert.isDefined(citation);
 
@@ -239,7 +244,7 @@ describe("quoteRenderPlan", function () {
     );
   });
 
-  it("renders a unique partial source as an ordinary trusted quote", function () {
+  it("keeps a partial source unresolved until the displayed quote is verified", function () {
     const quote =
       "A source-heavy summary adds wording that does not appear in the paper.";
     const citation = buildQuoteCitation({
@@ -260,7 +265,7 @@ describe("quoteRenderPlan", function () {
     });
 
     assert.lengthOf(plan.occurrences, 1);
-    assert.equal(plan.occurrences[0].trust, "trusted-anchor");
+    assert.equal(plan.occurrences[0].trust, "unverified-source-label");
     assert.equal(plan.occurrences[0].citationLabel, "(Eppler et al., 2026)");
     assert.equal(plan.occurrences[0].contextItemId, 81);
     assert.equal(
@@ -294,7 +299,7 @@ describe("quoteRenderPlan", function () {
     );
     assert.deepEqual(
       plan.occurrences.map((occurrence) => occurrence.trust),
-      ["trusted-anchor", "trusted-anchor"],
+      ["unverified-source-label", "unverified-source-label"],
     );
     assert.equal(
       (plan.displayMarkdown.match(QUOTE_RENDER_OCCURRENCE_PATTERN) || [])
@@ -413,7 +418,7 @@ describe("quoteRenderPlan", function () {
     });
 
     assert.lengthOf(plan.occurrences, 1);
-    assert.equal(plan.occurrences[0].trust, "trusted-anchor");
+    assert.equal(plan.occurrences[0].trust, "unverified-source-label");
     assert.include(plan.displayMarkdown, "[[quote-occurrence:");
     assert.notInclude(plan.displayMarkdown, `[[quote:${citation!.id}]]`);
     assert.notInclude(plan.displayMarkdown, "> [[quote:");
@@ -448,7 +453,7 @@ describe("quoteRenderPlan", function () {
     });
 
     assert.lengthOf(plan.occurrences, 1);
-    assert.equal(plan.occurrences[0].trust, "trusted-anchor");
+    assert.equal(plan.occurrences[0].trust, "unverified-source-label");
     assert.equal(plan.occurrences[0].displayText, `“${visibleQuote}”`);
     assert.equal(
       plan.occurrences[0].quoteCitation?.displayQuoteText,

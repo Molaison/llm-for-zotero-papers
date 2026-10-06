@@ -14,16 +14,11 @@ const HEADING_ENUMERATOR =
  */
 const QUOTED_SPAN = /(?:^|[\s(])["\u201c]([^"\u201d\n]+)["\u201d]/gm;
 const DIRECT_QUOTATION_MIN_WORDS = 5;
+/** How much of each offending quotation a rejection shows the model. */
+const QUOTATION_PREVIEW_CHARS = 60;
+const QUOTATION_PREVIEW_COUNT = 3;
 
-/**
- * The coverage disclosure rule in the words the validator enforces. Every
- * instruction that asks for the disclosure renders this text so the model is
- * never told one vocabulary and validated against another.
- */
-export const COVERAGE_DISCLOSURE_REQUIREMENT =
-  'Coverage disclosure required: one heading containing "scope" and one heading containing "limitations"; a single "Scope and limitations" section satisfies both.';
-
-function normalizeHeading(value: string): string {
+export function normalizeHeading(value: string): string {
   return value
     .trim()
     .replace(HEADING_ENUMERATOR, "")
@@ -32,13 +27,27 @@ function normalizeHeading(value: string): string {
     .replace(/\s+/g, " ");
 }
 
-function hasDirectQuotation(markdown: string): boolean {
-  if (/^\s*>\s+\S/m.test(markdown)) return true;
+/** Blockquotes and quoted runs of prose, in document order. */
+function findDirectQuotations(markdown: string): string[] {
+  const found: Array<{ index: number; text: string }> = [];
+  for (const match of markdown.matchAll(/^\s*>\s+(\S.*)$/gm)) {
+    found.push({ index: match.index, text: match[1] });
+  }
   for (const match of markdown.matchAll(QUOTED_SPAN)) {
     const words = match[1].trim().split(/\s+/).filter(Boolean);
-    if (words.length >= DIRECT_QUOTATION_MIN_WORDS) return true;
+    if (words.length >= DIRECT_QUOTATION_MIN_WORDS) {
+      found.push({ index: match.index, text: match[1] });
+    }
   }
-  return false;
+  return found
+    .sort((left, right) => left.index - right.index)
+    .map((entry) => entry.text.replace(/\s+/g, " ").trim());
+}
+
+function previewQuotation(text: string): string {
+  return text.length > QUOTATION_PREVIEW_CHARS
+    ? `${text.slice(0, QUOTATION_PREVIEW_CHARS).trimEnd()}…`
+    : text;
 }
 
 export function collectHeadings(markdown: string): Set<string> {
@@ -59,7 +68,7 @@ function hasCoverageDisclosure(headings: ReadonlySet<string>): boolean {
   return hasScope && hasLimitations;
 }
 
-function collectMissingSections(params: {
+export function collectMissingSections(params: {
   headings: ReadonlySet<string>;
   requiredSections: readonly string[];
   requiresCoverageSection: boolean;
@@ -88,14 +97,25 @@ export function collectDocumentDraftIssues(params: {
     requiresCoverageSection: params.requiresCoverageSection,
   });
   if (missing.length) {
-    issues.push(`Document is missing required sections: ${missing.join(", ")}`);
-  }
-  if (
-    params.validateQuotes !== false &&
-    hasDirectQuotation(params.markdown.replace(QUOTE_TOKEN, ""))
-  ) {
     issues.push(
-      "Direct quotations must use internal [[quote:Q1]] tokens and host-verifiable quote mappings",
+      `Document is missing required sections: ${missing.join(", ")}. Add each as a heading with that wording.`,
+    );
+  }
+  const quotations =
+    params.validateQuotes === false
+      ? []
+      : findDirectQuotations(params.markdown.replace(QUOTE_TOKEN, ""));
+  if (quotations.length) {
+    const shown = quotations
+      .slice(0, QUOTATION_PREVIEW_COUNT)
+      .map((text) => `"${previewQuotation(text)}"`)
+      .join("; ");
+    const more =
+      quotations.length > QUOTATION_PREVIEW_COUNT
+        ? `; and ${quotations.length - QUOTATION_PREVIEW_COUNT} more`
+        : "";
+    issues.push(
+      `Direct quotations must use internal [[quote:Q1]] tokens and host-verifiable quote mappings. Paraphrase or map: ${shown}${more}`,
     );
   }
   return issues;

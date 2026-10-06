@@ -206,9 +206,9 @@ describe("agent flight metrics", function () {
       stageEvent({
         stage: "zotero_action",
         callId: "call-undo",
-        toolName: "undo_last_action",
+        toolName: "undo",
       }),
-      toolCall({ callId: "call-undo", name: "undo_last_action" }),
+      toolCall({ callId: "call-undo", name: "undo" }),
     ];
     const turnEvents = [batchTurn, resumeTurn, undoTurn];
     const summary = summarizeAgentFlight(turnEvents.flat(), {

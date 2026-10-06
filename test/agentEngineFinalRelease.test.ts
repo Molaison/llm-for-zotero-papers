@@ -12,6 +12,17 @@ import type {
   AgentRuntimeRequest,
 } from "../src/agent/types";
 import { buildQuoteCitation } from "../src/services/quotes/quoteCitations";
+import { executionCheckpointEvent } from "../src/agent/execution/checkpointEvents";
+import {
+  clearAllTaskProgress,
+  displayedTaskRunState,
+  getTaskProgress,
+} from "../src/modules/contextPanel/taskProgress/store";
+import {
+  ledgerDelta,
+  outcomeCheckpoint,
+  outcomeTask,
+} from "./helpers/taskProgressFixtures";
 
 function fakeItem(id: number): Zotero.Item {
   return {
@@ -43,6 +54,8 @@ function createFinalThenHangingRuntime(
         "Continuing agent (2/24)",
         "Checkpointed agent segment 1; continuing",
         "Continuing agent (segment 2, 6/32)",
+        "Continuing agent (round 7)",
+        "Continuing agent (page 2 · 7 of 30)",
       ]) {
         await params.onEvent?.({ type: "status", text });
       }
@@ -436,8 +449,13 @@ describe("agent engine final UI release", function () {
     assert.notInclude(statuses, "Ready");
     assert.include(statuses, "Working");
     assert.isFalse(
-      statuses.some((text) => /Continuing agent|Checkpointed agent/.test(text)),
+      statuses.some((text) =>
+        /Continuing agent \((?!page)|Checkpointed agent/.test(text),
+      ),
+      "round and segment bookkeeping reads as Working",
     );
+    // A long job's page progress is the status itself.
+    assert.include(statuses, "Continuing agent (page 2 · 7 of 30)");
   });
 
   it("preserves and persists the final answer when completion fails after the final event", async function () {
@@ -1839,4 +1857,451 @@ describe("agent engine final UI release", function () {
     const assistant = stored.find((message) => message.role === "assistant");
     assert.deepEqual(assistant?.quoteCitations, [claimAnchor!]);
   });
+
+  describe("Task progress wiring", function () {
+    afterEach(function () {
+      clearAllTaskProgress();
+    });
+
+    function runtimeWith(
+      body: (params: any) => Promise<AgentRuntimeOutcome>,
+    ): AgentRuntime {
+      return {
+        getCapabilities: () => ({
+          streaming: true,
+          toolCalls: true,
+          multimodal: false,
+        }),
+        runTurn: body,
+      } as unknown as AgentRuntime;
+    }
+
+    it("starts the run at onStart, records reads, answers, and completes with citations", async function () {
+      const conversationKey = 701;
+      const anchor = buildQuoteCitation({
+        quoteText: "Drift scales with experience rather than elapsed time.",
+        citationLabel: "(Geva, 2023)",
+        itemId: 3,
+        contextItemId: 30,
+      })!;
+      const seen: Array<{ state?: string; runId?: string; turn?: number }> = [];
+      const snap = () => {
+        const record = getTaskProgress(conversationKey);
+        seen.push({
+          state: record?.runState,
+          runId: record?.runId,
+          turn: record?.turnIndex,
+        });
+      };
+      const finalText = `Drift tracks experience [[quote:${anchor.id}]].`;
+      const deps = createDeps({
+        runtime: runtimeWith(async (params) => {
+          await params.onStart?.("run-tp");
+          snap();
+          await params.onEvent?.({
+            type: "paper_ledger_update",
+            callId: "c1",
+            delta: ledgerDelta("c1", [[3, "read", "Drift scales."]], "run-tp"),
+          });
+          await params.onEvent?.({ type: "message_delta", text: "Drift " });
+          snap();
+          await params.onEvent?.({
+            type: "final",
+            text: finalText,
+            quoteCitations: [anchor],
+          });
+          return {
+            kind: "completed",
+            runId: "run-tp",
+            text: finalText,
+            usedFallback: false,
+          };
+        }),
+        pendingWrites: [],
+        idleRestores: [],
+        statuses: [],
+      });
+      deps.chatHistory.set(conversationKey, [
+        { role: "user", text: "Earlier", timestamp: 1 },
+        { role: "assistant", text: "Earlier answer", timestamp: 2 },
+      ]);
+
+      await sendAgentTurn(
+        {
+          body: {} as Element,
+          item: fakeItem(conversationKey),
+          question: "What drives drift?",
+        },
+        deps,
+      );
+
+      assert.deepEqual(seen, [
+        { state: "working", runId: "run-tp", turn: 2 },
+        { state: "answering", runId: "run-tp", turn: 2 },
+      ]);
+      const record = getTaskProgress(conversationKey)!;
+      assert.equal(record.runState, "completed");
+      assert.equal(record.ledger.papers["1:3"].turns[2].state, "cited");
+      assert.lengthOf(record.ledger.papers["1:3"].turns[2].citations, 1);
+    });
+
+    it("marks the run failed when the runtime throws after onStart", async function () {
+      const conversationKey = 702;
+      const deps = createDeps({
+        runtime: runtimeWith(async (params) => {
+          await params.onStart?.("run-fail");
+          await params.onEvent?.({
+            type: "paper_ledger_update",
+            callId: "c1",
+            delta: ledgerDelta("c1", [[5, "read"]], "run-fail"),
+          });
+          throw new Error("provider down");
+        }),
+        pendingWrites: [],
+        idleRestores: [],
+        statuses: [],
+      });
+      deps.chatHistory.set(conversationKey, []);
+      await sendAgentTurn(
+        {
+          body: {} as Element,
+          item: fakeItem(conversationKey),
+          question: "q",
+        },
+        deps,
+      );
+      const record = getTaskProgress(conversationKey)!;
+      assert.equal(record.runState, "failed");
+      assert.equal(
+        record.ledger.papers["1:5"].state,
+        "read",
+        "the partial ledger stays",
+      );
+    });
+
+    it("ends the run interrupted when its answer broke off mid-stream, as a reopen shows it", async function () {
+      const conversationKey = 707;
+      const deps = createDeps({
+        runtime: runtimeWith(async (params) => {
+          await params.onStart?.("run-drop");
+          await params.onEvent?.({
+            type: "message_delta",
+            text: "Drift tracks experience",
+          });
+          throw new Error("Error in input stream");
+        }),
+        pendingWrites: [],
+        idleRestores: [],
+        statuses: [],
+      });
+      const history: any[] = [];
+      deps.chatHistory.set(conversationKey, history);
+      await sendAgentTurn(
+        {
+          body: {} as Element,
+          item: fakeItem(conversationKey),
+          question: "What drives drift?",
+        },
+        deps,
+      );
+      assert.isTrue(history[history.length - 1].interrupted);
+      assert.equal(getTaskProgress(conversationKey)!.runState, "interrupted");
+    });
+
+    it("marks the run cancelled when the user stopped it", async function () {
+      const conversationKey = 703;
+      let cancelled = false;
+      const deps = createDeps({
+        runtime: runtimeWith(async (params) => {
+          await params.onStart?.("run-cancel");
+          await params.onEvent?.({ type: "message_delta", text: "Partial" });
+          cancelled = true;
+          return {
+            kind: "completed",
+            runId: "run-cancel",
+            text: "Partial",
+            usedFallback: false,
+          };
+        }),
+        pendingWrites: [],
+        idleRestores: [],
+        statuses: [],
+      });
+      deps.cancelledRequestId = () => (cancelled ? 77 : 0);
+      deps.chatHistory.set(conversationKey, []);
+      await sendAgentTurn(
+        {
+          body: {} as Element,
+          item: fakeItem(conversationKey),
+          question: "q",
+        },
+        deps,
+      );
+      assert.equal(getTaskProgress(conversationKey)!.runState, "cancelled");
+    });
+
+    it("numbers a retried run by the question it retries", async function () {
+      const conversationKey = 704;
+      const userMessage = {
+        role: "user" as const,
+        text: "second question",
+        timestamp: 3,
+        runMode: "agent" as const,
+      };
+      const assistantMessage: any = {
+        role: "assistant" as const,
+        text: "previous",
+        timestamp: 4,
+        runMode: "agent" as const,
+      };
+      let turnAtStart = 0;
+      const deps = createDeps({
+        runtime: runtimeWith(async (params) => {
+          await params.onStart?.("run-retry");
+          turnAtStart = getTaskProgress(conversationKey)!.turnIndex;
+          throw new Error("stop");
+        }),
+        pendingWrites: [],
+        idleRestores: [],
+        statuses: [],
+      });
+      deps.chatHistory.set(conversationKey, [
+        { role: "user", text: "first", timestamp: 1 },
+        { role: "assistant", text: "one", timestamp: 2 },
+        userMessage,
+        assistantMessage,
+      ]);
+      deps.findLatestRetryPair = () => ({
+        userIndex: 2,
+        userMessage,
+        assistantMessage,
+      });
+      deps.reconstructRetryPayload = () => ({
+        question: userMessage.text,
+        screenshotImages: [],
+        paperContexts: [],
+        pdfPaperContexts: [],
+        fullTextPaperContexts: [],
+        selectedCollectionContexts: [],
+        selectedTagContexts: [],
+      });
+      await retryAgentTurn(
+        {} as Element,
+        fakeItem(conversationKey),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        deps,
+      );
+      assert.equal(turnAtStart, 2);
+      assert.equal(getTaskProgress(conversationKey)!.runState, "failed");
+    });
+
+    it("shows the run's outcomes as they move and keeps how its ledger ended after the answer", async function () {
+      const conversationKey = 705;
+      const seen: Array<{ state: string; steps: string[] }> = [];
+      const snap = () => {
+        const record = getTaskProgress(conversationKey);
+        seen.push({
+          state: displayedTaskRunState(record),
+          steps: (record?.checklist?.steps || []).map(
+            (step) => `${step.label}:${step.status}`,
+          ),
+        });
+      };
+      const save = outcomeTask("save", {
+        description: "Save the summary as a note",
+      });
+      const tags = outcomeTask("host:1", {
+        description: "Added tags",
+        origin: "host",
+        status: "completed",
+        targets: ["item:3", "item:4"],
+        doneTargets: ["item:3"],
+        exceptions: [{ targets: ["item:4"], reason: "Not applied" }],
+      });
+      const deps = createDeps({
+        runtime: runtimeWith(async (params) => {
+          await params.onStart?.("run-outcomes");
+          const first = outcomeCheckpoint([save]);
+          await params.onEvent?.(executionCheckpointEvent(undefined, first));
+          snap();
+          // The runtime publishes each later change as a delta.
+          const delta = executionCheckpointEvent(
+            first,
+            outcomeCheckpoint(
+              [{ ...save, status: "completed" }, tags],
+              "completed_with_exceptions",
+              3,
+            ),
+          );
+          assert.equal(delta.type, "execution_checkpoint_delta");
+          await params.onEvent?.(delta);
+          snap();
+          await params.onEvent?.({ type: "final", text: "Saved." });
+          return {
+            kind: "completed",
+            runId: "run-outcomes",
+            text: "Saved.",
+            usedFallback: false,
+          };
+        }),
+        pendingWrites: [],
+        idleRestores: [],
+        statuses: [],
+      });
+      deps.chatHistory.set(conversationKey, []);
+      await sendAgentTurn(
+        {
+          body: {} as Element,
+          item: fakeItem(conversationKey),
+          question: "Save a summary and tag both papers",
+        },
+        deps,
+      );
+      assert.deepEqual(seen, [
+        { state: "working", steps: ["Save the summary as a note:pending"] },
+        {
+          state: "completed_with_exceptions",
+          steps: [
+            "Save the summary as a note:completed",
+            "Added tags:completed",
+          ],
+        },
+      ]);
+      const record = getTaskProgress(conversationKey)!;
+      assert.equal(record.runState, "completed");
+      assert.equal(displayedTaskRunState(record), "completed_with_exceptions");
+      assert.isTrue(record.planSeen);
+    });
+
+    it("waits on the user while a decision card is open, then works on", async function () {
+      const conversationKey = 706;
+      const states: string[] = [];
+      const deps = createDeps({
+        runtime: runtimeWith(async (params) => {
+          await params.onStart?.("run-wait");
+          await params.onEvent?.({
+            type: "confirmation_required",
+            requestId: "req-1",
+            action: {
+              toolName: "edit_current_note",
+              title: "Save the note?",
+              confirmLabel: "Save",
+              cancelLabel: "Cancel",
+              fields: [],
+            },
+          });
+          states.push(getTaskProgress(conversationKey)!.runState);
+          await params.onEvent?.({
+            type: "confirmation_resolved",
+            requestId: "req-1",
+            approved: true,
+          });
+          states.push(getTaskProgress(conversationKey)!.runState);
+          await params.onEvent?.({ type: "final", text: "Saved." });
+          return {
+            kind: "completed",
+            runId: "run-wait",
+            text: "Saved.",
+            usedFallback: false,
+          };
+        }),
+        pendingWrites: [],
+        idleRestores: [],
+        statuses: [],
+      });
+      deps.chatHistory.set(conversationKey, []);
+      await sendAgentTurn(
+        {
+          body: {} as Element,
+          item: fakeItem(conversationKey),
+          question: "Save a note",
+        },
+        deps,
+      );
+      assert.deepEqual(states, ["waiting", "working"]);
+      assert.equal(getTaskProgress(conversationKey)!.runState, "completed");
+    });
+  });
+});
+
+describe("agent engine reasoning repaints at run end", function () {
+  const scenarios: Array<{
+    name: string;
+    end: "throw" | "complete" | "cancel";
+  }> = [
+    { name: "a runtime error", end: "throw" },
+    { name: "a run that completes without a final event", end: "complete" },
+    { name: "a cancelled run", end: "cancel" },
+  ];
+  for (const scenario of scenarios) {
+    it(`never repaints waiting thinking after ${scenario.name} has ended the turn`, async function () {
+      const conversationKey = 9100 + scenarios.indexOf(scenario);
+      let cancelled = 0;
+      const runtime = {
+        getCapabilities: () => ({
+          streaming: true,
+          toolCalls: true,
+          multimodal: false,
+        }),
+        runTurn: async (params: any) => {
+          await params.onStart?.(`run-reasoning-${scenario.end}`);
+          // A few short deltas: far below the size flush, so only the
+          // coalescer's timer would ever paint them.
+          for (const summary of ["Weighing ", "the ", "evidence"])
+            await params.onEvent?.({ type: "reasoning", round: 1, summary });
+          if (scenario.end === "cancel") {
+            cancelled = 77;
+            throw Object.assign(new Error("aborted"), { name: "AbortError" });
+          }
+          if (scenario.end === "throw") throw new Error("Provider failed");
+          return {
+            kind: "completed",
+            runId: `run-reasoning-${scenario.end}`,
+            text: "Done.",
+            usedFallback: false,
+          } as AgentRuntimeOutcome;
+        },
+      } as unknown as AgentRuntime;
+      const deps = createDeps({
+        runtime,
+        pendingWrites: [],
+        idleRestores: [],
+        statuses: [],
+      });
+      deps.cancelledRequestId = () => cancelled;
+      let refreshes = 0;
+      deps.createPanelUpdateHelpers = () => ({
+        refreshChatSafely: () => undefined,
+        refreshAssistantMessageSafely: () => {
+          refreshes += 1;
+        },
+        setStatusSafely: () => undefined,
+      });
+      deps.chatHistory.set(conversationKey, []);
+      await sendAgentTurn(
+        {
+          body: {} as Element,
+          item: fakeItem(conversationKey),
+          question: "Weigh the evidence.",
+        },
+        deps,
+      );
+      const atEnd = refreshes;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      assert.equal(
+        refreshes,
+        atEnd,
+        "no repaint arrives after the turn has ended",
+      );
+    });
+  }
 });

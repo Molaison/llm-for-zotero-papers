@@ -12,6 +12,7 @@ import { isQuoteValidationPreempted } from "../quoteValidationActivity";
 import { activeContextPanels, chatHistory } from "../state";
 import type { Message } from "../types";
 import type { QuoteCitation } from "../../../shared/types";
+import { buildQuoteExpandedMarkdown } from "../quoteRenderPlan";
 import { refreshQuoteValidatedConversation } from "./chatRefreshBridge";
 import {
   applyAssistantMessageQuoteGate,
@@ -266,7 +267,10 @@ function startConversationQuoteValidation(conversationKey: number): void {
             isPendingQuoteValidationCurrent(conversationKey, request);
           const secondaryEvidence = sourceIndex
             ? await collectLivePdfQuoteSecondaryEvidence({
-                markdown: rawMarkdown,
+                markdown: buildQuoteExpandedMarkdown({
+                  markdown: rawMarkdown,
+                  quoteCitations: rawQuoteCitations,
+                }),
                 sourceIndex,
                 yieldToMain: yieldQuoteValidation,
                 shouldContinue: shouldContinueQuoteValidation,

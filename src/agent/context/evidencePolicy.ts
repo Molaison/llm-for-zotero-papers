@@ -1,19 +1,17 @@
 /**
- * One owner for "how much more should this turn read before it answers".
- * Every paper read carries stop guidance rendered from this policy, so the
- * read budget and the wording the model is given can never disagree.
+ * Advisory evidence progress. Read counts describe work, not completeness;
+ * the model chooses whether the requested answer needs further source text.
  */
 
 export type EvidenceCoverage = "overview" | "targeted" | "exhaustive";
 
 export type ReadStopPolicy = {
   coverage: EvidenceCoverage;
-  /** Reads in this turn after which the model is told to answer with what it has. */
+  /** Legacy telemetry threshold; never a restriction on further reading. */
   readBudget: number;
 };
 
 export type ReadStopRecommendation =
-  | "continue_plan"
   | "answer_now"
   | "answer_or_self_check"
   | "name_a_specific_missing_dimension"
@@ -59,22 +57,14 @@ export function resolveReadStopGuidance(
   }
   if (state.frontier === "unchanged") {
     return {
-      recommendation: "answer_now",
+      recommendation: "name_a_specific_missing_dimension",
       reason:
-        policy.coverage === "targeted"
-          ? "This read added no new source text. If a specific claim still lacks support, read one unread section by sectionId from the outline; otherwise answer now from the delivered evidence."
-          : "This read added no new source text. Answer now from the evidence already held and delivered; do not retrieve again for this question.",
-    };
-  }
-  if (state.readsThisTurn >= policy.readBudget) {
-    return {
-      recommendation: "answer_now",
-      reason: `The ${policy.coverage} read budget for this turn (${policy.readBudget}) is used. Answer now from the held and delivered evidence and disclose any claim it does not support instead of retrieving again.`,
+        "This read added no new source text. Avoid repeating it; choose another passage or section if needed to support the answer.",
     };
   }
   return {
     recommendation: "answer_or_self_check",
     reason:
-      "New source text was delivered. Answer from the held and delivered evidence. Retrieve again only for one specifically named claim in your draft that this evidence does not support.",
+      "New source text was delivered. Decide whether it supports the requested explanation; choose further reads for missing methods, results, qualifications, or other relevant evidence. Read counts do not establish sufficient coverage.",
   };
 }

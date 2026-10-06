@@ -8,7 +8,6 @@ export type PanelDomRefs = {
   modelMenu: HTMLDivElement | null;
   reasoningBtn: HTMLButtonElement | null;
   runtimeModeBtn: HTMLButtonElement | null;
-  planModeChip: HTMLButtonElement | null;
   reasoningSlot: HTMLDivElement | null;
   reasoningMenu: HTMLDivElement | null;
   actionsRow: HTMLDivElement | null;
@@ -28,8 +27,11 @@ export type PanelDomRefs = {
   historyToggleBtn: HTMLButtonElement | null;
   historyModeIndicator: HTMLButtonElement | null;
   historyMenu: HTMLDivElement | null;
-  modeCapsule: HTMLElement | null;
-  modeChipBtn: HTMLButtonElement | null;
+  chatModeTabs: HTMLDivElement | null;
+  paperChatTabBtn: HTMLButtonElement | null;
+  libraryChatTabBtn: HTMLButtonElement | null;
+  /** The Stacked layout's mode chip and its hover switch. */
+  modeSwitch: HTMLDivElement | null;
   historyRowMenu: HTMLDivElement | null;
   historyRowRenameBtn: HTMLButtonElement | null;
   historyUndo: HTMLDivElement | null;
@@ -115,9 +117,6 @@ export function getPanelDomRefs(body: Element): PanelDomRefs {
     runtimeModeBtn: body.querySelector(
       "#llm-runtime-mode-toggle",
     ) as HTMLButtonElement | null,
-    planModeChip: body.querySelector(
-      "#llm-plan-mode-chip",
-    ) as HTMLButtonElement | null,
     reasoningSlot: body.querySelector(
       "#llm-reasoning-dropdown",
     ) as HTMLDivElement | null,
@@ -162,10 +161,18 @@ export function getPanelDomRefs(body: Element): PanelDomRefs {
     historyModeIndicator: body.querySelector(
       "#llm-history-toggle",
     ) as HTMLButtonElement | null,
-    modeCapsule: body.querySelector("#llm-mode-capsule") as HTMLElement | null,
-    modeChipBtn: body.querySelector(
-      "#llm-mode-chip",
+    chatModeTabs: body.querySelector(
+      "#llm-chat-mode-tabs",
+    ) as HTMLDivElement | null,
+    paperChatTabBtn: body.querySelector(
+      "#llm-paper-chat-tab",
     ) as HTMLButtonElement | null,
+    libraryChatTabBtn: body.querySelector(
+      "#llm-library-chat-tab",
+    ) as HTMLButtonElement | null,
+    modeSwitch: body.querySelector(
+      "#llm-mode-capsule",
+    ) as HTMLDivElement | null,
     historyMenu: body.querySelector(
       "#llm-history-menu",
     ) as HTMLDivElement | null,

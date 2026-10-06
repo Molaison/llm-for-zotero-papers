@@ -1,0 +1,67 @@
+import { TOKEN_ESTIMATE_CHARS_PER_TOKEN } from "../../utils/modelInputCap";
+
+export type AdaptiveReadingBudget = Readonly<{
+  contextWindowTokens: number;
+  usedContextTokens: number;
+  outputReserveTokens: number;
+  remainingInputTokens: number;
+  allocatedReadingTokens: number;
+  tokensPerPaper: number;
+  maxCharactersPerPaper: number;
+}>;
+
+/**
+ * Allocate source text from the actual remaining model context. This is a
+ * capacity calculation, not a small/medium/large corpus policy: adding papers
+ * reduces each paper's share, while a larger live context permits deeper reads.
+ */
+export function resolveAdaptiveReadingBudget(params: {
+  contextWindowTokens: number;
+  usedContextTokens: number;
+  outputReserveTokens: number;
+  paperCount: number;
+  /**
+   * A long job's page share: a paper read while a page is open gets no more
+   * than its share of the page, however few papers the call names.
+   */
+  maxTokensPerPaper?: number;
+}): AdaptiveReadingBudget {
+  const contextWindowTokens = Math.max(
+    1,
+    Math.floor(params.contextWindowTokens),
+  );
+  const usedContextTokens = Math.max(0, Math.floor(params.usedContextTokens));
+  const outputReserveTokens = Math.max(
+    0,
+    Math.floor(params.outputReserveTokens),
+  );
+  const paperCount = Math.max(1, Math.floor(params.paperCount));
+  const remainingInputTokens = Math.max(
+    0,
+    contextWindowTokens - usedContextTokens - outputReserveTokens,
+  );
+  // Keep a proportional serialization/safety margin for tool envelopes and
+  // the next model turn. The allocation still grows continuously with the
+  // provider's measured remaining capacity.
+  const allocatedReadingTokens = Math.max(
+    0,
+    Math.floor(remainingInputTokens * 0.8),
+  );
+  const pageShare =
+    params.maxTokensPerPaper && params.maxTokensPerPaper > 0
+      ? Math.floor(params.maxTokensPerPaper)
+      : Number.POSITIVE_INFINITY;
+  const tokensPerPaper = Math.max(
+    1,
+    Math.min(Math.floor(allocatedReadingTokens / paperCount), pageShare),
+  );
+  return {
+    contextWindowTokens,
+    usedContextTokens,
+    outputReserveTokens,
+    remainingInputTokens,
+    allocatedReadingTokens,
+    tokensPerPaper,
+    maxCharactersPerPaper: tokensPerPaper * TOKEN_ESTIMATE_CHARS_PER_TOKEN,
+  };
+}

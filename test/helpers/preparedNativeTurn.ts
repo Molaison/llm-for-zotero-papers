@@ -9,16 +9,7 @@ type NativeFixtureInput = Omit<
   "executionRequest" | "eventJournal"
 > & {
   eventJournal?: import("../src/agent/store/traceStore").AgentRunEventJournal;
-} & Partial<
-    Pick<
-      AgentRuntimeRequest,
-      | "planContext"
-      | "actionContract"
-      | "classifiedIntent"
-      | "skillRoutingReceipt"
-      | "actionPreparation"
-    >
-  > & {
+} & Partial<Pick<AgentRuntimeRequest, "skillRoutingReceipt">> & {
     executionRequest?: AgentRuntimeRequest;
     sourceMessageTimestamp?: number;
   };
@@ -34,13 +25,6 @@ export const runCodexAppServerNativeTurn = (input: NativeFixtureInput) => {
       apiBase: input.codexPath,
       skillContext: input.skillContext,
     }),
-    classifiedIntent: input.classifiedIntent || input.actionContract?.intent,
-    actionContract: input.actionContract,
-    actionPreparation: input.actionPreparation || {
-      state: "ready" as const,
-      issues: [],
-    },
-    planContext: input.planContext,
     executionContext: {
       version: 1 as const,
       executionId: `native-fixture-${input.scope.conversationKey}`,

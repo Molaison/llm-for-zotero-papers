@@ -79,7 +79,7 @@ async function execute(
       "The bound destination is not a live note in the requested library",
     );
   }
-  const scope = context.request.actionContract?.id || context.runId;
+  const scope = context.runId;
   const actionId =
     scope && !context.journalActionScope && isAgentChangeJournalAvailable()
       ? `note-${await sha256Text(JSON.stringify([context.request.conversationKey, scope, note.libraryID, note.key, mode, canonicalNoteHtml(html)]))}`

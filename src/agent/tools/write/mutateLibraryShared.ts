@@ -598,7 +598,7 @@ export async function executeAndRecordUndo(
 /**
  * Execute multiple operations via the mutation service and register a single
  * grouped undo entry. Used by facade tools that support batching (e.g.
- * update_metadata with multiple items).
+ * a metadata update across multiple items).
  */
 export async function executeAndRecordUndoBatch(
   mutationService: LibraryMutationService,
@@ -772,7 +772,7 @@ export function normalizeCreatorsList(
 
 /**
  * Normalize a metadata patch from tool input.
- * Handles nested `.fields` objects (e.g. from query_library snapshots),
+ * Handles nested `.fields` objects (e.g. from library_search snapshots),
  * the "creators"/"authors" alias, and string/number/boolean field coercion.
  * Skips un-normalizable fields instead of aborting the entire patch.
  */

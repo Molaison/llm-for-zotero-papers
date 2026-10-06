@@ -6,6 +6,14 @@ import {
   planDocumentCitationSourceHref,
 } from "../planDocumentPresentation";
 
+/**
+ * The action contract a classifier-era run recorded. No run records one now;
+ * a stored trace is read for its intent only.
+ */
+type StoredActionContract = {
+  intent?: { semantic?: unknown; deliverableIntent?: string };
+};
+
 export function savedNoteIsPrimaryOutcome(
   events: readonly import("../../../agent/types").AgentEvent[],
   hasPlan: boolean,
@@ -19,9 +27,7 @@ export function savedNoteIsPrimaryOutcome(
     );
   const contract =
     event?.type === "provider_event"
-      ? (event.payload?.contract as
-          | import("../../../agent/contracts/types").AgentActionContract
-          | undefined)
+      ? (event.payload?.contract as StoredActionContract | undefined)
       : undefined;
   return (
     !hasPlan &&

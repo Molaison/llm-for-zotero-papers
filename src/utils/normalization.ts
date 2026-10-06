@@ -13,17 +13,6 @@ import {
   MAX_ALLOWED_TOKENS,
   MAX_ALLOWED_INPUT_TOKEN_CAP,
 } from "./llmDefaults";
-import {
-  getModelOutputTokenLimit as getCatalogOutputTokenLimit,
-  type ModelCapabilityIdentity,
-} from "../modelCapabilities";
-
-export function getModelOutputTokenLimit(
-  modelName?: string,
-  identity?: Omit<ModelCapabilityIdentity, "model">,
-): number {
-  return getCatalogOutputTokenLimit(modelName || "", identity);
-}
 
 /** Clamp a temperature value to [0, 2], falling back to DEFAULT_TEMPERATURE. */
 export function normalizeTemperature(value?: number | string): number {
@@ -64,25 +53,6 @@ export function normalizeMaxTokens(value?: number | string): number {
     return DEFAULT_CUSTOM_OUTPUT_TOKEN_LIMIT;
   }
   return Math.min(parsed, MAX_ALLOWED_TOKENS);
-}
-
-/** Clamp max-tokens using a model-specific output limit when known. */
-export function normalizeMaxTokensForModel(
-  value?: number | string,
-  modelName?: string,
-  identity?: Omit<ModelCapabilityIdentity, "model">,
-): number {
-  const parsed =
-    typeof value === "string"
-      ? Number.parseInt(value, 10)
-      : Math.floor(Number(value));
-  if (!Number.isFinite(parsed) || parsed < 1) {
-    return DEFAULT_CUSTOM_OUTPUT_TOKEN_LIMIT;
-  }
-  return Math.min(
-    parsed,
-    getCatalogOutputTokenLimit(modelName || "", identity),
-  );
 }
 
 /** Clamp an input-token-cap value to [1, MAX_ALLOWED_INPUT_TOKEN_CAP], with configurable fallback. */

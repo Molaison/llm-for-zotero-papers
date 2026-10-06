@@ -1,6 +1,6 @@
 import type { ZoteroGateway } from "../services/zoteroGateway";
-import type { ResearchEvidenceRecord } from "../research/types";
-import type { ResearchScopeSnapshotItem } from "../research/types";
+import type { ResearchEvidenceRecord } from "./coverageTypes";
+import type { ResearchScopeSnapshotItem } from "./coverageTypes";
 import type {
   DocumentSpec,
   FormattedCitationBundle,
@@ -246,6 +246,27 @@ export function bindCitationEvidenceRefs(
   }));
 }
 
+const CITATION_ID = /^[A-Za-z0-9._:-]+$/;
+
+/**
+ * Split each `[[cite:A,B,C]]` token into adjacent single tokens
+ * `[[cite:A]][[cite:B]][[cite:C]]`, the form consecutive citations take: the
+ * chat answer accepts comma-joined ids, so models write them here too. Only a
+ * token whose every id is well formed splits; one with an empty id stays as
+ * written and is refused as malformed, and an unknown id is refused by name
+ * as an unresolved token.
+ */
+function splitCommaJoinedTokens(markdown: string, repairs: string[]): string {
+  return markdown.replace(/\[\[cite:([^\]]*,[^\]]*)\]\]/g, (token, body) => {
+    const ids = String(body)
+      .split(",")
+      .map((id) => id.trim());
+    if (!ids.every((id) => CITATION_ID.test(id))) return token;
+    repairs.push(`split comma-joined citation token ${token}`);
+    return ids.map((id) => `[[cite:${id}]]`).join("");
+  });
+}
+
 export async function formatDocumentCitations(params: {
   gateway: ZoteroGateway;
   draftMarkdown: string;
@@ -257,18 +278,24 @@ export async function formatDocumentCitations(params: {
 }): Promise<{
   visibleMarkdown: string;
   citationBundle: FormattedCitationBundle;
+  /** Unused citation mappings the host dropped instead of rejecting. */
+  repairs: string[];
 }> {
-  const draftMarkdown = stripHandwrittenReferences(params.draftMarkdown);
+  const repairs: string[] = [];
+  const draftMarkdown = splitCommaJoinedTokens(
+    stripHandwrittenReferences(params.draftMarkdown),
+    repairs,
+  );
   const corpusKeys = new Set(params.corpus.map(sourceKey));
   const evidenceByRef = new Map(
     params.evidence.map((record) => [record.evidenceRef, record]),
   );
-  const clusters =
+  const boundClusters =
     params.requireEvidence === false
       ? [...params.clusters]
       : bindCitationEvidenceRefs(params.clusters, params.evidence);
   const clustersById = new Map<string, PlanCitationCluster>();
-  const resolved = clusters.map((cluster) => {
+  const allResolved = boundClusters.map((cluster) => {
     if (!cluster.citationId.trim() || clustersById.has(cluster.citationId)) {
       throw new ToolInputRejection(
         `Duplicate or empty citation ID: ${cluster.citationId}`,
@@ -332,11 +359,6 @@ export async function formatDocumentCitations(params: {
   for (const match of draftMarkdown.matchAll(CITATION_TOKEN)) {
     tokenIds.push(match[1]);
   }
-  if (!tokenIds.length && clusters.length) {
-    throw new ToolInputRejection(
-      "Citation mappings were supplied but the document has no citation tokens",
-    );
-  }
   for (const citationId of tokenIds) {
     if (!clustersById.has(citationId)) {
       throw new ToolInputRejection(
@@ -344,13 +366,33 @@ export async function formatDocumentCitations(params: {
       );
     }
   }
-  for (const citationId of clustersById.keys()) {
-    if (!tokenIds.includes(citationId)) {
+  // A token the strict form does not match would otherwise ship as literal
+  // text while its clusters are dropped as unused.
+  for (const [token] of draftMarkdown.matchAll(/\[\[cite:[^\]]*\]\]/g)) {
+    if (!/^\[\[cite:[A-Za-z0-9._:-]+\]\]$/.test(token)) {
       throw new ToolInputRejection(
-        `Citation ${citationId} is not used in the document`,
+        `Document contains malformed citation token ${token}; use one [[cite:ID]] token per citation`,
       );
     }
   }
+  if (!tokenIds.length && boundClusters.length) {
+    throw new ToolInputRejection(
+      "Citation mappings were supplied but the document has no citation tokens",
+    );
+  }
+  // A mapping no token uses is dropped: it changes nothing the reader sees.
+  for (const citationId of [...clustersById.keys()]) {
+    if (!tokenIds.includes(citationId)) {
+      clustersById.delete(citationId);
+      repairs.push(`dropped unused citation ${citationId}`);
+    }
+  }
+  const clusters = boundClusters.filter((cluster) =>
+    clustersById.has(cluster.citationId),
+  );
+  const resolved = allResolved.filter((cluster) =>
+    clustersById.has(cluster.citationId),
+  );
   if (!clusters.length) {
     if (params.spec.requiresReferences) {
       throw new ToolInputRejection(
@@ -368,6 +410,7 @@ export async function formatDocumentCitations(params: {
         },
         locale: params.spec.citationStyle.locale,
       },
+      repairs,
     };
   }
 
@@ -508,6 +551,7 @@ export async function formatDocumentCitations(params: {
       style: { id: formatted.styleId, title: formatted.styleTitle },
       locale: formatted.locale,
     },
+    repairs,
   };
 }
 

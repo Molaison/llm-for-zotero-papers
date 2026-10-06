@@ -753,6 +753,11 @@ export async function retireOrphanedConversationLedgerEntries(params: {
   system: ConversationSystem;
   kind: ConversationKeyLedgerKind;
   catalogTables: readonly string[];
+  /**
+   * Commits one orphan's retirement and registry cleanup as a unit.  Defaults
+   * to running inline, for callers already inside a transaction.
+   */
+  atomically?: <T>(task: () => Promise<T>) => Promise<T>;
 }): Promise<void> {
   const db = getDb();
   if (!db?.queryAsync) return;
@@ -818,21 +823,25 @@ export async function retireOrphanedConversationLedgerEntries(params: {
       system: params.system,
       kind: params.kind,
     });
-    await retireConversationKeyInTransaction({
-      conversationKey: key,
-      instanceID,
-      reason: "orphaned-ledger-allocation-after-crash",
+    const atomically =
+      params.atomically || (<T>(task: () => Promise<T>) => task());
+    await atomically(async () => {
+      await retireConversationKeyInTransaction({
+        conversationKey: key,
+        instanceID,
+        reason: "orphaned-ledger-allocation-after-crash",
+      });
+      try {
+        await (db as QueryableZoteroDb).queryAsync(
+          `DELETE FROM llm_for_zotero_conversation_registry
+           WHERE legacy_conversation_key = ? AND instance_id = ?`,
+          [key, instanceID],
+        );
+      } catch (error) {
+        if (!/no such table|no table/i.test(String(error))) throw error;
+      }
     });
     rememberConversationKeyRetired(key);
-    try {
-      await db.queryAsync(
-        `DELETE FROM llm_for_zotero_conversation_registry
-         WHERE legacy_conversation_key = ? AND instance_id = ?`,
-        [key, instanceID],
-      );
-    } catch (error) {
-      if (!/no such table|no table/i.test(String(error))) throw error;
-    }
   }
 }
 
@@ -995,13 +1004,53 @@ export async function withRetiredKeyErrorMapping<T>(
 }
 
 /**
- * Remove fence triggers from superseded versions.  `DROP TRIGGER IF EXISTS` is
- * a no-op when the trigger is absent, so this is safe to run unconditionally
- * on every store initialization and repairs a profile that already ran an
- * earlier fence.
+ * Names of the triggers already installed in the database, or `null` when the
+ * catalog cannot be read (non-SQLite test doubles, older DB wrappers).  The
+ * installers use it to issue DDL only for what is actually missing or
+ * superseded: every trigger statement is a schema write that queues behind
+ * Zotero's own work on the shared storage thread, and a warm start would
+ * otherwise re-issue hundreds of them on every launch.  A `null` result keeps
+ * the unconditional `IF [NOT] EXISTS` behavior.
+ */
+async function readInstalledTriggerNames(
+  db: ZoteroDb,
+): Promise<Set<string> | null> {
+  if (!db.queryAsync) return null;
+  try {
+    const rows = (await db.queryAsync(
+      `SELECT name FROM sqlite_master WHERE type = 'trigger'`,
+    )) as Array<{ name?: unknown }> | undefined;
+    return new Set(
+      (rows || [])
+        .map((row) => (typeof row.name === "string" ? row.name : ""))
+        .filter(Boolean),
+    );
+  } catch {
+    return null;
+  }
+}
+
+/** Create a trigger unless the catalog already lists it under that name. */
+async function createTriggerIfMissing(
+  db: ZoteroDb,
+  installed: ReadonlySet<string> | null,
+  name: string,
+  sql: string,
+): Promise<void> {
+  if (installed?.has(name) || !db.queryAsync) return;
+  await db.queryAsync(sql);
+}
+
+/**
+ * Remove fence triggers from superseded versions.  With a readable trigger
+ * catalog (`installed`), only legacy names actually present are dropped, so a
+ * current profile issues no DDL at all.  Without one, `DROP TRIGGER IF EXISTS`
+ * runs for every legacy name: it is a no-op when the trigger is absent, and
+ * repairs a profile that already ran an earlier fence.
  */
 async function dropSupersededConversationFenceTriggers(
   tables: readonly string[],
+  installed: ReadonlySet<string> | null,
 ): Promise<void> {
   const db = getDb();
   if (!db?.queryAsync) return;
@@ -1024,6 +1073,7 @@ async function dropSupersededConversationFenceTriggers(
       `${safe}_live_run_insert`,
       `${safe}_live_run_update`,
     ]) {
+      if (installed && !installed.has(legacy)) continue;
       try {
         await db.queryAsync(`DROP TRIGGER IF EXISTS ${legacy}`);
       } catch (error) {
@@ -1046,12 +1096,16 @@ export async function installConversationKeyLedgerCatalogTriggers(
   const db = getDb();
   if (!db?.queryAsync)
     throw new Error("Conversation key ledger DB is unavailable");
-  await dropSupersededConversationFenceTriggers(catalogTables);
+  const installed = await readInstalledTriggerNames(db);
+  await dropSupersededConversationFenceTriggers(catalogTables, installed);
   for (const table of catalogTables) {
     const safeTable = table.replace(/[^A-Za-z0-9_]/g, "");
     const insertTrigger = `${safeTable}_conversation_fence_v${CONVERSATION_FENCE_VERSION}_insert`;
     const updateTrigger = `${safeTable}_conversation_fence_v${CONVERSATION_FENCE_VERSION}_update`;
-    await db.queryAsync(
+    await createTriggerIfMissing(
+      db,
+      installed,
+      insertTrigger,
       `CREATE TRIGGER IF NOT EXISTS ${insertTrigger}
        BEFORE INSERT ON ${safeTable}
        WHEN ${retiredKeyPredicate("conversation_key")}
@@ -1059,7 +1113,10 @@ export async function installConversationKeyLedgerCatalogTriggers(
          SELECT RAISE(ABORT, '${RETIRED_KEY_ABORT_MESSAGE}');
        END`,
     );
-    await db.queryAsync(
+    await createTriggerIfMissing(
+      db,
+      installed,
+      updateTrigger,
       `CREATE TRIGGER IF NOT EXISTS ${updateTrigger}
        BEFORE UPDATE OF conversation_key ON ${safeTable}
        WHEN ${retiredKeyPredicate("conversation_key")}
@@ -1084,10 +1141,14 @@ export async function installConversationKeyLedgerMessageTriggers(params: {
   }
   const messageTable = params.messageTable.replace(/[^A-Za-z0-9_]/g, "");
   if (!messageTable) return;
-  await dropSupersededConversationFenceTriggers([messageTable]);
+  const installed = await readInstalledTriggerNames(db);
+  await dropSupersededConversationFenceTriggers([messageTable], installed);
   const insertTrigger = `${messageTable}_conversation_fence_v${CONVERSATION_FENCE_VERSION}_insert`;
   const updateTrigger = `${messageTable}_conversation_fence_v${CONVERSATION_FENCE_VERSION}_update`;
-  await db.queryAsync(
+  await createTriggerIfMissing(
+    db,
+    installed,
+    insertTrigger,
     `CREATE TRIGGER IF NOT EXISTS ${insertTrigger}
      BEFORE INSERT ON ${messageTable}
      WHEN ${retiredKeyPredicate("conversation_key")}
@@ -1095,7 +1156,10 @@ export async function installConversationKeyLedgerMessageTriggers(params: {
        SELECT RAISE(ABORT, '${RETIRED_KEY_ABORT_MESSAGE}');
      END`,
   );
-  await db.queryAsync(
+  await createTriggerIfMissing(
+    db,
+    installed,
+    updateTrigger,
     `CREATE TRIGGER IF NOT EXISTS ${updateTrigger}
      BEFORE UPDATE OF conversation_key ON ${messageTable}
      WHEN ${retiredKeyPredicate("conversation_key")}
@@ -1115,21 +1179,23 @@ export async function installConversationKeyLedgerMessageTriggers(params: {
 export async function installConversationKeyLedgerAgentTriggers(): Promise<void> {
   const db = getDb();
   if (!db?.queryAsync) return;
-  let rows: Array<{ name?: unknown }> | undefined;
+  let rows: Array<{ type?: unknown; name?: unknown }> | undefined;
   try {
     rows = (await db.queryAsync(
-      `SELECT name FROM sqlite_master WHERE type = 'table'`,
-    )) as Array<{ name?: unknown }> | undefined;
+      `SELECT type, name FROM sqlite_master WHERE type IN ('table', 'trigger')`,
+    )) as Array<{ type?: unknown; name?: unknown }> | undefined;
   } catch {
     // Non-SQLite test doubles and older Zotero DB wrappers do not expose the
     // catalog query.  Their normal runtime fences remain in effect.
     return;
   }
-  const tables = new Set(
-    (rows || [])
-      .map((row) => (typeof row.name === "string" ? row.name : ""))
-      .filter(Boolean),
-  );
+  const tables = new Set<string>();
+  const installed = new Set<string>();
+  for (const row of rows || []) {
+    if (typeof row.name !== "string" || !row.name) continue;
+    if (row.type === "table") tables.add(row.name);
+    else if (row.type === "trigger") installed.add(row.name);
+  }
   const keyTables = [
     "llm_for_zotero_agent_memory",
     "llm_for_zotero_agent_transcript",
@@ -1142,7 +1208,10 @@ export async function installConversationKeyLedgerAgentTriggers(): Promise<void>
     if (!tables.has(table)) continue;
     const safe = table.replace(/[^A-Za-z0-9_]/g, "");
     try {
-      await db.queryAsync(
+      await createTriggerIfMissing(
+        db,
+        installed,
+        `${safe}_retired_key_insert`,
         `CREATE TRIGGER IF NOT EXISTS ${safe}_retired_key_insert
          BEFORE INSERT ON ${safe}
          WHEN EXISTS (
@@ -1154,7 +1223,10 @@ export async function installConversationKeyLedgerAgentTriggers(): Promise<void>
            SELECT RAISE(ABORT, 'conversation key is permanently retired');
          END`,
       );
-      await db.queryAsync(
+      await createTriggerIfMissing(
+        db,
+        installed,
+        `${safe}_retired_key_update`,
         `CREATE TRIGGER IF NOT EXISTS ${safe}_retired_key_update
          BEFORE UPDATE OF conversation_key ON ${safe}
          WHEN EXISTS (
@@ -1176,7 +1248,10 @@ export async function installConversationKeyLedgerAgentTriggers(): Promise<void>
   const coverageTable = "llm_for_zotero_agent_coverage";
   if (tables.has(coverageTable)) {
     try {
-      await db.queryAsync(
+      await createTriggerIfMissing(
+        db,
+        installed,
+        `${coverageTable}_retired_origin_insert`,
         `CREATE TRIGGER IF NOT EXISTS ${coverageTable}_retired_origin_insert
          BEFORE INSERT ON ${coverageTable}
          WHEN NEW.origin_conversation_key IS NOT NULL
@@ -1189,7 +1264,10 @@ export async function installConversationKeyLedgerAgentTriggers(): Promise<void>
            SELECT RAISE(ABORT, 'conversation key is permanently retired');
          END`,
       );
-      await db.queryAsync(
+      await createTriggerIfMissing(
+        db,
+        installed,
+        `${coverageTable}_retired_origin_update`,
         `CREATE TRIGGER IF NOT EXISTS ${coverageTable}_retired_origin_update
          BEFORE UPDATE OF origin_conversation_key ON ${coverageTable}
          WHEN NEW.origin_conversation_key IS NOT NULL
@@ -1212,7 +1290,7 @@ export async function installConversationKeyLedgerAgentTriggers(): Promise<void>
   const eventsTable = "llm_for_zotero_agent_run_events";
   const runsTable = "llm_for_zotero_agent_runs";
   if (tables.has(eventsTable) && tables.has(runsTable)) {
-    await dropSupersededConversationFenceTriggers([eventsTable]);
+    await dropSupersededConversationFenceTriggers([eventsTable], installed);
     try {
       // Reject events for a run whose conversation was RETIRED, not for one the
       // ledger has merely never seen. The superseded rule required a live
@@ -1228,7 +1306,10 @@ export async function installConversationKeyLedgerAgentTriggers(): Promise<void>
             AND l.retired_at IS NOT NULL
            WHERE r.run_id = NEW.run_id
          )`;
-      await db.queryAsync(
+      await createTriggerIfMissing(
+        db,
+        installed,
+        `${eventsTable}_conversation_fence_v${CONVERSATION_FENCE_VERSION}_insert`,
         `CREATE TRIGGER IF NOT EXISTS ${eventsTable}_conversation_fence_v${CONVERSATION_FENCE_VERSION}_insert
          BEFORE INSERT ON ${eventsTable}
          WHEN ${retiredRunConversation}
@@ -1236,7 +1317,10 @@ export async function installConversationKeyLedgerAgentTriggers(): Promise<void>
            SELECT RAISE(ABORT, '${RETIRED_KEY_ABORT_MESSAGE}');
          END`,
       );
-      await db.queryAsync(
+      await createTriggerIfMissing(
+        db,
+        installed,
+        `${eventsTable}_conversation_fence_v${CONVERSATION_FENCE_VERSION}_update`,
         `CREATE TRIGGER IF NOT EXISTS ${eventsTable}_conversation_fence_v${CONVERSATION_FENCE_VERSION}_update
          BEFORE UPDATE OF run_id ON ${eventsTable}
          WHEN ${retiredRunConversation}
@@ -1253,7 +1337,7 @@ export async function installConversationKeyLedgerAgentTriggers(): Promise<void>
 
   const refsTable = "llm_for_zotero_attachment_refs";
   if (tables.has(refsTable)) {
-    await dropSupersededConversationFenceTriggers([refsTable]);
+    await dropSupersededConversationFenceTriggers([refsTable], installed);
     try {
       // Attachment references predate immutable instance IDs and key their
       // owner by the numeric conversation key.  Retirement is the boundary
@@ -1262,7 +1346,10 @@ export async function installConversationKeyLedgerAgentTriggers(): Promise<void>
       // additionally rejected any owner the ledger had not seen yet, which
       // turned a lazily-initialized store racing the seeding pass into a hard
       // SQL failure rather than a soft skip.
-      await db.queryAsync(
+      await createTriggerIfMissing(
+        db,
+        installed,
+        `${refsTable}_conversation_fence_v${CONVERSATION_FENCE_VERSION}_insert`,
         `CREATE TRIGGER IF NOT EXISTS ${refsTable}_conversation_fence_v${CONVERSATION_FENCE_VERSION}_insert
          BEFORE INSERT ON ${refsTable}
          WHEN NEW.owner_type = 'conversation'
@@ -1271,7 +1358,10 @@ export async function installConversationKeyLedgerAgentTriggers(): Promise<void>
            SELECT RAISE(ABORT, '${RETIRED_KEY_ABORT_MESSAGE}');
          END`,
       );
-      await db.queryAsync(
+      await createTriggerIfMissing(
+        db,
+        installed,
+        `${refsTable}_conversation_fence_v${CONVERSATION_FENCE_VERSION}_update`,
         `CREATE TRIGGER IF NOT EXISTS ${refsTable}_conversation_fence_v${CONVERSATION_FENCE_VERSION}_update
          BEFORE UPDATE OF owner_type, owner_id ON ${refsTable}
          WHEN NEW.owner_type = 'conversation'

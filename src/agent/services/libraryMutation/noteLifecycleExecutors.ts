@@ -139,7 +139,17 @@ export const noteLifecycleExecutors = {
         now,
       });
     };
+    // Where the user's Stop ended the batch: the notes before this index
+    // were reached, the rest were never started.
+    let stoppedAt: number | undefined;
     for (const [index, entry] of operation.notes.entries()) {
+      // Stop takes effect between notes. The note in flight has landed, or
+      // failed, on its own terms; no further note starts, and each one left
+      // keeps its pending row for a resume.
+      if (context.signal?.aborted) {
+        stoppedAt = index;
+        break;
+      }
       const bound = binding?.items[index];
       // The durable row's own place in the batch, not this call's: a resume
       // writes a subset, and a cursor renumbered from it would report the
@@ -263,6 +273,11 @@ export const noteLifecycleExecutors = {
             ),
           ],
           notes: rows,
+          // The notes it reached, of all it was given; the receipt owner
+          // judges a stopped batch on those alone.
+          ...(stoppedAt === undefined
+            ? {}
+            : { stopped: { after: stoppedAt, of: operation.notes.length } }),
         },
       },
       // Each note is a durable step of the owning action and records its own

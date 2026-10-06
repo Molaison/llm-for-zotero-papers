@@ -1,4 +1,3 @@
-import { appLogger } from "../../../core/logging";
 import type {
   AgentActionSummaryResultCard,
   AgentNoteChangeResultCard,
@@ -20,17 +19,12 @@ import {
 } from "../../../agent/documents/store";
 import type { PlanDocument } from "../../../agent/documents/types";
 import { subscribeDocumentPublication } from "../../../agent/documents/publicationEvents";
-import { planExecutionCoordinator } from "../../../agent/plans/coordinator";
-import {
-  loadPlanArtifact,
-  loadPlanExecutionLedger,
-} from "../../../agent/plans/store";
+import { documentMessageLead } from "../../../agent/documents/publication";
 import {
   isContentLikeToolArgumentKey,
   isMalformedToolArgumentsDiagnostic,
 } from "../../../agent/toolArgumentDiagnostics";
 import type {
-  AgentActionContract,
   AgentActionReceipt,
   AgentConfirmationResolution,
   AgentPendingAction,
@@ -46,11 +40,8 @@ import type {
   AgentTraceRequestSummary,
   AgentStage,
   AgentWorkCategory,
-  PlanArtifact,
-  PlanExecutionLedger,
 } from "../../../agent/types";
 import { SKILL_ACTIVATION_TRACE_LABEL } from "../../../agent/workCategory";
-import { getConversationWriteGeneration } from "../../../shared/conversationWriteFence";
 import type { GeneratedChatImage } from "../../../shared/types";
 import { toFileUrl } from "../../../utils/pathFileUrl";
 import { normalizePublicWebUrl } from "../../../webAccess/tavilyClient";
@@ -75,17 +66,17 @@ import {
   renderPlanDocumentContent,
   renderPlanDocumentFigures,
 } from "../planDocumentPresentation";
-import {
-  PLAN_APPROVED_EVENT,
-  PLAN_CANCEL_EVENT,
-  PLAN_REVISE_EVENT,
-  stageApprovedPlanExecution,
-} from "../planModeState";
 import { buildAssistantDisplayMarkdownForRender } from "../assistantRichText";
 import { renderRenderedMarkdownInto } from "../renderedMarkdown";
 import { applyStableAnimationPhase } from "../stableAnimationPhase";
-import { showStandaloneConfirmationDialog } from "../standaloneConfirmationDialog";
+import { isCodexPlanChecklistEvent } from "../taskProgress/codexPlan";
+import { PLAN_STATUS_SYMBOLS } from "../taskProgress/planSteps";
 import { openStandalonePlanDocumentWindow } from "../standalonePlanDocumentWindow";
+import {
+  readStoredPlanEvent,
+  type StoredPlanArtifact,
+  type StoredPlanExecution,
+} from "./storedPlanEvents";
 import {
   disposeStreamingMarkdown,
   renderStreamingMarkdownInto,
@@ -113,15 +104,30 @@ import {
   buildToolResultTraceInfo,
   type ToolResultTraceInfo,
 } from "./toolResultTraceInfo";
+import {
+  isTruncatedToolResultContent,
+  toolResultContentForDisplay,
+} from "../../../agent/store/truncatedToolResult";
 import { getAgentRuntime } from "../../../agent";
 import { projectStageEvents } from "./stageProjection";
 import { resolveAgentToolPresentation } from "./toolPresentation";
 import {
-  appendAgentTraceText,
   compactAgentTraceEvents,
+  createAgentTraceCompactor,
   getReasoningTraceKey,
   normalizeInlineTextForDedupe,
+  appendAgentTraceText,
+  type AgentTraceCompactor,
 } from "./traceReducer";
+import {
+  applyAgentTraceEventToScan,
+  createAgentTraceEventScan,
+  readPendingConfirmation,
+  readTraceDisplayLabels,
+  readTracePlanPhase,
+  scanAgentTraceEvents,
+  type AgentTraceEventScan,
+} from "./traceEventScan";
 
 type AgentTraceSummaryKind = "plan" | "tool" | "ok" | "skip" | "done";
 
@@ -228,7 +234,6 @@ type RenderAgentTraceParams = {
   userMessage?: Message | null;
   events: AgentRunEventRecord[];
   previous?: HTMLElement;
-  allowPlanRecovery?: boolean;
   onTraceMissing?: () => void;
   onInterleavedText?: () => void;
   /** The conversation owns this footer below the assistant's final answer. */
@@ -257,11 +262,9 @@ export function formatAgentActivityDuration(durationMs: number): string {
 function resolveAgentActivityDurationMs(
   message: Message,
   userMessage: Message | null | undefined,
-  events: AgentRunEventRecord[],
+  eventTimes: { first: number; last: number },
 ): number {
-  const eventTimes = events
-    .map((event) => Number(event.createdAt))
-    .filter((value) => Number.isFinite(value) && value > 0);
+  const firstEventAt = eventTimes.first;
   const waitingStartedAt = Number(message.waitingAnimationStartedAt);
   const userStartedAt = Number(userMessage?.timestamp);
   const messageTimestamp = Number(message.timestamp);
@@ -269,7 +272,7 @@ function resolveAgentActivityDurationMs(
     (Number.isFinite(waitingStartedAt) && waitingStartedAt > 0
       ? waitingStartedAt
       : 0) ||
-    (eventTimes.length ? Math.min(...eventTimes) : 0) ||
+    (firstEventAt > 0 ? firstEventAt : 0) ||
     (Number.isFinite(userStartedAt) && userStartedAt > 0 ? userStartedAt : 0) ||
     (Number.isFinite(messageTimestamp) && messageTimestamp > 0
       ? messageTimestamp
@@ -281,7 +284,7 @@ function resolveAgentActivityDurationMs(
         Number.isFinite(messageTimestamp) && messageTimestamp > 0
           ? messageTimestamp
           : 0,
-        ...eventTimes,
+        eventTimes.last > 0 ? eventTimes.last : 0,
       );
   return Math.max(0, end - start);
 }
@@ -292,12 +295,12 @@ function appendAgentActivityDisclosure(params: {
   list: HTMLElement;
   message: Message;
   userMessage?: Message | null;
-  events: AgentRunEventRecord[];
+  scan: AgentTraceEventScan;
   forceOpen?: boolean;
 }): void {
-  const { doc, wrap, list, message, userMessage, events } = params;
+  const { doc, wrap, list, message, userMessage, scan } = params;
   const working = message.streaming === true;
-  const planPhase = resolveTracePlanPhase(events);
+  const planPhase = scan.planPhase;
   const previous = agentActivityExpandedCache.get(message);
   const state = working
     ? !previous || !previous.wasWorking
@@ -319,11 +322,10 @@ function appendAgentActivityDisclosure(params: {
   const summary =
     details.querySelector?.("summary") || doc.createElement("summary");
   summary.className = "llm-agent-activity-summary";
-  const durationMs = resolveAgentActivityDurationMs(
-    message,
-    userMessage,
-    events,
-  );
+  const durationMs = resolveAgentActivityDurationMs(message, userMessage, {
+    first: scan.minCreatedAt,
+    last: scan.maxCreatedAt,
+  });
   const view = traceViews.get(wrap)!;
   if (working) {
     let label = summary.querySelector(".llm-agent-activity-label");
@@ -404,16 +406,8 @@ function resolveTracePlanPhase(
   events: readonly AgentRunEventRecord[],
 ): "planning" | "executing" | null {
   for (let index = events.length - 1; index >= 0; index -= 1) {
-    const payload = events[index]?.payload;
-    if (payload?.type === "plan_execution_updated") return "executing";
-    if (payload?.type === "plan_ready" || payload?.type === "plan_updated") {
-      return "planning";
-    }
-    if (payload?.type === "status") {
-      const text = payload.text.trim().toLowerCase();
-      if (text.startsWith("executing the approved plan")) return "executing";
-      if (text.startsWith("planning the request")) return "planning";
-    }
+    const phase = readTracePlanPhase(events[index]?.payload);
+    if (phase) return phase;
   }
   return null;
 }
@@ -464,27 +458,6 @@ function getMessageSelectedTexts(message: Message): string[] {
 
 function normalizePaperContexts(paperContexts: unknown): PaperContextRef[] {
   return normalizePaperContextRefs(paperContexts, { sanitizeText });
-}
-
-function getPendingConfirmation(
-  events: AgentRunEventRecord[],
-): { requestId: string; action: AgentPendingAction } | null {
-  const pending = new Map<string, AgentPendingAction>();
-  for (const entry of events) {
-    if (entry.payload.type === "confirmation_required") {
-      pending.set(entry.payload.requestId, entry.payload.action);
-      continue;
-    }
-    if (entry.payload.type === "confirmation_resolved") {
-      pending.delete(entry.payload.requestId);
-    }
-  }
-  const last = Array.from(pending.entries()).pop();
-  if (!last) return null;
-  return {
-    requestId: last[0],
-    action: last[1],
-  };
 }
 
 function isAgentTraceRecord(value: unknown): value is Record<string, unknown> {
@@ -4153,8 +4126,21 @@ export function isGenericAgentStatusText(text: string): boolean {
   const normalized = text.trim().toLowerCase();
   return (
     normalized === "running agent" ||
-    /^continuing agent \((?:segment \d+, )?\d+\/\d+\)$/.test(normalized) ||
+    // "(round n)"; runs recorded before it said "(n/24)" or "(segment 2, n/32)".
+    /^continuing agent \((?:round \d+|(?:segment \d+, )?\d+\/\d+)\)$/.test(
+      normalized,
+    ) ||
     /^checkpointed agent segment \d+; continuing$/.test(normalized)
+  );
+}
+
+/**
+ * A long job's progress, "Continuing agent (page 2 · 7 of 30)": the live
+ * status shows it as written, and the trace does not repeat it every round.
+ */
+export function isAgentPageProgressText(text: string): boolean {
+  return /^continuing agent \(page \d+ · \d+ of \d+\)$/.test(
+    text.trim().toLowerCase(),
   );
 }
 
@@ -4193,12 +4179,12 @@ function replaceInlineTextDedupeKey(
   if (nextKey) visibleInlineText.add(nextKey);
 }
 
+/** `chunk` is already sanitized: the caller remembers it per payload. */
 function appendInterleavedInlineText(
   items: AgentTraceDisplayItem[],
-  rawText: string,
+  chunk: string,
   visibleInlineText: Set<string>,
 ): void {
-  const chunk = sanitizeText(rawText || "");
   if (!chunk) return;
 
   const lastItem = items[items.length - 1];
@@ -4246,7 +4232,7 @@ function appendInterleavedInlineText(
   items.push({ type: "inline_text", text });
 }
 
-function getFinalTraceText(events: AgentRunEventRecord[]): string {
+function getFinalTraceText(events: readonly AgentRunEventRecord[]): string {
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const entry = events[index];
     if (entry?.payload.type === "final") {
@@ -4256,14 +4242,23 @@ function getFinalTraceText(events: AgentRunEventRecord[]): string {
   return "";
 }
 
+/**
+ * Inline text the answer bubble already shows. Text the model streamed before
+ * a tool call and the host kept (an intermediate item) is part of the final
+ * answer; so is the text streamed after it, which ends the answer.
+ */
 function shouldSuppressInlineFinalAnswer(
   item: AgentTraceDisplayItem,
   finalText: string,
+  intermediate: boolean,
 ): boolean {
   if (item.type !== "inline_text") return false;
   const finalKey = normalizeInlineTextForDedupe(finalText);
   const itemKey = normalizeInlineTextForDedupe(item.text);
-  return Boolean(finalKey && itemKey && finalKey === itemKey);
+  if (!finalKey || !itemKey) return false;
+  if (finalKey === itemKey) return true;
+  if (!intermediate) return finalKey.endsWith(` ${itemKey}`);
+  return itemKey.length >= 40 && finalKey.includes(itemKey);
 }
 
 type AgentTraceAdapterContext = {
@@ -4428,6 +4423,176 @@ function appendReasoningTraceItem(
   });
 }
 
+type TraceToolCallPayload = Extract<
+  AgentRunEventRecord["payload"],
+  { type: "tool_call" }
+>;
+type TraceToolResultPayload = Extract<
+  AgentRunEventRecord["payload"],
+  { type: "tool_result" }
+>;
+
+/**
+ * How often the trace read a tool result's payload, for tests only.
+ *
+ * A result can be megabytes of paper text and is read on every refresh of a
+ * live run; each payload must be read once and remembered.
+ */
+const agentTraceProjectionCounters = {
+  toolResultTraceInfo: 0,
+  toolResultCards: 0,
+  toolCallDetails: 0,
+  /** Live refreshes that patched the last thinking block alone. */
+  liveReasoningPatches: 0,
+  /** Live refreshes that walked the folded trace. */
+  liveWalks: 0,
+  /** Live states started over from the first event. */
+  liveResets: 0,
+};
+
+export function readAgentTraceProjectionCountersForTests(): Readonly<
+  typeof agentTraceProjectionCounters
+> {
+  return { ...agentTraceProjectionCounters };
+}
+
+export function resetAgentTraceProjectionCountersForTests(): void {
+  for (const key of Object.keys(agentTraceProjectionCounters))
+    agentTraceProjectionCounters[
+      key as keyof typeof agentTraceProjectionCounters
+    ] = 0;
+}
+
+/*
+ * What the trace reads from one event payload, remembered by that payload.
+ * Stored events are never rewritten in place (a changed event is a new
+ * record), so a payload's projection holds for as long as the payload does,
+ * and a refresh reads each result once however often it repaints.
+ */
+const toolResultTraceInfoMemo = new WeakMap<
+  TraceToolResultPayload,
+  ToolResultTraceInfo | null
+>();
+const toolResultCardsMemo = new WeakMap<
+  TraceToolResultPayload,
+  {
+    build: Parameters<typeof selectToolResultTraceCards>[1];
+    cards: AgentToolResultCard[];
+  }
+>();
+type TraceToolCallProjection = {
+  result: TraceToolResultPayload | undefined;
+  presentation: ReturnType<typeof resolveAgentToolPresentation>;
+  resultInfo: ToolResultTraceInfo | null;
+  details: AgentTraceDetail[];
+  summary: string | null;
+};
+const toolCallProjectionMemo = new WeakMap<
+  TraceToolCallPayload,
+  TraceToolCallProjection
+>();
+/** Shared details arrays, so a row's signature need not serialize them. */
+const memoizedTraceDetailIds = new WeakMap<AgentTraceDetail[], number>();
+let nextMemoizedTraceDetailId = 0;
+const sanitizedMessageDeltaMemo = new WeakMap<object, string>();
+
+function projectToolResultTraceInfo(
+  result: TraceToolResultPayload | undefined,
+): ToolResultTraceInfo | null {
+  if (!result) return null;
+  const known = toolResultTraceInfoMemo.get(result);
+  if (known !== undefined) return known;
+  agentTraceProjectionCounters.toolResultTraceInfo += 1;
+  const info = buildToolResultTraceInfo(result);
+  toolResultTraceInfoMemo.set(result, info);
+  return info;
+}
+
+function projectToolResultCards(
+  payload: TraceToolResultPayload,
+  build: Parameters<typeof selectToolResultTraceCards>[1],
+): AgentToolResultCard[] {
+  const known = toolResultCardsMemo.get(payload);
+  if (known && known.build === build) return known.cards.slice();
+  agentTraceProjectionCounters.toolResultCards += 1;
+  const cards = selectToolResultTraceCards(payload, build);
+  toolResultCardsMemo.set(payload, { build, cards });
+  return cards.slice();
+}
+
+/** The parts of a call row read from its arguments and its result. */
+function projectToolCall(
+  payload: TraceToolCallPayload,
+  result: TraceToolResultPayload | undefined,
+): TraceToolCallProjection {
+  const presentation = resolveAgentToolPresentation(payload.name);
+  const known = toolCallProjectionMemo.get(payload);
+  if (known && known.result === result && known.presentation === presentation)
+    return known;
+  agentTraceProjectionCounters.toolCallDetails += 1;
+  const resultInfo = projectToolResultTraceInfo(result);
+  // A result the trace stored by handle is read from its preview.
+  const resultContent = toolResultContentForDisplay(result?.content);
+  const storedByHandle = isTruncatedToolResultContent(result?.content);
+  let presentationDetails: AgentTraceDetail[] = [];
+  if (result) {
+    try {
+      presentationDetails =
+        presentation?.buildTraceDetails?.({
+          args: payload.args,
+          content: resultContent,
+        }) ?? [];
+    } catch {
+      presentationDetails = [];
+    }
+  }
+  const details = dedupeAgentTraceDetails(
+    presentationDetails.length
+      ? [
+          ...presentationDetails,
+          // A stored result also says how big it was and where it is.
+          ...(storedByHandle
+            ? (resultInfo?.details || []).filter(
+                (detail) =>
+                  detail.label === "Result size" ||
+                  detail.label === "Stored by handle",
+              )
+            : []),
+        ]
+      : [
+          ...buildAgentTraceArgsDetails(payload.name, payload.args),
+          ...(resultInfo?.details || []),
+        ],
+  );
+  memoizedTraceDetailIds.set(details, (nextMemoizedTraceDetailId += 1));
+  let summary: string | null = null;
+  if (result?.ok && presentation?.buildTraceSummary) {
+    try {
+      summary =
+        presentation.buildTraceSummary({
+          args: payload.args,
+          content: resultContent,
+        }) || null;
+    } catch {
+      // Keep the regular call summary when display-only formatting fails.
+      summary = null;
+    }
+  }
+  const projection = { result, presentation, resultInfo, details, summary };
+  toolCallProjectionMemo.set(payload, projection);
+  return projection;
+}
+
+function sanitizeMessageDeltaText(
+  payload: Extract<AgentRunEventRecord["payload"], { type: "message_delta" }>,
+): string {
+  const known = sanitizedMessageDeltaMemo.get(payload);
+  if (known !== undefined) return known;
+  const text = sanitizeText(payload.text || "");
+  sanitizedMessageDeltaMemo.set(payload, text);
+  return text;
+}
+
 function appendLegacyAgentTraceEvent(
   ctx: AgentTraceAdapterContext,
   entry: AgentRunEventRecord,
@@ -4438,6 +4603,7 @@ function appendLegacyAgentTraceEvent(
       if (
         !statusText ||
         isGenericAgentStatusText(statusText) ||
+        isAgentPageProgressText(statusText) ||
         statusText === ctx.lastMeaningfulStatus
       ) {
         return true;
@@ -4468,49 +4634,15 @@ function appendLegacyAgentTraceEvent(
     case "tool_call": {
       if (isToolHiddenFromTrace(entry.payload.name)) return true;
       const resultEvent = ctx.toolResultsByCallId.get(entry.payload.callId);
-      const resultInfo = buildToolResultTraceInfo(resultEvent);
-      let presentationDetails: AgentTraceDetail[] = [];
-      if (resultEvent) {
-        try {
-          presentationDetails =
-            resolveAgentToolPresentation(
-              entry.payload.name,
-            )?.buildTraceDetails?.({
-              args: entry.payload.args,
-              content: resultEvent.content,
-            }) ?? [];
-        } catch {
-          presentationDetails = [];
-        }
-      }
-      const details = presentationDetails.length
-        ? presentationDetails
-        : [
-            ...buildAgentTraceArgsDetails(
-              entry.payload.name,
-              entry.payload.args,
-            ),
-            ...(resultInfo?.details || []),
-          ];
-      const presentation = resolveAgentToolPresentation(entry.payload.name);
+      const call = projectToolCall(entry.payload, resultEvent);
       let row = summarizeAgentTraceToolCall(
         entry.payload.name,
         entry.payload.args,
         entry.payload.toolLabel,
         ctx.requestSummary,
-        resultInfo || undefined,
+        call.resultInfo || undefined,
       );
-      if (resultEvent?.ok && presentation?.buildTraceSummary) {
-        try {
-          const summary = presentation.buildTraceSummary({
-            args: entry.payload.args,
-            content: resultEvent.content,
-          });
-          if (summary) row = { ...row, text: summary };
-        } catch {
-          // Keep the regular call summary when display-only formatting fails.
-        }
-      }
+      if (call.summary) row = { ...row, text: call.summary };
       ctx.items.push({
         type: "action",
         row,
@@ -4520,7 +4652,7 @@ function appendLegacyAgentTraceEvent(
           entry.payload.args,
           ctx.userMessage,
         ),
-        details: dedupeAgentTraceDetails(details),
+        details: call.details,
         detailKey: `tool-call:${entry.payload.callId}`,
       });
       ctx.fallbackReasoningStep += 1;
@@ -4549,7 +4681,8 @@ function appendLegacyAgentTraceEvent(
       let row = summarizeAgentTraceToolResult(
         entry.payload.name,
         entry.payload.ok,
-        entry.payload.content,
+        // A result the trace stored by handle is summarized from its preview.
+        toolResultContentForDisplay(entry.payload.content),
         entry.payload.toolLabel,
         entry.payload.effect,
         ctx.requestSummary,
@@ -4604,7 +4737,7 @@ function appendLegacyAgentTraceEvent(
             },
           });
         }
-        const cards = selectToolResultTraceCards(
+        const cards = projectToolResultCards(
           entry.payload,
           resolveAgentToolPresentation(entry.payload.name)?.buildResultCards,
         );
@@ -4634,7 +4767,7 @@ function appendLegacyAgentTraceEvent(
     case "message_delta":
       appendInterleavedInlineText(
         ctx.items,
-        entry.payload.text || "",
+        sanitizeMessageDeltaText(entry.payload),
         ctx.visibleInlineText,
       );
       return true;
@@ -4704,6 +4837,8 @@ function appendCodexAgentTraceEvent(
       return true;
     }
     case "codex_progress": {
+      // Codex's own plan shows in the Task progress Steps block, not here.
+      if (isCodexPlanChecklistEvent(entry.payload)) return true;
       const progressText = readAgentTraceText(entry.payload.text);
       if (progressText) {
         // Agent messages are activity entries. Keep them in arrival order with
@@ -4726,33 +4861,36 @@ function appendSharedAgentTraceEvent(
   ctx: AgentTraceAdapterContext,
   entry: AgentRunEventRecord,
 ): boolean {
-  switch (entry.payload.type) {
-    case "plan_scope_amended":
-      ctx.items.push({
-        type: "action",
-        row: {
-          kind: "plan",
-          icon: "↳",
-          text:
-            `Scope amended${entry.payload.authority === "user" ? "" : " automatically"} (${entry.payload.previousItemCount} to ` +
-            `${entry.payload.newItemCount}; ${entry.payload.authority}): ` +
-            entry.payload.rationale,
+  // An old plan run's scope amendment, as its run recorded it.
+  const amended = readStoredPlanEvent(entry.payload);
+  if (amended?.type === "plan_scope_amended") {
+    ctx.items.push({
+      type: "action",
+      row: {
+        kind: "plan",
+        icon: "↳",
+        text:
+          `Scope amended${amended.authority === "user" ? "" : " automatically"} (${amended.previousItemCount} to ` +
+          `${amended.newItemCount}; ${amended.authority}): ` +
+          amended.rationale,
+      },
+      details: [
+        {
+          label: "Mode",
+          value: amended.mode,
+          kind: "text",
         },
-        details: [
-          {
-            label: "Mode",
-            value: entry.payload.mode,
-            kind: "text",
-          },
-          {
-            label: "Amendment",
-            value: entry.payload.amendmentId,
-            kind: "text",
-          },
-        ],
-        detailKey: `plan-amendment:${entry.payload.amendmentId}`,
-      });
-      return true;
+        {
+          label: "Amendment",
+          value: amended.amendmentId,
+          kind: "text",
+        },
+      ],
+      detailKey: `plan-amendment:${amended.amendmentId}`,
+    });
+    return true;
+  }
+  switch (entry.payload.type) {
     case "material_finalized": {
       const announced = readMaterialAnnouncement(entry.payload);
       if (!announced) return true;
@@ -4866,129 +5004,279 @@ function appendSharedAgentTraceEvent(
  * is not, so a result is read for it whenever it carries one. A run that
  * never resolved any has none, and identities stay as they are.
  */
-function readPaperDisplayLabels(value: unknown): unknown {
-  return isAgentTraceRecord(value) ? value.displayLabels : undefined;
-}
-
 function researchDisplayLabels(
   events: readonly AgentRunEventRecord[],
 ): Map<string, string> | undefined {
   for (let index = events.length - 1; index >= 0; index--) {
-    const event = events[index].payload;
-    const values =
-      event.type === "provider_event" &&
-      event.providerType === "paper_display_labels" &&
-      event.payload?.version === 1
-        ? event.payload.displayLabels
-        : event.type === "tool_result" && event.ok
-          ? readPaperDisplayLabels(event.content)
-          : undefined;
-    if (values && typeof values === "object")
-      return new Map(
-        Object.entries(values).filter(
-          (entry): entry is [string, string] => typeof entry[1] === "string",
-        ),
-      );
+    const labels = readTraceDisplayLabels(events[index].payload);
+    if (labels) return labels;
   }
   return undefined;
 }
 
-type TraceProjection = ReturnType<typeof buildAgentTraceDisplayItemsCanonical>;
-const streamingProjections = new WeakMap<
-  Message,
-  {
-    events: AgentRunEventRecord[];
-    count: number;
-    last: AgentRunEventRecord | undefined;
-    text: string;
-    user: Message | null | undefined;
-    projection: TraceProjection;
-    labels?: Map<string, string>;
-    tail?: Extract<AgentRunEventRecord["payload"], { type: "reasoning" }>;
-  }
->();
+type TraceProjection = {
+  items: AgentTraceDisplayItem[];
+  isInterleaved: boolean;
+  inlineTextReplacesAssistantText: boolean;
+};
 
-/** Reuse the canonical projection; append the active compacted reasoning group. */
+type ReasoningTraceItem = Extract<AgentTraceDisplayItem, { type: "reasoning" }>;
+
+/**
+ * What a live run's projection keeps between refreshes.
+ *
+ * The run's events are folded once each: into the compacted list the
+ * projection walks and into the whole-run facts (plan phase, pending
+ * confirmation, final answer, paper labels) the renderer reads. A refresh
+ * folds only what arrived since the last one.
+ */
+type LiveTraceState = {
+  runId: string | undefined;
+  events: AgentRunEventRecord[];
+  /** The records folded so far, to notice one replaced in place. */
+  folded: AgentRunEventRecord[];
+  compactor: AgentTraceCompactor;
+  scan: AgentTraceEventScan;
+  /** Events arrived since `cached` was projected. */
+  changed: boolean;
+  /** ... and every one of them only lengthened the last reasoning entry. */
+  onlyTailReasoning: boolean;
+  cached?: {
+    projection: TraceProjection;
+    user: Message | null | undefined;
+    hasText: boolean;
+    /**
+     * The answer text's length and hash: the projection reads the text to
+     * hide inline text the answer already shows, so a changed text projects
+     * again even when no event arrived.
+     */
+    textKey: string;
+    providerLabel: Message["modelProviderLabel"];
+    runMode: Message["runMode"];
+    /** The shown item the last compacted entry produced, when reasoning. */
+    tailReasoning?: ReasoningTraceItem;
+  };
+};
+
+/**
+ * One live run per streaming message. A message that stops streaming drops
+ * its state on its next projection, and a message that is discarded takes
+ * its state with it.
+ */
+const liveTraces = new WeakMap<Message, LiveTraceState>();
+
+function createLiveTraceState(
+  events: AgentRunEventRecord[],
+  runId: string | undefined,
+): LiveTraceState {
+  return {
+    runId,
+    events,
+    folded: [],
+    compactor: createAgentTraceCompactor(),
+    scan: createAgentTraceEventScan(),
+    changed: true,
+    onlyTailReasoning: false,
+  };
+}
+
+/** Whether every folded record is still where it was folded from. */
+function foldedRecordsUnchanged(
+  folded: readonly AgentRunEventRecord[],
+  events: readonly AgentRunEventRecord[],
+): boolean {
+  if (events.length < folded.length) return false;
+  for (let index = folded.length - 1; index >= 0; index -= 1) {
+    if (folded[index] !== events[index]) return false;
+  }
+  return true;
+}
+
+/**
+ * Fold the events that arrived since the last refresh.
+ *
+ * An event list that was replaced, shortened, or had a record rewritten in
+ * place cannot be folded forward, so its state starts over from the first
+ * event, once.
+ */
+function advanceLiveTrace(
+  events: AgentRunEventRecord[],
+  message: Message,
+): LiveTraceState {
+  let state = liveTraces.get(message);
+  if (
+    !state ||
+    state.events !== events ||
+    state.runId !== message.agentRunId ||
+    !foldedRecordsUnchanged(state.folded, events)
+  ) {
+    state = createLiveTraceState(events, message.agentRunId);
+    liveTraces.set(message, state);
+    agentTraceProjectionCounters.liveResets += 1;
+  }
+  for (let index = state.folded.length; index < events.length; index += 1) {
+    const entry = events[index];
+    state.folded.push(entry);
+    const change = state.compactor.push(entry);
+    applyAgentTraceEventToScan(state.scan, entry);
+    state.changed = true;
+    if (entry.payload.type !== "reasoning" || change !== "merged_tail")
+      state.onlyTailReasoning = false;
+  }
+  return state;
+}
+
+/**
+ * Whether the run's events are already the stage-annotated log the
+ * projection reads: it reports its own stages, or holds nothing a stage could
+ * be reconstructed from (see `projectStageEvents`).
+ */
+function liveTraceReadsOwnEvents(scan: AgentTraceEventScan): boolean {
+  return scan.hasAgentStage || !scan.hasStageSource;
+}
+
+/**
+ * The whole-run facts the renderer reads, folded once per event for a live
+ * run and in one pass for a finished one.
+ */
+function readAgentTraceEventScan(
+  events: AgentRunEventRecord[],
+  message: Message,
+): AgentTraceEventScan {
+  if (!message.streaming) return scanAgentTraceEvents(events);
+  return advanceLiveTrace(events, message).scan;
+}
+
+/**
+ * The display items for a run.
+ *
+ * A finished run is projected from scratch. A live run folds only the events
+ * that arrived since its last refresh and walks the compacted trace, whose
+ * every tool payload was read once and remembered; a refresh that only
+ * lengthened the last thinking block patches that block alone.
+ */
+/** The answer text's length and FNV-1a hash, as one cache key. */
+function answerTextKey(text: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return `${text.length}:${(hash >>> 0).toString(36)}`;
+}
+
 export function buildAgentTraceDisplayItems(
   events: AgentRunEventRecord[],
   userMessage?: Message | null,
   assistantMessage?: Message | null,
 ): TraceProjection {
-  const cached = assistantMessage && streamingProjections.get(assistantMessage);
-  if (
-    assistantMessage?.streaming &&
+  if (!assistantMessage?.streaming) {
+    if (assistantMessage) liveTraces.delete(assistantMessage);
+    return buildAgentTraceDisplayItemsCanonical(
+      events,
+      userMessage,
+      assistantMessage,
+    );
+  }
+  const state = advanceLiveTrace(events, assistantMessage);
+  const hasText = Boolean(assistantMessage.text?.trim());
+  const textKey = answerTextKey(assistantMessage.text || "");
+  const cached = state.cached;
+  const ownEvents = liveTraceReadsOwnEvents(state.scan);
+  const sameInputs =
     cached &&
-    cached.events === events &&
-    cached.count <= events.length &&
-    events[cached.count - 1] === cached.last &&
-    cached.text === assistantMessage.text &&
-    cached.user === userMessage
+    cached.user === userMessage &&
+    cached.hasText === hasText &&
+    cached.textKey === textKey &&
+    cached.providerLabel === assistantMessage.modelProviderLabel &&
+    cached.runMode === assistantMessage.runMode;
+  if (cached && sameInputs && !state.changed) return cached.projection;
+  if (
+    cached?.tailReasoning &&
+    sameInputs &&
+    ownEvents &&
+    state.onlyTailReasoning
   ) {
-    const added = events.slice(cached.count);
-    if (!added.length) return cached.projection;
-    const tail = cached.tail;
-    const lastItem =
-      cached.projection.items[cached.projection.items.length - 1];
-    if (
-      tail &&
-      lastItem?.type === "reasoning" &&
-      added.every(
-        (entry) =>
-          entry.payload.type === "reasoning" &&
-          getReasoningTraceKey(entry.payload) === getReasoningTraceKey(tail),
-      )
-    ) {
-      for (const entry of added) {
-        const next = entry.payload as typeof tail;
-        tail.summary = appendAgentTraceText(tail.summary, next.summary);
-        tail.details = appendAgentTraceText(tail.details, next.details);
-        tail.stepLabel = next.stepLabel || tail.stepLabel;
-      }
-      if (readAgentTraceText(tail.stepLabel))
-        lastItem.label = readAgentTraceText(tail.stepLabel)!;
-      lastItem.summary =
+    const entries = state.compactor.entries;
+    const tail = entries[entries.length - 1]?.payload;
+    if (tail?.type === "reasoning") {
+      const item = cached.tailReasoning;
+      const stepLabel = readAgentTraceText(tail.stepLabel);
+      if (stepLabel) item.label = stepLabel;
+      const text =
         readAgentTraceText(tail.details) ||
         readAgentTraceText(tail.summary) ||
         undefined;
-      if (cached.labels && lastItem.summary)
-        lastItem.summary = projectPaperReferences(
-          lastItem.summary,
-          cached.labels,
-        );
-      cached.count = events.length;
-      cached.last = events[events.length - 1];
+      item.summary =
+        text && state.scan.labels
+          ? projectPaperReferences(text, state.scan.labels)
+          : text;
+      state.changed = false;
+      state.onlyTailReasoning = true;
+      agentTraceProjectionCounters.liveReasoningPatches += 1;
       return cached.projection;
     }
   }
-  const projection = buildAgentTraceDisplayItemsCanonical(
-    events,
+  agentTraceProjectionCounters.liveWalks += 1;
+  // A live run that neither reports stages nor is free of tool work has its
+  // stages reconstructed from the whole list, which only the canonical
+  // reducer does; its tool payloads are still read once each.
+  const { projection, tailReasoning } = ownEvents
+    ? projectAgentTrace(
+        {
+          compactedEvents: state.compactor.entries,
+          labels: state.scan.labels,
+          planPhase: state.scan.planPhase,
+          finalText: state.scan.finalText,
+        },
+        userMessage,
+        assistantMessage,
+      )
+    : {
+        projection: buildAgentTraceDisplayItemsCanonical(
+          events,
+          userMessage,
+          assistantMessage,
+        ),
+        tailReasoning: undefined,
+      };
+  state.cached = {
+    projection,
+    user: userMessage,
+    hasText,
+    textKey,
+    providerLabel: assistantMessage.modelProviderLabel,
+    runMode: assistantMessage.runMode,
+    tailReasoning,
+  };
+  state.changed = false;
+  state.onlyTailReasoning = true;
+  return projection;
+}
+
+/**
+ * The display items for a run, projected from its events alone. History
+ * replay and every finished run read this; a live run's incremental
+ * projection must equal it after every event.
+ */
+export function buildAgentTraceDisplayItemsCanonical(
+  events: AgentRunEventRecord[],
+  userMessage?: Message | null,
+  assistantMessage?: Message | null,
+): TraceProjection {
+  // A trace recorded before the runtime emitted stage events is reconstructed
+  // once, here, so everything below reads one kind of event log.
+  const compactedEvents = compactAgentTraceEvents(projectStageEvents(events));
+  return projectAgentTrace(
+    {
+      compactedEvents,
+      labels: researchDisplayLabels(events),
+      planPhase: resolveTracePlanPhase(compactedEvents),
+      finalText: getFinalTraceText(compactedEvents),
+    },
     userMessage,
     assistantMessage,
-  );
-  if (assistantMessage?.streaming) {
-    const compacted = compactAgentTraceEvents(events);
-    const tail = compacted[compacted.length - 1]?.payload;
-    const lastItem = projection.items[projection.items.length - 1];
-    const labels = researchDisplayLabels(events);
-    const canAppend =
-      tail?.type === "reasoning" &&
-      lastItem?.type === "reasoning" &&
-      (Boolean(labels) ||
-        lastItem.summary ===
-          (readAgentTraceText(tail.details) ||
-            readAgentTraceText(tail.summary)));
-    streamingProjections.set(assistantMessage, {
-      events,
-      count: events.length,
-      last: events[events.length - 1],
-      text: assistantMessage.text,
-      user: userMessage,
-      projection,
-      tail: canAppend ? { ...tail } : undefined,
-      labels,
-    });
-  } else if (assistantMessage) streamingProjections.delete(assistantMessage);
-  return projection;
+  ).projection;
 }
 
 /**
@@ -5260,22 +5548,27 @@ function projectPaperReferencesOntoTraceItems(
   });
 }
 
-function buildAgentTraceDisplayItemsCanonical(
-  events: AgentRunEventRecord[],
+/**
+ * Walk a compacted, stage-annotated trace into display items.
+ *
+ * The whole-run facts come in with it, read from the run's own events, so a
+ * live run passes the ones it folded and a replay the ones it scanned.
+ */
+function projectAgentTrace(
+  input: {
+    compactedEvents: readonly AgentRunEventRecord[];
+    labels: Map<string, string> | undefined;
+    planPhase: "planning" | "executing" | null;
+    finalText: string;
+  },
   userMessage: Message | null | undefined,
   assistantMessage?: Message | null,
-): {
-  items: AgentTraceDisplayItem[];
-  isInterleaved: boolean;
-  inlineTextReplacesAssistantText: boolean;
-} {
+): { projection: TraceProjection; tailReasoning?: ReasoningTraceItem } {
+  const { compactedEvents, labels, planPhase, finalText } = input;
   const items: AgentTraceDisplayItem[] = [];
   const isCodexTrace = assistantMessage?.modelProviderLabel === "Codex";
   const isAgentTrace = assistantMessage?.runMode === "agent";
   const preserveRolledBackText = isCodexTrace || isAgentTrace;
-  // A trace recorded before the runtime emitted stage events is reconstructed
-  // once, here, so everything below reads one kind of event log.
-  const compactedEvents = compactAgentTraceEvents(projectStageEvents(events));
   const toolResultsByCallId = new Map<
     string,
     Extract<AgentRunEventRecord["payload"], { type: "tool_result" }>
@@ -5287,7 +5580,6 @@ function buildAgentTraceDisplayItemsCanonical(
   }
   const requestChips = buildAgentTraceRequestChips(userMessage);
   const requestSummary = buildAgentTraceRequestSummary(userMessage);
-  const planPhase = resolveTracePlanPhase(compactedEvents);
   const adapterContext: AgentTraceAdapterContext = {
     items,
     isCodexTrace,
@@ -5342,6 +5634,8 @@ function buildAgentTraceDisplayItemsCanonical(
   });
 
   const stageGrouper = createTraceStageGrouper(items);
+  /** The reasoning item the last entry opened, for a live run to extend. */
+  let tailReasoningKey: string | undefined;
   for (let index = 0; index < compactedEvents.length; index += 1) {
     const entry = compactedEvents[index];
     if (entry.payload.type === "agent_stage") {
@@ -5353,6 +5647,14 @@ function buildAgentTraceDisplayItemsCanonical(
       appendCodexAgentTraceEvent(adapterContext, entry) ||
       appendLegacyAgentTraceEvent(adapterContext, entry) ||
       appendSharedAgentTraceEvent(adapterContext, entry);
+    if (index === compactedEvents.length - 1) {
+      const opened = items[itemCountBeforeEvent];
+      tailReasoningKey =
+        items.length === itemCountBeforeEvent + 1 &&
+        opened?.type === "reasoning"
+          ? opened.key
+          : undefined;
+    }
     if (
       handled &&
       !NON_INTERLEAVING_TRACE_EVENT_TYPES.has(entry.payload.type) &&
@@ -5378,7 +5680,6 @@ function buildAgentTraceDisplayItemsCanonical(
   );
   if (actionSummary) items.push({ type: "card_list", cards: [actionSummary] });
 
-  const finalText = getFinalTraceText(compactedEvents);
   const isInterleaved = items.some(
     (item) =>
       item.type === "inline_text" &&
@@ -5389,33 +5690,56 @@ function buildAgentTraceDisplayItemsCanonical(
       item.type === "inline_text" &&
       !adapterContext.intermediateInlineTextItems.has(item),
   );
-  const hasCanonicalAssistantText = Boolean(assistantMessage?.text?.trim());
-  const displayItems = isInterleaved
-    ? finalText
-      ? items.filter(
-          (item) => !shouldSuppressInlineFinalAnswer(item, finalText),
-        )
-      : hasCanonicalAssistantText
-        ? items.filter(
-            (item) =>
-              item.type !== "inline_text" ||
-              adapterContext.intermediateInlineTextItems.has(item),
-          )
-        : items
-    : replaceInlineTextWithDraftingAction(items);
+  const canonicalAssistantText = assistantMessage?.text || "";
+  const hasCanonicalAssistantText = Boolean(canonicalAssistantText.trim());
   const inlineTextReplacesAssistantText =
     isInterleaved &&
     !finalText &&
     (!hasTerminalInlineText || !hasCanonicalAssistantText);
+  const displayItems = isInterleaved
+    ? finalText
+      ? items.filter(
+          (item) =>
+            !shouldSuppressInlineFinalAnswer(
+              item,
+              finalText,
+              item.type === "inline_text" &&
+                adapterContext.intermediateInlineTextItems.has(item),
+            ),
+        )
+      : hasCanonicalAssistantText
+        ? // While the answer streams, the bubble already shows text kept
+          // from before a tool call; the trace does not repeat it.
+          items.filter(
+            (item) =>
+              item.type !== "inline_text" ||
+              (adapterContext.intermediateInlineTextItems.has(item) &&
+                (inlineTextReplacesAssistantText ||
+                  !shouldSuppressInlineFinalAnswer(
+                    item,
+                    canonicalAssistantText,
+                    true,
+                  ))),
+          )
+        : items
+    : replaceInlineTextWithDraftingAction(items);
 
-  const labels = researchDisplayLabels(events);
   const presentedItems = labels
     ? projectPaperReferencesOntoTraceItems(displayItems, labels)
     : displayItems;
+  const lastShown = presentedItems[presentedItems.length - 1];
   return {
-    items: presentedItems,
-    isInterleaved,
-    inlineTextReplacesAssistantText,
+    projection: {
+      items: presentedItems,
+      isInterleaved,
+      inlineTextReplacesAssistantText,
+    },
+    tailReasoning:
+      tailReasoningKey !== undefined &&
+      lastShown?.type === "reasoning" &&
+      lastShown.key === tailReasoningKey
+        ? lastShown
+        : undefined,
   };
 }
 
@@ -5640,392 +5964,203 @@ function disposePlanCard(node: HTMLElement): void {
   node.remove();
 }
 
-function dispatchPlanEvent(
-  root: HTMLElement,
-  name: string,
-  detail: Record<string, unknown>,
-): void {
-  const EventCtor = root.ownerDocument.defaultView?.CustomEvent;
-  if (!EventCtor) return;
-  root.dispatchEvent(new EventCtor(name, { bubbles: true, detail }));
+/**
+ * A run's plan as that run's own events recorded it: the proposal it drafted
+ * and, for a run that executed one, the execution as it last stood. Plan mode
+ * is retired, so this only ever describes an old conversation, and the card
+ * built from it is read-only.
+ */
+type PlanProjection = {
+  artifact?: StoredPlanArtifact;
+  ledger?: StoredPlanExecution;
+};
+
+function readPlanProjection(scan: AgentTraceEventScan): PlanProjection | null {
+  const artifact = scan.planArtifact;
+  const ledger = scan.planLedger;
+  return artifact || ledger ? { artifact, ledger } : null;
 }
 
-function getPlanProjection(
-  events: AgentRunEventRecord[],
-):
-  | { artifact: PlanArtifact; ledger?: undefined }
-  | { artifact?: undefined; ledger: PlanExecutionLedger }
-  | null {
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const event = events[index].payload;
-    if (event.type === "plan_execution_updated") {
-      return { ledger: event.ledger };
+/** A planning run's card is its answer; an execution run keeps its own. */
+function isPlanningAnswer(projection: PlanProjection | null): boolean {
+  return Boolean(projection?.artifact && !projection.ledger);
+}
+
+/**
+ * How the plan ended, as its run last recorded it. A plan that stopped
+ * mid-way never resumes now, so every live state reads as not finished.
+ */
+function planEnd(projection: PlanProjection): {
+  status: string;
+  label: string;
+} {
+  if (projection.ledger) {
+    switch (projection.ledger.status) {
+      case "completed":
+        return { status: "completed", label: "Completed" };
+      case "completed_with_exceptions":
+        return { status: "partial", label: "Completed with exceptions" };
+      case "blocked":
+        return { status: "blocked", label: "Blocked" };
+      case "failed":
+        return { status: "failed", label: "Failed" };
+      case "cancelled":
+        return { status: "cancelled", label: "Cancelled" };
+      case "superseded":
+        return { status: "superseded", label: "Superseded" };
+      case "interrupted":
+        return { status: "interrupted", label: "Interrupted" };
     }
-    if (event.type === "plan_ready" || event.type === "plan_updated") {
-      return { artifact: event.artifact };
-    }
+    return { status: "not_finished", label: "Not finished" };
   }
-  return null;
-}
-
-function getPlanActionContract(
-  events: AgentRunEventRecord[],
-): AgentActionContract | undefined {
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const event = events[index].payload;
-    if (
-      event.type === "provider_event" &&
-      event.providerType === "agent_action_contract" &&
-      event.payload?.contract
-    ) {
-      return event.payload.contract as AgentActionContract;
-    }
+  switch (projection.artifact?.status) {
+    case "approved":
+      return { status: "approved", label: "Approved" };
+    case "superseded":
+      return { status: "superseded", label: "Superseded" };
+    case "cancelled":
+      return { status: "cancelled", label: "Cancelled" };
+    case "awaiting_approval":
+      return { status: "proposed", label: "Proposed" };
   }
-  return undefined;
+  return { status: "not_finished", label: "Not finished" };
 }
 
+/** The plan's text and steps as the model proposed them. */
+function renderPlanProposal(
+  doc: Document,
+  events: AgentRunEventRecord[],
+  artifact: StoredPlanArtifact,
+): HTMLElement {
+  const markdown = doc.createElement("div");
+  markdown.className = "llm-plan-markdown";
+  const rawSource =
+    artifact.nativePlanning?.proposal?.markdown ||
+    [
+      artifact.explanation?.trim() || "",
+      ...(artifact.steps || []).map(
+        (step, index) => `${index + 1}. ${step.content}`,
+      ),
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+  const labels = researchDisplayLabels(events);
+  const source = labels ? projectPaperReferences(rawSource, labels) : rawSource;
+  try {
+    renderRenderedMarkdownInto(markdown, source, doc);
+  } catch {
+    markdown.textContent = source;
+  }
+  if (artifact.nativePlanning?.proposal && artifact.contract) {
+    const summary = doc.createElement("p");
+    summary.className = "llm-plan-contract-summary";
+    const investigation = artifact.contract.investigation;
+    summary.textContent = [
+      investigation?.scopeSnapshot
+        ? `Research scope: ${investigation.scopeSnapshot.itemCount} papers`
+        : "Scope: the approved request",
+      `Deliverable: ${artifact.contract.deliverable.kind}`,
+      artifact.contract.effects?.libraryMutation
+        ? `Library changes: ${artifact.contract.effects.libraryMutation.approval === "after_research" ? "review exact targets after research" : "within the approved scope"}`
+        : "Library changes: none",
+    ].join(" · ");
+    markdown.appendChild(summary);
+  }
+  return markdown;
+}
+
+/**
+ * An executed plan's steps as they stood when its run last reported them. A
+ * step still marked in progress was cut off with its run, so it shows as
+ * interrupted rather than as a spinner that never stops.
+ */
+function renderEndedPlanTasks(
+  doc: Document,
+  ledger: StoredPlanExecution,
+): HTMLElement {
+  const list = doc.createElement("div");
+  list.className = "llm-plan-task-list";
+  list.setAttribute("role", "list");
+  (ledger.tasks || []).forEach((task, index) => {
+    const status = task.status === "in_progress" ? "interrupted" : task.status;
+    const row = doc.createElement("div");
+    row.dataset.taskId = task.taskId;
+    row.className = `llm-plan-task llm-plan-task-${status}`;
+    row.setAttribute("role", "listitem");
+    const line = doc.createElement("div");
+    line.className = "llm-plan-task-line";
+    const badge = doc.createElement("span");
+    badge.className = `llm-plan-task-badge llm-plan-task-badge-${status}`;
+    badge.setAttribute("aria-hidden", "true");
+    badge.textContent = PLAN_STATUS_SYMBOLS[status] || `${index + 1}`;
+    const content = doc.createElement("span");
+    content.className = "llm-plan-task-content";
+    const label = doc.createElement("span");
+    label.className = "llm-plan-task-label";
+    label.textContent = task.content || task.activeForm || "";
+    content.appendChild(label);
+    line.append(badge, content);
+    row.appendChild(line);
+    list.appendChild(row);
+  });
+  return list;
+}
+
+/** An old plan, read-only: its steps and how it ended, with no control. */
 function renderPlanContainer(params: {
   doc: Document;
   events: AgentRunEventRecord[];
-  projection:
-    | { artifact: PlanArtifact; ledger?: undefined }
-    | { artifact?: undefined; ledger: PlanExecutionLedger };
+  projection: PlanProjection;
 }): HTMLElement {
-  if (params.projection.ledger) {
-    const ledger = params.projection.ledger;
-    const root = params.doc.createElement("section");
-    root.className = "llm-plan-recovery-card";
-    const text = params.doc.createElement("p");
-    text.textContent = "Plan execution was interrupted.";
-    const resume = params.doc.createElement("button");
-    resume.type = "button";
-    resume.className = "llm-plan-action llm-plan-approve";
-    const label = params.doc.createElement("span");
-    label.className = "llm-plan-action-label-full";
-    label.textContent = "Resume execution";
-    resume.appendChild(label);
-    let disposed = false;
-    const onResume = async () => {
-      resume.disabled = true;
-      try {
-        const current = await loadPlanExecutionLedger(ledger.executionId);
-        if (disposed || !root.isConnected) return;
-        if (!current || current.status !== "interrupted") {
-          text.textContent = "This execution is no longer available to resume.";
-          resume.remove();
-          return;
-        }
-        stageApprovedPlanExecution(current);
-        dispatchPlanEvent(root, PLAN_APPROVED_EVENT, {
-          planId: current.planId,
-          revision: current.revision,
-          executionId: current.executionId,
-          recovery: true,
-        });
-      } catch (error) {
-        if (!disposed)
-          text.textContent =
-            error instanceof Error ? error.message : String(error);
-      } finally {
-        if (!disposed) resume.disabled = false;
-      }
-    };
-    resume.addEventListener("click", onResume);
-    cardDisposers.set(root, () => {
-      disposed = true;
-      resume.removeEventListener("click", onResume);
-    });
-    root.append(text, resume);
-    return root;
-  }
-  const root = params.doc.createElement("section");
+  const { doc, projection } = params;
+  const { artifact, ledger } = projection;
+  const root = doc.createElement("section");
   root.className = "llm-plan-container";
-  const actionContract = getPlanActionContract(params.events);
+  const revision = ledger?.revision || artifact?.revision || 1;
+  root.dataset.llmPlanId = ledger?.planId || artifact?.planId || "";
+  root.dataset.llmPlanRevision = `${revision}`;
+  root.setAttribute("aria-label", "Plan");
 
-  const artifactStatusLabel = (status: PlanArtifact["status"]): string => {
-    switch (status) {
-      case "drafting":
-        return "Planning";
-      case "awaiting_approval":
-        return "Ready to review";
-      case "approved":
-        return "Approved";
-      case "superseded":
-        return "Superseded";
-      case "cancelled":
-        return "Cancelled";
-    }
-  };
+  const header = doc.createElement("div");
+  header.className = "llm-plan-header";
+  const heading = doc.createElement("div");
+  heading.className = "llm-plan-heading";
+  const title = doc.createElement("strong");
+  title.className = "llm-plan-title";
+  title.textContent = "Plan";
+  heading.appendChild(title);
+  if (revision > 1) {
+    const version = doc.createElement("span");
+    version.className = "llm-plan-version";
+    version.textContent = `Revision ${revision}`;
+    heading.appendChild(version);
+  }
+  const end = planEnd(projection);
+  const status = doc.createElement("span");
+  status.className = "llm-plan-status";
+  status.textContent = end.label;
+  status.dataset.status = end.status;
+  header.append(heading, status);
+  root.appendChild(header);
 
-  const renderArtifactMarkdown = (artifact: PlanArtifact): HTMLElement => {
-    const markdown = params.doc.createElement("div");
-    markdown.className = "llm-plan-markdown";
-    const rawSource =
-      artifact.nativePlanning?.proposal?.markdown ||
-      [
-        artifact.explanation?.trim() || "",
-        ...artifact.steps.map((step, index) => `${index + 1}. ${step.content}`),
-      ]
-        .filter(Boolean)
-        .join("\n\n");
-    const labels = researchDisplayLabels(params.events);
-    const source = labels
-      ? projectPaperReferences(rawSource, labels)
-      : rawSource;
-    try {
-      renderRenderedMarkdownInto(markdown, source, params.doc);
-    } catch {
-      markdown.textContent = source;
-    }
-    if (artifact.nativePlanning?.proposal && artifact.contract) {
-      const summary = params.doc.createElement("p");
-      summary.className = "llm-plan-contract-summary";
-      const investigation = artifact.contract.investigation;
-      summary.textContent = [
-        investigation?.scopeSnapshot
-          ? `Research scope: ${investigation.scopeSnapshot.itemCount} papers`
-          : "Scope: the approved request",
-        `Deliverable: ${artifact.contract.deliverable.kind}`,
-        artifact.contract.effects?.libraryMutation
-          ? `Library changes: ${artifact.contract.effects.libraryMutation.approval === "after_research" ? "review exact targets after research" : "within the approved scope"}`
-          : "Library changes: none",
-      ].join(" · ");
-      markdown.appendChild(summary);
-    }
-    return markdown;
-  };
-
-  let disposed = false;
-  let lastArtifact = params.projection.artifact;
-  let paintedSignature = "";
-  cardDisposers.set(root, () => {
-    disposed = true;
-  });
-  const paint = (projection: { artifact: PlanArtifact }) => {
-    if (disposed || projection.artifact.updatedAt < lastArtifact.updatedAt)
-      return;
-    const signature = JSON.stringify([
-      projection.artifact.planId,
-      projection.artifact.revision,
-      projection.artifact.digest,
-      projection.artifact.status,
-      projection.artifact.updatedAt,
-    ]);
-    if (signature === paintedSignature) return;
-    paintedSignature = signature;
-    lastArtifact = projection.artifact;
-    root.replaceChildren();
-    const artifact = projection.artifact;
-    const planId = artifact.planId;
-    const revision = artifact.revision;
-    root.dataset.llmPlanId = planId;
-    root.dataset.llmPlanRevision = `${revision}`;
-    root.setAttribute("aria-label", "Plan");
-
-    const header = params.doc.createElement("div");
-    header.className = "llm-plan-header";
-    const heading = params.doc.createElement("div");
-    heading.className = "llm-plan-heading";
-    const title = params.doc.createElement("strong");
-    title.className = "llm-plan-title";
-    title.textContent = "Plan";
-    heading.appendChild(title);
-    if (revision > 1) {
-      const version = params.doc.createElement("span");
-      version.className = "llm-plan-version";
-      version.textContent = `Revision ${revision}`;
-      heading.appendChild(version);
-    }
-    const status = params.doc.createElement("span");
-    status.className = "llm-plan-status";
-    status.textContent = artifactStatusLabel(artifact.status);
-    status.dataset.status = artifact.status;
-    header.append(heading, status);
-    root.appendChild(header);
-
-    if (artifact) {
-      root.appendChild(renderArtifactMarkdown(artifact));
-      const snapshot = artifact.contract?.investigation?.scopeSnapshot;
-      if (snapshot) {
-        const scope = params.doc.createElement("div");
-        scope.className = "llm-plan-scope-snapshot";
-        const createdAt = new Date(snapshot.createdAt).toLocaleString();
-        const shortDigest =
-          snapshot.digest.length > 24
-            ? `${snapshot.digest.slice(0, 16)}…${snapshot.digest.slice(-8)}`
-            : snapshot.digest;
-        scope.textContent = `Frozen scope · ${snapshot.itemCount.toLocaleString()} items · ${createdAt} · policy v${snapshot.policyVersion} · ${shortDigest}`;
-        scope.title = `Scope snapshot ${snapshot.snapshotId}\nDigest: ${snapshot.digest}`;
-        root.appendChild(scope);
-      }
-    }
-
-    const live = params.doc.createElement("div");
-    live.className = "llm-plan-live-region";
-    live.setAttribute("aria-live", "polite");
-    live.textContent = status.textContent || "";
-    root.appendChild(live);
-
-    if (projection.artifact?.status === "awaiting_approval") {
-      const approvalHint = params.doc.createElement("p");
-      approvalHint.className = "llm-plan-approval-hint";
-      approvalHint.textContent =
-        "Approve to start these steps. During execution, Safe reviews eligible scope amendments, Auto handles in-goal amendments, and YOLO may also approve successor revisions. Hard safety boundaries remain enforced.";
-      root.appendChild(approvalHint);
-      const actions = params.doc.createElement("div");
-      actions.className = "llm-plan-actions llm-plan-review-actions";
-      const setReviewActionLabel = (
-        button: HTMLButtonElement,
-        fullLabel: string,
-        compactLabel: string,
-      ) => {
-        button.setAttribute("aria-label", fullLabel);
-        const full = params.doc.createElement("span");
-        full.className = "llm-plan-action-label-full";
-        full.textContent = fullLabel;
-        const compact = params.doc.createElement("span");
-        compact.className = "llm-plan-action-label-compact";
-        compact.textContent = compactLabel;
-        button.replaceChildren(full, compact);
-      };
-      const approve = params.doc.createElement("button");
-      approve.type = "button";
-      approve.className = "llm-plan-action llm-plan-approve";
-      setReviewActionLabel(approve, "Approve plan", "Approve");
-      const revise = params.doc.createElement("button");
-      revise.type = "button";
-      revise.className = "llm-plan-action llm-plan-revise";
-      setReviewActionLabel(revise, "Request changes", "Revise");
-      const cancel = params.doc.createElement("button");
-      cancel.type = "button";
-      cancel.className = "llm-plan-action llm-plan-cancel";
-      setReviewActionLabel(cancel, "Cancel", "Cancel");
-      actions.append(approve, revise, cancel);
-      root.appendChild(actions);
-
-      const revisionBox = params.doc.createElement("div");
-      revisionBox.className = "llm-plan-revision-box";
-      revisionBox.style.display = "none";
-      const revisionInput = params.doc.createElement("textarea");
-      revisionInput.className = "llm-plan-revision-input";
-      revisionInput.placeholder = "What should change in this plan?";
-      const sendRevision = params.doc.createElement("button");
-      sendRevision.type = "button";
-      sendRevision.className = "llm-plan-action llm-plan-approve";
-      sendRevision.textContent = "Send revision";
-      revisionBox.append(revisionInput, sendRevision);
-      root.appendChild(revisionBox);
-
-      const reviewArtifact = projection.artifact;
-      approve.addEventListener("click", () => {
-        approve.disabled = true;
-        revise.disabled = true;
-        cancel.disabled = true;
-        approve.textContent = "Starting…";
-        approve.setAttribute("aria-label", "Starting plan");
-        void planExecutionCoordinator
-          .approve({
-            planId: reviewArtifact.planId,
-            revision: reviewArtifact.revision,
-            expectedDigest: reviewArtifact.digest,
-            conversationGeneration: getConversationWriteGeneration(
-              reviewArtifact.conversationKey,
-            ),
-            actionContract,
-          })
-          .then(async (ledger) => {
-            stageApprovedPlanExecution(ledger);
-            const approvedArtifact = await loadPlanArtifact(
-              reviewArtifact.planId,
-              reviewArtifact.revision,
-            );
-            paint({
-              artifact:
-                approvedArtifact ||
-                ({
-                  ...reviewArtifact,
-                  status: "approved",
-                  approvedAt: Date.now(),
-                  updatedAt: Date.now(),
-                } as PlanArtifact),
-            });
-            dispatchPlanEvent(root, PLAN_APPROVED_EVENT, {
-              planId: ledger.planId,
-              revision: ledger.revision,
-              executionId: ledger.executionId,
-            });
-          })
-          .catch((error) => {
-            approve.disabled = false;
-            revise.disabled = false;
-            cancel.disabled = false;
-            setReviewActionLabel(approve, "Approve plan", "Approve");
-            const errorMessage = params.doc.createElement("p");
-            errorMessage.className = "llm-plan-error";
-            errorMessage.textContent =
-              error instanceof Error ? error.message : String(error);
-            root.appendChild(errorMessage);
-          });
-      });
-      revise.addEventListener("click", () => {
-        revisionBox.style.display =
-          revisionBox.style.display === "none" ? "flex" : "none";
-        if (revisionBox.style.display !== "none") revisionInput.focus();
-      });
-      sendRevision.addEventListener("click", () => {
-        const comment = revisionInput.value.trim();
-        if (!comment) return;
-        dispatchPlanEvent(root, PLAN_REVISE_EVENT, {
-          planId: reviewArtifact.planId,
-          revision: reviewArtifact.revision,
-          provider: reviewArtifact.provider,
-          comment,
-        });
-      });
-      cancel.addEventListener("click", () => {
-        void (async () => {
-          const confirmed = await showStandaloneConfirmationDialog(params.doc, {
-            title: "Cancel this plan?",
-            message: "The cancelled plan will remain in conversation history.",
-            confirmLabel: "Cancel plan",
-            cancelLabel: "Keep plan",
-            destructive: true,
-          });
-          if (!confirmed) return;
-          const artifact = await planExecutionCoordinator.cancelArtifact({
-            planId: reviewArtifact.planId,
-            revision: reviewArtifact.revision,
-          });
-          if (artifact) paint({ artifact });
-          dispatchPlanEvent(root, PLAN_CANCEL_EVENT, {
-            planId: reviewArtifact.planId,
-            revision: reviewArtifact.revision,
-          });
-        })();
-      });
-    }
-  };
-
-  paint(params.projection);
-  const artifact = params.projection.artifact;
-  if (artifact) {
-    void loadPlanArtifact(artifact.planId, artifact.revision)
-      .then((stored) => {
-        if (disposed || !root.isConnected) return;
-        if (stored) paint({ artifact: stored });
-      })
-      .catch((error) => appLogger.warn("LLM: Failed to hydrate plan:", error));
+  if (ledger?.tasks?.length)
+    root.appendChild(renderEndedPlanTasks(doc, ledger));
+  else if (artifact)
+    root.appendChild(renderPlanProposal(doc, params.events, artifact));
+  const snapshot = artifact?.contract?.investigation?.scopeSnapshot;
+  if (snapshot) {
+    const scope = doc.createElement("div");
+    scope.className = "llm-plan-scope-snapshot";
+    const createdAt = new Date(snapshot.createdAt).toLocaleString();
+    const shortDigest =
+      snapshot.digest.length > 24
+        ? `${snapshot.digest.slice(0, 16)}…${snapshot.digest.slice(-8)}`
+        : snapshot.digest;
+    scope.textContent = `Frozen scope · ${snapshot.itemCount.toLocaleString()} items · ${createdAt} · policy v${snapshot.policyVersion} · ${shortDigest}`;
+    scope.title = `Scope snapshot ${snapshot.snapshotId}\nDigest: ${snapshot.digest}`;
+    root.appendChild(scope);
   }
   return root;
-}
-
-function getPlanDocumentId(events: AgentRunEventRecord[]): string | null {
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const event = events[index].payload;
-    if (event.type === "material_finalized")
-      return event.materialRef.documentId;
-  }
-  return null;
 }
 
 function createDocumentActionButton(params: {
@@ -6184,11 +6319,96 @@ async function pickMarkdownExportPath(
     : picker.file?.path || null;
 }
 
+/** The visible markdown of documents a card painted, by document id. */
+const documentMarkdownById = new Map<string, string>();
+const DOCUMENT_MARKDOWN_CACHE_LIMIT = 64;
+
+function rememberDocumentMarkdown(document: PlanDocument): void {
+  documentMarkdownById.delete(document.documentId);
+  documentMarkdownById.set(document.documentId, document.visibleMarkdown);
+  if (documentMarkdownById.size > DOCUMENT_MARKDOWN_CACHE_LIMIT) {
+    const oldest = documentMarkdownById.keys().next().value;
+    if (oldest !== undefined) documentMarkdownById.delete(oldest);
+  }
+}
+
+/**
+ * A document's visible markdown, when known without loading it: from a card
+ * that painted it, else from the submit_document result in the run's events
+ * (a stored result too big for the trace keeps only a preview, which does
+ * not count). Undefined until the card loads it.
+ */
+function knownDocumentMarkdown(
+  documentId: string,
+  events: readonly AgentRunEventRecord[],
+): string | undefined {
+  const known = documentMarkdownById.get(documentId);
+  if (known !== undefined) return known;
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const payload = events[index].payload;
+    if (payload.type !== "tool_result" || !payload.ok) continue;
+    const content = payload.content as
+      | { documentId?: unknown; visibleMarkdown?: unknown }
+      | null
+      | undefined;
+    if (
+      content &&
+      typeof content === "object" &&
+      !isTruncatedToolResultContent(content) &&
+      content.documentId === documentId &&
+      typeof content.visibleMarkdown === "string"
+    )
+      return content.visibleMarkdown;
+  }
+  return undefined;
+}
+
+/**
+ * Shows the text a message carries before its document (text the model
+ * wrote before calling the tool) directly above the document card. The
+ * answer bubble below stays hidden, since it would repeat the document; the
+ * card's Copy, Export and Save Note deliver the document alone.
+ */
+function syncDocumentLead(
+  doc: Document,
+  documentView: NonNullable<TraceView["document"]>,
+  documentMarkdown: string,
+): void {
+  const text = documentMessageLead(
+    documentView.message.text || "",
+    documentMarkdown,
+  );
+  if (!text) {
+    documentView.lead?.node.remove();
+    documentView.lead = undefined;
+    return;
+  }
+  const card = documentView.node;
+  if (documentView.lead?.text !== text) {
+    documentView.lead?.node.remove();
+    const node = doc.createElement("div");
+    node.className = "llm-agent-inline-text llm-plan-document-lead";
+    const markdown = buildAgentTraceMarkdownForRender(
+      text,
+      documentView.message,
+    );
+    try {
+      renderRenderedMarkdownInto(node, markdown, doc);
+    } catch {
+      node.textContent = markdown;
+    }
+    documentView.lead = { text, node };
+  }
+  const lead = documentView.lead!.node;
+  if (card.parentElement && lead.nextSibling !== card)
+    card.parentElement.insertBefore(lead, card);
+}
+
 function renderPlanDocumentCard(params: {
   doc: Document;
   documentId: string;
   citationContext?: import("../assistantRichText").AssistantCitationContext;
-  onReady?: () => void;
+  onReady?: (document: PlanDocument) => void;
 }): HTMLElement {
   const root = params.doc.createElement("section");
   root.className = "llm-plan-container llm-plan-document-card";
@@ -6303,7 +6523,7 @@ function renderPlanDocumentCard(params: {
     if (figures) root.appendChild(figures);
     if (coverage) root.appendChild(coverage);
     unsubscribe();
-    params.onReady?.();
+    params.onReady?.(document);
   };
 
   const reload = () => {
@@ -6336,7 +6556,12 @@ function renderPlanDocumentCard(params: {
   return root;
 }
 
-type TraceItemView = { signature: string; node: HTMLElement };
+type TraceItemView = {
+  signature: string;
+  node: HTMLElement;
+  /** A thinking block's text node host, found once when it is built. */
+  reasoningText?: HTMLElement | null;
+};
 type TraceView = {
   activityClock?: { startedAt: number; paint: () => void; stop: () => void };
   discovery?: { key: string; node: HTMLElement };
@@ -6351,8 +6576,9 @@ type TraceView = {
     message: Message;
     node: HTMLElement;
     caption: HTMLElement;
+    /** Text the message carries before the document, shown above the card. */
+    lead?: { text: string; node: HTMLElement };
   };
-  allowPlanRecovery?: boolean;
   streaming?: boolean;
   eventCount?: number;
   lastEvent?: AgentRunEventRecord;
@@ -6372,17 +6598,41 @@ export function disposeAgentTrace(root: HTMLElement): void {
   traceViews.delete(root);
 }
 
+/**
+ * The text each thinking block last committed to its DOM, so a refresh never
+ * reads a growing block back out of the document to diff it.
+ */
+const committedReasoningText = new WeakMap<HTMLElement, string>();
+
 function updateReasoningText(target: HTMLElement, next: string): void {
-  const text = target.firstChild;
-  const previous = target.textContent || "";
+  const previous =
+    committedReasoningText.get(target) ?? target.textContent ?? "";
   if (previous === next) return;
+  const text = target.firstChild;
   if (
     text?.nodeType === 3 &&
     target.childNodes.length === 1 &&
+    next.length > previous.length &&
     next.startsWith(previous)
   ) {
     (text as Text).appendData(next.slice(previous.length));
   } else target.textContent = next;
+  committedReasoningText.set(target, next);
+}
+
+/**
+ * A row's signature: the item itself, except where the projection shares a
+ * remembered value. A shared details array stands in by identity, so a call
+ * row holding a megabyte result preview is not reserialized every refresh.
+ */
+function traceItemSignature(item: AgentTraceDisplayItem): string {
+  return JSON.stringify(item, (key, value) => {
+    if (key === "details" && Array.isArray(value)) {
+      const id = memoizedTraceDetailIds.get(value);
+      if (id !== undefined) return `#details:${id}`;
+    }
+    return value;
+  });
 }
 
 export function renderAgentTrace({
@@ -6394,7 +6644,6 @@ export function renderAgentTrace({
   onTraceMissing,
   onInterleavedText,
   previous,
-  allowPlanRecovery = false,
   actionCardNavigation,
   actionSummaryHost,
 }: RenderAgentTraceParams): HTMLElement | null {
@@ -6440,7 +6689,6 @@ export function renderAgentTrace({
   view.quoteCitations = message.quoteCitations;
   view.quoteOverride = message.quoteDisplayOverride;
   const textOnly =
-    view.allowPlanRecovery === allowPlanRecovery &&
     view.streaming === message.streaming &&
     message.streaming !== false &&
     !formattingChanged &&
@@ -6450,7 +6698,6 @@ export function renderAgentTrace({
         entry.payload.type === "reasoning" ||
         entry.payload.type === "message_delta",
     );
-  view.allowPlanRecovery = allowPlanRecovery;
   view.streaming = message.streaming;
   view.eventCount = events.length;
   view.lastEvent = events[events.length - 1];
@@ -6473,7 +6720,7 @@ export function renderAgentTrace({
       list,
       message,
       userMessage,
-      events,
+      scan: createAgentTraceEventScan(),
       // Loading a saved trace must not override the reader's disclosure state.
       // A live run already opens by default through message.streaming.
     });
@@ -6481,11 +6728,12 @@ export function renderAgentTrace({
   }
   const { items: processItems, inlineTextReplacesAssistantText } =
     buildAgentTraceDisplayItems(events, userMessage, message);
-  const tracePlanPhase = resolveTracePlanPhase(events);
+  const scan = readAgentTraceEventScan(events, message);
+  const tracePlanPhase = scan.planPhase;
   if (inlineTextReplacesAssistantText) {
     onInterleavedText?.();
   }
-  const pending = getPendingConfirmation(events);
+  const pending = readPendingConfirmation(scan);
   if (!textOnly) {
     wrap.className = "llm-agent-activity";
     delete wrap.dataset.llmAssistantTurnReplacement;
@@ -6511,9 +6759,7 @@ export function renderAgentTrace({
     view.items.clear();
     return wrap;
   }
-  const hasFinalResponse = events.some(
-    (entry) => entry.payload.type === "final",
-  );
+  const hasFinalResponse = scan.hasFinal;
   const nextViews = new Map<string, TraceItemView>();
   // Stage groups nest their rows, so placement walks one container at a time
   // and recurses into a stage's body with the same retained-view cache.
@@ -6525,10 +6771,14 @@ export function renderAgentTrace({
     let cursor: ChildNode | null = container.firstChild;
     let currentKey = "";
     let currentSignature = "";
-    const place = (node: HTMLElement) => {
+    const place = (node: HTMLElement, reasoningText?: HTMLElement | null) => {
       if (node !== cursor) container.insertBefore(node, cursor);
       cursor = node.nextSibling;
-      nextViews.set(currentKey, { signature: currentSignature, node });
+      nextViews.set(currentKey, {
+        signature: currentSignature,
+        node,
+        ...(reasoningText ? { reasoningText } : {}),
+      });
     };
     for (const [itemIndex, itemEntry] of itemsToRender.entries()) {
       currentKey =
@@ -6564,14 +6814,34 @@ export function renderAgentTrace({
           renderTraceItemsInto(body, itemEntry.children, `${currentKey}/`);
         continue;
       }
-      currentSignature = JSON.stringify(itemEntry);
+      if (itemEntry.type === "reasoning") {
+        // A thinking block only ever grows while it streams: its text is
+        // appended in place rather than reserialized into a signature.
+        currentSignature = `reasoning:${itemEntry.key}`;
+        const old = view.items.get(currentKey);
+        const target = old?.reasoningText;
+        if (old && target) {
+          updateReasoningText(
+            target,
+            itemEntry.summary || itemEntry.details || "",
+          );
+          const label = old.node.querySelector("summary");
+          if (label && label.textContent !== itemEntry.label)
+            label.textContent = itemEntry.label;
+          place(old.node, target);
+          continue;
+        }
+      } else currentSignature = traceItemSignature(itemEntry);
       if (
         itemEntry.type === "inline_text" ||
         (itemEntry.type === "message" && itemEntry.markdown)
       )
         currentSignature += `:${view.formattingVersion || 0}`;
       const old = view.items.get(currentKey);
-      if (old?.signature === currentSignature) {
+      if (
+        old?.signature === currentSignature &&
+        itemEntry.type !== "reasoning"
+      ) {
         place(old.node);
         continue;
       }
@@ -6584,22 +6854,6 @@ export function renderAgentTrace({
         );
         place(old.node);
         continue;
-      }
-      if (old && itemEntry.type === "reasoning") {
-        const target = old.node.querySelector<HTMLElement>(
-          ".llm-agent-reasoning-text",
-        );
-        if (target) {
-          updateReasoningText(
-            target,
-            itemEntry.summary || itemEntry.details || "",
-          );
-          const label = old.node.querySelector("summary");
-          if (label && label.textContent !== itemEntry.label)
-            label.textContent = itemEntry.label;
-          place(old.node);
-          continue;
-        }
       }
       if (itemEntry.type === "inline_text") {
         const inlineEl = doc.createElement("div");
@@ -6708,12 +6962,15 @@ export function renderAgentTrace({
 
         // Show only summary — details from most models duplicate the summary
         const reasoningText = itemEntry.summary || itemEntry.details;
+        let reasoningTextNode: HTMLDivElement | null = null;
         if (reasoningText) {
           const summaryBlock = doc.createElement("div") as HTMLDivElement;
           summaryBlock.className = "llm-agent-reasoning-block";
           const text = doc.createElement("div") as HTMLDivElement;
           text.className = "llm-agent-reasoning-text";
           text.textContent = reasoningText;
+          committedReasoningText.set(text, reasoningText);
+          reasoningTextNode = text;
           summaryBlock.appendChild(text);
           bodyWrap.appendChild(summaryBlock);
         }
@@ -6721,7 +6978,7 @@ export function renderAgentTrace({
         // Details section removed — most models duplicate summary in details
 
         details.appendChild(bodyWrap);
-        place(details);
+        place(details, reasoningTextNode);
         continue;
       }
 
@@ -6803,7 +7060,10 @@ export function renderAgentTrace({
   }
   view.items = nextViews;
   if (textOnly) {
-    if (view.document || (view.plan && getPlanProjection(events)?.artifact))
+    if (
+      view.document ||
+      (view.plan && isPlanningAnswer(readPlanProjection(scan)))
+    )
       onInterleavedText?.();
     return wrap;
   }
@@ -6815,6 +7075,7 @@ export function renderAgentTrace({
         child !== view.plan?.node &&
         child !== view.document?.node &&
         child !== view.document?.caption &&
+        child !== view.document?.lead?.node &&
         child !== view.discovery?.node
       )
         child?.remove();
@@ -6826,7 +7087,7 @@ export function renderAgentTrace({
     list,
     message,
     userMessage,
-    events,
+    scan,
     forceOpen: Boolean(pending),
   });
 
@@ -6889,25 +7150,19 @@ export function renderAgentTrace({
         : renderSavedNoteCard(doc, card),
     );
 
-  const planProjection = getPlanProjection(events);
-  const visiblePlanProjection =
-    planProjection?.artifact ||
-    (allowPlanRecovery && planProjection?.ledger?.status === "interrupted")
-      ? planProjection
-      : null;
-  if (!visiblePlanProjection && view.plan) {
+  const planProjection = readPlanProjection(scan);
+  if (!planProjection && view.plan) {
     disposePlanCard(view.plan.node);
     view.plan = undefined;
   }
-  if (visiblePlanProjection) {
-    // The structured plan is the planning turn's visible answer. Keep the
-    // provider's often-duplicated prose in durable history without rendering a
-    // second copy below the card. Execution turns still render their final
-    // answer normally; the live request owns execution progress separately.
-    if (visiblePlanProjection.artifact) onInterleavedText?.();
+  if (planProjection) {
+    // An old planning turn's card is its visible answer: keep the provider's
+    // often-duplicated prose in durable history without rendering a second
+    // copy below it. An execution turn renders its final answer as usual.
+    if (isPlanningAnswer(planProjection)) onInterleavedText?.();
     const planSignature = JSON.stringify([
-      visiblePlanProjection,
-      [...(researchDisplayLabels(events) || [])],
+      planProjection,
+      [...(scan.labels || [])],
     ]);
     if (view.plan?.signature !== planSignature) {
       if (view.plan) disposePlanCard(view.plan.node);
@@ -6916,14 +7171,12 @@ export function renderAgentTrace({
         node: renderPlanContainer({
           doc,
           events,
-          projection: visiblePlanProjection,
+          projection: planProjection,
         }),
       };
     }
     const planContainer = view.plan.node;
-    const planId =
-      visiblePlanProjection.artifact?.planId ||
-      visiblePlanProjection.ledger!.planId;
+    const planId = planContainer.dataset.llmPlanId;
     for (const node of Array.from(
       doc.querySelectorAll<HTMLElement>(".llm-plan-container"),
     )) {
@@ -6948,7 +7201,7 @@ export function renderAgentTrace({
   }
 
   const planDocumentId =
-    message.documentId || message.planDocumentId || getPlanDocumentId(events);
+    message.documentId || message.planDocumentId || scan.planDocumentId;
   const savedNotePrimary =
     hasSavedNote &&
     savedNoteIsPrimaryOutcome(
@@ -6973,6 +7226,7 @@ export function renderAgentTrace({
       if (existing) {
         disposePlanCard(existing.node);
         existing.caption.remove();
+        existing.lead?.node.remove();
       }
       const caption = doc.createElement("p");
       caption.className = "llm-plan-document-completion-caption";
@@ -6988,8 +7242,11 @@ export function renderAgentTrace({
               pairedUserMessage: userMessage,
             }
           : undefined,
-        onReady: () => {
+        onReady: (document) => {
           caption.hidden = false;
+          rememberDocumentMarkdown(document);
+          if (view.document?.node === card)
+            syncDocumentLead(doc, view.document, document.visibleMarkdown);
         },
       });
       view.document = {
@@ -7003,9 +7260,12 @@ export function renderAgentTrace({
       };
       wrap.append(card, caption);
     }
+    const markdown = knownDocumentMarkdown(planDocumentId, events);
+    if (markdown !== undefined) syncDocumentLead(doc, view.document!, markdown);
   } else if (view.document) {
     disposePlanCard(view.document.node);
     view.document.caption.remove();
+    view.document.lead?.node.remove();
     view.document = undefined;
   }
 
@@ -7031,7 +7291,10 @@ export function renderAgentTrace({
     wrap.appendChild(divider);
   }
 
-  const discovery = getDiscoveryCardProjection(events);
+  // Only a run that asked for a discovery review can show its card.
+  const discovery = scan.hasDiscovery
+    ? getDiscoveryCardProjection(events)
+    : undefined;
   if (discovery && message.streaming === false) discovery.phase = "closed";
   if (discovery) {
     const identity = discovery.pending.action.discovery!;

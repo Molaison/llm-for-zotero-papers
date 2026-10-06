@@ -5,6 +5,7 @@ import {
 } from "../../shared/conversationKeyLedger";
 import type { AgentRuntimeRequest } from "../types";
 import type { AgentCacheEvidenceActivity } from "./cacheManagement";
+import { isCatalogToolName } from "./toolNames";
 
 export type AgentCoverageSourceKind =
   | "zotero_metadata"
@@ -157,7 +158,9 @@ function normalizeRecord(value: unknown): Record<string, unknown> {
 }
 
 function stableJson(value: unknown): string {
-  return JSON.stringify(stabilizeForJson(value));
+  // JSON.stringify(undefined) is undefined, not a string; a visual paper_read
+  // redirect with neither pages nor artifacts hashes exactly that value.
+  return JSON.stringify(stabilizeForJson(value)) ?? "";
 }
 
 function stabilizeForJson(value: unknown): unknown {
@@ -1112,31 +1115,16 @@ export function buildAgentCoverageEntriesForActivity(
   if (activity.toolName === "paper_read") {
     return buildPaperReadCoverageEntries(activity);
   }
-  if (
-    activity.toolName === "search_paper" ||
-    activity.toolName === "read_paper"
-  ) {
-    return buildSearchPaperCoverageEntries(activity);
-  }
-  if (activity.toolName === "view_pdf_pages") {
-    return buildVisualCoverageEntries(activity);
-  }
   if (activity.toolName === "file_io") {
     return buildFileIoCoverageEntries(activity);
   }
   if (activity.toolName === "read_attachment") {
     return buildReadAttachmentCoverageEntries(activity);
   }
-  if (
-    activity.toolName === "library_search" ||
-    activity.toolName === "query_library"
-  ) {
+  if (isCatalogToolName(activity.toolName)) {
     return buildLibrarySearchCoverageEntries(activity);
   }
-  if (
-    activity.toolName === "library_read" ||
-    activity.toolName === "read_library"
-  ) {
+  if (activity.toolName === "library_read") {
     return buildLibraryReadCoverageEntries(activity);
   }
   if (activity.toolName === "library_retrieve") {

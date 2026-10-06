@@ -3,15 +3,9 @@ import {
   readOnlyInvocationPlan,
   stateChangeInvocationPlan,
 } from "../src/agent/authorization/invocationPlan";
-import {
-  authorizeOriginalAction,
-  normalizeStoredActionConstraints,
-} from "../src/agent/authorization/policy";
+import { authorizeOriginalAction } from "../src/agent/authorization/policy";
 import { buildActionProposal } from "../src/agent/authorization/proposal";
-import type {
-  ActionConstraint,
-  ActionProposal,
-} from "../src/agent/authorization/types";
+import type { ActionProposal } from "../src/agent/authorization/types";
 
 function action(
   operation = "apply_tags",
@@ -57,24 +51,6 @@ function action(
     capabilities: [options.capability || "zotero.tags"],
   };
 }
-const noNotes: ActionConstraint = {
-  kind: "deny_effects",
-  effects: ["create"],
-  domains: ["zotero_library"],
-  operations: ["note_create", "save_note", "save_notes_batch"],
-  description: "No new notes",
-};
-const noZotero: ActionConstraint = {
-  kind: "deny_effects",
-  effects: ["create", "modify", "delete"],
-  domains: ["zotero_library"],
-  description: "Do not change Zotero",
-};
-const noShell: ActionConstraint = {
-  kind: "deny_mechanisms",
-  mechanisms: ["shell", "zotero_script"],
-  description: "No commands or scripts",
-};
 
 describe("central authorization from concrete proposals", function () {
   for (const mode of ["safe", "auto", "yolo"] as const) {
@@ -84,102 +60,11 @@ describe("central authorization from concrete proposals", function () {
         "execute",
       );
     });
-    it(`${mode}: rejects prohibited effects, including opaque mechanisms`, function () {
-      for (const operation of [
-        "note_create",
-        "save_note",
-        "save_notes_batch",
-        "create_collection+note_create",
-      ]) {
-        assert.equal(
-          authorizeOriginalAction(action(operation, { effect: "create" }), {
-            mode,
-            constraints: [noNotes],
-            hasMatchingActionIntent: true,
-          }).kind,
-          "block",
-        );
-      }
-      assert.equal(
-        authorizeOriginalAction(
-          action("zotero_script_execute", {
-            effect: "create",
-            mechanism: "zotero_script",
-            assurance: "unknown",
-          }),
-          { mode, constraints: [noNotes], hasMatchingActionIntent: true },
-        ).kind,
-        "block",
-      );
-      assert.equal(
-        authorizeOriginalAction(
-          action("create_collection", { effect: "create" }),
-          { mode, constraints: [noNotes], hasMatchingActionIntent: true },
-        ).kind,
-        mode === "safe" ? "confirm" : "execute",
-      );
-    });
-    it(`${mode}: preserves independent domain and mechanism restrictions`, function () {
-      assert.equal(
-        authorizeOriginalAction(
-          action("file_write", { domain: "filesystem" }),
-          { mode, constraints: [noZotero], hasMatchingActionIntent: true },
-        ).kind,
-        mode === "safe" ? "confirm" : "execute",
-      );
-      assert.equal(
-        authorizeOriginalAction(action("note_create", { effect: "create" }), {
-          mode,
-          constraints: [noZotero],
-          hasMatchingActionIntent: true,
-        }).kind,
-        "block",
-      );
-      assert.equal(
-        authorizeOriginalAction(
-          action("command_execute", { mechanism: "shell" }),
-          { mode, constraints: [noShell], hasMatchingActionIntent: true },
-        ).kind,
-        "block",
-      );
-    });
-    it(`${mode}: preserves exact exceptions and independent blanket bans`, function () {
-      const restriction: ActionConstraint = {
-        kind: "deny_effects",
-        domains: ["zotero_library"],
-        effects: ["delete"],
-        exceptOperations: ["trash_items"],
-        description: "No permanent deletion",
-      };
-      assert.equal(
-        authorizeOriginalAction(action("trash_items", { effect: "delete" }), {
-          mode,
-          constraints: [restriction],
-          hasMatchingActionIntent: true,
-        }).kind,
-        mode === "safe" ? "confirm" : "execute",
-      );
-      assert.equal(
-        authorizeOriginalAction(
-          action("delete_attachment", { effect: "delete" }),
-          { mode, constraints: [restriction], hasMatchingActionIntent: true },
-        ).kind,
-        "block",
-      );
-      assert.equal(
-        authorizeOriginalAction(action("trash_items", { effect: "delete" }), {
-          mode,
-          constraints: [restriction, noZotero],
-          hasMatchingActionIntent: true,
-        }).kind,
-        "block",
-      );
-    });
     it(`${mode}: uses mode policy for existing and new notes`, function () {
       assert.equal(
         authorizeOriginalAction(
           action("note_edit", { capability: "zotero.notes" }),
-          { mode, constraints: [noNotes], hasMatchingActionIntent: true },
+          { mode },
         ).kind,
         mode === "safe" ? "confirm" : "execute",
       );
@@ -189,7 +74,7 @@ describe("central authorization from concrete proposals", function () {
             effect: "create",
             capability: "zotero.notes",
           }),
-          { mode, hasMatchingActionIntent: true },
+          { mode },
         ),
         mode === "safe"
           ? {
@@ -221,24 +106,6 @@ describe("central authorization from concrete proposals", function () {
             },
       );
     });
-    it(`${mode}: plan approval does not bypass integrity or restrictions`, function () {
-      const context = { mode, hasApprovedPlanAuthority: true };
-      assert.equal(authorizeOriginalAction(action(), context).kind, "execute");
-      assert.equal(
-        authorizeOriginalAction(action(), {
-          ...context,
-          constraints: [noZotero],
-        }).kind,
-        "block",
-      );
-      assert.equal(
-        authorizeOriginalAction(
-          action("apply_tags", { riskSignals: ["protected_target"] }),
-          context,
-        ).kind,
-        "block",
-      );
-    });
     it(`${mode}: assesses concrete effects without semantic intent`, function () {
       const expected =
         mode === "safe"
@@ -268,29 +135,27 @@ describe("central authorization from concrete proposals", function () {
     });
     it(`${mode}: judgment never bypasses hard rails`, function () {
       assert.equal(
-        authorizeOriginalAction(action(), { mode, constraints: [noZotero] })
-          .kind,
-        "block",
-      );
-      assert.equal(
         authorizeOriginalAction(
-          action("apply_tags", { riskSignals: ["protected_target"] }),
+          action("apply_tags", { riskSignals: ["raw_database"] }),
           { mode },
-        ).kind,
-        "block",
-      );
-      assert.equal(
-        authorizeOriginalAction(
-          action("command_execute", {
-            mechanism: "shell",
-            assurance: "unknown",
-          }),
-          { mode, constraints: [noShell] },
         ).kind,
         "block",
       );
     });
   }
+
+  it("safe: an approved plan is no authority, so every write is reviewed", function () {
+    assert.deepEqual(
+      authorizeOriginalAction(action(), {
+        mode: "safe",
+        hasApprovedPlanAuthority: true,
+      } as never),
+      {
+        kind: "confirm",
+        reason: "Safe mode reviews every external write before it runs.",
+      },
+    );
+  });
 
   it("auto permits ordinary writes and full recovery across library and directory boundaries", function () {
     const executionContext = {
@@ -347,7 +212,7 @@ describe("central authorization from concrete proposals", function () {
     );
     assert.equal(
       authorizeOriginalAction(
-        action("apply_tags", { riskSignals: ["ambiguous_target"] }),
+        action("apply_tags", { riskSignals: ["scope_expansion"] }),
         { mode: "auto" },
       ).kind,
       "execute",
@@ -418,25 +283,6 @@ describe("central authorization from concrete proposals", function () {
       "model_review",
     );
   });
-  it("retains decoding of legacy execution restrictions for history", function () {
-    assert.deepEqual(
-      normalizeStoredActionConstraints([
-        {
-          kind: "deny_effects",
-          effects: ["execute"],
-          domains: ["local_execution"],
-          description: "Legacy",
-        },
-      ]),
-      [
-        {
-          kind: "deny_mechanisms",
-          mechanisms: ["shell", "zotero_script"],
-          description: "Legacy",
-        },
-      ],
-    );
-  });
 });
 
 describe("action interaction contract", function () {
@@ -457,7 +303,6 @@ describe("action interaction contract", function () {
           assert.equal(
             authorizeOriginalAction(action(operation), {
               mode,
-              hasMatchingActionIntent: true,
               interaction,
             }).kind,
             mode === "safe" || interaction.reviewPreference === "review"
@@ -470,7 +315,6 @@ describe("action interaction contract", function () {
         assert.equal(
           authorizeOriginalAction(action(operation), {
             mode,
-            hasMatchingActionIntent: true,
             interaction: {
               entryPoint: "conversation",
               reviewPreference: "direct",

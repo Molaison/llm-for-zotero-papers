@@ -314,16 +314,19 @@ export function registerReaderContextPanel() {
       }
     })();
   };
+  // Zotero draws the head icon in a 16px box and the rail icon at its own
+  // size in a 28px button, so each slot gets the icon drawn for its size,
+  // as Zotero's own itempane/16 and itempane/20 icons are.
   Zotero.ItemPaneManager.registerSection({
     paneID: PANE_ID,
     pluginID: config.addonID,
     header: {
       l10nID: getLocaleID("llm-panel-head"),
-      icon: `chrome://${config.addonRef}/content/icons/icon-sidebar.svg`,
+      icon: `chrome://${config.addonRef}/content/icons/icon-sidebar-16.svg`,
     },
     sidenav: {
       l10nID: getLocaleID("llm-panel-sidenav-tooltip"),
-      icon: `chrome://${config.addonRef}/content/icons/icon-sidebar.svg`,
+      icon: `chrome://${config.addonRef}/content/icons/icon-sidebar-20.svg`,
     },
     onInit: ({ body, setEnabled, tabType }) => {
       body

@@ -22,15 +22,15 @@ import {
   formatCreatorsDisplay,
 } from "./tools/write/mutateLibraryShared";
 
-type SearchLiteratureOnlineMode =
+type LiteratureSearchMode =
   | "recommendations"
   | "references"
   | "citations"
   | "search"
   | "metadata";
 
-type SearchLiteratureOnlineSource = "openalex" | "arxiv" | "europepmc";
-type SearchLiteratureOnlineWorkflow = "answer" | "review";
+type LiteratureSearchSource = "openalex" | "arxiv" | "europepmc";
+type LiteratureSearchWorkflow = "answer" | "review";
 
 type SearchReviewPaper = {
   rowId: string;
@@ -62,7 +62,7 @@ type SearchReviewMetadataChoice = {
 type SearchReviewPrepared =
   | {
       kind: "paper_results";
-      mode: Exclude<SearchLiteratureOnlineMode, "metadata">;
+      mode: Exclude<LiteratureSearchMode, "metadata">;
       source?: string;
       query?: string;
       papers: SearchReviewPaper[];
@@ -81,9 +81,9 @@ type SearchReviewArgs = {
   targetCollectionId?: number;
   destinationLabel?: string;
   shortfallReason?: string;
-  workflow?: SearchLiteratureOnlineWorkflow;
-  mode?: SearchLiteratureOnlineMode;
-  source?: SearchLiteratureOnlineSource;
+  workflow?: LiteratureSearchWorkflow;
+  mode?: LiteratureSearchMode;
+  source?: LiteratureSearchSource;
   limit?: number;
   libraryID?: number;
   itemId?: number;
@@ -364,9 +364,7 @@ function prepareSearchReview(
     return null;
   }
   const content = result.content as Record<string, unknown>;
-  const mode = readString(content.mode) as
-    | SearchLiteratureOnlineMode
-    | undefined;
+  const mode = readString(content.mode) as LiteratureSearchMode | undefined;
   const results = Array.isArray(content.results) ? content.results : [];
   if (!mode || (results.length === 0 && !content.sessionId)) {
     return null;
@@ -512,12 +510,10 @@ function normalizeSearchReviewArgs(args: unknown): SearchReviewArgs {
     destinationLabel: readString(record.destinationLabel),
     shortfallReason: readString(record.shortfallReason),
     workflow: readString(record.workflow) as
-      | SearchLiteratureOnlineWorkflow
+      | LiteratureSearchWorkflow
       | undefined,
-    mode: readString(record.mode) as SearchLiteratureOnlineMode | undefined,
-    source: readString(record.source) as
-      | SearchLiteratureOnlineSource
-      | undefined,
+    mode: readString(record.mode) as LiteratureSearchMode | undefined,
+    source: readString(record.source) as LiteratureSearchSource | undefined,
     limit: readPositiveInt(record.limit),
     libraryID: readPositiveInt(record.libraryID),
     itemId: readPositiveInt(record.itemId),

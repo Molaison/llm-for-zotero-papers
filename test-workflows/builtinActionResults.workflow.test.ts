@@ -27,7 +27,7 @@ describe("workflow: verified built-in action summaries", function () {
           onProgress: (event: unknown) => events.push(event),
           requestConfirmation: async (requestId: string, action: any) => {
             confirmations++;
-            await paper.reload(undefined, true);
+            await paper.reload(undefined as never, true);
             assert.lengthOf(
               paper.getTags(),
               0,
@@ -44,9 +44,9 @@ describe("workflow: verified built-in action summaries", function () {
               ".llm-agent-hitl-tag-chip-input",
             );
             if (!input) {
-              const add = [...card.querySelectorAll("button")].find(
-                (button) => button.textContent?.trim() === "Add tag",
-              )!;
+              const add = (
+                [...card.querySelectorAll("button")] as HTMLButtonElement[]
+              ).find((button) => button.textContent?.trim() === "Add tag")!;
               (add as HTMLButtonElement).click();
               input = card.querySelector<HTMLInputElement>(
                 ".llm-agent-hitl-tag-chip-input",
@@ -59,7 +59,9 @@ describe("workflow: verified built-in action summaries", function () {
                 bubbles: true,
               }),
             );
-            const confirm = [...card.querySelectorAll("button")].find(
+            const confirm = (
+              [...card.querySelectorAll("button")] as HTMLButtonElement[]
+            ).find(
               (button) => button.textContent?.trim() === "Confirm",
             ) as HTMLButtonElement;
             assert.exists(confirm);
@@ -68,7 +70,7 @@ describe("workflow: verified built-in action summaries", function () {
           },
         },
       );
-      await paper.reload(undefined, true);
+      await paper.reload(undefined as never, true);
       assert.equal(confirmations, 1);
       assert.isAbove(
         paper.getTags().length,

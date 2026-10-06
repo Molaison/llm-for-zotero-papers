@@ -75,6 +75,10 @@ export class FakePrefElement {
   public className = "";
   public type = "";
   public title = "";
+  /** Form-control state a binder writes and a test reads, as on a real input. */
+  public checked = false;
+  public disabled = false;
+  public value = "";
   /** What `getBoundingClientRect` reports; a test sets it where it matters. */
   public rect: FakeRect = rect(0, 0, 0, 0);
   private ownText = "";

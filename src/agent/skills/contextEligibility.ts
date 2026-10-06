@@ -9,7 +9,6 @@ export type SkillRoutingRequest = Pick<
   | "selectedTextSources"
   | "selectedTexts"
   | "turnPaperScope"
-  | "classifiedIntent"
   | "conversationKind"
   | "screenshots"
   | "attachments"

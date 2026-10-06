@@ -1,7 +1,7 @@
 {
   "name": "llm-for-zotero",
   "type": "module",
-  "version": "3.9.9-papers.11",
+  "version": "3.9.10-papers.12",
   "description": "AI research agent rooted in your Zotero library",
   "config": {
     "addonName": "llm-for-zotero",
@@ -29,8 +29,9 @@
     "lint:check": "prettier --check . && eslint .",
     "lint:fix": "prettier --write . && eslint . --fix",
     "release": "zotero-plugin release",
-    "typecheck": "tsc --noEmit",
-    "test": "npm run typecheck && npm run test:unit && npm run test:workflow",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.workflow.json",
+    "test": "npm run typecheck && npm run check:tool-vocabulary && npm run test:unit && npm run test:workflow",
+    "check:tool-vocabulary": "node scripts/check-retired-tool-names.cjs",
     "test:unit": "npx tsx node_modules/mocha/bin/mocha.js --require ./test/register.cjs 'test/**/*.test.ts'",
     "test:mineru-restart": "node scripts/run-mineru-restart-tests.mjs",
     "test:workflow": "node scripts/run-workflow-tests.mjs",

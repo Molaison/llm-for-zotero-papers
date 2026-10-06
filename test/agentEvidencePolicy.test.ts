@@ -8,7 +8,7 @@ describe("read stop guidance", function () {
     readBudget: Number.POSITIVE_INFINITY,
   };
 
-  it("asks for a draft-based self-check after the first targeted read", function () {
+  it("leaves further reading to the agent after new evidence", function () {
     const guidance = resolveReadStopGuidance(targeted, {
       frontier: "advanced",
       readsThisTurn: 1,
@@ -16,42 +16,44 @@ describe("read stop guidance", function () {
     assert.equal(guidance.recommendation, "answer_or_self_check");
     assert.include(
       guidance.reason,
-      "Answer from the held and delivered evidence",
+      "Decide whether it supports the requested explanation",
     );
-    assert.include(guidance.reason, "specifically named claim in your draft");
+    assert.include(guidance.reason, "choose further reads");
     assert.notInclude(guidance.reason, "missing dimension");
   });
 
-  it("points a targeted read that adds nothing new at the outline", function () {
+  it("discourages repeating unchanged reads while allowing another section", function () {
     const guidance = resolveReadStopGuidance(targeted, {
       frontier: "unchanged",
       readsThisTurn: 2,
     });
-    assert.equal(guidance.recommendation, "answer_now");
+    assert.equal(guidance.recommendation, "name_a_specific_missing_dimension");
     assert.equal(
       guidance.reason,
-      "This read added no new source text. If a specific claim still lacks support, read one unread section by sectionId from the outline; otherwise answer now from the delivered evidence.",
+      "This read added no new source text. Avoid repeating it; choose another passage or section if needed to support the answer.",
     );
   });
 
-  it("keeps the stop-now wording for overview reads that add nothing new", function () {
+  it("allows missing evidence retrieval after an unchanged overview", function () {
     const guidance = resolveReadStopGuidance(
       { coverage: "overview", readBudget: 1 },
       { frontier: "unchanged", readsThisTurn: 1 },
     );
-    assert.equal(guidance.recommendation, "answer_now");
-    assert.include(guidance.reason, "do not retrieve again for this question");
+    assert.equal(guidance.recommendation, "name_a_specific_missing_dimension");
+    assert.include(guidance.reason, "choose another passage or section");
     assert.notInclude(guidance.reason, "sectionId");
   });
 
-  it("stops targeted retrieval once the read budget is used", function () {
+  it("keeps reading optional after the legacy read budget is used", function () {
     const guidance = resolveReadStopGuidance(targeted, {
       frontier: "advanced",
       readsThisTurn: 2,
     });
-    assert.equal(guidance.recommendation, "answer_now");
-    assert.include(guidance.reason, "read budget");
-    assert.include(guidance.reason, "disclose");
+    assert.equal(guidance.recommendation, "answer_or_self_check");
+    assert.include(
+      guidance.reason,
+      "Read counts do not establish sufficient coverage",
+    );
   });
 
   it("keeps gap hunting for exhaustive coverage", function () {

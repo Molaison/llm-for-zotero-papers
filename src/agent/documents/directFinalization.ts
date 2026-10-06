@@ -1,4 +1,5 @@
-import type { TrustedReadObservation } from "../plans/types";
+import type { TrustedReadObservation } from "../context/readObservationTypes";
+import { expandEvidenceRefs } from "../context/evidenceRefTokens";
 import type { ZoteroGateway } from "../services/zoteroGateway";
 import type { AgentRuntimeRequest, AgentToolArtifact } from "../types";
 import type { DocumentCitationEvidence } from "./citationService";
@@ -7,7 +8,6 @@ import {
   directDocumentId,
   loadDocumentForRunByContentHash,
   loadLatestDocumentForRun,
-  loadPlanDocument,
   loadPlanDocumentOutbox,
   nextDirectDocumentSequence,
 } from "./store";
@@ -19,14 +19,8 @@ import type {
   PlanDocumentOutboxRecord,
   SubmitPlanDocumentInput,
 } from "./types";
-import {
-  assertMaterialReady,
-  materialDocumentId,
-  resolveMaterialOutput,
-} from "./workflowMaterial";
 import { ToolInputRejection } from "../tools/execution/failure";
 import { normalizeNoteSourceText } from "../../services/notes/noteRendering";
-import type { MaterialOutputIntent } from "../contracts/workflowDependencies";
 
 /** The already stored document, with the outbox record that published it. */
 async function storedDocumentResult(document: PlanDocument): Promise<{
@@ -193,6 +187,44 @@ function validateDirectAssetProvenance(params: {
   }
 }
 
+/**
+ * The submission with every evidence ref it names as a full observation id:
+ * tool results show refs in short form, and every check, and the stored
+ * document, reads full ids.
+ */
+function withFullEvidenceRefs(
+  input: SubmitPlanDocumentInput,
+  observationIds: readonly string[],
+): SubmitPlanDocumentInput {
+  const expand = (refs: readonly string[]) =>
+    expandEvidenceRefs(refs, observationIds);
+  return {
+    ...input,
+    citations: input.citations.map((cluster) => ({
+      ...cluster,
+      sources: cluster.sources.map((source) => ({
+        ...source,
+        evidenceRefs: expand(source.evidenceRefs),
+      })),
+    })),
+    quotes: input.quotes.map((quote) => ({
+      ...quote,
+      evidenceRefs: expand(quote.evidenceRefs),
+    })),
+    assets: input.assets.map((asset) =>
+      asset.provenance.origin === "generated"
+        ? {
+            ...asset,
+            provenance: {
+              ...asset.provenance,
+              evidenceRefs: expand(asset.provenance.evidenceRefs),
+            },
+          }
+        : asset,
+    ),
+  };
+}
+
 export class DirectDocumentFinalizer {
   constructor(private readonly gateway: ZoteroGateway) {}
 
@@ -201,36 +233,26 @@ export class DirectDocumentFinalizer {
     runId: string;
     input: SubmitPlanDocumentInput;
     now?: number;
-  }): Promise<{ document: PlanDocument; outbox: PlanDocumentOutboxRecord }> {
-    const configuredPolicy = params.request.documentOutcomePolicy;
-    const material = resolveMaterialOutput(
-      params.request,
-      params.input.materialOutputId,
-    );
-    const stableDocumentId = material
-      ? materialDocumentId(params.request, material.id)
-      : undefined;
-    if (params.request.planContext?.phase === "planning") {
-      throw new Error("Direct document finalization is not authorized");
-    }
-    if (params.request.planContext?.phase === "executing" && !material) {
-      throw new Error("Plan document finalization must use the approved spec");
-    }
-    const policy: DocumentOutcomePolicy = configuredPolicy?.required
-      ? configuredPolicy
-      : {
-          required: true,
-          documentKind: params.input.documentKind || "custom",
-          integrityPolicy: params.input.integrityPolicy || "authored",
-          trigger: "document_intent",
-        };
+  }): Promise<{
+    document: PlanDocument;
+    outbox: PlanDocumentOutboxRecord;
+    /** Format repairs the host made instead of rejecting. */
+    repairs: string[];
+  }> {
+    const policy: DocumentOutcomePolicy = {
+      documentKind: params.input.documentKind || "custom",
+      integrityPolicy: params.input.integrityPolicy || "authored",
+    };
     return this.publish({
       request: params.request,
       runId: params.runId,
-      input: params.input,
+      input: withFullEvidenceRefs(
+        params.input,
+        (params.request.documentReadObservations || []).map(
+          (observation) => observation.observationId,
+        ),
+      ),
       policy,
-      material,
-      stableDocumentId,
       now: params.now,
     });
   }
@@ -250,7 +272,12 @@ export class DirectDocumentFinalizer {
     title: string;
     markdown: string;
     now?: number;
-  }): Promise<{ document: PlanDocument; outbox: PlanDocumentOutboxRecord }> {
+  }): Promise<{
+    document: PlanDocument;
+    outbox: PlanDocumentOutboxRecord;
+    /** Format repairs the host made instead of rejecting. */
+    repairs: string[];
+  }> {
     return this.publish({
       request: params.request,
       runId: params.runId,
@@ -265,12 +292,7 @@ export class DirectDocumentFinalizer {
         groundingReviewed: "passed",
         groundingIssues: [],
       },
-      policy: {
-        required: true,
-        documentKind: "note",
-        integrityPolicy: "authored",
-        trigger: "document_intent",
-      },
+      policy: { documentKind: "note", integrityPolicy: "authored" },
       now: params.now,
     });
   }
@@ -280,24 +302,22 @@ export class DirectDocumentFinalizer {
     runId: string;
     input: SubmitPlanDocumentInput;
     policy: DocumentOutcomePolicy;
-    material?: MaterialOutputIntent;
-    stableDocumentId?: string;
     now?: number;
-  }): Promise<{ document: PlanDocument; outbox: PlanDocumentOutboxRecord }> {
-    const { material, stableDocumentId, policy } = params;
-    const prior = stableDocumentId
-      ? await loadPlanDocument(stableDocumentId)
-      : await loadLatestDocumentForRun(params.runId);
+  }): Promise<{
+    document: PlanDocument;
+    outbox: PlanDocumentOutboxRecord;
+    /** Format repairs the host made instead of rejecting. */
+    repairs: string[];
+  }> {
+    const { policy } = params;
+    const prior = await loadLatestDocumentForRun(params.runId);
     if (prior && prior.conversationKey !== params.request.conversationKey)
       throw new Error(
         "The finalized material belongs to another conversation.",
       );
-    // A workflow material output has one frozen identity, so its stored
-    // version is the answer. A direct run has no such identity: it may author
-    // several documents, and whether this submission is a retry of the stored
-    // one is only known once its content hash is computed below.
-    if (prior && stableDocumentId) return storedDocumentResult(prior);
-    if (material) assertMaterialReady(params.request, material, this.gateway);
+    // A direct run may author several documents, and whether this submission
+    // is a retry of the stored one is only known once its content hash is
+    // computed below.
     const now = params.now ?? Date.now();
     const title = params.input.title.trim();
     const observations = params.request.documentReadObservations || [];
@@ -332,12 +352,10 @@ export class DirectDocumentFinalizer {
     const coverageItems = researchGrounded
       ? coverageFromObservations(observations)
       : [];
-    const documentId =
-      stableDocumentId ||
-      directDocumentId(
-        params.runId,
-        await nextDirectDocumentSequence(params.runId),
-      );
+    const documentId = directDocumentId(
+      params.runId,
+      await nextDirectDocumentSequence(params.runId),
+    );
     const finalized = await finalizeDocument({
       gateway: this.gateway,
       input: params.input,
@@ -379,18 +397,20 @@ export class DirectDocumentFinalizer {
     // older content for the input the model just submitted. One run may
     // publish many documents — a note batch publishes one per item — so the
     // retry it is looking for is not always the newest one.
-    if (!stableDocumentId) {
-      const duplicate = await loadDocumentForRunByContentHash({
-        runId: params.runId,
-        contentHash: finalized.document.contentHash,
-        documentKind: spec.kind,
-      });
-      if (
-        duplicate &&
-        duplicate.conversationKey === params.request.conversationKey
-      )
-        return storedDocumentResult(duplicate);
-    }
+    const duplicate = await loadDocumentForRunByContentHash({
+      runId: params.runId,
+      contentHash: finalized.document.contentHash,
+      documentKind: spec.kind,
+    });
+    if (
+      duplicate &&
+      duplicate.conversationKey === params.request.conversationKey
+    )
+      // Identical content means the same repairs were made again.
+      return {
+        ...(await storedDocumentResult(duplicate)),
+        repairs: finalized.repairs,
+      };
     await persistFinalizedDocument(finalized);
     return finalized;
   }

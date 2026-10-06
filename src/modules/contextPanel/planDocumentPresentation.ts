@@ -97,15 +97,22 @@ export function buildDocumentCitationContext(
   if (!papers.size) add(resolvePaperContextRefFromItem(panelItem));
   const priorMessage = source?.assistantMessage;
   const certifiedQuotes = normalizeQuoteCitations(quotes);
+  // The chat message may lead the document with text the model wrote before
+  // calling the tool. Its display override then covers that text too: reuse
+  // its citations, but its markdown only when it is the document's alone.
+  const priorText = priorMessage?.text || "";
   const previousDisplay =
-    priorMessage?.text === document.visibleMarkdown
-      ? priorMessage.quoteDisplayOverride
+    document.visibleMarkdown && priorText.endsWith(document.visibleMarkdown)
+      ? priorMessage?.quoteDisplayOverride
       : undefined;
   const quoteCitations = mergeQuoteCitations(
     previousDisplay?.quoteCitations || priorMessage?.quoteCitations,
     certifiedQuotes,
   );
-  let displayMarkdown = previousDisplay?.markdown ?? document.visibleMarkdown;
+  let displayMarkdown =
+    (priorText === document.visibleMarkdown
+      ? previousDisplay?.markdown
+      : undefined) ?? document.visibleMarkdown;
   try {
     displayMarkdown = bindDocumentCitationGroupsForDisplay({
       markdown: displayMarkdown,

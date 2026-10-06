@@ -1,4 +1,3 @@
-import { semanticFixture } from "./helpers/semanticIntent";
 import { assert } from "chai";
 import {
   LibraryRetrieveService as ResolvedLibraryRetrieveService,
@@ -6,17 +5,25 @@ import {
   buildQuicksearchProbes,
 } from "../src/agent/services/libraryRetrieveService";
 import { buildRetrievalQueryPlan } from "../src/services/retrieval/retrievalQueryPlan";
-import type {
-  EditableArticleMetadataSnapshot,
-  LibraryItemTarget,
-} from "../src/agent/services/zoteroGateway";
-import type {
-  PaperContextCandidate,
-  PdfContext,
-} from "../src/services/paperContent/types";
+import type { PaperContextCandidate } from "../src/services/paperContent/types";
 import type { PaperContextRef } from "../src/shared/types";
-import { normalizeLibraryRetrieveArgs } from "../src/agent/tools/read/libraryRetrieve";
+import {
+  createLibraryRetrieveTool,
+  normalizeLibraryRetrieveArgs,
+} from "../src/agent/tools/read/libraryRetrieve";
+import {
+  EVIDENCE_SECTION_KINDS,
+  type EvidenceSectionKind,
+} from "../src/shared/libraryChatEvidencePolicy";
+import { AgentToolRegistry } from "../src/agent/tools/registry";
+import { resolveAgentRuntimeRequest } from "../src/agent/context/resolvedAgentRequest";
+import { renderAgentPromptEnvelope } from "../src/agent/model/messageBuilder";
 import { resolvedAgentRequest } from "./helpers/resolvedAgentRequest";
+import {
+  makeGateway,
+  makeItem,
+  makePdfContext,
+} from "./helpers/libraryRetrieveRig";
 
 class LibraryRetrieveService extends ResolvedLibraryRetrieveService {
   override retrieve(
@@ -29,317 +36,57 @@ class LibraryRetrieveService extends ResolvedLibraryRetrieveService {
   }
 }
 
-function makeItem(
-  itemId: number,
-  title: string,
-  abstractNote = "",
-  options: { hasPdf?: boolean; collectionIds?: number[]; tags?: string[] } = {},
-): {
-  target: LibraryItemTarget;
-  metadata: EditableArticleMetadataSnapshot;
-  paperContext: PaperContextRef | null;
-} {
-  const hasPdf = options.hasPdf !== false;
-  return {
-    target: {
-      itemId,
-      itemType: "journalArticle",
-      title,
-      firstCreator: "Smith",
-      year: "2024",
-      attachments: hasPdf
-        ? [
-            {
-              contextItemId: 1000 + itemId,
-              title: "PDF",
-              contentType: "application/pdf",
-            },
-          ]
-        : [],
-      tags: options.tags || [],
-      collectionIds: options.collectionIds || [],
-    },
-    metadata: {
-      itemId,
-      itemType: "journalArticle",
-      title,
-      fields: {
-        title,
-        shortTitle: "",
-        abstractNote,
-        publicationTitle: "",
-        journalAbbreviation: "",
-        proceedingsTitle: "",
-        date: "2024",
-        volume: "",
-        issue: "",
-        pages: "",
-        DOI: "",
-        url: "",
-        language: "",
-        extra: "",
-        ISSN: "",
-        ISBN: "",
-        publisher: "",
-        place: "",
-      },
-      creators: [
-        {
-          creatorType: "author",
-          firstName: "Ada",
-          lastName: "Smith",
-        },
-      ],
-    },
-    paperContext: hasPdf
-      ? {
-          itemId,
-          contextItemId: 1000 + itemId,
-          title,
-          firstCreator: "Smith",
-          year: "2024",
-        }
-      : null,
-  };
-}
-
-function makePdfContext(chunks: string[]): PdfContext {
-  return {
-    title: "PDF",
-    chunks,
-    chunkMeta: chunks.map((chunk, index) => ({
-      chunkIndex: index,
-      text: chunk,
-      normalizedText: chunk,
-      chunkKind: index === 0 ? "abstract" : "body",
-      sectionLabel: index === 0 ? "Abstract" : "Methods",
-    })),
-    chunkStats: chunks.map((chunk, index) => ({
-      index,
-      tf: {},
-      uniqueTerms: [],
-      length: chunk.split(/\s+/).length,
-    })),
-    docFreq: {},
-    avgChunkLength: chunks.length
-      ? chunks.join(" ").split(/\s+/).length / chunks.length
-      : 0,
-    fullLength: chunks.join("\n\n").length,
-    sourceType: "zotero-fulltext-cache",
-  };
-}
-
-function makeGateway(
-  entries: ReturnType<typeof makeItem>[],
-  options: {
-    collectionItems?: ReturnType<typeof makeItem>[];
-    quicksearchItemIds?: number[] | ((query: string | undefined) => number[]);
-    quicksearchCalls?: Array<{
-      limit?: number;
-      query?: string;
-      filters?: Record<string, unknown>;
-      allowedItemIds?: number[];
-    }>;
-  } = {},
-) {
-  const byItemId = new Map(
-    entries.map((entry) => [entry.target.itemId, entry]),
-  );
-  const collectionItems = options.collectionItems || entries;
-  return {
-    resolveLibraryID: () => 1,
-    getItem: (itemId: number | undefined) =>
-      itemId ? ({ id: itemId } as Zotero.Item) : null,
-    getEditableArticleMetadata: (item: Zotero.Item | null | undefined) =>
-      item ? byItemId.get((item as { id: number }).id)?.metadata || null : null,
-    resolvePaperContextTarget: ({ itemId }: { itemId?: number }) =>
-      itemId ? byItemId.get(itemId)?.paperContext || null : null,
-    getCollectionSummary: (collectionId: number | undefined) =>
-      collectionId
-        ? {
-            collectionId,
-            name: `Collection ${collectionId}`,
-            libraryID: 1,
-            path: `Root / Collection ${collectionId}`,
-          }
-        : null,
-    listBibliographicItemTargets: async ({ limit }: { limit?: number }) => ({
-      items: entries
-        .map((entry) => entry.target)
-        .slice(0, limit || entries.length),
-      totalCount: entries.length,
-    }),
-    listCollectionItemTargets: async ({
-      collectionId,
-      limit,
-    }: {
-      collectionId: number;
-      limit?: number;
-    }) => ({
-      collection: {
-        collectionId,
-        name: `Collection ${collectionId}`,
-        libraryID: 1,
-        path: `Root / Collection ${collectionId}`,
-      },
-      items: collectionItems
-        .map((entry) => entry.target)
-        .slice(0, limit || collectionItems.length),
-      totalCount: collectionItems.length,
-    }),
-    listTagItemTargets: async ({
-      tagContext,
-      limit,
-    }: {
-      tagContext: {
-        name: string;
-        normalizedName?: string;
-        scope?: "allTagged" | "untagged";
-      };
-      limit?: number;
-    }) => {
-      const normalizedName = (
-        tagContext.normalizedName || tagContext.name
-      ).toLowerCase();
-      const tagItems = entries.filter((entry) => {
-        if (tagContext.scope === "allTagged") {
-          return entry.target.tags.length > 0;
-        }
-        if (tagContext.scope === "untagged") {
-          return entry.target.tags.length === 0;
-        }
-        return entry.target.tags.some(
-          (tag) =>
-            tag === tagContext.name || tag.toLowerCase() === normalizedName,
-        );
-      });
-      return {
-        tagName: tagContext.name,
-        items: tagItems
-          .map((entry) => entry.target)
-          .slice(0, limit || tagItems.length),
-        totalCount: tagItems.length,
-      };
-    },
-    resolveLibraryScopeItemIds: async ({
-      itemIds = [],
-      collectionIds = [],
-      tagContexts = [],
-    }: {
-      itemIds?: number[];
-      collectionIds?: number[];
-      tagContexts?: Array<{
-        name: string;
-        normalizedName?: string;
-        scope?: "allTagged" | "untagged";
-      }>;
-    }) => {
-      const union = new Set<number>();
-      const tagItemIds = new Set<number>();
-      let summedScopeCount = 0;
-      const add = (
-        scopedEntries: ReturnType<typeof makeItem>[],
-        tagScope = false,
-      ) => {
-        for (const entry of scopedEntries) {
-          union.add(entry.target.itemId);
-          if (tagScope) tagItemIds.add(entry.target.itemId);
-        }
-        return scopedEntries.length;
-      };
-
-      add(
-        itemIds
-          .map((itemId) => byItemId.get(itemId))
-          .filter((entry): entry is ReturnType<typeof makeItem> =>
-            Boolean(entry),
-          ),
-      );
-
-      const collectionNames: string[] = [];
-      for (const collectionId of collectionIds) {
-        collectionNames.push(`Root / Collection ${collectionId}`);
-        const matches = collectionItems.filter((entry) =>
-          entry.target.collectionIds.includes(collectionId),
-        );
-        summedScopeCount += add(matches);
-      }
-
-      const tagNames: string[] = [];
-      for (const tagContext of tagContexts) {
-        tagNames.push(tagContext.name);
-        const normalizedName = (
-          tagContext.normalizedName || tagContext.name
-        ).toLowerCase();
-        const matches = entries.filter((entry) => {
-          if (tagContext.scope === "allTagged") {
-            return entry.target.tags.length > 0;
-          }
-          if (tagContext.scope === "untagged") {
-            return entry.target.tags.length === 0;
-          }
-          return entry.target.tags.some(
-            (tag) =>
-              tag === tagContext.name || tag.toLowerCase() === normalizedName,
-          );
-        });
-        summedScopeCount += add(matches, true);
-      }
-
-      return {
-        itemIds: [...union],
-        tagItemIds: [...tagItemIds],
-        collectionNames,
-        tagNames,
-        summedScopeCount,
-      };
-    },
-    getBibliographicItemTargetsByItemIds: (itemIds: number[]) =>
-      itemIds
-        .map((itemId) => byItemId.get(itemId)?.target)
-        .filter((entry): entry is LibraryItemTarget => Boolean(entry)),
-    searchAllLibraryItems: async (params: {
-      limit?: number;
-      query?: string;
-      filters?: Record<string, unknown>;
-      allowedItemIds?: number[];
-    }) => {
-      options.quicksearchCalls?.push(params);
-      const quicksearchIds =
-        typeof options.quicksearchItemIds === "function"
-          ? options.quicksearchItemIds(params.query)
-          : options.quicksearchItemIds || [];
-      const allowedItemIds = Array.isArray(params.allowedItemIds)
-        ? new Set(params.allowedItemIds)
-        : null;
-      const tagFilter =
-        typeof params.filters?.tag === "string" ? params.filters.tag : "";
-      const collectionFilter =
-        typeof params.filters?.collectionId === "number"
-          ? params.filters.collectionId
-          : 0;
-      const matches = quicksearchIds
-        .map((itemId) => byItemId.get(itemId)?.target)
-        .filter((entry): entry is LibraryItemTarget => Boolean(entry))
-        .filter((entry) =>
-          allowedItemIds ? allowedItemIds.has(entry.itemId) : true,
-        )
-        .filter((entry) =>
-          collectionFilter
-            ? entry.collectionIds.includes(collectionFilter)
-            : true,
-        )
-        .filter((entry) => (tagFilter ? entry.tags.includes(tagFilter) : true));
-      const limit = params.limit || matches.length;
-      return {
-        items: matches.slice(0, limit),
-        totalCount: matches.length,
-      };
-    },
-  };
-}
-
 describe("LibraryRetrieveService", function () {
+  it("leaves out a folder's papers the user removed in Task progress", async function () {
+    const entries = [1, 2, 3].map((itemId) =>
+      makeItem(itemId, `Drift paper ${itemId}`, "Representational drift.", {
+        hasPdf: true,
+        collectionIds: [44],
+      }),
+    );
+    const gateway = makeGateway(entries) as any;
+    const resolve = gateway.resolveLibraryScopeItemIds;
+    const seen: Array<number[] | undefined> = [];
+    gateway.resolveLibraryScopeItemIds = async (params: any) => {
+      seen.push(params.excludedItemIds);
+      const resolved = await resolve(params);
+      const excluded = new Set(params.excludedItemIds || []);
+      return {
+        ...resolved,
+        itemIds: resolved.itemIds.filter((id: number) => !excluded.has(id)),
+      };
+    };
+    const service = new LibraryRetrieveService(
+      gateway,
+      { ensurePaperContext: async () => makePdfContext([]) } as any,
+      async () => [],
+    );
+    const result = await service.retrieve({
+      query: "representational drift",
+      depth: "metadata",
+      request: {
+        conversationKey: 1,
+        mode: "agent",
+        userText: "What do these papers say about drift?",
+        libraryID: 1,
+        selectedCollectionContexts: [
+          {
+            collectionId: 44,
+            name: "Drift",
+            libraryID: 1,
+            excludedItemIds: [2],
+          },
+        ],
+      },
+    });
+    assert.deepEqual(seen, [[2]], "the exclusion reaches the scope");
+    assert.equal(result.resourcePool.totalItems, 2);
+    assert.notInclude(
+      result.candidates.map((candidate) => candidate.itemId),
+      "2",
+    );
+  });
+
   it("metadata mode inspects a 500-paper folder without full-text expansion", async function () {
     const entries = Array.from({ length: 500 }, (_, index) =>
       makeItem(
@@ -2759,10 +2506,9 @@ describe("LibraryRetrieveService evidence triage", function () {
   });
 });
 
-describe("LibraryRetrieveService classified intent defaults", function () {
+describe("LibraryRetrieveService intent defaults", function () {
   const run = async (params: {
     intent?: "enumerate" | "verify" | "summarize";
-    classifiedIntent?: unknown;
   }) => {
     const entries = [makeItem(1, "Drift paper", "Representational drift.")];
     const service = new LibraryRetrieveService(
@@ -2779,39 +2525,16 @@ describe("LibraryRetrieveService classified intent defaults", function () {
         mode: "agent",
         userText: "x",
         libraryID: 1,
-        ...(params.classifiedIntent
-          ? { classifiedIntent: params.classifiedIntent }
-          : {}),
       } as any,
     });
   };
-
-  it("uses the classified retrieval intent as the default", async function () {
-    const result = await run({
-      classifiedIntent: {
-        semantic: semanticFixture(),
-        retrievalIntent: "summarize",
-        wantedSections: [],
-      },
-    });
-
-    assert.equal(result.intent, "summarize");
-  });
-
-  it("lets explicit tool-arg intent beat the classified intent", async function () {
-    const result = await run({
-      intent: "verify",
-      classifiedIntent: {
-        semantic: semanticFixture(),
-        retrievalIntent: "summarize",
-        wantedSections: [],
-      },
-    });
+  it("uses the explicit tool-arg intent", async function () {
+    const result = await run({ intent: "verify" });
 
     assert.equal(result.intent, "verify");
   });
 
-  it("keeps regex defaulting when no classified intent is present", async function () {
+  it("defaults the intent from the query when the tool gives none", async function () {
     const result = await run({});
 
     assert.equal(result.intent, "enumerate");
@@ -2930,46 +2653,190 @@ describe("LibraryRetrieveService body-evidence defaults", function () {
     assert.equal(result.snippets[0].chunkKind, "abstract");
   });
 
-  it("steers section ranking from classifier wantedSections for a CJK query", async function () {
-    const entries = [makeItem(1, "Drift paper", "Representational drift.")];
-    const service = new LibraryRetrieveService(
-      makeGateway(entries) as any,
-      {
-        ensurePaperContext: async () => makePdfContext(["chunk a", "chunk b"]),
-      } as any,
-      (async (
-        paperContext: PaperContextRef,
-      ): Promise<PaperContextCandidate[]> => [
-        makeCandidate(paperContext, {
-          chunkIndex: 2,
-          chunkKind: "results",
-          sectionLabel: "Results",
-          evidenceScore: 1,
-        }),
-        makeCandidate(paperContext, {
-          chunkIndex: 5,
-          chunkKind: "methods",
-          sectionLabel: "Methods",
-          evidenceScore: 0.5,
-        }),
-      ]) as any,
-    );
+  describe("section steering in any language", function () {
+    const QUESTION = "这些论文用了什么方法？";
+    const INTRODUCTION = {
+      chunkIndex: 1,
+      chunkKind: "introduction",
+      sectionLabel: "Introduction",
+    };
+    const METHODS = {
+      chunkIndex: 2,
+      chunkKind: "methods",
+      sectionLabel: "Methods",
+    };
 
-    const result = await service.retrieve({
-      query: "这些论文用了什么实验手段",
-      depth: "evidence",
-      perPaperTopK: 1,
-      request: {
-        ...REQUEST,
-        classifiedIntent: {
-          semantic: semanticFixture(),
-          retrievalIntent: "enumerate",
-          wantedSections: ["methods"],
-        },
-      } as any,
+    /** The section labels of the one-slot evidence a paper of `chunks`
+     * (equally relevant, in paper order) yields for the Chinese question. */
+    async function steeredSections(
+      args: { queryVariants?: string[]; sections?: EvidenceSectionKind[] },
+      chunks: Array<typeof INTRODUCTION> = [INTRODUCTION, METHODS],
+    ): Promise<Array<string | undefined>> {
+      const entries = [makeItem(1, "Drift paper", "Representational drift.")];
+      const service = new LibraryRetrieveService(
+        makeGateway(entries) as any,
+        {
+          ensurePaperContext: async () =>
+            makePdfContext(["chunk a", "chunk b", "chunk c"]),
+        } as any,
+        (async (
+          paperContext: PaperContextRef,
+        ): Promise<PaperContextCandidate[]> =>
+          chunks.map((chunk) =>
+            makeCandidate(paperContext, { ...chunk, evidenceScore: 0.5 }),
+          )) as any,
+      );
+      const result = await service.retrieve({
+        query: QUESTION,
+        ...args,
+        scope: { itemIds: [1] },
+        depth: "evidence",
+        perPaperTopK: 1,
+        maxTotalSnippets: 1,
+        request: REQUEST,
+      });
+      return result.snippets.map((snippet) => snippet.sectionLabel);
+    }
+
+    it("prefers the sections the model names for a question in any language", async function () {
+      assert.deepEqual(await steeredSections({ sections: ["methods"] }), [
+        "Methods",
+      ]);
     });
 
-    assert.equal(result.snippets[0]?.sectionLabel, "Methods");
+    it("reads the section cue from English query variants", async function () {
+      assert.deepEqual(
+        await steeredSections({ queryVariants: ["methods used"] }),
+        ["Methods"],
+      );
+    });
+
+    it("keeps the base order when nothing names a section", async function () {
+      assert.deepEqual(await steeredSections({}), ["Introduction"]);
+    });
+
+    it("ranks a directly read chunk by its enclosing section before its subsection title, like the index path", async function () {
+      const firstLabel = async (sections: EvidenceSectionKind[]) => {
+        const entries = [makeItem(1, "Drift paper", "Representational drift.")];
+        const service = new LibraryRetrieveService(
+          makeGateway(entries) as any,
+          {
+            ensurePaperContext: async () =>
+              makePdfContext(["chunk a", "chunk b", "chunk c"]),
+          } as any,
+          (async (
+            paperContext: PaperContextRef,
+          ): Promise<PaperContextCandidate[]> => [
+            makeCandidate(paperContext, {
+              ...INTRODUCTION,
+              evidenceScore: 0.5,
+            }),
+            {
+              ...makeCandidate(paperContext, {
+                chunkIndex: 6,
+                chunkKind: "body",
+                sectionLabel: "Data analysis",
+                evidenceScore: 0.5,
+              }),
+              enclosingSection: "Materials and methods",
+            },
+          ]) as any,
+        );
+        const result = await service.retrieve({
+          query: QUESTION,
+          sections,
+          scope: { itemIds: [1] },
+          depth: "evidence",
+          perPaperTopK: 1,
+          maxTotalSnippets: 1,
+          request: REQUEST,
+        });
+        return result.snippets[0]?.sectionLabel;
+      };
+      assert.equal(
+        await firstLabel(["methods"]),
+        "Materials and methods › Data analysis",
+        "the snippet names its enclosing section too",
+      );
+      assert.equal(await firstLabel(["results"]), "Introduction");
+    });
+
+    it("admits a named abstract instead of demoting it as front matter", async function () {
+      const ABSTRACT = {
+        chunkIndex: 0,
+        chunkKind: "abstract",
+        sectionLabel: "Abstract",
+      };
+      assert.deepEqual(await steeredSections({}, [ABSTRACT, METHODS]), [
+        "Methods",
+      ]);
+      assert.deepEqual(
+        await steeredSections({ sections: ["abstract"] }, [ABSTRACT, METHODS]),
+        ["Abstract"],
+      );
+    });
+  });
+});
+
+describe("library_retrieve sections argument", function () {
+  it("normalizes named sections and rejects an unknown section kind with the accepted ones", function () {
+    const tool = createLibraryRetrieveTool({} as never);
+    const accepted = tool.validate({
+      query: "这些论文用了什么方法？",
+      sections: ["Methods", "limitations", "methods"],
+    });
+    assert.isTrue(accepted.ok);
+    assert.deepEqual(accepted.ok && accepted.value.sections, [
+      "methods",
+      "limitations",
+    ]);
+
+    for (const sections of [["method"], "methods", [3]]) {
+      const refused = tool.validate({ query: "q", sections });
+      assert.isFalse(refused.ok, JSON.stringify(sections));
+      const error = refused.ok ? "" : refused.error;
+      assert.include(error, "sections");
+      assert.include(error, EVIDENCE_SECTION_KINDS.join(", "));
+    }
+    const named = tool.validate({ query: "q", sections: ["method"] });
+    assert.include(named.ok ? "" : named.error, '"method"');
+  });
+
+  it("tells the model about sections in the schema and turn guidance it sees", async function () {
+    const registry = new AgentToolRegistry();
+    registry.register(createLibraryRetrieveTool({} as never));
+    const spec = registry
+      .listTools()
+      .find((entry) => entry.name === "library_retrieve")!;
+    const schema = spec.inputSchema as {
+      properties: Record<string, unknown>;
+    };
+    assert.deepEqual(schema.properties.sections, {
+      type: "array",
+      items: { type: "string" },
+    });
+
+    // Parameter descriptions never reach the model; a library-level turn's
+    // guidance does, and it names every section kind.
+    const rendered = await renderAgentPromptEnvelope(
+      resolveAgentRuntimeRequest({
+        conversationKey: 1,
+        mode: "agent",
+        userText: "这些论文用了什么方法？",
+        libraryID: 1,
+      }),
+      registry.listToolDefinitions(),
+      [],
+    );
+    const sectionsLine = rendered.inventory.toolGuidanceInstructions
+      .join("\n")
+      .split("\n")
+      .find((line) => /\bsections\b/.test(line));
+    assert.isString(sectionsLine);
+    assert.include(sectionsLine, "any language");
+    for (const kind of EVIDENCE_SECTION_KINDS) {
+      assert.include(sectionsLine, kind);
+    }
   });
 });
 

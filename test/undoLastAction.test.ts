@@ -1,5 +1,5 @@
 import { assert } from "chai";
-import { createUndoLastActionTool } from "../src/agent/tools/write/undoLastAction";
+import { createUndoTool } from "../src/agent/tools/write/undo";
 import {
   initAgentChangeJournal,
   listJournalActions,
@@ -14,13 +14,13 @@ import { createTestActionContractService } from "./helpers/actionContractService
 import { ChangeJournalTestDb } from "./helpers/changeJournalTestDb";
 
 /**
- * undo_last_action had no test file of its own. The first block pins the
+ * The single-undo form of `undo` (no count/actionIds/dryRun). The first block pins the
  * proposal it freezes. The second is the evidence half: it runs the real
  * journal, the real inverse replay and the real receipt minting, so what it
  * asserts about `verification` is what a user's undo produces.
  */
-describe("undo_last_action effect path", function () {
-  const tool = createUndoLastActionTool({} as never);
+describe("undo single-action effect path", function () {
+  const tool = createUndoTool({} as never);
   const service = createTestActionContractService();
 
   const validated = (args: Record<string, unknown>) => {
@@ -55,7 +55,7 @@ describe("undo_last_action effect path", function () {
       tool,
       validated({ actionId: "action-42" }),
     );
-    const receipts = await service.finalize(undefined, prepared, {
+    const receipts = await service.finalize(prepared, {
       ok: true,
       effect: "applied",
       content: { status: "undone", actionId: "action-42", reverted: 1 },
@@ -76,7 +76,7 @@ describe("undo_last_action effect path", function () {
       tool,
       validated({ actionId: "action-42" }),
     );
-    const receipts = await service.finalize(undefined, prepared, {
+    const receipts = await service.finalize(prepared, {
       ok: true,
       effect: "partial",
       content: {
@@ -93,7 +93,7 @@ describe("undo_last_action effect path", function () {
 
   it("treats nothing-to-undo as already satisfied, not as a failed write", async function () {
     const prepared = await service.prepare(tool, validated({}));
-    const receipts = await service.finalize(undefined, prepared, {
+    const receipts = await service.finalize(prepared, {
       ok: true,
       effect: "none",
       content: { status: "nothing_reversible", reverted: 0 },
@@ -110,7 +110,7 @@ describe("undo_last_action effect path", function () {
  * restore, which is how a step's post-revert re-read is made to disagree with
  * the replay without faking the tool's own result.
  */
-describe("undo_last_action native re-read", function () {
+describe("undo single-action native re-read", function () {
   const originalZotero = globalThis.Zotero;
   const service = createTestActionContractService();
   let settings: Record<string, string>;
@@ -141,7 +141,7 @@ describe("undo_last_action native re-read", function () {
     },
   } as never;
 
-  const tool = createUndoLastActionTool(gateway);
+  const tool = createUndoTool(gateway);
 
   async function seedTwoStepAction(actionId: string): Promise<void> {
     await prepareJournalAction({
@@ -201,7 +201,7 @@ describe("undo_last_action native re-read", function () {
     if (!input.ok) throw new Error(input.error);
     const prepared = await service.prepare(tool, input.value, context);
     const result = await tool.execute(input.value, context);
-    const receipts = await service.finalize(undefined, prepared, {
+    const receipts = await service.finalize(prepared, {
       ok: true,
       effect: result.effect,
       content: result.content,

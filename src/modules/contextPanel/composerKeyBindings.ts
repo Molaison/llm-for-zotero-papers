@@ -2,7 +2,7 @@
  * The single list of keys the panel composer's keydown handler binds. The
  * handler lives in `setupHandlers.ts` (`inputBox.addEventListener("keydown")`)
  * and owns the behaviour: Enter sends, ArrowUp recalls, Escape and Backspace
- * edit the command row, Tab and the arrows drive the pickers and plan mode.
+ * edit the command row, Tab and the arrows drive the pickers.
  *
  * The panel ownership fence (`panelHostOwnership.ts`) reads this list to decide
  * which key combinations it may hand to the application while it is refusing a

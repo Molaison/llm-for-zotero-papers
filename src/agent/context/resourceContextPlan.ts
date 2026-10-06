@@ -56,6 +56,7 @@ export type AgentResourceContextPlan = {
   contextCache?: ContextCachePlan;
   resourceSignature: string;
   stableContextBlock: string;
+  paperContext?: import("./paperPromptContext").PaperPromptContext;
   resourceSnapshot: AgentResourceSnapshot;
   priorReadBlock?: string;
 };
@@ -617,9 +618,9 @@ export function buildAgentStableResourceContextBlock(
   ];
   if (retrievalOnlyPapers.length) {
     lines.push(
-      "Retrieval-only paper refs:",
+      "Selected paper refs (text coverage is reported in the paper source blocks):",
       ...retrievalOnlyPapers.map((entry) =>
-        formatPaperResourceLine("Retrieval paper", entry),
+        formatPaperResourceLine("Selected paper", entry),
       ),
     );
   }
@@ -656,7 +657,7 @@ export function buildAgentStableResourceContextBlock(
       "Treat collection membership as the scope boundary. Use library_retrieve({ scope:{ collectionIds:[<collectionId>] }, query:'...', queryVariants:[...], intent:'enumerate'|'summarize', depth:'metadata'|'evidence' }) for broad comprehensive evidence search when variants would improve recall, library_search({ entity:'items', mode:'list', filters:{ collectionId:<collectionId> } }) for catalog listing, or collection-scoped actions when the user asks to operate on them. Do not assume all full text has already been read.",
       "Catalog rows and manifest rows are navigation context, not evidence. Ground final content claims in library_retrieve snippets or paper_read results.",
       "When reading papers from a collection, prefer library_retrieve for staged resource-pool search. It maps metadata, scans indexed/searchable text, returns a paper-level frontier, and expands snippets only for selected branches; use paper_read only for close reading explicit itemId/contextItemId targets returned by search/retrieval. Do not use the active reader paper as an implicit collection member.",
-      "If the user explicitly asks to read or analyze the full text of every paper in a collection, use library_retrieve or plan a batch workflow: enumerate papers, read/process them in bounded batches, create compact per-paper digests with evidence, then synthesize.",
+      "When the request needs one result per paper (summaries, extracted fields, relevance to a question, support or challenge for an idea), declare a digest part with task_update ({ expectedEffect:'digest', scope:true } for the whole collection, or targetIds for chosen papers) whose description states that per-paper result; the host runs it on each paper and returns the results with the evidence refs to cite; synthesize from them. For a question over a large collection, shortlist with library_retrieve first and digest the shortlist. Membership makes a paper available, not relevant: judge relevance from each paper's content. A synthesis uses a paper only where its content bears on the question: leave out one that does not, never stretch it in by analogy, list it under excluded (submit_document or task_update) with the reason, and name it by title without a citation.",
       "If the user explicitly asks to include or only read child attachments in this collection, enumerate item attachments with library_search plus library_read sections:['attachments']; otherwise ignore sibling attachments for primary-document workflows.",
     );
   }
@@ -669,7 +670,7 @@ export function buildAgentStableResourceContextBlock(
       "Treat tag membership as the scope boundary. Use library_retrieve({ query:'...', queryVariants:[...], intent:'enumerate'|'summarize', depth:'metadata'|'evidence' }) to search the selected tag pool by default, library_retrieve({ scope:{ tagNames:['<tag>'] }, query:'...', intent:'enumerate' }) for an explicit named tag scope, or library_search({ entity:'items', mode:'list', filters:{ tag:'<tag>' } }) for catalog listing. Do not ask which tag the user means when a selected tag scope is listed here.",
       "Catalog rows and manifest rows are navigation context, not evidence. Ground final content claims in library_retrieve snippets or paper_read results.",
       "When reading papers from a tag, prefer library_retrieve for staged resource-pool search. It maps metadata, scans indexed/searchable text inside the tag where possible, returns a paper-level frontier, and expands snippets only for selected branches; use paper_read only for close reading explicit itemId/contextItemId targets returned by search/retrieval. Do not use the active reader paper as an implicit tag member.",
-      "If the user explicitly asks to analyze the full text of every paper in a tag, use library_retrieve or plan a bounded batch workflow: enumerate papers, read/process them in batches, create compact per-paper digests with evidence, then synthesize.",
+      "When the request needs one result per paper (summaries, extracted fields, relevance to a question, support or challenge for an idea), declare a digest part with task_update ({ expectedEffect:'digest', scope:true } for the whole tag, or targetIds for chosen papers) whose description states that per-paper result; the host runs it on each paper and returns the results with the evidence refs to cite; synthesize from them. For a question over a large tag, shortlist with library_retrieve first and digest the shortlist. Membership makes a paper available, not relevant: judge relevance from each paper's content. A synthesis uses a paper only where its content bears on the question: leave out one that does not, never stretch it in by analogy, list it under excluded (submit_document or task_update) with the reason, and name it by title without a citation.",
     );
   }
 

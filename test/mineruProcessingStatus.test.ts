@@ -278,45 +278,6 @@ describe("mineruProcessingStatus", function () {
     });
   });
 
-  it("lets a joined auto subscriber pause without cancelling a batch-owned task", async function () {
-    const runOnce = mineruProcessingStatus.runMineruTaskOnce;
-    const ownerController = new AbortController();
-    const joinedController = new AbortController();
-    let sharedSignal!: AbortSignal;
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-
-    const owner = runOnce(
-      103,
-      async (_report, signal) => {
-        sharedSignal = signal!;
-        await gate;
-        return "batch-complete";
-      },
-      undefined,
-      ownerController.signal,
-    );
-    await Promise.resolve();
-    const joined = runOnce(
-      103,
-      async () => "duplicate",
-      undefined,
-      joinedController.signal,
-    );
-
-    joinedController.abort();
-    await assertCancelled(joined);
-    assert.isFalse(sharedSignal.aborted);
-
-    release();
-    assert.deepEqual(await owner, {
-      joined: false,
-      value: "batch-complete",
-    });
-  });
-
   it("cancels a batch-owned task when an auto subscriber deletes it", async function () {
     const runOnce = mineruProcessingStatus.runMineruTaskOnce;
     const ownerController = new AbortController();

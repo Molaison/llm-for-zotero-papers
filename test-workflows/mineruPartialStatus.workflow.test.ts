@@ -1,3 +1,4 @@
+import { mineruLegacyHealth } from "../test/helpers/mineruLegacyHealth";
 import { mineruResultFixture } from "../test/helpers/mineruResultFixture";
 import { assert } from "chai";
 import {
@@ -77,10 +78,10 @@ describe("workflow: MinerU Partial status", function () {
       )!;
       assert.isOk(legend, "Partial is included in the existing status legend");
       assert.equal(
-        win.getComputedStyle(legend).backgroundColor,
+        win.getComputedStyle(legend)!.backgroundColor,
         "rgb(139, 92, 246)",
       );
-      const style = win.getComputedStyle(dot);
+      const style = win.getComputedStyle(dot)!;
       assert.equal(style.backgroundColor, "rgb(139, 92, 246)");
       assert.equal(style.borderRadius, "50%");
       assert.equal(dot.getBoundingClientRect().height, 8);
@@ -91,6 +92,8 @@ describe("workflow: MinerU Partial status", function () {
       toolkit.getGlobal = function (name: string) {
         if (name !== "fetch") return getGlobal.call(this, name);
         return async (url: string) => {
+          const health = mineruLegacyHealth(String(url));
+          if (health) return health;
           assert.isTrue(String(url).endsWith("/file_parse"));
           const part = nextPart++;
           record.uploads.push(part);
@@ -128,7 +131,7 @@ describe("workflow: MinerU Partial status", function () {
         `[data-parent-id="${record.id}"] [data-status="cached"]`,
       ) as HTMLElement;
       assert.equal(
-        win.getComputedStyle(complete).backgroundColor,
+        win.getComputedStyle(complete)!.backgroundColor,
         "rgb(16, 185, 129)",
       );
     } finally {

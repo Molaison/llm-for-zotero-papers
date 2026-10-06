@@ -1,77 +1,9 @@
 /* LLM Panel Styles */
 
-:root:not([data-llm-pane-view="stacked"]) .llm-dedicated-chat-pane .llm-panel {
-  padding-top: 0;
-}
-
 :root:not([data-llm-pane-view="stacked"]) .llm-dedicated-chat-pane .llm-header {
   padding: 0 8px 4px;
   gap: 10px;
   flex-shrink: 0;
-}
-
-.llm-docked-title-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  /* Match Zotero's reader toolbar, including its bottom separator. */
-  box-sizing: border-box;
-  height: 41px;
-  min-height: 41px;
-  margin-inline: -10px;
-  padding-inline: 10px;
-  border-bottom: var(--material-panedivider);
-}
-
-.llm-docked-brand {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  min-width: 0;
-  color: var(--fill-primary);
-  font-size: var(--llm-fs-12);
-  font-weight: 600;
-}
-
-.llm-docked-logo {
-  width: 24px;
-  height: 24px;
-  flex: 0 0 24px;
-}
-
-.llm-docked-close {
-  appearance: none;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: 0 0 26px;
-  width: 26px;
-  height: 26px;
-  padding: 5px;
-  border: 0;
-  border-radius: 5px;
-  color: var(--fill-secondary);
-  background: transparent;
-  cursor: pointer;
-}
-
-.llm-docked-close::before {
-  content: "";
-  width: 16px;
-  height: 16px;
-  background-color: currentColor;
-  mask: url("icons/action-close.svg") center / contain no-repeat;
-}
-
-.llm-docked-close:hover {
-  color: var(--fill-primary);
-  background: var(--fill-quinary);
-}
-
-.llm-docked-close:focus-visible {
-  outline: 2px solid var(--color-accent);
-  outline-offset: 2px;
 }
 
 /* Chat is a dedicated view of the native right pane. Keep its per-tab host
@@ -297,6 +229,8 @@
     --stroke-secondary,
     rgba(120, 120, 120, 0.26)
   );
+  /* Task progress card: the border sets it apart in light themes. */
+  --llm-task-progress-shadow: none;
   --llm-popup-overlay-bg: rgba(0, 0, 0, 0.22);
   --llm-history-paper-chip-text: #1d4ed8;
   --llm-history-paper-chip-bg: rgba(59, 130, 246, 0.12);
@@ -369,6 +303,8 @@
     black 8%
   );
   --llm-popup-surface-border: rgba(255, 255, 255, 0.12);
+  /* Task progress card: lifted off the dark pane. */
+  --llm-task-progress-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
   --llm-popup-overlay-bg: rgba(0, 0, 0, 0.48);
   --llm-history-paper-chip-text: #93c5fd;
   --llm-history-paper-chip-bg: rgba(59, 130, 246, 0.15);
@@ -420,11 +356,49 @@
 }
 
 .llm-header-top {
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+/*
+ * Row 1 (Independent): the Paper chat | Library chat toggle, centered, at the
+ * standalone window's own segmented-tab size. It flows with the header: no
+ * fixed height, no divider. No code writes its display, so it is laid out
+ * whenever the history bar below is (that bar's display is !important); only
+ * the Stacked layout drops it, for the mode chip in row 2.
+ */
+.llm-header-toggle-row {
+  --llm-standalone-ui-font-size: var(--llm-fs-12);
+  --llm-standalone-ui-line-height: calc(20px * var(--llm-font-scale));
+  --llm-standalone-chrome-gap: 4px;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-width: 0;
+  padding: 6px 0 8px;
+}
+
+/*
+ * Row 2: new chat, history, and runtime systems on the left, panel actions on
+ * the right, with the pane divider closing the header off from the chat. The
+ * negative inline margin runs the divider edge to edge past the panel's 2px
+ * padding (10px in the independent pane).
+ */
+.llm-header-nav-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   column-gap: 4px;
-  position: relative;
+  margin-inline: -2px;
+  padding: 0 2px 6px;
+}
+
+:root:not([data-llm-pane-view="stacked"])
+  .llm-dedicated-chat-pane
+  .llm-header-nav-row {
+  margin-inline: -10px;
+  padding-inline: 10px;
 }
 
 .llm-header-info {
@@ -460,7 +434,7 @@
   flex-direction: row !important;
   flex-wrap: nowrap !important;
   align-items: center !important;
-  gap: 10px;
+  gap: 4px;
   min-height: 22px;
   min-width: 0;
 }
@@ -477,6 +451,7 @@
   line-height: 1.2;
   border-radius: 0;
   min-height: 22px;
+  margin: 0;
   padding: 0;
   cursor: pointer;
 }
@@ -486,12 +461,13 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 20px;
-  min-width: 20px;
-  height: 20px;
-  min-height: 20px;
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  min-height: 28px;
   font-size: 0;
   line-height: 0;
+  border-radius: 4px;
 }
 
 .llm-history-new::before {
@@ -516,15 +492,15 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 20px;
-  min-width: 20px;
-  height: 20px;
-  min-height: 20px;
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  min-height: 28px;
   font-size: 0;
   line-height: 0;
   padding: 0;
   border: none;
-  border-radius: 0;
+  border-radius: 4px;
   background: transparent;
 }
 
@@ -637,80 +613,325 @@
   outline-offset: 2px;
 }
 
-/* ---- Mode chip: single pill showing current mode ---- */
+/* ---- Runtime systems and the Paper chat | Library chat toggle ---- */
 
 .llm-header-runtime-controls {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  min-width: max-content;
-  flex: 0 0 auto;
-}
-
-.llm-mode-switch {
-  display: flex !important;
-  flex-direction: row !important;
-  flex-wrap: nowrap !important;
-  align-items: center !important;
-  justify-content: flex-start;
-  gap: 5px;
-  margin: 0 !important;
-  padding: 0 !important;
-  flex: 0 0 auto;
-  width: auto;
   min-width: 0;
-  height: 22px;
-}
-
-.llm-mode-chip {
-  appearance: none;
-  -moz-appearance: none;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  margin: 0 !important;
-  width: auto;
   flex: 0 0 auto;
-  border: 1px solid var(--stroke-secondary);
-  background: var(--fill-quinary);
-  cursor: pointer;
-  font: inherit;
-  font-size: var(--llm-fs-12);
-  font-weight: 600;
-  color: var(--fill-primary);
-  padding: 2px 9px;
-  border-radius: 999px;
+}
+
+/* A thin rule between the history button and the runtime systems. */
+.llm-header-runtime-divider {
+  box-sizing: border-box;
+  flex: 0 0 auto;
+  width: 1px;
+  height: 16px;
+  margin-inline: 2px;
+  border-inline-start: var(--material-panedivider);
+}
+
+/* The sidebar toggle reuses the standalone segmented tabs. It has no flyout
+ * to rise above, so header menus keep painting over it. */
+.llm-header-toggle-row .llm-header-mode-tabs {
+  z-index: auto;
+}
+
+/* Balanced tabs: equal minimum widths, labels that shrink only when the
+ * sidebar is too narrow for both. Scoped to the row to outrank the shared
+ * .llm-standalone-tab padding. */
+.llm-header-toggle-row .llm-header-mode-tab {
+  flex: 0 1 auto;
+  min-width: 64px;
+  padding-inline: 12px;
+}
+
+.llm-header-mode-tab-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
-  line-height: normal;
-  height: 22px;
-  min-height: 22px;
-  vertical-align: middle;
-  align-self: center;
-  transition:
-    background 0.15s,
-    border-color 0.15s;
 }
 
-/* Hover only in standalone window where the chip is interactive */
-[data-standalone="true"] .llm-mode-chip:hover {
-  background: var(--fill-secondary);
-  border-color: var(--stroke-secondary);
-}
-
-.llm-mode-chip:focus-visible {
+.llm-header-mode-tab:focus-visible {
   outline: 2px solid var(--color-accent);
   outline-offset: 2px;
 }
 
-.llm-mode-chip[data-webchat-static="true"],
-.llm-mode-chip:disabled[data-webchat-static="true"] {
+/* WebChat and note conversations hold the toggle static. */
+.llm-header-mode-tab:disabled {
   cursor: default;
-  opacity: 1;
 }
 
-[data-standalone="true"] .llm-mode-chip[data-webchat-static="true"]:hover {
-  background: var(--fill-quinary);
-  border-color: var(--stroke-secondary);
+.llm-header-mode-tab:disabled:not(.active):hover {
+  color: var(--fill-secondary);
+}
+
+/* ---- Stacked: one header row, with the mode chip ----
+ * Every header builds both controls and the root layout attribute picks one,
+ * so a live layout change swaps them without rebuilding the panel.
+ * Independent keeps the toggle row above the actions row; Stacked drops it
+ * and shows the chip in the divider's place. The standalone window hides
+ * this header altogether. */
+:root[data-llm-sidebar-layout="stacked"] .llm-header-toggle-row,
+:root[data-llm-sidebar-layout="stacked"] .llm-header-runtime-divider {
+  display: none;
+}
+
+:root[data-llm-sidebar-layout="stacked"] .llm-mode-switch {
+  display: grid;
+}
+
+/* An empty Stacked library opens the full-pane chat: its single row takes
+ * the top space the toggle row gives the Independent pane. */
+:root[data-llm-sidebar-layout="stacked"]:not([data-llm-pane-view="stacked"])
+  .llm-dedicated-chat-pane
+  .llm-header-nav-row {
+  padding-top: 6px;
+}
+
+/* At rest the chip is the selected pill. On hover or keyboard focus a dark
+ * track drops down from it, the current mode in the chip's place and the
+ * other beneath. The open switch stays in the chip's column and paints over
+ * the top of the chat: above the Task progress card (8), below the header
+ * menus (13, 14). sidebarModeSwitch.ts writes the data attributes. */
+.llm-mode-switch {
+  --llm-mode-switch-duration: 300ms;
+  --llm-mode-switch-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --llm-mode-switch-track: color-mix(
+    in srgb,
+    var(--material-sidepane) 66%,
+    black 34%
+  );
+  --llm-mode-switch-thumb: color-mix(
+    in srgb,
+    var(--fill-primary) 11%,
+    var(--material-sidepane)
+  );
+  --llm-mode-switch-thumb-edge: rgba(255, 255, 255, 0.05);
+  /* --stroke-secondary is unset in Zotero 10: fall back to its dark value. */
+  --llm-mode-switch-edge: var(--stroke-secondary, rgba(255, 255, 255, 0.1));
+  position: relative;
+  z-index: 12;
+  display: none;
+  flex: 0 0 auto;
+  height: 22px;
+  margin: 0;
+}
+
+@media (prefers-color-scheme: light) {
+  .llm-mode-switch {
+    --llm-mode-switch-track: color-mix(
+      in srgb,
+      var(--material-sidepane) 88%,
+      black 12%
+    );
+    --llm-mode-switch-thumb: var(--material-background);
+    --llm-mode-switch-thumb-edge: rgba(0, 0, 0, 0.06);
+    --llm-mode-switch-edge: var(--stroke-secondary, rgba(0, 0, 0, 0.09));
+  }
+}
+
+/* Laid out but never painted: the chip is as wide as the longest label it
+ * can show (Note chat and the WebChat sites included), so it keeps one width
+ * in every state and the icons beside it never shift. */
+.llm-mode-switch-sizer {
+  display: grid;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+/* Both labels are semibold in every state, so widths never jump. */
+.llm-mode-switch-sizer > span,
+.llm-mode-switch-option {
+  font: inherit;
+  font-size: var(--llm-fs-12);
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.llm-mode-switch-sizer > span {
+  grid-area: 1 / 1;
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 9px;
+}
+
+.llm-mode-switch-track {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 22px;
+  box-sizing: border-box;
+  border-radius: 11px;
+  background: var(--llm-mode-switch-track);
+  box-shadow: inset 0 0 0 1px var(--llm-mode-switch-edge);
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    height var(--llm-mode-switch-duration) var(--llm-mode-switch-ease),
+    opacity 200ms ease,
+    box-shadow var(--llm-mode-switch-duration) ease;
+}
+
+/* Open: two 22px rows, 2px apart, inside 3px of padding. The track keeps the
+ * pointer inside the switch between the rows. */
+.llm-mode-switch[data-expanded="true"] .llm-mode-switch-track {
+  height: 52px;
+  opacity: 1;
+  pointer-events: auto;
+  box-shadow:
+    inset 0 0 0 1px var(--llm-mode-switch-edge),
+    0 6px 16px rgba(0, 0, 0, 0.28);
+}
+
+/* The selected pill: at rest it is the chip; open, it slides to its row. */
+.llm-mode-switch-thumb {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 22px;
+  box-sizing: border-box;
+  border-radius: 11px;
+  background: var(--llm-mode-switch-thumb);
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.28),
+    inset 0 0 0 1px var(--llm-mode-switch-thumb-edge);
+  pointer-events: none;
+  transition:
+    transform var(--llm-mode-switch-duration) var(--llm-mode-switch-ease),
+    width var(--llm-mode-switch-duration) var(--llm-mode-switch-ease),
+    border-radius var(--llm-mode-switch-duration) var(--llm-mode-switch-ease);
+}
+
+.llm-mode-switch[data-expanded="true"] .llm-mode-switch-thumb {
+  width: calc(100% - 6px);
+  border-radius: 8px;
+  transform: translate(3px, 27px);
+}
+
+.llm-mode-switch[data-expanded="true"][data-top="paper"][data-mode="paper"]
+  .llm-mode-switch-thumb,
+.llm-mode-switch[data-expanded="true"][data-top="library"][data-mode="library"]
+  .llm-mode-switch-thumb {
+  transform: translate(3px, 3px);
+}
+
+.llm-mode-switch-option {
+  appearance: none;
+  -moz-appearance: none;
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 22px;
+  min-width: 0;
+  min-height: 0;
+  margin: 0;
+  padding: 0 9px;
+  box-sizing: border-box;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  color: var(--fill-secondary);
+  cursor: pointer;
+  /* Closed, the other mode waits a row down, out of sight. */
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(0, 24px);
+  transition:
+    transform var(--llm-mode-switch-duration) var(--llm-mode-switch-ease),
+    width var(--llm-mode-switch-duration) var(--llm-mode-switch-ease),
+    opacity 180ms ease,
+    color 200ms ease;
+}
+
+.llm-mode-switch-option[aria-pressed="true"] {
+  z-index: 2;
+  color: var(--fill-primary);
+  opacity: 1;
+  pointer-events: auto;
+  transform: none;
+}
+
+/* Closing after a pick from the upper row: the old mode slides under the
+ * chip as it fades. */
+.llm-mode-switch[data-top="paper"]:not([data-expanded="true"])
+  .llm-mode-switch-option[data-tab="paper"],
+.llm-mode-switch[data-top="library"]:not([data-expanded="true"])
+  .llm-mode-switch-option[data-tab="library"] {
+  transform: none;
+}
+
+/* Open, the rows keep the order they opened with: a click moves the pill,
+ * never the word under the pointer. */
+.llm-mode-switch[data-expanded="true"] .llm-mode-switch-option {
+  width: calc(100% - 6px);
+  padding-inline: 3px;
+  opacity: 1;
+  pointer-events: auto;
+  transform: translate(3px, 27px);
+}
+
+.llm-mode-switch[data-expanded="true"][data-top="paper"]
+  .llm-mode-switch-option[data-tab="paper"],
+.llm-mode-switch[data-expanded="true"][data-top="library"]
+  .llm-mode-switch-option[data-tab="library"] {
+  transform: translate(3px, 3px);
+}
+
+.llm-mode-switch[data-expanded="true"]
+  .llm-mode-switch-option:not([aria-pressed="true"]):hover {
+  color: var(--fill-primary);
+}
+
+.llm-mode-switch-option:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
+/* Note sessions and WebChat: a static pill. */
+.llm-mode-switch[data-static="true"] .llm-mode-switch-option {
+  cursor: default;
+}
+
+/* The chat settles in when the mode changes, in the Stacked sidebar. */
+:root[data-llm-sidebar-layout="stacked"]
+  .llm-dedicated-chat-pane
+  .llm-messages.llm-mode-switch-fade {
+  animation: llm-mode-switch-fade 260ms ease both;
+}
+
+@keyframes llm-mode-switch-fade {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .llm-mode-switch,
+  .llm-mode-switch * {
+    transition-duration: 0ms !important;
+  }
+
+  .llm-messages.llm-mode-switch-fade {
+    animation: none !important;
+  }
 }
 
 .llm-runtime-system-controls {
@@ -1114,15 +1335,25 @@
   }
 
   /*
-   * Tighten the leading gaps when the trailing icons compact, so the space
-   * comes out of the chrome rather than out of the mode chip's label. The chip
-   * is the only element here that scales with --llm-font-scale, and it is
-   * pinned rigid, so every pixel reclaimed from these gaps is headroom the
-   * label can grow into before it reaches the action icons. The icons keep
-   * their own size — only the spacing between them closes up.
+   * Tighten the leading icons together with the trailing ones, so both ends
+   * of the actions row compact evenly.
    */
   .llm-history-bar {
-    gap: 4px;
+    gap: 0;
+  }
+
+  .llm-history-new,
+  .llm-history-toggle {
+    width: 24px;
+    min-width: 24px;
+    height: 24px;
+    min-height: 24px;
+  }
+
+  /* With the history bar's gap gone, the Stacked chip keeps 4px from
+   * history, as on its Codex side. */
+  .llm-mode-switch {
+    margin-inline-start: 4px;
   }
 }
 
@@ -1275,6 +1506,8 @@
     --stroke-secondary,
     rgba(120, 120, 120, 0.26)
   );
+  /* Task progress card: the border sets it apart in light themes. */
+  --llm-task-progress-shadow: none;
   --llm-popup-overlay-bg: rgba(0, 0, 0, 0.22);
   --llm-history-paper-chip-text: #1d4ed8;
   --llm-history-paper-chip-bg: rgba(59, 130, 246, 0.12);
@@ -1293,6 +1526,8 @@
     black 8%
   );
   --llm-popup-surface-border: rgba(255, 255, 255, 0.12);
+  /* Task progress card: lifted off the dark pane. */
+  --llm-task-progress-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
   --llm-popup-overlay-bg: rgba(0, 0, 0, 0.48);
   --llm-history-paper-chip-text: #93c5fd;
   --llm-history-paper-chip-bg: rgba(59, 130, 246, 0.15);
@@ -1348,8 +1583,11 @@
     transform 0.15s;
 }
 
+/* A pressed toggle (Task progress) keeps the hover look, as the code block's
+ * wrap toggle does. */
 .llm-standalone-nav-toggle:hover,
-.llm-standalone-title-action:hover {
+.llm-standalone-title-action:hover,
+.llm-standalone-title-action[aria-pressed="true"] {
   background: var(--fill-quinary);
   color: var(--fill-primary);
 }
@@ -1415,6 +1653,11 @@
 .llm-standalone-icon-clear::before {
   mask-image: url("icons/action-clear.svg");
   -webkit-mask-image: url("icons/action-clear.svg");
+}
+
+.llm-standalone-icon-task-progress::before {
+  mask-image: url("icons/action-task-progress.svg");
+  -webkit-mask-image: url("icons/action-task-progress.svg");
 }
 
 .llm-standalone-icon-exit::before {
@@ -2565,7 +2808,10 @@
   gap: 2px;
   padding: 1px;
   border-radius: 10px;
-  background: color-mix(in srgb, var(--material-background) 80%, black 20%);
+  background: var(
+    --llm-standalone-tab-track-bg,
+    color-mix(in srgb, var(--material-background) 80%, black 20%)
+  );
   border: 1px solid color-mix(in srgb, var(--stroke-secondary) 60%, transparent);
   min-width: 0;
   max-width: 100%;
@@ -2599,38 +2845,43 @@
 }
 
 .llm-standalone-tab.active {
-  background: var(--fill-quinary);
+  background: var(--llm-standalone-tab-active-bg, var(--fill-quinary));
   color: var(--fill-primary);
   font-weight: 600;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
 }
 
-#llmforzotero-standalone-chat-root[data-standalone-theme="light"] {
-  --llm-standalone-tab-track-bg: color-mix(
+/* Light surfaces for the segmented tabs, shared by the standalone window and
+ * the sidebar header. Each surface opts in below with its own theme hook. */
+#llmforzotero-standalone-chat-root,
+.llm-header-toggle-row {
+  --llm-standalone-tab-light-track-bg: color-mix(
     in srgb,
     var(--material-background) 88%,
     var(--fill-primary) 12%
   );
-  --llm-standalone-tab-active-bg: color-mix(
+  --llm-standalone-tab-light-active-bg: color-mix(
     in srgb,
     var(--material-background) 78%,
     var(--fill-primary) 22%
   );
+}
+
+@media (prefers-color-scheme: light) {
+  .llm-header-toggle-row {
+    --llm-standalone-tab-track-bg: var(--llm-standalone-tab-light-track-bg);
+    --llm-standalone-tab-active-bg: var(--llm-standalone-tab-light-active-bg);
+  }
+}
+
+#llmforzotero-standalone-chat-root[data-standalone-theme="light"] {
+  --llm-standalone-tab-track-bg: var(--llm-standalone-tab-light-track-bg);
+  --llm-standalone-tab-active-bg: var(--llm-standalone-tab-light-active-bg);
   --llm-standalone-sidebar-surface-bg: color-mix(
     in srgb,
     var(--material-background) 90%,
     var(--fill-primary) 10%
   );
-}
-
-#llmforzotero-standalone-chat-root[data-standalone-theme="light"]
-  .llm-standalone-tab-group {
-  background: var(--llm-standalone-tab-track-bg);
-}
-
-#llmforzotero-standalone-chat-root[data-standalone-theme="light"]
-  .llm-standalone-tab.active {
-  background: var(--llm-standalone-tab-active-bg);
 }
 
 .llm-standalone-content-wrapper {
@@ -2693,6 +2944,7 @@
   gap: calc(var(--llm-standalone-chrome-gap) / 2);
 }
 
+.llm-standalone-content-title-actions .llm-standalone-icon-task-progress,
 .llm-standalone-content-title-actions .llm-standalone-icon-export,
 .llm-standalone-content-title-actions .llm-standalone-icon-clear {
   width: calc(24px + var(--llm-standalone-chrome-gap));
@@ -2784,7 +3036,9 @@
    the messages flex-column with the card and the card shrinks to whatever
    space is left. Attribute toggled by setupHandlers (JS-based rather than
    :has() to stay compatible across Gecko versions). */
-[data-has-action-card="true"][data-start-page-active="true"] .llm-start-page {
+[data-has-action-card="true"][data-start-page-active="true"] .llm-start-page,
+[data-has-action-card="true"][data-start-page-active="true"]
+  .llm-standalone-start-page {
   display: none;
 }
 
@@ -3028,6 +3282,9 @@
 }
 
 .llm-chat-latest {
+  appearance: none;
+  -moz-appearance: none;
+  box-sizing: border-box;
   position: absolute;
   z-index: 7;
   left: 50%;
@@ -3038,7 +3295,10 @@
   justify-content: center;
   width: 32px;
   min-width: 32px;
+  max-width: 32px;
   height: 32px;
+  min-height: 32px;
+  max-height: 32px;
   margin: 0;
   padding: 0;
   border: 1px solid var(--stroke-secondary);
@@ -7664,6 +7924,12 @@ label.llm-search-results-item:hover {
     --llm-diff-remove-bg: rgba(226, 88, 88, 0.13);
     --llm-diff-remove-strong: rgba(226, 88, 88, 0.34);
     --llm-diff-remove-fg: #ea7c7c;
+    --llm-task-progress-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+  }
+
+  /* A standalone window the user switched to light keeps a flat card. */
+  #llmforzotero-standalone-chat-root[data-standalone-theme="light"] .llm-panel {
+    --llm-task-progress-shadow: none;
   }
 }
 
@@ -8880,19 +9146,16 @@ label.llm-search-results-item:hover {
   -webkit-overflow-scrolling: touch;
 }
 
-.llm-rendered-markdown .math-display > .katex-display > .katex > .katex-html {
-  box-sizing: border-box;
-  min-width: 100%;
-  padding-right: 3.25em;
-}
-
-.llm-rendered-markdown
-  .math-display
-  > .katex-display
-  > .katex
-  > .katex-html
-  > .tag {
-  right: 0;
+/* KaTeX pins a \tag label absolutely at the right edge and relies on spare
+   width to keep it clear of the equation. Chat panels are narrow and labels
+   can be long ("(Equation 1)"), so the label paints over the formula. Let it
+   flow after the equation instead; wide equations already scroll. Unscoped so
+   the quote-card preview, which renders outside .llm-rendered-markdown, gets
+   it too. */
+.math-display .katex-display > .katex > .katex-html > .tag,
+.math-display-inline .katex-display > .katex > .katex-html > .tag {
+  position: static;
+  margin-left: 1em;
 }
 
 /* Math error styling */
@@ -9166,42 +9429,6 @@ label.llm-search-results-item:hover {
   width: fit-content;
 }
 
-.llm-plan-mode-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  order: -90;
-  box-sizing: border-box;
-  width: fit-content;
-  max-width: 100%;
-  min-width: 0;
-  min-height: 26px;
-  padding: 3px 5px 3px 8px;
-  border: 1px solid var(--stroke-secondary);
-  border-radius: 4px;
-  background: var(--material-background);
-  color: var(--fill-secondary);
-  cursor: pointer;
-  font-size: var(--llm-fs-12);
-  line-height: 1.25;
-}
-
-.llm-plan-mode-chip:hover {
-  border-color: var(--stroke-primary);
-  color: var(--fill-primary);
-}
-
-.llm-plan-mode-chip:focus-visible {
-  outline: 1px solid var(--color-accent);
-  outline-offset: 1px;
-}
-
-.llm-plan-mode-chip-label {
-  min-width: 0;
-  font-weight: 500;
-  white-space: nowrap;
-}
-
 .llm-plan-container,
 .llm-agent-hitl-card {
   box-sizing: border-box;
@@ -9218,26 +9445,6 @@ label.llm-search-results-item:hover {
     var(--fill-quinary)
   );
   color: var(--fill-primary);
-}
-
-.llm-plan-container-execution {
-  width: 100%;
-  padding: 0;
-  overflow: visible;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-}
-
-.llm-plan-recovery-card .llm-plan-action {
-  appearance: none;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  box-sizing: border-box;
-  max-height: none;
-  max-width: 100%;
-  line-height: 1.25;
 }
 
 .llm-note-review-card {
@@ -9659,157 +9866,9 @@ details.llm-agent-action-row[open] > summary .llm-agent-action-row-marker {
   margin-top: 16px;
 }
 
-.llm-plan-progress-trigger {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  box-sizing: border-box;
-  width: fit-content;
-  max-width: 100%;
-  min-height: 34px;
-  padding: 6px 11px;
-  border: 1px solid var(--stroke-secondary);
-  border-radius: 999px;
-  background: color-mix(
-    in srgb,
-    var(--material-background) 92%,
-    var(--fill-quinary)
-  );
-  color: var(--fill-primary);
-  box-shadow: 0 5px 18px color-mix(in srgb, #000 16%, transparent);
-  cursor: pointer;
-  font: inherit;
-  line-height: 1.2;
-  text-align: left;
-}
-
-.llm-plan-progress-trigger:hover,
-.llm-plan-progress-trigger:focus-visible {
-  border-color: color-mix(
-    in srgb,
-    var(--color-accent) 58%,
-    var(--stroke-secondary)
-  );
-}
-
-.llm-plan-progress-trigger:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--color-accent) 42%, transparent);
-  outline-offset: 2px;
-}
-
-.llm-plan-progress-trigger-dot {
-  flex: 0 0 auto;
-  width: 8px;
-  height: 8px;
-  border: 1.5px solid var(--color-accent);
-  border-radius: 50%;
-}
-
-.llm-plan-progress-trigger-dot[data-status="running"],
-.llm-plan-progress-trigger-dot[data-status="pending"] {
-  border-right-color: transparent;
-  animation: llm-plan-progress-spin 900ms linear infinite;
-  animation-delay: var(--llm-stable-animation-delay, 0ms);
-}
-
-.llm-plan-progress-trigger-dot[data-status="interrupted"],
-.llm-plan-progress-trigger-dot[data-status="blocked"],
-.llm-plan-progress-trigger-dot[data-status="waiting_for_user"] {
-  border-color: #d58a28;
-  background: color-mix(in srgb, #d58a28 24%, transparent);
-}
-
-.llm-plan-progress-trigger-dot[data-status="completed"],
-.llm-plan-progress-trigger-dot[data-status="completed_with_exceptions"] {
-  border-color: #2e9b55;
-  background: #2e9b55;
-}
-
 @keyframes llm-plan-progress-spin {
   to {
     transform: rotate(360deg);
-  }
-}
-
-.llm-plan-progress-trigger-label,
-.llm-plan-progress-trigger-count {
-  white-space: nowrap;
-}
-
-.llm-plan-progress-trigger-label {
-  font-size: var(--llm-fs-11);
-  font-weight: 600;
-}
-
-.llm-plan-progress-trigger-count {
-  color: var(--fill-secondary);
-  font-size: var(--llm-fs-10);
-  font-variant-numeric: tabular-nums;
-}
-
-.llm-plan-progress-trigger-chevron {
-  flex: 0 0 auto;
-  color: var(--fill-tertiary);
-  font-size: var(--llm-fs-10);
-  transition: transform 160ms ease;
-}
-
-.llm-plan-progress-popover {
-  display: none;
-  box-sizing: border-box;
-  width: 100%;
-  max-width: 420px;
-  max-height: min(50vh, 360px);
-  margin-top: 7px;
-  padding: 8px;
-  overflow: auto;
-  border: 1px solid var(--stroke-secondary);
-  border-radius: 10px;
-  background: var(--material-sidepane, var(--material-background));
-  color: var(--fill-primary);
-  box-shadow: 0 8px 24px color-mix(in srgb, #000 18%, transparent);
-}
-
-.llm-plan-progress-open > .llm-plan-progress-popover,
-.llm-plan-progress-hover > .llm-plan-progress-popover {
-  display: block;
-}
-
-.llm-plan-progress-open
-  > .llm-plan-progress-trigger
-  .llm-plan-progress-trigger-chevron {
-  transform: rotate(180deg);
-}
-
-.llm-plan-progress-floating {
-  position: sticky;
-  z-index: 30;
-  bottom: 10px;
-  display: flex;
-  align-self: center;
-  justify-content: center;
-  width: calc(100% - 12px);
-  max-width: 640px;
-  margin: 2px auto 0;
-  pointer-events: none;
-}
-
-.llm-plan-progress-floating > .llm-plan-progress-trigger,
-.llm-plan-progress-floating > .llm-plan-progress-popover {
-  pointer-events: auto;
-}
-
-.llm-plan-progress-floating > .llm-plan-progress-popover {
-  position: fixed;
-  margin: 0;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .llm-plan-progress-trigger-dot[data-status="running"],
-  .llm-plan-progress-trigger-dot[data-status="pending"] {
-    animation: none;
-    border-right-color: var(--color-accent);
-    background: color-mix(in srgb, var(--color-accent) 22%, transparent);
   }
 }
 
@@ -9874,7 +9933,9 @@ details.llm-agent-action-row[open] > summary .llm-agent-action-row-marker {
   color: #2e9b55;
 }
 
-.llm-plan-status[data-status="partial"] {
+.llm-plan-status[data-status="partial"],
+[data-llm-checklist-source="outcomes"]
+  .llm-plan-status[data-status="waiting_for_user"] {
   background: color-mix(in srgb, #d58a22 16%, transparent);
   color: #d58a22;
 }
@@ -10598,103 +10659,73 @@ details.llm-agent-action-row[open] > summary .llm-agent-action-row-marker {
   color: #c84b4b;
 }
 
-.llm-plan-task-details {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin: 0 9px 9px 40px;
-  padding-left: 9px;
-  border-left: 1px solid var(--stroke-secondary);
-}
-
-.llm-plan-task-details p {
-  margin: 0;
-  color: var(--fill-tertiary);
-  font-size: var(--llm-fs-10);
-  line-height: 1.4;
-}
-
-.llm-plan-task-details .llm-plan-task-failure {
-  color: #c84b4b;
-}
-
-.llm-plan-progress-popover .llm-plan-header {
+.llm-task-progress-steps .llm-plan-header {
   gap: 8px;
   min-height: 18px;
 }
 
-.llm-plan-progress-popover .llm-plan-heading {
+.llm-task-progress-steps .llm-plan-heading {
   gap: 5px;
 }
 
-.llm-plan-progress-popover .llm-plan-title {
+.llm-task-progress-steps .llm-plan-title {
   font-size: var(--llm-fs-11);
 }
 
-.llm-plan-progress-popover .llm-plan-status {
+.llm-task-progress-steps .llm-plan-status {
   padding: 1px 5px;
 }
 
-.llm-plan-progress-popover .llm-plan-progress {
+.llm-task-progress-steps .llm-plan-progress {
   gap: 0;
   margin-top: 6px;
 }
 
-.llm-plan-progress-popover .llm-plan-task-list {
+.llm-task-progress-steps .llm-plan-task-list {
   margin-top: 6px;
   border-radius: 8px;
 }
 
-.llm-plan-progress-popover .llm-plan-task-line {
+.llm-task-progress-steps .llm-plan-task-line {
   gap: 6px;
   min-height: 32px;
   padding: 5px 7px;
 }
 
-.llm-plan-progress-popover .llm-plan-task-badge {
+.llm-task-progress-steps .llm-plan-task-badge {
   flex-basis: 18px;
   width: 18px;
   height: 18px;
   border-width: 1px;
 }
 
-.llm-plan-progress-popover .llm-plan-task-badge-in_progress::after {
+.llm-task-progress-steps .llm-plan-task-badge-in_progress::after {
   inset: -1px;
   border-width: 1px;
 }
 
-.llm-plan-progress-popover .llm-plan-task-label {
+.llm-task-progress-steps .llm-plan-task-label {
   line-height: 1.3;
 }
 
-.llm-plan-progress-popover .llm-plan-task-original {
+.llm-task-progress-steps .llm-plan-task-original {
   line-height: 1.2;
 }
 
-.llm-plan-progress-popover .llm-plan-task-pill {
+.llm-task-progress-steps .llm-plan-task-pill {
   padding: 1px 5px;
 }
 
-.llm-plan-progress-popover .llm-plan-task-details {
-  gap: 3px;
-  margin: 0 7px 7px 31px;
-  padding-left: 7px;
-}
-
-.llm-plan-progress-popover .llm-plan-task-details p {
-  line-height: 1.3;
-}
-
-.llm-plan-progress-popover .llm-plan-research-progress {
+.llm-task-progress-steps .llm-plan-research-progress {
   margin-top: 6px;
 }
 
-.llm-plan-progress-popover .llm-plan-actions {
+.llm-task-progress-steps .llm-plan-actions {
   gap: 4px;
   margin-top: 6px;
 }
 
-.llm-plan-progress-popover .llm-plan-action {
+.llm-task-progress-steps .llm-plan-action {
   min-height: 26px;
   padding: 3px 8px;
   font-size: var(--llm-fs-10);
@@ -10789,7 +10820,6 @@ details.llm-agent-action-row[open] > summary .llm-agent-action-row-marker {
   margin-left: 0;
 }
 
-.llm-plan-recovery-card .llm-plan-approve .llm-plan-action-label-full,
 .llm-plan-review-actions .llm-plan-approve .llm-plan-action-label-full,
 .llm-plan-review-actions .llm-plan-approve .llm-plan-action-label-compact {
   position: relative;
@@ -12467,35 +12497,6 @@ details.llm-agent-action-row[open] > summary .llm-agent-action-row-marker {
   margin: 0;
 }
 
-/* ── Action progress indicator (in-thread "working" card) ─────────────── */
-
-.llm-action-progress-card {
-  margin: 8px 0 4px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  flex: 0 0 auto;
-}
-
-.llm-action-progress-typing {
-  padding: 0;
-}
-
-.llm-action-progress-step {
-  font-size: var(--llm-fs-11);
-  color: var(--fill-secondary);
-}
-
-.llm-action-progress-summary {
-  font-size: var(--llm-fs-10);
-  color: var(--fill-tertiary);
-  min-height: 0;
-}
-
-.llm-action-progress-summary:empty {
-  display: none;
-}
-
 /* ── Action launch form ─────────────────────────────────────────────────── */
 
 .llm-action-launch-form {
@@ -12577,25 +12578,6 @@ details.llm-agent-action-row[open] > summary .llm-agent-action-row-marker {
   border-radius: 0;
   background: transparent;
   position: static;
-}
-
-/* Plan is a removable composer mode chip, not an expandable context stack. */
-.llm-selected-context.llm-plan-mode-chip {
-  display: inline-flex;
-  flex-direction: row;
-  align-items: center;
-  gap: 6px;
-  width: fit-content;
-  min-height: 26px;
-  padding: 3px 5px 3px 8px;
-  border: 1px solid var(--stroke-secondary);
-  border-radius: 4px;
-  background: var(--material-background);
-}
-
-.llm-selected-context.llm-plan-mode-chip:hover {
-  border-color: var(--stroke-primary);
-  color: var(--fill-primary);
 }
 
 .llm-selected-context.expanded .llm-selected-context-header {
@@ -13317,34 +13299,63 @@ details.llm-agent-action-row[open] > summary .llm-agent-action-row-marker {
   border-color: transparent;
 }
 
-.llm-send-btn {
-  width: auto;
-  min-width: 78px;
-  height: var(--llm-action-height);
-  min-height: var(--llm-action-height);
-  padding: var(--llm-action-pill-padding);
-  border-radius: 999px;
-  font-size: var(--llm-action-font-size);
-  font-weight: 600;
-  line-height: 1;
-}
-
+/* Send / Cancel: 28px round icon buttons. Send is a blue circle with an
+   up-arrow; Cancel is a neutral circle with a stop square, so a streaming
+   reply never reads as an error. Names live in title + aria-label. */
+.llm-send-btn,
 .llm-send-btn.llm-action-icon-only {
-  width: 36px;
-  min-width: 36px;
+  flex: 0 0 auto;
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  min-height: 28px;
   padding: 0;
   border-radius: 999px;
-  font-size: var(--llm-action-icon-font-size);
-  font-weight: 700;
+  font-size: 0;
+  line-height: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
-.llm-cancel-btn {
-  width: auto;
-  min-width: 82px;
-  height: var(--llm-action-height);
-  min-height: var(--llm-action-height);
-  padding: var(--llm-action-pill-padding);
-  font-size: var(--llm-action-font-size);
+.llm-send-btn::before {
+  content: "";
+  display: block;
+  width: 16px;
+  height: 16px;
+  background-color: currentColor;
+  mask-image: url("icons/action-send-arrow.svg");
+  -webkit-mask-image: url("icons/action-send-arrow.svg");
+  mask-repeat: no-repeat;
+  mask-position: center;
+  mask-size: contain;
+  -webkit-mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  -webkit-mask-size: contain;
+  pointer-events: none;
+}
+
+.llm-cancel-btn,
+.llm-cancel-btn.llm-action-icon-only {
+  background: var(--fill-primary);
+  border-color: var(--fill-primary);
+  color: var(--material-background);
+}
+
+.llm-cancel-btn:hover:not(:disabled) {
+  background: var(--fill-secondary);
+  border-color: var(--fill-secondary);
+}
+
+.llm-cancel-btn:active:not(:disabled) {
+  transform: scale(0.96);
+}
+
+.llm-cancel-btn::before {
+  width: 12px;
+  height: 12px;
+  mask-image: url("icons/action-stop.svg");
+  -webkit-mask-image: url("icons/action-stop.svg");
 }
 
 .llm-send-icon {
@@ -13616,6 +13627,34 @@ details.llm-agent-action-row[open] > summary .llm-agent-action-row-marker {
   flex: 0 0 auto;
   width: var(--llm-fs-16);
   height: var(--llm-fs-16);
+}
+
+.llm-provider-quota {
+  appearance: none;
+  -moz-appearance: none;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--fill-secondary);
+  font-family: inherit;
+  font-size: var(--llm-fs-11);
+  line-height: 1.2;
+  min-width: 0;
+  max-width: 12ch;
+  padding: 1px 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.llm-provider-quota:hover {
+  background: var(--fill-quinary);
+}
+
+.llm-provider-quota:focus-visible {
+  outline: 1px solid var(--color-accent);
+  outline-offset: 1px;
 }
 
 .llm-context-gauge {
@@ -14830,7 +14869,1023 @@ item-pane-sidenav .llm-persistent-rail-entry[hidden] {
   visibility: visible;
 }
 
-/* Stacked mode restores the native collapsible section and classic toolbar. */
-:root[data-llm-pane-view="stacked"] .llm-docked-title-row {
+/* ── Task progress ────────────────────────────────────────────────────────
+   The one task-progress view: a row under the header and a drawer that
+   unrolls from it at the top of the chat shell. The drawer is in the flow:
+   the messages below shrink (never below a strip of chat) and stay mounted.
+   Theme tokens only; they follow Zotero's light and dark hooks. */
+
+/* One container: a rounded card at the top of the chat shell. Collapsed it is
+   just its header; clicking the header unrolls the drawer inside the same
+   card. It has the pane's own colour: border and, in dark themes, shadow. */
+.llm-task-progress-card {
+  --llm-task-progress-ease: cubic-bezier(0.23, 1, 0.32, 1);
+  position: relative;
+  z-index: 8;
+  display: flex;
+  flex: 0 1 auto;
+  flex-direction: column;
+  box-sizing: border-box;
+  min-height: 0;
+  margin: 0 2px 6px;
+  overflow: clip;
+  /* The plugin's popup-surface stroke: themed light and dark, in the panel
+     and the standalone window (--stroke-secondary is unset in Zotero 10). */
+  border: 1px solid var(--llm-popup-surface-border);
+  border-radius: 12px;
+  /* The pane's own colour; the border (and, in dark themes, the shadow)
+     sets the card apart. The drawer shares this one surface. */
+  background: var(--material-sidepane, var(--material-background));
+  box-shadow: var(--llm-task-progress-shadow, none);
+  color: var(--fill-primary);
+}
+
+.llm-task-progress-card[hidden] {
   display: none;
+}
+
+/* The row lowers from under the header and rises back like a curtain, with
+   the motion of the sidebar header's mode switch: 300 ms on its ease, the
+   card fading in over 200 ms and out over 180 ms. */
+.llm-chat-shell {
+  --llm-task-progress-curtain-duration: 300ms;
+  --llm-task-progress-curtain-ease: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* At rest the curtain makes no box: the card is the shell's own flex item.
+   view.ts moves its height (inline) between measured heights. */
+.llm-task-progress-curtain {
+  display: contents;
+  transition: height var(--llm-task-progress-curtain-duration)
+    var(--llm-task-progress-curtain-ease);
+}
+
+.llm-task-progress-curtain[hidden] {
+  display: none !important;
+}
+
+/* Moving, a box as tall as the part of the card shown, clipped at its top
+   edge only (the dark theme's shadow still falls on the chat). The card
+   keeps its height inside and slides by it, its lower edge on the
+   curtain's. */
+.llm-task-progress-curtain:not([data-curtain="open"]) {
+  position: relative;
+  z-index: 8;
+  display: flow-root;
+  flex: 0 0 auto;
+  box-sizing: border-box;
+  min-height: 0;
+  clip-path: inset(0 -24px -24px -24px);
+}
+
+.llm-task-progress-curtain[data-curtain="closed"] > .llm-task-progress-card,
+.llm-task-progress-curtain[data-curtain="closing"] > .llm-task-progress-card {
+  opacity: 0;
+  transform: translateY(-100%);
+}
+
+.llm-task-progress-curtain[data-curtain="opening"] > .llm-task-progress-card {
+  transition:
+    transform var(--llm-task-progress-curtain-duration)
+      var(--llm-task-progress-curtain-ease),
+    opacity 200ms ease;
+}
+
+.llm-task-progress-curtain[data-curtain="closing"] > .llm-task-progress-card {
+  transition:
+    transform var(--llm-task-progress-curtain-duration)
+      var(--llm-task-progress-curtain-ease),
+    opacity 180ms ease;
+}
+
+/* The shell's gap under the header moves with the row. */
+.llm-chat-shell[data-task-progress-curtain="opening"],
+.llm-chat-shell[data-task-progress-curtain="closing"] {
+  transition: margin-top var(--llm-task-progress-curtain-duration)
+    var(--llm-task-progress-curtain-ease);
+}
+
+/* Paragraph evidence uses the shared source footer and its accessible popover. */
+.llm-paper-source-icon {
+  width: 1em;
+  height: 1em;
+  color: inherit;
+}
+.llm-paper-source-count {
+  font-size: inherit;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  white-space: nowrap;
+}
+.llm-paper-source-indicator {
+  margin-inline-start: 4px;
+  vertical-align: baseline;
+}
+.llm-paper-source-popover {
+  gap: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--llm-popup-surface-border, rgba(128, 128, 128, 0.3));
+  border-radius: 9px;
+  font-size: var(--llm-fs-12);
+  line-height: 1.55;
+}
+.llm-paper-source-title {
+  margin-bottom: 10px;
+  font-weight: 500;
+}
+.llm-paper-source-passage {
+  flex: 0 0 auto;
+}
+.llm-paper-source-passage + .llm-paper-source-passage {
+  margin-top: 12px;
+}
+.llm-paper-source-heading {
+  display: block;
+  color: var(--fill-secondary);
+  margin-bottom: 4px;
+}
+.llm-paper-source-popover .llm-quote-card {
+  margin: 0;
+  border-radius: 0;
+  background: transparent;
+  font-size: inherit;
+}
+.llm-paper-source-popover .llm-quote-card-content {
+  padding: 0;
+}
+.llm-paper-source-popover .llm-quote-card-preview {
+  display: none;
+}
+.llm-paper-source-popover .llm-quote-card-body {
+  display: block;
+  border-left: 2px solid
+    var(--llm-popup-surface-border, rgba(128, 128, 128, 0.3));
+  color: var(--fill-primary);
+  font-style: normal;
+  line-height: inherit;
+}
+.llm-paper-source-popover .llm-quote-card-citation {
+  padding: 4px 0 0 12px;
+}
+
+.llm-paper-source-indicator .llm-web-source-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.25em;
+  font: inherit;
+  font-size: 0.75em;
+  line-height: 1;
+  width: auto;
+  height: 1.25em;
+  padding: 0 0.4em;
+  border: 1px solid var(--stroke-secondary, var(--llm-popup-surface-border));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--fill-secondary) 8%, transparent);
+}
+.llm-paper-source-indicator .llm-web-source-chip:hover,
+.llm-paper-source-indicator .llm-web-source-chip:focus-visible,
+.llm-paper-source-indicator.expanded .llm-web-source-chip {
+  border-color: var(--fill-secondary);
+  color: var(--fill-secondary);
+  background: color-mix(in srgb, var(--fill-secondary) 12%, transparent);
+}
+.llm-paper-source-indicator .llm-web-source-chip:focus-visible {
+  outline-color: currentColor;
+}
+
+/* The header: status ring, label, counts, status pill, chevron. */
+.llm-task-progress {
+  appearance: none;
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 9px;
+  box-sizing: border-box;
+  width: 100%;
+  height: 38px;
+  min-height: 38px;
+  margin: 0;
+  padding: 0 8px 0 9px;
+  border: 0;
+  border-radius: 0;
+  outline: none;
+  background: transparent;
+  color: var(--fill-primary);
+  font: inherit;
+  font-size: var(--llm-fs-12);
+  line-height: 1.2;
+  text-align: left;
+  cursor: pointer;
+  user-select: none;
+  transition: background-color 200ms ease;
+}
+
+.llm-task-progress[hidden] {
+  display: none !important;
+}
+
+.llm-task-progress:hover {
+  background: color-mix(in srgb, var(--fill-primary) 4%, transparent);
+}
+
+/* Keyboard focus tints the header; no outline box. */
+.llm-task-progress:focus-visible {
+  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+}
+
+.llm-task-progress-label {
+  flex: 0 0 auto;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.llm-task-progress-count {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fill-secondary);
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.llm-task-progress-ring {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 20px;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+}
+
+.llm-task-progress-ring-track {
+  position: absolute;
+  inset: 0;
+}
+
+.llm-task-progress-ring-base {
+  stroke: var(--llm-popup-surface-border);
+}
+
+.llm-task-progress-ring-arc {
+  display: none;
+  stroke: var(--fill-secondary);
+}
+
+.llm-task-progress[data-state="working"] .llm-task-progress-ring-arc,
+.llm-task-progress[data-state="answering"] .llm-task-progress-ring-arc,
+.llm-task-progress[data-state="waiting"] .llm-task-progress-ring-arc {
+  display: inline;
+}
+
+.llm-task-progress[data-state="working"] .llm-task-progress-ring-track,
+.llm-task-progress[data-state="answering"] .llm-task-progress-ring-track,
+.llm-task-progress[data-state="waiting"] .llm-task-progress-ring-track {
+  animation: llm-plan-progress-spin 1.1s linear infinite;
+  animation-delay: var(--llm-stable-animation-delay, 0ms);
+}
+
+.llm-task-progress[data-state="cancelled"] .llm-task-progress-ring-base,
+.llm-task-progress[data-state="interrupted"] .llm-task-progress-ring-base,
+.llm-task-progress[data-state="blocked"] .llm-task-progress-ring-base {
+  stroke-dasharray: 3 3;
+}
+
+.llm-task-progress-badge {
+  position: absolute;
+  inset: 1px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  color: var(--material-sidepane, var(--material-background));
+}
+
+.llm-task-progress-badge-done {
+  background: var(--llm-diff-add-fg);
+}
+
+.llm-task-progress-badge-failed {
+  background: var(--llm-diff-remove-fg);
+}
+
+.llm-task-progress[data-state="completed"] .llm-task-progress-badge-done,
+.llm-task-progress[data-state="completed_with_exceptions"]
+  .llm-task-progress-badge-done,
+.llm-task-progress[data-state="failed"] .llm-task-progress-badge-failed {
+  display: inline-flex;
+  animation: llm-task-progress-pop 300ms var(--llm-task-progress-ease) both;
+}
+
+.llm-task-progress[data-state="completed"] .llm-task-progress-ring-track,
+.llm-task-progress[data-state="completed_with_exceptions"]
+  .llm-task-progress-ring-track,
+.llm-task-progress[data-state="failed"] .llm-task-progress-ring-track {
+  display: none;
+}
+
+.llm-task-progress-pill {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  height: 20px;
+  padding: 0 8px;
+  border-radius: 999px;
+  color: var(--fill-secondary);
+  background: color-mix(in srgb, var(--fill-primary) 7%, transparent);
+  font-size: var(--llm-fs-11);
+  font-weight: 500;
+  white-space: nowrap;
+  animation: llm-task-progress-fade 200ms ease-out both;
+}
+
+.llm-task-progress-pill[hidden] {
+  display: none;
+}
+
+.llm-task-progress-pill[data-tone="completed"] {
+  color: var(--llm-diff-add-fg);
+  background: color-mix(in srgb, var(--llm-diff-add-fg) 16%, transparent);
+}
+
+.llm-task-progress-pill[data-tone="failed"] {
+  color: var(--llm-diff-remove-fg);
+  background: color-mix(in srgb, var(--llm-diff-remove-fg) 16%, transparent);
+}
+
+/* A run that ended short of everything it set out to do, or waits on the
+   user: the amber the plan's partial status and interrupted badge use in
+   both themes. */
+.llm-task-progress-pill[data-tone="completed_with_exceptions"],
+.llm-task-progress-pill[data-tone="blocked"],
+.llm-task-progress-pill[data-tone="waiting"],
+.llm-task-progress-pill[data-tone="interrupted"] {
+  color: #d58a22;
+  background: color-mix(in srgb, #d58a22 16%, transparent);
+}
+
+.llm-task-progress-chevron {
+  display: inline-flex;
+  flex: 0 0 24px;
+  align-items: center;
+  justify-content: center;
+  height: 24px;
+  color: var(--fill-tertiary);
+}
+
+.llm-task-progress-chevron svg {
+  transition: transform 300ms var(--llm-task-progress-ease);
+}
+
+.llm-task-progress[aria-expanded="true"] .llm-task-progress-chevron svg {
+  transform: rotate(180deg);
+}
+
+@keyframes llm-task-progress-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.4);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes llm-task-progress-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes llm-task-progress-rise {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .llm-task-progress-curtain,
+  .llm-task-progress-card,
+  .llm-task-progress-card *,
+  .llm-chat-shell[data-task-progress-curtain] {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+
+/* While the card is in the shell, the shell stacks it over the messages; the
+   messages give up height, down to a strip of chat. */
+.llm-chat-shell.llm-task-progress-present {
+  --llm-task-progress-chat-strip: 96px;
+  display: flex;
+  flex-direction: column;
+}
+
+/* The card is the third header row: the same gap under the actions row as
+   between the toggle and the actions (the panel's own gap is taken back).
+   Only while the row lowers or is down: the gap moves with the row. */
+.llm-panel:not([data-standalone="true"])
+  .llm-chat-shell.llm-task-progress-present[data-task-progress-curtain="opening"],
+.llm-panel:not([data-standalone="true"])
+  .llm-chat-shell.llm-task-progress-present[data-task-progress-curtain="open"] {
+  margin-top: -8px;
+}
+
+:root:not([data-llm-pane-view="stacked"])
+  .llm-dedicated-chat-pane
+  .llm-panel:not([data-standalone="true"])
+  .llm-chat-shell.llm-task-progress-present[data-task-progress-curtain="opening"],
+:root:not([data-llm-pane-view="stacked"])
+  .llm-dedicated-chat-pane
+  .llm-panel:not([data-standalone="true"])
+  .llm-chat-shell.llm-task-progress-present[data-task-progress-curtain="open"] {
+  margin-top: -12px;
+}
+
+/* The card's dark-theme shadow reaches ~20px past it: where the shell has
+   no native resize grip (the independent pane, the standalone window), let
+   it paint past the shell's edges instead of being cut off. */
+:root:not([data-llm-pane-view="stacked"])
+  .llm-dedicated-chat-pane
+  .llm-chat-shell.llm-task-progress-present,
+[data-standalone="true"] .llm-chat-shell.llm-task-progress-present {
+  overflow: clip;
+  overflow-clip-margin: 24px;
+}
+
+.llm-chat-shell.llm-task-progress-present > .llm-messages {
+  flex: 1 1 0;
+  height: auto;
+  min-height: var(--llm-task-progress-chat-strip);
+  max-height: none;
+}
+
+/* The turn rail stays centred on the chat below the open drawer. */
+.llm-chat-shell.llm-task-progress-shown > .llm-turn-navigator {
+  top: calc(
+    var(--llm-task-progress-inset, 0px) +
+      (100% - var(--llm-task-progress-inset, 0px)) / 2
+  );
+  height: calc(100% - var(--llm-task-progress-inset, 0px) - 24px);
+}
+
+/* The drawer unrolls inside the card, under a hairline. Its height is its
+   content, up to the dragged height and the space above the chat strip. */
+.llm-task-progress-drawer {
+  position: relative;
+  display: flex;
+  flex: 0 1 auto;
+  flex-direction: column;
+  box-sizing: border-box;
+  min-height: 0;
+  max-height: var(--llm-task-progress-drawer-max, none);
+  overflow: clip;
+  border-top: 1px solid
+    color-mix(in srgb, var(--llm-popup-surface-border) 80%, transparent);
+  font-size: var(--llm-fs-12);
+  user-select: text;
+  transition:
+    height 300ms var(--llm-task-progress-ease),
+    opacity 300ms var(--llm-task-progress-ease);
+}
+
+.llm-task-progress-drawer[hidden] {
+  display: none;
+}
+
+.llm-task-progress-drawer[data-state="opening"] {
+  opacity: 1;
+  animation: llm-task-progress-fade 300ms var(--llm-task-progress-ease) both;
+}
+
+.llm-task-progress-drawer[data-state="closing"] {
+  opacity: 0;
+}
+
+.llm-task-progress-drawer-body {
+  flex: 0 1 auto;
+  box-sizing: border-box;
+  min-height: 0;
+  padding: 6px 0 12px;
+  overflow-x: clip;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+}
+
+/* The drag handle: a thin strip on the bottom edge, drawn only on hover,
+   focus or while held. */
+.llm-task-progress-drawer-grip {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 8px;
+  cursor: ns-resize;
+  outline: none;
+  user-select: none;
+  touch-action: none;
+}
+
+.llm-task-progress-drawer-grip::before {
+  position: absolute;
+  bottom: 3px;
+  left: 50%;
+  width: 36px;
+  height: 3px;
+  margin-left: -18px;
+  border-radius: 2px;
+  background: var(--stroke-primary, var(--fill-secondary, #7a7a7a));
+  content: "";
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.llm-task-progress-drawer-grip:hover::before,
+.llm-task-progress-drawer-grip:focus-visible::before,
+.llm-task-progress-resizing .llm-task-progress-drawer-grip::before {
+  opacity: 1;
+}
+
+.llm-task-progress-resizing,
+.llm-task-progress-resizing * {
+  cursor: ns-resize !important;
+  user-select: none !important;
+}
+
+.llm-task-progress-head[hidden] {
+  display: none;
+}
+
+.llm-task-progress-head {
+  padding: 0 14px 8px;
+  color: var(--fill-secondary);
+  line-height: 1.4;
+}
+
+.llm-task-progress-scope {
+  color: var(--fill-primary);
+  font-weight: 600;
+}
+
+.llm-task-progress-note {
+  padding: 0 14px 8px;
+  color: var(--fill-tertiary);
+  font-size: var(--llm-fs-11);
+}
+
+.llm-task-progress-note[hidden],
+.llm-task-progress-steps[hidden],
+.llm-task-progress-papers-title[hidden],
+.llm-task-progress-more[hidden],
+.llm-task-paper-details[hidden],
+.llm-task-paper-source[hidden] {
+  display: none;
+}
+
+.llm-task-progress-steps {
+  margin: 2px 12px 8px 14px;
+  padding: 0 0 8px;
+  border-bottom: 1px solid
+    color-mix(in srgb, var(--llm-popup-surface-border) 80%, transparent);
+}
+
+.llm-task-progress-steps-title,
+.llm-task-progress-papers-title {
+  margin: 0;
+  color: var(--fill-secondary);
+  font-size: var(--llm-fs-11);
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+}
+
+.llm-task-progress-steps .llm-plan-task-list {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.llm-task-progress-steps .llm-plan-task {
+  border-bottom: 0;
+}
+
+/* A step's label may wrap; steps sit further apart than its lines do, so
+   each step reads as one block. */
+.llm-task-progress-steps .llm-plan-task + .llm-plan-task {
+  margin-top: 6px;
+}
+
+.llm-task-progress-steps .llm-plan-task-line {
+  min-height: 26px;
+  padding: 2px 0;
+}
+
+.llm-task-progress-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* Papers are a list inside the card: one line each, hairlines between,
+   a status ring, the title, what was read, and a chevron. */
+.llm-task-paper {
+  position: relative;
+  margin: 0;
+  padding: 0;
+}
+
+/* Remove from the task: shown on the row's hover or focus, over its
+   summary text, left of the chevron. */
+.llm-task-paper-remove {
+  appearance: none;
+  position: absolute;
+  /* Centred on the title's line: the summary's 9px top padding plus half a
+     12px line at 1.35, less half the 22px button. */
+  top: calc(9px + var(--llm-fs-12) * 0.675 - 11px);
+  right: 30px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fill-secondary);
+  cursor: pointer;
+}
+
+.llm-task-paper-remove:hover,
+.llm-task-paper-remove:focus-visible {
+  outline: none;
+  background: color-mix(in srgb, var(--fill-primary) 8%, transparent);
+  color: var(--fill-primary);
+}
+
+.llm-task-paper:hover > .llm-task-paper-remove:not([hidden]),
+.llm-task-paper:focus-within > .llm-task-paper-remove:not([hidden]) {
+  display: inline-flex;
+}
+
+/* Hovered, a removable row makes room for its × beside the chevron: the
+   title and then the summary give way (the summary truncates, never hides). */
+.llm-task-paper-removable:hover .llm-task-paper-grid,
+.llm-task-paper-removable:focus-within .llm-task-paper-grid {
+  grid-template-columns: 18px auto minmax(0, 1fr) minmax(0, max-content) 44px;
+}
+
+.llm-task-paper-removable:hover .llm-task-paper-chevron,
+.llm-task-paper-removable:focus-within .llm-task-paper-chevron {
+  justify-self: end;
+}
+
+.llm-task-paper + .llm-task-paper,
+.llm-task-progress-history,
+.llm-task-progress-question-section + .llm-task-progress-question-section {
+  border-top: 1px solid
+    color-mix(in srgb, var(--llm-popup-surface-border) 70%, transparent);
+}
+
+.llm-task-paper-summary {
+  appearance: none;
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  height: auto;
+  min-height: 0;
+  max-height: none;
+  margin: 0;
+  padding: 9px 8px 9px 10px;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 200ms ease;
+}
+
+.llm-task-paper-grid {
+  display: grid;
+  grid-template-columns: 18px auto minmax(0, 1fr) minmax(0, max-content) 18px;
+  align-items: center;
+  column-gap: 8px;
+  row-gap: 3px;
+  width: 100%;
+  min-width: 0;
+  line-height: 1.35;
+}
+
+.llm-task-paper-summary:hover {
+  background: color-mix(in srgb, var(--fill-primary) 4%, transparent);
+}
+
+.llm-task-paper-summary:focus-visible {
+  outline: none;
+  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+}
+
+.llm-task-paper-index {
+  grid-row: 1;
+  grid-column: 2;
+  min-width: 14px;
+  color: var(--fill-tertiary);
+  font-size: var(--llm-fs-10);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+/* The paper's status ring: empty when only listed, outlined when matched,
+   half-filled when skimmed, filled with a check once read, and in the cite
+   colour once the answer cites it. */
+.llm-task-paper-dot {
+  position: relative;
+  grid-row: 1;
+  grid-column: 1;
+  box-sizing: border-box;
+  width: 16px;
+  height: 16px;
+  border: 1.5px solid var(--llm-popup-surface-border);
+  border-radius: 50%;
+}
+
+.llm-task-paper[data-state="matched"] .llm-task-paper-dot {
+  border-color: var(--fill-secondary);
+}
+
+.llm-task-paper[data-state="skimmed"] .llm-task-paper-dot {
+  border-color: var(--color-accent);
+  background: linear-gradient(90deg, var(--color-accent) 50%, transparent 50%);
+}
+
+.llm-task-paper[data-state="read"] .llm-task-paper-dot,
+.llm-task-paper[data-state="cited"] .llm-task-paper-dot {
+  border: 0;
+  background: var(--color-accent);
+}
+
+.llm-task-paper[data-state="cited"] .llm-task-paper-dot {
+  background: var(--llm-context-icon-note-color);
+}
+
+.llm-task-paper[data-state="read"] .llm-task-paper-dot::after,
+.llm-task-paper[data-state="cited"] .llm-task-paper-dot::after {
+  position: absolute;
+  top: 3px;
+  left: 5.5px;
+  width: 3.5px;
+  height: 7px;
+  border: solid var(--material-sidepane, var(--material-background));
+  border-width: 0 1.8px 1.8px 0;
+  transform: rotate(45deg);
+  content: "";
+}
+
+.llm-task-paper-chevron {
+  display: inline-flex;
+  grid-row: 1;
+  grid-column: 5;
+  align-items: center;
+  justify-content: center;
+  color: var(--fill-tertiary);
+}
+
+.llm-task-paper-chevron svg {
+  transition: transform 300ms var(--llm-task-progress-ease, ease);
+}
+
+.llm-task-paper-summary[aria-expanded="true"] .llm-task-paper-chevron svg {
+  transform: rotate(180deg);
+}
+
+.llm-task-paper-title {
+  grid-row: 1;
+  grid-column: 3;
+  min-width: 0;
+  overflow: hidden;
+  font-size: var(--llm-fs-12);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.llm-task-paper-tail {
+  grid-row: 1;
+  grid-column: 4;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--fill-secondary);
+  font-size: var(--llm-fs-10);
+  white-space: nowrap;
+}
+
+/* The paper's details line shows once the row is opened. */
+.llm-task-paper-summary:not([aria-expanded="true"]) .llm-task-paper-meta {
+  display: none;
+}
+
+.llm-task-paper-meta {
+  grid-row: 2;
+  grid-column: 3 / 6;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fill-tertiary);
+  font-size: var(--llm-fs-10);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.llm-task-paper-source {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 0 4px;
+  border: 1px solid var(--stroke-secondary);
+  border-radius: 4px;
+  font-size: calc(9.5px * var(--llm-font-scale));
+}
+
+/* A paper's reads unroll under it along a thin guide line, one after
+   another. */
+.llm-task-paper-details {
+  margin: 0 14px 10px 18px;
+  padding: 0 0 2px 12px;
+  border-left: 1px solid var(--llm-popup-surface-border);
+  font-size: var(--llm-fs-12);
+  animation: llm-task-progress-fade 300ms
+    var(--llm-task-progress-ease, ease-out) both;
+}
+
+.llm-task-paper-details > * {
+  animation: llm-task-progress-rise 300ms
+    var(--llm-task-progress-ease, ease-out) both;
+}
+
+.llm-task-paper-details > :nth-child(2) {
+  animation-delay: 60ms;
+}
+
+.llm-task-paper-details > :nth-child(3) {
+  animation-delay: 120ms;
+}
+
+.llm-task-paper-details > :nth-child(n + 4) {
+  animation-delay: 180ms;
+}
+
+.llm-task-paper-empty {
+  color: var(--fill-tertiary);
+  font-style: italic;
+}
+
+.llm-task-paper-turn {
+  margin: 6px 0 4px;
+  color: var(--fill-tertiary);
+  font-size: var(--llm-fs-10);
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+}
+
+.llm-task-paper-read {
+  margin: 0 0 8px;
+}
+
+.llm-task-paper-how {
+  color: var(--fill-secondary);
+  font-size: var(--llm-fs-11);
+}
+
+/* The passage's label, with "Source" (open it in the paper) at the right. */
+.llm-task-paper-read-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.llm-task-paper-read-head > .llm-task-paper-how {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.llm-task-paper-open {
+  appearance: none;
+  flex: 0 0 auto;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--fill-tertiary);
+  font: inherit;
+  font-size: var(--llm-fs-11);
+  cursor: pointer;
+}
+
+.llm-task-paper-open:hover,
+.llm-task-paper-open:focus-visible {
+  outline: none;
+  color: var(--fill-primary);
+  text-decoration: underline;
+}
+
+.llm-task-paper-open:disabled {
+  opacity: 0.5;
+  cursor: default;
+  text-decoration: none;
+}
+
+.llm-task-paper-snippet {
+  margin: 3px 0 0;
+  padding: 5px 9px;
+  border: 0;
+  border-radius: 7px;
+  background: var(--fill-quinary);
+  color: var(--fill-primary);
+  font-size: var(--llm-fs-11);
+  line-height: 1.5;
+}
+
+.llm-task-paper-cited {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  margin-top: 6px;
+}
+
+.llm-task-paper-citation {
+  appearance: none;
+  min-height: 0;
+  margin: 0;
+  padding: 2px 0;
+  border: 0;
+  background: none;
+  color: var(--color-accent);
+  font: inherit;
+  font-size: var(--llm-fs-11);
+  text-align: left;
+  cursor: pointer;
+}
+
+.llm-task-paper-citation:hover {
+  text-decoration: underline;
+}
+
+.llm-task-progress-more {
+  padding: 8px 14px;
+  color: var(--fill-tertiary);
+  font-size: var(--llm-fs-11);
+}
+
+/* The drawer's history, once it holds more than one question: the current
+   question named above its steps and papers, and each earlier one a header
+   with a paper row's look that unrolls its own. */
+.llm-task-progress-question-current {
+  padding: 2px 8px 6px 10px;
+}
+
+.llm-task-progress-question-label {
+  /* From the row's first column, flush with the Papers heading. */
+  grid-column: 1 / 4;
+  display: flex;
+  min-width: 0;
+  font-weight: 600;
+}
+
+.llm-task-progress-question-name {
+  flex: none;
+}
+
+.llm-task-progress-question-words {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  /* pre keeps the space before "·", which a flex item would trim. */
+  white-space: pre;
+}
+
+.llm-task-progress-question-counts {
+  margin-left: 6px;
+}
+
+.llm-task-progress-papers-title {
+  padding: 2px 14px 4px;
+}
+
+.llm-quote-card.llm-task-progress-flash {
+  box-shadow: 0 0 0 2px var(--color-accent);
+  transition: box-shadow 300ms ease;
 }

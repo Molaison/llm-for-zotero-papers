@@ -102,7 +102,7 @@ describe("workflow: MinerU page-limit selection", function () {
       const originalBounds = preset.getBoundingClientRect();
       assert.isAtMost(originalBounds.width, 88, "compact inline control");
       const originalUnitX = unit.getBoundingClientRect().x;
-      const selectStyle = win.getComputedStyle(preset);
+      const selectStyle = win.getComputedStyle(preset)!;
       assert.equal(selectStyle.textAlign, "left");
       change(preset, "custom");
       const editBounds = input.getBoundingClientRect();
@@ -110,7 +110,7 @@ describe("workflow: MinerU page-limit selection", function () {
       assert.closeTo(editBounds.width, originalBounds.width, 1);
       assert.closeTo(editBounds.height, originalBounds.height, 1);
       assert.closeTo(unit.getBoundingClientRect().x, originalUnitX, 1);
-      const inputStyle = win.getComputedStyle(input);
+      const inputStyle = win.getComputedStyle(input)!;
       assert.equal(inputStyle.textAlign, selectStyle.textAlign);
       assert.equal(inputStyle.paddingLeft, selectStyle.paddingLeft);
       assert.equal(inputStyle.fontSize, selectStyle.fontSize);

@@ -1,5 +1,17 @@
 import { appLogger } from "../../core/logging";
 import { copyNoteEditingSelectedTextContext } from "./noteEditing/selectionController";
+import {
+  disposeTaskProgressPanel,
+  syncTaskProgressPanel,
+} from "./taskProgress/panel";
+import {
+  TASK_PROGRESS_OPEN_PASSAGE_EVENT,
+  TASK_PROGRESS_REMOVE_PAPER_EVENT,
+} from "./taskProgress/view";
+import type { TaskPaperPassageTarget } from "./taskProgress/passageSource";
+import { navigateToTaskPaperPassage } from "./assistantCitationLinks";
+import { resolveTaskPaperScopeItemIds } from "../../agent/context/taskPaperScopeListing";
+import { libraryIndexService } from "../../services/libraryIndexService";
 import { createNoteConversationItem } from "../../services/notes/conversationItem";
 /* eslint-disable @typescript-eslint/no-require-imports */
 import { createElement } from "../../utils/domHelpers";
@@ -375,6 +387,16 @@ import {
   type RuntimeConversationSystem,
   type RuntimeSystemControls,
 } from "./runtimeSystemControls";
+import {
+  resolveSidebarChatModeToggleState,
+  type SidebarChatModeTab,
+} from "./sidebarChatModeToggle";
+import {
+  playSidebarModeChangeFade,
+  removeSidebarModeSwitchDot,
+  showSidebarModeSwitchDot,
+  syncSidebarModeSwitch,
+} from "./sidebarModeSwitch";
 import { getPanelDomRefs } from "./setupHandlers/domRefs";
 import {
   chooseAutoLoadedContextPanelItem,
@@ -468,6 +490,9 @@ import { createLocalPdfResourceResolver } from "./setupHandlers/controllers/loca
 import { isZoteroPdfAttachmentCandidate } from "./setupHandlers/controllers/pdfAttachmentPolicy";
 import { resolvePdfModeModelInputs } from "./setupHandlers/controllers/pdfPaperModelInputController";
 import { attachFooterPermissionControl } from "./footerPermissionControl";
+import { attachFooterQuotaControl } from "./footerQuotaControl";
+import { readFooterQuota } from "./footerQuotaReader";
+import { resolveQuotaTarget } from "../../providers/quota";
 import { createWebChatHistoryController } from "./setupHandlers/controllers/webChatHistoryController";
 import {
   createHistoryLifecycleController,
@@ -480,17 +505,6 @@ import { attachComposeCaptureController } from "./setupHandlers/controllers/comp
 import { attachFloatingMenuInteractionController } from "./setupHandlers/controllers/floatingMenuInteractionController";
 import { createPaperPickerController } from "./setupHandlers/controllers/paperPickerController";
 import { createActionCommandController } from "./setupHandlers/controllers/actionCommandController";
-import { showStandaloneConfirmationDialog } from "./standaloneConfirmationDialog";
-import {
-  PLAN_APPROVED_EVENT,
-  PLAN_CANCEL_EVENT,
-  PLAN_REVISE_EVENT,
-  beginPlanRevision,
-  disableComposePlanMode,
-  enableComposePlanMode,
-  getComposePlanState,
-  toggleComposePlanMode,
-} from "./planModeState";
 import { parseInlineActionCommand } from "./setupHandlers/controllers/actionCommandParams";
 import { addZoteroItemsAsDefaultContext } from "./contextSelectionActions";
 import { registerContextSurfaceActionTarget } from "./zoteroItemContextMenu";
@@ -722,7 +736,6 @@ export function setupHandlers(
     modelMenu,
     reasoningBtn,
     runtimeModeBtn,
-    planModeChip,
     reasoningSlot,
     reasoningMenu,
     actionsRow,
@@ -742,8 +755,10 @@ export function setupHandlers(
     historyToggleBtn,
     historyModeIndicator,
     historyMenu,
-    modeCapsule,
-    modeChipBtn,
+    chatModeTabs,
+    paperChatTabBtn,
+    libraryChatTabBtn,
+    modeSwitch,
     historyRowMenu,
     historyRowRenameBtn,
     historyUndo,
@@ -1005,6 +1020,9 @@ export function setupHandlers(
   });
   const openRemotePaperHistory = () => remoteHistoryController.open();
 
+  let quotaControl: ReturnType<typeof attachFooterQuotaControl> | null = null;
+  let quotaPendingConversationKey: number | null = null;
+  let quotaRequestWasPending = false;
   const syncRequestUiForCurrentConversation = () => {
     const activeConversationKey = item ? getConversationKey(item) : null;
     const isWebChatActive = isWebChatModeActive();
@@ -1012,6 +1030,15 @@ export function setupHandlers(
       activeConversationKey !== null &&
       Number.isFinite(activeConversationKey) &&
       isRequestPending(activeConversationKey);
+    if (
+      quotaRequestWasPending &&
+      !isCurrentConversationPending &&
+      quotaPendingConversationKey === activeConversationKey
+    ) {
+      void quotaControl?.sync(true);
+    }
+    quotaPendingConversationKey = activeConversationKey;
+    quotaRequestWasPending = isCurrentConversationPending;
     if (sendBtn) {
       sendBtn.style.display = isCurrentConversationPending ? "none" : "";
       sendBtn.disabled = !item;
@@ -1359,6 +1386,11 @@ export function setupHandlers(
   let disposeFooterPermissionControl: (() => void) | null = null;
   const updateRuntimeModeButton = () => {
     syncRemoteHistoryButton();
+    updateRuntimeModeButtonState();
+    // Plain chat lists the scope only; Agent mode records reads.
+    syncTaskProgressPanel(body);
+  };
+  const updateRuntimeModeButtonState = () => {
     void syncFooterPermissionControl();
     if (!runtimeModeBtn) return;
     const indicator = runtimeModeBtn.querySelector(
@@ -1450,13 +1482,21 @@ export function setupHandlers(
     },
   };
   let runtimeSystemSwitchInFlight = false;
+  const runtimeDivider = body.querySelector(
+    "#llm-header-runtime-controls .llm-header-runtime-divider",
+  ) as HTMLElement | null;
   const updateRuntimeSystemToggles = () => {
-    syncRuntimeSystemControls(panelRuntimeSystemControls, {
+    const state = syncRuntimeSystemControls(panelRuntimeSystemControls, {
       activeSystem: getConversationSystem(),
       codexEnabled: isCodexModeAvailable(),
       claudeEnabled: isClaudeModeAvailable(),
       busy: runtimeSystemSwitchInFlight,
     });
+    // The divider before the runtime systems goes when they do. Their
+    // wrapper stays: in the Stacked layout it also holds the mode chip.
+    if (runtimeDivider) {
+      runtimeDivider.style.display = state.groupVisible ? "" : "none";
+    }
   };
   let claudeWarmupInFlight: Promise<void> | null = null;
   const warmClaudeModeCaches = () => {
@@ -1783,7 +1823,6 @@ export function setupHandlers(
 
   // Compute conversation key early so all closures can reference it.
   let conversationKey = item ? getConversationKey(item) : null;
-  let syncPlanModeChip = () => {};
   const handleQuoteProvenanceRevalidationRequest = () => {
     const activeConversationKey = item ? getConversationKey(item) : null;
     if (activeConversationKey) {
@@ -1796,6 +1835,57 @@ export function setupHandlers(
   );
   const getTextContextConversationKey = (): number | null =>
     item ? getConversationKey(item) : null;
+  // WebChat owns the paper slot's tooltip while it is active, and the Stacked
+  // chip shows its site there.
+  let webChatModeTabTitle = "";
+  let webChatModeChipLabel = "";
+  let lastSyncedModeTab: SidebarChatModeTab | null = null;
+  // One sync for both mode controls, the Independent tabs and the Stacked
+  // chip, so whichever the layout shows always matches the panel's mode.
+  const syncChatModeTabs = () => {
+    const state = resolveSidebarChatModeToggleState({
+      isGlobalMode: Boolean(item) && isGlobalMode(),
+      isNoteSession: isNoteSession(),
+      isWebChat: panelRoot.dataset.webchatMode === "true",
+    });
+    const paperLabel = t(state.paperTabLabel);
+    if (chatModeTabs && paperChatTabBtn && libraryChatTabBtn) {
+      chatModeTabs.dataset.mode = state.activeTab;
+      const paperLabelEl = paperChatTabBtn.querySelector(
+        ".llm-header-mode-tab-label",
+      );
+      if (paperLabelEl) paperLabelEl.textContent = paperLabel;
+      paperChatTabBtn.title =
+        state.showWebChatDot && webChatModeTabTitle
+          ? webChatModeTabTitle
+          : paperLabel;
+      for (const tab of [paperChatTabBtn, libraryChatTabBtn]) {
+        const active = tab.dataset.tab === state.activeTab;
+        tab.classList.toggle("active", active);
+        tab.setAttribute("aria-pressed", active ? "true" : "false");
+        tab.disabled = state.disabled;
+        if (state.disabled) tab.setAttribute("aria-disabled", "true");
+        else tab.removeAttribute("aria-disabled");
+      }
+    }
+    if (modeSwitch) {
+      const webChatSite = state.showWebChatDot ? webChatModeChipLabel : "";
+      syncSidebarModeSwitch(modeSwitch, {
+        activeTab: state.activeTab,
+        paperLabel: webChatSite || paperLabel,
+        libraryLabel: t(state.libraryTabLabel),
+        disabled: state.disabled,
+        paperTitle: webChatSite ? webChatModeTabTitle : "",
+      });
+    }
+    // The chat settles in on a mode change (CSS plays it in Stacked only).
+    if (chatBox && lastSyncedModeTab && lastSyncedModeTab !== state.activeTab) {
+      playSidebarModeChangeFade(chatBox);
+    }
+    lastSyncedModeTab = state.activeTab;
+    // The Task progress row follows the conversation and mode shown.
+    syncTaskProgressPanel(body);
+  };
   const syncConversationIdentity = () => {
     if (
       item &&
@@ -1825,7 +1915,6 @@ export function setupHandlers(
       Number.isFinite(conversationKey) && (conversationKey as number) > 0
         ? `${conversationKey}`
         : "";
-    syncPlanModeChip();
     const libraryID = getCurrentLibraryID();
     panelRoot.dataset.libraryId = libraryID > 0 ? `${libraryID}` : "";
     const mode: "global" | "paper" | null = item
@@ -1935,34 +2024,7 @@ export function setupHandlers(
       // Keep historyModeIndicator (which is the clock history button) accessible.
       // Its label is static "Conversation history" — no text update needed.
     }
-    // Update mode capsule data-active state
-    if (modeCapsule) {
-      modeCapsule.dataset.mode = mode || "";
-    }
-    if (modeChipBtn) {
-      // [webchat] Don't overwrite — applyWebChatModeUI manages the chip in webchat mode
-      if (!modeChipBtn.querySelector(".llm-webchat-dot")) {
-        const currentLabel = noteSession
-          ? t("Note chat")
-          : mode === "global"
-            ? t("Library chat")
-            : t("Paper chat");
-        modeChipBtn.textContent = currentLabel;
-        modeChipBtn.title = noteSession
-          ? currentLabel
-          : mode === "global"
-            ? "Switch to paper chat"
-            : "Switch to library chat";
-        modeChipBtn.setAttribute(
-          "aria-label",
-          noteSession
-            ? currentLabel
-            : mode === "global"
-              ? "Switch to paper chat"
-              : "Switch to library chat",
-        );
-      }
-    }
+    syncChatModeTabs();
     if (inputBox && !noteSession) {
       inputBox.placeholder =
         mode === "global"
@@ -2242,38 +2304,6 @@ export function setupHandlers(
       uploadBtn.setAttribute("aria-expanded", "false");
     }
   };
-  const getCurrentPlanProvider = (): "original" | "codex" | "claude" =>
-    isClaudeConversationSystem()
-      ? "claude"
-      : isCodexConversationSystem()
-        ? "codex"
-        : "original";
-  const isPlanAvailable = () =>
-    !isWebChatModeActive() &&
-    (isRuntimeConversationSystem() || getCurrentRuntimeMode() === "agent");
-  syncPlanModeChip = () => {
-    if (!planModeChip || !item) return;
-    const state = getComposePlanState(getConversationKey(item));
-    planModeChip.style.display =
-      isPlanAvailable() && state?.enabled ? "inline-flex" : "none";
-    planModeChip.dataset.planId = state?.planId || "";
-    planModeChip.dataset.planRevision = state ? `${state.revision}` : "";
-  };
-  const activatePlanMode = () => {
-    if (!item || isWebChatModeActive()) return;
-    if (!isPlanAvailable()) {
-      if (status) {
-        setStatus(status, "Plan mode is available in Agent mode", "warning");
-      }
-      return;
-    }
-    enableComposePlanMode({
-      conversationKey: getConversationKey(item),
-      provider: getCurrentPlanProvider(),
-    });
-    syncPlanModeChip();
-    if (status) setStatus(status, "Plan mode enabled", "ready");
-  };
   let openModelMenu = () => {};
   let closeModelMenu = () => {
     setFloatingMenuOpen(modelMenu, MODEL_MENU_OPEN_CLASS, false);
@@ -2294,7 +2324,6 @@ export function setupHandlers(
     disposeFooterPermissionControl = controller.dispose;
     void syncFooterPermissionControl();
   }
-  syncPlanModeChip();
   let openReasoningMenu = () => {};
   let closeReasoningMenu = () => {
     setFloatingMenuOpen(reasoningMenu, REASONING_MENU_OPEN_CLASS, false);
@@ -2445,7 +2474,12 @@ export function setupHandlers(
       if (panelWidth <= 0) return;
       withScrollGuard(chatBox, conversationKey, () => {
         applyResponsiveActionButtonsLayout();
-        updateHeaderSpacing(headerTop);
+        // The runtime systems share the actions row (row 2) with the panel
+        // actions; that row's gap is the one they compress against.
+        updateHeaderSpacing(
+          headerTop?.querySelector<HTMLElement>(".llm-header-nav-row") ||
+            headerTop,
+        );
         if (panelWidth !== lastUserContextAlignmentPanelWidth) {
           syncUserContextAlignmentWidths(body);
           lastUserContextAlignmentPanelWidth = panelWidth;
@@ -4212,6 +4246,16 @@ export function setupHandlers(
     list.appendChild(chip);
   };
 
+  /** A folder or tag chip's name, with the papers removed in Task progress. */
+  const withExcludedCount = (name: string, excluded?: number[]) =>
+    excluded?.length
+      ? `${name} · ${
+          excluded.length === 1
+            ? t("1 excluded")
+            : t("{count} excluded").replace("{count}", `${excluded.length}`)
+        }`
+      : name;
+
   const appendCollectionChip = (
     ownerDoc: Document,
     list: HTMLDivElement,
@@ -4249,7 +4293,7 @@ export function setupHandlers(
       ownerDoc,
       "span",
       "llm-collection-chip-title",
-      { textContent: ref.name },
+      { textContent: withExcludedCount(ref.name, ref.excludedItemIds) },
     );
     chipLabel.append(chipIcon, chipTitle);
     const removeBtn = createElement(
@@ -4293,7 +4337,7 @@ export function setupHandlers(
     });
     const chipIcon = createContextIcon(ownerDoc, "tag", "llm-tag-chip-icon");
     const chipTitle = createElement(ownerDoc, "span", "llm-tag-chip-title", {
-      textContent: ref.name,
+      textContent: withExcludedCount(ref.name, ref.excludedItemIds),
     });
     chipLabel.append(chipIcon, chipTitle);
     const removeBtn = createElement(
@@ -4314,6 +4358,12 @@ export function setupHandlers(
   };
 
   const updatePaperPreview = () => {
+    renderPaperPreview();
+    // Task progress lists what the context bar holds: follow every change.
+    syncTaskProgressPanel(body);
+  };
+
+  const renderPaperPreview = () => {
     if (!item || !paperPreview || !paperPreviewList) return;
     closePaperChipMenu();
     const itemId = item.id;
@@ -4787,6 +4837,91 @@ export function setupHandlers(
     schedulePanelStateRefresh();
   };
   requestAutoLoadedPaperContextRefresh = updatePaperPreviewPreservingScroll;
+
+  // Task progress lists the context bar's papers and can remove one. A paper
+  // added on its own loses its chip; a paper that came with a folder or a tag
+  // is excluded from that folder or tag (the chip stays and counts it), so
+  // retrieval and the next question leave it out.
+  body.addEventListener(TASK_PROGRESS_REMOVE_PAPER_EVENT, (event: Event) => {
+    void removeTaskProgressPaper(event);
+  });
+  // "Source" on a passage the card lists: open its paper at the passage.
+  body.addEventListener(TASK_PROGRESS_OPEN_PASSAGE_EVENT, (event: Event) => {
+    const target = (event as CustomEvent<TaskPaperPassageTarget>).detail;
+    if (!target || !(Number(target.itemId) > 0)) return;
+    const button =
+      (event.target as Element | null)?.closest?.<HTMLButtonElement>(
+        "button.llm-task-paper-open",
+      ) || null;
+    void navigateToTaskPaperPassage({ body, target, button }).catch(
+      (error: unknown) => {
+        appLogger.warn("LLM task progress passage open failed", error);
+      },
+    );
+  });
+  const removeTaskProgressPaper = async (event: Event) => {
+    if (!item) return;
+    const owner = item;
+    const itemId = Math.floor(
+      Number((event as CustomEvent<{ itemId?: number }>).detail?.itemId || 0),
+    );
+    if (!(itemId > 0)) return;
+    const autoLoaded = resolveAutoLoadedPaperContext();
+    if (autoLoaded?.itemId === itemId) return;
+    const papers = getManualPaperContextsForItem(item.id, autoLoaded);
+    const removed = papers.filter((paper) => paper.itemId === itemId);
+    let changed = false;
+    if (removed.length) {
+      for (const paper of removed) {
+        paperContextModeOverrides.delete(`${item.id}:${buildPaperKey(paper)}`);
+      }
+      const next = papers.filter((paper) => paper.itemId !== itemId);
+      if (next.length) selectedPaperContextCache.set(item.id, next);
+      else clearSelectedPaperState(item.id);
+      changed = true;
+    }
+    // A folder or tag that also brings the paper keeps it out from now on.
+    const collections = selectedCollectionContextCache.get(item.id) || [];
+    const tags = selectedTagContextCache.get(item.id) || [];
+    const libraryID =
+      collections[0]?.libraryID || tags[0]?.libraryID || item.libraryID;
+    const snapshot =
+      collections.length || tags.length
+        ? await libraryIndexService.getSnapshot(libraryID).catch(() => null)
+        : null;
+    // The panel moved on to another conversation while the index loaded.
+    if (item !== owner) return;
+    if (snapshot) {
+      const holds = (
+        contexts: Parameters<typeof resolveTaskPaperScopeItemIds>[1],
+      ) => resolveTaskPaperScopeItemIds(snapshot, contexts).includes(itemId);
+      const exclude = <T extends { excludedItemIds?: number[] }>(ref: T): T =>
+        ({
+          ...ref,
+          excludedItemIds: [...(ref.excludedItemIds || []), itemId],
+        }) as T;
+      let excluded = false;
+      const nextCollections = collections.map((ref) => {
+        if (!holds({ collections: [ref] })) return ref;
+        excluded = true;
+        return exclude(ref);
+      });
+      const nextTags = tags.map((ref) => {
+        if (!holds({ tags: [ref] })) return ref;
+        excluded = true;
+        return exclude(ref);
+      });
+      if (excluded) {
+        if (collections.length)
+          selectedCollectionContextCache.set(item.id, nextCollections);
+        if (tags.length) selectedTagContextCache.set(item.id, nextTags);
+        changed = true;
+      }
+    }
+    if (!changed) return;
+    initializedConversationComposeContextKeys.add(item.id);
+    updatePaperPreviewPreservingScroll();
+  };
   const updateFilePreviewPreservingScroll = () => {
     schedulePanelStateRefresh();
   };
@@ -4846,7 +4981,9 @@ export function setupHandlers(
     historyUndoText,
     historyUndoBtn,
     topToast,
-    modeChipBtn,
+    paperChatTabBtn,
+    libraryChatTabBtn,
+    modeSwitch,
     getItem: () => item,
     setItem: (nextItem) => {
       if (
@@ -5078,7 +5215,28 @@ export function setupHandlers(
     };
   };
 
+  quotaControl = attachFooterQuotaControl({
+    button: body.querySelector<HTMLButtonElement>("#llm-provider-quota"),
+    getTarget: () => {
+      if (!item) return null;
+      if (isClaudeConversationSystem()) {
+        const context = resolveClaudeModelCatalogContext();
+        return context
+          ? {
+              kind: "claude",
+              bridgeUrl: getClaudeBridgeUrl(),
+              settingSources: getClaudeSettingSourcesCsvByPref(),
+              context,
+            }
+          : null;
+      }
+      return resolveQuotaTarget(getSelectedModelInfo().selectedEntry);
+    },
+    read: readFooterQuota,
+  });
+
   updateModelButton = (onlyIfChanged = false) => {
+    void quotaControl?.sync();
     if (!item || !modelBtn) return;
     // A model change can add or remove the remote-history button.
     syncRemoteHistoryButton();
@@ -5850,7 +6008,7 @@ export function setupHandlers(
       selectedLevel === "auto"
     ) {
       reasoningBtn.dataset.reasoningAdjustment =
-        "The previous reasoning level is unavailable for this model. Using the provider default.";
+        "The previous reasoning level is unavailable for this model. Using Auto.";
     }
     return {
       provider,
@@ -6137,7 +6295,6 @@ export function setupHandlers(
             params.currentValue.toLowerCase() === choice.value.toLowerCase()
               ? `\u2713 ${choice.label}`
               : choice.label,
-          title: choice.description || choice.label,
         },
       );
       const applySelection = (event: Event) => {
@@ -6442,61 +6599,51 @@ export function setupHandlers(
     panelRoot.dataset.webchatMode = isWebChat ? "true" : "false";
     syncQueuedFollowUpRegistration();
 
-    // Mode chip: show target site name with connection dot, or restore original
-    if (modeChipBtn) {
+    // Mode controls: WebChat takes the paper slot, with its connection dot,
+    // in the Independent tab and the Stacked chip (which names the site), and
+    // both stay static until WebChat exits.
+    if (paperChatTabBtn) {
       if (isWebChat) {
-        // Resolve the target label from the current model name
+        let webchatTabTitle = "WebChat Sync";
         let webchatChipLabel = "chatgpt";
-        let webchatChipTitle = "WebChat Sync";
         try {
           const { currentModel } = getSelectedModelInfo();
           const { getWebChatTargetByModelName } =
             require("../../webchat/types") as typeof import("../../webchat/types");
           const entry = getWebChatTargetByModelName(currentModel || "");
           if (entry) {
+            webchatTabTitle = `${entry.label} Web Sync (${entry.modelName})`;
             webchatChipLabel = entry.displayName;
-            webchatChipTitle = `${entry.label} Web Sync (${entry.modelName})`;
           }
         } catch {
           /* fallback to defaults */
         }
+        webChatModeTabTitle = webchatTabTitle;
+        webChatModeChipLabel = webchatChipLabel;
 
-        let dot = modeChipBtn.querySelector(
+        let dot = paperChatTabBtn.querySelector(
           ".llm-webchat-dot",
         ) as HTMLElement | null;
         if (!dot) {
-          dot = (modeChipBtn.ownerDocument as Document).createElement("span");
+          dot = (paperChatTabBtn.ownerDocument as Document).createElement(
+            "span",
+          );
           dot.className = "llm-webchat-dot llm-webchat-dot-disconnected";
         }
-        modeChipBtn.textContent = "";
-        modeChipBtn.appendChild(dot);
-        modeChipBtn.appendChild(
-          (modeChipBtn.ownerDocument as Document).createTextNode(
-            ` ${webchatChipLabel}`,
-          ),
-        );
-        modeChipBtn.title = webchatChipTitle;
-        modeChipBtn.disabled = true;
-        modeChipBtn.setAttribute("aria-disabled", "true");
-        modeChipBtn.dataset.webchatStatic = "true";
-        modeChipBtn.style.cursor = "default";
-        webChatFeature.startConnectionCheck(dot);
+        paperChatTabBtn.prepend(dot);
+        const modeSwitchDot = showSidebarModeSwitchDot(modeSwitch);
+        syncChatModeTabs();
+        webChatFeature.startConnectionCheck(dot, modeSwitchDot);
       } else {
-        const oldDot = modeChipBtn.querySelector(".llm-webchat-dot");
+        webChatModeTabTitle = "";
+        webChatModeChipLabel = "";
+        const oldDot = paperChatTabBtn.querySelector(".llm-webchat-dot");
         if (oldDot) {
           oldDot.remove();
-          // Restore mode chip text — the normal render sync skips it while the dot is present
-          const chipLabel = isGlobalMode() ? "Library chat" : "Paper chat";
-          modeChipBtn.textContent = chipLabel;
-          modeChipBtn.title = isGlobalMode()
-            ? "Switch to paper chat"
-            : "Switch to library chat";
         }
+        removeSidebarModeSwitchDot(modeSwitch);
         webChatFeature.stopConnectionCheck();
-        modeChipBtn.disabled = false;
-        modeChipBtn.removeAttribute("aria-disabled");
-        delete modeChipBtn.dataset.webchatStatic;
-        modeChipBtn.style.cursor = "";
+        syncChatModeTabs();
       }
     }
 
@@ -6606,7 +6753,7 @@ export function setupHandlers(
     if (headerTop) ro.observe(headerTop);
     for (const element of Array.from(
       headerTop?.querySelectorAll(
-        ".llm-mode-chip, .llm-runtime-system-controls",
+        ".llm-header-nav-row, .llm-runtime-system-controls",
       ) || [],
     ))
       ro.observe(element as Element);
@@ -6840,8 +6987,6 @@ export function setupHandlers(
     logError: (message, error) => {
       appLogger.debug(message, error);
     },
-    activatePlanMode,
-    isPlanAvailable,
   });
   const {
     isActionPickerOpen,
@@ -7249,47 +7394,6 @@ export function setupHandlers(
     consumeForcedSkillIds,
   });
   doSend = sendFlowController.doSend;
-  const handlePlanApproved = (event: Event) => {
-    const detail = (event as CustomEvent<{ planId?: string }>).detail;
-    syncPlanModeChip();
-    void doSend({
-      overrideText: `Execute the approved plan${detail?.planId ? ` ${detail.planId}` : ""}. Follow the durable task ledger and verify every required step.`,
-    });
-  };
-  const handlePlanRevise = (event: Event) => {
-    if (!item) return;
-    const detail = (
-      event as CustomEvent<{
-        planId: string;
-        revision: number;
-        provider: "original" | "codex" | "claude";
-        comment: string;
-      }>
-    ).detail;
-    if (!detail?.planId || !detail.comment?.trim()) return;
-    beginPlanRevision({
-      conversationKey: getConversationKey(item),
-      planId: detail.planId,
-      revision: detail.revision + 1,
-      provider: detail.provider,
-    });
-    syncPlanModeChip();
-    void doSend({
-      // Native Plan receives the prior artifact and revision instructions in
-      // its turn context. Keep the user's request intact for action contracts.
-      overrideText:
-        detail.provider === "codex" && isCodexAppServerModeEnabled()
-          ? detail.comment.trim()
-          : `Revise the prior plan using this feedback: ${detail.comment.trim()}`,
-    });
-  };
-  const handlePlanCancel = () => {
-    if (item) disableComposePlanMode(getConversationKey(item));
-    syncPlanModeChip();
-  };
-  body.addEventListener(PLAN_APPROVED_EVENT, handlePlanApproved);
-  body.addEventListener(PLAN_REVISE_EVENT, handlePlanRevise);
-  body.addEventListener(PLAN_CANCEL_EVENT, handlePlanCancel);
   // The header trash action uses the same durable, undoable deletion
   // lifecycle as Delete in conversation history.
   const executeSend = async () => {
@@ -7665,7 +7769,6 @@ export function setupHandlers(
       // Only an explicit toggle updates the sticky default, so implicit
       // switches (/compact, skill selection) stay scoped to this conversation.
       setLastUsedRuntimeMode(nextMode);
-      syncPlanModeChip();
       if (status) {
         setStatus(
           status,
@@ -7675,90 +7778,6 @@ export function setupHandlers(
           "ready",
         );
       }
-    });
-  }
-
-  if (planModeChip) {
-    planModeChip.addEventListener("click", (e: Event) => {
-      e.preventDefault();
-      e.stopPropagation();
-      if (
-        !item ||
-        !requireCurrentPanelOwnership(body, item, "cancel-agent-plan")
-      ) {
-        return;
-      }
-      const ownershipLease = capturePanelOperationLease(body);
-      const ownershipItem = item;
-      if (!ownershipLease) return;
-      void (async () => {
-        const key = getConversationKey(ownershipItem);
-        const state = getComposePlanState(key);
-        if (!state) return;
-        if (state.submitted) {
-          const confirmed = await showStandaloneConfirmationDialog(
-            body.ownerDocument,
-            {
-              title: "Cancel this plan?",
-              message:
-                "Planning will stop. The cancelled plan remains visible in the conversation history.",
-              confirmLabel: "Cancel plan",
-              cancelLabel: "Keep planning",
-              destructive: true,
-            },
-          );
-          if (!confirmed) return;
-          if (
-            !isPanelOperationLeaseCurrent(ownershipLease) ||
-            !requireCurrentPanelOwnership(
-              body,
-              ownershipItem,
-              "cancel-agent-plan-commit",
-            )
-          ) {
-            return;
-          }
-          getAbortController(key)?.abort();
-          await import("../../agent/plans/coordinator").then(
-            ({ planExecutionCoordinator }) => {
-              if (
-                !isPanelOperationLeaseCurrent(ownershipLease) ||
-                !requireCurrentPanelOwnership(
-                  body,
-                  ownershipItem,
-                  "cancel-agent-plan-artifact",
-                )
-              ) {
-                return;
-              }
-              return planExecutionCoordinator.cancelArtifact({
-                planId: state.planId,
-                revision: state.revision,
-              });
-            },
-          );
-          if (
-            !isPanelOperationLeaseCurrent(ownershipLease) ||
-            !requireCurrentPanelOwnership(
-              body,
-              ownershipItem,
-              "cancel-agent-plan-result",
-            )
-          ) {
-            return;
-          }
-        }
-        disableComposePlanMode(key);
-        syncPlanModeChip();
-        const CustomEventCtor = body.ownerDocument.defaultView?.CustomEvent;
-        if (CustomEventCtor)
-          body.dispatchEvent(
-            new CustomEventCtor(PLAN_CANCEL_EVENT, {
-              bubbles: true,
-              detail: { planId: state.planId, revision: state.revision },
-            }),
-          );
-      })();
     });
   }
 
@@ -7857,40 +7876,6 @@ export function setupHandlers(
         selectActivePaperPickerRow();
         return;
       }
-    }
-    if (
-      ke.key === "Tab" &&
-      ke.shiftKey &&
-      !ke.altKey &&
-      !ke.ctrlKey &&
-      !ke.metaKey
-    ) {
-      const anotherSurfaceOwnsShortcut =
-        isFloatingMenuOpen(modelMenu) ||
-        isFloatingMenuOpen(reasoningMenu) ||
-        isFloatingMenuOpen(retryModelMenu) ||
-        isHistoryMenuOpen() ||
-        isHistoryNewMenuOpen() ||
-        Boolean(actionHitlPanel && actionHitlPanel.style.display !== "none") ||
-        Boolean(body.ownerDocument.querySelector("[role='dialog']"));
-      if (anotherSurfaceOwnsShortcut) return;
-      e.preventDefault();
-      e.stopPropagation();
-      if (!item || isWebChatModeActive()) return;
-      if (!isPlanAvailable()) return;
-      const enabled = toggleComposePlanMode({
-        conversationKey: getConversationKey(item),
-        provider: getCurrentPlanProvider(),
-      });
-      syncPlanModeChip();
-      if (status) {
-        setStatus(
-          status,
-          enabled ? "Plan mode enabled" : "Plan mode disabled",
-          "ready",
-        );
-      }
-      return;
     }
     // Backspace at position 0 with active badge: remove it
     if (
@@ -8345,18 +8330,18 @@ export function setupHandlers(
     disconnectObserverCleanup?.();
     disconnectObserverCleanup = null;
     cleanupPrefObservers?.();
+    quotaControl?.dispose();
+    quotaControl = null;
     disposeFooterPermissionControl?.();
     disposeFooterPermissionControl = null;
     cleanupMineruPaperSourceObservers?.();
     cleanupModelCapabilitySubscription?.();
     cleanupModelCapabilitySubscription = null;
     disposeHistoryActivity?.();
+    disposeTaskProgressPanel(body);
     disposeConversationTurnNavigator(body);
     disposeChatRendering(body);
     cleanupChatScroll();
-    body.removeEventListener(PLAN_APPROVED_EVENT, handlePlanApproved);
-    body.removeEventListener(PLAN_REVISE_EVENT, handlePlanRevise);
-    body.removeEventListener(PLAN_CANCEL_EVENT, handlePlanCancel);
     codexDirectController?.dispose();
     codexDirectController = null;
     body.removeEventListener(

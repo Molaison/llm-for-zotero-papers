@@ -20,7 +20,6 @@ function makeSkill(id: string, instruction: string): AgentSkill {
 
     contexts: ["any"],
     activation: "auto",
-    supersedes: [],
     instruction,
     source: "system",
   };
@@ -118,7 +117,7 @@ describe("Codex native skills", function () {
 
   it("uses the same context-count eligibility for native paper and library turns", async function () {
     setUserSkills([
-      parseSkill(BUILTIN_SKILL_FILES["simple-paper-qa.md"]),
+      parseSkill(BUILTIN_SKILL_FILES["evidence-based-qa.md"]),
       parseSkill(BUILTIN_SKILL_FILES["library-analysis.md"]),
     ]);
 
@@ -134,9 +133,9 @@ describe("Codex native skills", function () {
       userText: "summarize this paper",
       model: "",
       apiBase: "",
-      skillContext: { forcedSkillIds: ["simple-paper-qa"] },
+      skillContext: { forcedSkillIds: ["evidence-based-qa"] },
     });
-    assert.deepEqual(paperTurn.matchedSkillIds, ["simple-paper-qa"]);
+    assert.deepEqual(paperTurn.matchedSkillIds, ["evidence-based-qa"]);
 
     const libraryTurn = await resolveCodexNativeSkills({
       scope: {
@@ -179,7 +178,7 @@ describe("Codex native skills", function () {
     assert.deepEqual(resolved.matchedSkillIds, ["compare-papers"]);
     assert.include(
       resolved.instructionBlock,
-      "A selected Zotero collection/folder is also a valid comparison corpus",
+      parseSkill(BUILTIN_SKILL_FILES["compare-papers.md"]).instruction,
     );
   });
 
@@ -210,9 +209,8 @@ describe("Codex native skills", function () {
     assert.deepEqual(resolved.matchedSkillIds, ["evidence-based-qa"]);
     assert.include(
       resolved.instructionBlock,
-      "For a selected collection/folder or whole-library evidence question",
+      parseSkill(BUILTIN_SKILL_FILES["evidence-based-qa.md"]).instruction,
     );
-    assert.include(resolved.instructionBlock, "for exact presence/absence");
   });
 
   it("builds native request context from scope and UI context", function () {

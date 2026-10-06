@@ -3,7 +3,6 @@ import { createFileIOTool } from "../src/agent/tools/write/fileIO";
 import { sha256Bytes } from "../src/agent/store/journalRecoveryBlobStore";
 import { ActionContractService } from "../src/agent/contracts/actionContract";
 import { resolvedAgentRequest } from "./helpers/resolvedAgentRequest";
-import { classifiedFixture } from "./helpers/semanticIntent";
 
 describe("finalized document file export", function () {
   const originalZotero = globalThis.Zotero;
@@ -111,20 +110,9 @@ describe("finalized document file export", function () {
         userText: "Export the figure report",
         model: "fixture",
         libraryID: 1,
-        classifiedIntent: classifiedFixture({
-          deliverableIntent: "document",
-          documentKind: "report",
-        }),
       }),
       journalFallbackApproved: true,
     };
-    context.request.documentOutcomePolicy = {
-      required: true,
-      documentKind: "report",
-      integrityPolicy: "authored",
-      trigger: "document_intent",
-    };
-    context.request.classifiedIntent.semantic.noteDestination = "file";
   });
   afterEach(function () {
     globalThis.Zotero = originalZotero;
@@ -160,7 +148,7 @@ describe("finalized document file export", function () {
     assert.include(markdown, "![Figure 1](report_assets/figure-1.png)");
     assert.equal(
       (
-        await service.finalize(undefined, prepared, {
+        await service.finalize(prepared, {
           ok: true,
           effect: result.effect,
           content: result.content,
@@ -171,7 +159,7 @@ describe("finalized document file export", function () {
     const corrupted = { ...(result.content as any), exportedFiles: [] };
     assert.equal(
       (
-        await service.finalize(undefined, prepared, {
+        await service.finalize(prepared, {
           ok: true,
           effect: result.effect,
           content: corrupted,
@@ -272,6 +260,7 @@ describe("finalized document file export", function () {
       const validated = tool.validate({
         action: "write",
         filePath: "/vault/report.md",
+        documentId: document.documentId,
         content,
       });
       if (!validated.ok) throw new Error(validated.error);

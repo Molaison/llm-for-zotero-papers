@@ -1,5 +1,5 @@
 import { assert } from "chai";
-import { createTrustedReadObservations } from "../src/agent/plans/readObservation";
+import { createTrustedReadObservations } from "../src/agent/context/readObservation";
 
 describe("trusted read observations", function () {
   const priorZotero = (globalThis as { Zotero?: unknown }).Zotero;
@@ -9,6 +9,8 @@ describe("trusted read observations", function () {
       [10, { id: 10, key: "AAAA1111", libraryID: 1 }],
       [11, { id: 11, key: "BBBB2222", libraryID: 1 }],
       [20, { id: 20, key: "PDFP1111", libraryID: 1, parentID: 10 }],
+      // A standalone PDF: an attachment that is its own bibliographic item.
+      [30, { id: 30, key: "PDFS3030", libraryID: 1, isAttachment: () => true }],
     ]);
     (globalThis as { Zotero?: unknown }).Zotero = {
       Items: { get: (itemId: number) => items.get(itemId) || null },
@@ -17,6 +19,40 @@ describe("trusted read observations", function () {
 
   after(function () {
     (globalThis as { Zotero?: unknown }).Zotero = priorZotero;
+  });
+
+  it("names a standalone PDF as the attachment it read, and never a regular item", async function () {
+    const read = (paperContext: { itemId: number; contextItemId: number }) =>
+      createTrustedReadObservations({
+        toolName: "paper_read",
+        callId: `read-${paperContext.itemId}`,
+        input: { mode: "full" },
+        result: {
+          papers: [
+            {
+              paperContext,
+              pageIndex: 2,
+              sourceFingerprint: "pdfjs:standalone",
+              text: "A verified passage",
+            },
+          ],
+        },
+      });
+
+    const [standalone] = await read({ itemId: 30, contextItemId: 30 });
+    assert.deepInclude(standalone, {
+      libraryID: 1,
+      itemKey: "PDFS3030",
+      attachmentItemKey: "PDFS3030",
+      pageIndex: 2,
+    });
+
+    const [regular] = await read({ itemId: 10, contextItemId: 10 });
+    assert.equal(regular.itemKey, "AAAA1111");
+    assert.isUndefined(
+      regular.attachmentItemKey,
+      "a regular item is not an attachment, even as its own context",
+    );
   });
 
   it("does not treat unknown or empty result shapes as provenance", async function () {
@@ -160,6 +196,85 @@ describe("trusted read observations", function () {
     assert.deepEqual(full[0].capabilities, ["body"]);
     assert.equal(full[0].sourceFingerprint, "pdfjs:full");
   });
+});
+
+describe("trusted read observations ignore retired tool names", function () {
+  const priorZotero = (globalThis as { Zotero?: unknown }).Zotero;
+  before(function () {
+    const items = new Map<number, Record<string, unknown>>([
+      [10, { id: 10, key: "AAAA1111", libraryID: 1 }],
+      [20, { id: 20, key: "PDFP1111", libraryID: 1, parentID: 10 }],
+    ]);
+    (globalThis as { Zotero?: unknown }).Zotero = {
+      Items: { get: (itemId: number) => items.get(itemId) || null },
+    };
+  });
+  after(function () {
+    (globalThis as { Zotero?: unknown }).Zotero = priorZotero;
+  });
+
+  const paper = { paperContext: { itemId: 10, contextItemId: 20 } };
+  // Each retired name is paired with the facade call that replaced it and a
+  // result the facade credits. Stored history carrying the retired name earns
+  // no read credit: only facade names seed trusted read observations.
+  const pairs: Array<{
+    retired: string;
+    facade: string;
+    input: Record<string, unknown>;
+    result: Record<string, unknown>;
+  }> = [
+    {
+      retired: "read_paper",
+      facade: "paper_read",
+      input: { mode: "full" },
+      result: { papers: [{ ...paper, pageIndex: 4, text: "A passage" }] },
+    },
+    {
+      retired: "search_paper",
+      facade: "paper_read",
+      input: { mode: "targeted" },
+      result: {
+        mode: "targeted",
+        results: [{ ...paper, text: "passage", chunkIndex: 3 }],
+      },
+    },
+    {
+      retired: "view_pdf_pages",
+      facade: "paper_read",
+      input: { mode: "visual" },
+      result: {
+        mode: "visual",
+        results: [{ ...paper, pages: [{ pageIndex: 2 }] }],
+      },
+    },
+    {
+      retired: "query_library",
+      facade: "library_search",
+      input: { query: "alpha" },
+      result: { results: [{ itemId: 10, title: "Alpha" }] },
+    },
+  ];
+
+  for (const { retired, facade, input, result } of pairs) {
+    it(`credits ${facade} but not the retired ${retired}`, async function () {
+      const credited = await createTrustedReadObservations({
+        toolName: facade,
+        callId: `${facade}-call`,
+        input,
+        result,
+      });
+      assert.isNotEmpty(credited, `${facade} should seed an observation`);
+      assert.deepEqual(
+        await createTrustedReadObservations({
+          toolName: retired,
+          callId: `${retired}-call`,
+          input,
+          result,
+        }),
+        [],
+      );
+    });
+  }
 });
 
 describe("trusted read observations carry the paper_read mode", function () {

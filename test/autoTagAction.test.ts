@@ -128,7 +128,7 @@ function registerReviewApplyTagsTool(
   registry.register({
     effectOperations: ["apply_tags"],
     spec: {
-      name: "apply_tags",
+      name: "library_update",
       description: "apply tags",
       inputSchema: { type: "object" },
       executionClass: "external_effect",
@@ -161,7 +161,7 @@ function registerReviewApplyTagsTool(
     ],
     createPendingAction(input) {
       return {
-        toolName: "apply_tags",
+        toolName: "library_update",
         title: "Review tag additions",
         confirmLabel: "Apply",
         cancelLabel: "Cancel",
@@ -230,7 +230,7 @@ describe("autoTag action", function () {
     registry.register(
       createStubTool(
         {
-          name: "apply_tags",
+          name: "library_update",
           description: "apply tags",
           inputSchema: { type: "object" },
           executionClass: "external_effect",
@@ -301,7 +301,7 @@ describe("autoTag action", function () {
     registry.register(
       createStubTool(
         {
-          name: "apply_tags",
+          name: "library_update",
           description: "apply tags",
           inputSchema: { type: "object" },
           executionClass: "external_effect",
@@ -362,7 +362,7 @@ describe("autoTag action", function () {
     registry.register(
       createStubTool(
         {
-          name: "apply_tags",
+          name: "library_update",
           description: "apply tags",
           inputSchema: { type: "object" },
           executionClass: "external_effect",
@@ -430,7 +430,7 @@ describe("autoTag action", function () {
     registry.register(
       createStubTool(
         {
-          name: "apply_tags",
+          name: "library_update",
           description: "apply tags",
           inputSchema: { type: "object" },
           executionClass: "external_effect",
@@ -510,7 +510,7 @@ describe("autoTag action", function () {
     registry.register(
       createStubTool(
         {
-          name: "apply_tags",
+          name: "library_update",
           description: "apply tags",
           inputSchema: { type: "object" },
           executionClass: "external_effect",
@@ -575,7 +575,7 @@ describe("autoTag action", function () {
     registry.register(
       createStubTool(
         {
-          name: "apply_tags",
+          name: "library_update",
           description: "apply tags",
           inputSchema: { type: "object" },
           executionClass: "external_effect",
@@ -633,7 +633,7 @@ describe("autoTag action", function () {
     registry.register({
       effectOperations: ["apply_tags"],
       spec: {
-        name: "apply_tags",
+        name: "library_update",
         description: "apply tags",
         inputSchema: { type: "object" },
         executionClass: "external_effect",
@@ -662,7 +662,7 @@ describe("autoTag action", function () {
       ],
       createPendingAction(input) {
         return {
-          toolName: "apply_tags",
+          toolName: "library_update",
           title: "Review tag additions",
           confirmLabel: "Apply",
           cancelLabel: "Cancel",
@@ -778,7 +778,7 @@ describe("autoTag action", function () {
       describeAction: describeLibraryMutationInput,
       effectOperations: ["apply_tags"],
       spec: {
-        name: "apply_tags",
+        name: "library_update",
         description: "apply tags",
         inputSchema: { type: "object" },
         executionClass: "external_effect",
@@ -794,7 +794,7 @@ describe("autoTag action", function () {
       },
       createPendingAction(input) {
         return {
-          toolName: "apply_tags",
+          toolName: "library_update",
           title: "Review tag additions",
           confirmLabel: "Apply",
           cancelLabel: "Cancel",

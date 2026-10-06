@@ -231,7 +231,7 @@ describe("workflow: editable note review card", function () {
         ".llm-note-review-actions",
       )!;
       assert.equal(
-        doc.defaultView!.getComputedStyle(footer).justifyContent,
+        doc.defaultView!.getComputedStyle(footer)!.justifyContent,
         "flex-end",
       );
       const approve =
@@ -286,9 +286,11 @@ describe("workflow: editable note review card", function () {
         updateCard.querySelector(".llm-agent-hitl-diff-line-add")!.textContent,
         "revised",
       );
-      for (const button of updateCard.querySelectorAll<HTMLButtonElement>(
-        ".llm-note-review-actions button",
-      )) {
+      for (const button of Array.from(
+        updateCard.querySelectorAll<HTMLButtonElement>(
+          ".llm-note-review-actions button",
+        ),
+      ) as HTMLButtonElement[]) {
         assert.isAtMost(
           button.getBoundingClientRect().right,
           updateCard.getBoundingClientRect().right,

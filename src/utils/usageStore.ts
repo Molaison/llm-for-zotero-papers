@@ -10,7 +10,9 @@
  * every plugin version has always understood -- and never on a column a newer
  * version introduced.  `initUsageStore` is idempotent and re-entrant: it uses
  * `CREATE TABLE IF NOT EXISTS`, adds any column a downgrade/upgrade cycle left
- * missing, and shares one in-flight promise between concurrent callers.
+ * missing, and shares one in-flight promise between concurrent callers.  It
+ * holds no transaction, so it never contends with Zotero's startup
+ * transactions (issue #485).
  */
 
 import { appLogger } from "../core/logging";
@@ -308,31 +310,18 @@ async function createUsageSchema(db: UsageDb): Promise<void> {
   await db.queryAsync(USAGE_UNREPORTED_HEAL_SQL);
 }
 
-/** Idempotent and re-entrant: concurrent callers share one schema pass. */
+/**
+ * Idempotent and re-entrant: concurrent callers share one schema pass.
+ *
+ * No transaction is held: every statement is idempotent and individually
+ * atomic, and a startup `executeTransaction` would occupy Zotero's single
+ * transaction slot while its library load runs (issue #485).
+ */
 export async function initUsageStore(): Promise<void> {
   if (initPromise) return initPromise;
   const db = getUsageDb();
   if (!db) return;
-  initPromise = (async () => {
-    // Zotero.DB.executeTransaction reads `this._callbacks`, so it has to be
-    // invoked AS A METHOD of the connection. Calling a detached reference
-    // throws "can't access property _callbacks", which would leave the ledger
-    // without a table and silently drop every recorded turn.
-    const connection = (
-      globalThis as {
-        Zotero?: {
-          DB?: { executeTransaction?: (task: () => Promise<void>) => unknown };
-        };
-      }
-    ).Zotero?.DB;
-    if (typeof connection?.executeTransaction === "function") {
-      await connection.executeTransaction(async () => {
-        await createUsageSchema(db);
-      });
-      return;
-    }
-    await createUsageSchema(db);
-  })();
+  initPromise = createUsageSchema(db);
   try {
     await initPromise;
   } catch (error) {

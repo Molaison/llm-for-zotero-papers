@@ -11,11 +11,22 @@ describe("direct Agent model tool surface", function () {
       pdfPageService: {} as never,
       retrievalService: {} as never,
     });
+    // An ordinary turn runs as the Original Agent, so task_update counts.
     const request = resolveAgentRuntimeRequest({
       conversationKey: 1,
       mode: "agent",
       userText: "Answer a question about my library",
       libraryID: 1,
+      executionContext: {
+        version: 1,
+        executionId: "execution-1",
+        conversationKey: 1,
+        conversationGeneration: 0,
+        chatLibraryID: 1,
+        permissionOwner: "original_agent",
+        workspaceSnapshot: { selectedPapers: [], selectedCollections: [] },
+        configuredAccess: { libraryIDs: [1], outputDirectories: [] },
+      },
     });
 
     const tools = registry.listToolsForRequest(request);
@@ -32,15 +43,22 @@ describe("direct Agent model tool surface", function () {
       [],
     );
 
-    // Includes concrete figure selectors and the native image-embedding contract.
-    assert.isAtMost(serializedToolCharacters, 21_000);
+    // Includes concrete figure selectors, the native image-embedding contract
+    // and task_update. Each cap is the next whole thousand above the measured
+    // payload: 23,477 tool characters and 32,106 with the fixed prompt
+    // (2026-10-03, after task_update named excluded and replaces, the
+    // workflow asked for a digest part per per-paper result, submit_document
+    // named excluded, and literature_search said it searches outside the
+    // library and its metadata mode proposes changes).
+    assert.isAtMost(serializedToolCharacters, 24_000);
     assert.isAtMost(
       rendered.inventory.fixedPrompt.length + serializedToolCharacters,
-      32_000,
+      33_000,
     );
     assert.includeMembers(
       tools.map((tool) => tool.name),
       [
+        "task_update",
         "library_search",
         "paper_read",
         "library_update",

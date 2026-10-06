@@ -101,25 +101,6 @@ describe("provider auth-mode transitions", function () {
     assert.equal(matrixCases, 25);
   });
 
-  it("preserves every advanced row field between configurable modes", function () {
-    const configurableModes = [
-      "api_key",
-      "codex_app_server",
-      "copilot_auth",
-    ] as const;
-    for (const sourceMode of configurableModes) {
-      const source = transitionProviderAuthMode(standardGroup(), sourceMode);
-      for (const targetMode of configurableModes) {
-        const next = transitionProviderAuthMode(source, targetMode);
-        assert.equal(next.authMode, targetMode);
-        if (next.authMode === "codex_auth" || next.authMode === "webchat") {
-          assert.fail("expected configurable provider");
-        }
-        assert.deepEqual(next.models[0], source.models[0]);
-      }
-    }
-  });
-
   it("enters Direct with fixed credentials while preserving row IDs", function () {
     const next = transitionProviderAuthMode(standardGroup(), "codex_auth");
 

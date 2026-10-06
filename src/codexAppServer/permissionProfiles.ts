@@ -571,7 +571,6 @@ export async function getCodexPermissionOptionCatalog(
 }
 
 export async function resolveCodexPermissionExecution(params: {
-  planning?: boolean;
   proc: CodexAppServerProcess;
   cwd?: string;
   fresh?: boolean;
@@ -585,22 +584,8 @@ export async function resolveCodexPermissionExecution(params: {
     cwd: params.cwd,
     fresh: params.fresh ?? true,
   });
-  const preference =
-    params.planning && capabilities.protocol !== "legacy"
-      ? {
-          ...savedPreference,
-          hasUserValue: true,
-          state: {
-            boundary: { kind: "profile" as const, profileId: ":read-only" },
-            approvalOverride: {
-              policy: "never" as const,
-              reviewer: "user" as const,
-            },
-          },
-        }
-      : savedPreference;
   return buildCodexPermissionExecution({
-    preference,
+    preference: savedPreference,
     capabilities,
     hasExistingThread: params.hasExistingThread,
     appliedState: params.appliedState,

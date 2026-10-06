@@ -1,5 +1,10 @@
 import { assert } from "chai";
-import { callLLM, callLLMStream } from "../src/utils/llmClient";
+import {
+  callLLM,
+  callLLMStream,
+  resolveOllamaNumCtx,
+} from "../src/utils/llmClient";
+import type { OutputRequestPolicy } from "../src/utils/outputTokenPolicy";
 import {
   resolveOllamaNativeApiRoot,
   resolveOllamaNativeEndpoint,
@@ -438,7 +443,10 @@ describe("ollama native protocol", function () {
       assert.isNumber(options.temperature);
     });
 
-    it("allocates Ollama num_ctx from the explicit qwen3.8-max input cap", async function () {
+    /** Run one streaming chat request and return the options it sent. */
+    async function captureChatOptions(
+      params: Parameters<typeof callLLMStream>[0],
+    ): Promise<Record<string, unknown>> {
       let body: Record<string, unknown> = {};
       mockFetch(async (_url, init) => {
         body = JSON.parse(String(init?.body || "{}")) as Record<
@@ -456,22 +464,55 @@ describe("ollama native protocol", function () {
           text: async () => "",
         };
       });
+      await callLLMStream(params, () => undefined);
+      return (body.options as Record<string, unknown>) || {};
+    }
 
-      await callLLMStream(
-        {
-          prompt: "hi",
-          model: "qwen3.8-max",
-          apiBase: "http://localhost:11434",
-          providerProtocol: "ollama_native",
-          inputTokenCap: 1_000_000,
+    it("treats an explicit input cap as a ceiling, not the num_ctx to allocate", async function () {
+      const options = await captureChatOptions({
+        prompt: "hi",
+        model: "qwen3.8-max",
+        apiBase: "http://localhost:11434",
+        providerProtocol: "ollama_native",
+        inputTokenCap: 1_000_000,
+      });
+
+      assert.isNumber(options.num_ctx);
+      assert.isAtMost(
+        options.num_ctx as number,
+        16_384,
+        "a short prompt must not pre-allocate the whole 1M-token cap",
+      );
+    });
+
+    it("caps num_ctx at the model window for a long prompt", async function () {
+      const options = await captureChatOptions({
+        prompt: "word ".repeat(20_000),
+        model: "qwen3:8b",
+        apiBase: "http://localhost:11434",
+        providerProtocol: "ollama_native",
+        profileOverride: {
+          forModel: "qwen3:8b",
+          limits: { contextWindowTokens: 40_960 },
         },
-        () => undefined,
-      );
+      });
 
-      assert.equal(
-        (body.options as Record<string, unknown>)?.num_ctx,
-        1_000_000,
-      );
+      assert.equal(options.num_ctx, 40_960);
+    });
+
+    it("sizes num_ctx to a mid-sized prompt within a large window", async function () {
+      const options = await captureChatOptions({
+        prompt: "word ".repeat(12_000),
+        model: "qwen3:8b",
+        apiBase: "http://localhost:11434",
+        providerProtocol: "ollama_native",
+        profileOverride: {
+          forModel: "qwen3:8b",
+          limits: { contextWindowTokens: 131_072 },
+        },
+      });
+
+      assert.equal(options.num_ctx, 32_768);
     });
 
     it("clamps a custom output limit to the detected model maximum", async function () {
@@ -548,6 +589,89 @@ describe("ollama native protocol", function () {
         (body.options as Record<string, unknown>)?.num_predict,
         4096,
       );
+    });
+  });
+
+  describe("num_ctx sizing", function () {
+    const unlimited: OutputRequestPolicy = {
+      mode: "unlimited",
+      source: "auto_provider",
+    };
+
+    function numCtx(
+      estimatedPromptTokens: number,
+      contextWindowTokens: number,
+      outputPolicy: OutputRequestPolicy = unlimited,
+    ) {
+      return resolveOllamaNumCtx({
+        protocol: "ollama_native",
+        estimatedPromptTokens,
+        outputPolicy,
+        contextWindowTokens,
+      });
+    }
+
+    it("allocates a small tier for a short prompt", function () {
+      assert.equal(numCtx(1_500, 40_960), 8_192);
+    });
+
+    it("rounds a larger prompt up to the next power-of-two tier", function () {
+      assert.equal(numCtx(20_000, 40_960 * 4), 32_768);
+    });
+
+    it("never exceeds the resolved context window", function () {
+      assert.equal(numCtx(60_000, 40_960), 40_960);
+    });
+
+    it("does not allocate the 256K default window for a short prompt", function () {
+      assert.equal(numCtx(1_500, 256_000), 8_192);
+    });
+
+    it("reserves a custom output limit inside num_ctx", function () {
+      const custom: OutputRequestPolicy = {
+        mode: "numeric",
+        tokens: 32_768,
+        source: "custom",
+      };
+      assert.equal(numCtx(1_500, 256_000, custom), 65_536);
+      assert.equal(numCtx(1_500, 40_960, custom), 40_960);
+    });
+
+    it("uses the auto reserve for a capability-ceiling output policy", function () {
+      const ceiling: OutputRequestPolicy = {
+        mode: "numeric",
+        tokens: 64_000,
+        source: "auto_capability",
+      };
+      assert.equal(numCtx(1_500, 256_000, ceiling), 8_192);
+    });
+
+    it("returns an explicit window below the minimum tier as-is", function () {
+      assert.equal(numCtx(1_500, 2_048), 2_048);
+    });
+
+    it("sends nothing for other protocols", function () {
+      assert.isUndefined(
+        resolveOllamaNumCtx({
+          protocol: "openai_chat_compat",
+          estimatedPromptTokens: 1_500,
+          outputPolicy: unlimited,
+          contextWindowTokens: 40_960,
+        }),
+      );
+    });
+
+    it("rounds at the tier boundary", function () {
+      // need = ceil(prompt * 1.2) + 4096
+      assert.equal(numCtx(0, 256_000), 4_096);
+      assert.equal(numCtx(3_413, 256_000), 8_192, "need exactly 8192");
+      assert.equal(numCtx(3_414, 256_000), 16_384, "need 8193");
+    });
+
+    it("tolerates non-finite inputs", function () {
+      assert.equal(numCtx(Number.NaN, 40_960), 4_096);
+      assert.equal(numCtx(1_500, Number.NaN), 8_192);
+      assert.equal(numCtx(1_500, 0), 8_192);
     });
   });
 

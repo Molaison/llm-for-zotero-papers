@@ -9,7 +9,6 @@ import {
 } from "../../services/notePersistence";
 import { importNoteImageAsset } from "../../services/notes/noteImages";
 import { escapeNoteHtml } from "../../utils/textSanitization";
-import { loadPlanArtifact } from "../plans/store";
 import {
   prepareDocumentMarkdownExport,
   readVerifiedAssetBytes,
@@ -20,11 +19,7 @@ import {
   loadPlanDocument,
   updateDocumentActionState,
 } from "./store";
-import {
-  getPlannedDocumentOrigin,
-  type DocumentActionState,
-  type PlanDocument,
-} from "./types";
+import type { DocumentActionState, PlanDocument } from "./types";
 
 /** Embed the finalized document's assets for both new and existing notes. */
 export async function finalizeDocumentNoteHtml(
@@ -230,10 +225,6 @@ async function saveDocumentNote(
       );
   }
 
-  const planned = getPlannedDocumentOrigin(document);
-  const artifact = planned
-    ? await loadPlanArtifact(planned.planId, planned.planRevision)
-    : null;
   const cited = citedItems(document);
   const singleParent = target
     ? Zotero.Items.get(target.parentItemId)
@@ -251,10 +242,8 @@ async function saveDocumentNote(
       "The requested summary-note parent is unavailable in the frozen library.",
     );
   }
-  const scope = artifact?.contract?.investigation?.scope;
   const libraryID =
     singleParent?.libraryID ||
-    scope?.libraryID ||
     cited[0]?.libraryID ||
     Zotero.Libraries.userLibraryID;
   const note = new Zotero.Item("note");
@@ -266,12 +255,6 @@ async function saveDocumentNote(
   await note.loadPrimaryData(false);
   if (singleParent && !singleParent.deleted) {
     note.parentID = singleParent.id;
-  } else if (
-    scope &&
-    (scope.kind === "collections" || scope.kind === "mixed") &&
-    scope.collectionIds?.length === 1
-  ) {
-    note.addToCollection(scope.collectionIds[0]);
   }
   let pendingNote: NonNullable<DocumentActionState["pendingNote"]> = {
     libraryID,

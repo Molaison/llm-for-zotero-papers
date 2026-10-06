@@ -41,18 +41,28 @@ describe("blockStreamCoalescer", function () {
     ]);
   });
 
-  it("flushes by hard cap for uninterrupted text", function () {
-    const blocks: Array<{ text: string; reason: BlockStreamFlushReason }> = [];
-    const coalescer = createBlockStreamCoalescer({
-      hardCapChars: 8,
-      maxWaitMs: 0,
-      onBlock: (text, reason) => blocks.push({ text, reason }),
+  for (const { label, options, limit } of [
+    { label: "default", options: {}, limit: 800 },
+    { label: "custom", options: { hardCapChars: 8 }, limit: 8 },
+  ]) {
+    it(`flushes uninterrupted text at the ${label} hard cap`, function () {
+      const blocks: Array<{ text: string; reason: BlockStreamFlushReason }> =
+        [];
+      const coalescer = createBlockStreamCoalescer({
+        ...options,
+        maxWaitMs: 0,
+        onBlock: (text, reason) => blocks.push({ text, reason }),
+      });
+
+      coalescer.pushText("x".repeat(limit - 1));
+      assert.deepEqual(blocks, []);
+
+      coalescer.pushText("x");
+      assert.deepEqual(blocks, [
+        { text: "x".repeat(limit), reason: "hard-cap" },
+      ]);
     });
-
-    coalescer.pushText("abcdefgh");
-
-    assert.deepEqual(blocks, [{ text: "abcdefgh", reason: "hard-cap" }]);
-  });
+  }
 
   it("flushes by timer when no natural boundary arrives", function () {
     const blocks: Array<{ text: string; reason: BlockStreamFlushReason }> = [];
@@ -69,6 +79,9 @@ describe("blockStreamCoalescer", function () {
       onBlock: (text, reason) => blocks.push({ text, reason }),
     });
 
+    coalescer.pushText("");
+    assert.isNull(timerCallback, "empty input does not schedule a timer");
+
     coalescer.pushText("partial");
     assert.deepEqual(blocks, []);
     assert.isFunction(timerCallback);
@@ -77,18 +90,48 @@ describe("blockStreamCoalescer", function () {
     assert.deepEqual(blocks, [{ text: "partial", reason: "timer" }]);
   });
 
-  it("can cancel pending output without emitting it", function () {
+  it("cancels pending output and its timer while retaining all streamed text", function () {
     const blocks: string[] = [];
+    const pendingTimers = new Map<unknown, () => void>();
     const coalescer = createBlockStreamCoalescer({
-      maxWaitMs: 0,
       onBlock: (text) => blocks.push(text),
+      setTimer: (callback) => {
+        const timer = {};
+        pendingTimers.set(timer, callback);
+        return timer;
+      },
+      clearTimer: (timer) => {
+        pendingTimers.delete(timer);
+      },
     });
 
-    coalescer.pushText("abandoned");
+    coalescer.pushText("released ");
+    coalescer.flushNow("event");
+    assert.deepEqual(blocks, ["released "]);
+    assert.equal(pendingTimers.size, 0, "flushing clears the pending timer");
+
+    coalescer.pushText("pending");
+    assert.equal(
+      pendingTimers.size,
+      1,
+      "the pending tail has a timer to clear",
+    );
     coalescer.cancel();
+    assert.equal(
+      pendingTimers.size,
+      0,
+      "cancellation clears the pending timer",
+    );
+
+    coalescer.pushText("after cancellation");
     coalescer.flushNow("final");
 
-    assert.deepEqual(blocks, []);
-    assert.equal(coalescer.getFullText(), "abandoned");
+    assert.deepEqual(blocks, ["released "]);
+    assert.equal(coalescer.getFullText(), "released pending");
+    assert.equal(
+      pendingTimers.size,
+      0,
+      "later deltas cannot restart the timer",
+    );
   });
 });

@@ -216,7 +216,7 @@ export class AttachmentReadService {
     if (category === "pdf") {
       return {
         ...baseResult,
-        note: "Use read_paper, search_paper, or view_pdf_pages to read PDF content.",
+        note: "Use paper_read to read PDF content: mode:'targeted' for text evidence, mode:'visual' for rendered pages.",
       };
     }
 

@@ -1,9 +1,5 @@
 import "./hostSurfaceBootstrap";
-import {
-  appendAgentRunEvent,
-  createAgentRun,
-  finishAgentRun,
-} from "../src/agent/store/traceStore";
+import { createAgentRun, finishAgentRun } from "../src/agent/store/traceStore";
 import { assert } from "chai";
 import { ActionContractService } from "../src/agent/contracts/actionContract";
 import { AgentToolRegistry } from "../src/agent/tools/registry";
@@ -16,11 +12,8 @@ import {
   getOriginalAgentPermissionMode,
   setOriginalAgentPermissionMode,
 } from "../src/agent/originalAgentPermissionMode";
-import {
-  actionFixture,
-  classifiedFixture,
-} from "../test/helpers/semanticIntent";
 import { resolvedAgentRequest } from "../test/helpers/resolvedAgentRequest";
+import { createAgentExecutionContext } from "../src/agent/execution/context";
 import type { AgentToolContext } from "../src/agent/types";
 
 describe("workflow: registered operation script", function () {
@@ -29,7 +22,7 @@ describe("workflow: registered operation script", function () {
     const mode = getOriginalAgentPermissionMode();
     const libraryID = Zotero.Libraries.userLibraryID;
     const source = new Zotero.Collection();
-    source.libraryID = libraryID;
+    (source as { libraryID: number }).libraryID = libraryID;
     source.name = `Workflow script source ${Date.now()}`;
     await source.saveTx();
     const paper = new Zotero.Item("journalArticle");
@@ -49,44 +42,27 @@ describe("workflow: registered operation script", function () {
       await initAgentChangeJournal();
       setOriginalAgentPermissionMode("auto");
       const name = `Registered destination ${Date.now()}`;
-      const create = actionFixture("create_collection", {
-        collectionName: name,
-        parentCollectionId: source.id,
-      }).actionIntents[0];
-      const file = {
-        ...actionFixture("move_to_collection", { collectionName: name })
-          .actionIntents[0],
-        dependsOn: [0],
-        targetSelectors: [{ kind: "item_id" as const, value: paper.id }],
-      };
       const request = resolvedAgentRequest({
         conversationKey: paper.id,
         mode: "agent",
         libraryID,
         activeItemId: paper.id,
         userText: `Create ${name} under collection ${source.id} and add paper ${paper.id}. Preserve its other memberships.`,
-        classifiedIntent: classifiedFixture({
-          writeDisposition: "required",
-          actionIntents: [create, file],
-        }),
       });
+      // An ordinary agent turn: the in-plugin agent owns permission.
+      request.executionContext = createAgentExecutionContext(request, runId);
       const contracts = new ActionContractService(new ZoteroGateway());
-      request.actionContract = await contracts.createContract(request);
-      request.actionProgress = contracts.createProgress(request.actionContract);
-      request.actionPreparation = { state: "ready", issues: [] };
       const registry = new AgentToolRegistry(contracts);
       const agent = (Zotero as any).LLMForZotero.api.agent;
-      for (const tool of ["collection_update", "library_update"])
-        registry.register(agent.getToolDefinition(tool));
+      registry.register(agent.getToolDefinition("library_update"));
       await createAgentRun({
         runId,
         conversationKey: paper.id,
         mode: "agent",
-        modelName: "native-workflow",
+        model: "native-workflow",
         status: "running",
         createdAt: Date.now(),
       });
-      let checkpointSequence = 0;
       let sequence = 0;
       const context: AgentToolContext = {
         request,
@@ -94,16 +70,6 @@ describe("workflow: registered operation script", function () {
         item: paper,
         currentAnswerText: "",
         modelName: "native-workflow",
-        checkpointActionProgress: async () => {
-          await appendAgentRunEvent(runId, ++checkpointSequence, {
-            type: "provider_event",
-            providerType: "agent_action_contract",
-            payload: {
-              contract: request.actionContract,
-              progress: request.actionProgress,
-            },
-          });
-        },
         invokeRegisteredOperation: async (tool, args) => {
           const prepared = await registry.prepareExecution(
             { id: `registered:${++sequence}`, name: tool, arguments: args },
@@ -125,7 +91,7 @@ describe("workflow: registered operation script", function () {
         description:
           "Create destination and file the paper through registered operations",
         script: `if (typeof Zotero !== "undefined" || typeof globalThis.Components !== "undefined") throw new Error("Unexpected native globals");
-const creation = await env.invoke("collection_update", {action:"create",name:${JSON.stringify(name)},parentCollectionId:${source.id},libraryID:${libraryID}});
+const creation = await env.invoke("library_update", {kind:"collection",action:"create",name:${JSON.stringify(name)},parentCollectionId:${source.id},libraryID:${libraryID}});
 if (!creation.ok) throw new Error(JSON.stringify(creation.content));
 const receipt=creation.actionReceipts.find(entry=>entry.operation==="create_collection"&&entry.verification==="verified");
 const destinationId=Number(receipt.appliedTargets[0].split(":")[1]);
@@ -142,8 +108,8 @@ return destinationId;`,
       destination = Zotero.Collections.get(result.content.returnValue);
       assert.isOk(destination);
       assert.equal(destination!.name, name);
-      await paper.reload(undefined, true);
-      await sentinel.reload(undefined, true);
+      await paper.reload(undefined as never, true);
+      await sentinel.reload(undefined as never, true);
       assert.sameMembers(paper.getCollections(), [source.id, destination!.id]);
       assert.sameMembers(sentinel.getCollections(), [source.id]);
       assert.lengthOf(result.content.operations, 2);
@@ -154,11 +120,6 @@ return destinationId;`,
             operation.actionReceipts.some(
               (receipt: any) => receipt.verification === "verified",
             ),
-        ),
-      );
-      assert.isTrue(
-        request.actionProgress.obligations.every(
-          (entry) => entry.status === "fulfilled",
         ),
       );
       const journals = await listJournalActions({ runId, limit: 10 });

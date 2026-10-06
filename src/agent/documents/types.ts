@@ -1,4 +1,4 @@
-import type { ResearchCoverageStatus } from "../research/types";
+import type { ResearchCoverageStatus } from "./coverageTypes";
 import type { SkillRoutingReceipt } from "../skills/routingTypes";
 
 export const PLAN_DOCUMENT_MARKDOWN_MAX_BYTES = 2 * 1024 * 1024;
@@ -31,17 +31,10 @@ export type DocumentSpec = Readonly<{
 
 export type DocumentIntegrityPolicy = "research_grounded" | "authored";
 
+/** How a submitted document is validated: its kind and integrity policy. */
 export type DocumentOutcomePolicy = Readonly<{
-  required: boolean;
   documentKind: DocumentSpec["kind"];
   integrityPolicy: DocumentIntegrityPolicy;
-  trigger:
-    | "workflow_material"
-    | "plan_deliverable"
-    | "literature_review_skill"
-    | "literature_review_intent"
-    | "document_intent"
-    | "none";
 }>;
 
 export type PlanCitationSource = Readonly<{
@@ -259,8 +252,7 @@ export type PlanDocumentOutboxRecord = Readonly<{
 }>;
 
 export type SubmitPlanDocumentInput = Readonly<{
-  materialOutputId?: string;
-  /** Direct-agent document shape. Approved Plans continue to use their frozen spec. */
+  /** The document's shape. */
   documentKind?: DocumentSpec["kind"];
   /** Use research_grounded when claims depend on retrieved literature evidence. */
   integrityPolicy?: DocumentIntegrityPolicy;

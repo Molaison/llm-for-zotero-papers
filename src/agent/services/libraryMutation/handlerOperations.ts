@@ -8,6 +8,7 @@ import type {
   LibraryMutationHandler,
   LibraryMutationOperationOf,
   LibraryMutationOperationType,
+  MutationTargetJudgment,
 } from "./handlerDefinition";
 import type { ZoteroGateway } from "../zoteroGateway";
 import type { ForwardExecution } from "./forwardExecutors";
@@ -26,12 +27,6 @@ export function capabilityForLibraryMutation(
 ): AgentActionCapability {
   const type = typeof operation === "string" ? operation : operation.type;
   return libraryMutationHandlers[type].actionCapability;
-}
-
-export function libraryMutationTargetsItems(
-  type: LibraryMutationOperationType,
-): boolean {
-  return libraryMutationHandlers[type].targetScope === "items";
 }
 
 export function targetItemIdsForLibraryMutation(
@@ -158,6 +153,44 @@ export function mutationPostconditionIsSatisfied(
     operation as never,
     asMutationStateView(state),
   );
+}
+
+/**
+ * The handler's own target-by-target judgment of a write, from the states
+ * captured before and after it, or undefined when the handler does not judge
+ * its targets one by one.
+ */
+export function judgeLibraryMutationTargets(
+  operation: LibraryMutationOperation,
+  before: LibraryMutationState | MutationStateView,
+  after: LibraryMutationState | MutationStateView,
+): MutationTargetJudgment | undefined {
+  const judge = libraryMutationHandlers[operation.type].judgeTargets as
+    | ((
+        operation: never,
+        before: MutationStateView,
+        after: MutationStateView,
+      ) => MutationTargetJudgment)
+    | undefined;
+  return judge?.(
+    operation as never,
+    asMutationStateView(before),
+    asMutationStateView(after),
+  );
+}
+
+/**
+ * The part of `operation` a call the user stopped between its items reached,
+ * from the call's result payload; undefined when the call was not stopped.
+ */
+export function mutationReachedFromHandler(
+  operation: LibraryMutationOperation,
+  result: unknown,
+): LibraryMutationOperation | undefined {
+  return libraryMutationHandlers[operation.type].reached(
+    operation as never,
+    result,
+  ) as LibraryMutationOperation | undefined;
 }
 
 export function executeMutationFromHandler(

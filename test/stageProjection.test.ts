@@ -8,7 +8,6 @@ import { projectStageEvents } from "../src/modules/contextPanel/agentTrace/stage
 import { buildAgentStageEvent } from "../src/agent/stageEvents";
 import { mapCodexNativeItemToEvents } from "../src/codexAppServer/nativeActivityStages";
 import { createCodexNativeActivityTraceControllerForTests } from "../src/modules/contextPanel/codexNativeTrace/controller";
-import { classifiedFixture } from "./helpers/semanticIntent";
 import { createTestActionContractService } from "./helpers/actionContractService";
 import { installMockDb } from "./helpers/agentRuntimeMockDb";
 import type {
@@ -19,10 +18,6 @@ import type {
   AgentRuntimeRequest,
   AgentToolContext,
 } from "../src/agent/types";
-import type {
-  PlanArtifact,
-  PlanArtifactStatus,
-} from "../src/agent/plans/types";
 import type {
   AgentModelAdapter,
   AgentStepParams,
@@ -82,7 +77,8 @@ const BATCH_ITEM_REF = {
   contentHash: "sha256:batch",
 };
 
-function planArtifact(status: PlanArtifactStatus): PlanArtifact {
+/** An old plan artifact, as plan mode stored it in its events. */
+function planArtifact(status: "drafting" | "awaiting_approval") {
   return {
     version: 1,
     planId: "plan-1",
@@ -262,7 +258,6 @@ async function runLiveJourney(): Promise<AgentEvent[]> {
     });
     const outcome = await runtime.runTurn({
       request: {
-        classifiedIntent: classifiedFixture(),
         conversationKey: 991_201,
         mode: "agent",
         libraryID: 1,
@@ -758,13 +753,13 @@ describe("agent trace stage projection", function () {
   });
 
   it("builds a stage the same way wherever one is produced", function () {
-    // Three producers emit stage events -- the runtime, the Codex bridge and
-    // this projection -- and one trace can hold events from any of them. They
-    // share one builder so "the same stage" is the same object, and so an
-    // undefined-valued key never survives into a trace the store would drop
-    // it from.
+    // Three producers emit stage events -- the runtime's tool execution, the
+    // Codex bridge and this projection -- and one trace can hold events from
+    // any of them. They share one builder so "the same stage" is the same
+    // object, and so an undefined-valued key never survives into a trace the
+    // store would drop it from.
     const sources = [
-      readFileSync("src/agent/runtime.ts", "utf8"),
+      readFileSync("src/agent/execution/toolExecution.ts", "utf8"),
       readFileSync(
         "src/modules/contextPanel/agentTrace/stageProjection.ts",
         "utf8",

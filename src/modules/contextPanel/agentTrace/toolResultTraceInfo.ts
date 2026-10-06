@@ -3,6 +3,7 @@ import type {
   AgentTraceDetail,
 } from "../../../agent/types";
 import { sanitizeText } from "../../../utils/textSanitization";
+import { isTruncatedToolResultContent } from "../../../agent/store/truncatedToolResult";
 
 type ToolResultPayload = Extract<
   AgentRunEventRecord["payload"],
@@ -198,6 +199,28 @@ export function buildToolResultTraceInfo(
   if (!result) return null;
   const details: AgentTraceDetail[] = [];
   let rowSuffix: string | undefined;
+  if (isTruncatedToolResultContent(result.content)) {
+    // A big result the trace stored by handle: its size, where it is, and
+    // the bounded preview the trace kept of it.
+    const { bytes, handle, preview } = result.content;
+    pushTraceDetail(
+      details,
+      "Result size",
+      `${formatTraceNumber(bytes)} chars`,
+    );
+    pushTraceDetail(details, "Stored by handle", handle);
+    if (typeof preview === "string") {
+      pushTraceDetail(
+        details,
+        "Result preview",
+        buildTraceResultPreview(preview),
+      );
+    } else if (preview !== undefined) {
+      const detail = buildJsonTraceDetail("Result preview", preview);
+      if (detail) details.push(detail);
+    }
+    return { details: dedupeTraceDetails(details) };
+  }
   if (typeof result.content === "string" && result.content.trim()) {
     const rangeLabel = formatTraceResultLineRange(
       readTraceResultLineRange(result.content),

@@ -1,6 +1,6 @@
 import { installNativeNoteStore } from "./helpers/nativeNoteStore";
 import { assert } from "chai";
-import { createEditCurrentNoteTool } from "../src/agent/tools/write/editCurrentNote";
+import { createNoteWriteTool } from "../src/agent/tools/write/noteWrite";
 import { LibraryMutationService } from "../src/agent/services/libraryMutationService";
 import type { AgentToolContext } from "../src/agent/types";
 
@@ -53,7 +53,7 @@ describe("note into a collection (issue #374)", function () {
 
   it("accepts a collection target on note_write", function () {
     const { gateway } = makeGateway();
-    const tool = createEditCurrentNoteTool(gateway as never);
+    const tool = createNoteWriteTool(gateway as never);
     const result = tool.validate({
       mode: "create",
       content: "The answer.",
@@ -70,7 +70,7 @@ describe("note into a collection (issue #374)", function () {
 
   it("describes the stored note text rather than raw Markdown syntax", async function () {
     const { gateway } = makeGateway();
-    const tool = createEditCurrentNoteTool(gateway as never);
+    const tool = createNoteWriteTool(gateway as never);
     const result = tool.validate({
       mode: "create",
       content: "# Issue388 marker\n\n**Verified body.**",
@@ -90,7 +90,7 @@ describe("note into a collection (issue #374)", function () {
 
   it("names the destination collection on the confirmation card", function () {
     const { gateway } = makeGateway();
-    const tool = createEditCurrentNoteTool(gateway as never);
+    const tool = createNoteWriteTool(gateway as never);
     const result = tool.validate({
       mode: "create",
       content: "The answer.",
@@ -100,6 +100,8 @@ describe("note into a collection (issue #374)", function () {
     assert.isTrue(result.ok);
     if (!result.ok) return;
     const pending = tool.createPendingAction?.(result.value, context);
+    // The module owns the public name: no wrapper renames its review card.
+    assert.equal(pending?.toolName, "note_write");
     assert.include(
       pending?.description || "",
       "Neuroscience",
@@ -143,7 +145,7 @@ describe("note into a collection (issue #374)", function () {
     const native = installNativeNoteStore();
     try {
       const { gateway } = makeGateway();
-      const tool = createEditCurrentNoteTool(gateway as never);
+      const tool = createNoteWriteTool(gateway as never);
       const result = tool.validate({
         mode: "create",
         content: "The answer.",
@@ -198,7 +200,7 @@ describe("note into a collection (issue #374)", function () {
       };
 
       const { gateway } = makeGateway();
-      const tool = createEditCurrentNoteTool(gateway as never);
+      const tool = createNoteWriteTool(gateway as never);
       const validated = tool.validate({
         mode: "create",
         content: "See ![Figure 1](file:///tmp/fig.png)",
@@ -243,7 +245,7 @@ describe("note into a collection (issue #374)", function () {
         throw new Error("saveAnswerToNote must not be reached");
       },
     };
-    const tool = createEditCurrentNoteTool(gateway as never);
+    const tool = createNoteWriteTool(gateway as never);
     const validated = tool.validate({
       mode: "create",
       content: "The answer.",
@@ -274,7 +276,7 @@ describe("note into a collection (issue #374)", function () {
       getItem: () => null,
       getActiveNoteSnapshot: () => null,
     };
-    const tool = createEditCurrentNoteTool(gateway as never);
+    const tool = createNoteWriteTool(gateway as never);
     const validated = tool.validate({
       mode: "create",
       content: "The answer.",

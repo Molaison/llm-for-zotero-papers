@@ -11,12 +11,13 @@ import {
   collectDisplayedQuoteVerificationRequests,
   finalizeAssistantQuoteCitations,
   finalizeAssistantQuoteCitationsCooperatively,
-  withReusableQuoteTextIndexes,
   type QuoteSecondaryEvidence,
 } from "../../../services/quotes/quoteCitations";
 import type { QuoteCitation } from "../../../shared/types";
+import { paragraphCitationIds } from "../../../services/quotes/paragraphCitations";
 import { verifyCompleteQuoteInLivePdfJs } from "../livePdfSelectionLocator";
 import type { Message } from "../types";
+import { buildQuoteExpandedMarkdown } from "../quoteRenderPlan";
 import {
   buildQuoteValidationEvidenceSignature,
   cacheQuoteValidationDecision,
@@ -83,14 +84,7 @@ export async function applyAssistantMessageQuoteGate(
         sourceEvidenceComplete ? "complete" : "defer",
         requireBodyEvidenceQuotes ? "body" : "all",
         markdown,
-        ...reviewCitations.map((citation) =>
-          [
-            citation.id,
-            citation.contextItemId || "",
-            citation.sourceFingerprint || "",
-            citation.quoteText,
-          ].join("\u241f"),
-        ),
+        ...reviewCitations.map((citation) => JSON.stringify(citation)),
         ...secondaryEvidence.map((entry) =>
           [
             "secondary",
@@ -110,6 +104,9 @@ export async function applyAssistantMessageQuoteGate(
             entry.status === "matched"
               ? entry.certificate.sourceMatchKind || "exact"
               : "",
+            entry.status === "matched"
+              ? entry.certificate.verificationMode || ""
+              : "",
           ].join("\u241f"),
         ),
       ].join("\u241e")
@@ -122,38 +119,39 @@ export async function applyAssistantMessageQuoteGate(
     : null;
   if (!finalized) {
     noteQuoteValidationDecisionComputed();
-    const reusableSourceIndex = reviewCitations.length
-      ? preparedSourceIndex ||
-        (evidenceSignature
-          ? getOrBuildCachedQuoteSourceIndex(
-              evidenceSignature,
-              evidence.sourceTexts,
-            )
-          : undefined)
-      : undefined;
-    const sourceIndex = reviewCitations.length
-      ? buildQuoteSourceIndex({
-          quoteCitations: reviewCitations,
-          sourceTexts: reusableSourceIndex
-            ? withReusableQuoteTextIndexes(
-                evidence.sourceTexts,
-                reusableSourceIndex,
-              )
-            : evidence.sourceTexts,
-        })
-      : preparedSourceIndex
-        ? preparedSourceIndex
-        : evidenceSignature
-          ? getOrBuildCachedQuoteSourceIndex(
-              evidenceSignature,
-              evidence.sourceTexts,
-            )
-          : buildQuoteSourceIndex({ sourceTexts: evidence.sourceTexts });
+    // Registered anchors identify what to review; their own text is never
+    // evidence for that review. Expand the same deduplicated occurrences the
+    // user sees so bare anchors and handwritten quotes take one path.
+    const reviewMarkdown = buildQuoteExpandedMarkdown(
+      { markdown, quoteCitations },
+      { preserveParagraphCitations: true },
+    );
+    // Preserve paragraph source bindings while reviewing the separate cards.
+    // These records never enter the independent evidence sources below.
+    const paragraphIds = paragraphCitationIds(markdown);
+    const paragraphCitations = quoteCitations?.filter((citation) =>
+      paragraphIds.has(citation.id),
+    );
+    const independentIndex =
+      preparedSourceIndex ||
+      (evidenceSignature
+        ? getOrBuildCachedQuoteSourceIndex(
+            evidenceSignature,
+            evidence.sourceTexts,
+          )
+        : buildQuoteSourceIndex({ sourceTexts: evidence.sourceTexts }));
+    const sourceIndex = {
+      ...independentIndex,
+      quoteCitations: [],
+      sources: independentIndex.sources.filter(
+        (source) => source.origin !== "quote-citation",
+      ),
+    };
     finalized = cooperativeOptions
       ? await finalizeAssistantQuoteCitationsCooperatively(
           {
-            markdown,
-            quoteCitations,
+            markdown: reviewMarkdown,
+            quoteCitations: paragraphCitations,
             sourceIndex,
             requireBodyEvidenceQuotes,
             quoteSourceReview: {
@@ -164,8 +162,8 @@ export async function applyAssistantMessageQuoteGate(
           cooperativeOptions,
         )
       : finalizeAssistantQuoteCitations({
-          markdown,
-          quoteCitations,
+          markdown: reviewMarkdown,
+          quoteCitations: paragraphCitations,
           sourceIndex,
           requireBodyEvidenceQuotes,
           quoteSourceReview: {
@@ -181,7 +179,10 @@ export async function applyAssistantMessageQuoteGate(
   const finalizedQuoteCitations = finalized.quoteCitations.length
     ? finalized.quoteCitations
     : undefined;
-  const displayChanged = finalized.markdown !== markdown;
+  const displayChanged =
+    finalized.markdown !== markdown ||
+    JSON.stringify(finalizedQuoteCitations || []) !==
+      JSON.stringify(quoteCitations || []);
   const nextOverride = displayChanged
     ? {
         markdown: finalized.markdown,
