@@ -1,3 +1,7 @@
+import {
+  CONVERSATION_RESTORE_REFS_TABLE,
+  initConversationRestorePointStore,
+} from "./conversationRestorePoint";
 import { appLogger } from "../core/logging";
 import {
   ATTACHMENT_BLOBS_TABLE,
@@ -38,7 +42,7 @@ function queryAttachmentMaintenance(
   )(sql, params, getMaintenanceQueryOptions());
 }
 
-async function withAttachmentMutationLock<T>(
+export async function withAttachmentMutationLock<T>(
   task: () => Promise<T>,
 ): Promise<T> {
   const previous = attachmentMutationChain;
@@ -295,6 +299,7 @@ export async function collectAndDeleteUnreferencedBlobs(
 ): Promise<void> {
   await withAttachmentMutationLock(async () => {
     await ensureAttachmentRefTables();
+    await initConversationRestorePointStore();
     const minAge = Number.isFinite(minAgeMs)
       ? Math.max(0, Math.floor(minAgeMs))
       : ATTACHMENT_GC_MIN_AGE_MS;
@@ -305,6 +310,10 @@ export async function collectAndDeleteUnreferencedBlobs(
        LEFT JOIN ${ATTACHMENT_REFS_TABLE} r
          ON r.blob_hash = b.hash
        WHERE r.blob_hash IS NULL
+         AND NOT EXISTS (
+           SELECT 1 FROM ${CONVERSATION_RESTORE_REFS_TABLE} snapshot_ref
+           WHERE snapshot_ref.blob_hash = b.hash
+         )
          AND b.created_at <= ?`,
       [cutoff],
     )) as Array<{ hash?: unknown; path?: unknown }> | undefined;
@@ -335,8 +344,12 @@ export async function collectAndDeleteUnreferencedBlobs(
              SELECT 1
              FROM ${ATTACHMENT_REFS_TABLE}
              WHERE blob_hash = ?
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM ${CONVERSATION_RESTORE_REFS_TABLE}
+             WHERE blob_hash = ?
            )`,
-        [hash, hash],
+        [hash, hash, hash],
       );
     }
   });

@@ -1,0 +1,30 @@
+name: Papers History Safety
+
+on:
+  pull_request:
+    branches: ["codex/papers"]
+
+permissions:
+  contents: read
+
+jobs:
+  history-safety:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+      - run: npm ci
+      - name: Papers history and storage regressions
+        run: >-
+          node --import tsx node_modules/mocha/bin/mocha.js --require ./test/register.cjs
+          test/cprPapersConfig.test.ts test/cprPapersRegistry.test.ts
+          test/cprPaperHistoryDialog.test.ts test/cprLocalHistoryRecovery.test.ts
+          test/chatStore.cprSnapshot.test.ts
+          test/conversationStoreMechanics.test.ts test/conversationKeyLedger.test.ts
+      - name: Build and typecheck
+        run: npm run build
+      - name: Architecture boundaries
+        run: npm run check:architecture && npm run check:cycles

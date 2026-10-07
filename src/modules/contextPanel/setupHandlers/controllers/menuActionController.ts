@@ -64,6 +64,8 @@ type MenuActionControllerDeps = {
   settingsBtn: HTMLButtonElement | null;
   remoteHistoryBtn: HTMLButtonElement | null;
   openRemotePaperHistory: () => void;
+  restoreHistoryBtn?: HTMLButtonElement | null;
+  restoreLocalPaperHistory?: () => Promise<void>;
   preferencesPaneId: string;
   getItem: () => Zotero.Item | null;
   getResponseMenuTarget: () => ResponseMenuTarget;
@@ -746,6 +748,22 @@ export function attachMenuActionController(
     deps.closeExportMenu();
     void Promise.resolve(deps.openRemotePaperHistory()).catch((error) => {
       deps.logError("LLM: failed to open remote paper history", error);
+    });
+  });
+
+  deps.restoreHistoryBtn?.addEventListener("click", (e: Event) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (deps.restoreHistoryBtn?.disabled) return;
+    deps.closeRetryModelMenu();
+    deps.closeSlashMenu();
+    deps.closeResponseMenu();
+    deps.closePromptMenu();
+    deps.closeHistoryNewMenu();
+    deps.closeHistoryMenu();
+    deps.closeExportMenu();
+    void deps.restoreLocalPaperHistory?.().catch((error) => {
+      deps.logError("LLM: failed to restore local paper history", error);
     });
   });
 

@@ -329,10 +329,24 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
   );
   remoteHistoryBtn.setAttribute("aria-label", t("Sync remote conversation"));
   remoteHistoryBtn.style.display = "none";
+  const restoreHistoryBtn = createElement(
+    doc,
+    "button",
+    "llm-btn-icon llm-restore-history-btn",
+    {
+      id: "llm-restore-history",
+      type: "button",
+      title: t("Restore local history"),
+      textContent: "↶",
+    },
+  );
+  restoreHistoryBtn.setAttribute("aria-label", t("Restore local history"));
+  restoreHistoryBtn.style.display = "none";
   headerActions.append(
     popoutBtn,
     settingsBtn,
     remoteHistoryBtn,
+    restoreHistoryBtn,
     exportBtn,
     clearBtn,
   );
