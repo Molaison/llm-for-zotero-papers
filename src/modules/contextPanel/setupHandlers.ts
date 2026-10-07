@@ -142,6 +142,11 @@ import {
   shouldOfferCprPaperHistory,
   type CprPaperHistoryRequest,
 } from "./cprPaperHistoryDialog";
+import {
+  createCprLocalHistoryRecoveryController,
+  shouldOfferCprLocalHistoryRecovery,
+} from "./cprLocalHistoryRecovery";
+import { hasConversationRestorePoint } from "../../utils/chatStore";
 import { normalizeSelectedTextSource } from "../../services/context/normalizers";
 import { resolveSelectedTextAnchors } from "./selectedTextAnchors";
 import {
@@ -190,6 +195,7 @@ import {
   sendQuestion,
   refreshChat,
   replaceCurrentPaperChat,
+  restoreCurrentPaperChat,
   syncUserContextAlignmentWidths,
   getConversationKey,
   ensureConversationLoaded,
@@ -336,7 +342,10 @@ import type {
   SelectedTextContext,
 } from "./types";
 import type { ReasoningLevel as LLMReasoningLevel } from "../../utils/llmClient";
-import { isReasoningLevelActive, loadCprPaperHistory } from "../../utils/llmClient";
+import {
+  isReasoningLevelActive,
+  loadCprPaperHistory,
+} from "../../utils/llmClient";
 import type { ReasoningConfig as LLMReasoningConfig } from "../../utils/llmClient";
 import {
   browseAllItemCandidates,
@@ -745,6 +754,7 @@ export function setupHandlers(
     settingsBtn,
     exportBtn,
     remoteHistoryBtn,
+    restoreHistoryBtn,
     clearBtn,
     titleStatic,
     historyBar,
@@ -917,6 +927,7 @@ export function setupHandlers(
   // The header button reuses the conversation's own transport settings and its
   // request slot, so fetching remote history can never race a send.
   let remoteHistoryBusy = false;
+  let localHistoryRecoveryBusy = false;
   const resolveRemoteHistoryContext = (): {
     visible: boolean;
     request: CprPaperHistoryRequest | null;
@@ -930,14 +941,17 @@ export function setupHandlers(
         ""
       ).trim();
       const paperItemId = target
-        ? resolveConversationBaseItem(target)?.id ?? null
+        ? (resolveConversationBaseItem(target)?.id ?? null)
         : null;
-      const visible = Boolean(target) && !resolveActiveNoteSession(target) &&
-        getCurrentRuntimeMode() === "chat" && shouldOfferCprPaperHistory({
-        conversationSystem: getConversationSystem(),
-        model,
-        paperItemId,
-      });
+      const visible =
+        Boolean(target) &&
+        !resolveActiveNoteSession(target) &&
+        getCurrentRuntimeMode() === "chat" &&
+        shouldOfferCprPaperHistory({
+          conversationSystem: getConversationSystem(),
+          model,
+          paperItemId,
+        });
       return {
         visible,
         request:
@@ -956,23 +970,46 @@ export function setupHandlers(
     }
   };
 
+  const isLocalHistoryRecoveryAvailable = (): boolean => {
+    try {
+      return shouldOfferCprLocalHistoryRecovery({
+        conversationSystem: getConversationSystem(),
+        paperItemId: item ? resolveConversationBaseItem(item)?.id : null,
+        isNoteSession: Boolean(item && resolveActiveNoteSession(item)),
+      });
+    } catch {
+      // Initial panel setup can run before its conversation system is resolved.
+      return false;
+    }
+  };
+
   const syncRemoteHistoryButton = () => {
-    if (!remoteHistoryBtn) return;
     const { visible } = resolveRemoteHistoryContext();
+    const restoreVisible = isLocalHistoryRecoveryAvailable();
     const activeKey = item ? getConversationKey(item) : null;
-    const conversationBusy =
-      activeKey !== null && isRequestPending(activeKey);
-    const display = visible ? "" : "none";
-    if (remoteHistoryBtn.style.display !== display) {
-      remoteHistoryBtn.style.display = display;
+    const busy =
+      remoteHistoryBusy ||
+      localHistoryRecoveryBusy ||
+      (activeKey !== null && isRequestPending(activeKey));
+    let layoutChanged = false;
+    for (const [button, offered] of [
+      [remoteHistoryBtn, visible],
+      [restoreHistoryBtn, restoreVisible],
+    ] as const) {
+      if (!button) continue;
+      const display = offered ? "" : "none";
+      if (button.style.display !== display) {
+        button.style.display = display;
+        layoutChanged = true;
+      }
+      button.disabled = !offered || busy;
+    }
+    if (layoutChanged) {
       updateHeaderSpacing(
-        headerTop?.querySelector<HTMLElement>(".llm-header-nav-row") || headerTop,
+        headerTop?.querySelector<HTMLElement>(".llm-header-nav-row") ||
+          headerTop,
       );
     }
-    // Disabled while this conversation is already sending or fetching, so a
-    // click can never queue a second request for the same conversation.
-    remoteHistoryBtn.disabled =
-      !visible || remoteHistoryBusy || conversationBusy;
   };
 
   const remoteHistoryController = createCprPaperHistoryController({
@@ -988,23 +1025,34 @@ export function setupHandlers(
       if (!started) return null;
       const lease = capturePanelOperationLease(body);
       const targetPaperId = request.itemId;
-      const expectedGeneration = getConversationWriteGeneration(started.conversationKey);
+      const expectedGeneration = getConversationWriteGeneration(
+        started.conversationKey,
+      );
       const isCurrent = () => {
         const current = resolveRemoteHistoryContext().request;
-        return !started.signal.aborted && isPanelOperationLeaseCurrent(lease) &&
+        return (
+          !started.signal.aborted &&
+          isPanelOperationLeaseCurrent(lease) &&
           getConversationKey(targetItem) === started.conversationKey &&
           current?.itemId === targetPaperId &&
-          current.model === request.model && current.apiBase === request.apiBase &&
-          current.apiKey === request.apiKey;
+          current.model === request.model &&
+          current.apiBase === request.apiBase &&
+          current.apiKey === request.apiKey
+        );
       };
       return {
         request,
         signal: started.signal,
         isCurrent,
-        applyHistory: (history) => replaceCurrentPaperChat({
-          body, item: targetItem, conversationKey: started.conversationKey,
-          expectedGeneration, messages: history.messages, isCurrent,
-        }),
+        applyHistory: (history) =>
+          replaceCurrentPaperChat({
+            body,
+            item: targetItem,
+            conversationKey: started.conversationKey,
+            expectedGeneration,
+            messages: history.messages,
+            isCurrent,
+          }),
         finish: () =>
           finishPanelRequest(
             body,
@@ -1027,6 +1075,80 @@ export function setupHandlers(
     },
   });
   const openRemotePaperHistory = () => remoteHistoryController.open();
+
+  const localHistoryRecoveryController =
+    createCprLocalHistoryRecoveryController({
+      begin: () => {
+        const targetItem = item;
+        if (!targetItem || !isLocalHistoryRecoveryAvailable()) return null;
+        const started = beginPanelRequest(
+          body,
+          targetItem,
+          t("Restoring local history…"),
+        );
+        if (!started) return null;
+        const lease = capturePanelOperationLease(body);
+        const expectedGeneration = getConversationWriteGeneration(
+          started.conversationKey,
+        );
+        const isCurrent = () =>
+          !started.signal.aborted &&
+          isPanelOperationLeaseCurrent(lease) &&
+          item === targetItem &&
+          getConversationKey(targetItem) === started.conversationKey &&
+          isLocalHistoryRecoveryAvailable();
+        return {
+          signal: started.signal,
+          isCurrent,
+          hasRestorePoint: () =>
+            hasConversationRestorePoint(started.conversationKey),
+          restoreHistory: () =>
+            restoreCurrentPaperChat({
+              body,
+              item: targetItem,
+              conversationKey: started.conversationKey,
+              expectedGeneration,
+              isCurrent,
+            }),
+          finish: () =>
+            finishPanelRequest(
+              body,
+              targetItem,
+              started.conversationKey,
+              started.requestId,
+            ),
+        };
+      },
+      confirmRestore: () => {
+        const win = body.ownerDocument?.defaultView;
+        if (!win) return false;
+        const title = t("Restore local history");
+        const message = t(
+          "Replace the currently displayed local messages with the saved pre-sync history? This consumes the restore point and replaces any messages added since that point. The server conversation is unchanged.",
+        );
+        const prompt = (
+          globalThis as {
+            Services?: {
+              prompt?: {
+                confirm?: (win: Window, title: string, text: string) => boolean;
+              };
+            };
+          }
+        ).Services?.prompt;
+        return prompt?.confirm
+          ? prompt.confirm(win, title, message)
+          : win.confirm(message);
+      },
+      setBusy: (busy) => {
+        localHistoryRecoveryBusy = busy;
+        syncRemoteHistoryButton();
+      },
+      setStatusMessage: (message, level) => {
+        if (status) setStatus(status, message, level);
+      },
+      logError: (message, error) => appLogger.debug(message, error),
+    });
+  const restoreLocalPaperHistory = () => localHistoryRecoveryController.open();
 
   let quotaControl: ReturnType<typeof attachFooterQuotaControl> | null = null;
   let quotaPendingConversationKey: number | null = null;
@@ -2395,6 +2517,8 @@ export function setupHandlers(
     settingsBtn,
     remoteHistoryBtn,
     openRemotePaperHistory,
+    restoreHistoryBtn,
+    restoreLocalPaperHistory,
     preferencesPaneId: PREFERENCES_PANE_ID,
     getItem: () => item,
     getResponseMenuTarget: () => responseMenuTarget,

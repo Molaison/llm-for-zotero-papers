@@ -126,9 +126,20 @@ import {
   deleteUsageEventsForConversation,
   deleteUsageEventsForConversationInTransaction,
 } from "./usageStore";
-import { clearOwnerAttachmentRefsInTransaction } from "./attachmentRefStore";
+import {
+  clearOwnerAttachmentRefsInTransaction,
+  withAttachmentMutationLock,
+} from "./attachmentRefStore";
+import {
+  CONVERSATION_RESTORE_POINTS_TABLE,
+  CONVERSATION_RESTORE_REFS_TABLE,
+  MAX_CONVERSATION_RESTORE_BYTES,
+  initConversationRestorePointStore,
+  deleteConversationRestorePointInTransaction,
+} from "./conversationRestorePoint";
 import {
   areConversationWritesFrozen,
+  bumpConversationWriteGeneration,
   isConversationWriteGenerationCurrent,
   withConversationWriteLock,
 } from "../shared/conversationWriteFence";
@@ -2529,11 +2540,174 @@ export async function forkUpstreamConversationMessages(params: {
   );
 }
 
-/** Replace only a live conversation's message snapshot; keep its catalog and provider identity. */
+type ConversationSnapshotOptions = {
+  expectedGeneration: number;
+  isCurrent: () => boolean;
+};
+
+type ConversationRestorePoint = {
+  conversation_id: string;
+  conversation_instance_id: string;
+  profile_signature: string;
+  columns_json: string;
+  messages_json: string;
+  last_synced_hash: string | null;
+};
+
+async function readConversationRestorePoint(
+  key: number,
+): Promise<ConversationRestorePoint | undefined> {
+  const rows = (await Zotero.DB.queryAsync(
+    `SELECT conversation_id, conversation_instance_id, profile_signature,
+            columns_json, messages_json, last_synced_hash
+     FROM ${CONVERSATION_RESTORE_POINTS_TABLE} WHERE conversation_key = ?`,
+    [key],
+  )) as ConversationRestorePoint[];
+  const row = rows[0];
+  return row
+    ? {
+        conversation_id: row.conversation_id,
+        conversation_instance_id: row.conversation_instance_id,
+        profile_signature: row.profile_signature,
+        columns_json: row.columns_json,
+        messages_json: row.messages_json,
+        last_synced_hash: row.last_synced_hash,
+      }
+    : undefined;
+}
+
+export async function hasConversationRestorePoint(
+  conversationKey: number,
+): Promise<boolean> {
+  const key = normalizeConversationKey(conversationKey);
+  if (!key || !isUpstreamStoreConversationKey(key)) return false;
+  await initConversationRestorePointStore();
+  const point = await readConversationRestorePoint(key);
+  const scope = await getRegisteredConversationScope(key);
+  return Boolean(
+    point &&
+    scope?.valid &&
+    scope.system === "upstream" &&
+    point.profile_signature === getCurrentProfileSignature() &&
+    point.conversation_id === scope.conversationID &&
+    point.conversation_instance_id === scope.instanceID,
+  );
+}
+
+async function readRawConversationSnapshot(
+  selector: MessageConversationSelector,
+): Promise<{
+  columns: string[];
+  messagesJson: string;
+  hash: string;
+}> {
+  // Preserve raw metadata rather than round-trip through the display normalizer.
+  const schema = (await Zotero.DB.queryAsync(
+    `PRAGMA table_info(${CHAT_MESSAGES_TABLE})`,
+  )) as Array<{ name: string }>;
+  const columns = schema.map(({ name }) => name);
+  if (!columns.length || columns.some((name) => !/^[a-z_]+$/.test(name))) {
+    throw new Error("Cannot safely capture the local conversation schema");
+  }
+  const rows = (await Zotero.DB.queryAsync(
+    `SELECT * FROM ${CHAT_MESSAGES_TABLE} WHERE ${selector.whereSql}
+     ORDER BY ${storedMessageDisplayOrderSql()}`,
+    selector.params,
+  )) as Array<Record<string, unknown>>;
+  const messagesJson = JSON.stringify(
+    rows.map((row) => columns.map((name) => row[name])),
+  );
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(JSON.stringify(columns) + messagesJson),
+  );
+  const hash = Array.from(new Uint8Array(digest), (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
+  return { columns, messagesJson, hash };
+}
+
+/** Retain undo across unchanged syncs; newer local edits advance the single restore point. */
+async function saveConversationRestorePoint(
+  key: number,
+  selector: MessageConversationSelector,
+  conversationID: string,
+  instanceID: string,
+): Promise<void> {
+  const existing = await readConversationRestorePoint(key);
+  if (
+    existing &&
+    (existing.conversation_id !== conversationID ||
+      existing.conversation_instance_id !== instanceID ||
+      existing.profile_signature !== getCurrentProfileSignature())
+  ) {
+    throw new Error("The saved conversation scope no longer matches");
+  }
+  const { columns, messagesJson, hash } =
+    await readRawConversationSnapshot(selector);
+  if (existing?.last_synced_hash === hash) return;
+  if (
+    new TextEncoder().encode(messagesJson).byteLength >
+    MAX_CONVERSATION_RESTORE_BYTES
+  ) {
+    throw new Error(
+      "Local history exceeds the 16 MiB restore limit; remote sync was not applied",
+    );
+  }
+  await deleteConversationRestorePointInTransaction(key);
+  await Zotero.DB.queryAsync(
+    `INSERT INTO ${CONVERSATION_RESTORE_POINTS_TABLE}
+     (conversation_key, conversation_id, conversation_instance_id, profile_signature,
+      created_at, columns_json, messages_json) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [
+      key,
+      conversationID,
+      instanceID,
+      getCurrentProfileSignature(),
+      Date.now(),
+      JSON.stringify(columns),
+      messagesJson,
+    ],
+  );
+  try {
+    await Zotero.DB.queryAsync(
+      `INSERT INTO ${CONVERSATION_RESTORE_REFS_TABLE}
+       (conversation_key, blob_hash, updated_at)
+       SELECT owner_id, blob_hash, updated_at FROM llm_for_zotero_attachment_refs
+       WHERE owner_type = 'conversation' AND owner_id = ?`,
+      [key],
+    );
+  } catch (error) {
+    // Attachment storage is lazy. Other errors must abort before any replacement.
+    if (!/no such table|no table/i.test(String(error))) throw error;
+  }
+}
+
+/** Atomically replace messages while retaining identity and an original local restore point. */
 export async function replaceConversationMessages(
   conversationKey: number,
-  messages: Array<Pick<StoredChatMessage, "role" | "text"> & { timestamp: number | null }>,
-  options: { expectedGeneration: number; isCurrent: () => boolean },
+  messages: Array<
+    Pick<StoredChatMessage, "role" | "text"> & { timestamp: number | null }
+  >,
+  options: ConversationSnapshotOptions,
+): Promise<StoredChatMessage[]> {
+  return applyConversationSnapshot(conversationKey, messages, options);
+}
+
+/** Restore the saved local messages and attachment references; never contact the server. */
+export async function restoreConversationMessages(
+  conversationKey: number,
+  options: ConversationSnapshotOptions,
+): Promise<StoredChatMessage[]> {
+  return applyConversationSnapshot(conversationKey, null, options);
+}
+
+async function applyConversationSnapshot(
+  conversationKey: number,
+  messages: Array<
+    Pick<StoredChatMessage, "role" | "text"> & { timestamp: number | null }
+  > | null,
+  options: ConversationSnapshotOptions,
 ): Promise<StoredChatMessage[]> {
   const key = normalizeConversationKey(conversationKey);
   if (!key || !isUpstreamStoreConversationKey(key)) {
@@ -2546,70 +2720,175 @@ export async function replaceConversationMessages(
       pendingDeletionStore.isConversationPendingDeletion(key) ||
       !isConversationWriteGenerationCurrent(key, options.expectedGeneration)
     ) {
-      throw new DOMException("Conversation synchronization was superseded", "AbortError");
+      throw new DOMException(
+        "Conversation synchronization was superseded",
+        "AbortError",
+      );
     }
   };
-  return withConversationWriteLock(key, async () => {
-    assertCurrent();
-    const stored = await Zotero.DB.executeTransaction(async () => {
-      const selector = await resolveRepairingMessageConversationSelector(key, {
-        destructive: true,
-      });
-      const scope = selector.registered;
-      if (
-        !scope?.valid || !scope.conversationID || scope.system !== "upstream" ||
-        scope.profileSignature !== getCurrentProfileSignature()
-      ) {
-        throw new Error("The original conversation scope is unavailable");
-      }
-      const identity = await resolveUpstreamAppendIdentity(key, scope.instanceID || undefined);
-      await assertUpstreamForkSourceLive({
-        conversationKey: key,
-        instanceID: identity.instanceID || undefined,
-        conversationID: scope.conversationID,
-      });
-      const previous = (await Zotero.DB.queryAsync(
-        `SELECT timestamp FROM ${CHAT_MESSAGES_TABLE}
-         WHERE ${selector.whereSql}
-         ORDER BY ${storedMessageDisplayOrderSql()} LIMIT 1`,
-        selector.params,
-      )) as Array<{ timestamp: number }>;
-      const firstTimed = messages.findIndex((message) =>
-        message.timestamp !== null && Number.isFinite(message.timestamp) && message.timestamp > 0,
-      );
-      // Preserve native order even when timestamps are absent, equal or out of order.
-      // A timestamp-free repeat reuses the persisted starting time.
-      const start = firstTimed >= 0
-        ? Math.max(1, Math.floor(messages[firstTimed].timestamp!) - firstTimed)
-        : Number(previous[0]?.timestamp) || Date.now();
-      let timestamp = start - 1;
+  return withConversationWriteLock(key, () =>
+    withAttachmentMutationLock(async () => {
       assertCurrent();
-      await Zotero.DB.queryAsync(
-        `DELETE FROM ${CHAT_MESSAGES_TABLE} WHERE ${selector.whereSql}`,
-        selector.params,
-      );
-      for (const message of messages) {
-        timestamp = Math.max(
-          timestamp + 1,
-          message.timestamp !== null && Number.isFinite(message.timestamp)
-            ? Math.floor(message.timestamp) : timestamp + 1,
+      await initConversationRestorePointStore();
+      const stored = await Zotero.DB.executeTransaction(async () => {
+        const selector = await resolveRepairingMessageConversationSelector(
+          key,
+          {
+            destructive: true,
+          },
         );
-        await Zotero.DB.queryAsync(
-          `INSERT INTO ${CHAT_MESSAGES_TABLE}
-           (conversation_id, conversation_instance_id, conversation_key, role, text, timestamp, run_mode)
-           VALUES (?, ?, ?, ?, ?, ?, 'chat')`,
-          [scope.conversationID, identity.instanceID, key, message.role, message.text, timestamp],
+        const scope = selector.registered;
+        if (
+          !scope?.valid ||
+          !scope.conversationID ||
+          scope.system !== "upstream" ||
+          scope.profileSignature !== getCurrentProfileSignature()
+        ) {
+          throw new Error("The original conversation scope is unavailable");
+        }
+        const identity = await resolveUpstreamAppendIdentity(
+          key,
+          scope.instanceID || undefined,
         );
-      }
-      await clearOwnerAttachmentRefsInTransaction("conversation", key);
-      await refreshUpstreamConversationCatalogSummary(key);
-      const rows = await loadConversation(key, Math.max(1, messages.length));
-      assertCurrent();
-      return rows;
-    });
-    await refreshUpstreamConversationSearchIndex(key);
-    return stored;
-  });
+        if (!identity.instanceID)
+          throw new Error("Conversation identity is unavailable");
+        await assertUpstreamForkSourceLive({
+          conversationKey: key,
+          instanceID: identity.instanceID,
+          conversationID: scope.conversationID,
+        });
+        assertCurrent();
+        let restoredCount = 0;
+        if (messages === null) {
+          const point = await readConversationRestorePoint(key);
+          if (!point)
+            throw new Error(
+              "No saved local history is available for this conversation",
+            );
+          if (
+            point.conversation_id !== scope.conversationID ||
+            point.conversation_instance_id !== identity.instanceID ||
+            point.profile_signature !== getCurrentProfileSignature()
+          ) {
+            throw new Error("The saved conversation scope no longer matches");
+          }
+          const columns: unknown = JSON.parse(point.columns_json);
+          const rows: unknown = JSON.parse(point.messages_json);
+          if (
+            !Array.isArray(columns) ||
+            !columns.length ||
+            !columns.every(
+              (name) => typeof name === "string" && /^[a-z_]+$/.test(name),
+            ) ||
+            !Array.isArray(rows) ||
+            !rows.every(
+              (row) => Array.isArray(row) && row.length === columns.length,
+            )
+          ) {
+            throw new Error("The saved local history is invalid");
+          }
+          await Zotero.DB.queryAsync(
+            `DELETE FROM ${CHAT_MESSAGES_TABLE} WHERE ${selector.whereSql}`,
+            selector.params,
+          );
+          for (const row of rows) {
+            await Zotero.DB.queryAsync(
+              `INSERT INTO ${CHAT_MESSAGES_TABLE} (${columns.join(", ")})
+             VALUES (${columns.map(() => "?").join(", ")})`,
+              row,
+            );
+          }
+          await clearOwnerAttachmentRefsInTransaction("conversation", key);
+          const refs = (await Zotero.DB.queryAsync(
+            `SELECT blob_hash, updated_at FROM ${CONVERSATION_RESTORE_REFS_TABLE}
+           WHERE conversation_key = ?`,
+            [key],
+          )) as Array<{ blob_hash: string; updated_at: number }>;
+          for (const ref of refs) {
+            await Zotero.DB.queryAsync(
+              `INSERT INTO llm_for_zotero_attachment_refs (owner_type, owner_id, blob_hash, updated_at)
+             VALUES ('conversation', ?, ?, ?)`,
+              [key, ref.blob_hash, ref.updated_at],
+            );
+          }
+          await deleteConversationRestorePointInTransaction(key);
+          restoredCount = rows.length;
+        } else {
+          await saveConversationRestorePoint(
+            key,
+            selector,
+            scope.conversationID,
+            identity.instanceID,
+          );
+          const previous = (await Zotero.DB.queryAsync(
+            `SELECT timestamp FROM ${CHAT_MESSAGES_TABLE}
+           WHERE ${selector.whereSql}
+           ORDER BY ${storedMessageDisplayOrderSql()} LIMIT 1`,
+            selector.params,
+          )) as Array<{ timestamp: number }>;
+          const firstTimed = messages.findIndex(
+            (message) =>
+              message.timestamp !== null &&
+              Number.isFinite(message.timestamp) &&
+              message.timestamp > 0,
+          );
+          // Preserve native order even with missing, equal or out-of-order timestamps.
+          const start =
+            firstTimed >= 0
+              ? Math.max(
+                  1,
+                  Math.floor(messages[firstTimed].timestamp!) - firstTimed,
+                )
+              : Number(previous[0]?.timestamp) || Date.now();
+          let timestamp = start - 1;
+          assertCurrent();
+          await Zotero.DB.queryAsync(
+            `DELETE FROM ${CHAT_MESSAGES_TABLE} WHERE ${selector.whereSql}`,
+            selector.params,
+          );
+          for (const message of messages) {
+            timestamp = Math.max(
+              timestamp + 1,
+              message.timestamp !== null && Number.isFinite(message.timestamp)
+                ? Math.floor(message.timestamp)
+                : timestamp + 1,
+            );
+            await Zotero.DB.queryAsync(
+              `INSERT INTO ${CHAT_MESSAGES_TABLE}
+             (conversation_id, conversation_instance_id, conversation_key, role, text, timestamp, run_mode)
+             VALUES (?, ?, ?, ?, ?, ?, 'chat')`,
+              [
+                scope.conversationID,
+                identity.instanceID,
+                key,
+                message.role,
+                message.text,
+                timestamp,
+              ],
+            );
+          }
+          await clearOwnerAttachmentRefsInTransaction("conversation", key);
+          const { hash } = await readRawConversationSnapshot(selector);
+          await Zotero.DB.queryAsync(
+            `UPDATE ${CONVERSATION_RESTORE_POINTS_TABLE} SET last_synced_hash = ?
+             WHERE conversation_key = ?`,
+            [hash, key],
+          );
+        }
+        await refreshUpstreamConversationCatalogSummary(key);
+        const result = await loadConversation(
+          key,
+          Math.max(1, messages?.length ?? restoredCount),
+        );
+        assertCurrent();
+        return result;
+      });
+      // Retire queued writes and a second restore/sync captured before this commit.
+      bumpConversationWriteGeneration(key);
+      await refreshUpstreamConversationSearchIndex(key);
+      return stored;
+    }),
+  );
 }
 
 export async function appendMessage(
@@ -3119,6 +3398,7 @@ export async function clearConversation(
          ${messageIdentityClause}`,
       [...selector.params, ...messageIdentityParams],
     );
+    await deleteConversationRestorePointInTransaction(normalizedKey);
     await refreshUpstreamConversationCatalogSummary(normalizedKey);
     await onBeforeCommit?.();
   });
@@ -3703,11 +3983,13 @@ export async function deletePaperConversation(
 ): Promise<void> {
   const normalizedKey = normalizeConversationKey(conversationKey);
   if (!normalizedKey || !isUpstreamPaperConversationKey(normalizedKey)) return;
-  await Zotero.DB.queryAsync(
-    `DELETE FROM ${PAPER_CONVERSATIONS_TABLE}
-     WHERE conversation_key = ?`,
-    [normalizedKey],
-  );
+  await runChatStoreTransaction(async () => {
+    await deleteConversationRestorePointInTransaction(normalizedKey);
+    await Zotero.DB.queryAsync(
+      `DELETE FROM ${PAPER_CONVERSATIONS_TABLE} WHERE conversation_key = ?`,
+      [normalizedKey],
+    );
+  });
   await deleteUpstreamConversationSearchIndex(normalizedKey);
   // Legacy pre-ledger deletion path: cascade the usage ledger here too, so no
   // entry point can leave usage rows for a conversation the user deleted.
@@ -4181,11 +4463,13 @@ export async function deleteGlobalConversation(
 ): Promise<void> {
   const normalizedKey = normalizeConversationKey(conversationKey);
   if (!normalizedKey || !isUpstreamGlobalConversationKey(normalizedKey)) return;
-  await Zotero.DB.queryAsync(
-    `DELETE FROM ${GLOBAL_CONVERSATIONS_TABLE}
-     WHERE conversation_key = ?`,
-    [normalizedKey],
-  );
+  await runChatStoreTransaction(async () => {
+    await deleteConversationRestorePointInTransaction(normalizedKey);
+    await Zotero.DB.queryAsync(
+      `DELETE FROM ${GLOBAL_CONVERSATIONS_TABLE} WHERE conversation_key = ?`,
+      [normalizedKey],
+    );
+  });
   await deleteUpstreamConversationSearchIndex(normalizedKey);
   // Legacy pre-ledger deletion path: cascade the usage ledger here too, so no
   // entry point can leave usage rows for a conversation the user deleted.
@@ -4323,6 +4607,7 @@ export async function deleteUpstreamConversationLocalRows(
           ]
         : [...selector.params, ...messageIdentityParams],
     );
+    await deleteConversationRestorePointInTransaction(normalizedKey);
     await clearPersistedAgentConversationRowsInTransaction(normalizedKey);
     await clearOwnerAttachmentRefsInTransaction("conversation", normalizedKey);
     // A deleted conversation leaves no usage rows behind: the local usage
