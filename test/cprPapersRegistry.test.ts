@@ -43,6 +43,61 @@ describe("CPR server-owned paper registry client", function () {
     assert.include(String(caught), "需要先选择一篇论文");
     assert.equal(fetches, 0);
   });
+  it("rejects another paper's reservation before reading or fingerprinting the PDF", async function () {
+    let calls = 0;
+    let reads = 0;
+    let caught: unknown;
+    try {
+      await prepareCprPaperRequest({
+        itemId,
+        apiBase: CPR_PAPERS_API_BASE,
+        apiKey: "test",
+        prompt: "q",
+        fetchFn: async () => {
+          calls++;
+          return calls === 1
+            ? ready("doi:10.1234/other", "missing", { upload_token: "wrong-paper-token" })
+            : ready("doi:10.1234/abc");
+        },
+        readBytes: async () => {
+          reads++;
+          return new TextEncoder().encode("%PDF-test");
+        },
+      });
+    } catch (error) {
+      caught = error;
+    }
+    assert.include(String(caught), "不同的论文身份");
+    assert.equal(calls, 1);
+    assert.equal(reads, 0);
+    assert.isFalse([...prefs.keys()].some(key => key.includes(".cprPaperReservation.")));
+  });
+  it("rejects a different paper returned by the fingerprint lookup", async function () {
+    let calls = 0;
+    let caught: unknown;
+    try {
+      await prepareCprPaperRequest({
+        itemId,
+        apiBase: CPR_PAPERS_API_BASE,
+        apiKey: "test",
+        prompt: "q",
+        fetchFn: async () => {
+          calls++;
+          return calls === 1
+            ? ready("doi:10.1234/abc", "missing", { upload_token: "own-paper-token" })
+            : ready("doi:10.1234/other", "missing", { upload_token: "wrong-paper-token" });
+        },
+        readBytes: async () => new TextEncoder().encode("%PDF-test"),
+      });
+    } catch (error) {
+      caught = error;
+    }
+    assert.include(String(caught), "不同的论文身份");
+    assert.equal(calls, 2);
+    const reservations = [...prefs.entries()].filter(([key]) => key.includes(".cprPaperReservation."));
+    assert.lengthOf(reservations, 1);
+    assert.equal(reservations[0][1], "own-paper-token");
+  });
   it("resolves different paper portal sessions to the real item and same saved thread", async function () {
     const paper = Zotero.Items.get(itemId);
     const lookups: number[] = [];
