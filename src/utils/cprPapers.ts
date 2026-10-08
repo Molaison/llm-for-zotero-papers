@@ -252,7 +252,9 @@ export async function prepareCprPaperRequest(params: {
       signal: params.signal,
     });
     if (!response.ok) throw new Error(`CPR 论文登记 HTTP ${response.status}: ${(await response.text()).slice(0, 600)}`);
-    return parsePaperResolution(await response.json());
+    const result = parsePaperResolution(await response.json());
+    if (result.paper_id !== paperId) throw new Error("CPR 返回了不同的论文身份；已停止发送。");
+    return result;
   };
   let registry = await resolveRegistry(lookupIdentity);
   // A DOI added on another device must reuse an existing hash-only binding before uploading bytes.
@@ -261,7 +263,6 @@ export async function prepareCprPaperRequest(params: {
     await loadPdf();
     registry = await resolveRegistry({...lookupIdentity, paper_upload_token: registry.upload_token, paper_pdf_sha256: pdfHash});
   }
-  if (registry.paper_id !== paperId) throw new Error("CPR 返回了不同的论文身份；已停止发送。");
   if (registry.status === "pending") throw new Error("这篇论文正由另一请求处理；请稍后再试，不会重复上传 PDF。");
   if (registry.status === "uncertain") throw new Error("服务端需要核对这篇论文的原对话；已停止发送，不会自动重传 PDF。");
   const content: Array<{type: "input_text"; text: string} | {type: "input_file"; filename: string; file_data: string}> = [];
