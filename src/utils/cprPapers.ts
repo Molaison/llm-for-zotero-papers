@@ -105,7 +105,11 @@ export function parsePaperResolution(value: unknown) {
   const result = parsePaperOutput(value);
   if (!isRecord(result) || typeof result.paper_id !== "string" || typeof result.thread_id !== "string"
     || !["missing", "ready", "pending", "uncertain"].includes(String(result.status))
-    || typeof result.upload_required !== "boolean") throw new Error("CPR 论文登记格式不正确；没有上传 PDF。");
+    || typeof result.upload_required !== "boolean"
+    || (result.status === "missing" && result.upload_required === true
+      && (typeof result.upload_token !== "string" || !result.upload_token.trim()))) {
+    throw new Error("CPR 论文登记格式不正确；没有上传 PDF。");
+  }
   return result;
 }
 
