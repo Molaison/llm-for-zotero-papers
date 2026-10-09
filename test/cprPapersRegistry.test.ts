@@ -277,6 +277,48 @@ describe("CPR server-owned paper registry client", function () {
     assert.equal(calls, 0);
   });
 
+  for (const uploadToken of ["", "   "]) {
+    it(`rejects a blank upload reservation ${JSON.stringify(uploadToken)} before reading the PDF`, async function () {
+      let calls = 0;
+      let reads = 0;
+      let caught: unknown;
+      try {
+        await prepareCprPaperRequest({
+          itemId, apiBase: CPR_PAPERS_API_BASE, apiKey: "test", prompt: "read",
+          fetchFn: async () => {
+            calls++;
+            return ready("doi:10.1234/abc", "missing", {upload_token: uploadToken});
+          },
+          readBytes: async () => {
+            reads++;
+            return new TextEncoder().encode("%PDF-test");
+          },
+        });
+      } catch (error) {caught = error;}
+      assert.include(String(caught), "CPR 论文登记格式不正确");
+      assert.equal(calls, 1);
+      assert.equal(reads, 0);
+      assert.isFalse([...prefs.keys()].some(key => key.includes(".cprPaperReservation.")));
+    });
+  }
+  it("preserves the valid reservation when the fingerprint lookup returns a blank token", async function () {
+    let calls = 0;
+    let caught: unknown;
+    try {
+      await prepareCprPaperRequest({
+        itemId, apiBase: CPR_PAPERS_API_BASE, apiKey: "test", prompt: "read",
+        fetchFn: async () => ready("doi:10.1234/abc", "missing", {
+          upload_token: ++calls === 1 ? "valid-reservation" : "",
+        }),
+        readBytes: async () => new TextEncoder().encode("%PDF-test"),
+      });
+    } catch (error) {caught = error;}
+    assert.include(String(caught), "CPR 论文登记格式不正确");
+    assert.equal(calls, 2);
+    const reservations = [...prefs.entries()].filter(([key]) => key.includes(".cprPaperReservation."));
+    assert.lengthOf(reservations, 1);
+    assert.equal(reservations[0][1], "valid-reservation");
+  });
   it("uploads only with the server reservation, including its PDF hash", async function () {
     const req = await prepareCprPaperRequest({itemId, apiBase: CPR_PAPERS_API_BASE, apiKey: "test", prompt: "read", fetchFn: async () => ready("doi:10.1234/abc", "missing", {upload_token: "reservation"}),
       readBytes: async () => new TextEncoder().encode("%PDF-test")});
