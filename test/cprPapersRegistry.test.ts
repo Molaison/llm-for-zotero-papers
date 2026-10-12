@@ -43,6 +43,30 @@ describe("CPR server-owned paper registry client", function () {
     assert.include(String(caught), "需要先选择一篇论文");
     assert.equal(fetches, 0);
   });
+  for (const threadId of ["", "   "]) {
+    it(`rejects a blank server thread ${JSON.stringify(threadId)} before constructing a chat request`, async function () {
+      let calls = 0;
+      let reads = 0;
+      let caught: unknown;
+      try {
+        await prepareCprPaperRequest({
+          itemId, apiBase: CPR_PAPERS_API_BASE, apiKey: "test", prompt: "q",
+          fetchFn: async () => {
+            calls++;
+            return ready("doi:10.1234/abc", "ready", {thread_id: threadId});
+          },
+          readBytes: async () => {
+            reads++;
+            return new TextEncoder().encode("%PDF-test");
+          },
+        });
+      } catch (error) {caught = error;}
+      assert.include(String(caught), "CPR 论文登记格式不正确");
+      assert.equal(calls, 1);
+      assert.equal(reads, 0);
+      assert.isFalse([...prefs.keys()].some(key => key.includes(".cprPaperReservation.")));
+    });
+  }
   it("rejects another paper's reservation before reading or fingerprinting the PDF", async function () {
     let calls = 0;
     let reads = 0;
