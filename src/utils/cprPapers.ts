@@ -103,7 +103,7 @@ function parsePaperOutput(value: unknown): unknown {
 
 export function parsePaperResolution(value: unknown) {
   const result = parsePaperOutput(value);
-  if (!isRecord(result) || typeof result.paper_id !== "string" || typeof result.thread_id !== "string"
+  if (!isRecord(result) || typeof result.paper_id !== "string" || typeof result.thread_id !== "string" || !result.thread_id.trim()
     || !["missing", "ready", "pending", "uncertain"].includes(String(result.status))
     || typeof result.upload_required !== "boolean"
     || (result.status === "missing" && result.upload_required === true
