@@ -47,7 +47,7 @@ export type CprPaperHistoryControllerDeps = {
     params: CprPaperHistoryRequest & { signal?: AbortSignal },
   ) => Promise<CprPaperHistory>;
   setBusy: (busy: boolean) => void;
-  setStatusMessage: (message: string, level: "ready" | "warning" | "error") => void;
+  setStatusMessage: (message: string, level: "ready" | "warning" | "error", conversationUrl?: string) => void;
   logError: (message: string, error: unknown) => void;
 };
 
@@ -73,7 +73,7 @@ export function createCprPaperHistoryController(
       if (attempt.signal.aborted || !attempt.isCurrent()) return;
       await attempt.applyHistory(history);
       if (attempt.signal.aborted || !attempt.isCurrent()) return;
-      deps.setStatusMessage(t("Remote conversation synchronized"), "ready");
+      deps.setStatusMessage(t("Remote conversation synchronized"), "ready", history.conversation_url);
     } catch (error) {
       // Aborted or superseded: the panel already moved on, so say nothing.
       if (attempt.signal.aborted || !attempt.isCurrent()) return;

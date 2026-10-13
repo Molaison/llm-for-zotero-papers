@@ -1067,8 +1067,20 @@ export function setupHandlers(
       remoteHistoryBusy = busy;
       syncRemoteHistoryButton();
     },
-    setStatusMessage: (message, level) => {
-      if (status) setStatus(status, message, level);
+    setStatusMessage: (message, level, conversationUrl) => {
+      if (!status) return;
+      setStatus(status, message, level);
+      if (level !== "ready" || !conversationUrl) return;
+      const link = status.ownerDocument.createElement("a");
+      link.href = conversationUrl;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.textContent = t("View original ChatGPT conversation");
+      link.addEventListener("click", (event) => {
+        event.preventDefault();
+        Zotero.launchURL(conversationUrl);
+      });
+      status.append(" · ", link);
     },
     logError: (message, error) => {
       appLogger.debug(message, error);

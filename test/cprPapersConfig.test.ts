@@ -50,7 +50,7 @@ describe("CPR papers public configuration", function () {
     assert.equal(papers?.apiKey, "");
     assert.equal(papers?.providerProtocol, "responses_api");
     assert.deepEqual(papers?.models.map(m => m.model), [...CPR_PAPERS_MODELS]);
-    assert.deepEqual(papers?.models.map(m => m.providerProtocol), Array(4).fill("responses_api"));
+    assert.deepEqual(papers?.models.map(m => m.providerProtocol), Array(CPR_PAPERS_MODELS.length).fill("responses_api"));
     assert.equal(getLastUsedModelEntryId(), papers?.models[0].id);
     assert.equal(JSON.stringify(getModelProviderGroups()), JSON.stringify(groups));
   });
@@ -58,10 +58,11 @@ describe("CPR papers public configuration", function () {
   it("widens an installed single-model papers group once, keeping key, row id and selection", function () {
     prefs.set(pref("cprPapersPublicConfigured"), "1");
     prefs.set(pref("lastUsedModelEntryId"), "keep-me");
-    setModelProviderGroups([other, {id: "papers", apiBase: CPR_PAPERS_API_BASE, apiKey: "retained-key", authMode: "api_key", providerProtocol: "responses_api", models: [{id: "keep-me", model: CPR_PAPERS_MODEL}]}]);
+    setModelProviderGroups([other, {id: "papers", apiBase: CPR_PAPERS_API_BASE, apiKey: "retained-key", authMode: "api_key", providerProtocol: "responses_api", models: [{id: "keep-me", model: "papers/gpt-5.6-sol"}]}]);
     const groups = getModelProviderGroups();
     const papers = groups.find(g => g.id === "papers")!;
-    assert.deepEqual(papers.models.map(m => m.model), [...CPR_PAPERS_MODELS]);
+    const expected = ["papers/gpt-5.6-sol", ...CPR_PAPERS_MODELS.filter(m => m !== "papers/gpt-5.6-sol")];
+    assert.deepEqual(papers.models.map(m => m.model), expected);
     assert.equal(papers.models[0].id, "keep-me");
     assert.equal(papers.apiKey, "retained-key");
     assert.equal(groups[0].id, "other");
@@ -70,7 +71,7 @@ describe("CPR papers public configuration", function () {
     assert.equal(JSON.stringify(getModelProviderGroups()), JSON.stringify(groups));
     // The extension ran once: a row the user removes afterwards stays removed.
     setModelProviderGroups(groups.map(g => g.id === "papers" ? {...g, models: g.models.filter(m => m.model !== "papers/gpt-6-pro")} : g));
-    assert.deepEqual(getModelProviderGroups().find(g => g.id === "papers")!.models.map(m => m.model), ["papers/gpt-5.6-sol", "papers/gpt-5.6-sol-instant", "papers/gpt-5.6-pro"]);
+    assert.deepEqual(getModelProviderGroups().find(g => g.id === "papers")!.models.map(m => m.model), expected.filter(m => m !== "papers/gpt-6-pro"));
   });
 
   it("does not recreate a papers group the user deleted", function () {

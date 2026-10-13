@@ -23,7 +23,7 @@ type Harness = {
   deps: CprPaperHistoryControllerDeps;
   loads: Array<{ itemId: number; apiBase: string; apiKey: string; model: string }>;
   shown: CprPaperHistory[];
-  statuses: Array<{ message: string; level: string }>;
+  statuses: Array<{ message: string; level: string; conversationUrl?: string }>;
   finished: () => number;
   setNext: (value: CprPaperHistory | Error | Promise<CprPaperHistory>) => void;
 };
@@ -69,8 +69,8 @@ function createHarness(
       });
     },
     setBusy: () => {},
-    setStatusMessage: (message, level) => {
-      statuses.push({ message, level });
+    setStatusMessage: (message, level, conversationUrl) => {
+      statuses.push({ message, level, ...(conversationUrl ? { conversationUrl } : {}) });
     },
     logError: () => {},
   };
@@ -162,6 +162,7 @@ describe("CPR remote paper history flow", function () {
     assert.isFalse(controller.isBusy());
     assert.equal(harness.shown.length, 1);
     assert.equal(harness.finished(), 1);
+    assert.equal(harness.statuses.at(-1)?.conversationUrl, history.conversation_url);
   });
 
   it("drops the answer of a paper the panel has left", async function () {

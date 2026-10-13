@@ -274,8 +274,18 @@ describe("reasoningProfiles", function () {
   });
 
   describe("CPR papers aliases", function () {
-    // The four aliases the papers route offers, each with its own ladder.
+    // The papers route has distinct model-specific effort ladders.
     it("gives each canonical papers alias its own effort ladder and default", function () {
+      assert.deepEqual(levels("openai", "papers/gpt-6-sol"), [
+        "medium",
+        "high",
+        "xhigh",
+      ]);
+      assert.equal(
+        getReasoningDefaultLevelForModel("openai", "papers/gpt-6-sol"),
+        "medium",
+      );
+      assert.deepEqual(levels("openai", "papers/gpt-6-sol-instant"), ["low"]);
       assert.deepEqual(levels("openai", "papers/gpt-5.6-sol"), [
         "high",
         "medium",

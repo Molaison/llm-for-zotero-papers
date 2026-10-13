@@ -309,10 +309,8 @@ const OPENAI_GPT56_PROFILE: ProviderProfile = {
 };
 
 /**
- * The four papers aliases are separate upstream models, each with its own
- * effort ladder (verified against the account's model list, not inferred from
- * the family): sol takes medium/high/xhigh and defaults to high, sol-instant
- * only low, and both pro aliases only max. The canonical ids are matched
+ * Papers aliases have separate effort ladders. GPT-5.6 Sol defaults to high,
+ * GPT-6 Sol defaults to medium, Instant to low, and Pro to max. Ids are matched
  * exactly, so a plain `gpt-5.6-sol` served by another provider keeps its own
  * documented ladder.
  */
@@ -325,6 +323,20 @@ const OPENAI_PAPERS_SOL_PROFILE: ProviderProfile = {
     levelToEffort: {
       high: "high",
       medium: "medium",
+      xhigh: "xhigh",
+    },
+  },
+};
+
+const OPENAI_PAPERS_GPT6_SOL_PROFILE: ProviderProfile = {
+  supportsReasoning: true,
+  defaultLevel: "medium",
+  options: [option("medium"), option("high"), option("xhigh")],
+  openai: {
+    defaultEffort: "medium",
+    levelToEffort: {
+      medium: "medium",
+      high: "high",
       xhigh: "xhigh",
     },
   },
@@ -872,6 +884,14 @@ const PROFILE_RULES: Record<
       {
         // Canonical papers aliases (`papers/<model>`) only: the plain name is
         // a different deployment with its own documented ladder.
+        match: /^papers\/gpt-6-sol-instant$/,
+        profile: OPENAI_PAPERS_INSTANT_PROFILE,
+      },
+      {
+        match: /^papers\/gpt-6-sol$/,
+        profile: OPENAI_PAPERS_GPT6_SOL_PROFILE,
+      },
+      {
         match: /^papers\/gpt-5\.6-sol-instant$/,
         profile: OPENAI_PAPERS_INSTANT_PROFILE,
       },

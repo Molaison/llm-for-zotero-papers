@@ -881,9 +881,9 @@ function ensureModelProviderGroups(): ModelProviderGroup[] {
   return migrateLegacyModelProviderGroups();
 }
 
-/** The table the four-model extension was applied from. */
+/** The versioned papers alias table, extended without changing user selections. */
 const CPR_PAPERS_MODELS_VERSION_PREF_KEY = "cprPapersModelsVersion";
-const CPR_PAPERS_MODELS_VERSION = "4";
+const CPR_PAPERS_MODELS_VERSION = "5";
 
 /** The dedicated public papers group: every row is a canonical papers alias. */
 function isCprPapersGroup(group: ModelProviderGroup): boolean {

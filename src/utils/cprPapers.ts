@@ -5,17 +5,19 @@ import { resolveProviderSessionId, createProviderOperationId } from "./providerS
 import { getOpenAIReasoningProfileForModel } from "./reasoningProfiles";
 
 /**
- * The papers route serves exactly these four canonical aliases. They are
+ * The papers route serves these canonical aliases. They are
  * distinct upstream models with distinct effort ladders, so the id is chosen
  * per request and never rewritten to another alias.
  */
 export const CPR_PAPERS_MODELS = [
+  "papers/gpt-6-sol",
+  "papers/gpt-6-sol-instant",
   "papers/gpt-5.6-sol",
   "papers/gpt-5.6-sol-instant",
   "papers/gpt-5.6-pro",
   "papers/gpt-6-pro",
 ] as const;
-/** Default papers model; a caller that names no model keeps Sol. */
+/** Default on new installations; existing model selections remain unchanged. */
 export const CPR_PAPERS_MODEL = CPR_PAPERS_MODELS[0];
 export const CPR_PAPERS_API_BASE = "https://cpr.molaisonz.dpdns.org/v1";
 

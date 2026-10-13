@@ -57,6 +57,7 @@ const zhCN: Record<string, string> = {
   "Could not restore local history": "无法恢复本地记录",
   "Replace the currently displayed local messages with the saved pre-sync history? This consumes the restore point and replaces any messages added since that point. The server conversation is unchanged.":
     "是否用同步前保存的记录替换当前显示的本地消息？恢复后会移除该恢复点，并替换此后新增的消息。服务端对话不会改变。",
+  "View original ChatGPT conversation": "在 ChatGPT 查看原生交互内容",
   "Remote record": "远端记录",
   "No remote messages yet.": "远端还没有消息。",
   "Could not sync remote conversation": "无法同步远端对话",

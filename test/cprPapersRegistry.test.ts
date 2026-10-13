@@ -227,7 +227,7 @@ describe("CPR server-owned paper registry client", function () {
     assert.equal(queries.length, 2);
     assert.deepEqual(second.payload.input[0].content, [{type: "input_text", text: "second"}]);
   });
-  it("keeps one paper identity, thread and reservation across all four papers models", async function () {
+  it("keeps one paper identity, thread and reservation across all papers models", async function () {
     const bodies: Array<Record<string, any>> = [];
     const identities: string[] = [];
     const fetchFn: typeof fetch = async (_url, init) => {
@@ -249,10 +249,10 @@ describe("CPR server-owned paper registry client", function () {
     // Same paper, same permanent thread, same question — only the model differs.
     assert.deepEqual(requests.map((req) => req.payload.model), [...CPR_PAPERS_MODELS]);
     assert.deepEqual(bodies.map((body) => body.model), [...CPR_PAPERS_MODELS]);
-    assert.deepEqual(requests.map((req) => req.payload.prompt_cache_key), Array(4).fill("permanent-server-thread"));
+    assert.deepEqual(requests.map((req) => req.payload.prompt_cache_key), Array(CPR_PAPERS_MODELS.length).fill("permanent-server-thread"));
     assert.equal(new Set(identities).size, 1);
     assert.equal(identities[0], "doi:10.1234/abc");
-    assert.deepEqual(requests.map((req) => req.payload.input[0].content), Array(4).fill([{type: "input_text", text: "question"}]));
+    assert.deepEqual(requests.map((req) => req.payload.input[0].content), Array(CPR_PAPERS_MODELS.length).fill([{type: "input_text", text: "question"}]));
     // Identity and reservation keys never carry the model: switching models
     // must not look like a new paper or a new upload.
     for (const key of prefs.keys()) assert.notInclude(String(key), "papers/gpt");
@@ -270,6 +270,10 @@ describe("CPR server-owned paper registry client", function () {
         readBytes: async () => {throw new Error("must not read ready PDF");}});
     const sol = await send("papers/gpt-5.6-sol", {provider: "openai", level: "xhigh", effort: "xhigh"});
     assert.equal(sol.payload.reasoning.effort, "xhigh");
+    const sol6 = await send("papers/gpt-6-sol");
+    assert.equal(sol6.payload.reasoning.effort, "medium");
+    const sol6Instant = await send("papers/gpt-6-sol-instant");
+    assert.equal(sol6Instant.payload.reasoning.effort, "low");
     const instant = await send("papers/gpt-5.6-sol-instant", {provider: "openai", level: "low"});
     assert.equal(instant.payload.reasoning.effort, "low");
     const pro = await send("papers/gpt-6-pro", {provider: "openai", level: "max"});
@@ -277,7 +281,7 @@ describe("CPR server-owned paper registry client", function () {
     const unselected = await send("papers/gpt-5.6-sol");
     assert.equal(unselected.payload.reasoning.effort, "high");
     // Preparation sends only lookups; the chat payloads were asserted above.
-    assert.deepEqual(efforts, Array(4).fill(undefined));
+    assert.deepEqual(efforts, Array(6).fill(undefined));
   });
 
   it("refuses an unsupported or mode-suffixed level before sending anything", async function () {
