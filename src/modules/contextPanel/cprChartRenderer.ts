@@ -83,8 +83,9 @@ export function renderCprChartWidgets(host: HTMLElement, attachments: readonly C
       };
       const left = 56, top = 18, width = 562, height = 230;
       const minValue = Math.min(0, ...visible.map((point) => point.y));
-      const maxValue = Math.max(0, ...visible.map((point) => point.y));
-      const span = maxValue - minValue || 1;
+      const dataMax = Math.max(0, ...visible.map((point) => point.y));
+      const maxValue = dataMax === minValue ? minValue + 1 : dataMax;
+      const span = maxValue - minValue;
       const y = (value: number) => top + (maxValue - value) / span * height;
       const x = (label: string) => left + (visibleCategories.indexOf(label) + .5) * width / Math.max(1, count);
       for (let tick = 0; tick <= 4; tick += 1) {
