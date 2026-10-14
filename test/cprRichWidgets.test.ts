@@ -85,5 +85,16 @@ describe("CPR papers rich widget boundary", function () {
     assert.lengthOf(plotted(), 1);
     controls.find(b => b.textContent === "重置")!.click();
     assert.lengthOf(plotted(), 2);
+    for (const mark of ["bar", "line", "point"]) {
+      const zeroHost = new ElementStub("host");
+      renderCprChartWidgets(zeroHost as unknown as HTMLElement, toCprChartAttachments([{
+        ...chart, mark, points: [{ x: "A", y: 0 }, { x: "B", y: 0 }],
+      }]), doc);
+      const zeroSvg = zeroHost.children[0]!.children[1]!.children[0]!;
+      const grid = zeroSvg.children.filter(el => el.tagName === "line").slice(0, 5);
+      assert.deepEqual(grid.map(el => Number(el.attrs.get("y1"))), [248, 190.5, 133, 75.5, 18]);
+      const labels = zeroSvg.children.filter(el => el.tagName === "text").slice(0, 5);
+      assert.deepEqual(labels.map(el => el.textContent), ["0", "0.25", "0.5", "0.75", "1"]);
+    }
   });
 });
