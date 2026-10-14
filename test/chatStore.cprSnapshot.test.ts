@@ -5,6 +5,7 @@ import {
   createPaperConversation,
   initChatStore,
   loadConversation,
+  updateLatestAssistantMessage,
   replaceConversationMessages,
   restoreConversationMessages,
   hasConversationRestorePoint,
@@ -36,6 +37,7 @@ import { resetConversationRegistryStoreInitForTests } from "../src/shared/conver
 import { resetRecentlyDeletedConversationsForTests } from "../src/core/conversations/recentlyDeletedConversations";
 import { resetPendingDeletionStoreForTests } from "../src/core/conversations/pendingDeletionStore";
 import { prepareCprPaperRequest } from "../src/utils/cprPapers";
+import { fromCprChartAttachments, toCprChartAttachments } from "../src/utils/cprRichWidgets";
 
 import { collectAndDeleteUnreferencedBlobs } from "../src/utils/attachmentRefStore";
 import { MAX_CONVERSATION_RESTORE_BYTES } from "../src/utils/conversationRestorePoint";
@@ -198,6 +200,25 @@ describe("CPR conversation snapshot replacement", function () {
         .get()!.n,
       0,
     );
+  });
+
+  it("persists chart-bearing assistants through remote sync, local rewrite and SQLite reload", async function () {
+    const chart = {version: 1, kind: "cartesian_chart", id: "chart-1", mark: "line",
+      title: "Activity", xField: "variant", yField: "score",
+      points: [{x: "WT", y: 1.3}, {x: "mut", y: 2.1}]};
+    const imported = remote.map((message) => ({
+      role: message.role, text: message.text, created_at: message.timestamp,
+      ...(message.role === "assistant" ? {rich_widgets: [chart]} : {}),
+    }));
+    await replaceCurrentPaperChat({body, item: portal, conversationKey: key,
+      expectedGeneration: getConversationWriteGeneration(key), messages: imported, isCurrent: () => true});
+    const attachments = toCprChartAttachments([chart]);
+    assert.deepEqual(fromCprChartAttachments((await loadConversation(key, 200))[1]?.attachments), [chart]);
+    assert.deepEqual(fromCprChartAttachments(chatHistory.get(key)?.[1]?.attachments), [chart]);
+    await replacePanel(); // Native remote history may return only prose; preserve the unique local chart.
+    assert.deepEqual(fromCprChartAttachments((await loadConversation(key, 200))[1]?.attachments), [chart]);
+    await updateLatestAssistantMessage(key, {text: "Updated", timestamp: Date.now(), attachments});
+    assert.deepEqual(fromCprChartAttachments((await loadConversation(key, 200))[1]?.attachments), [chart]);
   });
 
   it("replaces local-only and failed turns, repeats without accumulation, and saves timestamp fallbacks", async function () {

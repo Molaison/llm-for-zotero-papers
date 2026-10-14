@@ -3,6 +3,7 @@ import type { ReasoningConfig } from "../shared/llm";
 import { resolveEndpoint, RESPONSES_ENDPOINT } from "./apiHelpers";
 import { resolveProviderSessionId, createProviderOperationId } from "./providerSessionId";
 import { getOpenAIReasoningProfileForModel } from "./reasoningProfiles";
+import { parseCprChartWidget, type CprChartWidget } from "./cprRichWidgets";
 
 /**
  * The papers route serves these canonical aliases. They are
@@ -140,6 +141,7 @@ export type CprPaperHistoryMessage = {
   role: "user" | "assistant";
   text: string;
   created_at: number | null;
+  rich_widgets?: CprChartWidget[];
 };
 
 export type CprPaperHistory = {
@@ -168,7 +170,13 @@ export function parseCprPaperHistory(value: unknown, paperId: string): CprPaperH
       throw new Error("CPR 论文历史消息格式不正确；本地记录未修改。");
     }
     ids.add(message.id);
-    messages.push({id: message.id, role: message.role, text: message.text, created_at: message.created_at});
+    const rich_widgets = message.role === "assistant" && Array.isArray(message.rich_widgets)
+      ? message.rich_widgets.slice(0, 4).flatMap((value) => {
+          const chart = parseCprChartWidget(value);
+          return chart ? [chart] : [];
+        }) : [];
+    messages.push({id: message.id, role: message.role, text: message.text, created_at: message.created_at,
+      ...(rich_widgets.length ? {rich_widgets} : {})});
   }
   return {paper_id: paperId, thread_id: result.thread_id, conversation_url: result.conversation_url,
     title: result.title, messages};

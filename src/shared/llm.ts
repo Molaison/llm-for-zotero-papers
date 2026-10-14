@@ -2,6 +2,7 @@ import type {
   ReasoningLevel,
   ReasoningProvider,
 } from "../utils/reasoningProfiles";
+import type { CprChartWidget } from "../utils/cprRichWidgets";
 
 /** Image content for vision-capable models. */
 export type ImageContent = {
@@ -86,4 +87,6 @@ export type ModelTurnOutcome = {
   text: string;
   completion: ModelTurnCompletion;
   continuationState?: unknown;
+  /** Declarative, validated CPR papers charts; never provider executable content. */
+  richWidgets?: CprChartWidget[];
 };

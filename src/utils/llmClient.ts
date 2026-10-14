@@ -5,6 +5,7 @@
  */
 
 import { fetchCprPaperHistory, isCprPapersModel, prepareCprPaperRequest } from "./cprPapers";
+import { parseCprChartWidget, type CprChartWidget } from "./cprRichWidgets";
 import { appLogger } from "../core/logging";
 import { config } from "../../package.json";
 import {
@@ -4481,7 +4482,7 @@ export async function callLLMStream(
     });
     if (!response.ok) throw new Error(`CPR papers HTTP ${response.status}: ${(await response.text()).slice(0, 600)}`);
     if (!response.body) throw new Error("CPR papers 未返回事件流；未自动重发。");
-    const outcome = await parseResponsesStream(response.body, onDelta, onReasoning, onUsage, { requireCompleted: true });
+    const outcome = await parseResponsesStream(response.body, onDelta, onReasoning, onUsage, { requireCompleted: true, collectRichWidgets: true });
     if (outcome.completion.status === "complete") paperRequest.accept();
     return outcome;
   }
@@ -4951,7 +4952,7 @@ export async function parseResponsesStream(
   onDelta: (delta: string) => void,
   onReasoning?: (event: ReasoningEvent) => void,
   onUsage?: (usage: UsageStats) => void,
-  options: { requireCompleted?: boolean } = {},
+  options: { requireCompleted?: boolean; collectRichWidgets?: boolean } = {},
 ): Promise<ModelTurnOutcome> {
   const reader = body.getReader() as ReadableStreamDefaultReader<Uint8Array>;
   const decoder = new TextDecoder("utf-8");
@@ -4972,6 +4973,16 @@ export async function parseResponsesStream(
   let responseId: string | undefined;
   let sawCompleted = false;
   let streamFailure: string | undefined;
+  const richWidgets: CprChartWidget[] = [];
+  const receiveRichWidgets = (value: unknown): void => {
+    if (!options.collectRichWidgets) return;
+    const candidates = Array.isArray(value) ? value : [value];
+    for (const candidate of candidates) {
+      if (richWidgets.length >= 4) break;
+      const widget = parseCprChartWidget(candidate);
+      if (widget && !richWidgets.some((existing) => existing.id === widget.id)) richWidgets.push(widget);
+    }
+  };
 
   const normalizeReasoningText = (value: unknown): string => {
     if (typeof value === "string") return value;
@@ -5186,6 +5197,7 @@ export async function parseResponsesStream(
               content?: unknown;
               text?: unknown;
             };
+            widget?: unknown;
             response?: {
               id?: string;
               error?: { message?: string };
@@ -5193,6 +5205,7 @@ export async function parseResponsesStream(
               incomplete_details?: { reason?: string } | null;
               output_text?: unknown;
               output?: unknown;
+              rich_widgets?: unknown;
               usage?: {
                 input_tokens?: number;
                 output_tokens?: number;
@@ -5207,6 +5220,10 @@ export async function parseResponsesStream(
             typeof parsed.type === "string" ? parsed.type.toLowerCase() : "";
           if (typeof parsed.response?.id === "string") {
             responseId = parsed.response.id;
+          }
+          if (eventType === "response.rich_widget.done") {
+            receiveRichWidgets(parsed.widget);
+            continue;
           }
 
           if (eventType === "response.failed" || eventType === "error") {
@@ -5405,6 +5422,7 @@ export async function parseResponsesStream(
 
           if (eventType === "response.completed") {
             sawCompleted = !parsed.response?.status || parsed.response.status === "completed";
+            if (sawCompleted) receiveRichWidgets(parsed.response?.rich_widgets);
             completion = COMPLETE_MODEL_TURN;
             emitAnswer(
               parsed.response?.output_text ??
@@ -5463,11 +5481,14 @@ export async function parseResponsesStream(
   if (options.requireCompleted && (streamFailure || !sawCompleted)) {
     throw new Error(streamFailure || "CPR 连接在 response.completed 前结束；未标记 PDF 已上传，未自动重发。");
   }
-  return modelTurnOutcome(
+  return {
+    ...modelTurnOutcome(
     fullText,
     completion,
     completion.status === "incomplete" && responseId
       ? { responseId }
       : undefined,
-  );
+    ),
+    ...(sawCompleted && richWidgets.length ? { richWidgets } : {}),
+  };
 }

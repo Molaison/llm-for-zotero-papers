@@ -18,6 +18,9 @@ import { codexPlanTaskSteps } from "./taskProgress/codexPlan";
 import { paperLedgerUpdateFromMcpActivity } from "../../agent/context/taskPaperLedgerRecorder";
 import { createProviderRequestScope } from "../../utils/providerTransport";
 import { renderMarkdownForNote } from "../../utils/markdown";
+import { isCprPapersModel } from "../../utils/cprPapers";
+import { CPR_RICH_CHART_MIME, fromCprChartAttachments, toCprChartAttachments } from "../../utils/cprRichWidgets";
+import { renderCprChartWidgets } from "./cprChartRenderer";
 import { HTML_NS } from "../../utils/domHelpers";
 import {
   t,
@@ -2296,6 +2299,7 @@ export async function replaceCurrentPaperChat(params: {
     role: "user" | "assistant";
     text: string;
     created_at: number | null;
+    rich_widgets?: unknown[];
   }>;
   isCurrent: () => boolean;
 }): Promise<void> {
@@ -2311,12 +2315,33 @@ export async function replaceCurrentPaperChat(params: {
     : null;
   if (!validation?.valid)
     throw new Error("The original paper conversation scope is unavailable");
+  const priorCharts = new Map<string, ReturnType<typeof toCprChartAttachments>>();
+  const localMessages = chatHistory.get(conversationKey) || [];
+  const remoteCounts = new Map<string, number>();
+  const localCounts = new Map<string, number>();
+  for (const message of params.messages) {
+    if (message.role === "assistant") remoteCounts.set(message.text, (remoteCounts.get(message.text) || 0) + 1);
+  }
+  for (const message of localMessages) {
+    if (message.role === "assistant") localCounts.set(message.text, (localCounts.get(message.text) || 0) + 1);
+  }
+  for (const message of localMessages) {
+    if (message.role !== "assistant" || remoteCounts.get(message.text) !== 1 || localCounts.get(message.text) !== 1) continue;
+    const charts = toCprChartAttachments(fromCprChartAttachments(message.attachments));
+    if (charts.length) priorCharts.set(message.text, charts);
+  }
   const stored = await replaceStoredConversationMessages(
     conversationKey,
     params.messages.map((message) => ({
       role: message.role,
       text: message.text,
       timestamp: message.created_at,
+      ...(message.role === "assistant" ? {
+        attachments: (() => {
+          const fromRemote = toCprChartAttachments(message.rich_widgets ?? []);
+          return fromRemote.length ? fromRemote : priorCharts.get(message.text);
+        })(),
+      } : {}),
     })),
     { expectedGeneration, isCurrent },
   );
@@ -6889,6 +6914,13 @@ export async function retryLatestAssistantResponse(
       return;
     }
 
+    if (isCprPapersModel(effectiveRequestConfig.model)) {
+      assistantMessage.attachments = [
+        ...(assistantMessage.attachments || []).filter((entry) => entry.mimeType !== CPR_RICH_CHART_MIME),
+        ...toCprChartAttachments(modelOutcome.richWidgets || []),
+      ];
+    }
+
     streamingResponse.flush("final");
     const hasGeneratedOutput = normalizeGeneratedChatImages(
       assistantMessage.generatedImages,
@@ -6972,6 +7004,7 @@ export async function retryLatestAssistantResponse(
         contextWindow: latestContextSnapshot?.contextWindow,
         quoteCitations: assistantMessage.quoteCitations,
         generatedImages: assistantMessage.generatedImages,
+        attachments: assistantMessage.attachments,
       },
       effectiveStorageSystem,
     );
@@ -9318,6 +9351,7 @@ export async function sendQuestion(
         webchatChatId: assistantMessage.webchatChatId,
         quoteCitations: assistantMessage.quoteCitations,
         generatedImages: assistantMessage.generatedImages,
+        attachments: assistantMessage.attachments,
         compactMarker: assistantMessage.compactMarker,
       },
       effectiveStorageSystem,
@@ -9825,6 +9859,13 @@ export async function sendQuestion(
       usageFlushReason = "abort";
       await markCancelled();
       return;
+    }
+
+    if (isCprPapersModel(effectiveRequestConfig.model)) {
+      assistantMessage.attachments = [
+        ...(assistantMessage.attachments || []).filter((entry) => entry.mimeType !== CPR_RICH_CHART_MIME),
+        ...toCprChartAttachments(modelOutcome.richWidgets || []),
+      ];
     }
 
     streamingResponse.flush("final");
@@ -11415,6 +11456,9 @@ export function refreshChat(
             answerHost.textContent = safeText;
           }
         decorateWebSourceIndicators(answerHost, doc, webSourceAnchors);
+      }
+      if (fromCprChartAttachments(msg.attachments).length) {
+        renderCprChartWidgets(bubble, msg.attachments, doc);
       }
 
       const bubbleHeaderNodes: HTMLElement[] = [];

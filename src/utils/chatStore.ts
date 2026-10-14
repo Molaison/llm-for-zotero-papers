@@ -2687,7 +2687,7 @@ async function saveConversationRestorePoint(
 export async function replaceConversationMessages(
   conversationKey: number,
   messages: Array<
-    Pick<StoredChatMessage, "role" | "text"> & { timestamp: number | null }
+    Pick<StoredChatMessage, "role" | "text" | "attachments"> & { timestamp: number | null }
   >,
   options: ConversationSnapshotOptions,
 ): Promise<StoredChatMessage[]> {
@@ -2705,7 +2705,7 @@ export async function restoreConversationMessages(
 async function applyConversationSnapshot(
   conversationKey: number,
   messages: Array<
-    Pick<StoredChatMessage, "role" | "text"> & { timestamp: number | null }
+    Pick<StoredChatMessage, "role" | "text" | "attachments"> & { timestamp: number | null }
   > | null,
   options: ConversationSnapshotOptions,
 ): Promise<StoredChatMessage[]> {
@@ -2855,8 +2855,8 @@ async function applyConversationSnapshot(
             );
             await Zotero.DB.queryAsync(
               `INSERT INTO ${CHAT_MESSAGES_TABLE}
-             (conversation_id, conversation_instance_id, conversation_key, role, text, timestamp, run_mode)
-             VALUES (?, ?, ?, ?, ?, ?, 'chat')`,
+             (conversation_id, conversation_instance_id, conversation_key, role, text, timestamp, run_mode, attachments_json)
+             VALUES (?, ?, ?, ?, ?, ?, 'chat', ?)`,
               [
                 scope.conversationID,
                 identity.instanceID,
@@ -2864,6 +2864,7 @@ async function applyConversationSnapshot(
                 message.role,
                 message.text,
                 timestamp,
+                message.attachments?.length ? JSON.stringify(normalizeStoredAttachments(message.attachments)) : null,
               ],
             );
           }
@@ -3262,6 +3263,7 @@ export async function updateLatestAssistantMessage(
     | "contextWindow"
     | "quoteCitations"
     | "generatedImages"
+    | "attachments"
   >,
 ): Promise<void> {
   const normalizedKey = normalizeConversationKey(conversationKey);
@@ -3270,6 +3272,7 @@ export async function updateLatestAssistantMessage(
   const timestamp = Number(message.timestamp);
   const quoteCitations = normalizeQuoteCitations(message.quoteCitations);
   const generatedImages = normalizeGeneratedChatImages(message.generatedImages);
+  const attachments = message.attachments === undefined ? null : JSON.stringify(normalizeStoredAttachments(message.attachments));
   const selector =
     await resolveRepairingMessageConversationSelector(normalizedKey);
   await Zotero.DB.executeTransaction(async () => {
@@ -3292,6 +3295,7 @@ export async function updateLatestAssistantMessage(
            reasoning_details = ?,
            quote_citations_json = ?,
            generated_images_json = ?,
+            attachments_json = COALESCE(?, attachments_json),
            context_tokens = ?,
            context_window = ?
        WHERE id = (
@@ -3319,6 +3323,7 @@ export async function updateLatestAssistantMessage(
         message.reasoningDetails || null,
         quoteCitations.length ? JSON.stringify(quoteCitations) : null,
         generatedImages.length ? JSON.stringify(generatedImages) : null,
+        attachments,
         Number.isFinite(Number(message.contextTokens))
           ? Math.floor(Number(message.contextTokens))
           : null,
