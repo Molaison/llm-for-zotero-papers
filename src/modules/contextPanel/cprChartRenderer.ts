@@ -1,12 +1,22 @@
 import type { ChatAttachment } from "../../shared/types";
-import { fromCprChartAttachments, type CprChartWidget } from "../../utils/cprRichWidgets";
+import { fromCprChartAttachments, type CprCartesianChartWidget } from "../../utils/cprRichWidgets";
+import { renderCprHeatmapChart, renderCprPieChart } from "./cprSpecialChartRenderer";
 
 const SVG = "http://www.w3.org/2000/svg";
 const COLORS = ["#2563eb", "#dc2626", "#16a34a", "#9333ea", "#ea580c", "#0891b2"];
 
 /** Render only the validated chart contract, never provider HTML or executable chart code. */
 export function renderCprChartWidgets(host: HTMLElement, attachments: readonly ChatAttachment[] | undefined, doc: Document): void {
-  for (const chart of fromCprChartAttachments(attachments)) {
+  for (const widget of fromCprChartAttachments(attachments)) {
+    if (widget.kind === "pie_chart") {
+      renderCprPieChart(host, widget, doc);
+      continue;
+    }
+    if (widget.kind === "heatmap_chart") {
+      renderCprHeatmapChart(host, widget, doc);
+      continue;
+    }
+    const chart = widget;
     const root = doc.createElement("section");
     root.className = "llm-cpr-rich-chart";
     root.style.cssText = "margin:12px 0;padding:12px;border:1px solid var(--fill-quinary,#d4d4d8);border-radius:10px;max-width:100%;overflow:hidden";
@@ -99,7 +109,7 @@ export function renderCprChartWidgets(host: HTMLElement, attachments: readonly C
         if (count > 18 && index % Math.ceil(count / 18)) return;
         append("text", { x: String(x(label)), y: "266", "text-anchor": "middle", fill: "currentColor", "font-size": "11" }, label.length > 12 ? `${label.slice(0, 11)}…` : label);
       });
-      const onPoint = (node: Element, point: CprChartWidget["points"][number]) => {
+      const onPoint = (node: Element, point: CprCartesianChartWidget["points"][number]) => {
         node.setAttribute("tabindex", "0");
         const description = `${point.x}: ${point.y}${point.series !== undefined ? ` (${point.series})` : ""}`;
         const hint = doc.createElementNS(SVG, "title");
@@ -112,10 +122,16 @@ export function renderCprChartWidgets(host: HTMLElement, attachments: readonly C
         if (!enabled.has(name)) return;
         const values = visible.filter((point) => (point.series ?? "默认") === name);
         const color = COLORS[seriesIndex % COLORS.length];
-        if (chart.mark === "line" && values.length > 1) {
+        if ((chart.mark === "line" || chart.mark === "area") && values.length > 1) {
           const ordered = [...values].sort((a, b) => visibleCategories.indexOf(a.x) - visibleCategories.indexOf(b.x));
-          append("path", { d: ordered.map((point, index) => `${index ? "L" : "M"}${x(point.x)} ${y(point.y)}`).join(" "),
-            fill: "none", stroke: color, "stroke-width": "2" });
+          const outline = ordered.map((point, index) => `${index ? "L" : "M"}${x(point.x)} ${y(point.y)}`).join(" ");
+          const d = chart.mark === "area"
+            ? `${outline} L${x(ordered[ordered.length - 1].x)} ${y(0)} L${x(ordered[0].x)} ${y(0)} Z`
+            : outline;
+          append("path", { d,
+            fill: chart.mark === "area" ? color : "none",
+            ...(chart.mark === "area" ? { "fill-opacity": ".22" } : {}),
+            stroke: color, "stroke-width": "2" });
         }
         for (const point of values) {
           if (chart.mark === "bar") {

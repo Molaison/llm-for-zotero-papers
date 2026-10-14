@@ -491,11 +491,15 @@ export function isCprPapersProviderTarget(params: {
   protocol: ProviderProtocol;
 }): boolean {
   return (
-    (params.protocol === "responses_api" ||
-      params.protocol === "codex_responses") &&
     isCprPapersModel(params.modelName) &&
     normalizeCprPapersTarget(params.apiBase) === CPR_PAPERS_API_BASE
   );
+}
+
+export function assertCprPapersProviderProtocol(protocol: ProviderProtocol): void {
+  if (protocol !== "responses_api" && protocol !== "codex_responses") {
+    throw new Error("CPR papers 仅支持 Responses API；请把这个模型的协议设为 Responses API。未发送匿名推理请求。");
+  }
 }
 
 /**

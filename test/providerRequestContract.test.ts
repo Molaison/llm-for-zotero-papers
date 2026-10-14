@@ -1,6 +1,7 @@
 import { assert } from "chai";
 import { CPR_PAPERS_MODELS } from "../src/utils/cprPapers";
 import {
+  assertCprPapersProviderProtocol,
   isCprPapersProviderTarget,
   runCprPapersModelAccessTest,
   runProviderConnectionTest,
@@ -451,6 +452,17 @@ describe("papers provider configuration test", function () {
     assert.equal(calls[0].method, "GET");
     assert.equal(calls[0].url, "https://cpr.molaisonz.dpdns.org/v1/models");
     assert.equal(calls[0].authorization, "Bearer test-key");
+  });
+
+  it("recognizes the papers route despite an incorrectly selected protocol and fails before inference", function () {
+    assert.isTrue(isCprPapersProviderTarget({
+      apiBase: papersBase + "/responses",
+      modelName: papersModel,
+      protocol: "openai_chat_compat",
+    }));
+    assert.throws(() => assertCprPapersProviderProtocol("openai_chat_compat"), /仅支持 Responses API/);
+    assert.doesNotThrow(() => assertCprPapersProviderProtocol("responses_api"));
+    assert.lengthOf(calls, 0);
   });
 
   it("checks every canonical papers alias with one GET and no inference request", async function () {

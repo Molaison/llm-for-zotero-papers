@@ -92,6 +92,7 @@ import {
 } from "../utils/providerProtocol";
 import {
   isCprPapersProviderTarget,
+  assertCprPapersProviderProtocol,
   runCprPapersModelAccessTest,
   runProviderConnectionTest,
   runProviderSettingsChecks,
@@ -2828,6 +2829,7 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
                 protocol: providerProtocol,
               })
             ) {
+              assertCprPapersProviderProtocol(providerProtocol);
               const papers = await runCprPapersModelAccessTest({
                 requestScope,
                 fetchFn,

@@ -65,7 +65,7 @@ jobs:
 
       - name: Test papers contracts
         if: steps.version.outputs.publish == 'true'
-        run: node --import tsx node_modules/mocha/bin/mocha.js --require ./test/register.cjs test/cprPapersConfig.test.ts test/cprPapersRegistry.test.ts test/cprPaperHistoryDialog.test.ts test/chatStore.cprSnapshot.test.ts test/cprRichWidgets.test.ts test/cprLocalHistoryRecovery.test.ts test/reasoningProfiles.test.ts
+        run: node --import tsx node_modules/mocha/bin/mocha.js --require ./test/register.cjs test/cprPapersConfig.test.ts test/cprPapersRegistry.test.ts test/cprPaperHistoryDialog.test.ts test/chatStore.cprSnapshot.test.ts test/cprRichWidgets.test.ts test/cprLocalHistoryRecovery.test.ts test/reasoningProfiles.test.ts test/providerRequestContract.test.ts
 
       - name: Build
         if: steps.version.outputs.publish == 'true'
@@ -104,6 +104,7 @@ jobs:
           保留单篇论文固定对话、首次 PDF 上传、六模型/思考强度和短标题命名。新增 GPT-6 Sol、GPT-6 Sol Instant。
           同步远端对话会用远端已保存问答替换当前聊天，并保留输入框草稿；同步后可继续在原论文会话中提问。
           新增 Zotero 内可操作的 bar/line/point 图表：经服务端输出结构化数据后，使用本地安全 SVG 渲染，支持缩放、平移、系列开关与数据表；不执行来自远端的 HTML/JS。
+          进一步支持结构化 area 面积图、pie 饼图、heatmap 热力图；Papers 连接测试会拦截错误协议，避免误发匿名论文推理。
           对于不支持的 ChatGPT widget，仍提供原生 ChatGPT 对话链接查看。缺少原始结构化数据的远端历史无法凭纯文本重建图表。
           配套 QA2 服务修复首次 PDF 提交前内容丢失：确认尚未点击 Send 时允许一次安全重试；发送状态不明的 PDF 不自动重传。
           本 XPI Release 本身不部署 CPR 服务，不包含 API key、生产配置或用户论文。

@@ -8,6 +8,22 @@ const chart = {
   mark: "bar", xField: "variant", yField: "activity", seriesField: "group",
   points: [{ x: "WT", y: 1.2, series: "A" }, { x: "mutant", y: 2.8, series: "B" }],
 };
+const pie = {
+  version: 1, kind: "pie_chart", id: "chart-2", title: "Share",
+  labelField: "type", valueField: "count",
+  slices: [{ label: "A", value: 4 }, { label: "B", value: 6 }],
+};
+const heatmap = {
+  version: 1, kind: "heatmap_chart", id: "chart-3", title: "Activity matrix",
+  xField: "variant", yField: "dose", valueField: "activity",
+  cells: Array.from({ length: 13 }, (_, index) => ({
+    x: String(index), y: "1µM", value: index + 1,
+  })),
+};
+const area = {
+  ...chart, id: "chart-4", mark: "area",
+  points: [{ x: "WT", y: 1.2, series: "A" }, { x: "mutant", y: 2.8, series: "A" }],
+};
 
 const stream = (...events: unknown[]) => new ReadableStream<Uint8Array>({
   start(controller) {
@@ -46,6 +62,20 @@ describe("CPR papers rich widget boundary", function () {
     assert.isTrue(failed);
     assert.deepEqual(toCprChartAttachments([{ ...chart, points: [{ x: "bad", y: Infinity }] }]), []);
     assert.deepEqual(fromCprChartAttachments([{ ...toCprChartAttachments([chart])[0], textContent: "{\"bad\":\"<script>\"}" }]), []);
+  });
+
+  it("retains area, pie and heatmap data through the completed Responses stream and attachments", async function () {
+    const outcome = await parseResponsesStream(stream(
+      { type: "response.rich_widget.done", widget: area },
+      { type: "response.rich_widget.done", widget: pie },
+      { type: "response.rich_widget.done", widget: heatmap },
+      { type: "response.completed", response: { status: "completed", output_text: "Charts", rich_widgets: [area, pie, heatmap] } },
+    ), () => {}, undefined, undefined, { requireCompleted: true, collectRichWidgets: true });
+    assert.equal(outcome.text, "Charts");
+    assert.deepEqual(fromCprChartAttachments(toCprChartAttachments(outcome.richWidgets || [])), [area, pie, heatmap]);
+    assert.deepEqual(toCprChartAttachments([{ ...pie, slices: [{ label: "bad", value: -1 }] }]), []);
+    assert.deepEqual(toCprChartAttachments([{ ...heatmap, cells: [{ x: "A", y: "B", value: Infinity }] }]), []);
+    assert.deepEqual(toCprChartAttachments([{ ...pie, kind: "javascript" }]), []);
   });
 
   it("supports local chart table/series controls without remote script or HTML", function () {
@@ -96,5 +126,24 @@ describe("CPR papers rich widget boundary", function () {
       const labels = zeroSvg.children.filter(el => el.tagName === "text").slice(0, 5);
       assert.deepEqual(labels.map(el => el.textContent), ["0", "0.25", "0.5", "0.75", "1"]);
     }
+
+    const extensions = new ElementStub("host");
+    renderCprChartWidgets(extensions as unknown as HTMLElement,
+      toCprChartAttachments([area, pie, heatmap]), doc);
+    assert.lengthOf(extensions.children, 3);
+    const areaPlot = extensions.children[0]!.children[1]!.children[0]!;
+    assert.isTrue(areaPlot.children.some(el => el.tagName === "path" && el.attrs.get("fill") !== "none"));
+    const pieRoot = extensions.children[1]!;
+    const piePaths = () => pieRoot.children[2]!.children[0]!.children.filter(el => el.tagName === "path");
+    assert.lengthOf(piePaths(), 2);
+    pieRoot.children[1]!.children.find(button => button.textContent === "B")!.click();
+    assert.lengthOf(piePaths(), 1);
+    pieRoot.children[1]!.children.find(button => button.textContent === "数据表")!.click();
+    assert.isFalse(pieRoot.children[4]!.hidden);
+    const heatmapRoot = extensions.children[2]!;
+    const heatmapRects = () => heatmapRoot.children[2]!.children[0]!.children.filter(el => el.tagName === "rect");
+    assert.lengthOf(heatmapRects(), 12);
+    heatmapRoot.children[1]!.children.find(button => button.textContent === "X →")!.click();
+    assert.lengthOf(heatmapRects(), 1);
   });
 });
