@@ -134,7 +134,13 @@ export function renderCprHeatmapChart(host: HTMLElement, chart: CprHeatmapChartW
   const xs = [...new Set(chart.cells.map(cell => cell.x))];
   const ys = [...new Set(chart.cells.map(cell => cell.y))];
   const values = chart.cells.map(cell => cell.value);
-  const min = Math.min(...values), span = Math.max(...values) - min || 1;
+  const min = Math.min(...values), max = Math.max(...values);
+  const span = max - min || 1;
+  // Only rescale overflowing ranges; preserve precision for narrow finite ranges.
+  const scale = Math.max(Math.abs(min), Math.abs(max));
+  const fraction = Number.isFinite(span)
+    ? (value: number) => (value - min) / span
+    : (value: number) => (value / scale - min / scale) / (max / scale - min / scale);
   let xPage = 0, yPage = 0;
   const draw = () => {
     const plot = ui.svg(`heatmap chart: ${chart.title || chart.valueField}`);
@@ -148,7 +154,7 @@ export function renderCprHeatmapChart(host: HTMLElement, chart: CprHeatmapChartW
       const rect = ui.append(plot, "rect", {
         x: String(85 + x * width), y: String(14 + y * height),
         width: String(Math.max(1, width - 2)), height: String(Math.max(1, height - 2)),
-        fill: "#2563eb", opacity: String(0.16 + 0.84 * (cell.value - min) / span),
+        fill: "#2563eb", opacity: String(0.16 + 0.84 * fraction(cell.value)),
       });
       ui.tooltip(rect, `${cell.x} × ${cell.y}: ${cell.value}`);
     }
