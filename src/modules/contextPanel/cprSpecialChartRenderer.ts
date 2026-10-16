@@ -92,15 +92,21 @@ export function renderCprPieChart(host: HTMLElement, chart: CprPieChartWidget, d
   const enabled = new Set(categories);
   const draw = () => {
     const plot = ui.svg(`pie chart: ${chart.title || chart.valueField}`);
-    const shown = categories.map(label => ({
-      label, value: chart.slices.filter(row => row.label === label && enabled.has(label))
-        .reduce((sum, row) => sum + row.value, 0),
-    })).filter(slice => slice.value > 0);
-    const max = Math.max(1, ...shown.map(slice => slice.value));
-    const total = shown.reduce((sum, slice) => sum + slice.value / max, 0);
+    const visible = chart.slices.filter(row => enabled.has(row.label));
+    const max = Math.max(0, ...visible.map(row => row.value)) || 1;
+    const shown = categories.map(label => {
+      const rows = visible.filter(row => row.label === label);
+      const value = rows.reduce((sum, row) => sum + row.value, 0);
+      return {
+        label,
+        weight: rows.reduce((sum, row) => sum + row.value / max, 0),
+        value: Number.isFinite(value) ? String(value) : rows.map(row => String(row.value)).join(" + "),
+      };
+    }).filter(slice => slice.weight > 0);
+    const total = shown.reduce((sum, slice) => sum + slice.weight, 0);
     let angle = -Math.PI / 2;
     shown.forEach((slice, index) => {
-      const span = (slice.value / max) / total * Math.PI * 2;
+      const span = slice.weight / total * Math.PI * 2;
       const next = angle + span;
       const x1 = 320 + Math.cos(angle) * 117, y1 = 146 + Math.sin(angle) * 117;
       const x2 = 320 + Math.cos(next) * 117, y2 = 146 + Math.sin(next) * 117;
@@ -182,3 +188,4 @@ export function renderCprHeatmapChart(host: HTMLElement, chart: CprHeatmapChartW
   }
   draw();
 }
+
