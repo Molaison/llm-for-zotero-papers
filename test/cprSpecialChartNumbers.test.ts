@@ -89,4 +89,103 @@ describe("CPR special chart finite-number rendering", function () {
         assert.closeTo(opacity[1]!, 0.58, 1e-12);
     });
   }
+  function pie(slices: Array<{ label: string; value: number }>) {
+    return render({
+      version: 1,
+      kind: "pie_chart",
+      id: "chart-1",
+      title: "",
+      labelField: "category",
+      valueField: "value",
+      slices,
+    });
+  }
+  function paths(root: ElementStub) {
+    return root.children[2]!.children[0]!.children;
+  }
+  function assertEnd(path: ElementStub, fraction: number) {
+    const d = path.attrs.get("d")!;
+    assert.notMatch(d, /NaN|Infinity/);
+    const end = /1 ([^ ]+) ([^ ]+) Z$/.exec(d)!;
+    assert.isTrue(Boolean(end));
+    const angle = -Math.PI / 2 + fraction * Math.PI * 2;
+    assert.closeTo(Number(end[1]), 320 + Math.cos(angle) * 117, 1e-10);
+    assert.closeTo(Number(end[2]), 146 + Math.sin(angle) * 117, 1e-10);
+  }
+  for (const value of [1e308, Number.MAX_VALUE, 1e-300, Number.MIN_VALUE, 7]) {
+    it(`keeps grouped pie proportions finite for ${value}`, function () {
+      const { root } = pie([
+        { label: "A", value },
+        { label: "A", value },
+        { label: "B", value },
+      ]);
+      assert.lengthOf(paths(root), 2);
+      assertEnd(paths(root)[0]!, 2 / 3);
+      assertEnd(paths(root)[1]!, 1);
+      const sum = value + value;
+      assert.equal(
+        paths(root)[0]!.children[0]!.textContent,
+        `A: ${Number.isFinite(sum) ? sum : `${value} + ${value}`}`,
+      );
+      const rows = root.children[4]!.children[1]!.children;
+      assert.lengthOf(rows, 3);
+      assert.equal(rows[0]!.children[1]!.textContent, String(value));
+      root.children[1]!.children[0]!.click();
+      assert.isFalse(root.children[4]!.hidden);
+    });
+  }
+  it("preserves finite decimal tooltips without reconstructing the sum", function () {
+    const { root } = pie([
+      { label: "A", value: 0.1 },
+      { label: "A", value: 0.2 },
+      { label: "B", value: 0.3 },
+    ]);
+    assert.equal(
+      paths(root)[0]!.children[0]!.textContent,
+      "A: 0.30000000000000004",
+    );
+    assertEnd(paths(root)[0]!, 0.5);
+  });
+  it("keeps both overflowing categories proportional at the row limit", function () {
+    const { root } = pie(
+      Array.from({ length: 300 }, (_, i) => ({
+        label: i < 200 ? "A" : "B",
+        value: Number.MAX_VALUE,
+      })),
+    );
+    assert.lengthOf(paths(root), 2);
+    assertEnd(paths(root)[0]!, 2 / 3);
+    assertEnd(paths(root)[1]!, 1);
+    assert.equal(
+      paths(root)[0]!.children[0]!.textContent,
+      `A: ${Array(200).fill(String(Number.MAX_VALUE)).join(" + ")}`,
+    );
+  });
+  it("rescales pie data after toggling a dominating category", function () {
+    const { root } = pie([
+      { label: "large", value: Number.MAX_VALUE },
+      { label: "tiny", value: Number.MIN_VALUE },
+      { label: "tiny", value: Number.MIN_VALUE },
+      { label: "small", value: Number.MIN_VALUE },
+    ]);
+    const buttons = root.children[1]!.children;
+    buttons[1]!.click();
+    assert.equal(buttons[1]!.attrs.get("aria-pressed"), "false");
+    assert.lengthOf(paths(root), 2);
+    assertEnd(paths(root)[0]!, 2 / 3);
+    assertEnd(paths(root)[1]!, 1);
+    buttons[2]!.click();
+    assert.lengthOf(paths(root), 1);
+    assert.notMatch(paths(root)[0]!.attrs.get("d")!, /NaN|Infinity/);
+    assert.include(paths(root)[0]!.attrs.get("d")!, "A117 117 0 1 1 320 263");
+    buttons[3]!.click();
+    assert.lengthOf(paths(root), 0);
+    buttons[2]!.click();
+    buttons[3]!.click();
+    assertEnd(paths(root)[0]!, 2 / 3);
+    buttons[1]!.click();
+    paths(root).forEach((path) =>
+      assert.notMatch(path.attrs.get("d")!, /NaN|Infinity/),
+    );
+  });
 });
