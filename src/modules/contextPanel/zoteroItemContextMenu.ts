@@ -121,8 +121,22 @@ export async function dispatchZoteroItemsToSidebar(
   if ((await target.prepareItemsAsDefaultContextTarget?.()) === false)
     return false;
   const prepared = findTarget();
-  if (!prepared) return false;
-  const result = await prepared.addItemsAsDefaultContext(items);
+  if (!prepared) {
+    await target.afterItemsAsDefaultContextAdded?.({ changed: false }, items);
+    return false;
+  }
+  let result: ContextSelectionActionResult;
+  try {
+    result = await prepared.addItemsAsDefaultContext(items);
+  } catch (error) {
+    // Preparation may have auto-locked a fresh library chat. A failed context
+    // resolution must release that lock even though no result was delivered.
+    await target.afterItemsAsDefaultContextAdded?.({ changed: false }, items);
+    throw error;
+  }
+  if (prepared !== target) {
+    await target.afterItemsAsDefaultContextAdded?.(result, items);
+  }
   await prepared.afterItemsAsDefaultContextAdded?.(result, items);
   return result.changed;
 }
