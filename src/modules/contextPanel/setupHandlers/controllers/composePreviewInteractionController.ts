@@ -1,5 +1,6 @@
 import { t } from "../../../../utils/i18n";
 import { clearUserAddedContextForItem } from "../../contextSelectionActions";
+import { getConversationKey } from "../../conversationIdentity";
 import {
   getActiveContextAttachmentFromTabs,
   getSelectedTextContextEntries,
@@ -164,6 +165,7 @@ export function attachComposePreviewInteractionController(
     removeUnmanagedSelectedFileCopies(item.id);
     const result = clearUserAddedContextForItem({
       itemId: item.id,
+      conversationKey: getConversationKey(item),
       textContextKey: deps.getTextContextConversationKey(),
     });
     deps.closePaperChipMenu();
@@ -413,7 +415,9 @@ export function attachComposePreviewInteractionController(
           } else {
             selectedCollectionContextCache.delete(item.id);
           }
-          initializedConversationComposeContextKeys.add(item.id);
+          initializedConversationComposeContextKeys.add(
+            getConversationKey(item),
+          );
           deps.updatePaperPreviewPreservingScroll();
           setStatus(t("Collection context removed."), "ready");
         }
@@ -435,7 +439,9 @@ export function attachComposePreviewInteractionController(
           } else {
             selectedTagContextCache.delete(item.id);
           }
-          initializedConversationComposeContextKeys.add(item.id);
+          initializedConversationComposeContextKeys.add(
+            getConversationKey(item),
+          );
           deps.updatePaperPreviewPreservingScroll();
           setStatus(t("Tag context removed."), "ready");
         }
@@ -477,7 +483,9 @@ export function attachComposePreviewInteractionController(
       } else {
         clearSelectedPaperState(item.id);
       }
-      initializedConversationComposeContextKeys.add(item.id);
+      initializedConversationComposeContextKeys.add(
+        getConversationKey(item),
+      );
       deps.updatePaperPreviewPreservingScroll();
       setStatus(`Paper context removed (${nextPapers.length})`, "ready");
       deps.closePaperChipMenu();

@@ -84,6 +84,78 @@ describe("Zotero item context menu dispatch", function () {
     }
   });
 
+  it("releases the prepared lock if a sidebar target disappears or context resolution fails", async function () {
+    for (const failure of ["disconnect", "throw"]) {
+      const body = { isConnected: true } as Element;
+      const container = {
+        contains: (element: Element) => element === body,
+      } as Element;
+      let acquiredLock = false;
+      let rolledBack = 0;
+      registerContextSurfaceActionTarget(body, {
+        surfaceKind: "embedded",
+        prepareItemsAsDefaultContextTarget: async () => {
+          if (failure === "disconnect") (body as any).isConnected = false;
+          return true;
+        },
+        addItemsAsDefaultContext: async () => {
+          assert.isFalse(acquiredLock);
+          throw new Error("context resolution failed");
+        },
+        afterItemsAsDefaultContextAdded: (result) => {
+          if (result.changed) acquiredLock = true;
+          else rolledBack += 1;
+        },
+      });
+      if (failure === "throw") {
+        let error: unknown;
+        try {
+          await dispatchZoteroItemsToSidebar(container, [makeItem(1)]);
+        } catch (cause) {
+          error = cause;
+        }
+        assert.instanceOf(error, Error);
+      } else {
+        assert.isFalse(
+          await dispatchZoteroItemsToSidebar(container, [makeItem(1)]),
+        );
+      }
+      assert.isFalse(acquiredLock, "no failed drop can strand an auto-lock");
+      assert.equal(rolledBack, 1);
+    }
+  });
+
+  it("does not establish library ownership until the successful upsert callback", async function () {
+    const body = { isConnected: true } as Element;
+    const container = {
+      contains: (element: Element) => element === body,
+    } as Element;
+    let locked = false;
+    let contextCount = 0;
+    registerContextSurfaceActionTarget(body, {
+      surfaceKind: "embedded",
+      prepareItemsAsDefaultContextTarget: async () => {
+        assert.isFalse(locked);
+        return true;
+      },
+      addItemsAsDefaultContext: async (items) => {
+        assert.isFalse(locked, "metadata and context upsert precede auto-lock");
+        contextCount = items.length;
+        return { changed: true };
+      },
+      afterItemsAsDefaultContextAdded: (result) => {
+        if (result.changed) {
+          assert.equal(contextCount, 2);
+          locked = true;
+        }
+      },
+    });
+    assert.isTrue(
+      await dispatchZoteroItemsToSidebar(container, [makeItem(1), makeItem(2)]),
+    );
+    assert.isTrue(locked);
+  });
+
   it("registers the Zotero item-tree command between separators", function () {
     const registrations: Array<{
       menu: string;

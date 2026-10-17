@@ -354,7 +354,7 @@ export async function setTaskProgressComposerContexts(
   set(selectedPaperContextCache, input.paperContexts);
   set(selectedCollectionContextCache, input.collectionContexts);
   set(selectedTagContextCache, input.tagContexts);
-  initializedConversationComposeContextKeys.add(item.id);
+  initializedConversationComposeContextKeys.add(getConversationKey(item));
   // The panel state too: the chips redraw, and Task progress follows them
   // through the same sync a chip added by hand goes through.
   refreshConversationPanels(body, item, { includePanelState: true });

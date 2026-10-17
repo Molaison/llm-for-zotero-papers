@@ -2139,6 +2139,10 @@ export function restoreConversationComposeContext(item: Zotero.Item): boolean {
     itemId <= 0 ||
     !loadedConversationKeys.has(conversationKey) ||
     initializedConversationComposeContextKeys.has(conversationKey)
+    ||
+    // Explicit composer actions are item-scoped, while history is keyed by
+    // conversation. A bound/portal item can use different IDs for the two.
+    initializedConversationComposeContextKeys.has(itemId)
   ) {
     return false;
   }

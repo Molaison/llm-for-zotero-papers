@@ -473,6 +473,12 @@ import {
 } from "./setupHandlers/controllers/composeContextController";
 import { getPaperContextCollapseState } from "./setupHandlers/controllers/paperContextCollapseController";
 import {
+  lockPreparedLibraryChat,
+  releasePreparedLibraryChat,
+  type LibraryChatLockState,
+  type PreparedLibraryChat,
+} from "./libraryChatAutoLock";
+import {
   isPinnedFile,
   isPinnedImage,
   prunePinnedFileKeys,
@@ -3045,6 +3051,11 @@ export function setupHandlers(
     retainPinnedTextState_(pinnedSelectedTextKeys, itemId);
   const clearTransientComposeStateForItem = (itemId: number) => {
     initializedConversationComposeContextKeys.delete(itemId);
+    if (item && item.id === itemId) {
+      initializedConversationComposeContextKeys.delete(
+        getConversationKey(item),
+      );
+    }
     clearDraftInputState(itemId);
     clearSelectedImageState(itemId);
     clearAllRefContextState(itemId);
@@ -5153,7 +5164,7 @@ export function setupHandlers(
       }
     }
     if (!changed) return;
-    initializedConversationComposeContextKeys.add(item.id);
+    initializedConversationComposeContextKeys.add(getConversationKey(item));
     updatePaperPreviewPreservingScroll();
   };
   const updateFilePreviewPreservingScroll = () => {
@@ -7491,6 +7502,34 @@ export function setupHandlers(
     },
   });
   panelLifecycle.add(annotationReplies.dispose);
+
+  // One lock lifecycle for the send flow and for a library chat that a sidebar
+  // drop prepared: the first lock wins, and only an auto lock is ever released.
+  const libraryChatLockState: LibraryChatLockState = {
+    getLockedKey: (libraryID) => getLockedGlobalConversationKey(libraryID),
+    setLockedKey: (libraryID, conversationKey) =>
+      setLockedGlobalConversationKey(libraryID, conversationKey),
+    isAutoLockedKey: isAutoLockedGlobalConversation,
+    addAutoLockedKey: addAutoLockedGlobalConversationKey,
+    removeAutoLockedKey: removeAutoLockedGlobalConversationKey,
+  };
+  const lockLibraryChat = (prepared: PreparedLibraryChat): boolean => {
+    if (isRuntimeConversationSystem()) return false;
+    if (isStandalonePanel) return false;
+    const locked = lockPreparedLibraryChat(libraryChatLockState, prepared);
+    if (locked) syncConversationIdentity();
+    return locked;
+  };
+  const releaseLibraryChat = (prepared: PreparedLibraryChat): void => {
+    if (isRuntimeConversationSystem()) return;
+    if (isStandalonePanel) return;
+    if (releasePreparedLibraryChat(libraryChatLockState, prepared)) {
+      syncConversationIdentity();
+    }
+  };
+  // The library chat a sidebar drop prepared, held until its contexts land.
+  let pendingLibraryChatDrop: PreparedLibraryChat | null = null;
+
   const sendFlowController = createSendFlowController({
     annotationReplies,
     body,
@@ -8453,13 +8492,34 @@ export function setupHandlers(
         return result;
       },
       afterItemsAsDefaultContextAdded: (result) => {
-        if (!isStandalonePanel || !result.changed) return;
+        const prepared = pendingLibraryChatDrop;
+        pendingLibraryChatDrop = null;
+        if (prepared) {
+          if (
+            result.changed &&
+            panelRoot.isConnected &&
+            item &&
+            getConversationKey(item) === prepared.conversationKey
+          ) {
+            // Lock only after the context upsert succeeded, before the next
+            // deferred native render can rebind the panel to its paper.
+            lockLibraryChat(prepared);
+          } else {
+            releaseLibraryChat(prepared);
+          }
+        }
+        if (!result.changed) return;
         flushPanelStateRefreshNow();
+        if (!isStandalonePanel) return;
         hooks?.onDefaultContextRendered?.();
       },
       prepareItemsAsDefaultContextTarget: isStandalonePanel
         ? hooks?.prepareItemsAsDefaultContextTarget
         : async () => {
+            if (pendingLibraryChatDrop) {
+              releaseLibraryChat(pendingLibraryChatDrop);
+            }
+            pendingLibraryChatDrop = null;
             if (isNoteSession() || isWebChatMode()) return false;
             const lease = capturePanelOperationLease(body);
             const libraryID = getCurrentLibraryID();
@@ -8470,7 +8530,16 @@ export function setupHandlers(
               libraryID,
             });
             if (!summary || !isPanelOperationLeaseCurrent(lease)) return false;
-            return switchGlobalConversation(summary.conversationKey);
+            const prepared = {
+              libraryID,
+              conversationKey: summary.conversationKey,
+            };
+            if (!(await switchGlobalConversation(summary.conversationKey))) {
+              releaseLibraryChat(prepared);
+              return false;
+            }
+            pendingLibraryChatDrop = prepared;
+            return true;
           },
     },
   );
