@@ -93,6 +93,17 @@ export const BUILTIN_SHORTCUT_FILES = [
   { id: "key-points", label: "Key Points", file: "key-points.txt" },
   { id: "methodology", label: "Methodology", file: "methodology.txt" },
   { id: "limitations", label: "Limitations", file: "limitations.txt" },
+  {
+    id: "explain-context",
+    label: "Explain Context",
+    file: "explain-context.txt",
+  },
+  { id: "translate-term", label: "Translate Term", file: "translate-term.txt" },
+  {
+    id: "suggest-questions",
+    label: "Next Questions",
+    file: "suggest-questions.txt",
+  },
   { id: "mermaid-diagram", label: "Diagram", file: "mermaid-diagram.txt" },
 ] as const;
 

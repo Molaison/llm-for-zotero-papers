@@ -1,5 +1,7 @@
 import { assert } from "chai";
+import { PDFDocument } from "pdf-lib";
 import type { PaperContextRef } from "../src/modules/contextPanel/types";
+import { MULTI_PDF_DELIVERY_CONTRACT_VERSION } from "../src/webchat/types";
 
 type PipelineModule = typeof import("../src/webchat/pipeline");
 type RelayServerModule = typeof import("../src/webchat/relayServer");
@@ -305,7 +307,11 @@ describe("webchat PDF pipeline", function () {
     assert.deepEqual(pathLookups, [101]);
   });
 
-  it("rejects multiple selected PDFs before reading or submitting one", async function () {
+  it("submits multiple selected PDFs in explicit order", async function () {
+    relayServer.relaySetExtensionCapabilitiesForTests([
+      relayServer.ATTACHMENT_DELIVERY_CONTRACT_VERSION,
+      MULTI_PDF_DELIVERY_CONTRACT_VERSION,
+    ]);
     items.set(10, parent(10));
     items.set(20, parent(20));
     items.set(
@@ -316,27 +322,148 @@ describe("webchat PDF pipeline", function () {
       202,
       attachment({ id: 202, parentID: 20, path: "/papers/second.pdf" }),
     );
+    const readPaths: string[] = [];
+    (globalThis as typeof globalThis & { IOUtils?: unknown }).IOUtils = {
+      read: async (path: string) => {
+        readPaths.push(path);
+        return new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d]);
+      },
+    };
+    const abortController = new AbortController();
+    let send: Promise<unknown> | null = null;
+    const seqBeforeSend = relayServer.relayGetStateSnapshot().query.seq;
+
+    try {
+      send = pipeline.sendWebChatQuestion({
+        item: items.get(101)!,
+        question: "Compare these papers",
+        host: "http://127.0.0.1:23119/llm-for-zotero/webchat",
+        sendPdf: [context(10, 101), context(20, 202)],
+        signal: abortController.signal,
+        onAnswerSnapshot: () => {},
+      });
+      let snapshot = relayServer.relayGetStateSnapshot();
+      for (
+        let attempt = 0;
+        attempt < 20 && snapshot.query.seq === seqBeforeSend;
+        attempt++
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        snapshot = relayServer.relayGetStateSnapshot();
+      }
+      assert.deepEqual(readPaths, ["/papers/first.pdf", "/papers/second.pdf"]);
+      assert.deepEqual(
+        snapshot.query.pdf_attachments?.map((pdf) => pdf.pdf_filename),
+        ["first.pdf", "second.pdf"],
+      );
+      assert.equal(
+        snapshot.query.delivery_contract_version,
+        MULTI_PDF_DELIVERY_CONTRACT_VERSION,
+      );
+    } finally {
+      relayServer.relayRequestStop();
+      abortController.abort();
+      await send?.catch(() => undefined);
+      (globalThis as typeof globalThis & { IOUtils?: unknown }).IOUtils =
+        originalIOUtils;
+    }
+  });
+
+  it("bundles multiple PDFs for a contract-1 browser extension", async function () {
+    items.set(10, parent(10));
+    items.set(20, parent(20));
+    items.set(
+      101,
+      attachment({ id: 101, parentID: 10, path: "/papers/first.pdf" }),
+    );
+    items.set(
+      202,
+      attachment({ id: 202, parentID: 20, path: "/papers/second.pdf" }),
+    );
+    const first = await PDFDocument.create();
+    first.addPage([120, 120]);
+    const second = await PDFDocument.create();
+    second.addPage([120, 120]);
+    const files = new Map<string, Uint8Array>([
+      ["/papers/first.pdf", await first.save()],
+      ["/papers/second.pdf", await second.save()],
+    ]);
+    relayServer.relaySetExtensionCapabilitiesForTests([
+      relayServer.ATTACHMENT_DELIVERY_CONTRACT_VERSION,
+    ]);
+    (globalThis as typeof globalThis & { IOUtils?: unknown }).IOUtils = {
+      read: async (path: string) => files.get(path) || new Uint8Array(),
+    };
+    const abortController = new AbortController();
+    let send: Promise<unknown> | null = null;
+    const seqBeforeSend = relayServer.relayGetStateSnapshot().query.seq;
+
+    try {
+      send = pipeline.sendWebChatQuestion({
+        item: items.get(101)!,
+        question: "Compare these papers",
+        host: "http://127.0.0.1:23119/llm-for-zotero/webchat",
+        sendPdf: [context(10, 101), context(20, 202)],
+        signal: abortController.signal,
+        onAnswerSnapshot: () => {},
+      });
+      let snapshot = relayServer.relayGetStateSnapshot();
+      for (
+        let attempt = 0;
+        attempt < 20 && snapshot.query.seq === seqBeforeSend;
+        attempt++
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        snapshot = relayServer.relayGetStateSnapshot();
+      }
+      assert.deepEqual(
+        snapshot.query.pdf_attachments?.map((pdf) => pdf.pdf_filename),
+        ["selected-zotero-papers.pdf"],
+      );
+      assert.equal(
+        snapshot.query.delivery_contract_version,
+        relayServer.ATTACHMENT_DELIVERY_CONTRACT_VERSION,
+      );
+    } finally {
+      relayServer.relayRequestStop();
+      abortController.abort();
+      await send?.catch(() => undefined);
+      (globalThis as typeof globalThis & { IOUtils?: unknown }).IOUtils =
+        originalIOUtils;
+    }
+  });
+
+  it("rejects duplicate PDF selections before reading or submitting", async function () {
+    items.set(10, parent(10));
+    items.set(
+      101,
+      attachment({ id: 101, parentID: 10, path: "/papers/duplicate.pdf" }),
+    );
     let readCalls = 0;
     (globalThis as typeof globalThis & { IOUtils?: unknown }).IOUtils = {
       read: async () => {
         readCalls += 1;
-        return new Uint8Array([1]);
+        return new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d]);
       },
     };
+    const seqBeforeSend = relayServer.relayGetStateSnapshot().query.seq;
 
     try {
       await expectRejected(
         pipeline.sendWebChatQuestion({
           item: items.get(101)!,
-          question: "Compare these papers",
+          question: "Duplicate selection",
           host: "http://127.0.0.1:23119/llm-for-zotero/webchat",
-          sendPdf: true,
-          pdfPaperContexts: [context(10, 101), context(20, 202)],
+          sendPdf: [context(10, 101), context(10, 101)],
           onAnswerSnapshot: () => {},
         }),
-        "exactly one selected PDF",
+        "duplicate",
       );
       assert.equal(readCalls, 0);
+      assert.equal(
+        relayServer.relayGetStateSnapshot().query.seq,
+        seqBeforeSend,
+      );
     } finally {
       (globalThis as typeof globalThis & { IOUtils?: unknown }).IOUtils =
         originalIOUtils;

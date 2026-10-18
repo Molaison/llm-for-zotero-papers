@@ -623,6 +623,45 @@ export function attachComposePreviewInteractionController(
       if (paperChip.dataset.paperContextMenu === "false") return;
       deps.openPaperChipMenu(paperChip, paperContext, { sticky: true });
     });
+
+    paperPreview.addEventListener("keydown", (event: KeyboardEvent) => {
+      const target = event.target as Element | null;
+      const paperChip = target?.closest(
+        ".llm-paper-context-chip",
+      ) as HTMLDivElement | null;
+      if (!paperChip || !paperPreview.contains(paperChip)) return;
+      if (
+        target?.closest(
+          "button, input, textarea, select, [contenteditable='true']",
+        )
+      ) {
+        return;
+      }
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      event.stopPropagation();
+
+      const item = getItem();
+      const paperContext = deps.resolvePaperContextFromChipElement(paperChip);
+      if (!item || !paperContext) return;
+      const contentSource = deps.resolvePaperContentSourceMode(
+        item.id,
+        paperContext,
+      );
+      if (
+        isPaperContextReaderFocusableSourceMode(contentSource) &&
+        paperChip.dataset.paperContextMenu === "false"
+      ) {
+        void openPaperContextInReader({
+          ...paperContext,
+          contentSourceMode: contentSource,
+        });
+        return;
+      }
+      if (paperChip.dataset.paperContextMenu !== "false") {
+        deps.openPaperChipMenu(paperChip, paperContext, { sticky: true });
+      }
+    });
   }
 
   const openPaperContextInReader = async (

@@ -4187,6 +4187,17 @@ export function setupHandlers(
     chip.classList.toggle("llm-paper-context-chip-full", fullText);
     chip.dataset.contentSource = contentSourceMode;
     chip.classList.add(getContextSourceModeCssClassName(contentSourceMode));
+    // Keep informational chips out of the tab order, but make chips that
+    // open a source menu or reader usable without a mouse in narrow panes.
+    if (hasSourceMenu || hasReaderFocus) {
+      chip.tabIndex = 0;
+      chip.setAttribute("role", "button");
+      chip.setAttribute(
+        "aria-label",
+        formatPaperContextChipTitle(paperContext, contentSourceMode),
+      );
+      if (hasSourceMenu) chip.setAttribute("aria-haspopup", "menu");
+    }
     chip.classList.toggle(
       "llm-paper-context-chip-webchat-inactive",
       isWebChatMode() && contentSourceMode === "pdf" && !fullText,

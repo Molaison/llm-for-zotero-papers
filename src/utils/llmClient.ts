@@ -5,6 +5,12 @@
  */
 
 import { fetchCprPaperHistory, isCprPapersModel, prepareCprPaperRequest } from "./cprPapers";
+import {
+  isCprDirectWebModel,
+  prepareCprDirectWebRequest,
+  resolveCprDirectWebSessionId,
+  CPR_DIRECT_WEB_UNCERTAIN_MESSAGE,
+} from "./cprDirectWeb";
 import { parseCprChartWidget, type CprChartWidget } from "./cprRichWidgets";
 import { appLogger } from "../core/logging";
 import { config } from "../../package.json";
@@ -118,7 +124,11 @@ import {
   extractContextCacheUsage,
   type ContextCachePlan,
 } from "../contextCache/manager";
-import type { ModelInputMode, OutputTokenLimitSetting } from "../shared/types";
+import type {
+  ModelInputMode,
+  OutputTokenLimitSetting,
+  PaperContextRef,
+} from "../shared/types";
 import {
   compileReasoningControls,
   ensureModelCapabilities,
@@ -165,6 +175,8 @@ export type ChatFileAttachment = {
 
 export type ChatParams = {
   cprPaperItemId?: number;
+  /** Ordered PDFs selected for CPR's direct ChatGPT Web route. */
+  cprPaperContexts?: readonly PaperContextRef[];
   prompt: string;
   context?: string;
   history?: ChatMessage[];
@@ -210,6 +222,42 @@ export type ChatParams = {
    */
   profileOverride?: ModelProfileOverride;
 };
+
+/**
+ * CPR's generic ChatGPT Web route is persistent by its opaque thread key.
+ * Keep that key explicit even for text-only turns; otherwise the pool creates
+ * a new qa-request session for every request and a refresh silently forks the
+ * conversation.
+ */
+async function addCprDirectWebSessionHint(
+  params: ChatParams,
+  requestScope: ProviderRequestScope,
+): Promise<ChatParams> {
+  if (!isCprDirectWebModel(params.model || "", params.apiBase || "")) {
+    return params;
+  }
+  const promptCacheKey = await resolveCprDirectWebSessionId(requestScope);
+  const existing = params.contextCache;
+  return {
+    ...params,
+    contextCache: {
+      enabled: true,
+      mode: existing?.mode || "opaque_prefix",
+      provider: existing?.provider || "unknown",
+      providerLabel: existing?.providerLabel || "CPR ChatGPT Web",
+      telemetry: existing?.telemetry || "opaque",
+      ...(existing?.cacheKey ? { cacheKey: existing.cacheKey } : {}),
+      ...(existing?.contentHash ? { contentHash: existing.contentHash } : {}),
+      ...(existing?.contextTokens ? { contextTokens: existing.contextTokens } : {}),
+      ...(existing?.statusLabel ? { statusLabel: existing.statusLabel } : {}),
+      ...(existing?.reason ? { reason: existing.reason } : {}),
+      requestHints: {
+        ...existing?.requestHints,
+        promptCacheKey,
+      },
+    },
+  };
+}
 
 export type ContextBudgetPlan = {
   modelLimitTokens: number;
@@ -4305,9 +4353,18 @@ async function callNativeProtocol(params: {
  * Call LLM API (non-streaming)
  */
 export async function callLLM(params: ChatParams): Promise<ModelTurnOutcome> {
-  if (isCprPapersModel(params.model || "")) return callLLMStream(params, () => {});
+  if (
+    isCprPapersModel(params.model || "") ||
+    (isCprDirectWebModel(params.model || "", params.apiBase || "") &&
+      params.cprPaperContexts?.length)
+  ) {
+    return callLLMStream(params, () => {});
+  }
   const requestScope = params.requestScope ?? createProviderRequestScope();
-  params = { ...params, requestScope };
+  params = await addCprDirectWebSessionHint(
+    { ...params, requestScope },
+    requestScope,
+  );
   await preflightRequestModelCapabilities(params);
   const prepared = prepareChatRequest(params);
   const {
@@ -4462,6 +4519,68 @@ export async function callLLM(params: ChatParams): Promise<ModelTurnOutcome> {
 /**
  * Call LLM API with streaming response
  */
+async function callCprDirectWebStream(
+  params: ChatParams,
+  onDelta: (delta: string) => void,
+  onReasoning?: (event: ReasoningEvent) => void,
+  onUsage?: (usage: UsageStats) => void,
+): Promise<ModelTurnOutcome> {
+  if (!params.apiBase || !params.apiKey) {
+    throw new Error("请配置 CPR API 地址和密钥。");
+  }
+  const requestScope = params.requestScope ?? createProviderRequestScope();
+  const prepared = await prepareCprDirectWebRequest({
+    model: params.model || "",
+    apiBase: params.apiBase,
+    reasoning: params.reasoning,
+    prompt: params.prompt,
+    refs: [...(params.cprPaperContexts || [])],
+    requestScope,
+    readBytes: readLocalFileBytes,
+  });
+  if (prepared.uncertain.length) {
+    const warning = prepared.uncertain
+      .map((entry) => `${CPR_DIRECT_WEB_UNCERTAIN_MESSAGE} (${entry.filename})`)
+      .join("\n");
+    const lastMessage = prepared.payload.input[prepared.payload.input.length - 1];
+    const lastText = lastMessage?.content[lastMessage.content.length - 1];
+    if (lastText?.type === "input_text") {
+      lastText.text = `${warning}\n\n${lastText.text}`;
+    }
+  }
+  let response: Response;
+  try {
+    response = await getFetch()(resolveEndpoint(params.apiBase, "/v1/responses"), {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${params.apiKey}`,
+      },
+      body: JSON.stringify(prepared.payload),
+      signal: params.signal,
+    });
+    if (!response.ok) {
+      throw new Error(
+        `CPR ChatGPT Web HTTP ${response.status}: ${(await response.text()).slice(0, 600)}`,
+      );
+    }
+    if (!response.body) throw new Error("CPR ChatGPT Web 未返回事件流；未自动重发。");
+    const outcome = await parseResponsesStream(response.body, onDelta, onReasoning, onUsage, {
+      requireCompleted: true,
+      collectRichWidgets: true,
+    });
+    if (outcome.completion.status === "complete") {
+      prepared.accept();
+    } else {
+      prepared.markUncertain();
+    }
+    return outcome;
+  } catch (error) {
+    prepared.markUncertain();
+    throw error;
+  }
+}
+
 export async function callLLMStream(
   params: ChatParams,
   onDelta: (delta: string) => void,
@@ -4486,8 +4605,17 @@ export async function callLLMStream(
     if (outcome.completion.status === "complete") paperRequest.accept();
     return outcome;
   }
+  if (
+    isCprDirectWebModel(params.model || "", params.apiBase || "") &&
+    params.cprPaperContexts?.length
+  ) {
+    return callCprDirectWebStream(params, onDelta, onReasoning, onUsage);
+  }
   const requestScope = params.requestScope ?? createProviderRequestScope();
-  params = { ...params, requestScope };
+  params = await addCprDirectWebSessionHint(
+    { ...params, requestScope },
+    requestScope,
+  );
   await preflightRequestModelCapabilities(params);
   const prepared = prepareChatRequest(params);
   const {

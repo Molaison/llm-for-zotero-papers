@@ -8,6 +8,7 @@ import * as thirdParty from "./tiers/thirdParty";
 import { resolvePromptCacheCapability } from "../contextCache/manager";
 import { resolveModelInputMode } from "../utils/modelInputMode";
 import { getModelCapabilities } from "../modelCapabilities/service";
+import { isCprDirectWebModel } from "../utils/cprDirectWebTarget";
 
 // Evaluate in priority order: auth-mode tiers (copilot, codex) must come
 // before protocol-based tiers (native) so that e.g. copilot+responses_api
@@ -27,6 +28,9 @@ export function resolveProviderCapabilities(
   const matched = TIERS.find((tier) => tier.matches(params));
   const base = matched?.capabilities ?? thirdParty.capabilities;
   const inputMode = resolveModelInputMode(params.inputMode);
+  const cprDirectWebPdf =
+    inputMode !== "text_only" &&
+    isCprDirectWebModel(params.model, params.apiBase || "");
   const pdfDisabled =
     inputMode === "text_only" ||
     (inputMode === "auto" && isTextOnlyModel(params.model));
@@ -39,6 +43,7 @@ export function resolveProviderCapabilities(
 
   return {
     ...base,
+    ...(cprDirectWebPdf ? { pdf: "native" as const } : {}),
     promptCache: resolvePromptCacheCapability(params),
     images,
     multimodal: images || (!pdfDisabled && base.pdf !== "none"),

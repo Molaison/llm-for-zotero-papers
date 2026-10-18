@@ -35,6 +35,7 @@ import {
 import { buildNoteEditingTurnContext } from "../../noteEditing";
 import { resolveNoteEditingScope } from "../../../../services/notes/scope";
 import { readNoteSnapshot } from "../../../../services/notes/noteSnapshot";
+import { MAX_WEBCHAT_PDF_COUNT } from "../../../../webchat/types";
 
 type StatusLevel = "ready" | "warning" | "error";
 
@@ -419,9 +420,12 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
         }
         deps.updatePaperPreviewPreservingScroll();
       };
-      if (isWebChat && activeWebChatPdfPaperContexts.length > 1) {
+      if (
+        isWebChat &&
+        activeWebChatPdfPaperContexts.length > MAX_WEBCHAT_PDF_COUNT
+      ) {
         deps.setStatusMessage?.(
-          "Web chat supports one PDF attachment at a time. Keep one PDF active or start separate chats.",
+          `WebChat supports at most ${MAX_WEBCHAT_PDF_COUNT} PDF attachments per send.`,
           "error",
         );
         return;

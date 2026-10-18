@@ -28,11 +28,24 @@ import {
   getWebChatTarget,
   getWebChatTargetByUrl,
   isWebChatUrlForTarget,
+  MAX_WEBCHAT_PDF_COUNT,
+  MAX_WEBCHAT_PDF_FILENAME_LENGTH,
+  MAX_WEBCHAT_PDF_SIZE_BYTES,
+  MAX_WEBCHAT_PDF_TOTAL_BYTES,
+  MULTI_PDF_DELIVERY_CONTRACT_VERSION,
+  type WebChatPdfAttachment,
 } from "./types";
 
 const PREFIX = "/llm-for-zotero/webchat";
 const PRE_SUBMIT_RECLAIM_MS = 120_000;
 const PIPELINE_TIMEOUT_MS = 180_000;
+// Multi-PDF sends upload megabytes per attachment, and the extension may not
+// emit progress events while a large upload is in flight. Widen the idle
+// allowance per attachment and per megabyte so a slow multi-PDF upload is not
+// mistaken for a dead pipeline; the ceiling keeps genuinely stuck runs finite.
+const PIPELINE_TIMEOUT_PER_ATTACHMENT_MS = 60_000;
+const PIPELINE_TIMEOUT_PER_ATTACHMENT_MB_MS = 1_500;
+const PIPELINE_TIMEOUT_MAX_MS = 900_000;
 export const ATTACHMENT_DELIVERY_CONTRACT_VERSION = 1;
 
 /**
@@ -126,6 +139,7 @@ export interface RelayTurnDiagnostic {
   userTurnMatched?: boolean | null;
   assistantTurnMatched?: boolean | null;
   attachmentFilename?: string | null;
+  attachmentFilenames?: string[] | null;
   attachmentMethod?: string | null;
   attachmentVerificationMs?: number | null;
   attachmentPreviewVerified?: boolean | null;
@@ -152,6 +166,7 @@ export interface RelayState {
     prompt: string | null;
     pdf_base64: string | null;
     pdf_filename: string | null;
+    pdf_attachments: WebChatPdfAttachment[] | null;
     images: string[] | null;
     chatgpt_mode: string | null;
     /** Which registered webchat site to target. */
@@ -276,6 +291,7 @@ if (!Z._webchatRelay) {
         prompt: null,
         pdf_base64: null,
         pdf_filename: null,
+        pdf_attachments: null,
         images: null,
         chatgpt_mode: null,
         target: null,
@@ -581,6 +597,7 @@ function resetState() {
     prompt: null,
     pdf_base64: null,
     pdf_filename: null,
+    pdf_attachments: null,
     images: null,
     chatgpt_mode: null,
     target: null,
@@ -641,6 +658,161 @@ function parseBody(data: unknown): Record<string, unknown> {
   if (typeof data === "object" && data !== null)
     return data as Record<string, unknown>;
   return {};
+}
+
+function base64ByteLength(value: string): number | null {
+  if (
+    !value ||
+    value.length % 4 !== 0 ||
+    !/^[A-Za-z0-9+/]*={0,2}$/.test(value)
+  ) {
+    return null;
+  }
+  const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
+  return (value.length * 3) / 4 - padding;
+}
+
+/** Attachments carried by the current query, singular or multi-PDF shape. */
+function currentQueryAttachments(): WebChatPdfAttachment[] {
+  const attachments = S().query.pdf_attachments;
+  if (attachments && attachments.length > 0) return attachments;
+  const pdfBase64 = S().query.pdf_base64;
+  const pdfFilename = S().query.pdf_filename;
+  if (pdfBase64 && pdfFilename) {
+    return [{ pdf_base64: pdfBase64, pdf_filename: pdfFilename }];
+  }
+  return [];
+}
+
+/**
+ * Idle allowance for the current run. Multi-PDF sends get extra time per
+ * attachment and per megabyte so a slow upload is not killed early.
+ */
+function effectiveIdleTimeoutMs(baseMs: number): number {
+  const attachments = currentQueryAttachments();
+  if (attachments.length === 0) return baseMs;
+  let totalBytes = 0;
+  for (const attachment of attachments) {
+    totalBytes += Math.max(0, base64ByteLength(attachment.pdf_base64) || 0);
+  }
+  const totalMb = totalBytes / (1024 * 1024);
+  const extended =
+    baseMs +
+    attachments.length * PIPELINE_TIMEOUT_PER_ATTACHMENT_MS +
+    totalMb * PIPELINE_TIMEOUT_PER_ATTACHMENT_MB_MS;
+  return Math.min(Math.round(extended), PIPELINE_TIMEOUT_MAX_MS);
+}
+
+function normalizePdfAttachments(input: Record<string, unknown>): {
+  attachments: WebChatPdfAttachment[];
+  error?: string;
+} {
+  const hasList = Object.prototype.hasOwnProperty.call(
+    input,
+    "pdf_attachments",
+  );
+  const rawList = input.pdf_attachments;
+  let attachments: WebChatPdfAttachment[];
+
+  if (hasList && rawList != null) {
+    if (!Array.isArray(rawList)) {
+      return {
+        attachments: [],
+        error: "WebChat PDF attachments must be a list.",
+      };
+    }
+    attachments = [];
+    for (const entry of rawList) {
+      if (!entry || typeof entry !== "object") {
+        return {
+          attachments: [],
+          error: "A WebChat PDF attachment is malformed.",
+        };
+      }
+      const raw = entry as Record<string, unknown>;
+      if (
+        typeof raw.pdf_base64 !== "string" ||
+        typeof raw.pdf_filename !== "string"
+      ) {
+        return {
+          attachments: [],
+          error: "A WebChat PDF attachment is malformed.",
+        };
+      }
+      attachments.push({
+        pdf_base64: raw.pdf_base64,
+        pdf_filename: raw.pdf_filename,
+      });
+    }
+  } else if (
+    typeof input.pdf_base64 === "string" ||
+    typeof input.pdf_filename === "string"
+  ) {
+    if (
+      typeof input.pdf_base64 !== "string" ||
+      typeof input.pdf_filename !== "string"
+    ) {
+      return {
+        attachments: [],
+        error: "The WebChat PDF payload is incomplete.",
+      };
+    }
+    attachments = [
+      {
+        pdf_base64: input.pdf_base64,
+        pdf_filename: input.pdf_filename,
+      },
+    ];
+  } else {
+    attachments = [];
+  }
+
+  if (
+    hasList &&
+    (input.pdf_base64 != null || input.pdf_filename != null) &&
+    (attachments.length !== 1 ||
+      input.pdf_base64 !== attachments[0]?.pdf_base64 ||
+      input.pdf_filename !== attachments[0]?.pdf_filename)
+  ) {
+    return {
+      attachments: [],
+      error: "The WebChat singular and list PDF payloads disagree.",
+    };
+  }
+
+  if (attachments.length > MAX_WEBCHAT_PDF_COUNT) {
+    return {
+      attachments: [],
+      error: `WebChat supports at most ${MAX_WEBCHAT_PDF_COUNT} PDF attachments per send.`,
+    };
+  }
+
+  let totalBytes = 0;
+  for (const attachment of attachments) {
+    const filename = attachment.pdf_filename.trim();
+    const bytes = base64ByteLength(attachment.pdf_base64);
+    if (!filename || filename.length > MAX_WEBCHAT_PDF_FILENAME_LENGTH) {
+      return { attachments: [], error: "A WebChat PDF filename is invalid." };
+    }
+    if (bytes === null || bytes === 0) {
+      return { attachments: [], error: "A WebChat PDF payload is invalid." };
+    }
+    if (bytes > MAX_WEBCHAT_PDF_SIZE_BYTES) {
+      return {
+        attachments: [],
+        error: `A WebChat PDF exceeds the ${MAX_WEBCHAT_PDF_SIZE_BYTES / (1024 * 1024)}MB size limit.`,
+      };
+    }
+    totalBytes += bytes;
+    if (totalBytes > MAX_WEBCHAT_PDF_TOTAL_BYTES) {
+      return {
+        attachments: [],
+        error: `WebChat PDFs exceed the ${MAX_WEBCHAT_PDF_TOTAL_BYTES / (1024 * 1024)}MB total size limit.`,
+      };
+    }
+  }
+
+  return { attachments };
 }
 
 function normalizeSupportedDeliveryContracts(value: unknown): number[] {
@@ -729,15 +901,22 @@ function validateTargetCapabilityForDispatch(
 function validateDeliveryContractForDispatch(
   requestedVersion: number,
   targetId?: string | null,
+  multiPdf = false,
 ): string | null {
   if (targetId && !getWebChatTarget(targetId)) {
     return `Unknown WebChat target "${targetId}".`;
+  }
+  if (multiPdf && requestedVersion !== MULTI_PDF_DELIVERY_CONTRACT_VERSION) {
+    return `Multiple WebChat PDFs require delivery contract ${MULTI_PDF_DELIVERY_CONTRACT_VERSION}.`;
   }
   // Legacy clients may omit the delivery contract for existing sites. Gemini
   // is never inferred from that legacy shape and still requires an explicit
   // target/capture advertisement.
   if (requestedVersion === 0 && targetId !== "gemini") return null;
-  if (requestedVersion !== ATTACHMENT_DELIVERY_CONTRACT_VERSION) {
+  if (
+    requestedVersion !== ATTACHMENT_DELIVERY_CONTRACT_VERSION &&
+    requestedVersion !== MULTI_PDF_DELIVERY_CONTRACT_VERSION
+  ) {
     return `Unsupported WebChat delivery contract version ${requestedVersion}.`;
   }
   const extensionStatus = relayGetExtensionStatus();
@@ -870,7 +1049,13 @@ function isPreSubmitPhase(phase: RelayQueryPhase): boolean {
 }
 
 function copyQueryState(): RelayState["query"] {
-  return { ...S().query };
+  return {
+    ...S().query,
+    pdf_attachments:
+      S().query.pdf_attachments?.map((attachment) => ({
+        ...attachment,
+      })) || null,
+  };
 }
 
 function phaseOrder(phase: RelayQueryPhase): number {
@@ -906,7 +1091,14 @@ function expireStaleClaimIfNeeded(): void {
     return;
   }
 
-  if (Date.now() - S().running_since <= PRE_SUBMIT_RECLAIM_MS) {
+  // A large ordered attachment batch may still be in the browser upload
+  // handshake before the first durable prompt phase. Reclaiming it at the
+  // legacy fixed 120-second mark could let a second click submit the same
+  // PDFs again. Use the same bounded size-aware allowance as the active run.
+  if (
+    Date.now() - S().running_since <=
+    effectiveIdleTimeoutMs(PRE_SUBMIT_RECLAIM_MS)
+  ) {
     return;
   }
 
@@ -986,6 +1178,13 @@ function readNullableNumber(value: unknown): number | null {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
 }
 
+function readNullableStringArray(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null;
+  return value.every((entry) => typeof entry === "string")
+    ? value.map((entry) => entry.trim())
+    : null;
+}
+
 function normalizeTurnDiagnostic(
   body: Record<string, unknown>,
   fallback: RelayTurnDiagnostic | null = null,
@@ -1011,6 +1210,7 @@ function normalizeTurnDiagnostic(
     userTurnMatched: readNullableBoolean(raw.userTurnMatched),
     assistantTurnMatched: readNullableBoolean(raw.assistantTurnMatched),
     attachmentFilename: readNullableString(raw.attachmentFilename),
+    attachmentFilenames: readNullableStringArray(raw.attachmentFilenames),
     attachmentMethod: readNullableString(raw.attachmentMethod),
     attachmentVerificationMs:
       raw.attachmentVerificationMs == null
@@ -1066,7 +1266,10 @@ function validateTerminalDeliveryContract(
     Math.floor(Number(S().query.delivery_contract_version) || 0),
   );
   if (requestedVersion === 0) return null;
-  if (requestedVersion !== ATTACHMENT_DELIVERY_CONTRACT_VERSION) {
+  if (
+    requestedVersion !== ATTACHMENT_DELIVERY_CONTRACT_VERSION &&
+    requestedVersion !== MULTI_PDF_DELIVERY_CONTRACT_VERSION
+  ) {
     return `Unsupported WebChat delivery contract version ${requestedVersion}.`;
   }
   if (!diagnostic) {
@@ -1082,7 +1285,17 @@ function validateTerminalDeliveryContract(
     return "WebChat did not bind the response to the submitted user turn.";
   }
 
-  const pdfRequested = Boolean(S().query.pdf_base64);
+  const requestedPdfs =
+    S().query.pdf_attachments ||
+    (S().query.pdf_base64 && S().query.pdf_filename
+      ? [
+          {
+            pdf_base64: S().query.pdf_base64,
+            pdf_filename: S().query.pdf_filename,
+          },
+        ]
+      : []);
+  const pdfRequested = requestedPdfs.length > 0;
   if (diagnostic.attachmentRequested !== pdfRequested) {
     return "WebChat attachment mode did not match the Zotero request.";
   }
@@ -1093,6 +1306,31 @@ function validateTerminalDeliveryContract(
   if (!pdfRequested) {
     if (diagnostic.submittedPdfCount !== 0) {
       return "A prompt-only WebChat turn contained an unexpected PDF.";
+    }
+    return null;
+  }
+
+  if (requestedVersion === MULTI_PDF_DELIVERY_CONTRACT_VERSION) {
+    if (diagnostic.submittedPdfCount !== requestedPdfs.length) {
+      return `WebChat submitted ${diagnostic.submittedPdfCount ?? 0} PDFs, expected ${requestedPdfs.length}.`;
+    }
+    const expectedFilenames = requestedPdfs.map((pdf) => pdf.pdf_filename);
+    if (
+      !diagnostic.attachmentFilenames ||
+      diagnostic.attachmentFilenames.length !== expectedFilenames.length ||
+      diagnostic.attachmentFilenames.some(
+        (filename, index) => filename !== expectedFilenames[index],
+      )
+    ) {
+      return "WebChat did not return the requested PDF filenames in order.";
+    }
+    if (
+      diagnostic.uploadDetected !== true ||
+      diagnostic.attachmentPreviewVerified !== true ||
+      !Number.isFinite(diagnostic.submittedAttachmentCount) ||
+      Number(diagnostic.submittedAttachmentCount) < requestedPdfs.length
+    ) {
+      return "WebChat could not prove delivery of all requested PDFs.";
     }
     return null;
   }
@@ -1186,13 +1424,14 @@ function isRunningExpired(): boolean {
   if (isPreSubmitPhase(S().query.phase)) {
     return elapsed > PRE_SUBMIT_RECLAIM_MS;
   }
-  return elapsed > PIPELINE_TIMEOUT_MS;
+  return elapsed > effectiveIdleTimeoutMs(PIPELINE_TIMEOUT_MS);
 }
 
 export function describeWebChatPipelineTimeout(
   diagnostic: RelayTurnDiagnostic | null,
+  timeoutMs = PIPELINE_TIMEOUT_MS,
 ): { reasonCode: string; message: string } {
-  const timeoutSeconds = Math.floor(PIPELINE_TIMEOUT_MS / 1000);
+  const timeoutSeconds = Math.floor(timeoutMs / 1000);
   if (diagnostic?.attachmentContractVerified === true) {
     if (diagnostic.attachmentRequested === true) {
       return {
@@ -1220,16 +1459,20 @@ export function describeWebChatPipelineTimeout(
 }
 
 function expireRunningPipelineIfNeeded(): boolean {
+  const timeoutMs = effectiveIdleTimeoutMs(PIPELINE_TIMEOUT_MS);
   const activityAt = S().last_activity_at || S().running_since;
   if (
     S().status !== "running" ||
     activityAt <= 0 ||
-    Date.now() - activityAt <= PIPELINE_TIMEOUT_MS
+    Date.now() - activityAt <= timeoutMs
   ) {
     return false;
   }
 
-  const timeout = describeWebChatPipelineTimeout(S().last_diagnostic);
+  const timeout = describeWebChatPipelineTimeout(
+    S().last_diagnostic,
+    timeoutMs,
+  );
   const diagnostic: RelayTurnDiagnostic = {
     ...(S().last_diagnostic || {}),
     reasonCode: timeout.reasonCode,
@@ -1293,6 +1536,11 @@ const SubmitQueryEndpoint = createEndpoint(["POST"], (opts) => {
   const body = parseBody(opts.data);
   expireStaleClaimIfNeeded();
 
+  const pdfValidation = normalizePdfAttachments(body);
+  if (pdfValidation.error) {
+    return jsonReply({ error: pdfValidation.error }, 400);
+  }
+
   if (S().status === "pending" || S().status === "running") {
     if (S().status === "running" && isRunningExpired()) {
       expireRunningPipelineIfNeeded();
@@ -1310,6 +1558,7 @@ const SubmitQueryEndpoint = createEndpoint(["POST"], (opts) => {
   const compatibilityError = validateDeliveryContractForDispatch(
     requestedDeliveryContractVersion,
     requestedTarget,
+    pdfValidation.attachments.length > 1,
   );
   if (compatibilityError) {
     return jsonReply(
@@ -1347,8 +1596,17 @@ const SubmitQueryEndpoint = createEndpoint(["POST"], (opts) => {
 
   S().query.seq += 1;
   S().query.prompt = (body.prompt as string) || "";
-  S().query.pdf_base64 = (body.pdf_base64 as string) || null;
-  S().query.pdf_filename = (body.pdf_filename as string) || null;
+  S().query.pdf_base64 =
+    pdfValidation.attachments.length === 1
+      ? pdfValidation.attachments[0]!.pdf_base64
+      : null;
+  S().query.pdf_filename =
+    pdfValidation.attachments.length === 1
+      ? pdfValidation.attachments[0]!.pdf_filename
+      : null;
+  S().query.pdf_attachments = pdfValidation.attachments.length
+    ? pdfValidation.attachments
+    : null;
   S().query.images = (body.images as string[]) || null;
   S().query.chatgpt_mode = (body.chatgpt_mode as string) || null;
   S().query.target = requestedTarget;
@@ -2038,6 +2296,7 @@ export function relaySubmitQuery(opts: {
   prompt: string;
   pdf_base64?: string | null;
   pdf_filename?: string | null;
+  pdf_attachments?: readonly WebChatPdfAttachment[] | null;
   images?: string[] | null;
   chatgpt_mode?: string | null;
   target?: string | null;
@@ -2047,6 +2306,12 @@ export function relaySubmitQuery(opts: {
   delivery_contract_version?: number;
 }): { ok: boolean; seq: number; error?: string } {
   expireStaleClaimIfNeeded();
+  const pdfValidation = normalizePdfAttachments(
+    opts as unknown as Record<string, unknown>,
+  );
+  if (pdfValidation.error) {
+    return { ok: false, seq: 0, error: pdfValidation.error };
+  }
   if (S().status === "pending" || S().status === "running") {
     if (S().status === "running" && isRunningExpired()) {
       expireRunningPipelineIfNeeded();
@@ -2062,6 +2327,7 @@ export function relaySubmitQuery(opts: {
   const compatibilityError = validateDeliveryContractForDispatch(
     requestedDeliveryContractVersion,
     opts.target,
+    pdfValidation.attachments.length > 1,
   );
   if (compatibilityError) {
     return { ok: false, seq: 0, error: compatibilityError };
@@ -2091,8 +2357,17 @@ export function relaySubmitQuery(opts: {
   resetPerTurnTracking();
   S().query.seq += 1;
   S().query.prompt = opts.prompt || "";
-  S().query.pdf_base64 = opts.pdf_base64 || null;
-  S().query.pdf_filename = opts.pdf_filename || null;
+  S().query.pdf_base64 =
+    pdfValidation.attachments.length === 1
+      ? pdfValidation.attachments[0]!.pdf_base64
+      : null;
+  S().query.pdf_filename =
+    pdfValidation.attachments.length === 1
+      ? pdfValidation.attachments[0]!.pdf_filename
+      : null;
+  S().query.pdf_attachments = pdfValidation.attachments.length
+    ? pdfValidation.attachments
+    : null;
   S().query.images = opts.images || null;
   S().query.chatgpt_mode = opts.chatgpt_mode || null;
   S().query.target = opts.target || null;

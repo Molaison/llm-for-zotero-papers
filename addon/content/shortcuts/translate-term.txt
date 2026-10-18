@@ -1,0 +1,1 @@
+Translate the selected term or passage into the user's language, then explain the meaning it has in this paper. Keep technical names and symbols accurate, give alternatives when the translation is context-dependent, and preserve the original term in parentheses on first use. Do not translate a proper name as if it were a common word.

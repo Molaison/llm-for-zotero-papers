@@ -10,6 +10,7 @@
 import {
   ATTACHMENT_DELIVERY_CONTRACT_VERSION,
   relaySubmitQuery,
+  relayGetExtensionStatus,
   relayPollResponse,
   relayNewChat,
   relayLoadChat,
@@ -25,6 +26,12 @@ import {
   type RelayTurnDiagnostic,
   type ScrapedTranscriptSnapshot,
 } from "./relayServer";
+import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
+import {
+  MAX_WEBCHAT_PDF_SIZE_BYTES,
+  MULTI_PDF_DELIVERY_CONTRACT_VERSION,
+  type WebChatPdfAttachment,
+} from "./types";
 
 const POLL_INTERVAL_MS = 500;
 const REMOTE_READY_POLL_INTERVAL_MS = 250;
@@ -33,6 +40,9 @@ const DEEPSEEK_SCRAPE_TIMEOUT_MS = 45_000;
 const HISTORY_REFRESH_POLL_INTERVAL_MS = 500;
 const HISTORY_REFRESH_TIMEOUT_MS = 25_000;
 const TIMEOUT_MS = 300_000; // 5 minutes
+const RESPONSE_TIMEOUT_PER_ATTACHMENT_MS = 60_000;
+const RESPONSE_TIMEOUT_PER_ATTACHMENT_MB_MS = 1_500;
+const RESPONSE_TIMEOUT_MAX_MS = 900_000;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -117,6 +127,143 @@ export function bytesToBase64(bytes: Uint8Array): string {
   return btoa(binaryStr);
 }
 
+function base64ToBytes(value: string): Uint8Array {
+  const binary = atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
+}
+
+function printablePdfLabel(value: string): string {
+  return value.replace(/[^\x20-\x7e]/g, "?").slice(0, 96);
+}
+
+/** Estimated decoded byte length of a base64 string, without decoding it. */
+export function estimateBase64ByteLength(value: string): number {
+  const length = value.length;
+  if (length === 0) return 0;
+  const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
+  return Math.max(0, Math.floor((length * 3) / 4) - padding);
+}
+
+/** Keep the Zotero-side poll budget aligned with the relay's multi-PDF idle budget. */
+export function webChatResponseTimeoutMs(
+  attachments: readonly WebChatPdfAttachment[] = [],
+): number {
+  if (attachments.length === 0) return TIMEOUT_MS;
+  const totalBytes = attachments.reduce(
+    (total, attachment) =>
+      total + estimateBase64ByteLength(attachment.pdf_base64),
+    0,
+  );
+  const extended =
+    TIMEOUT_MS +
+    attachments.length * RESPONSE_TIMEOUT_PER_ATTACHMENT_MS +
+    (totalBytes / (1024 * 1024)) * RESPONSE_TIMEOUT_PER_ATTACHMENT_MB_MS;
+  return Math.min(Math.round(extended), RESPONSE_TIMEOUT_MAX_MS);
+}
+
+/**
+ * Explain why a combined multi-PDF bundle cannot satisfy the single-PDF size
+ * limit, or null while it still fits. The bundled PDF carries every selected
+ * page, so this is checked both on the raw inputs and on the final bytes.
+ */
+export function webChatBundleSizeError(
+  attachmentCount: number,
+  totalBytes: number,
+): string | null {
+  if (
+    !Number.isFinite(totalBytes) ||
+    totalBytes <= MAX_WEBCHAT_PDF_SIZE_BYTES
+  ) {
+    return null;
+  }
+  const limitMb = MAX_WEBCHAT_PDF_SIZE_BYTES / (1024 * 1024);
+  const totalMb = (totalBytes / (1024 * 1024)).toFixed(1);
+  return (
+    `The selected ${attachmentCount} PDFs total about ${totalMb}MB, which is over the ${limitMb}MB limit for a single WebChat PDF. ` +
+    `This browser extension can only send one PDF per turn, so the combined papers must fit within ${limitMb}MB. ` +
+    `Deselect papers or update the browser extension to send multiple PDFs directly.`
+  );
+}
+
+/**
+ * Keep multi-PDF sends usable with the installed contract-1 extension. The
+ * bundle is one real PDF with a small filename cover page, so the provider
+ * still receives every selected document in the requested order. Oversized
+ * combinations fail fast with a clear size message instead of a misleading
+ * single-PDF error after every page has been re-encoded.
+ */
+async function bundlePdfAttachments(
+  attachments: readonly WebChatPdfAttachment[],
+): Promise<WebChatPdfAttachment> {
+  const estimatedInputBytes = attachments.reduce(
+    (total, attachment) =>
+      total + estimateBase64ByteLength(attachment.pdf_base64),
+    0,
+  );
+  const estimatedError = webChatBundleSizeError(
+    attachments.length,
+    estimatedInputBytes,
+  );
+  if (estimatedError) throw new Error(estimatedError);
+
+  const output = await PDFDocument.create();
+  output.setTitle("Selected Zotero papers");
+  output.setSubject(attachments.map((entry) => entry.pdf_filename).join("\n"));
+  const font = await output.embedFont(StandardFonts.Helvetica);
+  const cover = output.addPage([612, 792]);
+  cover.drawText("Selected Zotero papers", {
+    x: 48,
+    y: 744,
+    size: 18,
+    font,
+    color: rgb(0.12, 0.12, 0.12),
+  });
+  cover.drawText("The following PDFs were selected for this question:", {
+    x: 48,
+    y: 712,
+    size: 10,
+    font,
+    color: rgb(0.25, 0.25, 0.25),
+  });
+
+  for (const [index, attachment] of attachments.entries()) {
+    const filename = attachment.pdf_filename.trim();
+    cover.drawText(`${index + 1}. ${printablePdfLabel(filename)}`, {
+      x: 64,
+      y: 680 - index * 22,
+      size: 11,
+      font,
+      color: rgb(0.12, 0.12, 0.12),
+    });
+    let source: PDFDocument;
+    try {
+      source = await PDFDocument.load(base64ToBytes(attachment.pdf_base64));
+    } catch {
+      throw new Error(
+        `The selected PDF "${filename}" could not be combined for this WebChat extension. Update the browser extension or send this PDF alone.`,
+      );
+    }
+    const pages = await output.copyPages(source, source.getPageIndices());
+    for (const page of pages) output.addPage(page);
+  }
+
+  const bundleBytes = await output.save();
+  const bundleError = webChatBundleSizeError(
+    attachments.length,
+    bundleBytes.byteLength,
+  );
+  if (bundleError) throw new Error(bundleError);
+
+  return {
+    pdf_base64: bytesToBase64(bundleBytes),
+    pdf_filename: "selected-zotero-papers.pdf",
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Submit query (direct state access)
 // ---------------------------------------------------------------------------
@@ -145,13 +292,41 @@ export async function submitQuery(
   target?: string,
   expectedChatUrl?: string | null,
   expectedChatId?: string | null,
+  pdfAttachments?: readonly WebChatPdfAttachment[],
 ): Promise<SubmitQueryResult> {
   if (signal?.aborted) throw createAbortError();
 
+  const effectivePdfAttachments =
+    pdfAttachments ??
+    (pdfBase64 && pdfFilename
+      ? [{ pdf_base64: pdfBase64, pdf_filename: pdfFilename }]
+      : []);
+  const extensionSupportsMultiPdf = Boolean(
+    relayGetExtensionStatus()?.supportedDeliveryContracts.includes(
+      MULTI_PDF_DELIVERY_CONTRACT_VERSION,
+    ),
+  );
+  const deliveredPdfAttachments =
+    effectivePdfAttachments.length > 1 && !extensionSupportsMultiPdf
+      ? [await bundlePdfAttachments(effectivePdfAttachments)]
+      : effectivePdfAttachments;
+  const deliveryContractVersion =
+    deliveredPdfAttachments.length > 1
+      ? MULTI_PDF_DELIVERY_CONTRACT_VERSION
+      : ATTACHMENT_DELIVERY_CONTRACT_VERSION;
+
   const result = relaySubmitQuery({
     prompt,
-    pdf_base64: pdfBase64,
-    pdf_filename: pdfFilename,
+    pdf_base64:
+      deliveredPdfAttachments.length === 1
+        ? deliveredPdfAttachments[0]!.pdf_base64
+        : null,
+    pdf_filename:
+      deliveredPdfAttachments.length === 1
+        ? deliveredPdfAttachments[0]!.pdf_filename
+        : null,
+    pdf_attachments:
+      pdfAttachments === undefined ? undefined : [...deliveredPdfAttachments],
     images: images || null,
     chatgpt_mode: chatgptMode || null,
     target: target || null,
@@ -162,7 +337,7 @@ export async function submitQuery(
       ? { expected_chat_id: expectedChatId }
       : {}),
     force_new_chat: forceNewChat === true,
-    delivery_contract_version: ATTACHMENT_DELIVERY_CONTRACT_VERSION,
+    delivery_contract_version: deliveryContractVersion,
   });
 
   if (!result.ok) {
@@ -329,6 +504,7 @@ export async function pollForResponse(
     | ((text: string, snapshot: WebChatThinkingSnapshot) => void)
     | undefined,
   signal: AbortSignal | undefined,
+  timeoutMs = TIMEOUT_MS,
 ): Promise<WebChatPollResult> {
   let lastAnswerText = "";
   let lastThinkingText = "";
@@ -481,7 +657,7 @@ export async function pollForResponse(
     onThinkingSnapshot(nextText, snapshot);
   };
 
-  while (Date.now() - startTime < TIMEOUT_MS) {
+  while (Date.now() - startTime < timeoutMs) {
     if (signal?.aborted) throw createAbortError();
 
     const data: PollResponseData = relayPollResponse();
@@ -554,7 +730,9 @@ export async function pollForResponse(
     await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
   }
 
-  throw new Error("Timed out waiting for webchat response (5 min).");
+  throw new Error(
+    `Timed out waiting for webchat response (${Math.round(timeoutMs / 1000)} seconds).`,
+  );
 }
 
 // ---------------------------------------------------------------------------

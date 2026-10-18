@@ -1,7 +1,9 @@
 import { assert } from "chai";
+import { PDFDocument } from "pdf-lib";
 
 type RelayServerModule = typeof import("../src/webchat/relayServer");
 type WebChatClientModule = typeof import("../src/webchat/client");
+type WebChatTypesModule = typeof import("../src/webchat/types");
 
 type EndpointReply = [number, string | Record<string, string>, string?];
 
@@ -47,6 +49,13 @@ describe("webchat relay/client", function () {
 
   let relayServer: RelayServerModule;
   let client: WebChatClientModule;
+  let types: WebChatTypesModule;
+
+  const tinyPdfBase64 = async (): Promise<string> => {
+    const doc = await PDFDocument.create();
+    doc.addPage([200, 200]);
+    return client.bytesToBase64(await doc.save());
+  };
 
   const invokeEndpoint = async (
     path: string,
@@ -86,6 +95,7 @@ describe("webchat relay/client", function () {
 
     relayServer = await import("../src/webchat/relayServer");
     client = await import("../src/webchat/client");
+    types = await import("../src/webchat/types");
     relayServer.registerWebChatRelay();
   });
 
@@ -1494,6 +1504,143 @@ describe("webchat relay/client", function () {
     const state = relayServer.relayGetStateSnapshot();
     assert.equal(state.turn_status, "navigating");
     assert.equal(state.remote_chat_id, null);
+  });
+
+  it("estimates decoded PDF bytes from a base64 payload without decoding it", function () {
+    assert.equal(client.estimateBase64ByteLength("AAAA"), 3);
+    assert.equal(client.estimateBase64ByteLength("AAA="), 2);
+    assert.equal(client.estimateBase64ByteLength("AA=="), 1);
+    assert.equal(client.estimateBase64ByteLength(""), 0);
+  });
+
+  it("explains an oversized multi-PDF bundle before it is built", function () {
+    const overLimit = client.webChatBundleSizeError(2, 80 * 1024 * 1024);
+    assert.isString(overLimit);
+    assert.include(overLimit as string, "50MB");
+    assert.include(overLimit as string, "80.0MB");
+    assert.isNull(client.webChatBundleSizeError(1, 10 * 1024 * 1024));
+    assert.isNull(
+      client.webChatBundleSizeError(2, types.MAX_WEBCHAT_PDF_SIZE_BYTES),
+    );
+    assert.isString(
+      client.webChatBundleSizeError(3, types.MAX_WEBCHAT_PDF_SIZE_BYTES + 1),
+    );
+  });
+
+  it("bundles multiple PDFs into one attachment for a contract-1 extension", async function () {
+    const first = await tinyPdfBase64();
+    const second = await tinyPdfBase64();
+
+    await client.submitQuery(
+      "",
+      "compare both papers",
+      null,
+      null,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      "chatgpt",
+      undefined,
+      undefined,
+      [
+        { pdf_base64: first, pdf_filename: "first.pdf" },
+        { pdf_base64: second, pdf_filename: "second.pdf" },
+      ],
+    );
+
+    const state = relayServer.relayGetStateSnapshot();
+    assert.equal(
+      state.query.delivery_contract_version,
+      relayServer.ATTACHMENT_DELIVERY_CONTRACT_VERSION,
+    );
+    assert.lengthOf(state.query.pdf_attachments ?? [], 1);
+    assert.equal(
+      state.query.pdf_attachments?.[0]?.pdf_filename,
+      "selected-zotero-papers.pdf",
+    );
+  });
+
+  it("widens the idle timeout for multi-PDF sends instead of a fixed 180 seconds", async function () {
+    relayServer.relayResetForTests();
+    await invokeEndpoint("/llm-for-zotero/webchat/extension_status", "POST", {
+      chatTabAlive: true,
+      contentScriptAlive: true,
+      supportedDeliveryContracts: [
+        relayServer.ATTACHMENT_DELIVERY_CONTRACT_VERSION,
+        types.MULTI_PDF_DELIVERY_CONTRACT_VERSION,
+      ],
+    });
+
+    const originalNow = Date.now;
+    let now = 9_000_000;
+    Date.now = () => now;
+    try {
+      const submit = relayServer.relaySubmitQuery({
+        prompt: "two papers",
+        delivery_contract_version: types.MULTI_PDF_DELIVERY_CONTRACT_VERSION,
+        pdf_attachments: [
+          { pdf_base64: "JVBERi0=", pdf_filename: "a.pdf" },
+          { pdf_base64: "JVBERi0=", pdf_filename: "b.pdf" },
+        ],
+      });
+      assert.isTrue(submit.ok);
+      const claimed = relayServer.relayClaimQuery(submit.seq);
+      const attempt = claimed.query?.attempt || 1;
+      const ack = await invokeEndpoint(
+        "/llm-for-zotero/webchat/ack_query_phase",
+        "POST",
+        { seq: submit.seq, attempt, phase: "submitted" },
+      );
+      assert.equal(ack.ok, true);
+
+      // A fixed 180s idle limit would already have killed this upload window.
+      now += 200_000;
+      assert.equal(relayServer.relayPollResponse().status, "running");
+
+      // Two PDFs extend the allowance to 180 + 2 * 60 = 300s.
+      now += 200_000;
+      const expired = relayServer.relayPollResponse();
+      assert.equal(expired.status, "error");
+      assert.equal(expired.responses.at(-1)?.completion_reason, "timeout");
+      assert.include(
+        String(expired.responses.at(-1)?.error || ""),
+        "300 seconds",
+      );
+    } finally {
+      Date.now = originalNow;
+    }
+  });
+
+  it("does not reclaim a large multi-PDF claim while the upload is pre-submit", function () {
+    relayServer.relayResetForTests();
+    relayServer.relaySetExtensionCapabilitiesForTests([
+      relayServer.ATTACHMENT_DELIVERY_CONTRACT_VERSION,
+      types.MULTI_PDF_DELIVERY_CONTRACT_VERSION,
+    ]);
+    const originalNow = Date.now;
+    let now = 10_000_000;
+    Date.now = () => now;
+    try {
+      const submit = relayServer.relaySubmitQuery({
+        prompt: "upload before typing",
+        delivery_contract_version: types.MULTI_PDF_DELIVERY_CONTRACT_VERSION,
+        pdf_attachments: [
+          { pdf_base64: "A".repeat(4 * 1024 * 1024), pdf_filename: "a.pdf" },
+          { pdf_base64: "A".repeat(4 * 1024 * 1024), pdf_filename: "b.pdf" },
+        ],
+      });
+      assert.isTrue(submit.ok);
+      const claimed = relayServer.relayClaimQuery(submit.seq);
+      assert.isTrue(claimed.ok);
+
+      // The old fixed 120s claim window would have made the same PDF batch
+      // re-claimable here; the size-aware window keeps ownership explicit.
+      now += 130_000;
+      assert.equal(relayServer.relayPollQuery().status, "running");
+    } finally {
+      Date.now = originalNow;
+    }
   });
 
   it("distinguishes verified PDF and prompt-only delivery from provider timeout", function () {

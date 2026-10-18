@@ -2372,7 +2372,7 @@ describe("sendFlowController", function () {
     assert.deepEqual(getLastSend().lastSentWebchatPdfPaperContexts, [pdfB]);
   });
 
-  it("blocks multiple active WebChat PDFs before clearing the draft", async function () {
+  it("passes multiple active WebChat PDFs to the send snapshot", async function () {
     const pdfPaperContexts: PaperContextRef[] = [
       {
         itemId: 10,
@@ -2387,7 +2387,7 @@ describe("sendFlowController", function () {
         contentSourceMode: "pdf",
       },
     ];
-    const { controller, inputBox, getCounts, getLastStatus } = createBaseDeps({
+    const { controller, inputBox, getCounts, getLastSend } = createBaseDeps({
       getSelectedProfile: () => ({
         entryId: "entry-1",
         model: "chatgpt-web",
@@ -2406,13 +2406,13 @@ describe("sendFlowController", function () {
 
     await controller.doSend();
 
-    assert.equal(getCounts().sendCalled, 0);
-    assert.equal(inputBox.value, "ask question");
-    assert.deepEqual(getLastStatus(), {
-      message:
-        "Web chat supports one PDF attachment at a time. Keep one PDF active or start separate chats.",
-      level: "error",
-    });
+    assert.equal(getCounts().sendCalled, 1);
+    assert.notEqual(inputBox.value, "ask question");
+    assert.isTrue(getLastSend().lastSentWebchatSendPdf);
+    assert.deepEqual(
+      getLastSend().lastSentWebchatPdfPaperContexts,
+      pdfPaperContexts,
+    );
   });
 
   it("allows a PDF upload after restoring a previous WebChat", async function () {

@@ -105,13 +105,13 @@ describe("shortcut defaults migration", function () {
 
     migrateShortcutDefaultsIfNeeded();
 
-    assert.equal(prefStore.get(prefKey("shortcutDefaultsMigrationVersion")), 2);
+    assert.equal(prefStore.get(prefKey("shortcutDefaultsMigrationVersion")), 3);
     assert.include(getShortcutOrder(), "mermaid-diagram");
     assert.notInclude(getDeletedShortcutIds(), "mermaid-diagram");
   });
 
   it("does not override user deletions after the current migration marker", function () {
-    prefStore.set(prefKey("shortcutDefaultsMigrationVersion"), 2);
+    prefStore.set(prefKey("shortcutDefaultsMigrationVersion"), 3);
     setDeletedShortcutIds(["mermaid-diagram"]);
 
     migrateShortcutDefaultsIfNeeded();
@@ -277,7 +277,7 @@ describe("shortcut reset", function () {
     assert.deepEqual(getShortcutOrder(), []);
   });
 
-  it("resets to the current five built-in shortcut identities", function () {
+  it("resets to the current built-in shortcut identities", function () {
     seedShortcutPrefs();
 
     resetShortcutsToDefault();
@@ -289,10 +289,13 @@ describe("shortcut reset", function () {
         "key-points",
         "methodology",
         "limitations",
+        "explain-context",
+        "translate-term",
+        "suggest-questions",
         "mermaid-diagram",
       ],
     );
-    assert.equal(BUILTIN_SHORTCUT_FILES.length, 5);
+    assert.equal(BUILTIN_SHORTCUT_FILES.length, 8);
     assert.deepEqual(getShortcutOverrides(), {});
     assert.deepEqual(getDeletedShortcutIds(), []);
     assert.deepEqual(getCustomShortcuts(), []);

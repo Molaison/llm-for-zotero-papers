@@ -10,7 +10,7 @@ describe("shortcut limits", function () {
       MAX_EDITABLE_SHORTCUTS - BUILTIN_SHORTCUT_FILES.length;
 
     assert.equal(MAX_EDITABLE_SHORTCUTS, 20);
-    assert.equal(BUILTIN_SHORTCUT_FILES[4]?.id, "mermaid-diagram");
+    assert.equal(BUILTIN_SHORTCUT_FILES[7]?.id, "mermaid-diagram");
     assert.isAtLeast(visibleCustomSlots, 6);
   });
 });

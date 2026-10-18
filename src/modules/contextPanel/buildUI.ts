@@ -896,6 +896,8 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
       title: t("Clear"),
     },
   );
+  // The glyph is the only text, so name the control for assistive tech.
+  commandRowClear.setAttribute("aria-label", t("Clear"));
   commandRowHeader.appendChild(commandRowLabel);
   commandRowHeader.appendChild(commandRowClear);
   commandRow.appendChild(commandRowHeader);

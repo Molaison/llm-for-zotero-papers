@@ -2,7 +2,7 @@
  * [webchat] Dedicated send pipeline for WebChat providers.
  *
  * Unlike the normal LLM pipeline, this:
- *   - Attaches the exact selected PDF when `sendPdf` is true (controlled by chip state)
+ *   - Attaches the exact selected PDFs in their explicit UI order
  *   - Sends only the raw question text (no system messages, no history)
  *   - Submits via the embedded Zotero relay → Chrome extension → provider site
  */
@@ -16,8 +16,15 @@ import {
   isZoteroPdfAttachmentCandidate,
 } from "../modules/contextPanel/setupHandlers/controllers/pdfAttachmentPolicy";
 import {
+  MAX_WEBCHAT_PDF_COUNT,
+  MAX_WEBCHAT_PDF_SIZE_BYTES,
+  MAX_WEBCHAT_PDF_TOTAL_BYTES,
+  type WebChatPdfAttachment,
+} from "./types";
+import {
   submitQuery,
   pollForResponse,
+  webChatResponseTimeoutMs,
   waitForRemoteReadyIfNavigating,
   bytesToBase64,
   type WebChatAnswerSnapshot,
@@ -41,6 +48,11 @@ export async function resolveSelectedWebChatPdfBatch(
   if (!paperContexts.length) {
     throw new Error("No selected PDF attachment was provided for WebChat.");
   }
+  if (paperContexts.length > MAX_WEBCHAT_PDF_COUNT) {
+    throw new Error(
+      `WebChat supports at most ${MAX_WEBCHAT_PDF_COUNT} PDF attachments per send.`,
+    );
+  }
 
   const seen = new Set<string>();
   const resolved: Array<{ path: string; filename: string }> = [];
@@ -57,7 +69,7 @@ export async function resolveSelectedWebChatPdfBatch(
       throw new Error("The selected WebChat PDF identity is invalid.");
     }
 
-    const sourceKey = `${itemId}:${contextItemId}`;
+    const sourceKey = String(contextItemId);
     if (seen.has(sourceKey)) {
       throw new Error("The selected WebChat PDF list contains a duplicate.");
     }
@@ -141,9 +153,12 @@ export type WebChatSendOptions = {
   item: Zotero.Item;
   question: string;
   host: string;
-  /** When true, attach the paper PDF to the query. */
-  sendPdf?: boolean;
-  /** Exact PDF attachment identities selected in the composer, in UI order. */
+  /**
+   * Explicit PDF selection in UI order. The boolean form is retained for old
+   * callers and uses pdfPaperContexts as its legacy single-PDF source.
+   */
+  sendPdf?: boolean | readonly PaperContextRef[];
+  /** Legacy selected PDF identities, in UI order. */
   pdfPaperContexts?: readonly PaperContextRef[];
   /** When true, force the next query into a fresh conversation. */
   forceNewChat?: boolean;
@@ -184,7 +199,7 @@ export function selectWebChatExpectedConversation(input: {
 
 /**
  * Send a question to a registered web provider via the embedded Zotero relay.
- * Attaches the exact selected paper PDF only when `sendPdf` is true.
+ * Attaches the exact selected paper PDFs only when `sendPdf` requests them.
  * The caller determines whether to send PDF based on the paper chip state.
  *
  * Returns the final response text.
@@ -208,37 +223,71 @@ export async function sendWebChatQuestion(
     onThinkingSnapshot,
   } = opts;
 
-  appLogger.debug(`[webchat] sendWebChatQuestion: sendPdf=${sendPdf}`);
+  appLogger.debug(
+    `[webchat] sendWebChatQuestion: sendPdf=${Array.isArray(sendPdf) ? sendPdf.length : sendPdf}`,
+  );
 
-  // --- Resolve and read the current paper's PDF (only when explicitly requested) ---
-  let pdfBase64: string | null = null;
-  let pdfFilename: string | null = null;
+  // --- Resolve and read every selected PDF before contacting the relay. ---
+  let pdfAttachments: WebChatPdfAttachment[] | undefined;
 
-  if (sendPdf) {
-    const pdfs = await resolveSelectedWebChatPdfBatch(pdfPaperContexts || []);
-    if (pdfs.length !== 1) {
+  const selectedContexts = Array.isArray(sendPdf)
+    ? sendPdf
+    : sendPdf === true
+      ? pdfPaperContexts || []
+      : null;
+
+  if (selectedContexts !== null) {
+    const pdfs = await resolveSelectedWebChatPdfBatch(selectedContexts);
+    let totalBytes = 0;
+    pdfAttachments = [];
+    for (const pdf of pdfs) {
+      let bytes: Uint8Array;
+      try {
+        bytes = await readLocalFileBytes(pdf.path);
+      } catch {
+        throw new Error("The selected WebChat PDF file could not be read.");
+      }
+      if (!bytes.byteLength) {
+        throw new Error("The selected WebChat PDF file is empty.");
+      }
+      if (bytes.byteLength > MAX_WEBCHAT_PDF_SIZE_BYTES) {
+        throw new Error(
+          `A selected WebChat PDF exceeds the ${MAX_WEBCHAT_PDF_SIZE_BYTES / (1024 * 1024)}MB size limit.`,
+        );
+      }
+      totalBytes += bytes.byteLength;
+      if (totalBytes > MAX_WEBCHAT_PDF_TOTAL_BYTES) {
+        throw new Error(
+          `Selected WebChat PDFs exceed the ${MAX_WEBCHAT_PDF_TOTAL_BYTES / (1024 * 1024)}MB total size limit.`,
+        );
+      }
+      if (
+        bytes.byteLength < 5 ||
+        String.fromCharCode(...bytes.subarray(0, 5)) !== "%PDF-"
+      ) {
+        throw new Error("The selected WebChat file is not a valid PDF.");
+      }
+      pdfAttachments.push({
+        pdf_base64: bytesToBase64(bytes),
+        pdf_filename: pdf.filename,
+      });
+    }
+
+    // Re-check the Zotero identities after reading. This closes the normal
+    // delete/move race without contacting the relay when the selection changed.
+    const currentPdfs = await resolveSelectedWebChatPdfBatch(selectedContexts);
+    if (
+      currentPdfs.length !== pdfs.length ||
+      currentPdfs.some(
+        (pdf, index) =>
+          pdf.path !== pdfs[index]!.path ||
+          pdf.filename !== pdfs[index]!.filename,
+      )
+    ) {
       throw new Error(
-        "WebChat supports exactly one selected PDF attachment per send.",
+        "The selected WebChat PDF attachment changed before send.",
       );
     }
-    const pdf = pdfs[0]!;
-    let bytes: Uint8Array;
-    try {
-      bytes = await readLocalFileBytes(pdf.path);
-    } catch {
-      throw new Error("The selected WebChat PDF file could not be read.");
-    }
-    if (!bytes.byteLength) {
-      throw new Error("The selected WebChat PDF file is empty.");
-    }
-    if (
-      bytes.byteLength < 5 ||
-      String.fromCharCode(...bytes.subarray(0, 5)) !== "%PDF-"
-    ) {
-      throw new Error("The selected WebChat file is not a valid PDF.");
-    }
-    pdfBase64 = bytesToBase64(bytes);
-    pdfFilename = pdf.filename;
   }
 
   // If the extension is still navigating to a loaded history item or a fresh
@@ -249,8 +298,8 @@ export async function sendWebChatQuestion(
   const { seq } = await submitQuery(
     host,
     question,
-    pdfBase64,
-    pdfFilename,
+    pdfAttachments?.length === 1 ? pdfAttachments[0]!.pdf_base64 : null,
+    pdfAttachments?.length === 1 ? pdfAttachments[0]!.pdf_filename : null,
     signal,
     images,
     chatgptMode,
@@ -258,6 +307,7 @@ export async function sendWebChatQuestion(
     target,
     expectedChatUrl,
     expectedChatId,
+    pdfAttachments,
   );
 
   // --- Poll for streaming response ---
@@ -267,5 +317,6 @@ export async function sendWebChatQuestion(
     onAnswerSnapshot,
     onThinkingSnapshot,
     signal,
+    webChatResponseTimeoutMs(pdfAttachments || []),
   );
 }

@@ -61,6 +61,23 @@ export const WEBCHAT_TARGETS = [
 
 export type WebChatTarget = (typeof WEBCHAT_TARGETS)[number]["id"];
 
+/**
+ * Ordered PDF payload carried by the WebChat relay.
+ *
+ * The singular pdf_base64/pdf_filename fields remain the contract-1 shape;
+ * this additive list is consumed by the multi-PDF contract.
+ */
+export type WebChatPdfAttachment = {
+  pdf_base64: string;
+  pdf_filename: string;
+};
+
+export const MAX_WEBCHAT_PDF_COUNT = 8;
+export const MAX_WEBCHAT_PDF_SIZE_BYTES = 50 * 1024 * 1024;
+export const MAX_WEBCHAT_PDF_TOTAL_BYTES = 100 * 1024 * 1024;
+export const MAX_WEBCHAT_PDF_FILENAME_LENGTH = 255;
+export const MULTI_PDF_DELIVERY_CONTRACT_VERSION = 2;
+
 export function getWebChatTarget(id: string): WebChatTargetEntry | undefined {
   return WEBCHAT_TARGETS.find((t) => t.id === id);
 }

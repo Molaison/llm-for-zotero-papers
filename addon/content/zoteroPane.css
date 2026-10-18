@@ -238,6 +238,21 @@
   --llm-history-library-chip-bg: rgba(249, 115, 22, 0.12);
   --llm-history-orphan-chip-text: #b91c1c;
   --llm-history-orphan-chip-bg: rgba(239, 68, 68, 0.12);
+
+  /* One focus ring for every keyboard-reachable control in the pane, so
+     keyboard focus never depends on the platform default outline. */
+  --llm-focus-ring-color: var(--color-accent, #3584e4);
+  --llm-focus-ring-width: 2px;
+  /* Composer status text: a red and an amber that stay readable on the light
+     pane and on the dark one, instead of one fixed pair for both. */
+  --llm-status-ready-text: var(--color-accent, #3584e4);
+  --llm-status-busy-text: var(--fill-secondary);
+  --llm-status-error-text: #c0392b;
+  --llm-status-warning-text: #b26a00;
+  /* A context chip's clear affordance: the glyph stays small, the pointer
+     target does not. */
+  --llm-chip-clear-size: 20px;
+  --llm-chip-clear-radius: 5px;
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -312,6 +327,9 @@
   --llm-history-library-chip-bg: rgba(249, 115, 22, 0.15);
   --llm-history-orphan-chip-text: #fca5a5;
   --llm-history-orphan-chip-bg: rgba(239, 68, 68, 0.16);
+  --llm-status-error-text: #ff9d93;
+  --llm-status-warning-text: #f5c04a;
+  --llm-status-busy-text: #d4d4d8;
 }
 
 .window-is-dark .llm-mermaid-viewer,
@@ -1531,6 +1549,21 @@
   --llm-history-library-chip-bg: rgba(249, 115, 22, 0.12);
   --llm-history-orphan-chip-text: #b91c1c;
   --llm-history-orphan-chip-bg: rgba(239, 68, 68, 0.12);
+
+  /* One focus ring for every keyboard-reachable control in the pane, so
+     keyboard focus never depends on the platform default outline. */
+  --llm-focus-ring-color: var(--color-accent, #3584e4);
+  --llm-focus-ring-width: 2px;
+  /* Composer status text: a red and an amber that stay readable on the light
+     pane and on the dark one, instead of one fixed pair for both. */
+  --llm-status-ready-text: var(--color-accent, #3584e4);
+  --llm-status-busy-text: var(--fill-secondary);
+  --llm-status-error-text: #c0392b;
+  --llm-status-warning-text: #b26a00;
+  /* A context chip's clear affordance: the glyph stays small, the pointer
+     target does not. */
+  --llm-chip-clear-size: 20px;
+  --llm-chip-clear-radius: 5px;
 }
 
 .window-is-dark #llmforzotero-standalone-chat-root,
@@ -1551,6 +1584,9 @@
   --llm-history-library-chip-bg: rgba(249, 115, 22, 0.15);
   --llm-history-orphan-chip-text: #fca5a5;
   --llm-history-orphan-chip-bg: rgba(239, 68, 68, 0.16);
+  --llm-status-error-text: #ff9d93;
+  --llm-status-warning-text: #f5c04a;
+  --llm-status-busy-text: #d4d4d8;
 }
 
 /* --- Lower area: sidebar + content side by side --- */
@@ -9445,6 +9481,14 @@ label.llm-search-results-item:hover {
   width: fit-content;
 }
 
+/* Keep keyboard focus visible inside a narrow pane. */
+.llm-paper-context-chip:focus-visible {
+  outline: var(--llm-focus-ring-width, 2px) solid
+    var(--llm-focus-ring-color, var(--color-accent, #3584e4));
+  outline-offset: calc(-1 * var(--llm-focus-ring-width, 2px));
+  border-radius: 8px;
+}
+
 .llm-plan-container,
 .llm-agent-hitl-card {
   box-sizing: border-box;
@@ -10984,8 +11028,10 @@ details.llm-agent-action-row[open] > summary .llm-agent-action-row-marker {
   display: grid;
   place-items: center;
   align-self: center;
-  width: 14px;
-  min-width: 14px;
+  width: var(--llm-chip-clear-size, 20px);
+  min-width: var(--llm-chip-clear-size, 20px);
+  height: var(--llm-chip-clear-size, 20px);
+  border-radius: var(--llm-chip-clear-radius, 5px);
   font-size: var(--llm-fs-12);
   line-height: 1;
   padding: 0;
@@ -11046,8 +11092,10 @@ details.llm-agent-action-row[open] > summary .llm-agent-action-row-marker {
   display: grid;
   place-items: center;
   align-self: center;
-  width: 14px;
-  min-width: 14px;
+  width: var(--llm-chip-clear-size, 20px);
+  min-width: var(--llm-chip-clear-size, 20px);
+  height: var(--llm-chip-clear-size, 20px);
+  border-radius: var(--llm-chip-clear-radius, 5px);
   font-size: var(--llm-fs-12);
   line-height: 1;
   padding: 0;
@@ -11122,8 +11170,10 @@ details.llm-agent-action-row[open] > summary .llm-agent-action-row-marker {
   display: grid;
   place-items: center;
   align-self: center;
-  width: 14px;
-  min-width: 14px;
+  width: var(--llm-chip-clear-size, 20px);
+  min-width: var(--llm-chip-clear-size, 20px);
+  height: var(--llm-chip-clear-size, 20px);
+  border-radius: var(--llm-chip-clear-radius, 5px);
   font-size: var(--llm-fs-12);
   line-height: 1;
   padding: 0;
@@ -11266,7 +11316,6 @@ details.llm-agent-action-row[open] > summary .llm-agent-action-row-marker {
   border: 1px solid var(--llm-pin-border-color);
   border-radius: 8px;
   background: var(--llm-pin-bg);
-  box-shadow: inset 0 0 0 1px var(--llm-pin-border-color);
 }
 
 .llm-paper-context-chip.llm-paper-context-chip-full
@@ -11292,7 +11341,6 @@ details.llm-agent-action-row[open] > summary .llm-agent-action-row-marker {
   border: 1px solid var(--llm-mineru-border-color);
   border-radius: 8px;
   background: var(--llm-mineru-bg);
-  box-shadow: inset 0 0 0 1px var(--llm-mineru-border-color);
 }
 
 .llm-paper-context-chip.llm-paper-context-chip-full.llm-paper-context-chip-mineru
@@ -11308,7 +11356,6 @@ details.llm-agent-action-row[open] > summary .llm-agent-action-row-marker {
   border: 1px solid var(--llm-pdf-border-color);
   border-radius: 8px;
   background: var(--llm-pdf-bg);
-  box-shadow: inset 0 0 0 1px var(--llm-pdf-border-color);
 }
 
 .llm-paper-context-chip.llm-paper-context-chip-pdf
@@ -11431,8 +11478,10 @@ details.llm-agent-action-row[open] > summary .llm-agent-action-row-marker {
   display: grid;
   place-items: center;
   align-self: center;
-  width: 14px;
-  min-width: 14px;
+  width: var(--llm-chip-clear-size, 20px);
+  min-width: var(--llm-chip-clear-size, 20px);
+  height: var(--llm-chip-clear-size, 20px);
+  border-radius: var(--llm-chip-clear-radius, 5px);
   font-size: var(--llm-fs-12);
   line-height: 1;
   padding: 0;
@@ -13315,6 +13364,29 @@ details.llm-agent-action-row[open] > summary .llm-agent-action-row-marker {
   border-color: transparent;
 }
 
+/* Keyboard focus for the flat composer buttons. The ring is drawn inside the
+   control because the actions row clips its own overflow, and an outer ring
+   would be cut off at the row's edges. */
+.llm-select-text-btn:focus-visible,
+.llm-screenshot-btn:focus-visible,
+.llm-upload-file-btn:focus-visible,
+.llm-model-btn:focus-visible,
+.llm-runtime-mode-btn:focus-visible,
+.llm-reasoning-btn:focus-visible {
+  outline: var(--llm-focus-ring-width, 2px) solid
+    var(--llm-focus-ring-color, var(--color-accent, #3584e4));
+  outline-offset: calc(-1 * var(--llm-focus-ring-width, 2px));
+}
+
+/* Send and Cancel sit outside that clip, so their ring keeps a gap and stays
+   legible on a filled circle. */
+.llm-send-btn:focus-visible,
+.llm-cancel-btn:focus-visible {
+  outline: var(--llm-focus-ring-width, 2px) solid
+    var(--llm-focus-ring-color, var(--color-accent, #3584e4));
+  outline-offset: var(--llm-focus-ring-width, 2px);
+}
+
 /* Send / Cancel: 28px round icon buttons. Send is a blue circle with an
    up-arrow; Cancel is a neutral circle with a stop square, so a streaming
    reply never reads as an error. Names live in title + aria-label. */
@@ -13447,19 +13519,19 @@ details.llm-agent-action-row[open] > summary .llm-agent-action-row-marker {
 }
 
 .llm-status-ready {
-  color: var(--color-accent);
+  color: var(--llm-status-ready-text, var(--color-accent));
 }
 
 .llm-status-sending {
-  color: var(--fill-secondary);
+  color: var(--llm-status-busy-text, var(--fill-secondary));
 }
 
 .llm-status-error {
-  color: #e74c3c;
+  color: var(--llm-status-error-text, #c0392b);
 }
 
 .llm-status-warning {
-  color: #f39c12;
+  color: var(--llm-status-warning-text, #b26a00);
 }
 
 .llm-status-context-missing {

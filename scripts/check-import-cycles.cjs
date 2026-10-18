@@ -111,8 +111,58 @@ function buildGraph({ root, runtimeOnly }) {
   return { files, graph };
 }
 
+// Runtime and static checks inspect the same source files. Parse each file
+// once so the repository's own cycle test stays below Mocha's short timeout.
+function buildGraphs(root) {
+  const sourceRoot = path.join(root, "src");
+  const files = walkSourceFiles(sourceRoot);
+  const fileSet = new Set(files);
+  const runtime = new Map();
+  const statik = new Map();
+  for (const file of files) {
+    const source = ts.createSourceFile(
+      file,
+      fs.readFileSync(file, "utf8"),
+      ts.ScriptTarget.Latest,
+      false,
+    );
+    const runtimeDeps = [];
+    const staticDeps = [];
+    for (const statement of source.statements) {
+      let specifier = null;
+      let typeOnly = false;
+      if (
+        ts.isImportDeclaration(statement) &&
+        ts.isStringLiteral(statement.moduleSpecifier)
+      ) {
+        specifier = statement.moduleSpecifier.text;
+        typeOnly = isTypeOnlyImport(statement);
+      } else if (
+        ts.isExportDeclaration(statement) &&
+        statement.moduleSpecifier &&
+        ts.isStringLiteral(statement.moduleSpecifier)
+      ) {
+        specifier = statement.moduleSpecifier.text;
+        typeOnly = isTypeOnlyExport(statement);
+      }
+      if (!specifier) continue;
+      const resolved = resolveRelativeImport(file, specifier, fileSet);
+      if (!resolved) continue;
+      staticDeps.push(resolved);
+      if (!typeOnly) runtimeDeps.push(resolved);
+    }
+    runtime.set(file, runtimeDeps);
+    statik.set(file, staticDeps);
+  }
+  return { files, runtime, static: statik };
+}
+
 function findCycles(root, runtimeOnly) {
   const { files, graph } = buildGraph({ root, runtimeOnly });
+  return findCyclesInGraph(files, graph);
+}
+
+function findCyclesInGraph(files, graph) {
   const visited = new Set();
   const onStack = new Set();
   const stack = [];
@@ -165,8 +215,9 @@ function compareCycles(found, allowed) {
 }
 
 function checkImportCycles(root = process.cwd()) {
-  const runtime = findCycles(root, true);
-  const staticCycles = findCycles(root, false);
+  const graphs = buildGraphs(root);
+  const runtime = findCyclesInGraph(graphs.files, graphs.runtime);
+  const staticCycles = findCyclesInGraph(graphs.files, graphs.static);
   const runtimeComparison = compareCycles(runtime, ALLOWED_RUNTIME_CYCLES);
   const staticComparison = compareCycles(staticCycles, ALLOWED_STATIC_CYCLES);
   return {

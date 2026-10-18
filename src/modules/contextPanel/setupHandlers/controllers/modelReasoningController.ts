@@ -6,6 +6,7 @@ import {
   resolveProviderCapabilities,
   type PdfSupport,
 } from "../../../../providers";
+import { isCprDirectWebModel } from "../../../../utils/cprDirectWebTarget";
 
 export function isScreenshotUnsupportedModel(
   modelName: string,
@@ -32,6 +33,15 @@ export function getModelPdfSupport(
   apiBase?: string,
   inputMode?: ModelInputMode,
 ): ModelPdfSupport {
+  // CPR's ChatGPT Web route accepts ordered inline PDF parts even though it
+  // is intentionally not classified as a first-party OpenAI host. Keep the
+  // UI's source picker aligned with the transport's actual contract.
+  if (
+    inputMode !== "text_only" &&
+    isCprDirectWebModel(modelName, apiBase || "")
+  ) {
+    return "native";
+  }
   return resolveProviderCapabilities({
     model: modelName,
     protocol: providerProtocol,
