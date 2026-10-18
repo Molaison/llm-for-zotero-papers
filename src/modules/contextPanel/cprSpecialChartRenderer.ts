@@ -92,15 +92,21 @@ export function renderCprPieChart(host: HTMLElement, chart: CprPieChartWidget, d
   const enabled = new Set(categories);
   const draw = () => {
     const plot = ui.svg(`pie chart: ${chart.title || chart.valueField}`);
-    const shown = categories.map(label => ({
-      label, value: chart.slices.filter(row => row.label === label && enabled.has(label))
-        .reduce((sum, row) => sum + row.value, 0),
-    })).filter(slice => slice.value > 0);
-    const max = Math.max(1, ...shown.map(slice => slice.value));
-    const total = shown.reduce((sum, slice) => sum + slice.value / max, 0);
+    const visible = chart.slices.filter(row => enabled.has(row.label));
+    const max = Math.max(0, ...visible.map(row => row.value)) || 1;
+    const shown = categories.map(label => {
+      const rows = visible.filter(row => row.label === label);
+      const value = rows.reduce((sum, row) => sum + row.value, 0);
+      return {
+        label,
+        weight: rows.reduce((sum, row) => sum + row.value / max, 0),
+        value: Number.isFinite(value) ? String(value) : rows.map(row => String(row.value)).join(" + "),
+      };
+    }).filter(slice => slice.weight > 0);
+    const total = shown.reduce((sum, slice) => sum + slice.weight, 0);
     let angle = -Math.PI / 2;
     shown.forEach((slice, index) => {
-      const span = (slice.value / max) / total * Math.PI * 2;
+      const span = slice.weight / total * Math.PI * 2;
       const next = angle + span;
       const x1 = 320 + Math.cos(angle) * 117, y1 = 146 + Math.sin(angle) * 117;
       const x2 = 320 + Math.cos(next) * 117, y2 = 146 + Math.sin(next) * 117;
@@ -134,7 +140,13 @@ export function renderCprHeatmapChart(host: HTMLElement, chart: CprHeatmapChartW
   const xs = [...new Set(chart.cells.map(cell => cell.x))];
   const ys = [...new Set(chart.cells.map(cell => cell.y))];
   const values = chart.cells.map(cell => cell.value);
-  const min = Math.min(...values), span = Math.max(...values) - min || 1;
+  const min = Math.min(...values), max = Math.max(...values);
+  const span = max - min || 1;
+  // Only rescale overflowing ranges; preserve precision for narrow finite ranges.
+  const scale = Math.max(Math.abs(min), Math.abs(max));
+  const fraction = Number.isFinite(span)
+    ? (value: number) => (value - min) / span
+    : (value: number) => (value / scale - min / scale) / (max / scale - min / scale);
   let xPage = 0, yPage = 0;
   const draw = () => {
     const plot = ui.svg(`heatmap chart: ${chart.title || chart.valueField}`);
@@ -148,7 +160,7 @@ export function renderCprHeatmapChart(host: HTMLElement, chart: CprHeatmapChartW
       const rect = ui.append(plot, "rect", {
         x: String(85 + x * width), y: String(14 + y * height),
         width: String(Math.max(1, width - 2)), height: String(Math.max(1, height - 2)),
-        fill: "#2563eb", opacity: String(0.16 + 0.84 * (cell.value - min) / span),
+        fill: "#2563eb", opacity: String(0.16 + 0.84 * fraction(cell.value)),
       });
       ui.tooltip(rect, `${cell.x} × ${cell.y}: ${cell.value}`);
     }
@@ -176,3 +188,4 @@ export function renderCprHeatmapChart(host: HTMLElement, chart: CprHeatmapChartW
   }
   draw();
 }
+
