@@ -11,6 +11,20 @@ import { sanitizeText } from "../../utils/textSanitization";
 export const EMPTY_OUTPUT_LIMIT_MESSAGE =
   "The model used its available output on reasoning before producing an answer. Try Continue, lower reasoning effort, or choose another model.";
 
+export function resolveDirectChatResponseText(
+  outcome: ModelTurnOutcome,
+  streamedText: string,
+  preserveDocumentText = false,
+): string {
+  const text = sanitizeText(outcome.text);
+  if (
+    text ||
+    (outcome.completion.status === "complete" && !preserveDocumentText)
+  )
+    return text;
+  return sanitizeText(streamedText);
+}
+
 export function resolveEmptyModelOutcomeMessage(
   completion: ModelTurnCompletion,
 ): string {

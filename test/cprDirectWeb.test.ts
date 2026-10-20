@@ -10,6 +10,7 @@ import {
 } from "../src/utils/cprDirectWeb";
 import { CPR_PAPERS_API_BASE } from "../src/utils/cprPapers";
 import { resetProviderSessionIdCacheForTests } from "../src/utils/providerSessionId";
+import { callLLMStream } from "../src/utils/llmClient";
 import type { PaperContextRef } from "../src/shared/types";
 
 const WEB_MODEL = "chatgpt-web/gpt-5.6-sol";
@@ -23,7 +24,11 @@ const pdfBytes = (marker: string, size = 0): Uint8Array => {
 };
 const digestOf = (bytes: Uint8Array): string =>
   createHash("sha256").update(bytes).digest("hex");
-const refOf = (itemId: number, contextItemId: number, title = "Paper"): PaperContextRef => ({
+const refOf = (
+  itemId: number,
+  contextItemId: number,
+  title = "Paper",
+): PaperContextRef => ({
   itemId,
   contextItemId,
   title,
@@ -40,11 +45,15 @@ describe("CPR direct web multi-PDF preparation", function () {
   let original: typeof Zotero;
   let prefs: Map<string, unknown>;
   let papers: Map<number, string>;
-  let attachments: Map<number, { parent: number; contentType: string; path: string }>;
+  let attachments: Map<
+    number,
+    { parent: number; contentType: string; path: string }
+  >;
   let files: Map<string, Uint8Array>;
   let reads: string[];
 
-  const addPaper = (itemId: number, doi: string): void => void papers.set(itemId, doi);
+  const addPaper = (itemId: number, doi: string): void =>
+    void papers.set(itemId, doi);
   const addAttachment = (
     id: number,
     parent: number,
@@ -87,7 +96,9 @@ describe("CPR direct web multi-PDF preparation", function () {
   const metadataOf = (payload: CprDirectWebPayload): Record<string, unknown> =>
     JSON.parse(payload.client_metadata["x-codex-turn-metadata"]);
   const ledgerKey = (sessionId?: string): string => {
-    const keys = [...prefs.keys()].filter((key) => key.includes(".cprDirectWebLedger."));
+    const keys = [...prefs.keys()].filter((key) =>
+      key.includes(".cprDirectWebLedger."),
+    );
     assert.lengthOf(keys, 1);
     if (sessionId) assert.include(keys[0], encodeURIComponent(sessionId));
     return keys[0];
@@ -172,7 +183,10 @@ describe("CPR direct web multi-PDF preparation", function () {
         ["doi:10.1000/bbb", 1],
       ],
     );
-    assert.match(textOf(prepared.payload), /1\. first\.pdf[\s\S]*2\. second\.pdf/);
+    assert.match(
+      textOf(prepared.payload),
+      /1\. first\.pdf[\s\S]*2\. second\.pdf/,
+    );
     assert.match(textOf(prepared.payload), /总结这两篇$/);
     assert.equal(prepared.payload.model, WEB_MODEL);
     assert.equal(prepared.payload.stream, true);
@@ -204,7 +218,7 @@ describe("CPR direct web multi-PDF preparation", function () {
     );
   });
 
-  it("keeps one session for a conversation and reuses a registered DOI without reading", async function () {
+  it("keeps one session for a conversation and verifies a registered DOI before reuse", async function () {
     addPaper(11, "https://doi.org/10.1000/aaa");
     addAttachment(101, 11, "/library/first.pdf");
     files.set("/library/first.pdf", pdfBytes("A"));
@@ -216,12 +230,15 @@ describe("CPR direct web multi-PDF preparation", function () {
     assert.lengthOf(reads, 1);
 
     const second = await prepare({ refs, requestScope: scope, prompt: "继续" });
-    assert.lengthOf(reads, 1);
+    assert.lengthOf(reads, 2);
     assert.lengthOf(second.uploaded, 0);
     assert.deepEqual(second.reused, ["doi:10.1000/aaa"]);
     assert.deepEqual(contentTypes(second.payload), ["input_text"]);
     assert.equal(textOf(second.payload), "继续");
-    assert.equal(second.payload.prompt_cache_key, first.payload.prompt_cache_key);
+    assert.equal(
+      second.payload.prompt_cache_key,
+      first.payload.prompt_cache_key,
+    );
     assert.equal(second.sessionId, first.sessionId);
   });
 
@@ -289,11 +306,18 @@ describe("CPR direct web multi-PDF preparation", function () {
       },
     ]);
 
-    const followUp = await prepare({ refs, requestScope: scope, prompt: "继续" });
-    assert.lengthOf(reads, 1);
+    const followUp = await prepare({
+      refs,
+      requestScope: scope,
+      prompt: "继续",
+    });
+    assert.lengthOf(reads, 2);
     assert.lengthOf(followUp.uploaded, 0);
     assert.deepEqual(contentTypes(followUp.payload), ["input_text"]);
-    assert.equal(followUp.payload.prompt_cache_key, first.payload.prompt_cache_key);
+    assert.equal(
+      followUp.payload.prompt_cache_key,
+      first.payload.prompt_cache_key,
+    );
     assert.deepEqual(followUp.uncertain, [
       {
         paperId: "doi:10.1000/aaa",
@@ -320,6 +344,7 @@ describe("CPR direct web multi-PDF preparation", function () {
         pdfSha256: fingerprint,
         filename: "first.pdf",
         order: 0,
+        owner: metadataOf(accepted.payload).turn_id,
       },
     ]);
     assert.lengthOf(before.uncertain, 0);
@@ -338,7 +363,10 @@ describe("CPR direct web multi-PDF preparation", function () {
     addPaper(12, "https://doi.org/10.1000/bbb");
     addAttachment(102, 12, "/library/second.pdf");
     files.set("/library/second.pdf", pdfBytes("B"));
-    const blocked = await prepare({ refs: [refOf(12, 102, "Second")], requestScope: scope });
+    const blocked = await prepare({
+      refs: [refOf(12, 102, "Second")],
+      requestScope: scope,
+    });
     blocked.markUncertain();
     const afterUnknown = ledgerOf(accepted.sessionId);
     assert.lengthOf(afterUnknown.entries, 1);
@@ -366,9 +394,13 @@ describe("CPR direct web multi-PDF preparation", function () {
     assert.match(first.sessionId, /^zotero-cpr-[a-f0-9]{32}$/);
     resetProviderSessionIdCacheForTests();
 
-    const afterReset = await prepare({ refs, requestScope: scope, prompt: "继续" });
+    const afterReset = await prepare({
+      refs,
+      requestScope: scope,
+      prompt: "继续",
+    });
     assert.equal(afterReset.sessionId, first.sessionId);
-    assert.lengthOf(reads, 1);
+    assert.lengthOf(reads, 2);
     assert.lengthOf(afterReset.uploaded, 0);
     assert.deepEqual(afterReset.reused, ["doi:10.1000/aaa"]);
     assert.equal(ledgerKey(first.sessionId), ledgerKey(afterReset.sessionId));
@@ -399,7 +431,10 @@ describe("CPR direct web multi-PDF preparation", function () {
   it("rejects a non-PDF payload and an unsupported model or effort before reading anything", async function () {
     addPaper(11, "https://doi.org/10.1000/aaa");
     addAttachment(101, 11, "/library/first.pdf");
-    files.set("/library/first.pdf", new TextEncoder().encode("not a pdf at all"));
+    files.set(
+      "/library/first.pdf",
+      new TextEncoder().encode("not a pdf at all"),
+    );
     let caught: unknown;
     try {
       await prepare({ refs: [refOf(11, 101)] });
@@ -411,7 +446,13 @@ describe("CPR direct web multi-PDF preparation", function () {
     for (const over of [
       { model: "papers/gpt-6-sol" },
       { apiBase: "https://api.openai.com/v1" },
-      { reasoning: { provider: "openai" as const, level: "high" as const, effort: "turbo" } },
+      {
+        reasoning: {
+          provider: "openai" as const,
+          level: "high" as const,
+          effort: "turbo",
+        },
+      },
     ]) {
       reads = [];
       let refused: unknown;
@@ -466,7 +507,10 @@ describe("CPR direct web multi-PDF preparation", function () {
       caught = error;
     }
     assert.include(String(caught), "超过 8 个上限");
-    assert.lengthOf([...prefs.keys()].filter((k) => k.includes("cprDirectWebLedger")), 0);
+    assert.lengthOf(
+      [...prefs.keys()].filter((k) => k.includes("cprDirectWebLedger")),
+      0,
+    );
 
     addPaper(11, "https://doi.org/10.1000/big");
     addAttachment(101, 11, "/library/big.pdf");
@@ -484,7 +528,10 @@ describe("CPR direct web multi-PDF preparation", function () {
       const id = 200 + index;
       addPaper(id, `https://doi.org/10.1000/wide${index}`);
       addAttachment(id * 10, id, `/library/wide${index}.pdf`);
-      files.set(`/library/wide${index}.pdf`, pdfBytes(`wide${index}`, 40 * MIB));
+      files.set(
+        `/library/wide${index}.pdf`,
+        pdfBytes(`wide${index}`, 40 * MIB),
+      );
       wideRefs.push(refOf(id, id * 10));
     }
     caught = undefined;
@@ -498,15 +545,22 @@ describe("CPR direct web multi-PDF preparation", function () {
 
   it("matches only the CPR papers target with a chatgpt-web model", function () {
     assert.isTrue(isCprDirectWebModel(WEB_MODEL, CPR_PAPERS_API_BASE));
-    assert.isTrue(isCprDirectWebModel(` ${WEB_MODEL} `, "http://127.0.0.1:18082/v1"));
-    assert.isFalse(isCprDirectWebModel("papers/gpt-6-sol", CPR_PAPERS_API_BASE));
+    assert.isTrue(
+      isCprDirectWebModel(` ${WEB_MODEL} `, "http://127.0.0.1:18082/v1"),
+    );
+    assert.isFalse(
+      isCprDirectWebModel("papers/gpt-6-sol", CPR_PAPERS_API_BASE),
+    );
     assert.isFalse(isCprDirectWebModel("gpt-5.6-sol", CPR_PAPERS_API_BASE));
     assert.isFalse(isCprDirectWebModel("chatgpt-web", CPR_PAPERS_API_BASE));
     assert.isFalse(isCprDirectWebModel(WEB_MODEL, "https://api.openai.com/v1"));
   });
 
   it("refuses an empty session and keeps standalone and conversation ids distinct", async function () {
-    assert.equal(await resolveCprDirectWebSessionId({ operationId: "op-9" }), "zotero-cpr-op-9");
+    assert.equal(
+      await resolveCprDirectWebSessionId({ operationId: "op-9" }),
+      "zotero-cpr-op-9",
+    );
     for (const scope of [
       { conversationKey: "   " },
       { conversationKey: "" },
@@ -521,10 +575,15 @@ describe("CPR direct web multi-PDF preparation", function () {
       }
       assert.include(String(caught), "缺少稳定的 CPR direct web 会话 id");
     }
-    const conversation = await resolveCprDirectWebSessionId({ conversationKey: 3 });
+    const conversation = await resolveCprDirectWebSessionId({
+      conversationKey: 3,
+    });
     const other = await resolveCprDirectWebSessionId({ conversationKey: 4 });
     assert.notEqual(conversation, other);
-    assert.notEqual(conversation, await resolveCprDirectWebSessionId({ operationId: conversation }));
+    assert.notEqual(
+      conversation,
+      await resolveCprDirectWebSessionId({ operationId: conversation }),
+    );
   });
 
   it("fails closed on a corrupted ledger instead of re-uploading", async function () {
@@ -544,5 +603,294 @@ describe("CPR direct web multi-PDF preparation", function () {
     }
     assert.include(String(caught), "本地 CPR direct web 记录损坏");
     assert.lengthOf(reads, 1);
+  });
+
+  it("grants only one upload claim to concurrent preparations of the same PDF", async function () {
+    addPaper(11, "10.1000/race");
+    addAttachment(101, 11, "/library/first.pdf");
+    files.set("/library/first.pdf", pdfBytes("A"));
+    let release!: () => void;
+    const bothReading = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let arrivals = 0;
+    const readBytes = async (path: string) => {
+      const bytes = await reader(path);
+      if (++arrivals === 2) release();
+      await bothReading;
+      return bytes;
+    };
+
+    const results = await Promise.all([
+      prepare({ refs: [refOf(11, 101)], readBytes }),
+      prepare({ refs: [refOf(11, 101)], readBytes }),
+    ]);
+
+    assert.equal(
+      results.reduce((sum, result) => sum + result.uploaded.length, 0),
+      1,
+    );
+    assert.equal(
+      results.reduce((sum, result) => sum + result.uncertain.length, 0),
+      1,
+    );
+    assert.lengthOf(ledgerOf().pending, 1);
+    for (const result of results) result.accept();
+    assert.lengthOf(ledgerOf().entries, 1);
+    assert.lengthOf(ledgerOf().pending, 0);
+  });
+
+  it("preserves disjoint PDF claims prepared concurrently in one session", async function () {
+    addPaper(11, "10.1000/aaa");
+    addPaper(12, "10.1000/bbb");
+    addAttachment(101, 11, "/library/first.pdf");
+    addAttachment(102, 12, "/library/second.pdf");
+    files.set("/library/first.pdf", pdfBytes("A"));
+    files.set("/library/second.pdf", pdfBytes("B"));
+
+    const results = await Promise.all([
+      prepare({ refs: [refOf(11, 101)] }),
+      prepare({ refs: [refOf(12, 102)] }),
+    ]);
+
+    assert.deepEqual(
+      results.map((result) => result.uploaded.length),
+      [1, 1],
+    );
+    assert.lengthOf(ledgerOf().pending, 2);
+    results[1].accept();
+    results[0].markUncertain();
+    assert.deepEqual(
+      ledgerOf().entries.map((entry) => entry.paperId),
+      ["doi:10.1000/bbb"],
+    );
+    assert.deepEqual(
+      ledgerOf().uncertain.map((entry) => entry.paperId),
+      ["doi:10.1000/aaa"],
+    );
+  });
+
+  it("ignores a released request's late settlement after another request takes ownership", async function () {
+    addPaper(11, "10.1000/owner");
+    addAttachment(101, 11, "/library/first.pdf");
+    files.set("/library/first.pdf", pdfBytes("A"));
+    const refs = [refOf(11, 101)];
+    const first = await prepare({ refs });
+    first.releaseUnsent();
+    const second = await prepare({ refs });
+    const owned = ledgerOf();
+
+    first.accept();
+    first.markUncertain();
+    first.releaseUnsent();
+    assert.deepEqual(ledgerOf(), owned);
+    second.markDispatched();
+    second.accept();
+    assert.lengthOf(ledgerOf().entries, 1);
+    assert.lengthOf(ledgerOf().pending, 0);
+    assert.lengthOf(ledgerOf().uncertain, 0);
+  });
+
+  it("never releases a dispatched PDF claim after an ambiguous failure", async function () {
+    addPaper(11, "10.1000/dispatched");
+    addAttachment(101, 11, "/library/first.pdf");
+    files.set("/library/first.pdf", pdfBytes("A"));
+    const refs = [refOf(11, 101)];
+    const first = await prepare({ refs });
+    first.markDispatched();
+    first.releaseUnsent();
+    first.markUncertain();
+
+    const retry = await prepare({ refs });
+    assert.lengthOf(retry.uploaded, 0);
+    assert.lengthOf(retry.uncertain, 1);
+    assert.lengthOf(ledgerOf().pending, 0);
+    assert.lengthOf(ledgerOf().uncertain, 1);
+  });
+
+  it("rejects an already canceled preparation without reading or claiming a PDF", async function () {
+    addPaper(11, "10.1000/cancel");
+    addAttachment(101, 11, "/library/first.pdf");
+    files.set("/library/first.pdf", pdfBytes("A"));
+    const controller = new AbortController();
+    controller.abort();
+    let caught: unknown;
+    try {
+      await prepare({ refs: [refOf(11, 101)], signal: controller.signal });
+    } catch (error) {
+      caught = error;
+    }
+    assert.equal((caught as Error)?.name, "AbortError");
+    assert.lengthOf(reads, 0);
+    assert.isFalse(
+      [...prefs.keys()].some((key) => key.includes(".cprDirectWebLedger.")),
+    );
+  });
+
+  for (const cancelAt of [
+    "read",
+    "before dispatch",
+    "after dispatch",
+  ] as const) {
+    it(`settles PDF ownership safely when cancellation happens ${cancelAt}`, async function () {
+      addPaper(11, "10.1000/cancel");
+      addAttachment(101, 11, "/library/first.pdf");
+      files.set("/library/first.pdf", pdfBytes("A"));
+      const globals = globalThis as typeof globalThis & {
+        IOUtils?: unknown;
+        ztoolkit?: unknown;
+      };
+      const originalIO = globals.IOUtils;
+      const originalToolkit = globals.ztoolkit;
+      const controller = new AbortController();
+      let fetchCalls = 0;
+      const fetchFn: typeof fetch = async (_url, init) => {
+        fetchCalls++;
+        if (cancelAt === "after dispatch") controller.abort();
+        init?.signal?.throwIfAborted();
+        throw new Error("must not dispatch a canceled preparation");
+      };
+      globals.IOUtils = {
+        read: async (path: string) => {
+          const bytes = await reader(path);
+          if (cancelAt === "read") controller.abort();
+          return bytes;
+        },
+      };
+      globals.ztoolkit = {
+        getGlobal: (name: string) => {
+          if (name !== "fetch") return undefined;
+          if (cancelAt === "before dispatch") controller.abort();
+          return fetchFn;
+        },
+      };
+      try {
+        let caught: unknown;
+        try {
+          await callLLMStream(
+            {
+              model: WEB_MODEL,
+              apiBase: CPR_PAPERS_API_BASE,
+              apiKey: "test-only",
+              prompt: "summarize",
+              requestScope: { operationId: "op-1" },
+              cprPaperContexts: [refOf(11, 101)],
+              signal: controller.signal,
+            },
+            () => {},
+          );
+        } catch (error) {
+          caught = error;
+        }
+        assert.equal((caught as Error)?.name, "AbortError");
+        assert.equal(fetchCalls, cancelAt === "after dispatch" ? 1 : 0);
+        const retry = await prepare({ refs: [refOf(11, 101)] });
+        assert.lengthOf(retry.uploaded, cancelAt === "after dispatch" ? 0 : 1);
+        assert.lengthOf(retry.uncertain, cancelAt === "after dispatch" ? 1 : 0);
+      } finally {
+        globals.IOUtils = originalIO;
+        globals.ztoolkit = originalToolkit;
+      }
+    });
+  }
+
+  it("keeps an ownerless pending record conservative after restart", async function () {
+    addPaper(11, "10.1000/legacy");
+    addAttachment(101, 11, "/library/first.pdf");
+    files.set("/library/first.pdf", pdfBytes("A"));
+    const refs = [refOf(11, 101)];
+    const first = await prepare({ refs });
+    const legacy = ledgerOf();
+    delete legacy.pending[0].owner;
+    prefs.set(ledgerKey(), JSON.stringify(legacy));
+    resetProviderSessionIdCacheForTests();
+
+    first.accept();
+    first.releaseUnsent();
+    const retry = await prepare({ refs });
+    assert.lengthOf(retry.uploaded, 0);
+    assert.lengthOf(retry.uncertain, 1);
+    assert.deepEqual(ledgerOf(), legacy);
+  });
+
+  for (const state of ["ready", "uncertain"] as const) {
+    it(`rejects a different PDF selected under a ${state} DOI`, async function () {
+      addPaper(11, "10.1000/version");
+      addAttachment(101, 11, "/library/first.pdf");
+      addAttachment(102, 11, "/library/replacement.pdf");
+      files.set("/library/first.pdf", pdfBytes("A"));
+      files.set("/library/replacement.pdf", pdfBytes("B"));
+      const first = await prepare({ refs: [refOf(11, 101)] });
+      if (state === "ready") first.accept();
+      else first.markUncertain();
+      const before = ledgerOf();
+      let caught: unknown;
+      try {
+        await prepare({ refs: [refOf(11, 102)] });
+      } catch (error) {
+        caught = error;
+      }
+      assert.include(String(caught), "同一 DOI 已登记不同的 PDF 指纹");
+      assert.deepEqual(ledgerOf(), before);
+    });
+  }
+
+  it("rechecks reused identities after concurrent pending ownership replacement", async function () {
+    addPaper(11, "10.1000/race");
+    addAttachment(101, 11, "/library/first.pdf");
+    addAttachment(102, 11, "/library/replacement.pdf");
+    files.set("/library/first.pdf", pdfBytes("A"));
+    files.set("/library/replacement.pdf", pdfBytes("B"));
+    const first = await prepare({ refs: [refOf(11, 101)] });
+    let started!: () => void;
+    let resume!: () => void;
+    const reading = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const released = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    const overlapping = prepare({
+      refs: [refOf(11, 101)],
+      readBytes: async (path) => {
+        const bytes = await reader(path);
+        started();
+        await released;
+        return bytes;
+      },
+    });
+    await reading;
+    first.releaseUnsent();
+    const replacement = await prepare({ refs: [refOf(11, 102)] });
+    replacement.accept();
+    const settled = ledgerOf();
+    resume();
+
+    let caught: unknown;
+    try {
+      await overlapping;
+    } catch (error) {
+      caught = error;
+    }
+    assert.include(String(caught), "不同 PDF");
+    assert.deepEqual(ledgerOf(), settled);
+  });
+
+  it("rejects two different PDFs sharing one DOI in the same preparation", async function () {
+    addPaper(11, "10.1000/version");
+    addAttachment(101, 11, "/library/first.pdf");
+    addAttachment(102, 11, "/library/replacement.pdf");
+    files.set("/library/first.pdf", pdfBytes("A"));
+    files.set("/library/replacement.pdf", pdfBytes("B"));
+    let caught: unknown;
+    try {
+      await prepare({ refs: [refOf(11, 101), refOf(11, 102)] });
+    } catch (error) {
+      caught = error;
+    }
+    assert.include(String(caught), "同一 DOI 已登记不同的 PDF 指纹");
+    assert.isFalse(
+      [...prefs.keys()].some((key) => key.includes(".cprDirectWebLedger.")),
+    );
   });
 });

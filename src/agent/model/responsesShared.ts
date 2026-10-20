@@ -1,7 +1,10 @@
 import {
+  ResponsesText,
+  type ResponsesTextPosition,
+} from "../../utils/responsesText";
+import {
   createFallbackToolCallId,
   groupToolContinuationMessages,
-  parseToolCallArguments,
   stringifyUnknown,
 } from "./shared";
 import { stringifyMessageContent } from "./messageBuilder";
@@ -335,6 +338,8 @@ function extractOutputTextFromContent(content: unknown): string {
 function extractToolCallsFromOutputs(outputs: unknown): AgentToolCall[] {
   if (!Array.isArray(outputs)) return [];
   const calls: AgentToolCall[] = [];
+  const callIds = new Set<string>();
+  const itemIds = new Set<string>();
   for (let index = 0; index < outputs.length; index += 1) {
     const output = outputs[index];
     if (!output || typeof output !== "object") continue;
@@ -351,11 +356,30 @@ function extractToolCallsFromOutputs(outputs: unknown): AgentToolCall[] {
         : typeof row.id === "string" && row.id.trim()
           ? row.id.trim()
           : createFallbackToolCallId("tool", index);
-    calls.push({
-      id: callId,
-      name,
-      arguments: parseToolCallArguments(row.arguments),
-    });
+    const itemId = typeof row.id === "string" ? row.id.trim() : "";
+    if (callIds.has(callId) || (itemId && itemIds.has(itemId))) {
+      throw new Error(
+        "The provider returned a duplicate or conflicting tool call identifier; no tool was executed.",
+      );
+    }
+    callIds.add(callId);
+    if (itemId) itemIds.add(itemId);
+    let args: unknown = row.arguments;
+    if (typeof args === "string") {
+      try {
+        args = JSON.parse(args);
+      } catch {
+        throw new Error(
+          "The provider returned malformed tool arguments; the tool was not executed.",
+        );
+      }
+    }
+    if (!args || typeof args !== "object" || Array.isArray(args)) {
+      throw new Error(
+        "The provider returned non-object tool arguments; the tool was not executed.",
+      );
+    }
+    calls.push({ id: callId, name, arguments: args });
   }
   return calls;
 }
@@ -378,43 +402,58 @@ function extractOutputText(outputs: unknown): string {
     .join("");
 }
 
-function getResponseOutputItemKey(item: unknown): string | null {
-  if (!item || typeof item !== "object") return null;
+function getResponseOutputItemKeys(item: unknown): string[] {
+  if (!item || typeof item !== "object") return [];
   const row = item as ResponsesOutputItem;
+  const keys: string[] = [];
   if (typeof row.id === "string" && row.id.trim()) {
-    return `id:${row.id.trim()}`;
+    keys.push(`id:${row.id.trim()}`);
   }
   if (typeof row.call_id === "string" && row.call_id.trim()) {
-    return `call:${row.call_id.trim()}`;
+    keys.push(`call:${row.call_id.trim()}`);
   }
-  return null;
+  return keys;
+}
+
+function getResponseOutputItemKey(item: unknown): string | null {
+  return getResponseOutputItemKeys(item)[0] ?? null;
 }
 
 function mergeResponseOutputItems(
   payloadItems: unknown[],
   streamedItems: ResponsesOutputItem[],
+  finalOutputProvided: boolean,
 ): unknown[] {
   if (!streamedItems.length) return payloadItems;
   const merged = [...payloadItems];
   const indexByKey = new Map<string, number>();
   for (let index = 0; index < merged.length; index += 1) {
-    const key = getResponseOutputItemKey(merged[index]);
-    if (key) {
+    for (const key of getResponseOutputItemKeys(merged[index])) {
       indexByKey.set(key, index);
     }
   }
   for (const item of streamedItems) {
-    const key = getResponseOutputItemKey(item);
-    if (!key) {
-      merged.push(item);
-      continue;
+    const keys = getResponseOutputItemKeys(item);
+    const matches = new Set(
+      keys
+        .map((key) => indexByKey.get(key))
+        .filter((index) => index !== undefined),
+    );
+    if (matches.size > 1) {
+      throw new Error(
+        "Responses output item identifiers refer to conflicting final items.",
+      );
     }
-    const existingIndex = indexByKey.get(key);
+    const existingIndex = matches.values().next().value;
     if (typeof existingIndex === "number") {
-      merged[existingIndex] = item;
+      merged[existingIndex] = {
+        ...item,
+        ...(merged[existingIndex] as ResponsesOutputItem),
+      };
       continue;
     }
-    indexByKey.set(key, merged.length);
+    if (finalOutputProvided) continue;
+    for (const key of keys) indexByKey.set(key, merged.length);
     merged.push(item);
   }
   return merged;
@@ -426,7 +465,27 @@ export function normalizeResponsesStepFromPayload(
   const outputs = Array.isArray(data.output) ? data.output : [];
   const responseId =
     typeof data.id === "string" && data.id.trim() ? data.id.trim() : undefined;
-  const toolCalls = extractToolCallsFromOutputs(outputs);
+  const status =
+    typeof data.status === "string" ? data.status.trim().toLowerCase() : "";
+  let completion = normalizeProviderCompletion(
+    !status || status === "incomplete"
+      ? data.incomplete_details?.reason
+      : undefined,
+    {
+      responseStatus: status,
+    },
+  );
+  if (status === "incomplete" && completion.status === "complete") {
+    completion = {
+      status: "blocked",
+      reason: "other",
+      providerReason: "incomplete",
+    };
+  }
+  const toolCalls =
+    completion.status === "complete"
+      ? extractToolCallsFromOutputs(outputs)
+      : [];
   const text =
     stringifyUnknown(data.output_text).trim() ||
     extractOutputText(outputs).trim();
@@ -435,9 +494,7 @@ export function normalizeResponsesStepFromPayload(
     text,
     toolCalls,
     outputItems: outputs,
-    completion: normalizeProviderCompletion(data.incomplete_details?.reason, {
-      responseStatus: data.status,
-    }),
+    completion,
   };
 }
 
@@ -452,11 +509,11 @@ export async function parseResponsesStepStream(
   let buffer = "";
   let responseId: string | undefined;
   let latestPayload: ResponsesPayload | null = null;
-  let streamedText = "";
+  const answer = new ResponsesText();
   const streamedOutputs: ResponsesOutputItem[] = [];
+  const completedOutputKeys = new Set<string>();
   const eventTypesSeen = new Set<string>();
-  let sawAnswerDelta = false;
-  let sawAnswerFinal = false;
+
   let sawSummaryDelta = false;
   let sawSummaryFinal = false;
   let sawDetailsDelta = false;
@@ -474,7 +531,10 @@ export async function parseResponsesStepStream(
       (entry) => getResponseOutputItemKey(entry) === key,
     );
     if (existingIndex >= 0) {
-      streamedOutputs[existingIndex] = normalizedItem;
+      streamedOutputs[existingIndex] = {
+        ...streamedOutputs[existingIndex],
+        ...normalizedItem,
+      };
       return;
     }
     streamedOutputs.push(normalizedItem);
@@ -496,21 +556,39 @@ export async function parseResponsesStepStream(
 
   const emitAnswer = async (
     value: unknown,
-    mode: "delta" | "final",
+    mode: "delta" | "snapshot" | "final",
+    position: ResponsesTextPosition = {},
   ): Promise<void> => {
+    if (value === undefined || value === null) return;
     const text =
       extractOutputTextFromContent(value) || normalizeResponsesText(value);
-    if (!text) return;
-    if (mode === "delta" && sawAnswerFinal) return;
-    if (mode === "final" && (sawAnswerDelta || sawAnswerFinal)) return;
-    if (mode === "delta") {
-      sawAnswerDelta = true;
+    const delta = answer.update(text, mode, position);
+    if (delta && onTextDelta) await onTextDelta(delta);
+  };
+
+  const emitOutputItem = async (
+    value: unknown,
+    position: ResponsesTextPosition = {},
+    mode: "delta" | "snapshot" | "final" = "final",
+  ) => {
+    if (!value || typeof value !== "object") return;
+    const item = value as ResponsesOutputItem;
+    if (
+      item.type !== "message" &&
+      item.type !== "output_text" &&
+      item.type !== "text"
+    )
+      return;
+    const base = { ...position, item_id: item.id ?? position.item_id };
+    if (Array.isArray(item.content)) {
+      for (const [content_index, part] of item.content.entries()) {
+        await emitAnswer(extractOutputTextFromContent(part), mode, {
+          ...base,
+          content_index,
+        });
+      }
     } else {
-      sawAnswerFinal = true;
-    }
-    streamedText += text;
-    if (onTextDelta) {
-      await onTextDelta(text);
+      await emitAnswer(item.content ?? item.text, mode, base);
     }
   };
 
@@ -540,7 +618,7 @@ export async function parseResponsesStepStream(
   };
 
   try {
-    while (true) {
+    readStream: while (true) {
       const { value, done } = await reader.read();
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
@@ -551,288 +629,307 @@ export async function parseResponsesStepStream(
         const trimmed = line.trim();
         if (!trimmed.startsWith("data:")) continue;
         const data = trimmed.slice(5).trim();
-        if (!data || data === "[DONE]") continue;
-        try {
-          const parsed = JSON.parse(data) as {
+        if (!data) continue;
+        if (data === "[DONE]") break readStream;
+        const parsed = JSON.parse(data) as {
+          type?: unknown;
+          item_id?: unknown;
+          output_index?: unknown;
+          content_index?: unknown;
+          delta?: unknown;
+          text?: unknown;
+          summary?: unknown;
+          reasoning?: unknown;
+          item?: unknown;
+          message?: { content?: unknown };
+          part?: {
             type?: unknown;
-            delta?: unknown;
-            text?: unknown;
             summary?: unknown;
-            reasoning?: unknown;
-            item?: unknown;
-            message?: { content?: unknown };
-            part?: {
-              type?: unknown;
-              summary?: unknown;
-              content?: unknown;
-              text?: unknown;
-            };
-            response?: ResponsesPayload;
+            content?: unknown;
+            text?: unknown;
           };
-          const eventType =
-            typeof parsed.type === "string" ? parsed.type.toLowerCase() : "";
-          if (eventType) eventTypesSeen.add(eventType);
-          if (eventType === "response.output_text.delta") {
-            await emitAnswer(parsed.delta, "delta");
-            continue;
-          }
-          if (eventType === "response.output_text.done") {
-            await emitAnswer(parsed.text ?? parsed.delta, "final");
-            continue;
-          }
-          if (
-            eventType === "response.content_part.added" ||
-            eventType === "response.content_part.delta"
-          ) {
-            const partType =
-              typeof parsed.part?.type === "string"
-                ? parsed.part.type.toLowerCase()
-                : "";
-            if (
-              !partType ||
-              partType === "output_text" ||
-              partType === "text"
-            ) {
-              await emitAnswer(
-                parsed.delta ??
-                  parsed.text ??
-                  parsed.part?.text ??
-                  parsed.part?.content,
-                "delta",
-              );
-            }
-            continue;
-          }
-          if (eventType === "response.content_part.done") {
-            const partType =
-              typeof parsed.part?.type === "string"
-                ? parsed.part.type.toLowerCase()
-                : "";
-            if (
-              !partType ||
-              partType === "output_text" ||
-              partType === "text"
-            ) {
-              await emitAnswer(
-                parsed.text ??
-                  parsed.delta ??
-                  parsed.part?.text ??
-                  parsed.part?.content,
-                "final",
-              );
-            }
-            continue;
-          }
-          if (
-            eventType === "response.message.delta" ||
-            eventType === "response.message.added"
-          ) {
-            await emitAnswer(parsed.message?.content, "delta");
-            continue;
-          }
-          if (eventType === "response.message.done") {
-            await emitAnswer(parsed.message?.content, "final");
-            continue;
-          }
-          if (
-            (eventType === "response.reasoning_summary.delta" ||
-              eventType === "response.reasoning_summary_text.delta") &&
-            parsed.delta
-          ) {
-            sawSummaryDelta = true;
-            await emitReasoning({
-              summary: normalizeResponsesText(parsed.delta),
-            });
-            continue;
-          }
-          if (
-            (eventType === "response.reasoning_summary.done" ||
-              eventType === "response.reasoning_summary_text.done") &&
-            (parsed.text || parsed.delta)
-          ) {
-            sawSummaryFinal = true;
-            if (!sawSummaryDelta) {
-              await emitReasoning({
-                summary: normalizeResponsesText(parsed.text ?? parsed.delta),
-              });
-            }
-            continue;
-          }
-          if (
-            (eventType === "response.reasoning_summary_part.added" ||
-              eventType === "response.reasoning_summary_part.done") &&
-            parsed.part
-          ) {
-            const partType =
-              typeof parsed.part.type === "string"
-                ? parsed.part.type.toLowerCase()
-                : "";
-            if (
-              !partType ||
-              partType === "summary_text" ||
-              partType === "reasoning_summary"
-            ) {
-              // Skip if we already streamed this content via delta events
-              if (!sawSummaryDelta) {
-                const partSummary = normalizeResponsesText(
-                  parsed.part.text ??
-                    parsed.part.content ??
-                    parsed.part.summary,
-                );
-                if (partSummary) {
-                  sawSummaryFinal = true;
-                  await emitReasoning({ summary: partSummary });
-                }
-              }
-            }
-            continue;
-          }
-          if (
-            (eventType === "response.reasoning.delta" ||
-              eventType === "response.reasoning_text.delta") &&
-            parsed.delta
-          ) {
-            sawDetailsDelta = true;
-            await emitReasoning({
-              details: normalizeResponsesText(parsed.delta),
-            });
-            continue;
-          }
-          if (
-            (eventType === "response.reasoning.done" ||
-              eventType === "response.reasoning_text.done") &&
-            (parsed.text || parsed.delta)
-          ) {
-            sawDetailsFinal = true;
-            if (!sawDetailsDelta) {
-              await emitReasoning({
-                details: normalizeResponsesText(parsed.text ?? parsed.delta),
-              });
-            }
-            continue;
-          }
-          if (eventType === "response.reasoning" && parsed.reasoning) {
-            sawDetailsFinal = true;
-            if (!sawDetailsDelta) {
-              await emitReasoning({
-                details: normalizeReasoningText(parsed.reasoning),
-              });
-            }
-            continue;
-          }
-          if (
-            eventType === "response.output_item.added" ||
-            eventType === "response.output_item.delta" ||
-            eventType === "response.output_item.done"
-          ) {
-            mergeOutputItem(parsed.item);
-            await emitReasoningFromOutputItem(parsed.item);
-            // Skip emitAnswer for reasoning items — their summary text would be
-            // incorrectly treated as an answer, setting sawAnswerFinal and
-            // blocking the real answer from being captured.
-            const itemType =
-              parsed.item && typeof parsed.item === "object"
-                ? String(
-                    (parsed.item as { type?: unknown }).type ?? "",
-                  ).toLowerCase()
-                : "";
-            if (itemType !== "reasoning" && itemType !== "reasoning_summary") {
-              if (eventType === "response.output_item.done") {
-                await emitAnswer(parsed.item, "final");
-              } else {
-                await emitAnswer(parsed.item, "delta");
-              }
-            }
-            continue;
-          }
-          if (
-            (eventType === "response.completed" ||
-              eventType === "response.incomplete") &&
-            parsed.response
-          ) {
-            latestPayload = parsed.response;
-            if (
-              typeof parsed.response.id === "string" &&
-              parsed.response.id.trim()
-            ) {
-              responseId = parsed.response.id.trim();
-            }
-            const outputs = Array.isArray(parsed.response.output)
-              ? parsed.response.output
-              : [];
-            for (const output of outputs) {
-              await emitReasoningFromOutputItem(output);
-            }
-            await emitAnswer(
-              parsed.response.output_text || extractOutputText(outputs),
-              "final",
-            );
-            const usage =
-              parsed.response &&
-              typeof parsed.response === "object" &&
-              "usage" in parsed.response
-                ? (
-                    parsed.response as {
-                      usage?: {
-                        input_tokens?: unknown;
-                        output_tokens?: unknown;
-                        total_tokens?: unknown;
-                        input_tokens_details?: unknown;
-                        prompt_tokens_details?: unknown;
-                      };
-                    }
-                  ).usage
-                : undefined;
-            const totalTokens =
-              typeof usage?.total_tokens === "number"
-                ? usage.total_tokens
-                : (typeof usage?.input_tokens === "number"
-                    ? usage.input_tokens
-                    : 0) +
-                  (typeof usage?.output_tokens === "number"
-                    ? usage.output_tokens
-                    : 0);
-            if (onUsage && totalTokens > 0) {
-              const cacheUsage = extractContextCacheUsage(usage);
-              await onUsage({
-                promptTokens:
-                  typeof usage?.input_tokens === "number"
-                    ? usage.input_tokens
-                    : 0,
-                completionTokens:
-                  typeof usage?.output_tokens === "number"
-                    ? usage.output_tokens
-                    : 0,
-                totalTokens,
-                ...cacheUsage,
-                ...(typeof usage?.input_tokens === "number"
-                  ? {
-                      contextTokens: usage.input_tokens,
-                      contextWindowIsAuthoritative: true,
-                    }
-                  : {}),
-              });
-            }
-          }
-        } catch (_error) {
+          response?: ResponsesPayload;
+        };
+        const eventType =
+          typeof parsed.type === "string" ? parsed.type.toLowerCase() : "";
+        if (eventType) eventTypesSeen.add(eventType);
+        if (eventType === "response.output_text.delta") {
+          await emitAnswer(parsed.delta, "delta", parsed);
           continue;
+        }
+        if (eventType === "response.output_text.done") {
+          await emitAnswer(parsed.text ?? parsed.delta, "final", parsed);
+          continue;
+        }
+        if (
+          eventType === "response.content_part.added" ||
+          eventType === "response.content_part.delta"
+        ) {
+          const partType =
+            typeof parsed.part?.type === "string"
+              ? parsed.part.type.toLowerCase()
+              : "";
+          if (!partType || partType === "output_text" || partType === "text") {
+            await emitAnswer(
+              parsed.delta ??
+                parsed.text ??
+                parsed.part?.text ??
+                parsed.part?.content,
+              eventType === "response.content_part.added"
+                ? "snapshot"
+                : "delta",
+              parsed,
+            );
+          }
+          continue;
+        }
+        if (eventType === "response.content_part.done") {
+          const partType =
+            typeof parsed.part?.type === "string"
+              ? parsed.part.type.toLowerCase()
+              : "";
+          if (!partType || partType === "output_text" || partType === "text") {
+            await emitAnswer(
+              parsed.text ??
+                parsed.delta ??
+                parsed.part?.text ??
+                parsed.part?.content,
+              "final",
+              parsed,
+            );
+          }
+          continue;
+        }
+        if (
+          eventType === "response.message.delta" ||
+          eventType === "response.message.added"
+        ) {
+          await emitOutputItem(
+            { type: "message", ...parsed.message },
+            parsed,
+            eventType === "response.message.added" ? "snapshot" : "delta",
+          );
+          continue;
+        }
+        if (eventType === "response.message.done") {
+          await emitOutputItem({ type: "message", ...parsed.message }, parsed);
+          continue;
+        }
+        if (
+          (eventType === "response.reasoning_summary.delta" ||
+            eventType === "response.reasoning_summary_text.delta") &&
+          parsed.delta
+        ) {
+          sawSummaryDelta = true;
+          await emitReasoning({
+            summary: normalizeResponsesText(parsed.delta),
+          });
+          continue;
+        }
+        if (
+          (eventType === "response.reasoning_summary.done" ||
+            eventType === "response.reasoning_summary_text.done") &&
+          (parsed.text || parsed.delta)
+        ) {
+          sawSummaryFinal = true;
+          if (!sawSummaryDelta) {
+            await emitReasoning({
+              summary: normalizeResponsesText(parsed.text ?? parsed.delta),
+            });
+          }
+          continue;
+        }
+        if (
+          (eventType === "response.reasoning_summary_part.added" ||
+            eventType === "response.reasoning_summary_part.done") &&
+          parsed.part
+        ) {
+          const partType =
+            typeof parsed.part.type === "string"
+              ? parsed.part.type.toLowerCase()
+              : "";
+          if (
+            !partType ||
+            partType === "summary_text" ||
+            partType === "reasoning_summary"
+          ) {
+            // Skip if we already streamed this content via delta events
+            if (!sawSummaryDelta) {
+              const partSummary = normalizeResponsesText(
+                parsed.part.text ?? parsed.part.content ?? parsed.part.summary,
+              );
+              if (partSummary) {
+                sawSummaryFinal = true;
+                await emitReasoning({ summary: partSummary });
+              }
+            }
+          }
+          continue;
+        }
+        if (
+          (eventType === "response.reasoning.delta" ||
+            eventType === "response.reasoning_text.delta") &&
+          parsed.delta
+        ) {
+          sawDetailsDelta = true;
+          await emitReasoning({
+            details: normalizeResponsesText(parsed.delta),
+          });
+          continue;
+        }
+        if (
+          (eventType === "response.reasoning.done" ||
+            eventType === "response.reasoning_text.done") &&
+          (parsed.text || parsed.delta)
+        ) {
+          sawDetailsFinal = true;
+          if (!sawDetailsDelta) {
+            await emitReasoning({
+              details: normalizeResponsesText(parsed.text ?? parsed.delta),
+            });
+          }
+          continue;
+        }
+        if (eventType === "response.reasoning" && parsed.reasoning) {
+          sawDetailsFinal = true;
+          if (!sawDetailsDelta) {
+            await emitReasoning({
+              details: normalizeReasoningText(parsed.reasoning),
+            });
+          }
+          continue;
+        }
+        if (
+          eventType === "response.output_item.added" ||
+          eventType === "response.output_item.delta" ||
+          eventType === "response.output_item.done"
+        ) {
+          mergeOutputItem(parsed.item);
+          await emitReasoningFromOutputItem(parsed.item);
+          const itemKey = getResponseOutputItemKey(parsed.item);
+          if (eventType === "response.output_item.done" && itemKey)
+            completedOutputKeys.add(itemKey);
+          await emitOutputItem(
+            parsed.item,
+            parsed,
+            eventType === "response.output_item.done" ? "final" : "snapshot",
+          );
+          continue;
+        }
+        if (
+          eventType === "response.completed" ||
+          eventType === "response.incomplete" ||
+          eventType === "response.failed" ||
+          eventType === "error"
+        ) {
+          const status =
+            eventType === "response.completed"
+              ? "completed"
+              : eventType === "response.incomplete"
+                ? "incomplete"
+                : "failed";
+          if (
+            status !== "failed" &&
+            (!parsed.response ||
+              (parsed.response.status && parsed.response.status !== status))
+          ) {
+            throw new Error(
+              "Responses terminal event has an invalid response status.",
+            );
+          }
+          latestPayload = { ...parsed.response, status };
+          if (
+            typeof parsed.response?.id === "string" &&
+            parsed.response.id.trim()
+          ) {
+            responseId = parsed.response.id.trim();
+          }
+          const outputs = Array.isArray(parsed.response?.output)
+            ? parsed.response.output
+            : [];
+          for (const output of outputs) {
+            await emitReasoningFromOutputItem(output);
+          }
+          const finalText =
+            normalizeResponsesText(parsed.response?.output_text) ||
+            extractOutputText(outputs);
+          if (
+            parsed.response?.output_text !== undefined ||
+            Array.isArray(parsed.response?.output)
+          ) {
+            const delta = answer.finish(finalText);
+            if (delta && onTextDelta) await onTextDelta(delta);
+          }
+          const usage =
+            parsed.response &&
+            typeof parsed.response === "object" &&
+            "usage" in parsed.response
+              ? (
+                  parsed.response as {
+                    usage?: {
+                      input_tokens?: unknown;
+                      output_tokens?: unknown;
+                      total_tokens?: unknown;
+                      input_tokens_details?: unknown;
+                      prompt_tokens_details?: unknown;
+                    };
+                  }
+                ).usage
+              : undefined;
+          const totalTokens =
+            typeof usage?.total_tokens === "number"
+              ? usage.total_tokens
+              : (typeof usage?.input_tokens === "number"
+                  ? usage.input_tokens
+                  : 0) +
+                (typeof usage?.output_tokens === "number"
+                  ? usage.output_tokens
+                  : 0);
+          if (onUsage && totalTokens > 0) {
+            const cacheUsage = extractContextCacheUsage(usage);
+            await onUsage({
+              promptTokens:
+                typeof usage?.input_tokens === "number"
+                  ? usage.input_tokens
+                  : 0,
+              completionTokens:
+                typeof usage?.output_tokens === "number"
+                  ? usage.output_tokens
+                  : 0,
+              totalTokens,
+              ...cacheUsage,
+              ...(typeof usage?.input_tokens === "number"
+                ? {
+                    contextTokens: usage.input_tokens,
+                    contextWindowIsAuthoritative: true,
+                  }
+                : {}),
+            });
+          }
+          break readStream;
         }
       }
     }
   } finally {
+    void reader.cancel().catch(() => {});
     reader.releaseLock();
   }
 
   if (latestPayload) {
-    const normalized = normalizeResponsesStepFromPayload(latestPayload);
     const outputItems = mergeResponseOutputItems(
-      normalized.outputItems,
-      streamedOutputs,
+      Array.isArray(latestPayload.output) ? latestPayload.output : [],
+      streamedOutputs.filter(
+        (item) =>
+          item.type !== "function_call" ||
+          completedOutputKeys.has(getResponseOutputItemKey(item) ?? ""),
+      ),
+      Array.isArray(latestPayload.output),
     );
-    const finalText =
-      normalized.text ||
-      streamedText.trim() ||
-      extractOutputText(outputItems).trim();
+    const normalized = normalizeResponsesStepFromPayload({
+      ...latestPayload,
+      output: outputItems,
+    });
+    const finalText = answer.text.trim();
     if (!finalText && (outputItems.length || eventTypesSeen.size > 0)) {
       logEmptyResponse(
         "LLM Agent: Empty responses step after completed payload",
@@ -857,15 +954,15 @@ export async function parseResponsesStepStream(
     return {
       responseId: normalized.responseId || responseId,
       text: finalText,
-      toolCalls: extractToolCallsFromOutputs(outputItems),
+      toolCalls: normalized.toolCalls,
       outputItems,
       completion: normalized.completion,
     };
   }
 
-  const toolCalls = extractToolCallsFromOutputs(streamedOutputs);
+  const toolCalls: AgentToolCall[] = [];
   const finalText =
-    streamedText.trim() || extractOutputText(streamedOutputs).trim();
+    answer.text.trim() || extractOutputText(streamedOutputs).trim();
   if (!finalText && (streamedOutputs.length || eventTypesSeen.size > 0)) {
     logEmptyResponse(
       "LLM Agent: Empty responses step without completed payload",
@@ -883,6 +980,10 @@ export async function parseResponsesStepStream(
     text: finalText,
     toolCalls,
     outputItems: streamedOutputs,
-    completion: { status: "complete" },
+    completion: {
+      status: "blocked",
+      reason: "other",
+      providerReason: "stream_interrupted",
+    },
   };
 }

@@ -120,6 +120,7 @@ import {
   appendContinuationText,
   callDirectChatTurnWithRecovery,
   EMPTY_OUTPUT_LIMIT_MESSAGE,
+  resolveDirectChatResponseText,
   resolveEmptyModelOutcomeMessage,
 } from "./directChatCompletion";
 import {
@@ -6929,10 +6930,10 @@ export async function retryLatestAssistantResponse(
     const outputLimited =
       modelOutcome.completion.status === "incomplete" &&
       modelOutcome.completion.reason === "output_limit";
-    const responseText =
-      sanitizeText(modelOutcome.text) ||
-      streamingResponse.getStreamedText() ||
-      "";
+    const responseText = resolveDirectChatResponseText(
+      modelOutcome,
+      streamingResponse.getStreamedText(),
+    );
     const visibleResponseText = continueIncomplete
       ? appendContinuationText(assistantSnapshot.text, responseText)
       : responseText;
@@ -9878,8 +9879,11 @@ export async function sendQuestion(
       modelOutcome.completion.status === "incomplete" &&
       modelOutcome.completion.reason === "output_limit";
     assistantMessage.text =
-      sanitizeText(modelOutcome.text) ||
-      assistantMessage.text ||
+      resolveDirectChatResponseText(
+        modelOutcome,
+        assistantMessage.text,
+        Boolean(assistantMessage.documentId || assistantMessage.planDocumentId),
+      ) ||
       (hasGeneratedOutput
         ? ""
         : outputLimited
