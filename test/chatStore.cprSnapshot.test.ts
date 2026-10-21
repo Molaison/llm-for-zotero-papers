@@ -97,6 +97,7 @@ describe("CPR conversation snapshot replacement", function () {
       isRegularItem: () => true,
       isAttachment: () => false,
       isNote: () => false,
+      getBestAttachment: async () => false,
       getField: (field: string) =>
         field === "DOI" ? "10.1234/snapshot" : "Paper title",
     } as unknown as Zotero.Item;
@@ -298,7 +299,7 @@ describe("CPR conversation snapshot replacement", function () {
       model: "papers/gpt-5.6-sol",
       prompt: "Only my next question",
       readBytes: async () => {
-        throw new Error("Must not reload the registered PDF");
+        throw new Error("No local attachment is available to read");
       },
       fetchFn: async () =>
         new Response(
