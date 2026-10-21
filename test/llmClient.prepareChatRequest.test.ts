@@ -1226,41 +1226,30 @@ describe("llmClient prepareChatRequest", function () {
   });
 
   it("refreshes codex auth token on 401 and retries once", async function () {
-    const prefsKey = "extensions.zotero.llmforzotero.modelProviderGroups";
-    const versionKey =
-      "extensions.zotero.llmforzotero.modelProviderGroupsMigrationVersion";
-    (
-      globalThis.Zotero.Prefs as { set: (key: string, value: unknown) => void }
-    ).set(
-      prefsKey,
-      JSON.stringify([
-        {
-          id: "provider-codex",
-          apiBase: "https://chatgpt.com/backend-api/codex/responses",
-          apiKey: "",
-          authMode: "codex_auth",
-          models: [
-            {
-              id: "m1",
-              model: "gpt-5.4",
-              temperature: 0.3,
-              outputTokenLimit: { mode: "auto" },
-            },
-          ],
-        },
-      ]),
-    );
-    (
-      globalThis.Zotero.Prefs as { set: (key: string, value: unknown) => void }
-    ).set(versionKey, 2);
-
     const authJson = JSON.stringify({
       tokens: { access_token: "old-access", refresh_token: "refresh-1" },
-      last_refresh: "2026-01-01T00:00:00.000Z",
+    });
+    await loadCodexDirectCatalog({
+      authPath: "/test/codex/auth.json",
+      readText: async () => authJson,
+      fetchFn: (async () =>
+        new Response(
+          JSON.stringify({
+            models: [
+              {
+                slug: "gpt-5.4",
+                visibility: "list",
+                supported_reasoning_levels: [{ effort: "high" }],
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        )) as typeof fetch,
     });
     const writes: string[] = [];
+    const authorizations: Array<string | null> = [];
     let apiCallCount = 0;
-    const fetchMock = async (url: string) => {
+    const fetchMock = async (url: string, init?: RequestInit) => {
       if (url === "https://auth.openai.com/oauth/token") {
         return {
           ok: true,
@@ -1273,6 +1262,8 @@ describe("llmClient prepareChatRequest", function () {
           text: async () => "",
         };
       }
+      assert.equal(url, CODEX_DIRECT_RESPONSES_URL);
+      authorizations.push(new Headers(init?.headers).get("Authorization"));
       apiCallCount += 1;
       if (apiCallCount === 1) {
         return {
@@ -1283,13 +1274,12 @@ describe("llmClient prepareChatRequest", function () {
           json: async () => ({}),
         };
       }
-      return {
-        ok: true,
-        status: 200,
-        statusText: "OK",
-        json: async () => ({ output_text: "OK after refresh" }),
-        text: async () => "",
-      };
+      return new Response(
+        makeSseStream([
+          'data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"OK after refresh"}]}]}}\n\n',
+        ]),
+        { status: 200, headers: { "Content-Type": "text/event-stream" } },
+      );
     };
 
     (
@@ -1318,9 +1308,15 @@ describe("llmClient prepareChatRequest", function () {
     const output = await callLLM({
       prompt: "ping",
       model: "gpt-5.4",
+      apiBase: CODEX_DIRECT_RESPONSES_URL,
+      authMode: "codex_auth",
     });
     assert.equal(output.text, "OK after refresh");
     assert.equal(apiCallCount, 2);
+    assert.deepEqual(authorizations, [
+      "Bearer old-access",
+      "Bearer new-access",
+    ]);
     assert.isAtLeast(writes.length, 1);
     assert.include(writes[writes.length - 1], "new-access");
   });
