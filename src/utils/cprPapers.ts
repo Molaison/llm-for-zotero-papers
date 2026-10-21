@@ -123,15 +123,25 @@ function getCprPaper(itemId?: number) {
   return { item, paper };
 }
 
+type CprPaperPdf = { path: string; bytes: Uint8Array; hash: string };
+
 async function readCprPaperPdf(item: Zotero.Item | undefined, paper: Zotero.Item,
-  readBytes: (path: string) => Promise<Uint8Array>) {
+  readBytes: (path: string) => Promise<Uint8Array>): Promise<CprPaperPdf>;
+async function readCprPaperPdf(item: Zotero.Item | undefined, paper: Zotero.Item,
+  readBytes: (path: string) => Promise<Uint8Array>, allowMissing: true): Promise<CprPaperPdf | undefined>;
+async function readCprPaperPdf(item: Zotero.Item | undefined, paper: Zotero.Item,
+  readBytes: (path: string) => Promise<Uint8Array>, allowMissing = false): Promise<CprPaperPdf | undefined> {
   const attachment = item?.isAttachment() && item.attachmentContentType === "application/pdf"
     ? item : await paper.getBestAttachment();
   if (!attachment || attachment.attachmentContentType !== "application/pdf") {
+    if (allowMissing) return undefined;
     throw new Error("这篇论文没有 PDF 附件；请先添加或下载 PDF，不会改用摘要。");
   }
   const path = await attachment.getFilePathAsync();
-  if (!path) throw new Error("PDF 尚未下载到本机，请先同步附件。");
+  if (!path) {
+    if (allowMissing) return undefined;
+    throw new Error("PDF 尚未下载到本机，请先同步附件。");
+  }
   const bytes = await readBytes(path);
   return { path, bytes, hash: await sha256(bytes) };
 }
@@ -229,6 +239,7 @@ export async function prepareCprPaperRequest(params: {
   // Resolved before any identity lookup or upload: an unsupported level must
   // fail without touching the server.
   const reasoningEffort = resolveCprPapersReasoningEffort(model, params.reasoning);
+  params.signal?.throwIfAborted();
   const {item, paper} = getCprPaper(params.itemId);
   const paperTitle = cprPaperConversationTitle(
     String(paper.getField("shortTitle") || ""), String(paper.getField("title") || ""),
@@ -236,9 +247,17 @@ export async function prepareCprPaperRequest(params: {
   let path: string | undefined;
   let bytes: Uint8Array | undefined;
   let pdfHash: string | undefined;
-  const loadPdf = async () => {
+  const loadPdf = async (required = true) => {
     if (bytes) return;
-    const pdf = await readCprPaperPdf(item, paper, params.readBytes);
+    const pdf = required
+      ? await readCprPaperPdf(item, paper, params.readBytes)
+      : await readCprPaperPdf(item, paper, params.readBytes, true);
+    params.signal?.throwIfAborted();
+    if (!pdf) return;
+    const magic = [0x25, 0x50, 0x44, 0x46, 0x2d];
+    if (pdf.bytes.length < magic.length || magic.some((byte, index) => pdf.bytes[index] !== byte)) {
+      throw new Error("附件不是有效的 PDF（缺少 %PDF- 头）；没有发送聊天请求。");
+    }
     path = pdf.path; bytes = pdf.bytes; pdfHash = pdf.hash;
   };
   let paperId = normalizePaperDoi(String(paper.getField("DOI") || ""));
@@ -255,10 +274,12 @@ export async function prepareCprPaperRequest(params: {
   const legacyUploaded = typeof legacyTarget === "string" && normalizeCprPapersTarget(legacyTarget) === target;
   const lookupIdentity = {
     paper_id: paperId, paper_operation: "resolve",
+    ...(pdfHash ? {paper_pdf_sha256: pdfHash} : {}),
     ...(typeof cachedToken === "string" && cachedToken ? {paper_upload_token: cachedToken} : {}),
     ...(legacyUploaded ? {paper_legacy_thread_id: legacy, paper_legacy_uploaded: true} : {}),
   };
   const resolveRegistry = async (identity: Record<string, unknown>) => {
+    params.signal?.throwIfAborted();
     const response = await params.fetchFn(resolveEndpoint(params.apiBase, RESPONSES_ENDPOINT), {
       method: "POST", headers: {"Content-Type": "application/json", Authorization: `Bearer ${params.apiKey}`},
       body: JSON.stringify({model, stream: false, input: "paper registry lookup",
@@ -271,6 +292,19 @@ export async function prepareCprPaperRequest(params: {
     return result;
   };
   let registry = await resolveRegistry(lookupIdentity);
+  if (registry.status === "ready" && registry.upload_required === false && !pdfHash) {
+    // A remote-ready DOI remains usable on a device without a local PDF. When
+    // bytes are available, however, the current attachment must agree with the
+    // server's saved content before this question can reuse that conversation.
+    const originalThread = registry.thread_id;
+    await loadPdf(false);
+    if (pdfHash) {
+      registry = await resolveRegistry({...lookupIdentity, paper_pdf_sha256: pdfHash});
+      if (registry.status !== "ready" || registry.upload_required !== false || registry.thread_id !== originalThread) {
+        throw new Error("论文会话或状态在内容校验期间发生变化；已停止发送，不会自动重新上传 PDF。");
+      }
+    }
+  }
   // A DOI added on another device must reuse an existing hash-only binding before uploading bytes.
   if (paperId.startsWith("doi:") && registry.status === "missing" && registry.upload_required === true && typeof registry.upload_token === "string") {
     Zotero.Prefs.set(reservationKey, registry.upload_token, true);
@@ -305,7 +339,8 @@ export async function prepareCprPaperRequest(params: {
       client_metadata: {"x-codex-turn-metadata": JSON.stringify({thread_id: registry.thread_id, turn_id: turn,
         paper_id: paperId, paper_operation: "chat",
         ...(paperTitle ? {paper_title: paperTitle} : {}),
-        ...(uploadToken ? {paper_upload_token: uploadToken, paper_pdf_sha256: pdfHash} : {})})},
+        ...(uploadToken ? {paper_upload_token: uploadToken} : {}),
+        ...(pdfHash ? {paper_pdf_sha256: pdfHash} : {})})},
       input: [{type: "message", role: "user", id: `paper-${turn}`, content}],
     },
     accept: () => Zotero.Prefs.set(reservationKey, "", true),

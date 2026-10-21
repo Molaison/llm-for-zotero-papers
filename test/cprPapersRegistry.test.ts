@@ -1,4 +1,5 @@
 import { assert } from "chai";
+import { createHash } from "node:crypto";
 import { fetchCprPaperHistory, parseCprPaperHistory, prepareCprPaperRequest, normalizePaperDoi, cprPaperConversationTitle, CPR_PAPERS_API_BASE, CPR_PAPERS_MODELS } from "../src/utils/cprPapers";
 import { resetProviderSessionIdCacheForTests } from "../src/utils/providerSessionId";
 import { createPaperPortalItem, resolveConversationBaseItem } from "../src/modules/contextPanel/portalScope";
@@ -15,15 +16,17 @@ describe("CPR server-owned paper registry client", function () {
   let doi: string;
   let itemId: number;
   let shortTitle: string;
+  let pdfPath: string | false;
   beforeEach(function () {
     original = globalThis.Zotero;
     prefs = new Map(); doi = "https://doi.org/10.1234/ABC"; itemId = 7;
     shortTitle = "";
+    pdfPath = "/paper.pdf";
     resetProviderSessionIdCacheForTests();
     globalThis.Zotero = {Prefs: {get: (k: string) => prefs.get(k), set: (k: string, v: unknown) => prefs.set(k, v)},
       Items: {get: () => ({id: itemId, key: String(itemId), libraryID: itemId, isRegularItem: () => true,
         isAttachment: () => false, getField: (field: string) => field === "DOI" ? doi : field === "shortTitle" ? shortTitle : "Paper title",
-        getBestAttachment: async () => ({attachmentContentType: "application/pdf", getFilePathAsync: async () => "/paper.pdf"}),
+        getBestAttachment: async () => ({attachmentContentType: "application/pdf", getFilePathAsync: async () => pdfPath}),
       })},
     } as unknown as typeof Zotero;
   });
@@ -123,6 +126,7 @@ describe("CPR server-owned paper registry client", function () {
     assert.equal(reservations[0][1], "own-paper-token");
   });
   it("resolves different paper portal sessions to the real item and same saved thread", async function () {
+    pdfPath = false;
     const paper = Zotero.Items.get(itemId);
     const lookups: number[] = [];
     Zotero.Items.get = ((id: number) => {
@@ -204,6 +208,7 @@ describe("CPR server-owned paper registry client", function () {
     assert.equal(prefs.size, 0);
   });
   it("uses the short title for display without changing the paper identity", async function () {
+    pdfPath = false;
     shortTitle = "  MaSIF-neosurf\n paper  ";
     const request = await prepareCprPaperRequest({itemId, apiBase: CPR_PAPERS_API_BASE, apiKey: "test", prompt: "q",
       fetchFn: async () => ready("doi:10.1234/abc"), readBytes: async () => {throw new Error("must not read ready PDF");}});
@@ -214,7 +219,8 @@ describe("CPR server-owned paper registry client", function () {
     assert.equal(cprPaperConversationTitle("", " Paper title "), "Paper title");
     assert.lengthOf(cprPaperConversationTitle("x".repeat(100), "unused"), 80);
   });
-  it("uses the same server thread across devices and does not read or transmit PDF on ready", async function () {
+  it("uses the same server thread across devices without requiring a local ready PDF", async function () {
+    pdfPath = false;
     const queries: unknown[] = [];
     const fetchFn: typeof fetch = async (_url, init) => {queries.push(JSON.parse(String(init?.body)));return ready("doi:10.1234/abc");};
     const first = await prepareCprPaperRequest({itemId, apiBase: CPR_PAPERS_API_BASE, apiKey: "test", prompt: "first", fetchFn,
@@ -228,6 +234,7 @@ describe("CPR server-owned paper registry client", function () {
     assert.deepEqual(second.payload.input[0].content, [{type: "input_text", text: "second"}]);
   });
   it("keeps one paper identity, thread and reservation across all papers models", async function () {
+    pdfPath = false;
     const bodies: Array<Record<string, any>> = [];
     const identities: string[] = [];
     const fetchFn: typeof fetch = async (_url, init) => {
@@ -259,6 +266,7 @@ describe("CPR server-owned paper registry client", function () {
   });
 
   it("sends the selected papers model's own effort, and none on the lookup", async function () {
+    pdfPath = false;
     const efforts: unknown[] = [];
     const fetchFn: typeof fetch = async (_url, init) => {
       const body = JSON.parse(String(init?.body));
@@ -374,8 +382,8 @@ describe("CPR server-owned paper registry client", function () {
     const req = await prepareCprPaperRequest({itemId, apiBase: CPR_PAPERS_API_BASE, apiKey: "test", prompt: "read", fetchFn: async (_url, init) => {
       queried = JSON.parse(JSON.parse(String(init?.body)).client_metadata["x-codex-turn-metadata"]).paper_id;
       return ready(queried);
-    }, readBytes: async () => new TextEncoder().encode("abc")});
-    assert.equal(queried, "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    }, readBytes: async () => new TextEncoder().encode("%PDF-test")});
+    assert.equal(queried, `sha256:${createHash("sha256").update("%PDF-test").digest("hex")}`);
     assert.equal(req.payload.input[0].content.length, 1);
   });
   it("does not upload when a different client is pending or the prior send is uncertain", async function () {
