@@ -16030,3 +16030,623 @@ item-pane-sidenav .llm-persistent-rail-entry[hidden] {
   box-shadow: none;
   transition: none;
 }
+/* ========================================================================
+ * UI REDESIGN HILL CLIMB
+ * Shared visual system for the chat surface. This section intentionally
+ * overrides presentation only: the existing DOM, IDs, state attributes and
+ * interaction contracts remain unchanged.
+ * ======================================================================== */
+
+.llm-panel {
+  --llm-redesign-radius-sm: 7px;
+  --llm-redesign-radius-md: 10px;
+  --llm-redesign-radius-lg: 12px;
+  --llm-redesign-control-height: 34px;
+  --llm-redesign-surface-raised: var(--llm-slate2);
+  --llm-redesign-surface-soft: var(--llm-slate3);
+  --llm-redesign-border: var(--llm-slate6);
+  --llm-redesign-border-strong: var(--llm-slate7);
+  --llm-redesign-focus: var(--llm-indigo9);
+  gap: 10px;
+  padding: 10px;
+  background: var(--llm-slate1);
+}
+
+/* Keep the pane visually separate from Zotero's native item details without
+   changing its sizing or its host layout. */
+.llm-header-nav-row {
+  min-height: 42px;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--llm-redesign-border);
+  border-radius: var(--llm-redesign-radius-md);
+  background: var(--llm-redesign-surface-raised);
+}
+
+.llm-header-info,
+.llm-header-actions {
+  min-height: var(--llm-redesign-control-height);
+}
+
+.llm-header-actions {
+  gap: 3px;
+}
+
+.llm-header-actions > button,
+.llm-header-actions .llm-conversation-tools > summary {
+  min-width: var(--llm-redesign-control-height);
+  min-height: var(--llm-redesign-control-height);
+  border-radius: var(--llm-redesign-radius-sm);
+}
+
+.llm-conversation-tools > summary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 9px;
+}
+
+.llm-conversation-tools > summary:hover,
+.llm-conversation-tools[open] > summary {
+  background: var(--llm-redesign-surface-soft);
+  color: var(--llm-slate12);
+}
+
+.llm-conversation-tools-body,
+.llm-source-body,
+.llm-status-control:hover > .llm-status:not(:empty),
+.llm-status-control:focus-within > .llm-status:not(:empty) {
+  border: 1px solid var(--llm-redesign-border-strong);
+  border-radius: var(--llm-redesign-radius-md);
+  background: var(--llm-slate1);
+  box-shadow: 0 8px 24px rgb(15 23 42 / 14%);
+}
+
+.llm-chat-shell {
+  min-height: 0;
+  border: 1px solid var(--llm-redesign-border);
+  border-radius: var(--llm-redesign-radius-lg);
+  background: var(--llm-slate1);
+  overflow: hidden;
+}
+
+.llm-messages {
+  gap: 20px;
+  padding: 20px clamp(14px, 3vw, 30px) 24px;
+  background: var(--llm-slate1);
+}
+
+.llm-message-wrapper.user {
+  margin-inline-start: clamp(16px, 8%, 56px);
+}
+
+.llm-bubble.user {
+  max-width: min(100%, 760px);
+  padding: 11px 14px;
+  border: 1px solid var(--llm-redesign-border);
+  border-radius: 12px 12px 4px 12px;
+  background: var(--llm-redesign-surface-soft);
+}
+
+.llm-bubble.assistant {
+  padding-inline: 2px;
+}
+
+.llm-message-meta {
+  gap: 6px;
+  padding-inline: 2px;
+}
+
+.llm-message-action,
+.llm-edit-latest {
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  flex-basis: 28px;
+  border-radius: var(--llm-redesign-radius-sm);
+}
+
+.llm-message-action:hover:not(:disabled),
+.llm-message-action:focus-visible,
+.llm-edit-latest:hover:not(:disabled),
+.llm-edit-latest:focus-visible {
+  background: var(--llm-redesign-surface-soft);
+}
+
+/* Source chips stay compact while the composer owns the available height.
+   Expanded previews scroll internally instead of pushing the textarea away. */
+.llm-input-section {
+  gap: 6px;
+  min-height: 0;
+  padding: 0;
+}
+
+.llm-context-previews {
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: min(18vh, 164px);
+  gap: 5px;
+  padding: 2px;
+  scrollbar-gutter: stable;
+  overscroll-behavior: contain;
+}
+
+.llm-context-previews > :is(
+    #llm-runtime-mode-toggle,
+    #llm-selected-context-list > .llm-selected-context,
+    .llm-image-preview,
+    #llm-file-context-preview,
+    #llm-paper-context-preview
+  ) {
+  min-height: 28px;
+  border: 1px solid var(--llm-redesign-border);
+  border-radius: 999px;
+  background: var(--llm-redesign-surface-raised);
+}
+
+#llm-runtime-mode-toggle {
+  min-height: 30px;
+  padding-inline: 10px;
+  border-color: var(--llm-redesign-border-strong);
+  border-radius: 999px;
+}
+
+.llm-compose-area {
+  flex: 0 0 auto;
+  gap: 7px;
+  padding: 8px 9px 9px;
+  border: 1px solid var(--llm-redesign-border-strong);
+  border-radius: var(--llm-redesign-radius-lg);
+  background: var(--llm-redesign-surface-raised);
+  box-shadow: 0 4px 14px rgb(15 23 42 / 8%);
+}
+
+.llm-compose-area:focus-within {
+  border-color: var(--llm-redesign-focus);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--llm-indigo9) 18%, transparent),
+    0 6px 18px rgb(15 23 42 / 10%);
+}
+
+.llm-input {
+  min-height: 68px;
+  max-height: 200px;
+  padding: 10px 11px;
+  border-radius: var(--llm-redesign-radius-sm);
+  background: var(--llm-slate1);
+}
+
+.llm-actions {
+  gap: 6px;
+  min-height: var(--llm-redesign-control-height);
+  padding-top: 7px;
+  border-top: 1px solid var(--llm-redesign-border);
+}
+
+.llm-actions-left,
+.llm-actions-right {
+  gap: 4px;
+}
+
+.llm-actions button,
+.llm-action-btn,
+.llm-actions .llm-shortcut-btn,
+.llm-actions .llm-select-text-btn,
+.llm-actions .llm-screenshot-btn {
+  min-height: var(--llm-redesign-control-height);
+  border-radius: var(--llm-redesign-radius-sm);
+}
+
+.llm-actions button:hover:not(:disabled),
+.llm-actions button:focus-visible {
+  border-color: var(--llm-redesign-border-strong);
+}
+
+.llm-source-control {
+  border: 1px solid transparent;
+  border-radius: var(--llm-redesign-radius-sm);
+}
+
+.llm-source-control:focus-within,
+.llm-source-control:hover {
+  border-color: var(--llm-redesign-border);
+  background: var(--llm-redesign-surface-soft);
+}
+
+.llm-source-toggle {
+  min-height: var(--llm-redesign-control-height);
+  padding-inline: 8px;
+  border-radius: var(--llm-redesign-radius-sm);
+}
+
+.llm-source-toggle:hover {
+  background: transparent;
+}
+
+.llm-source-shortcut {
+  border-radius: var(--llm-redesign-radius-sm) !important;
+}
+
+.llm-task-progress-card {
+  margin: 0 0 8px;
+  border: 1px solid var(--llm-redesign-border-strong);
+  border-radius: var(--llm-redesign-radius-md);
+  background: var(--llm-redesign-surface-raised);
+  box-shadow: 0 4px 16px rgb(15 23 42 / 8%);
+}
+
+.llm-task-progress {
+  height: 42px;
+  min-height: 42px;
+  padding-inline: 11px;
+  border-radius: var(--llm-redesign-radius-md);
+}
+
+.llm-task-progress:hover,
+.llm-task-progress:focus-visible {
+  background: var(--llm-redesign-surface-soft);
+}
+
+.llm-task-progress-pill {
+  height: 22px;
+  padding-inline: 9px;
+  border-radius: 999px;
+}
+
+.llm-task-progress-drawer {
+  border-top-color: var(--llm-redesign-border);
+}
+
+.llm-task-progress-steps {
+  border-bottom-color: var(--llm-redesign-border);
+}
+
+.llm-task-paper-summary {
+  padding: 10px 11px;
+  border-radius: var(--llm-redesign-radius-sm);
+}
+
+.llm-task-paper-summary:hover,
+.llm-task-paper-summary:focus-visible {
+  background: var(--llm-redesign-surface-soft);
+}
+
+.llm-task-paper + .llm-task-paper,
+.llm-task-progress-history,
+.llm-task-progress-question-section + .llm-task-progress-question-section {
+  border-top-color: var(--llm-redesign-border);
+}
+
+.llm-task-paper-source,
+.llm-paper-source-indicator .llm-web-source-chip {
+  border-color: var(--llm-redesign-border-strong);
+  border-radius: 999px;
+  background: var(--llm-redesign-surface-soft);
+}
+
+.llm-quote-card {
+  margin: 8px 0;
+  border: 1px solid var(--llm-redesign-border);
+  border-radius: var(--llm-redesign-radius-md);
+  background: var(--llm-redesign-surface-raised);
+}
+
+.llm-quote-card[data-expanded="false"] {
+  background: var(--llm-redesign-surface-raised);
+}
+
+.llm-quote-card[data-expanded="false"]:hover,
+.llm-quote-card[data-expanded="false"]:focus-within {
+  border-color: var(--llm-redesign-border-strong);
+  background: var(--llm-redesign-surface-soft);
+}
+
+.llm-quote-card-content {
+  padding: 10px 12px 5px;
+}
+
+.llm-quote-card-citation {
+  padding: 0 12px 8px;
+}
+
+.llm-quote-card-body,
+.llm-quote-card-preview {
+  border-left-width: 2px;
+  border-left-color: var(--llm-quote-card-rail);
+}
+
+.llm-panel :is(button, summary, select, textarea, input[type="checkbox"]):focus-visible {
+  outline: 2px solid var(--llm-redesign-focus);
+  outline-offset: 1px;
+}
+
+@media (max-width: 520px) {
+  .llm-panel {
+    padding: 6px;
+    gap: 7px;
+  }
+
+  .llm-header-nav-row {
+    padding-inline: 7px;
+  }
+
+  .llm-messages {
+    padding-inline: 12px;
+  }
+
+  .llm-message-wrapper.user {
+    margin-inline-start: 8px;
+  }
+
+  .llm-context-previews {
+    max-height: min(16vh, 132px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .llm-compose-area,
+  .llm-task-progress-card,
+  .llm-panel * {
+    scroll-behavior: auto;
+  }
+}
+
+/* Scope bar added by buildUI.ts: keep the current paper/library identity
+   visible while leaving history and low-frequency actions discoverable. */
+.llm-scope-bar {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  min-height: 38px;
+  padding: 6px 10px;
+  border: 1px solid var(--llm-redesign-border);
+  border-radius: var(--llm-redesign-radius-md);
+  background: var(--llm-redesign-surface-raised);
+}
+
+.llm-scope-icon {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 9px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--llm-indigo9);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--llm-indigo9) 16%, transparent);
+}
+
+.llm-scope-bar[data-scope="library"] .llm-scope-icon {
+  background: var(--llm-green9);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--llm-green9) 16%, transparent);
+}
+
+.llm-scope-bar[data-scope="note"] .llm-scope-icon {
+  background: var(--llm-amber9);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--llm-amber9) 16%, transparent);
+}
+
+.llm-scope-bar[data-scope="empty"] .llm-scope-icon {
+  background: var(--llm-slate8);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--llm-slate8) 16%, transparent);
+}
+
+.llm-scope-copy {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 5px 8px;
+  min-width: 0;
+  line-height: 1.2;
+}
+
+.llm-scope-kind {
+  color: var(--llm-ui-muted);
+  font-size: var(--llm-text-small);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.llm-scope-title {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--llm-slate12);
+  font-size: var(--llm-text-control);
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.llm-scope-meta {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--llm-ui-muted);
+  font-size: var(--llm-text-small);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.llm-context-add-slot {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.llm-context-add-slot .llm-upload-file-btn {
+  min-width: 34px;
+  padding-inline: 9px;
+}
+
+.llm-context-previews {
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+/* History is a first-class workflow object. Keep the existing clock icon and
+   add a short visible label when the rail has room; the narrow breakpoint
+   below returns to the compact icon-only target. */
+.llm-history-toggle {
+  width: auto;
+  min-width: 28px;
+  padding-inline: 8px 9px;
+}
+
+.llm-history-toggle::after {
+  content: attr(data-visible-label);
+  margin-inline-start: 5px;
+  color: currentColor;
+  font-size: var(--llm-text-small);
+  line-height: 1;
+}
+
+/* Round 2: a compact, shared run-status affordance. Existing controllers
+   continue to own the text and state; these rules only give every state the
+   same footprint and contrast. */
+.llm-panel {
+  --llm-redesign-shadow: 0 8px 24px rgb(15 23 42 / 14%);
+}
+
+.llm-conversation-tools-body,
+.llm-source-body,
+.llm-compose-area,
+.llm-task-progress-card {
+  box-shadow: var(--llm-redesign-shadow);
+}
+
+.llm-run-status-strip {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  min-height: 28px;
+  max-width: min(42%, 260px);
+  padding: 3px 8px;
+  border: 1px solid var(--llm-redesign-border);
+  border-radius: 999px;
+  color: var(--llm-status-busy-text);
+  background: var(--llm-redesign-surface-soft);
+  font-size: var(--llm-text-small);
+  line-height: 1.25;
+}
+
+.llm-run-status-strip .llm-status {
+  position: static;
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  padding: 0;
+  clip-path: none;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.llm-run-status-strip .llm-status.llm-status-ready {
+  color: var(--llm-status-ready-text);
+}
+
+.llm-run-status-strip .llm-status.llm-status-sending {
+  color: var(--llm-status-busy-text);
+}
+
+.llm-run-status-strip .llm-status.llm-status-warning {
+  color: var(--llm-status-warning-text);
+}
+
+.llm-run-status-strip .llm-status.llm-status-error {
+  color: var(--llm-status-error-text);
+}
+
+.llm-status[data-status="queued"],
+.llm-status[data-state="queued"],
+.llm-run-status-strip[data-status="queued"] {
+  color: var(--llm-status-warning-text);
+}
+
+.llm-status[data-status="running"],
+.llm-status[data-state="running"],
+.llm-run-status-strip[data-status="running"] {
+  color: var(--llm-status-busy-text);
+}
+
+.llm-status[data-status="complete"],
+.llm-status[data-status="completed"],
+.llm-status[data-state="complete"],
+.llm-status[data-state="completed"],
+.llm-run-status-strip[data-status="complete"],
+.llm-run-status-strip[data-status="completed"] {
+  color: var(--llm-status-ready-text);
+}
+
+.llm-status[data-status="error"],
+.llm-status[data-state="error"],
+.llm-run-status-strip[data-status="error"] {
+  color: var(--llm-status-error-text);
+  border-color: var(--llm-red7);
+  background: var(--llm-red3);
+}
+
+.llm-scope-bar[data-scope="empty"] {
+  border-style: dashed;
+  background: var(--llm-slate2);
+}
+
+.llm-scope-bar[data-scope="empty"] .llm-scope-title {
+  color: var(--llm-ui-muted);
+  font-weight: 550;
+}
+
+@media (prefers-color-scheme: dark) {
+  .llm-panel,
+  .window-is-dark .llm-panel,
+  :root[lwtheme-brighttext] .llm-panel,
+  :root[sizemode][lwtheme-brighttext] .llm-panel {
+    --llm-redesign-shadow: 0 8px 24px rgb(0 0 0 / 38%);
+  }
+}
+
+@media (max-width: 520px) {
+  .llm-scope-bar {
+    min-height: 34px;
+    padding-inline: 8px;
+  }
+
+  .llm-scope-copy {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .llm-scope-meta {
+    display: none;
+  }
+}
+
+/* Keep the narrowest layout last so it wins over the <=520px two-column
+   rule above. The button keeps its full accessible label outside this range. */
+@media (max-width: 420px) {
+  .llm-scope-copy {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+  }
+
+  .llm-scope-kind { grid-row: 1; }
+  .llm-scope-title { grid-row: 2; }
+  .llm-context-add-slot .llm-upload-file-btn {
+    min-width: 34px;
+    padding-inline: 9px;
+    font-size: 0;
+  }
+  .llm-context-add-slot .llm-upload-file-btn::before {
+    content: "+";
+    font-size: var(--llm-text-control);
+  }
+  .llm-run-status-strip { max-width: 48%; }
+
+  .llm-history-toggle {
+    width: 28px;
+    min-width: 28px;
+    padding-inline: 0;
+  }
+
+  .llm-history-toggle::after { display: none; }
+}
+
