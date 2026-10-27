@@ -14,14 +14,20 @@ export function getSidebarLayout(): SidebarLayout {
 }
 
 export function syncSidebarSectionLayout(doc: Document): void {
-  const stacked =
-    doc.documentElement.getAttribute("data-llm-pane-view") === "stacked";
+  const root = doc.documentElement;
+  const stacked = root.getAttribute("data-llm-pane-view") === "stacked";
+  const layout = root.getAttribute("data-llm-sidebar-layout") || "stacked";
+  root.setAttribute("data-llm-sidebar-layout-mode", layout);
   for (const section of Array.from(
     doc.querySelectorAll(".llm-dedicated-chat-pane > collapsible-section"),
   )) {
     const collapsible = section as Element & { collapsible: boolean };
+    section.setAttribute("data-llm-layout", layout);
     collapsible.collapsible = stacked;
-    if (!stacked) collapsible.setAttribute("open", "true");
+    if (!stacked) {
+      collapsible.setAttribute("open", "true");
+      collapsible.setAttribute("aria-expanded", "true");
+    }
   }
 }
 
@@ -32,6 +38,10 @@ export function installSidebarLayoutPreference(doc: Document): () => void {
     const layout = getSidebarLayout();
     const current = root.getAttribute("data-llm-pane-view");
     root.setAttribute("data-llm-sidebar-layout", layout);
+    root.setAttribute(
+      "data-llm-sidebar-layout-label",
+      layout === "stacked" ? "Stacked" : "Independent",
+    );
     root.setAttribute(
       "data-llm-pane-view",
       layout === "stacked"
@@ -48,5 +58,7 @@ export function installSidebarLayoutPreference(doc: Document): () => void {
   return () => {
     if (observer !== undefined) prefs?.unregisterObserver?.(observer);
     root.removeAttribute("data-llm-sidebar-layout");
+    root.removeAttribute("data-llm-sidebar-layout-mode");
+    root.removeAttribute("data-llm-sidebar-layout-label");
   };
 }
