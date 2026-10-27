@@ -1,0 +1,3097 @@
+<vbox
+  id="__addonRef__-prefs"
+  onload="
+    Zotero.__addonInstance__.hooks.onPrefsEvent('load', {
+      window: this.ownerDocument.defaultView,
+    })
+  "
+  xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"
+  xmlns:html="http://www.w3.org/1999/xhtml"
+>
+  <linkset>
+    <html:link rel="localization" href="__addonRef__-preferences.ftl" />
+  </linkset>
+  <html:style>
+    .llm-mineru-page-limit { width: 88px; height: 26px; margin: 0; padding: 3px
+    8px; font-family: inherit; font-size: 12px; text-align: left; border-radius:
+    6px; box-sizing: border-box; flex: 0 0 88px; } /* The preferences window is
+    a chrome document, whose used user-select value roots at `none` — hints,
+    helper text, and status lines must opt back in so users can copy URLs and
+    error details out of them. Interactive controls opt out again. */ /* Field
+    and edge colours for the WHOLE preferences pane, not just the two tabs built
+    from .llm-pref-*: every text input, dropdown and textarea on Customization
+    and MinerU takes them too, so the pane reads as one design. Zotero never
+    defines --stroke-secondary, so the borders those tabs used to draw fell back
+    to a light #c8c8c8 on a dark pane. */ #__addonRef__-prefs {
+    --llm-pref-surface: #f4f4f4; --llm-pref-head: #ffffff; --llm-pref-field:
+    #ffffff; --llm-pref-stroke: #dadada; } /* The Usage tab's one subtle
+    surface: metric cards, active segmented-control segments, list tracks and
+    the heatmap's empty-day cells all share it, so a day with no activity reads
+    as background rather than as the lightest ramp stop. currentColor against
+    Field follows the light/dark scheme on its own. */ #__addonRef__-prefs {
+    --llm-usage-subtle: color-mix(in srgb, currentColor 8%, Field); } @media
+    (prefers-color-scheme: dark) { #__addonRef__-prefs { --llm-pref-surface:
+    #3a3a3a; --llm-pref-head: #282828; --llm-pref-field: #282828;
+    --llm-pref-stroke: #4f4f4f; } } #__addonRef__-prefs .llm-pref-fields
+    :is(textarea, select,
+    input:not([type="checkbox"]):not([type="radio"]):not([type="range"])) {
+    background: var(--llm-pref-field); color: FieldText; border: 1px solid
+    var(--llm-pref-stroke); } #__addonRef__-prefs { -moz-user-select: text;
+    user-select: text; } #__addonRef__-prefs button, #__addonRef__-prefs select,
+    #__addonRef__-prefs option, #__addonRef__-prefs summary, #__addonRef__-prefs
+    input[type="checkbox"], #__addonRef__-prefs input[type="radio"] {
+    -moz-user-select: none; user-select: none; } /* ── Agent tab
+    ────────────────────────────────────────────────────── One collapsible row
+    per subject, one switch idiom for every on/off, and a fixed label column so
+    fields line up down the whole tab. Detail that only matters when something
+    is wrong lives in a per-row advanced drawer. Icon URLs are absolute on
+    purpose: Zotero inlines this markup into its own preferences document, so a
+    relative url() would resolve against chrome://zotero/content/ and silently
+    render nothing. */ /* Surfaces and edges for both preference tabs. Zotero
+    paints the preferences content area with #prefs-outer-container {
+    background-color: var(--material-sidepane); } which is #303030 dark /
+    #f2f2f2 light. A card has to sit ABOVE that, so these are literal values
+    chosen against it rather than Zotero tokens: --material-mix-quinary is
+    #2b2b2b dark — DARKER than the pane, so a card painted with it sinks into
+    the page, and in light it is #f2f2f2, exactly the pane colour, so the card
+    disappears entirely. --stroke-secondary is never defined by Zotero at all
+    (checked against Zotero.app/Contents/Resources/app/omni.ja ->
+    chrome/skin/default/zotero/preferences.css), so var(--stroke-secondary,
+    #c8c8c8) always drew the light-grey fallback. The Field system colour is
+    near-black in dark chrome. Literals are deliberate here: the colour is the
+    requirement, so it must not move when a Zotero token changes underneath it.
+    tmp/build-provider-preview.mjs renders this stylesheet on the real #303030 /
+    #f2f2f2 pane — check any change there. */ .llm-pref-panel { display: flex;
+    flex-direction: column; gap: 14px; } .llm-pref-panel .llm-pref-intro {
+    margin: 0; font-size: 11.5px; line-height: 1.5; color: var(--fill-secondary,
+    #888); } .llm-pref-panel .llm-pref-group { display: flex; flex-direction:
+    column; gap: 8px; } .llm-pref-panel .llm-pref-group-title { font-size: 11px;
+    font-weight: 700; color: var(--fill-secondary, #888); } .llm-pref-panel
+    [hidden] { display: none !important; } .llm-pref-panel .llm-pref-row {
+    border: 1px solid var(--llm-pref-stroke); border-radius: 10px; background:
+    var(--llm-pref-surface); overflow: hidden; } .llm-pref-panel
+    .llm-pref-row-head { display: grid; background: var(--llm-pref-head);
+    grid-template-columns: 18px minmax(0, 1fr) auto auto 12px; gap: 10px;
+    align-items: center; min-height: 42px; padding: 0 12px 1px; }
+    .llm-pref-panel .llm-pref-row-icon { width: 18px; height: 18px; flex: none;
+    background-repeat: no-repeat; background-position: center; background-size:
+    contain; } .llm-pref-panel .llm-pref-row-icon--original { background-image:
+    url("chrome://__addonRef__/content/icons/icon.svg"); background-size: 130%;
+    } .llm-pref-panel .llm-pref-row-icon--codex { background-image:
+    url("chrome://__addonRef__/content/icons/codex-logo.svg"); } .llm-pref-panel
+    .llm-pref-row-icon--claude { background-color: #d97757; mask-image:
+    url("chrome://__addonRef__/content/icons/claude-code.svg"); mask-repeat:
+    no-repeat; mask-position: center; mask-size: contain; -webkit-mask-image:
+    url("chrome://__addonRef__/content/icons/claude-code.svg");
+    -webkit-mask-repeat: no-repeat; -webkit-mask-position: center;
+    -webkit-mask-size: contain; } .llm-pref-panel .llm-pref-row-icon--notes {
+    background-color: FieldText; mask-image:
+    url("chrome://__addonRef__/content/icons/folder-open.svg"); mask-repeat:
+    no-repeat; mask-position: center; mask-size: contain; -webkit-mask-image:
+    url("chrome://__addonRef__/content/icons/folder-open.svg");
+    -webkit-mask-repeat: no-repeat; -webkit-mask-position: center;
+    -webkit-mask-size: contain; } .llm-pref-panel .llm-pref-row-toggle {
+    appearance: none; -moz-appearance: none; display: grid; align-content:
+    center; gap: 1px; min-width: 0; padding: 0; text-align: start; background:
+    transparent; border: none; color: inherit; cursor: pointer; }
+    .llm-pref-panel .llm-pref-row-name { font-size: 12px; font-weight: 600;
+    line-height: 1.35; color: FieldText; } .llm-pref-panel .llm-pref-row-sub {
+    display: flex; align-items: center; gap: 6px; min-width: 0; }
+    .llm-pref-panel .llm-pref-row-dot { flex: none; width: 6px; height: 6px;
+    border-radius: 50%; background: var(--fill-secondary, #9aa1a9); }
+    .llm-pref-panel .llm-pref-row-dot[data-on="true"] { background:
+    var(--accent-green, #3aa76d); } .llm-pref-panel .llm-pref-row-summary {
+    font-size: 10.5px; line-height: 1.35; color: var(--fill-secondary, #888);
+    overflow-wrap: anywhere; } .llm-pref-panel [data-llm-row-summary="notes"] {
+    min-width: 0; white-space: nowrap; overflow: hidden; text-overflow:
+    ellipsis; } .llm-pref-panel .llm-pref-row-tag { font-size: 10.5px; color:
+    var(--fill-secondary, #888); white-space: nowrap; } .llm-pref-panel
+    .llm-pref-row-chevron { font-size: 12px; line-height: 1; color:
+    var(--fill-secondary, #888); justify-self: center; transition: transform
+    0.15s ease; } .llm-pref-panel .llm-pref-row[data-open="true"]
+    .llm-pref-row-chevron { transform: rotate(90deg); } .llm-pref-panel
+    .llm-pref-row-body { display: flex; flex-direction: column; gap: 12px;
+    padding: 12px; border-top: 1px solid var(--llm-pref-stroke); }
+    .llm-pref-panel .llm-pref-switch { appearance: none; -moz-appearance: none;
+    position: relative; flex: none; width: 32px; height: 18px; margin: 0;
+    padding: 0; border: none; border-radius: 999px; background:
+    var(--fill-secondary, #9aa1a9); cursor: pointer; transition: background
+    0.15s ease; } .llm-pref-panel .llm-pref-switch::before { content: "";
+    position: absolute; top: 2px; inset-inline-start: 2px; width: 14px; height:
+    14px; border-radius: 50%; background: #fff; transition: transform 0.15s
+    ease; } .llm-pref-panel .llm-pref-switch:checked { background:
+    var(--accent-green, #3aa76d); } .llm-pref-panel
+    .llm-pref-switch:checked::before { transform: translateX(14px); }
+    .llm-pref-panel .llm-pref-section { display: flex; flex-direction: column;
+    gap: 8px; } .llm-pref-panel .llm-pref-section + .llm-pref-section {
+    padding-top: 12px; border-top: 1px solid var(--llm-pref-stroke); }
+    .llm-pref-panel .llm-pref-section-title { font-size: 11px; font-weight: 700;
+    color: FieldText; } .llm-pref-panel .llm-pref-field { display: grid;
+    grid-template-columns: 148px minmax(0, 1fr); gap: 6px 14px; align-items:
+    start; } .llm-pref-panel .llm-pref-field > label { font-size: 12px;
+    padding-top: 5px; color: FieldText; } .llm-pref-panel .llm-pref-control {
+    display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+    .llm-pref-panel .llm-pref-line { display: flex; gap: 8px; align-items:
+    center; min-width: 0; } .llm-pref-panel .llm-pref-line--wrap { display:
+    grid; grid-template-columns: minmax(min(220px, 100%), 1fr) auto; box-sizing:
+    border-box; } .llm-pref-panel .llm-pref-hint { font-size: 11px; line-height:
+    1.45; color: var(--fill-secondary, #888); overflow-wrap: anywhere;
+    min-width: 0; } .llm-pref-panel .llm-pref-input, .llm-pref-panel
+    .llm-pref-select { width: 100%; min-width: 0; max-width: 100%; height: 26px;
+    margin: 0; padding: 3px 8px; font-size: 12px; box-sizing: border-box;
+    border: 1px solid var(--llm-pref-stroke); border-radius: 6px; background:
+    var(--llm-pref-field); color: FieldText; } .llm-pref-panel
+    textarea.llm-pref-input { height: auto; padding: 6px 8px; font-family:
+    monospace; line-height: 1.5; } .llm-pref-panel .llm-pref-button {
+    flex-shrink: 0; padding: 4px 10px; font-size: 11.5px; font-weight: 500;
+    white-space: nowrap; border: 1px solid var(--llm-pref-stroke);
+    border-radius: 6px; background: var(--llm-pref-field); color: FieldText;
+    cursor: pointer; } .llm-pref-panel .llm-pref-button--accent { border-color:
+    var(--color-accent, #2563eb); color: var(--color-accent, #2563eb);
+    background: transparent; } .llm-pref-panel .llm-pref-check { display: flex;
+    gap: 8px; align-items: flex-start; font-size: 12px; color: FieldText; }
+    .llm-pref-panel .llm-pref-check > input { margin: 2px 0 0; } .llm-pref-panel
+    .llm-pref-link { width: fit-content; font-size: 11px; color:
+    var(--color-accent, #2563eb); cursor: pointer; } .llm-pref-panel
+    .llm-pref-advanced { border-top: 1px solid var(--llm-pref-stroke);
+    padding-top: 10px; } .llm-pref-panel .llm-pref-advanced > summary {
+    font-size: 11.5px; font-weight: 600; color: var(--fill-secondary, #888);
+    cursor: pointer; } .llm-pref-panel .llm-pref-advanced-body { display: flex;
+    flex-direction: column; gap: 9px; padding-top: 10px; } /* ── Provider rows
+    (AI Providers tab) ────────────────────────────────── A provider is the same
+    collapsible row as a runtime, so every rule above applies unchanged. Only
+    the pieces a provider has and a runtime does not are defined here: a head
+    with no on/off switch, a section header that carries an action, the
+    per-model control line, and the gear drawer. */ .llm-pref-panel
+    .llm-pref-row-head--plain { grid-template-columns: 18px minmax(0, 1fr) auto
+    12px; } .llm-pref-panel .llm-pref-row-icon--provider { background-image:
+    url("chrome://__addonRef__/content/icons/custom-api.svg"); } .llm-pref-panel
+    .llm-pref-row-icon--webchat { background-image:
+    url("chrome://__addonRef__/content/icons/webchat-connection.svg"); }
+    .llm-pref-panel .llm-pref-row-icon--preset-openai { background-color:
+    FieldText; mask:
+    url("chrome://__addonRef__/content/icons/providers/openai.svg") center /
+    contain no-repeat; -webkit-mask:
+    url("chrome://__addonRef__/content/icons/providers/openai.svg") center /
+    contain no-repeat; } .llm-pref-panel .llm-pref-row-icon--preset-glm {
+    background-color: FieldText; mask:
+    url("chrome://__addonRef__/content/icons/providers/glm.svg") center /
+    contain no-repeat; -webkit-mask:
+    url("chrome://__addonRef__/content/icons/providers/glm.svg") center /
+    contain no-repeat; } .llm-pref-panel .llm-pref-row-icon--preset-grok {
+    background-color: FieldText; mask:
+    url("chrome://__addonRef__/content/icons/providers/grok.svg") center /
+    contain no-repeat; -webkit-mask:
+    url("chrome://__addonRef__/content/icons/providers/grok.svg") center /
+    contain no-repeat; } .llm-pref-panel .llm-pref-row-icon--preset-mimo {
+    background-color: FieldText; mask:
+    url("chrome://__addonRef__/content/icons/providers/mimo.svg") center /
+    contain no-repeat; -webkit-mask:
+    url("chrome://__addonRef__/content/icons/providers/mimo.svg") center /
+    contain no-repeat; } .llm-pref-panel .llm-pref-row-icon--preset-opencode {
+    background-color: FieldText; mask:
+    url("chrome://__addonRef__/content/icons/providers/opencode.svg") center /
+    contain no-repeat; -webkit-mask:
+    url("chrome://__addonRef__/content/icons/providers/opencode.svg") center /
+    contain no-repeat; } .llm-pref-panel .llm-pref-row-icon--preset-copilot {
+    background-color: FieldText; mask:
+    url("chrome://__addonRef__/content/icons/providers/copilot.svg") center /
+    contain no-repeat; -webkit-mask:
+    url("chrome://__addonRef__/content/icons/providers/copilot.svg") center /
+    contain no-repeat; } .llm-pref-panel .llm-pref-row-icon--preset-ollama {
+    background-color: FieldText; mask:
+    url("chrome://__addonRef__/content/icons/providers/ollama.svg") center /
+    contain no-repeat; -webkit-mask:
+    url("chrome://__addonRef__/content/icons/providers/ollama.svg") center /
+    contain no-repeat; } .llm-pref-panel .llm-pref-row-icon--preset-gemini {
+    background-image:
+    url("chrome://__addonRef__/content/icons/providers/gemini.svg"); }
+    .llm-pref-panel .llm-pref-row-icon--preset-anthropic { background-image:
+    url("chrome://__addonRef__/content/icons/providers/anthropic.svg"); }
+    .llm-pref-panel .llm-pref-row-icon--preset-minimax { background-image:
+    url("chrome://__addonRef__/content/icons/providers/minimax.svg"); }
+    .llm-pref-panel .llm-pref-row-icon--preset-deepseek { background-image:
+    url("chrome://__addonRef__/content/icons/providers/deepseek.svg"); }
+    .llm-pref-panel .llm-pref-row-icon--preset-qwen { background-image:
+    url("chrome://__addonRef__/content/icons/providers/qwen.svg"); }
+    .llm-pref-panel .llm-pref-row-icon--preset-kimi { background-image:
+    url("chrome://__addonRef__/content/icons/providers/kimi.svg"); }
+    .llm-pref-panel .llm-pref-row-icon--preset-kimi { background-color: #222;
+    border-radius: 3px; background-size: 85%; } .llm-pref-panel
+    .llm-pref-section-head { display: flex; align-items: center;
+    justify-content: space-between; gap: 8px; } .llm-pref-panel
+    .llm-pref-section--footer { align-items: flex-end; } .llm-pref-panel
+    .llm-pref-model-row { display: flex; flex-direction: column; gap: 5px; }
+    .llm-pref-panel .llm-pref-model-controls { display: flex; align-items:
+    center; gap: 6px; min-width: 0; } .llm-pref-panel .llm-pref-model-controls >
+    .llm-pref-input, .llm-pref-panel .llm-pref-model-controls > .llm-pref-select
+    { flex: 1; min-width: 0; } .llm-pref-panel .llm-pref-status { font-size:
+    11.5px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere;
+    min-width: 0; } .llm-pref-panel .llm-pref-advanced-panel { display: none;
+    flex-direction: column; gap: 8px; padding: 10px 12px; background: rgba(128,
+    128, 128, 0.06); border: 1px solid var(--llm-pref-stroke); border-radius:
+    6px; } .llm-pref-panel .llm-pref-advanced-panel[data-open="true"] { display:
+    flex; } .llm-pref-panel .llm-pref-compact-fields { display: flex; gap: 10px;
+    flex-wrap: wrap; align-items: flex-end; } .llm-pref-panel
+    .llm-pref-compact-field { display: flex; flex-direction: column; gap: 3px; }
+    .llm-pref-panel .llm-pref-compact-field > label { font-size: 10.5px;
+    font-weight: 600; color: FieldText; } .llm-pref-panel .llm-pref-input--sm {
+    width: 88px; height: 24px; padding: 3px 7px; border-radius: 5px; }
+    .llm-pref-panel .llm-pref-input--mode { width: 108px; } .llm-pref-panel
+    .llm-pref-input--protocol { width: 135px; } .llm-pref-panel
+    .llm-pref-button--danger { border-color: color-mix(in srgb, #e0574f 55%,
+    var(--llm-pref-stroke)); color: #e0574f; } .llm-pref-panel
+    .llm-pref-button--primary { border: none; background: var(--color-accent,
+    #2563eb); color: #fff; font-weight: 600; } .llm-pref-panel
+    .llm-pref-button--block { width: 100%; margin-top: 2px; padding: 5px 12px;
+    font-size: 12.5px; line-height: normal; text-align: center; }
+    .llm-pref-panel .llm-pref-button[disabled] { opacity: 0.4; cursor: default;
+    } .llm-pref-panel .llm-pref-model-control-slot { flex: 1; min-width: 0;
+    display: flex; align-items: center; gap: 6px; } .llm-pref-panel
+    .llm-pref-model-control-slot > .llm-pref-input, .llm-pref-panel
+    .llm-pref-model-control-slot > .llm-pref-select { flex: 1; min-width: 0; }
+    .llm-pref-panel .llm-pref-advanced-rule { border-top: 1px solid
+    var(--llm-pref-stroke); opacity: 0.6; margin: 2px 0; } /* ── Add-provider
+    row (AI Providers tab) ─────────────────────────────── An empty slot shaped
+    like a collapsed provider row — full width, the same 42px head height —
+    rather than a full-width button. Hovering fills it with the card surface it
+    is about to become (panel colours only, no accent) and lifts it slightly. */
+    .llm-pref-panel .llm-pref-add-card { display: grid; min-height: 42px;
+    border-style: dashed; background: var(--llm-pref-head); transition:
+    transform 0.18s ease, border-color 0.18s ease, background-color 0.18s ease;
+    } .llm-pref-panel .llm-pref-add-card-btn { display: grid; grid-auto-flow:
+    column; place-content: center; align-items: center; gap: 8px; padding: 0
+    12px; border-radius: inherit; color: var(--fill-secondary, #888); font:
+    inherit; cursor: pointer; -moz-user-select: none; user-select: none; }
+    .llm-pref-panel .llm-pref-add-card:hover { transform: scale(1.01);
+    border-color: color-mix(in srgb, var(--fill-primary, #fff) 28%,
+    var(--llm-pref-stroke)); background-color: color-mix(in srgb,
+    var(--fill-primary, #fff) 7%, var(--llm-pref-head)); } .llm-pref-panel
+    .llm-pref-add-card:active { transform: scale(0.995); } .llm-pref-panel
+    .llm-pref-add-card:hover .llm-pref-add-card-btn { color: var(--fill-primary,
+    inherit); } .llm-pref-panel .llm-pref-add-card[data-disabled="true"]
+    .llm-pref-add-card-btn { cursor: default; } .llm-pref-panel
+    .llm-pref-add-card-btn:focus-visible { outline: 2px solid
+    var(--color-accent, #2563eb); outline-offset: -3px; } .llm-pref-panel
+    .llm-pref-add-card-plus { font-size: 20px; line-height: 1; font-weight: 300;
+    color: inherit; transition: transform 0.18s ease; } .llm-pref-panel
+    .llm-pref-add-card:hover .llm-pref-add-card-plus { transform: scale(1.12); }
+    .llm-pref-panel .llm-pref-add-card-label { font-size: 12px; font-weight:
+    500; } .llm-pref-panel .llm-pref-add-card[disabled] { opacity: 0.4; }
+    .llm-pref-panel .llm-pref-add-card[disabled]:hover { transform: none;
+    background-color: transparent; border-color: var(--llm-pref-stroke); }
+    @media (prefers-reduced-motion: reduce) { .llm-pref-panel
+    .llm-pref-add-card, .llm-pref-panel .llm-pref-add-card-plus { transition:
+    none; } .llm-pref-panel .llm-pref-add-card:hover, .llm-pref-panel
+    .llm-pref-add-card:active, .llm-pref-panel .llm-pref-add-card:hover
+    .llm-pref-add-card-plus { transform: none; } }
+  </html:style>
+  <groupbox>
+    <html:div style="display: flex; flex-direction: column; padding: 10px">
+      <!-- ═══ Tab bar ═══ -->
+      <html:div
+        id="__addonRef__-pref-tab-bar"
+        style="
+          display: flex;
+          gap: 4px;
+          margin-bottom: 18px;
+          padding: 3px;
+          background: color-mix(in srgb, currentColor 12%, Field);
+          border-radius: 8px;
+          position: sticky;
+          top: 0;
+          z-index: 100;
+        "
+      >
+        <html:button
+          data-pref-tab="models"
+          type="button"
+          style="
+            flex: 1;
+            padding: 6px 0;
+            font-size: 12px;
+            font-weight: 500;
+            border: none;
+            border-radius: 6px;
+            background: transparent;
+            color: var(--fill-secondary, #888);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+          "
+          >AI Providers</html:button
+        >
+        <html:button
+          data-pref-tab="customization"
+          type="button"
+          style="
+            flex: 1;
+            padding: 6px 0;
+            font-size: 12px;
+            font-weight: 500;
+            border: none;
+            border-radius: 6px;
+            background: transparent;
+            color: var(--fill-secondary, #888);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+          "
+          >Customization</html:button
+        >
+        <html:button
+          data-pref-tab="agent"
+          type="button"
+          style="
+            flex: 1;
+            padding: 6px 0;
+            font-size: 12px;
+            font-weight: 500;
+            border: none;
+            border-radius: 6px;
+            background: transparent;
+            color: var(--fill-secondary, #888);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+          "
+          >Agent</html:button
+        >
+        <html:button
+          data-pref-tab="mineru"
+          type="button"
+          style="
+            flex: 1;
+            padding: 6px 0;
+            font-size: 12px;
+            font-weight: 500;
+            border: none;
+            border-radius: 6px;
+            background: transparent;
+            color: var(--fill-secondary, #888);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+          "
+          >MinerU</html:button
+        >
+        <html:button
+          data-pref-tab="usage"
+          type="button"
+          style="
+            flex: 1;
+            padding: 6px 0;
+            font-size: 12px;
+            font-weight: 500;
+            border: none;
+            border-radius: 6px;
+            background: transparent;
+            color: var(--fill-secondary, #888);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+          "
+          >Usage</html:button
+        >
+      </html:div>
+
+      <!-- ═══ Tab 1: AI Providers ═══ -->
+      <html:div
+        id="__addonRef__-pref-panel-models"
+        class="llm-pref-panel"
+        data-pref-panel="models"
+        style="display: flex; flex-direction: column"
+      >
+        <html:div
+          id="__addonRef__-model-sections"
+          style="display: flex; flex-direction: column; gap: 14px"
+        ></html:div>
+      </html:div>
+
+      <!-- ═══ Tab 2: Customization ═══ -->
+      <html:div
+        id="__addonRef__-pref-panel-customization"
+        class="llm-pref-fields"
+        data-pref-panel="customization"
+        style="display: none; flex-direction: column; gap: 18px"
+      >
+        <html:div style="display: flex; flex-direction: column; gap: 4px">
+          <html:label
+            for="__addonRef__-sidebar-layout"
+            style="font-weight: 600; font-size: 12px"
+            >Sidebar layout</html:label
+          >
+          <html:select
+            id="__addonRef__-sidebar-layout"
+            style="
+              width: 220px;
+              padding: 4px 8px;
+              font-size: 12px;
+              border-radius: 6px;
+            "
+          >
+            <html:option value="independent">Independent</html:option>
+            <html:option value="stacked">Stacked (default)</html:option>
+          </html:select>
+          <html:span
+            id="__addonRef__-sidebar-layout-hint"
+            style="font-size: 11px; color: var(--fill-secondary, #888)"
+            >Show chat in its own sidebar or alongside Zotero’s other item
+            sections. Changes apply immediately.</html:span
+          >
+        </html:div>
+
+        <html:div style="display: flex; flex-direction: column; gap: 4px">
+          <html:label
+            for="__addonRef__-system-prompt"
+            style="
+              display: block;
+              font-weight: 600;
+              font-size: 12px;
+              color: var(--fill-primary, inherit);
+              margin-bottom: 4px;
+            "
+          >
+            Custom System Prompt (Optional)
+          </html:label>
+          <html:textarea
+            id="__addonRef__-system-prompt"
+            rows="4"
+            placeholder="Custom instructions for the AI assistant..."
+            style="
+              width: 100%;
+              padding: 6px 10px;
+              font-size: 13px;
+              border-radius: 6px;
+              box-sizing: border-box;
+              resize: vertical;
+            "
+          ></html:textarea>
+          <html:span
+            style="
+              font-size: 11px;
+              color: var(--fill-secondary, #888);
+              margin-top: 3px;
+              display: block;
+            "
+          >
+            Add custom instructions to the default system prompt (leave empty to
+            use default only)
+          </html:span>
+          <html:details style="margin-top: 6px">
+            <html:summary
+              style="
+                font-size: 11px;
+                color: var(--fill-secondary, #888);
+                cursor: pointer;
+                user-select: none;
+              "
+            >
+              View default system prompt
+            </html:summary>
+            <html:pre
+              id="__addonRef__-default-system-prompt"
+              style="
+                margin-top: 6px;
+                padding: 8px 10px;
+                font-size: 11px;
+                line-height: 1.5;
+                color: var(--fill-secondary, #666);
+                background: var(--material-background, #f5f5f5);
+                border: 1px solid var(--stroke-secondary, #ddd);
+                border-radius: 6px;
+                white-space: pre-wrap;
+                word-break: break-word;
+                user-select: text;
+                cursor: text;
+                max-height: 200px;
+                overflow-y: auto;
+              "
+            ></html:pre>
+          </html:details>
+        </html:div>
+
+        <html:div style="display: flex; flex-direction: column; gap: 4px">
+          <html:label
+            style="
+              display: inline-flex;
+              align-items: center;
+              gap: 8px;
+              font-weight: 600;
+              font-size: 12px;
+              color: var(--fill-primary, inherit);
+            "
+          >
+            <html:input
+              id="__addonRef__-popup-add-text-enabled"
+              type="checkbox"
+            ></html:input>
+            Show "Add Text" in reader selection popup
+          </html:label>
+          <html:span
+            style="
+              font-size: 11px;
+              color: var(--fill-secondary, #888);
+              margin-top: 1px;
+              display: block;
+            "
+          >
+            Disable this if you prefer not to show the Add Text option in
+            Zotero's text selection popup menu.
+          </html:span>
+        </html:div>
+
+        <html:div style="display: flex; flex-direction: column; gap: 4px">
+          <html:div
+            style="
+              display: flex;
+              align-items: center;
+              gap: 10px;
+              flex-wrap: wrap;
+            "
+          >
+            <html:label
+              for="__addonRef__-panel-font-scale"
+              style="
+                font-weight: 600;
+                font-size: 12px;
+                color: var(--fill-primary, inherit);
+              "
+            >
+              Plugin Font Size
+            </html:label>
+            <html:input
+              id="__addonRef__-panel-font-scale"
+              type="range"
+              min="80"
+              max="180"
+              step="10"
+              value="120"
+              style="width: 180px; cursor: pointer; flex-shrink: 0"
+            ></html:input>
+            <html:span
+              id="__addonRef__-panel-font-scale-readout"
+              style="
+                font-size: 11px;
+                color: var(--fill-secondary, #888);
+                min-width: 38px;
+              "
+              >120%</html:span
+            >
+            <html:button
+              id="__addonRef__-panel-font-scale-reset"
+              type="button"
+              style="
+                font-size: 11px;
+                padding: 2px 8px;
+                border-radius: 4px;
+                border: 1px solid var(--stroke-secondary, #c8c8c8);
+                background: transparent;
+                color: inherit;
+                cursor: pointer;
+              "
+              >Reset</html:button
+            >
+          </html:div>
+          <html:span
+            style="
+              font-size: 11px;
+              color: var(--fill-secondary, #888);
+              margin-top: 1px;
+              display: block;
+            "
+          >
+            Adjusts text size in the chat panel and standalone window. You can
+            also use Cmd/Ctrl + and Cmd/Ctrl − while a panel is focused
+            (Cmd/Ctrl 0 to reset).
+          </html:span>
+        </html:div>
+
+        <html:details style="display: block">
+          <html:summary
+            style="
+              font-size: 11px;
+              color: var(--fill-secondary, #888);
+              cursor: pointer;
+              user-select: none;
+            "
+          >
+            Message typography
+          </html:summary>
+          <html:div
+            style="
+              display: flex;
+              flex-direction: column;
+              gap: 10px;
+              margin-top: 8px;
+              padding-left: 14px;
+            "
+          >
+            <html:div style="display: flex; flex-direction: column; gap: 4px">
+              <html:div
+                style="
+                  display: flex;
+                  align-items: center;
+                  gap: 10px;
+                  flex-wrap: wrap;
+                "
+              >
+                <html:label
+                  for="__addonRef__-message-paragraph-spacing"
+                  style="
+                    font-weight: 600;
+                    font-size: 12px;
+                    color: var(--fill-primary, inherit);
+                  "
+                  >Message Paragraph Spacing</html:label
+                >
+                <html:input
+                  id="__addonRef__-message-paragraph-spacing"
+                  type="range"
+                  min="0"
+                  max="32"
+                  step="1"
+                  value="8"
+                  style="width: 180px; cursor: pointer; flex-shrink: 0"
+                ></html:input>
+                <html:span
+                  id="__addonRef__-message-paragraph-spacing-readout"
+                  style="
+                    font-size: 11px;
+                    color: var(--fill-secondary, #888);
+                    min-width: 38px;
+                  "
+                  >8px</html:span
+                >
+                <html:button
+                  id="__addonRef__-message-paragraph-spacing-reset"
+                  type="button"
+                  style="
+                    font-size: 11px;
+                    padding: 2px 8px;
+                    border-radius: 4px;
+                    border: 1px solid var(--stroke-secondary, #c8c8c8);
+                    background: transparent;
+                    color: inherit;
+                    cursor: pointer;
+                  "
+                  >Reset</html:button
+                >
+              </html:div>
+              <html:span
+                style="
+                  font-size: 11px;
+                  color: var(--fill-secondary, #888);
+                  margin-top: 1px;
+                  display: block;
+                "
+              >
+                Adjusts spacing between normal rendered message paragraphs only.
+                Tables and code blocks keep their current spacing.
+              </html:span>
+            </html:div>
+
+            <html:div style="display: flex; flex-direction: column; gap: 4px">
+              <html:div
+                style="
+                  display: flex;
+                  align-items: center;
+                  gap: 10px;
+                  flex-wrap: wrap;
+                "
+              >
+                <html:label
+                  for="__addonRef__-message-line-spacing"
+                  style="
+                    font-weight: 600;
+                    font-size: 12px;
+                    color: var(--fill-primary, inherit);
+                  "
+                  >Message Line Spacing</html:label
+                >
+                <html:input
+                  id="__addonRef__-message-line-spacing"
+                  type="range"
+                  min="150"
+                  max="250"
+                  step="5"
+                  value="150"
+                  style="width: 180px; cursor: pointer; flex-shrink: 0"
+                ></html:input>
+                <html:span
+                  id="__addonRef__-message-line-spacing-readout"
+                  style="
+                    font-size: 11px;
+                    color: var(--fill-secondary, #888);
+                    min-width: 38px;
+                  "
+                  >150%</html:span
+                >
+                <html:button
+                  id="__addonRef__-message-line-spacing-reset"
+                  type="button"
+                  style="
+                    font-size: 11px;
+                    padding: 2px 8px;
+                    border-radius: 4px;
+                    border: 1px solid var(--stroke-secondary, #c8c8c8);
+                    background: transparent;
+                    color: inherit;
+                    cursor: pointer;
+                  "
+                  >Reset</html:button
+                >
+              </html:div>
+              <html:span
+                style="
+                  font-size: 11px;
+                  color: var(--fill-secondary, #888);
+                  margin-top: 1px;
+                  display: block;
+                "
+              >
+                Adjusts line height inside normal rendered message paragraphs.
+                Tables and code blocks keep their current spacing.
+              </html:span>
+            </html:div>
+
+            <html:div style="display: flex; flex-direction: column; gap: 4px">
+              <html:div
+                style="
+                  display: flex;
+                  align-items: center;
+                  gap: 10px;
+                  flex-wrap: wrap;
+                "
+              >
+                <html:label
+                  for="__addonRef__-message-word-spacing"
+                  style="
+                    font-weight: 600;
+                    font-size: 12px;
+                    color: var(--fill-primary, inherit);
+                  "
+                  >Message Word Spacing</html:label
+                >
+                <html:input
+                  id="__addonRef__-message-word-spacing"
+                  type="range"
+                  min="0"
+                  max="8"
+                  step="0.5"
+                  value="0"
+                  style="width: 180px; cursor: pointer; flex-shrink: 0"
+                ></html:input>
+                <html:span
+                  id="__addonRef__-message-word-spacing-readout"
+                  style="
+                    font-size: 11px;
+                    color: var(--fill-secondary, #888);
+                    min-width: 38px;
+                  "
+                  >0px</html:span
+                >
+                <html:button
+                  id="__addonRef__-message-word-spacing-reset"
+                  type="button"
+                  style="
+                    font-size: 11px;
+                    padding: 2px 8px;
+                    border-radius: 4px;
+                    border: 1px solid var(--stroke-secondary, #c8c8c8);
+                    background: transparent;
+                    color: inherit;
+                    cursor: pointer;
+                  "
+                  >Reset</html:button
+                >
+              </html:div>
+              <html:span
+                style="
+                  font-size: 11px;
+                  color: var(--fill-secondary, #888);
+                  margin-top: 1px;
+                  display: block;
+                "
+              >
+                Adjusts spacing between words in normal rendered message text
+                only.
+              </html:span>
+            </html:div>
+
+            <html:div style="display: flex; flex-direction: column; gap: 4px">
+              <html:label
+                for="__addonRef__-message-font-family"
+                style="
+                  font-weight: 600;
+                  font-size: 12px;
+                  color: var(--fill-primary, inherit);
+                "
+                >Message Font Family</html:label
+              >
+              <html:div
+                style="
+                  display: flex;
+                  align-items: center;
+                  gap: 10px;
+                  flex-wrap: wrap;
+                "
+              >
+                <html:input
+                  id="__addonRef__-message-font-family"
+                  type="text"
+                  placeholder='System default, or e.g. "Atkinson Hyperlegible", system-ui, sans-serif'
+                  style="
+                    flex: 1 1 320px;
+                    min-width: 220px;
+                    max-width: 520px;
+                    padding: 5px 8px;
+                    font-size: 12px;
+                    border-radius: 6px;
+                  "
+                />
+                <html:button
+                  id="__addonRef__-message-font-family-reset"
+                  type="button"
+                  style="
+                    font-size: 11px;
+                    padding: 2px 8px;
+                    border-radius: 4px;
+                    border: 1px solid var(--stroke-secondary, #c8c8c8);
+                    background: transparent;
+                    color: inherit;
+                    cursor: pointer;
+                  "
+                  >Reset</html:button
+                >
+              </html:div>
+              <html:span
+                style="
+                  font-size: 11px;
+                  color: var(--fill-secondary, #888);
+                  margin-top: 1px;
+                  display: block;
+                "
+              >
+                Comma-separated font family fallback stack. Leave empty to use
+                the plugin default.
+              </html:span>
+            </html:div>
+          </html:div>
+        </html:details>
+
+        <html:div style="display: flex; flex-direction: column; gap: 4px">
+          <html:label
+            style="
+              display: inline-flex;
+              align-items: center;
+              gap: 8px;
+              font-weight: 600;
+              font-size: 12px;
+              color: var(--fill-primary, inherit);
+            "
+          >
+            <html:input
+              id="__addonRef__-enable-semantic-search"
+              type="checkbox"
+            ></html:input>
+            Semantic Search
+          </html:label>
+          <html:span
+            style="
+              font-size: 11px;
+              color: var(--fill-secondary, #888);
+              margin-top: 1px;
+              display: block;
+            "
+          >
+            Uses vector embeddings for meaning-aware search. When disabled, only
+            keyword matching (BM25) is used.
+          </html:span>
+        </html:div>
+        <html:div
+          id="__addonRef__-semantic-search-sub-settings"
+          style="display: none; flex-direction: column; gap: 10px"
+        >
+          <!-- Card rendered dynamically by preferenceScript.ts -->
+          <html:div id="__addonRef__-semantic-search-mount"></html:div>
+        </html:div>
+
+        <html:div
+          id="__addonRef__-library-text-index-section"
+          style="display: flex; flex-direction: column; gap: 4px"
+        >
+          <html:label
+            style="
+              display: inline-flex;
+              align-items: center;
+              gap: 8px;
+              font-weight: 600;
+              font-size: 12px;
+              color: var(--fill-primary, inherit);
+            "
+          >
+            <html:input
+              id="__addonRef__-library-text-index-enabled"
+              type="checkbox"
+            ></html:input>
+            <html:span id="__addonRef__-library-text-index-label"
+              >Library index</html:span
+            >
+          </html:label>
+          <html:span
+            id="__addonRef__-library-text-index-hint"
+            style="
+              font-size: 11px;
+              color: var(--fill-secondary, #888);
+              margin-top: 1px;
+              display: block;
+            "
+          >
+            Keep a local full-text index of your library so library-wide
+            questions answer from the index instead of re-reading PDFs. Fills
+            from the questions you ask and, while Zotero is idle, in the
+            background.
+          </html:span>
+          <html:div
+            style="
+              display: flex;
+              align-items: center;
+              gap: 10px;
+              flex-wrap: wrap;
+              margin-top: 6px;
+            "
+          >
+            <html:label
+              id="__addonRef__-library-text-index-budget-label"
+              for="__addonRef__-library-text-index-budget"
+              style="
+                font-weight: 600;
+                font-size: 12px;
+                color: var(--fill-primary, inherit);
+              "
+              >Index size limit (MB)</html:label
+            >
+            <html:input
+              id="__addonRef__-library-text-index-budget"
+              type="number"
+              min="50"
+              step="50"
+              style="
+                width: 90px;
+                padding: 4px 8px;
+                font-size: 12px;
+                border-radius: 6px;
+              "
+            ></html:input>
+          </html:div>
+          <html:span
+            id="__addonRef__-library-text-index-budget-hint"
+            style="
+              font-size: 11px;
+              color: var(--fill-secondary, #888);
+              margin-top: 1px;
+              display: block;
+            "
+          >
+            Least-recently-searched papers are dropped from the index above this
+            size.
+          </html:span>
+          <html:span
+            id="__addonRef__-library-text-index-status"
+            style="
+              font-size: 11px;
+              color: var(--fill-secondary, #888);
+              margin-top: 6px;
+              display: block;
+            "
+          ></html:span>
+          <html:div
+            style="
+              display: flex;
+              align-items: center;
+              gap: 8px;
+              flex-wrap: wrap;
+              margin-top: 2px;
+            "
+          >
+            <html:button
+              id="__addonRef__-library-text-index-rebuild"
+              type="button"
+              style="
+                font-size: 11px;
+                padding: 2px 8px;
+                border-radius: 4px;
+                border: 1px solid var(--stroke-secondary, #c8c8c8);
+                background: transparent;
+                color: inherit;
+                cursor: pointer;
+              "
+              >Rebuild index</html:button
+            >
+            <html:button
+              id="__addonRef__-library-text-index-clear"
+              type="button"
+              style="
+                font-size: 11px;
+                padding: 2px 8px;
+                border-radius: 4px;
+                border: 1px solid var(--stroke-secondary, #c8c8c8);
+                background: transparent;
+                color: inherit;
+                cursor: pointer;
+              "
+              >Clear index</html:button
+            >
+          </html:div>
+        </html:div>
+
+        <html:div style="display: flex; flex-direction: column; gap: 4px">
+          <html:label
+            for="__addonRef__-locale-select"
+            style="
+              display: block;
+              font-weight: 600;
+              font-size: 12px;
+              color: var(--fill-primary, inherit);
+              margin-bottom: 2px;
+            "
+          >
+            Language
+          </html:label>
+          <html:select
+            id="__addonRef__-locale-select"
+            style="
+              width: 220px;
+              padding: 4px 8px;
+              font-size: 12px;
+              border-radius: 6px;
+            "
+          >
+            <html:option value="auto">Auto (follow Zotero)</html:option>
+            <html:option value="en-US">English</html:option>
+            <html:option value="zh-CN">中文 (简体)</html:option>
+          </html:select>
+          <html:span
+            id="__addonRef__-locale-restart-hint"
+            style="
+              font-size: 11px;
+              color: #f59e0b;
+              margin-top: 2px;
+              display: none;
+            "
+          >
+            Restart Zotero to apply language change.
+          </html:span>
+        </html:div>
+      </html:div>
+
+      <!-- ═══ Tab 3: Agent ═══ -->
+      <html:div
+        id="__addonRef__-pref-panel-agent"
+        class="llm-pref-panel"
+        data-pref-panel="agent"
+        style="display: none; flex-direction: column"
+      >
+        <html:p class="llm-pref-intro">
+          Three runtimes can answer in the chat panel. Turn on the ones you
+          want; the runtime you pick in the chat header answers a given turn.
+        </html:p>
+
+        <html:div class="llm-pref-group">
+          <html:span class="llm-pref-group-title">Runtimes</html:span>
+
+          <!-- ── Original Agent ── -->
+          <html:div
+            id="__addonRef__-original-agent-card"
+            class="llm-pref-row"
+            data-llm-agent-row="original"
+            data-open="true"
+          >
+            <html:div class="llm-pref-row-head">
+              <html:span
+                class="llm-pref-row-icon llm-pref-row-icon--original"
+              ></html:span>
+              <html:button
+                class="llm-pref-row-toggle"
+                type="button"
+                aria-expanded="true"
+                aria-controls="__addonRef__-agent-row-original-body"
+              >
+                <html:span class="llm-pref-row-name">Original Agent</html:span>
+                <html:span class="llm-pref-row-sub">
+                  <html:span
+                    class="llm-pref-row-dot"
+                    data-llm-row-dot="original"
+                  ></html:span>
+                  <html:span
+                    class="llm-pref-row-summary"
+                    data-llm-row-summary="original"
+                  ></html:span>
+                </html:span>
+              </html:button>
+              <html:span class="llm-pref-row-tag">Built in</html:span>
+              <html:input
+                id="__addonRef__-enable-agent-mode"
+                class="llm-pref-switch"
+                type="checkbox"
+                aria-label="Enable Original Agent"
+              ></html:input>
+              <html:span class="llm-pref-row-chevron">›</html:span>
+            </html:div>
+            <html:div
+              id="__addonRef__-agent-row-original-body"
+              class="llm-pref-row-body"
+            >
+              <html:span class="llm-pref-hint">
+                The agent that ships with the plugin. Turning it on adds the
+                "Agent (beta)" toggle to the chat context bar, which runs the
+                multi-step assistant inside Zotero. Its library permissions are
+                independent from the permission controls for Claude Code and
+                Codex.
+              </html:span>
+
+              <html:div class="llm-pref-section">
+                <html:span class="llm-pref-section-title"
+                  >Permissions</html:span
+                >
+                <html:div class="llm-pref-field">
+                  <html:label for="__addonRef__-original-agent-permission-mode">
+                    Permission mode
+                  </html:label>
+                  <html:div class="llm-pref-control">
+                    <html:select
+                      id="__addonRef__-original-agent-permission-mode"
+                      class="llm-pref-select"
+                    >
+                      <html:option value="safe">Safe</html:option>
+                      <html:option value="auto">Auto</html:option>
+                      <html:option value="yolo">Yolo</html:option>
+                    </html:select>
+                    <html:span
+                      id="__addonRef__-original-agent-permission-mode-description"
+                      class="llm-pref-hint"
+                    ></html:span>
+                    <html:span class="llm-pref-hint">
+                      This setting controls every Original Agent action,
+                      including Zotero changes, local files, commands, scripts,
+                      and network tools. Claude Code and Codex keep their own
+                      independent native permission profiles. Reversible
+                      Original Agent changes are recorded and can be reverted
+                      from Agent history.
+                    </html:span>
+                  </html:div>
+                </html:div>
+              </html:div>
+
+              <html:div id="__addonRef__-tavily-card" class="llm-pref-section">
+                <html:span class="llm-pref-section-title">Web search</html:span>
+                <html:span class="llm-pref-hint">
+                  Adds current, general web search and focused page reading to
+                  the in-plugin Agent. The key stays in your local Zotero
+                  preferences.
+                </html:span>
+                <html:div class="llm-pref-field">
+                  <html:label for="__addonRef__-tavily-api-key"
+                    >API key</html:label
+                  >
+                  <html:div class="llm-pref-control">
+                    <html:div class="llm-pref-line">
+                      <html:input
+                        id="__addonRef__-tavily-api-key"
+                        class="llm-pref-input"
+                        type="password"
+                        autocomplete="off"
+                        placeholder="tvly-…"
+                      ></html:input>
+                      <html:button
+                        id="__addonRef__-tavily-test"
+                        class="llm-pref-button llm-pref-button--accent"
+                        type="button"
+                      >
+                        Test connection
+                      </html:button>
+                    </html:div>
+                    <html:a
+                      id="__addonRef__-tavily-key-link"
+                      class="llm-pref-link"
+                      href="https://app.tavily.com"
+                    >
+                      Get a free API key
+                    </html:a>
+                    <html:span
+                      id="__addonRef__-tavily-status"
+                      class="llm-pref-hint"
+                      role="status"
+                      aria-live="polite"
+                      style="display: none; white-space: pre-line"
+                    ></html:span>
+                    <html:span class="llm-pref-hint">
+                      Basic search costs 1 Tavily credit; Advanced costs 2.
+                      Basic extraction costs 1 credit per 5 successful pages;
+                      Advanced costs 2 per 5. Tavily currently offers a free
+                      monthly credit allowance.
+                    </html:span>
+                    <html:span class="llm-pref-hint">
+                      Search queries and requested URLs are sent to Tavily and
+                      are handled under Tavily's privacy, retention, and
+                      search-index policies. When displayed, favicons are loaded
+                      from public URLs supplied by Tavily. Do not include
+                      credentials or sensitive private text in web queries.
+                    </html:span>
+                  </html:div>
+                </html:div>
+              </html:div>
+            </html:div>
+          </html:div>
+
+          <!-- ── Codex ── -->
+          <html:div
+            id="__addonRef__-codex-app-server-card"
+            class="llm-pref-row"
+            data-llm-agent-row="codex"
+            data-open="false"
+          >
+            <html:div class="llm-pref-row-head">
+              <html:span
+                class="llm-pref-row-icon llm-pref-row-icon--codex"
+              ></html:span>
+              <html:button
+                class="llm-pref-row-toggle"
+                type="button"
+                aria-expanded="false"
+                aria-controls="__addonRef__-agent-row-codex-body"
+              >
+                <html:span class="llm-pref-row-name">Codex</html:span>
+                <html:span class="llm-pref-row-sub">
+                  <html:span
+                    class="llm-pref-row-dot"
+                    data-llm-row-dot="codex"
+                  ></html:span>
+                  <html:span
+                    class="llm-pref-row-summary"
+                    data-llm-row-summary="codex"
+                  ></html:span>
+                </html:span>
+              </html:button>
+              <html:span class="llm-pref-row-tag">Codex CLI</html:span>
+              <html:input
+                id="__addonRef__-codex-app-server-enable"
+                class="llm-pref-switch"
+                type="checkbox"
+                aria-label="Enable Codex"
+              ></html:input>
+              <html:span class="llm-pref-row-chevron">›</html:span>
+            </html:div>
+            <html:div
+              id="__addonRef__-agent-row-codex-body"
+              class="llm-pref-row-body"
+              hidden="hidden"
+            >
+              <html:span class="llm-pref-hint">
+                Runs the Codex CLI as a local app server. Run
+                <html:code>codex login</html:code> before turning it on. Codex
+                controls tool approval through its own permission profile. When
+                enabled, Zotero adds a Codex button to the chat header. Codex
+                and Claude Code can both be enabled; only the selected runtime
+                is active.
+              </html:span>
+              <html:div
+                id="__addonRef__-codex-app-server-settings"
+                style="display: none; flex-direction: column; gap: 12px"
+              >
+                <html:div class="llm-pref-section">
+                  <html:span class="llm-pref-section-title">Model</html:span>
+                  <html:div class="llm-pref-field">
+                    <html:label for="__addonRef__-codex-app-server-model">
+                      Model
+                    </html:label>
+                    <html:div class="llm-pref-control">
+                      <html:div class="llm-pref-line llm-pref-line--wrap">
+                        <html:select
+                          id="__addonRef__-codex-app-server-model"
+                          class="llm-pref-select"
+                          aria-describedby="__addonRef__-codex-app-server-model-status"
+                          aria-busy="true"
+                        >
+                          <html:option value="" disabled="disabled">
+                            Loading models…
+                          </html:option>
+                          <html:option value="customized">
+                            Customized
+                          </html:option>
+                        </html:select>
+                        <html:button
+                          id="__addonRef__-codex-app-server-model-refresh"
+                          class="llm-pref-button"
+                          type="button"
+                        >
+                          Refresh
+                        </html:button>
+                      </html:div>
+                      <html:div
+                        id="__addonRef__-codex-app-server-custom-model-wrap"
+                        class="llm-pref-control"
+                        hidden="hidden"
+                      >
+                        <html:label
+                          for="__addonRef__-codex-app-server-custom-model"
+                        >
+                          Customized model
+                        </html:label>
+                        <html:input
+                          id="__addonRef__-codex-app-server-custom-model"
+                          class="llm-pref-input"
+                          type="text"
+                          autocomplete="off"
+                          spellcheck="false"
+                          placeholder="gpt-5.4"
+                        ></html:input>
+                      </html:div>
+                      <html:span
+                        id="__addonRef__-codex-app-server-model-status"
+                        class="llm-pref-hint"
+                        role="status"
+                        aria-live="polite"
+                      ></html:span>
+                      <html:span class="llm-pref-hint">
+                        Models are read from your installed Codex CLI. Choose
+                        Customized to enter a model ID by hand.
+                      </html:span>
+                    </html:div>
+                  </html:div>
+                  <html:div class="llm-pref-field">
+                    <html:label for="__addonRef__-codex-app-server-reasoning">
+                      Reasoning
+                    </html:label>
+                    <html:div class="llm-pref-control">
+                      <html:select
+                        id="__addonRef__-codex-app-server-reasoning"
+                        class="llm-pref-select"
+                      >
+                        <html:option value="auto">Auto</html:option>
+                        <html:option value="low">Low</html:option>
+                        <html:option value="medium">Medium</html:option>
+                        <html:option value="high">High</html:option>
+                        <html:option value="xhigh">XHigh</html:option>
+                      </html:select>
+                    </html:div>
+                  </html:div>
+                </html:div>
+
+                <html:div class="llm-pref-section">
+                  <html:span class="llm-pref-section-title"
+                    >Permissions</html:span
+                  >
+                  <html:div class="llm-pref-field">
+                    <html:label
+                      for="__addonRef__-codex-app-server-permission-profile"
+                    >
+                      Permission profile
+                    </html:label>
+                    <html:div class="llm-pref-control">
+                      <html:div class="llm-pref-line llm-pref-line--wrap">
+                        <html:select
+                          id="__addonRef__-codex-app-server-permission-profile"
+                          class="llm-pref-select"
+                        ></html:select>
+                        <html:button
+                          id="__addonRef__-codex-app-server-permission-refresh"
+                          class="llm-pref-button"
+                          type="button"
+                        >
+                          Refresh
+                        </html:button>
+                      </html:div>
+                      <html:span
+                        id="__addonRef__-codex-app-server-permission-status"
+                        class="llm-pref-hint"
+                        role="status"
+                        aria-live="polite"
+                      ></html:span>
+                      <html:span class="llm-pref-hint">
+                        The profile comes from Codex's own configuration. Change
+                        it in Codex; Zotero reads it so you can see what the
+                        runtime is allowed to do.
+                      </html:span>
+                    </html:div>
+                  </html:div>
+                </html:div>
+
+                <html:div class="llm-pref-section">
+                  <html:span class="llm-pref-section-title"
+                    >Connection</html:span
+                  >
+                  <html:div class="llm-pref-field">
+                    <html:label>Codex CLI</html:label>
+                    <html:div class="llm-pref-control">
+                      <html:div class="llm-pref-line">
+                        <html:button
+                          id="__addonRef__-codex-app-server-test"
+                          class="llm-pref-button llm-pref-button--accent"
+                          type="button"
+                        >
+                          Test connection
+                        </html:button>
+                      </html:div>
+                      <html:span
+                        id="__addonRef__-codex-app-server-status"
+                        class="llm-pref-hint"
+                        style="overflow-wrap: anywhere; min-width: 0"
+                      ></html:span>
+                    </html:div>
+                  </html:div>
+                </html:div>
+
+                <html:details class="llm-pref-advanced">
+                  <html:summary>Advanced</html:summary>
+                  <html:div class="llm-pref-advanced-body">
+                    <html:div class="llm-pref-field">
+                      <html:label for="__addonRef__-codex-app-server-path">
+                        Codex CLI path
+                      </html:label>
+                      <html:div class="llm-pref-control">
+                        <html:input
+                          id="__addonRef__-codex-app-server-path"
+                          class="llm-pref-input"
+                          type="text"
+                          placeholder="Optional absolute path to codex executable"
+                        ></html:input>
+                        <html:span
+                          id="__addonRef__-codex-app-server-path-helper"
+                          class="llm-pref-hint"
+                        ></html:span>
+                        <html:span class="llm-pref-hint">
+                          Leave blank to search your PATH.
+                        </html:span>
+                      </html:div>
+                    </html:div>
+                  </html:div>
+                </html:details>
+              </html:div>
+            </html:div>
+          </html:div>
+
+          <!-- ── Claude Code ── -->
+          <html:div
+            id="__addonRef__-claude-code-card"
+            class="llm-pref-row"
+            data-llm-agent-row="claude"
+            data-open="false"
+          >
+            <html:div class="llm-pref-row-head">
+              <html:span
+                class="llm-pref-row-icon llm-pref-row-icon--claude"
+              ></html:span>
+              <html:button
+                class="llm-pref-row-toggle"
+                type="button"
+                aria-expanded="false"
+                aria-controls="__addonRef__-agent-row-claude-body"
+              >
+                <html:span class="llm-pref-row-name">Claude Code</html:span>
+                <html:span class="llm-pref-row-sub">
+                  <html:span
+                    class="llm-pref-row-dot"
+                    data-llm-row-dot="claude"
+                  ></html:span>
+                  <html:span
+                    class="llm-pref-row-summary"
+                    data-llm-row-summary="claude"
+                  ></html:span>
+                </html:span>
+              </html:button>
+              <html:span class="llm-pref-row-tag">Claude Code CLI</html:span>
+              <html:input
+                id="__addonRef__-agent-backend-mode"
+                class="llm-pref-switch"
+                type="checkbox"
+                aria-label="Enable Claude Code"
+              ></html:input>
+              <html:span class="llm-pref-row-chevron">›</html:span>
+            </html:div>
+            <html:div
+              id="__addonRef__-agent-row-claude-body"
+              class="llm-pref-row-body"
+              hidden="hidden"
+            >
+              <html:span class="llm-pref-hint">
+                Runs the embedded Claude runtime against your library. When
+                enabled, Zotero adds a Claude Code button to the chat header;
+                you enter Claude Code mode from there, not from settings. Codex
+                and Claude Code can both be enabled; only the selected runtime
+                is active.
+              </html:span>
+              <html:div
+                id="__addonRef__-agent-bridge-settings"
+                style="display: none; flex-direction: column; gap: 12px"
+              >
+                <html:div class="llm-pref-section">
+                  <html:span class="llm-pref-section-title">Model</html:span>
+                  <html:div class="llm-pref-field">
+                    <html:label for="__addonRef__-claude-code-model">
+                      Default model
+                    </html:label>
+                    <html:div class="llm-pref-control">
+                      <html:div class="llm-pref-line llm-pref-line--wrap">
+                        <html:select
+                          id="__addonRef__-claude-code-model"
+                          class="llm-pref-select"
+                          aria-describedby="__addonRef__-claude-code-model-help __addonRef__-claude-code-model-status"
+                          aria-busy="true"
+                        >
+                          <html:option value="" disabled="disabled">
+                            Loading models…
+                          </html:option>
+                          <html:option value="customized">
+                            Customized
+                          </html:option>
+                        </html:select>
+                        <html:button
+                          id="__addonRef__-claude-code-model-refresh"
+                          class="llm-pref-button"
+                          type="button"
+                        >
+                          Refresh
+                        </html:button>
+                      </html:div>
+                      <html:div
+                        id="__addonRef__-claude-code-custom-model-wrap"
+                        class="llm-pref-control"
+                        hidden="hidden"
+                      >
+                        <html:label for="__addonRef__-claude-code-custom-model">
+                          Customized model
+                        </html:label>
+                        <html:input
+                          id="__addonRef__-claude-code-custom-model"
+                          class="llm-pref-input"
+                          type="text"
+                          autocomplete="off"
+                          spellcheck="false"
+                          disabled="disabled"
+                          placeholder="Provider/Exact-Model[1m]"
+                          aria-describedby="__addonRef__-claude-code-model-help __addonRef__-claude-code-model-status"
+                        ></html:input>
+                      </html:div>
+                      <html:span
+                        id="__addonRef__-claude-code-model-status"
+                        class="llm-pref-hint"
+                        role="status"
+                        aria-live="polite"
+                      ></html:span>
+                      <html:span
+                        id="__addonRef__-claude-code-model-help"
+                        class="llm-pref-hint"
+                      >
+                        Choose a model reported by Claude Code. Select
+                        Customized to enter an alias, exact model ID, or
+                        provider-specific value. Per-response output limit:
+                        Managed by runtime.
+                      </html:span>
+                    </html:div>
+                  </html:div>
+                  <html:div class="llm-pref-field">
+                    <html:label for="__addonRef__-claude-code-reasoning">
+                      Default reasoning
+                    </html:label>
+                    <html:div class="llm-pref-control">
+                      <html:select
+                        id="__addonRef__-claude-code-reasoning"
+                        class="llm-pref-select"
+                      >
+                        <html:option value="auto">auto</html:option>
+                        <html:option value="low">low</html:option>
+                        <html:option value="medium">medium</html:option>
+                        <html:option value="high">high</html:option>
+                        <html:option value="xhigh">xhigh</html:option>
+                        <html:option value="max">max</html:option>
+                      </html:select>
+                      <html:span class="llm-pref-hint">
+                        The reasoning effort Claude uses by default for new
+                        runs.
+                      </html:span>
+                    </html:div>
+                  </html:div>
+                </html:div>
+
+                <html:div class="llm-pref-section">
+                  <html:span class="llm-pref-section-title"
+                    >Permissions</html:span
+                  >
+                  <html:div class="llm-pref-field">
+                    <html:label for="__addonRef__-agent-permission-mode">
+                      Permission mode
+                    </html:label>
+                    <html:div class="llm-pref-control">
+                      <html:div class="llm-pref-line llm-pref-line--wrap">
+                        <html:select
+                          id="__addonRef__-agent-permission-mode"
+                          class="llm-pref-select"
+                        ></html:select>
+                        <html:button
+                          id="__addonRef__-claude-code-permission-refresh"
+                          class="llm-pref-button"
+                          type="button"
+                        >
+                          Refresh
+                        </html:button>
+                      </html:div>
+                      <html:span
+                        id="__addonRef__-claude-code-permission-status"
+                        class="llm-pref-hint"
+                        role="status"
+                        aria-live="polite"
+                      ></html:span>
+                      <html:span class="llm-pref-hint">
+                        The mode comes from your Claude Code settings. Change it
+                        in Claude Code; Zotero reads it so you can see what the
+                        runtime is allowed to do.
+                      </html:span>
+                    </html:div>
+                  </html:div>
+                </html:div>
+
+                <html:div class="llm-pref-section">
+                  <html:span class="llm-pref-section-title"
+                    >Conversation</html:span
+                  >
+                  <html:div class="llm-pref-field">
+                    <html:label>Streaming</html:label>
+                    <html:div class="llm-pref-control">
+                      <html:label class="llm-pref-check">
+                        <html:input
+                          id="__addonRef__-claude-code-block-streaming"
+                          type="checkbox"
+                        ></html:input>
+                        <html:span>Show answers as they stream</html:span>
+                      </html:label>
+                      <html:span class="llm-pref-hint">
+                        Shows Claude answers chunk by chunk while they stream,
+                        instead of waiting until the final answer is assembled.
+                      </html:span>
+                    </html:div>
+                  </html:div>
+                  <html:div class="llm-pref-field">
+                    <html:label>Auto-compact</html:label>
+                    <html:div class="llm-pref-control">
+                      <html:label class="llm-pref-check">
+                        <html:input
+                          id="__addonRef__-claude-code-auto-compact"
+                          type="checkbox"
+                        ></html:input>
+                        <html:span
+                          >Compact long conversations automatically</html:span
+                        >
+                      </html:label>
+                      <html:div class="llm-pref-line">
+                        <html:input
+                          id="__addonRef__-claude-code-auto-compact-threshold"
+                          type="range"
+                          min="30"
+                          max="80"
+                          step="1"
+                          style="flex: 1; min-width: 0"
+                        ></html:input>
+                        <html:span
+                          id="__addonRef__-claude-code-auto-compact-threshold-value"
+                          class="llm-pref-hint"
+                        ></html:span>
+                      </html:div>
+                      <html:span class="llm-pref-hint">
+                        Sends <html:code>/compact</html:code> before a new
+                        Claude turn once context usage crosses this threshold.
+                      </html:span>
+                    </html:div>
+                  </html:div>
+                </html:div>
+
+                <html:details class="llm-pref-advanced">
+                  <html:summary>Advanced</html:summary>
+                  <html:div class="llm-pref-advanced-body">
+                    <html:div class="llm-pref-field">
+                      <html:label for="__addonRef__-agent-bridge-url">
+                        Bridge URL
+                      </html:label>
+                      <html:div class="llm-pref-control">
+                        <html:input
+                          id="__addonRef__-agent-bridge-url"
+                          class="llm-pref-input"
+                          type="text"
+                          placeholder="http://127.0.0.1:19787"
+                        ></html:input>
+                        <html:span class="llm-pref-hint">
+                          Zotero sends Claude requests to this local bridge
+                          service. Only change it if you run the bridge
+                          yourself.
+                        </html:span>
+                      </html:div>
+                    </html:div>
+                    <html:div class="llm-pref-field">
+                      <html:label for="__addonRef__-agent-claude-config-source">
+                        Config source
+                      </html:label>
+                      <html:div class="llm-pref-control">
+                        <html:select
+                          id="__addonRef__-agent-claude-config-source"
+                          class="llm-pref-select"
+                        >
+                          <html:option value="default">
+                            default — user + project + local
+                          </html:option>
+                          <html:option value="user-only">
+                            user-only — only your global Claude config
+                          </html:option>
+                          <html:option value="zotero-only">
+                            zotero-only — only Zotero-managed configs
+                          </html:option>
+                        </html:select>
+                        <html:span class="llm-pref-hint">
+                          Where Claude loads its settings from. Most users
+                          should keep <html:code>default</html:code>, which
+                          loads user + project + local with priority local &gt;
+                          project &gt; user.
+                          <html:code>user-only</html:code> loads just your
+                          machine-wide Claude settings;
+                          <html:code>zotero-only</html:code> loads just the
+                          Zotero-managed shared and per-conversation settings.
+                        </html:span>
+                        <html:div
+                          id="__addonRef__-claude-config-paths"
+                          class="llm-pref-hint"
+                        ></html:div>
+                        <html:a
+                          id="__addonRef__-claude-config-doc-link"
+                          class="llm-pref-link"
+                          href="https://code.claude.com/docs/en/settings"
+                        >
+                          Claude Code settings guide
+                        </html:a>
+                      </html:div>
+                    </html:div>
+                    <html:div class="llm-pref-field">
+                      <html:label>Trace log</html:label>
+                      <html:div class="llm-pref-control">
+                        <html:div class="llm-pref-line">
+                          <html:label class="llm-pref-check">
+                            <html:input
+                              id="__addonRef__-claude-trace-enabled"
+                              type="checkbox"
+                            ></html:input>
+                            <html:span>Save runtime traces</html:span>
+                          </html:label>
+                          <html:button
+                            id="__addonRef__-claude-trace-copy-path"
+                            class="llm-pref-button"
+                            type="button"
+                          >
+                            Copy path
+                          </html:button>
+                        </html:div>
+                        <html:div
+                          id="__addonRef__-claude-trace-path"
+                          class="llm-pref-hint"
+                        ></html:div>
+                        <html:span class="llm-pref-hint">
+                          Records Claude runtime traces to a local file for
+                          debugging.
+                        </html:span>
+                      </html:div>
+                    </html:div>
+                    <html:div class="llm-pref-field">
+                      <html:label
+                        for="__addonRef__-claude-managed-instruction-template"
+                      >
+                        Runtime CLAUDE.md
+                      </html:label>
+                      <html:div class="llm-pref-control">
+                        <html:textarea
+                          id="__addonRef__-claude-managed-instruction-template"
+                          class="llm-pref-input"
+                          rows="10"
+                          spellcheck="false"
+                        ></html:textarea>
+                        <html:div class="llm-pref-line">
+                          <html:button
+                            id="__addonRef__-claude-managed-instruction-update"
+                            class="llm-pref-button"
+                            type="button"
+                          >
+                            Update runtime CLAUDE.md
+                          </html:button>
+                          <html:button
+                            id="__addonRef__-claude-managed-instruction-reset"
+                            class="llm-pref-button"
+                            type="button"
+                          >
+                            Reset to default
+                          </html:button>
+                        </html:div>
+                        <html:span
+                          id="__addonRef__-claude-managed-instruction-status"
+                          class="llm-pref-hint"
+                        ></html:span>
+                        <html:span class="llm-pref-hint">
+                          This is the text injected between
+                          <html:code
+                            >&lt;!-- LLM-FOR-ZOTERO:CLAUDE-MANAGED-BEGIN
+                            --&gt;</html:code
+                          >
+                          and
+                          <html:code
+                            >&lt;!-- LLM-FOR-ZOTERO:CLAUDE-MANAGED-END
+                            --&gt;</html:code
+                          >
+                          inside the runtime <html:code>CLAUDE.md</html:code>.
+                          Existing files are preserved and Update only refreshes
+                          that managed block. If you are not already comfortable
+                          editing Claude Code project instructions, leave this
+                          unchanged.
+                        </html:span>
+                      </html:div>
+                    </html:div>
+                  </html:div>
+                </html:details>
+              </html:div>
+            </html:div>
+          </html:div>
+        </html:div>
+
+        <html:div class="llm-pref-group">
+          <html:span class="llm-pref-group-title"
+            >Shared by every runtime</html:span
+          >
+
+          <!-- ── Notes directory ── -->
+          <html:div
+            class="llm-pref-row"
+            data-llm-agent-row="notes"
+            data-open="false"
+          >
+            <html:div class="llm-pref-row-head">
+              <html:span
+                class="llm-pref-row-icon llm-pref-row-icon--notes"
+              ></html:span>
+              <html:button
+                class="llm-pref-row-toggle"
+                type="button"
+                aria-expanded="false"
+                aria-controls="__addonRef__-agent-row-notes-body"
+              >
+                <html:span class="llm-pref-row-name">Notes directory</html:span>
+                <html:span class="llm-pref-row-sub">
+                  <html:span
+                    class="llm-pref-row-dot"
+                    data-llm-row-dot="notes"
+                  ></html:span>
+                  <html:span
+                    class="llm-pref-row-summary"
+                    data-llm-row-summary="notes"
+                  ></html:span>
+                </html:span>
+              </html:button>
+              <html:span class="llm-pref-row-tag"></html:span>
+              <html:span></html:span>
+              <html:span class="llm-pref-row-chevron">›</html:span>
+            </html:div>
+            <html:div
+              id="__addonRef__-agent-row-notes-body"
+              class="llm-pref-row-body"
+              hidden="hidden"
+            >
+              <html:span class="llm-pref-hint">
+                A local directory for saving notes as files. Note format and
+                templates are managed through skills — type
+                <html:code>/</html:code> in chat to see available skills, or
+                edit skill files directly.
+              </html:span>
+              <html:div class="llm-pref-field">
+                <html:label for="__addonRef__-notes-dir-nickname"
+                  >Nickname</html:label
+                >
+                <html:div class="llm-pref-control">
+                  <html:input
+                    id="__addonRef__-notes-dir-nickname"
+                    class="llm-pref-input"
+                    type="text"
+                    placeholder="e.g., Obsidian, Logseq, My Notes"
+                  ></html:input>
+                  <html:span class="llm-pref-hint">
+                    How you refer to this directory — the agent will recognize
+                    it when you mention it
+                  </html:span>
+                </html:div>
+              </html:div>
+              <html:div class="llm-pref-field">
+                <html:label for="__addonRef__-obsidian-vault-path"
+                  >Directory</html:label
+                >
+                <html:div class="llm-pref-control">
+                  <html:input
+                    id="__addonRef__-obsidian-vault-path"
+                    class="llm-pref-input"
+                    type="text"
+                    placeholder="/path/to/notes or C:\path\to\notes"
+                  ></html:input>
+                  <html:span class="llm-pref-hint">
+                    Absolute path to the directory where notes are saved as
+                    files
+                  </html:span>
+                </html:div>
+              </html:div>
+              <html:div class="llm-pref-field">
+                <html:label for="__addonRef__-obsidian-target-folder">
+                  Default folder
+                </html:label>
+                <html:div class="llm-pref-control">
+                  <html:input
+                    id="__addonRef__-obsidian-target-folder"
+                    class="llm-pref-input"
+                    type="text"
+                    placeholder="Zotero Notes"
+                  ></html:input>
+                  <html:span class="llm-pref-hint">
+                    Default subfolder for notes (the agent can write to any
+                    folder if you specify)
+                  </html:span>
+                </html:div>
+              </html:div>
+              <html:div class="llm-pref-field">
+                <html:label for="__addonRef__-obsidian-attachments-folder">
+                  Attachments folder
+                </html:label>
+                <html:div class="llm-pref-control">
+                  <html:div class="llm-pref-line">
+                    <html:input
+                      id="__addonRef__-obsidian-attachments-folder"
+                      class="llm-pref-input"
+                      type="text"
+                      placeholder="assets"
+                    ></html:input>
+                    <html:button
+                      id="__addonRef__-obsidian-test"
+                      class="llm-pref-button llm-pref-button--accent"
+                      type="button"
+                    >
+                      Test write access
+                    </html:button>
+                  </html:div>
+                  <html:span class="llm-pref-hint">
+                    Folder for images, relative to vault root (e.g., assets,
+                    Notes/imgs)
+                  </html:span>
+                  <html:span
+                    id="__addonRef__-obsidian-test-status"
+                    class="llm-pref-hint"
+                    style="display: none"
+                  ></html:span>
+                </html:div>
+              </html:div>
+            </html:div>
+          </html:div>
+
+          <!-- ── Zotero MCP: both clients in one panel ── -->
+          <html:div id="__addonRef__-shared-runtime-tools" class="llm-pref-row">
+            <html:div class="llm-pref-row-body" style="border-top: none">
+              <html:span class="llm-pref-section-title">Zotero MCP</html:span>
+              <html:span class="llm-pref-hint">
+                A curated local MCP server that exposes Zotero library and PDF
+                reading plus write operations. The calling client controls
+                approval with its own permission settings. Zotero validates
+                operations, records recovery data, and verifies changes without
+                duplicate permission prompts.
+              </html:span>
+
+              <html:div class="llm-pref-section">
+                <html:span class="llm-pref-section-title"
+                  >Built-in runtimes</html:span
+                >
+                <html:label class="llm-pref-check">
+                  <html:input
+                    id="__addonRef__-codex-app-server-mcp-enable"
+                    type="checkbox"
+                  ></html:input>
+                  <html:span>
+                    Enable Zotero MCP tools for native Codex and Claude Code
+                    turns
+                  </html:span>
+                </html:label>
+                <html:div class="llm-pref-line">
+                  <html:button
+                    id="__addonRef__-codex-app-server-mcp-setup"
+                    class="llm-pref-button"
+                    type="button"
+                  >
+                    Install/update Zotero MCP config
+                  </html:button>
+                  <html:span
+                    id="__addonRef__-codex-app-server-mcp-status"
+                    class="llm-pref-hint"
+                    style="overflow-wrap: anywhere; min-width: 0"
+                  ></html:span>
+                </html:div>
+                <html:span class="llm-pref-hint">
+                  For Codex, Zotero writes a local bearer-token protected MCP
+                  entry into Codex config and asks app-server to reload MCP
+                  servers. Claude Code receives a scoped MCP server directly for
+                  each turn. User-level Codex skills, plugins, and other MCP
+                  setup remain owned by Codex.
+                </html:span>
+              </html:div>
+            </html:div>
+          </html:div>
+        </html:div>
+      </html:div>
+
+      <!-- ═══ Tab 4: MinerU ═══ -->
+      <html:div
+        id="__addonRef__-pref-panel-mineru"
+        class="llm-pref-fields"
+        data-pref-panel="mineru"
+        style="display: none; flex-direction: column; gap: 18px"
+      >
+        <html:div style="display: flex; flex-direction: column; gap: 8px">
+          <html:div style="display: flex; flex-direction: column; gap: 2px">
+            <html:span
+              style="
+                font-size: 14px;
+                font-weight: 800;
+                color: var(--fill-primary, inherit);
+              "
+            >
+              MinerU PDF Parsing
+            </html:span>
+            <html:span
+              style="
+                font-size: 11.5px;
+                color: var(--fill-secondary, #888);
+                line-height: 1.5;
+              "
+            >
+              Extract high-quality structured text from PDFs with preserved math
+              formulas, tables, and figures. MinerU dramatically improves how
+              the AI understands your papers.
+            </html:span>
+          </html:div>
+
+          <html:label
+            style="
+              display: inline-flex;
+              align-items: center;
+              gap: 8px;
+              font-weight: 600;
+              font-size: 12px;
+              color: var(--fill-primary, inherit);
+            "
+          >
+            <html:input
+              id="__addonRef__-mineru-enabled"
+              type="checkbox"
+            ></html:input>
+            Enable MinerU PDF Parsing
+          </html:label>
+
+          <html:div
+            style="
+              display: flex;
+              flex-direction: column;
+              gap: 8px;
+              padding: 10px 12px;
+              border: 1px solid
+                var(--stroke-secondary, rgba(128, 128, 128, 0.25));
+              border-radius: 6px;
+            "
+          >
+            <html:label
+              style="
+                display: inline-flex;
+                align-items: center;
+                gap: 8px;
+                font-weight: 600;
+                font-size: 12px;
+                color: var(--fill-primary, inherit);
+              "
+            >
+              <html:input
+                id="__addonRef__-mineru-sync-enabled"
+                type="checkbox"
+              ></html:input>
+              Sync MinerU cache with Zotero file sync
+            </html:label>
+            <html:span
+              style="
+                font-size: 10.5px;
+                color: var(--fill-secondary, #888);
+                line-height: 1.45;
+                margin-left: 26px;
+              "
+            >
+              Creates companion ZIP attachments for MinerU full.md,
+              manifest.json, content_list.json, and PDF figure crops. Requires
+              Zotero file sync or WebDAV.
+            </html:span>
+            <html:div
+              style="
+                display: flex;
+                flex-direction: column;
+                gap: 6px;
+                margin-left: 26px;
+              "
+            >
+              <html:div
+                style="
+                  display: flex;
+                  align-items: center;
+                  gap: 8px;
+                  flex-wrap: wrap;
+                "
+              >
+                <html:button
+                  id="__addonRef__-mineru-sync-prepare"
+                  type="button"
+                  style="
+                    padding: 4px 10px;
+                    font-size: 12px;
+                    font-weight: 500;
+                    white-space: nowrap;
+                    background: transparent;
+                    color: var(--fill-primary, inherit);
+                    border: 1px solid
+                      var(--stroke-secondary, rgba(128, 128, 128, 0.45));
+                    border-radius: 5px;
+                    cursor: pointer;
+                  "
+                >
+                  Sync existing MinerU caches now
+                </html:button>
+                <html:button
+                  id="__addonRef__-mineru-sync-clean"
+                  type="button"
+                  style="
+                    padding: 4px 10px;
+                    font-size: 12px;
+                    font-weight: 500;
+                    white-space: normal;
+                    max-width: 280px;
+                    text-align: center;
+                    background: transparent;
+                    color: #dc2626;
+                    border: 1px solid #dc2626;
+                    border-radius: 5px;
+                    cursor: pointer;
+                  "
+                >
+                  Delete synced MinerU packages
+                </html:button>
+              </html:div>
+              <html:span
+                id="__addonRef__-mineru-sync-status"
+                style="
+                  font-size: 11.5px;
+                  display: none;
+                  color: var(--fill-secondary, #888);
+                  line-height: 1.35;
+                "
+              ></html:span>
+            </html:div>
+          </html:div>
+
+          <html:div
+            id="__addonRef__-mineru-sub-settings"
+            style="display: none; flex-direction: column; gap: 10px"
+          >
+            <html:label
+              style="
+                display: inline-flex;
+                align-items: center;
+                gap: 8px;
+                font-weight: 600;
+                font-size: 12px;
+                color: var(--fill-primary, inherit);
+              "
+            >
+              <html:input
+                id="__addonRef__-mineru-global-auto-parse"
+                type="checkbox"
+              ></html:input>
+              Auto-parse newly added items
+            </html:label>
+            <html:span
+              style="
+                font-size: 11px;
+                color: var(--fill-secondary, #888);
+                margin-top: -6px;
+                margin-left: 26px;
+                display: block;
+              "
+            >
+              <html:span
+                style="display: inline-flex; align-items: center; gap: 4px"
+              >
+                <html:span
+                  style="
+                    width: 8px;
+                    height: 8px;
+                    border-radius: 50%;
+                    background: #10b981;
+                    display: inline-block;
+                  "
+                ></html:span>
+                Ready
+                <html:span
+                  style="
+                    width: 8px;
+                    height: 8px;
+                    border-radius: 50%;
+                    background: #f59e0b;
+                    display: inline-block;
+                    margin-left: 8px;
+                  "
+                ></html:span>
+                Processing
+                <html:span
+                  id="__addonRef__-mineru-partial-legend-dot"
+                  style="
+                    width: 8px;
+                    height: 8px;
+                    border-radius: 50%;
+                    background: #8b5cf6;
+                    display: inline-block;
+                    margin-left: 8px;
+                  "
+                ></html:span>
+                Partial
+                <html:span
+                  style="
+                    width: 8px;
+                    height: 8px;
+                    border-radius: 50%;
+                    background: #ef4444;
+                    display: inline-block;
+                    margin-left: 8px;
+                  "
+                ></html:span>
+                Failed
+              </html:span>
+            </html:span>
+
+            <html:div
+              id="__addonRef__-mineru-mode-segmented"
+              role="group"
+              aria-label="MinerU parsing mode"
+              style="
+                display: flex;
+                gap: 4px;
+                padding: 3px;
+                background: color-mix(in srgb, currentColor 12%, Field);
+                border-radius: 8px;
+                width: 100%;
+                box-sizing: border-box;
+              "
+            >
+              <html:button
+                id="__addonRef__-mineru-mode-cloud"
+                type="button"
+                data-mineru-mode="cloud"
+                aria-pressed="true"
+                style="
+                  flex: 1;
+                  padding: 6px 0;
+                  font-size: 12px;
+                  font-weight: 600;
+                  border: none;
+                  border-radius: 6px;
+                  background: Field;
+                  color: FieldText;
+                  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+                  cursor: pointer;
+                  display: flex;
+                  align-items: center;
+                  justify-content: center;
+                "
+                >Cloud</html:button
+              >
+              <html:button
+                id="__addonRef__-mineru-mode-local"
+                type="button"
+                data-mineru-mode="local"
+                aria-pressed="false"
+                style="
+                  flex: 1;
+                  padding: 6px 0;
+                  font-size: 12px;
+                  font-weight: 500;
+                  border: none;
+                  border-radius: 6px;
+                  background: transparent;
+                  color: var(--fill-secondary, #888);
+                  box-shadow: none;
+                  cursor: pointer;
+                  display: flex;
+                  align-items: center;
+                  justify-content: center;
+                "
+                >Local</html:button
+              >
+            </html:div>
+
+            <!-- API key section -->
+            <html:div
+              id="__addonRef__-mineru-api-key-section"
+              style="display: flex; flex-direction: column; gap: 4px"
+            >
+              <html:label
+                for="__addonRef__-mineru-api-key"
+                style="
+                  display: block;
+                  font-weight: 600;
+                  font-size: 12px;
+                  color: var(--fill-primary, inherit);
+                  margin-bottom: 2px;
+                "
+              >
+                API Key (Required)
+              </html:label>
+              <html:input
+                id="__addonRef__-mineru-api-key"
+                type="password"
+                placeholder="Paste your free MinerU API key"
+                spellcheck="false"
+                autocapitalize="off"
+                style="
+                  width: 100%;
+                  padding: 6px 10px;
+                  font-size: 13px;
+                  border-radius: 6px;
+                  box-sizing: border-box;
+                "
+              ></html:input>
+              <html:span
+                style="
+                  font-size: 10.5px;
+                  color: var(--fill-secondary, #888);
+                  margin-top: 1px;
+                "
+              >
+                An API key is required. Get a free key from
+                <html:a
+                  href="https://mineru.net"
+                  target="_blank"
+                  rel="noopener"
+                  style="
+                    color: var(--color-accent, #2563eb);
+                    text-decoration: underline;
+                  "
+                  >mineru.net</html:a
+                >. Connects directly to mineru.net.
+              </html:span>
+            </html:div>
+
+            <html:div
+              id="__addonRef__-mineru-cloud-model-section"
+              style="display: flex; flex-direction: column; gap: 4px"
+            >
+              <html:label
+                for="__addonRef__-mineru-cloud-model"
+                style="
+                  display: block;
+                  font-weight: 600;
+                  font-size: 12px;
+                  color: var(--fill-primary, inherit);
+                  margin-bottom: 2px;
+                "
+              >
+                Parsing model
+              </html:label>
+              <html:select
+                id="__addonRef__-mineru-cloud-model"
+                style="
+                  width: 100%;
+                  padding: 6px 10px;
+                  font-size: 13px;
+                  border-radius: 6px;
+                  box-sizing: border-box;
+                "
+              >
+                <html:option value="pipeline">pipeline</html:option>
+                <html:option value="vlm">vlm (recommended)</html:option>
+              </html:select>
+              <html:span
+                style="
+                  font-size: 10.5px;
+                  color: var(--fill-secondary, #888);
+                  margin-top: 1px;
+                "
+              >
+                vlm uses a vision-language model — generally better at chapter
+                structure, figures, and formulas; may be slower than pipeline.
+              </html:span>
+            </html:div>
+
+            <html:div
+              id="__addonRef__-mineru-local-section"
+              style="display: none; flex-direction: column; gap: 8px"
+            >
+              <html:div style="display: flex; flex-direction: column; gap: 4px">
+                <html:label
+                  for="__addonRef__-mineru-local-api-base"
+                  style="
+                    display: block;
+                    font-weight: 600;
+                    font-size: 12px;
+                    color: var(--fill-primary, inherit);
+                    margin-bottom: 2px;
+                  "
+                >
+                  Local API Base URL
+                </html:label>
+                <html:input
+                  id="__addonRef__-mineru-local-api-base"
+                  type="text"
+                  placeholder="http://127.0.0.1:8000"
+                  style="
+                    width: 100%;
+                    padding: 6px 10px;
+                    font-size: 13px;
+                    border-radius: 6px;
+                    box-sizing: border-box;
+                  "
+                >
+                </html:input>
+                <html:span
+                  style="
+                    font-size: 10.5px;
+                    color: var(--fill-secondary, #888);
+                    margin-top: 1px;
+                  "
+                >
+                  Start a local MinerU API server separately. Test Connection
+                  detects its API; it does not parse a PDF.
+                </html:span>
+              </html:div>
+
+              <html:div
+                id="__addonRef__-mineru-legacy-options"
+                style="display: flex; flex-direction: column; gap: 8px"
+              >
+                <html:div
+                  style="display: flex; flex-direction: column; gap: 4px"
+                >
+                  <html:label
+                    for="__addonRef__-mineru-local-backend"
+                    style="
+                      display: block;
+                      font-weight: 600;
+                      font-size: 12px;
+                      color: var(--fill-primary, inherit);
+                      margin-bottom: 2px;
+                    "
+                  >
+                    Backend (MinerU 2/3)
+                  </html:label>
+                  <html:select
+                    id="__addonRef__-mineru-local-backend"
+                    style="
+                      width: 100%;
+                      padding: 6px 10px;
+                      font-size: 13px;
+                      border-radius: 6px;
+                      box-sizing: border-box;
+                    "
+                  >
+                    <html:option value="pipeline">pipeline</html:option>
+                    <html:option value="vlm">vlm</html:option>
+                    <html:option value="hybrid">hybrid</html:option>
+                    <html:option value="vlm-http-client"
+                      >vlm-http-client</html:option
+                    >
+                    <html:option value="hybrid-http-client"
+                      >hybrid-http-client</html:option
+                    >
+                  </html:select>
+                  <html:span
+                    style="
+                      font-size: 10.5px;
+                      color: var(--fill-secondary, #888);
+                      margin-top: 1px;
+                    "
+                  >
+                    Switching backend triggers a cold start: the first parse
+                    afterwards may take noticeably longer while the model loads.
+                  </html:span>
+                </html:div>
+
+                <html:label
+                  for="__addonRef__-mineru-local-effort"
+                  style="
+                    display: block;
+                    font-weight: 600;
+                    font-size: 12px;
+                    color: var(--fill-primary, inherit);
+                    margin-bottom: 2px;
+                  "
+                  >Hybrid effort (MinerU 3.3+)</html:label
+                >
+                <html:select
+                  id="__addonRef__-mineru-local-effort"
+                  style="
+                    width: 100%;
+                    padding: 6px 10px;
+                    font-size: 13px;
+                    border-radius: 6px;
+                    box-sizing: border-box;
+                  "
+                >
+                  <html:option value="medium">medium</html:option>
+                  <html:option value="high">high</html:option>
+                </html:select>
+                <html:label>
+                  <html:input
+                    id="__addonRef__-mineru-local-imageAnalysis"
+                    type="checkbox"
+                  >
+                  </html:input>
+                  Analyze images and charts (VLM or hybrid high
+                  effort)</html:label
+                >
+                <html:label
+                  for="__addonRef__-mineru-local-serverUrl"
+                  style="
+                    display: block;
+                    font-weight: 600;
+                    font-size: 12px;
+                    color: var(--fill-primary, inherit);
+                    margin-bottom: 2px;
+                  "
+                  >VLM server URL (HTTP-client backends)</html:label
+                >
+                <html:input
+                  id="__addonRef__-mineru-local-serverUrl"
+                  type="text"
+                  placeholder="http://127.0.0.1:30000"
+                  style="
+                    width: 100%;
+                    padding: 6px 10px;
+                    font-size: 13px;
+                    border-radius: 6px;
+                    box-sizing: border-box;
+                  "
+                >
+                </html:input>
+                <html:span
+                  style="font-size: 11px; color: var(--fill-secondary, #888)"
+                  >Legacy servers can keep parsing after Pause. Restart the
+                  server to stop that work.</html:span
+                >
+              </html:div>
+              <html:div
+                id="__addonRef__-mineru-v1-options"
+                style="display: flex; flex-direction: column; gap: 4px"
+              >
+                <html:label
+                  for="__addonRef__-mineru-local-tier"
+                  style="
+                    display: block;
+                    font-weight: 600;
+                    font-size: 12px;
+                    color: var(--fill-primary, inherit);
+                    margin-bottom: 2px;
+                  "
+                  >Quality tier (MinerU 4)</html:label
+                >
+                <html:select
+                  id="__addonRef__-mineru-local-tier"
+                  style="
+                    width: 100%;
+                    padding: 6px 10px;
+                    font-size: 13px;
+                    border-radius: 6px;
+                    box-sizing: border-box;
+                  "
+                >
+                  <html:option value="auto">Auto (best available)</html:option>
+                  <html:option value="flash">flash</html:option>
+                  <html:option value="basic">basic</html:option>
+                  <html:option value="standard">standard</html:option>
+                  <html:option value="advanced">advanced</html:option>
+                </html:select>
+                <html:span
+                  style="font-size: 11px; color: var(--fill-secondary, #888)"
+                  >For MinerU 4, configure the VLM server on the MinerU service.
+                  Pause requests job cancellation.</html:span
+                >
+              </html:div>
+              <html:label
+                for="__addonRef__-mineru-local-apiKey"
+                style="
+                  display: block;
+                  font-weight: 600;
+                  font-size: 12px;
+                  color: var(--fill-primary, inherit);
+                  margin-bottom: 2px;
+                "
+                >Local service API key (optional)</html:label
+              >
+              <html:input
+                id="__addonRef__-mineru-local-apiKey"
+                type="password"
+                placeholder=""
+                style="
+                  width: 100%;
+                  padding: 6px 10px;
+                  font-size: 13px;
+                  border-radius: 6px;
+                  box-sizing: border-box;
+                "
+              >
+              </html:input>
+              <html:span
+                id="__addonRef__-mineru-local-service"
+                style="font-size: 11px; color: var(--fill-secondary, #888)"
+              >
+              </html:span>
+            </html:div>
+
+            <html:div style="display: flex; flex-direction: column; gap: 4px">
+              <html:label
+                for="__addonRef__-mineru-force-ocr"
+                style="
+                  display: flex;
+                  align-items: center;
+                  gap: 8px;
+                  font-weight: 600;
+                  font-size: 12px;
+                  color: var(--fill-primary, inherit);
+                "
+              >
+                <html:input
+                  id="__addonRef__-mineru-force-ocr"
+                  type="checkbox"
+                  style="margin: 0"
+                />
+                Force OCR
+              </html:label>
+              <html:span
+                style="
+                  font-size: 10.5px;
+                  color: var(--fill-secondary, #888);
+                  margin-top: 1px;
+                "
+              >
+                Use OCR even when MinerU would normally auto-detect PDF text.
+                Leave off to keep MinerU's default detection.
+              </html:span>
+            </html:div>
+
+            <html:div style="display: flex; align-items: center; gap: 8px">
+              <html:button
+                id="__addonRef__-mineru-test"
+                type="button"
+                style="
+                  padding: 4px 10px;
+                  font-size: 12px;
+                  font-weight: 500;
+                  white-space: nowrap;
+                  background: transparent;
+                  color: var(--color-accent, #2563eb);
+                  border: 1px solid var(--color-accent, #2563eb);
+                  border-radius: 5px;
+                  cursor: pointer;
+                "
+              >
+                Test Connection
+              </html:button>
+              <html:span
+                id="__addonRef__-mineru-test-status"
+                style="font-size: 11.5px; display: none"
+              ></html:span>
+            </html:div>
+
+            <!-- ── Advanced MinerU parsing filters ── -->
+            <html:details style="margin-top: 8px">
+              <html:summary
+                style="font-size: 12px; font-weight: 600; cursor: pointer"
+              >
+                Advanced parsing filters
+              </html:summary>
+              <html:div
+                style="
+                  display: flex;
+                  flex-direction: column;
+                  gap: 10px;
+                  margin-top: 8px;
+                  padding: 10px 12px;
+                  border: 1px solid var(--stroke-secondary, #c8c8c8);
+                  border-radius: 6px;
+                  background: color-mix(in srgb, Field 94%, CanvasText 6%);
+                "
+              >
+                <html:div
+                  style="display: flex; flex-direction: column; gap: 4px"
+                >
+                  <html:div
+                    style="
+                      display: flex;
+                      align-items: center;
+                      gap: 8px;
+                      font-size: 12px;
+                      color: var(--fill-primary, inherit);
+                    "
+                  >
+                    <html:label
+                      for="__addonRef__-mineru-max-auto-pages-preset"
+                      style="font-weight: 600"
+                    >
+                      Skip files over
+                    </html:label>
+                    <html:select
+                      id="__addonRef__-mineru-max-auto-pages-preset"
+                      class="llm-mineru-page-limit"
+                    >
+                      <html:option value="100">100</html:option>
+                      <html:option value="200">200</html:option>
+                      <html:option value="500">500</html:option>
+                      <html:option value="1000">1000</html:option>
+                      <html:option value="0">Unlimited</html:option>
+                      <html:option value="custom">Customized</html:option>
+                    </html:select>
+                    <html:input
+                      id="__addonRef__-mineru-max-auto-pages"
+                      aria-label="Custom page limit"
+                      hidden="hidden"
+                      type="text"
+                      inputmode="numeric"
+                      pattern="[0-9]*"
+                      placeholder="100"
+                      class="llm-mineru-page-limit"
+                    ></html:input>
+                    <html:span
+                      id="__addonRef__-mineru-max-auto-pages-unit"
+                      style="font-weight: 600"
+                      >pages</html:span
+                    >
+                  </html:div>
+                  <html:span
+                    style="
+                      font-size: 10.5px;
+                      color: var(--fill-secondary, #888);
+                    "
+                  >
+                    Start All, Start Filtered, Start Selected, and auto-parse
+                    skip PDFs above this page count.
+                  </html:span>
+                </html:div>
+
+                <html:div
+                  style="display: flex; flex-direction: column; gap: 4px"
+                >
+                  <html:label
+                    for="__addonRef__-mineru-exclude-patterns"
+                    style="
+                      display: block;
+                      font-weight: 600;
+                      font-size: 12px;
+                      color: var(--fill-primary, inherit);
+                      margin-bottom: 2px;
+                    "
+                  >
+                    Exclude PDFs by Filename
+                  </html:label>
+                  <html:input
+                    id="__addonRef__-mineru-exclude-patterns"
+                    type="text"
+                    placeholder="e.g. 翻译, _translated, /\btranslat(ed|ion)\b/"
+                    style="
+                      width: 100%;
+                      padding: 6px 10px;
+                      font-size: 13px;
+                      border-radius: 6px;
+                      box-sizing: border-box;
+                    "
+                  ></html:input>
+                  <html:span
+                    style="
+                      font-size: 10.5px;
+                      color: var(--fill-secondary, #888);
+                      margin-top: 1px;
+                    "
+                  >
+                    Comma-separated patterns. Matching filenames are skipped by
+                    your rule. Wrap in /slashes/ for regex.
+                  </html:span>
+                </html:div>
+              </html:div>
+            </html:details>
+
+            <!-- ── Embedded MinerU manager ── -->
+            <html:div
+              style="
+                margin-top: 8px;
+                border-top: 1px solid
+                  var(--stroke-secondary, rgba(128, 128, 128, 0.25));
+                padding-top: 12px;
+              "
+            >
+              <html:div
+                style="
+                  display: flex;
+                  align-items: center;
+                  gap: 10px;
+                  margin-bottom: 8px;
+                "
+              >
+                <html:span style="font-size: 13px; font-weight: 700"
+                  >Manage Files</html:span
+                >
+                <html:progress
+                  id="__addonRef__-mineru-mgr-progress"
+                  value="0"
+                  max="100"
+                  style="flex: 1; height: 5px; min-width: 60px"
+                ></html:progress>
+                <html:span
+                  id="__addonRef__-mineru-mgr-progress-label"
+                  style="
+                    font-size: 11px;
+                    white-space: nowrap;
+                    color: var(--fill-secondary, #888);
+                  "
+                  >0 / 0</html:span
+                >
+              </html:div>
+              <html:div
+                id="__addonRef__-mineru-mgr-status"
+                style="
+                  font-size: 11px;
+                  color: var(--fill-secondary, #888);
+                  margin-bottom: 6px;
+                  min-height: 14px;
+                  line-height: 1.35;
+                  white-space: normal;
+                  overflow-wrap: anywhere;
+                "
+              ></html:div>
+              <html:div
+                style="
+                  display: flex;
+                  align-items: center;
+                  gap: 6px;
+                  margin-bottom: 8px;
+                "
+              >
+                <html:button
+                  id="__addonRef__-mineru-mgr-start-btn"
+                  type="button"
+                  style="
+                    padding: 3px 10px;
+                    font-size: 11px;
+                    font-weight: 600;
+                    border: 1px solid var(--color-accent, #2563eb);
+                    border-radius: 4px;
+                    background: var(--color-accent, #2563eb);
+                    color: #fff;
+                    cursor: pointer;
+                  "
+                  >Start All</html:button
+                >
+                <html:button
+                  id="__addonRef__-mineru-mgr-repair-btn"
+                  type="button"
+                  style="
+                    padding: 3px 10px;
+                    font-size: 11px;
+                    font-weight: 500;
+                    border: 1px solid var(--stroke-secondary, #8a8a8a);
+                    border-radius: 4px;
+                    background: transparent;
+                    color: FieldText;
+                    cursor: pointer;
+                  "
+                  >Repair Cache</html:button
+                >
+                <html:button
+                  id="__addonRef__-mineru-mgr-delete-btn"
+                  type="button"
+                  style="
+                    padding: 3px 10px;
+                    font-size: 11px;
+                    font-weight: 500;
+                    border: 1px solid #dc2626;
+                    border-radius: 4px;
+                    background: transparent;
+                    color: #dc2626;
+                    cursor: pointer;
+                  "
+                  >Delete All Cache</html:button
+                >
+                <html:span
+                  id="__addonRef__-mineru-mgr-error"
+                  style="
+                    font-size: 10px;
+                    color: #dc2626;
+                    display: none;
+                    margin-left: 2px;
+                  "
+                ></html:span>
+              </html:div>
+              <!-- Two-panel: sidebar + items -->
+              <html:div
+                style="
+                  display: flex;
+                  border: 1px solid
+                    var(--stroke-secondary, rgba(128, 128, 128, 0.25));
+                  border-radius: 6px;
+                  height: 500px;
+                  overflow: hidden;
+                "
+              >
+                <html:div
+                  id="__addonRef__-mineru-mgr-sidebar"
+                  style="
+                    width: 180px;
+                    min-width: 180px;
+                    max-width: 520px;
+                    border-right: 1px solid rgba(128, 128, 128, 0.2);
+                    overflow: auto;
+                    padding: 4px 0;
+                    flex-shrink: 0;
+                    font-size: 12px;
+                  "
+                ></html:div>
+                <html:div
+                  style="
+                    flex: 1;
+                    display: flex;
+                    flex-direction: column;
+                    min-width: 0;
+                  "
+                >
+                  <html:div
+                    id="__addonRef__-mineru-mgr-col-headers"
+                    style="
+                      display: flex;
+                      align-items: center;
+                      gap: 8px;
+                      padding: 4px 10px;
+                      font-size: 10px;
+                      font-weight: 600;
+                      color: #888;
+                      border-bottom: 1px solid rgba(128, 128, 128, 0.2);
+                      flex-shrink: 0;
+                      user-select: none;
+                    "
+                  >
+                    <html:span
+                      role="button"
+                      data-sort-key="cached"
+                      style="
+                        width: 8px;
+                        cursor: pointer;
+                        text-align: center;
+                        flex-shrink: 0;
+                      "
+                      >&#x25CF;</html:span
+                    >
+                    <html:span
+                      role="button"
+                      data-sort-key="title"
+                      style="flex: 1; min-width: 0; cursor: pointer"
+                      >Title</html:span
+                    >
+                    <html:span
+                      role="button"
+                      data-sort-key="firstCreator"
+                      style="flex: 0 0 90px; cursor: pointer"
+                      >Author</html:span
+                    >
+                    <html:span
+                      role="button"
+                      data-sort-key="year"
+                      style="flex: 0 0 34px; text-align: right; cursor: pointer"
+                      >Year</html:span
+                    >
+                    <html:span
+                      role="button"
+                      data-sort-key="dateAdded"
+                      style="flex: 0 0 64px; text-align: right; cursor: pointer"
+                      >Added</html:span
+                    >
+                  </html:div>
+                  <html:div
+                    id="__addonRef__-mineru-mgr-items-list"
+                    style="flex: 1; overflow-y: auto; min-height: 0"
+                  ></html:div>
+                </html:div>
+              </html:div>
+              <!-- Context menu -->
+              <html:div
+                id="__addonRef__-mineru-mgr-context-menu"
+                style="
+                  display: none;
+                  position: fixed;
+                  background: Field;
+                  border: 1px solid rgba(128, 128, 128, 0.3);
+                  border-radius: 6px;
+                  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+                  padding: 4px 0;
+                  z-index: 999;
+                  min-width: 170px;
+                "
+              >
+                <html:div
+                  id="__addonRef__-mineru-mgr-ctx-process"
+                  style="padding: 4px 12px; font-size: 11.5px; cursor: pointer"
+                  >Process This Item</html:div
+                >
+                <html:div
+                  id="__addonRef__-mineru-mgr-ctx-show-folder"
+                  style="padding: 4px 12px; font-size: 11.5px; cursor: pointer"
+                  >Show in File Manager</html:div
+                >
+                <html:div
+                  style="
+                    border-top: 1px solid rgba(128, 128, 128, 0.2);
+                    margin: 2px 0;
+                  "
+                ></html:div>
+                <html:div
+                  id="__addonRef__-mineru-mgr-ctx-delete"
+                  style="
+                    padding: 4px 12px;
+                    font-size: 11.5px;
+                    cursor: pointer;
+                    color: #dc2626;
+                  "
+                  >Delete MinerU Cache</html:div
+                >
+              </html:div>
+            </html:div>
+          </html:div>
+        </html:div>
+      </html:div>
+
+      <!-- ═══ Tab 5: Usage ═══ -->
+      <html:div
+        id="__addonRef__-pref-panel-usage"
+        class="llm-pref-fields llm-pref-panel"
+        data-pref-panel="usage"
+        style="display: none; flex-direction: column; gap: 18px"
+      >
+        <html:div
+          id="__addonRef__-usage-root"
+          style="
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            padding: 10px 12px;
+          "
+        ></html:div>
+      </html:div>
+    </html:div>
+  </groupbox>
+</vbox>
