@@ -25,6 +25,7 @@ export type StandaloneSidebarView = {
   skillsLabel: HTMLSpanElement;
   refreshButton: HTMLButtonElement;
   historyRegion: HTMLDivElement;
+  historyLabel: HTMLSpanElement;
   undo: HTMLDivElement;
   undoText: HTMLSpanElement;
   undoButton: HTMLButtonElement;
@@ -103,7 +104,10 @@ export function createStandaloneSidebarView(
     "llm-standalone-nav-toggle",
   );
   toggleButton.type = "button";
+  toggleButton.dataset.sidebarAction = "toggle-sidebar";
   toggleButton.setAttribute("aria-controls", panel.id);
+  toggleButton.setAttribute("aria-expanded", "true");
+  toggleButton.setAttribute("aria-label", translate("Collapse sidebar"));
   header.append(windowButtons, toggleButton);
 
   const primaryNavigation = createHtmlElement(
@@ -157,6 +161,23 @@ export function createStandaloneSidebarView(
     "llm-standalone-history-region",
   );
   historyRegion.id = "llm-standalone-history-region";
+  historyRegion.setAttribute("role", "region");
+  historyRegion.setAttribute("aria-label", translate("History"));
+  const historyLabel = createHtmlElement(
+    doc,
+    "span",
+    "llm-standalone-sidebar-section-label",
+  );
+  historyLabel.textContent = translate("History");
+  historyLabel.style.display = "block";
+  historyLabel.style.padding = "10px 18px 4px";
+  historyLabel.style.color = "var(--llm-slate11)";
+  historyLabel.style.fontSize = "var(--llm-text-small)";
+  historyLabel.style.fontWeight = "600";
+  historyLabel.style.letterSpacing = "0.04em";
+  historyLabel.style.textTransform = "uppercase";
+  historyLabel.style.userSelect = "none";
+  historyLabel.setAttribute("aria-hidden", "true");
   const undo = createHtmlElement(
     doc,
     "div",
@@ -172,7 +193,7 @@ export function createStandaloneSidebarView(
 
   const list = createHtmlElement(doc, "div", "llm-standalone-sidebar-list");
   list.id = "llm-standalone-sidebar-list";
-  historyRegion.append(undo, list);
+  historyRegion.append(historyLabel, undo, list);
 
   const preferencesRegion = createHtmlElement(
     doc,
@@ -221,6 +242,7 @@ export function createStandaloneSidebarView(
     skillsLabel: skills.label,
     refreshButton,
     historyRegion,
+    historyLabel,
     undo,
     undoText,
     undoButton,
@@ -246,6 +268,9 @@ export function setStandaloneSidebarState(
     expanded ? "Collapse sidebar" : "Expand sidebar",
   );
   view.toggleButton.setAttribute("aria-label", view.toggleButton.title);
+  view.toggleButton.setAttribute("aria-expanded", String(expanded));
+  view.toggleButton.dataset.sidebarState = state;
+  view.historyLabel.hidden = !expanded;
   placeWindowChrome(view, expanded);
   // A flyout belongs to one collapsed moment; any state change ends it.
   setStandaloneSidebarFlyoutOpen(view, false);
@@ -270,6 +295,8 @@ export function setStandaloneSidebarFlyoutOpen(
   open: boolean,
 ): void {
   view.root.dataset.sidebarFlyout = open ? "open" : "closed";
+  view.historyLabel.hidden =
+    view.root.dataset.sidebarState === "collapsed" && !open;
   view.toggleButton.setAttribute(
     "aria-expanded",
     String(view.root.dataset.sidebarState === "expanded" || open),
