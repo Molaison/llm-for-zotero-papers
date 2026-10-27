@@ -1306,7 +1306,10 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
   tokenUsage.dataset.summary = contextUsagePresentation.summary;
   tokenUsage.dataset.detail = contextUsagePresentation.detail;
   contextUsageControl.append(contextGauge, tokenUsage);
-  footerControls.append(permissionControl);
+  // Permission is a frequent, high-impact runtime control. Keep its existing
+  // node/ID/handlers, but place it in the always-visible composer footer rather
+  // than hiding it inside the low-frequency conversation-tools disclosure.
+  actionsLeft.append(permissionControl);
   const providerQuota = createElement(doc, "button", "llm-provider-quota", {
     id: "llm-provider-quota",
     type: "button",
