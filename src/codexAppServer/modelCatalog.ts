@@ -228,6 +228,8 @@ function createRuntimeModelEntry(params: {
     providerProtocol: "codex_responses",
     providerLabel: CODEX_APP_SERVER_PROVIDER_LABEL,
     providerOrder: -1,
+    paperRegistry: false,
+    directWebPdf: false,
     displayModelLabel: params.displayModelLabel,
     advanced: {
       temperature: DEFAULT_TEMPERATURE,

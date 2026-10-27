@@ -1,3 +1,10 @@
+import type { AnnotationReplyBatch } from "../../../../shared/types";
+import {
+  annotationReplyPrompt,
+  ANNOTATION_BATCH_MARKER,
+  completeAnnotationReplyBatch,
+  settleAnnotationReplyBatch,
+} from "../../../../services/pdf/annotationReplyService";
 import { appLogger } from "../../../../core/logging";
 import { MAX_SELECTED_IMAGES } from "../../constants";
 import type {
@@ -52,6 +59,8 @@ type SelectedProfile = {
     | "copilot_auth"
     | "webchat";
   providerProtocol?: ProviderProtocol;
+  paperRegistry?: boolean;
+  directWebPdf?: boolean;
 };
 
 type LatestEditablePair = {
@@ -80,6 +89,13 @@ export type SendFlowOptions =
     };
 
 type SendFlowControllerDeps = {
+  annotationReplies?: {
+    hasSelection: () => boolean;
+    prepare: (
+      conversationKey: number,
+    ) => Promise<AnnotationReplyBatch | undefined>;
+    settled: () => Promise<void>;
+  };
   body: Element;
   inputBox: HTMLTextAreaElement;
   getItem: () => Zotero.Item | null;
@@ -320,6 +336,7 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
     const shouldClearDraft = !options?.preserveInputDraft;
     let submittedInputRestored = false;
     let providerDispatchStarted = false;
+    let annotationBatch: AnnotationReplyBatch | undefined;
     const restoreSubmittedInput = () => {
       if (providerDispatchStarted || submittedInputRestored) return;
       submittedInputRestored = true;
@@ -442,7 +459,33 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
         panel.currentModelName ||
         ""
       ).trim();
+      const papersOwnsPdfUpload =
+        earlyProfile?.paperRegistry === true && pdfModePaperContexts.length > 0;
       const earlyAdvancedParams = panel.advancedModelParams;
+      const hasAnnotationReplies =
+        deps.annotationReplies?.hasSelection() || false;
+      if (
+        hasAnnotationReplies &&
+        (usesPluginAgentMode ||
+          panel.isCodexConversationSystem ||
+          isWebChat ||
+          panel.activeEditSession ||
+          earlyProfile?.authMode === "codex_app_server" ||
+          deps.isScreenshotUnsupportedModel(
+            earlyModelName,
+            earlyProfile?.providerProtocol,
+            earlyProfile?.authMode,
+            earlyProfile?.apiBase,
+            earlyAdvancedParams?.inputMode,
+          ))
+      ) {
+        deps.setStatusMessage?.(
+          "批注回写请使用支持图片的 Chat / Papers 模型；不支持 Agent、网页、原生代理或编辑重试模式。",
+          "error",
+        );
+        return;
+      }
+
       const selectedBaseFiles = deps.getSelectedFiles(item.id);
       if (useCodexAttachmentPolicy) {
         const blockedAttachments =
@@ -541,9 +584,11 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
         !selectedPaperContexts.length &&
         !selectedCollectionContexts.length &&
         !selectedTagContexts.length &&
+        !papersOwnsPdfUpload &&
         !selectedFiles.length &&
         !localDocuments.length &&
-        !hasImageInputs
+        !hasImageInputs &&
+        !hasAnnotationReplies
       ) {
         return;
       }
@@ -552,6 +597,7 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
         selectedFiles.length > 0 ||
         localDocuments.length > 0 ||
         selectedPaperContexts.length > 0 ||
+        papersOwnsPdfUpload ||
         selectedCollectionContexts.length > 0 ||
         selectedTagContexts.length > 0;
 
@@ -568,10 +614,13 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
       if (!resolvedPromptText && hasImageInputs) {
         resolvedPromptText = "Please analyze the attached images.";
       }
+      if (!resolvedPromptText && hasAnnotationReplies)
+        resolvedPromptText = "请逐条回答所选 PDF 文字批注。";
       if (!resolvedPromptText) return;
 
       const selectedScopeContextCount =
         selectedPaperContexts.length +
+        (papersOwnsPdfUpload ? pdfModePaperContexts.length : 0) +
         selectedCollectionContexts.length +
         selectedTagContexts.length;
       if (
@@ -582,11 +631,12 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
         !localDocuments.length &&
         !hasImageInputs
       ) {
-        resolvedPromptText = selectedPaperContexts.length
-          ? "Please analyze selected papers."
-          : selectedCollectionContexts.length
-            ? "Please analyze selected collection."
-            : "Please analyze selected tag.";
+        resolvedPromptText =
+          selectedPaperContexts.length || papersOwnsPdfUpload
+            ? "Please analyze selected papers."
+            : selectedCollectionContexts.length
+              ? "Please analyze selected collection."
+              : "Please analyze selected tag.";
       }
 
       const composedQuestionBase = primarySelectedText
@@ -822,7 +872,7 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
             : []),
         ]),
       );
-      const questionForSend =
+      let questionForSend =
         selectedProfile?.authMode === "codex_app_server" && forcedSkillIds[0]
           ? prependNativeSkillMention(composedQuestion, forcedSkillIds[0])
           : composedQuestion;
@@ -836,6 +886,21 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
         snapshot: readNoteSnapshot(item),
       }).activeNoteContext;
       if (!requestIsActive()) return;
+      if (hasAnnotationReplies) {
+        annotationBatch = await deps.annotationReplies!.prepare(
+          textContextConversationKey,
+        );
+        if (!requestIsActive()) return;
+        if (annotationBatch) {
+          images.push(...annotationBatch.pages.map((page) => page.dataURL));
+          if (images.length > 9 && selectedProfile?.paperRegistry === true) {
+            throw new Error(
+              "Papers 批注批次最多 9 张图片（为首次 PDF 留一个附件位）；请缩小选择。没有发送模型。",
+            );
+          }
+          questionForSend += "\n\n" + annotationReplyPrompt(annotationBatch);
+        }
+      }
       let webchatSendOutcome: "success" | "failed" | "cancelled" | null = null;
       const sendTask = deps.sendQuestion({
         body: deps.body,
@@ -846,6 +911,16 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
         },
         contextSource,
         question: questionForSend,
+        annotationReplyBatchId: annotationBatch?.id,
+        onAnnotationReplyComplete: annotationBatch
+          ? async (raw, complete) => {
+              if (!complete)
+                throw new Error(
+                  "批注回答未完整结束；不回写、不自动重发。请查看批次状态。",
+                );
+              await completeAnnotationReplyBatch(annotationBatch!.id, raw);
+            }
+          : undefined,
         images,
         model: selectedProfile?.model,
         apiBase: selectedProfile?.apiBase,
@@ -856,7 +931,9 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
         modelProviderLabel: selectedProfile?.providerLabel,
         reasoning: selectedReasoning,
         advanced: advancedParams,
-        displayQuestion,
+        displayQuestion: annotationBatch
+          ? `${displayQuestion}\n${ANNOTATION_BATCH_MARKER}${annotationBatch.id}]`
+          : displayQuestion,
         selectedTextContexts: selectedContexts.length
           ? selectedContexts
           : undefined,
@@ -936,6 +1013,20 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
       }
       deps.refreshGlobalHistoryHeader();
     } finally {
+      if (annotationBatch) {
+        try {
+          await settleAnnotationReplyBatch(
+            annotationBatch.id,
+            providerDispatchStarted,
+          );
+          await deps.annotationReplies?.settled();
+        } catch (error) {
+          deps.setStatusMessage?.(
+            `批注状态保存失败：${String(error)}；不要重发本批。`,
+            "error",
+          );
+        }
+      }
       if (request.signal.aborted && !providerDispatchStarted) {
         restoreSubmittedInput();
       }

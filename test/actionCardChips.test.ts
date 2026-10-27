@@ -258,7 +258,7 @@ describe("action card chips", function () {
     assert.include(skip.className, "llm-at-row-skip");
     assert.include(
       collectFakeText(skip),
-      "Skipped Okafor, 2019 · already in Reviews",
+      "Skipped Okafor, 2019，already in Reviews",
     );
     const twoSkipped = el(
       renderSkipRow(
@@ -272,7 +272,7 @@ describe("action card chips", function () {
     );
     assert.include(
       collectFakeText(twoSkipped),
-      "Skipped Okafor, 2019, Lee, 2020 · already in Reviews",
+      "Skipped Okafor, 2019, Lee, 2020，already in Reviews",
     );
   });
 });

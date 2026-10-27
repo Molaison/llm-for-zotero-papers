@@ -21,6 +21,8 @@ export type PdfPaperModelInputProfile = {
     | "webchat";
   providerProtocol?: ProviderProtocol;
   inputMode?: ModelInputMode;
+  /** The route keeps a server-side paper registry; explicit configuration. */
+  paperRegistry?: boolean;
 } | null;
 
 export type PdfPaperModelInputDeps = {
@@ -130,6 +132,36 @@ export async function resolvePdfModeModelInputs(params: {
     profile?.apiBase,
     profile?.inputMode,
   );
+  // The Papers route handles the paper's own PDF in llmClient, uploading only
+  // when the server has no ready binding. Do not also create a generic PDF
+  // attachment copy, or reject it because the capability table says "none".
+  if (
+    !isWebChat &&
+    profile?.paperRegistry === true &&
+    paperContexts.length > 0 &&
+    selectedPdfFiles.length === 0
+  ) {
+    deps.setStatusMessage?.(
+      paperContexts.length > 1
+        ? "Papers route uses only the current paper's PDF; other selected paper PDFs are not sent this turn."
+        : `Preparing PDF context for the papers route to ${modelName}...`,
+      paperContexts.length > 1 ? "warning" : "ready",
+    );
+    return {
+      ok: true,
+      pdfSupport,
+      selectedFiles: selectedNonPdfFiles,
+      modelFiles: selectedNonPdfFiles,
+      displayPdfPaperAttachments: [],
+      modelPdfPaperAttachments: [],
+      modelSelectedPdfAttachments: [],
+      selectedPdfFiles,
+      selectedNonPdfFiles,
+      pdfPageImageDataUrls: [],
+      pdfUploadSystemMessages: [],
+      localDocuments: [],
+    };
+  }
   let displayPdfPaperAttachments: ChatAttachment[] = [];
   let modelPdfPaperAttachments: ChatAttachment[] = [];
   let modelSelectedPdfAttachments = selectedPdfFiles;

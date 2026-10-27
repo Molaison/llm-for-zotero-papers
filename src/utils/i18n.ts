@@ -156,12 +156,18 @@ const zhCN: Record<string, string> = {
     "询问关于这篇论文的问题... 输入 / 查看操作，@ 添加论文",
   "Ask anything... Type / for actions, @ to add papers":
     "随便问... 输入 / 查看操作，@ 添加论文",
+  "Ask about this paper…": "询问这篇论文…",
+  "Ask a research question…": "输入研究问题…",
+  Paper: "论文",
   "Open a PDF first": "请先打开一个 PDF",
   "Include selected reader text": "包含选中的阅读器文本",
   "Select text in the reader first": "请先在阅读器中选择文本",
   "Select figure screenshot": "选择图片截图",
   "Context actions": "上下文操作",
   Reasoning: "推理",
+  "Add context": "添加上下文",
+  "Model controls unavailable": "模型控件不可用",
+  "Answer incomplete": "回答未完成",
   "Coming later": "即将推出",
   "Context window:": "上下文窗口：",
   "Context window usage unavailable": "上下文窗口使用量不可用",
@@ -654,6 +660,13 @@ const zhCN: Record<string, string> = {
   "API protocol override": "API 协议覆盖",
   "API URL": "API URL",
   "API Key": "API 密钥",
+  "Route capabilities": "路由能力",
+  "Server-side paper registry": "服务端论文登记",
+  "Send PDFs to this route's paper registry. Explicitly configured; a model name or host never selects this path.":
+    "把 PDF 发送到该路由的论文登记服务。需显式启用；模型名或主机地址不会自动选择此路径。",
+  "Direct ChatGPT Web PDF": "ChatGPT 网页直传 PDF",
+  "Send inline PDF parts to a web-backed route that remembers them per conversation.":
+    "把内联 PDF 发送到按对话记住附件的网页后端路由。",
   "codex auth": "codex 认证",
   "Codex Auth": "Codex 认证",
   "Codex Direct (Legacy)": "Codex 直连（旧版）",
@@ -1557,30 +1570,9 @@ export function getWelcomeHtml(): string {
 }
 
 export function getPaperChatStartPageHtml(): string {
-  if (getEffectiveLocale().startsWith("zh")) {
-    return `
-      <div class="llm-start-page">
-        <div class="llm-start-page-title">LLM-for-Zotero</div>
-        <div class="llm-start-page-subtitle">从这里开始，读懂这篇论文的一切</div>
-        <div class="llm-start-page-desc">
-          <p>论文对话回答关于当前活跃论文的问题。论文将在你提问前预加载到上下文中。</p>
-          <p>内联添加上下文：<strong>文本</strong>、<strong>截图</strong>或 <strong>@论文</strong>。左键点击论文标签发送 PDF；右键点击切换全文/检索模式。</p>
-          <p>使用文献库对话请通过顶部的对话模式控件切换。</p>
-        </div>
-      </div>
-    `;
-  }
-  return `
-    <div class="llm-start-page">
-      <div class="llm-start-page-title">LLM-for-Zotero</div>
-      <div class="llm-start-page-subtitle">Understand everything of this paper, from here</div>
-      <div class="llm-start-page-desc">
-        <p>Paper chat answers questions about your current active paper. The paper will be pre-loaded into context before your first question.</p>
-        <p>Add context inline: <strong>text</strong>, <strong>screenshots</strong>, or <strong>@papers</strong>. Left-click a paper chip to send its PDF; right-click to toggle between full-text and retrieval mode.</p>
-        <p>For library chat, use the chat mode control at the top.</p>
-      </div>
-    </div>
-  `;
+  return getEffectiveLocale().startsWith("zh")
+    ? '<div class="llm-start-page"><p class="llm-start-page-subtitle">针对这篇论文提问，或选择批注一起讨论。</p></div>'
+    : '<div class="llm-start-page"><p class="llm-start-page-subtitle">Ask about this paper, or select annotations to discuss.</p></div>';
 }
 
 export function getNoteEditingStartPageHtml(): string {
@@ -1611,36 +1603,7 @@ export function getNoteEditingStartPageHtml(): string {
 }
 
 export function getStandaloneLibraryChatStartPageHtml(): string {
-  if (getEffectiveLocale().startsWith("zh")) {
-    return `
-      <div class="llm-standalone-start-page">
-        <div class="llm-start-page-title">LLM-for-Zotero Agent</div>
-        <div class="llm-start-page-subtitle">为你和你的文献库服务</div>
-        <div class="llm-start-page-recommendations">
-          <div class="llm-start-page-rec-title">推荐设置以获得最佳体验</div>
-          <ol class="llm-start-page-rec-list">
-            <li><strong>偏好设置 → MinerU</strong>：将 PDF 解析为 Markdown + 图片<span class="llm-rec-reason">（MD 是 LLM 的语言；可以利用解析出的图片写出更好的笔记；节省 token）</span></li>
-            <li>启用 <strong>Agent 模式</strong>，让助手自主完成研究任务</li>
-            <li>使用<strong>高智能模型</strong>：如 Codex、GPT-5.4 等</li>
-            <li>在偏好设置中配置<strong>笔记目录路径</strong>（设置 → Agent 标签页）</li>
-          </ol>
-        </div>
-      </div>
-    `;
-  }
-  return `
-    <div class="llm-standalone-start-page">
-      <div class="llm-start-page-title">LLM-for-Zotero Agent</div>
-      <div class="llm-start-page-subtitle">serve you and your library</div>
-      <div class="llm-start-page-recommendations">
-        <div class="llm-start-page-rec-title">Recommended settings for the best experience</div>
-        <ol class="llm-start-page-rec-list">
-          <li><strong>Preferences → MinerU</strong>: parse your PDFs to Markdown + images<span class="llm-rec-reason"> (MD is the language of LLMs; enables better notes with parsed images; saves tokens)</span></li>
-          <li>Activate <strong>Agent mode</strong> for autonomous research</li>
-          <li>Use an <strong>intelligent model</strong>: Codex, GPT-5.4, or similar high-intelligence models</li>
-          <li>Set up <strong>Notes directory</strong> in Preferences (Settings → Agent tab)</li>
-        </ol>
-      </div>
-    </div>
-  `;
+  return getEffectiveLocale().startsWith("zh")
+    ? '<div class="llm-standalone-start-page"><p class="llm-start-page-subtitle">输入研究问题，用 @ 添加文献。</p></div>'
+    : '<div class="llm-standalone-start-page"><p class="llm-start-page-subtitle">Ask a research question. Add papers with @.</p></div>';
 }

@@ -459,7 +459,7 @@ export function renderPlanDocumentFigures(
             asset.provenance.libraryID,
             asset.provenance.itemKey,
           )}, PDF page ${asset.provenance.pageIndex + 1}`
-        : `Generated asset · ${asset.provenance.generator}`;
+        : `Generated asset，${asset.provenance.generator}`;
     caption.appendChild(provenance);
     figure.append(image, caption);
     gallery.appendChild(figure);

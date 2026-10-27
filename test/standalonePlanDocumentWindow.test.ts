@@ -37,7 +37,7 @@ describe("standalone plan document window", function () {
 
     assert.match(
       css,
-      /\.llm-plan-document-window-content a,\s*\.llm-plan-document-window-content \.llm-plan-document-citation-cluster\s*\{[^}]*color: var\(--color-accent\);[^}]*text-decoration: none;/s,
+      /\.llm-plan-document-window-content a,\s*\.llm-plan-document-window-content \.llm-plan-document-citation-cluster\s*\{[^}]*color: var\(--llm-indigo11\);[^}]*text-decoration: none;/s,
     );
   });
 });

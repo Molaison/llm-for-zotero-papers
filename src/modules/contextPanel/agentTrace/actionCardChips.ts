@@ -320,7 +320,7 @@ export function renderSkipRow(
   text.className = "llm-at-text";
   text.textContent = `Skipped ${rejected
     .map((target) => target.label)
-    .join(", ")}${reason ? ` · ${reason}` : ""}`;
+    .join(", ")}${reason ? `，${reason}` : ""}`;
   row.append(icon, text);
   return row;
 }

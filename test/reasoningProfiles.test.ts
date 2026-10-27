@@ -273,49 +273,19 @@ describe("reasoningProfiles", function () {
     });
   });
 
-  describe("CPR papers aliases", function () {
-    // The papers route has distinct model-specific effort ladders.
-    it("gives each canonical papers alias its own effort ladder and default", function () {
-      assert.deepEqual(levels("openai", "papers/gpt-6-sol"), [
-        "medium",
-        "high",
-        "xhigh",
-      ]);
-      assert.equal(
-        getReasoningDefaultLevelForModel("openai", "papers/gpt-6-sol"),
-        "medium",
+  describe("capability-routed aliases", function () {
+    it("does not carry a papers-specific ladder for a papers-shaped name", function () {
+      // Capability comes from the provider group, never the model name. A
+      // `papers/...` alias therefore gets the same unknown-model fallback as
+      // any other arbitrary alias.
+      assert.deepEqual(
+        levels("openai", "papers/gpt-6-sol"),
+        levels("openai", "gpt-6-sol"),
       );
-      assert.deepEqual(levels("openai", "papers/gpt-6-sol-instant"), ["low"]);
-      assert.deepEqual(levels("openai", "papers/gpt-5.6-sol"), [
-        "high",
-        "medium",
-        "xhigh",
-      ]);
-      assert.equal(
-        getReasoningDefaultLevelForModel("openai", "papers/gpt-5.6-sol"),
-        "high",
+      assert.deepEqual(
+        levels("openai", "papers/gpt-5.6-sol"),
+        levels("openai", "gpt-5.6-sol"),
       );
-      assert.deepEqual(levels("openai", "papers/gpt-5.6-sol-instant"), ["low"]);
-      assert.equal(
-        getReasoningDefaultLevelForModel(
-          "openai",
-          "papers/gpt-5.6-sol-instant",
-        ),
-        "low",
-      );
-      for (const model of ["papers/gpt-5.6-pro", "papers/gpt-6-pro"]) {
-        assert.deepEqual(levels("openai", model), ["max"], model);
-        assert.equal(
-          getReasoningDefaultLevelForModel("openai", model),
-          "max",
-          model,
-        );
-      }
-    });
-
-    it("does not transfer the papers ladders onto the plain model names", function () {
-      // The plain ids are different deployments with their own documented
-      // ladder; only the canonical `papers/...` alias carries the papers table.
       assert.deepEqual(levels("openai", "gpt-5.6-sol"), [
         "none",
         "low",
@@ -324,10 +294,11 @@ describe("reasoningProfiles", function () {
         "xhigh",
         "max",
       ]);
-      assert.equal(
-        getReasoningDefaultLevelForModel("openai", "papers/gpt-5.6-sol"),
+      assert.notDeepEqual(levels("openai", "papers/gpt-5.6-sol"), [
         "high",
-      );
+        "medium",
+        "xhigh",
+      ]);
     });
   });
 

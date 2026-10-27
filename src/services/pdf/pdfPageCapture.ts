@@ -26,6 +26,54 @@ function unwrapWrappedJsObject<T>(value: T): T {
   }
 }
 
+/** Unwrap before awaiting: an Xray-wrapped Promise may hide its then method. */
+async function getPdfJsPage(app: any, pageNumber: number): Promise<unknown> {
+  const pdfDocument = unwrapWrappedJsObject(
+    unwrapWrappedJsObject(app).pdfDocument,
+  );
+  if (typeof pdfDocument?.getPage !== "function") {
+    throw new Error("PDF.js document.getPage is unavailable");
+  }
+  const pendingPage = unwrapWrappedJsObject(pdfDocument.getPage(pageNumber));
+  return unwrapWrappedJsObject(await pendingPage);
+}
+
+export type PdfPageTextContent = {
+  items: Array<{
+    str?: string;
+    width?: number;
+    height?: number;
+    transform?: number[];
+  }>;
+};
+
+/** Shared native text boundary for page context and fixture geometry. */
+export async function getPdfPageTextContent(
+  app: any,
+  pageNumber: number,
+): Promise<PdfPageTextContent> {
+  const page = await getPdfJsPage(app, pageNumber) as {
+    getTextContent?: () => unknown;
+    then?: unknown;
+  };
+  if (typeof page?.getTextContent !== "function") {
+    throw new Error(`PDF.js page ${pageNumber}: getTextContent=${typeof page?.getTextContent}, then=${typeof page?.then}`);
+  }
+  const pendingContent = unwrapWrappedJsObject(page.getTextContent());
+  const content = unwrapWrappedJsObject(await pendingContent) as PdfPageTextContent;
+  return {
+    items: Array.from(unwrapWrappedJsObject(content.items), wrappedItem => {
+      const item = unwrapWrappedJsObject(wrappedItem);
+      return {
+        str: item.str,
+        width: item.width,
+        height: item.height,
+        transform: item.transform ? Array.from(unwrapWrappedJsObject(item.transform)) : undefined,
+      };
+    }),
+  };
+}
+
 type RenderablePdfPage = {
   view?: number[];
   rotate?: number;
@@ -790,7 +838,58 @@ function clearRenderCanvas(
 export type PdfJsPageRenderOptions = {
   scale?: number;
   allowVisibleCanvasFallback?: boolean;
+  /** Only these frozen comment-bearing annotations are painted, never reader overlays. */
+  annotationLabels?: Array<{ identity: string; rects: number[][] }>;
+
 };
+
+/** PDF.js viewport transform incorporates page crop, userUnit and rotation. */
+export function transformAnnotationRect(rect: number[], transform: number[]): number[] {
+  if (rect.length !== 4 || transform.length !== 6 || [...rect, ...transform].some(n => !Number.isFinite(n))) {
+    throw new Error("批注没有有效 PDF 坐标；未生成示意位置。");
+  }
+  const [a, b, c, d, e, f] = transform;
+  const corners = [[rect[0], rect[1]], [rect[0], rect[3]], [rect[2], rect[1]], [rect[2], rect[3]]]
+    .map(([x, y]) => [a*x + c*y + e, b*x + d*y + f]);
+  return [Math.min(...corners.map(p => p[0])), Math.min(...corners.map(p => p[1])),
+    Math.max(...corners.map(p => p[0])), Math.max(...corners.map(p => p[1]))];
+}
+export function drawPdfAnnotationLabels(
+  ctx: CanvasRenderingContext2D,
+  viewport: {transform?: number[]; width?: number; height?: number},
+  labels: Array<{identity: string; rects: number[][]}>,
+): void {
+  if (!viewport.transform || !viewport.width || !viewport.height) throw new Error("缺少 PDF viewport；不能定位批注。");
+  const width = viewport.width;
+  ctx.save();
+  ctx.fillStyle = "#f4f6f8";
+  ctx.fillRect(width, 0, 420, viewport.height);
+  ctx.font = "16px sans-serif";
+  labels.forEach((label, index) => {
+    if (!label.rects.length) throw new Error(`${label.identity} 缺少矩形位置`);
+    const rects = label.rects.map(rect => transformAnnotationRect(rect, viewport.transform!));
+    for (const [x1, y1, x2, y2] of rects) {
+      if (x1 < -1 || y1 < -1 || x2 > width + 1 || y2 > viewport.height! + 1 || x2 <= x1 || y2 <= y1) {
+        throw new Error(`${label.identity} 位置超出 PDF 裁剪区域；不能准确标记。`);
+      }
+      ctx.fillStyle = "rgba(37,99,235,0.13)";
+      ctx.fillRect(x1, y1, x2-x1, y2-y1);
+      ctx.strokeStyle = "#2563eb";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(x1, y1, x2-x1, y2-y1);
+    }
+    const rowY = 24 + index * 30;
+    if (rowY + 12 > viewport.height!) throw new Error("同页批注过多；请缩小本批选择以保持标识可读。");
+    const [x1, y1, x2, y2] = rects[0];
+    ctx.beginPath();
+    ctx.moveTo((x1+x2)/2, (y1+y2)/2);
+    ctx.lineTo(width + 8, rowY - 5);
+    ctx.stroke();
+    ctx.fillStyle = "#15345b";
+    ctx.fillText(label.identity, width + 16, rowY, 395);
+  });
+  ctx.restore();
+}
 
 function dataUrlToBytes(dataUrl: string): Uint8Array | null {
   const base64 = dataUrl.split(",")[1] || "";
@@ -828,17 +927,8 @@ export async function renderPdfPageToDataUrl(
     Zotero.getMainWindow?.()?.document;
   if (!canvasDoc) return null;
 
-  const pdfDocument = unwrapWrappedJsObject(
-    app.pdfDocument as { getPage?: (n: number) => Promise<unknown> },
-  );
-  if (typeof (pdfDocument as { getPage?: unknown }).getPage !== "function") {
-    return null;
-  }
-
   try {
-    const rawPage = await (
-      pdfDocument as { getPage: (n: number) => Promise<unknown> }
-    ).getPage(pageNumber);
+    const rawPage = await getPdfJsPage(app, pageNumber);
     const pdfPage = resolveRenderablePdfPage(rawPage);
     if (!pdfPage) return null;
 
@@ -858,7 +948,7 @@ export async function renderPdfPageToDataUrl(
 
     const renderDoc = renderWindow?.document || canvasDoc;
     const offscreen = renderDoc.createElement("canvas") as HTMLCanvasElement;
-    offscreen.width = Math.max(1, Math.ceil(viewportResult.width));
+    offscreen.width = Math.max(1, Math.ceil(viewportResult.width)) + (options.annotationLabels?.length ? 420 : 0);
     offscreen.height = Math.max(1, Math.ceil(viewportResult.height));
     offscreen.style.width = `${offscreen.width}px`;
     offscreen.style.height = `${offscreen.height}px`;
@@ -887,6 +977,7 @@ export async function renderPdfPageToDataUrl(
         | unknown = {
         canvasContext: rawContext,
         viewport: renderViewport,
+        ...(options.annotationLabels ? {annotationMode: 0} : {}),
       };
       const cloneIntoFn = getCloneInto();
       if (renderWindow && typeof cloneIntoFn === "function") {
@@ -895,6 +986,7 @@ export async function renderPdfPageToDataUrl(
             {
               canvasContext: rawContext,
               viewport: renderViewport,
+        ...(options.annotationLabels ? {annotationMode: 0} : {}),
             },
             renderWindow,
             {
@@ -927,6 +1019,9 @@ export async function renderPdfPageToDataUrl(
         await awaitPdfRenderTask(pdfPage.render(renderArgs));
       }
 
+      if (options.annotationLabels?.length) {
+        drawPdfAnnotationLabels(rawContext, rawViewport, options.annotationLabels);
+      }
       const exported = canvasToDataUrl(offscreen);
       dataUrl = exported && !isCanvasLikelyBlank(offscreen) ? exported : null;
     } finally {

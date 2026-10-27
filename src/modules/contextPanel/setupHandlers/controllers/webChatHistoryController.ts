@@ -264,19 +264,19 @@ export function createWebChatHistoryController(
       textContent: "WebChat Conversations",
     });
     title.style.padding = "6px 10px";
-    title.style.fontSize = "10px";
+    title.style.fontSize = "var(--llm-text-small)";
     title.style.fontWeight = "600";
-    title.style.textTransform = "uppercase";
-    title.style.letterSpacing = "0.5px";
-    title.style.opacity = "0.6";
+
+
+    title.style.color = "var(--llm-slate11)";
     header.appendChild(title);
 
     const loadingEl = createElement(doc, "div", "", {
       textContent: "Fetching chat history…",
     });
     loadingEl.style.padding = "12px 10px";
-    loadingEl.style.fontSize = "11px";
-    loadingEl.style.opacity = "0.5";
+    loadingEl.style.fontSize = "var(--llm-text-small)";
+    loadingEl.style.color = "var(--llm-slate11)";
     header.appendChild(loadingEl);
     deps.historyMenu.appendChild(header);
 
@@ -327,8 +327,8 @@ export function createWebChatHistoryController(
           : "No conversations yet",
       });
       empty.style.padding = "12px 10px";
-      empty.style.fontSize = "11px";
-      empty.style.opacity = "0.5";
+      empty.style.fontSize = "var(--llm-text-small)";
+      empty.style.color = "var(--llm-slate11)";
       header.appendChild(empty);
       return;
     }

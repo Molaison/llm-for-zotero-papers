@@ -16,10 +16,21 @@ describe("Claude bridge MCP scope token", function () {
     Zotero?: Record<string, unknown>;
   };
   const originalZotero = globalScope.Zotero;
+  const originalFetch = globalThis.fetch;
   const conversationKey = CLAUDE_GLOBAL_CONVERSATION_KEY_BASE + 73;
   const otherConversationKey = CLAUDE_GLOBAL_CONVERSATION_KEY_BASE + 74;
+  let fetchCalls: string[] = [];
 
   beforeEach(function () {
+    fetchCalls = [];
+    // Invalidation posts to the bridge; keep the unit test off the network.
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      fetchCalls.push(String(input));
+      return {
+        ok: true,
+        json: async () => ({}),
+      } as unknown as Response;
+    }) as typeof fetch;
     globalScope.Zotero = {
       Profile: { dir: "/tmp/lfz-claude-bridge-scope-profile" },
       Prefs: { get: () => "" },
@@ -28,6 +39,7 @@ describe("Claude bridge MCP scope token", function () {
   });
 
   afterEach(function () {
+    globalThis.fetch = originalFetch;
     resetConversationWriteFenceForTests();
     resetClaudeBridgeRuntime();
     globalScope.Zotero = originalZotero;
@@ -102,5 +114,8 @@ describe("Claude bridge MCP scope token", function () {
       profileSignature,
     );
     assert.notEqual(afterInvalidation, beforeInvalidation);
+    assert.deepEqual(fetchCalls, [
+      "http://127.0.0.1:19787/invalidate-session",
+    ]);
   });
 });

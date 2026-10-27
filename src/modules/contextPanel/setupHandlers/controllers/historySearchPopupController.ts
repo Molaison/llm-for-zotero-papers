@@ -373,7 +373,7 @@ export function createHistorySearchPopupController(
           entry.timestampText ||
           "";
         const metaText = timestamp
-          ? `${scopeLabel} \u00B7 ${timestamp}`
+          ? `${scopeLabel}，${timestamp}`
           : scopeLabel;
         const meta = createElement(doc, "div", "llm-standalone-search-meta", {
           textContent: metaText,

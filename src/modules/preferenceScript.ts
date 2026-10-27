@@ -91,9 +91,9 @@ import {
   type ProviderProtocol,
 } from "../utils/providerProtocol";
 import {
-  isCprPapersProviderTarget,
-  assertCprPapersProviderProtocol,
-  runCprPapersModelAccessTest,
+  isPaperRegistryProviderTarget,
+  assertPaperRegistryProviderProtocol,
+  runPaperRegistryModelAccessTest,
   runProviderConnectionTest,
   runProviderSettingsChecks,
   runCodexAppServerConnectionTest,
@@ -2823,14 +2823,15 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
             // GET /v1/models instead: key and model entitlement only, no
             // inference, and nothing is created on the server.
             if (
-              isCprPapersProviderTarget({
+              isPaperRegistryProviderTarget({
                 apiBase,
                 modelName,
                 protocol: providerProtocol,
+                paperRegistry: group.paperRegistry === true,
               })
             ) {
-              assertCprPapersProviderProtocol(providerProtocol);
-              const papers = await runCprPapersModelAccessTest({
+              assertPaperRegistryProviderProtocol(providerProtocol);
+              const papers = await runPaperRegistryModelAccessTest({
                 requestScope,
                 fetchFn,
                 authMode,
@@ -2933,15 +2934,55 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
           modelsWrap,
         );
       } else {
-        cardBody.append(
-          connectionSection(doc, [
-            authModeWrap,
-            providerPresetWrap,
-            apiUrlWrap,
-            apiKeyWrap,
-          ]),
-          modelsWrap,
-        );
+        const connectionFields = [
+          authModeWrap,
+          providerPresetWrap,
+          apiUrlWrap,
+          apiKeyWrap,
+        ];
+        if (group.authMode === "api_key") {
+          const { wrap: capabilitiesWrap, control: capabilitiesControl } =
+            prefField(doc, t("Route capabilities"));
+          const capabilityToggle = (
+            key: "paperRegistry" | "directWebPdf",
+            title: string,
+            hint: string,
+          ) => {
+            const label = createElement(doc, "label");
+            label.style.cssText =
+              "display: flex; align-items: center; gap: 8px; cursor: pointer;";
+            const checkbox = createElement(doc, "input");
+            checkbox.type = "checkbox";
+            checkbox.checked = group[key] === true;
+            checkbox.addEventListener("change", () => {
+              if (checkbox.checked) group[key] = true;
+              else delete group[key];
+              persistGroups(groups);
+              syncAddProviderBtn();
+            });
+            label.append(
+              checkbox,
+              createElement(doc, "span", undefined, { textContent: title }),
+            );
+            capabilitiesControl.append(label, prefHint(doc, hint));
+          };
+          capabilityToggle(
+            "paperRegistry",
+            t("Server-side paper registry"),
+            t(
+              "Send PDFs to this route's paper registry. Explicitly configured; a model name or host never selects this path.",
+            ),
+          );
+          capabilityToggle(
+            "directWebPdf",
+            t("Direct ChatGPT Web PDF"),
+            t(
+              "Send inline PDF parts to a web-backed route that remembers them per conversation.",
+            ),
+          );
+          connectionFields.push(capabilitiesWrap);
+        }
+        cardBody.append(connectionSection(doc, connectionFields), modelsWrap);
       }
       finishProviderRow();
     });

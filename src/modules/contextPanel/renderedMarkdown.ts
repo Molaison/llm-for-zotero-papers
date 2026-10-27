@@ -28,6 +28,7 @@ import {
 
 export type RenderedMarkdownOptions = {
   deferEnrichment?: boolean;
+  preserveExisting?: boolean;
   resolveImage?: (src: string) => string | null;
   onAsyncContentRendered?: () => void;
 };
@@ -2369,6 +2370,47 @@ export function renderRenderedMathPreviewInto(
   }
 }
 
+/** Patch the changing Markdown tail without discarding its unchanged text/math.
+ * A closed math source owns an immutable KaTeX subtree, including its font struts.
+ * This operates on already-sanitized renderer output, not arbitrary supplied HTML.
+ */
+export function reconcileRenderedMarkdownChildren(target: Node, desired: Node): void {
+  let current = target.firstChild;
+  for (const fresh of Array.from(desired.childNodes) as Node[]) {
+    const next = current?.nextSibling || null;
+    if (!current) {
+      target.appendChild(fresh);
+    } else if (current.nodeType !== fresh.nodeType || current.nodeName !== fresh.nodeName) {
+      target.replaceChild(fresh, current);
+    } else if (current.nodeType === 3) {
+      if (current.nodeValue !== fresh.nodeValue) current.nodeValue = fresh.nodeValue;
+    } else if (current.nodeType === 1) {
+      const oldElement = current as Element, newElement = fresh as Element;
+      const math = oldElement.classList.contains("llm-copyable-math") &&
+        newElement.classList.contains("llm-copyable-math") &&
+        oldElement.getAttribute("data-llm-copy-source") === newElement.getAttribute("data-llm-copy-source");
+      if (!math) {
+        for (const attr of Array.from(oldElement.attributes)) {
+          // One event binding belongs to the retained element, not to its text.
+          if (!newElement.hasAttribute(attr.name) && attr.name !== "data-copy-feedback-bound")
+            oldElement.removeAttribute(attr.name);
+        }
+        for (const attr of Array.from(newElement.attributes)) {
+          if (oldElement.getAttribute(attr.name) !== attr.value)
+            oldElement.setAttribute(attr.name, attr.value);
+        }
+        reconcileRenderedMarkdownChildren(current, fresh);
+      }
+    }
+    current = next;
+  }
+  while (current) {
+    const next = current.nextSibling;
+    target.removeChild(current);
+    current = next;
+  }
+}
+
 export function renderRenderedMarkdownInto(
   target: HTMLElement,
   text: string,
@@ -2377,25 +2419,31 @@ export function renderRenderedMarkdownInto(
 ): void {
   target.classList.add("llm-rendered-markdown");
   const html = renderAssistantMarkdownHtmlForChat(text, options);
-  if (!setRenderedMarkdownHtml(target, html, doc)) {
+  const renderTarget = options?.preserveExisting ? doc.createElement("div") : target;
+  if (!setRenderedMarkdownHtml(renderTarget, html, doc)) {
     const legacyHtml = renderMarkdownWithLegacyParser(
       sanitizeText(text),
       options,
     );
-    if (!setRenderedMarkdownHtml(target, legacyHtml, doc)) {
-      target.textContent = sanitizeText(text);
+    if (!setRenderedMarkdownHtml(renderTarget, legacyHtml, doc)) {
+      renderTarget.textContent = sanitizeText(text);
     }
   }
+  if (renderTarget !== target) reconcileRenderedMarkdownChildren(target, renderTarget);
   if (options?.deferEnrichment) return;
+  enrichRenderedMarkdown(target, doc, options?.onAsyncContentRendered);
+}
+
+export function enrichRenderedMarkdown(target: HTMLElement, doc: Document, onAsyncContentRendered?: () => void): void {
   attachRenderedCodeBlockControls(target, doc);
   attachRenderedCopyButtons(target, doc);
   attachRenderedSvgPreviewButtons(target, doc);
   void renderMermaidBlocks(
     target,
     doc,
-    options?.onAsyncContentRendered
+    onAsyncContentRendered
       ? {
-          onContentRendered: options.onAsyncContentRendered,
+          onContentRendered: onAsyncContentRendered,
         }
       : undefined,
   );

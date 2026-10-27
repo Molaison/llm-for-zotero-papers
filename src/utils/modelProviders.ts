@@ -1,9 +1,4 @@
 import { config } from "../../package.json";
-import {
-  CPR_PAPERS_API_BASE,
-  CPR_PAPERS_MODELS,
-  isCprPapersModel,
-} from "./cprPapers";
 import { DEFAULT_TEMPERATURE } from "./llmDefaults";
 import {
   normalizeMaxTokens,
@@ -84,6 +79,17 @@ export type StandardModelProviderGroup = {
   models: ModelProviderModel[];
   /** When "customized", UI shows Customized and allows editing URL; when undefined, preset is derived from apiBase. */
   presetIdOverride?: ProviderPresetId;
+  /**
+   * The endpoint keeps a server-side paper registry. This is explicit
+   * configuration, never inferred from a route name, client id, URL, or model
+   * name prefix.
+   */
+  paperRegistry?: boolean;
+  /**
+   * The endpoint accepts ChatGPT Web inline PDF parts and remembers them per
+   * upstream conversation. Also explicit; no naming convention decides it.
+   */
+  directWebPdf?: boolean;
 };
 
 export type CodexDirectModelRow = {
@@ -132,6 +138,9 @@ type RuntimeModelEntryBase = {
   providerOrder: number;
   displayModelLabel: string;
   catalogAvailability?: "available" | "unverified" | "saved-unavailable";
+  /** Route capabilities configured on this model's provider group. */
+  paperRegistry: boolean;
+  directWebPdf: boolean;
 };
 
 export type RuntimeModelEntry = RuntimeModelEntryBase &
@@ -347,6 +356,8 @@ type RawProviderGroup = {
   codexDirectModel?: unknown;
   selectedModel?: unknown;
   presetIdOverride?: unknown;
+  paperRegistry?: unknown;
+  directWebPdf?: unknown;
 };
 
 function normalizeCodexDirectModelRow(
@@ -487,6 +498,8 @@ function normalizeGroup(
     }),
     models,
     presetIdOverride: normalizeProviderPresetId(rawGroup.presetIdOverride),
+    ...(rawGroup.paperRegistry === true ? { paperRegistry: true } : {}),
+    ...(rawGroup.directWebPdf === true ? { directWebPdf: true } : {}),
   };
 }
 
@@ -881,67 +894,8 @@ function ensureModelProviderGroups(): ModelProviderGroup[] {
   return migrateLegacyModelProviderGroups();
 }
 
-/** The versioned papers alias table, extended without changing user selections. */
-const CPR_PAPERS_MODELS_VERSION_PREF_KEY = "cprPapersModelsVersion";
-const CPR_PAPERS_MODELS_VERSION = "5";
-
-/** The dedicated public papers group: every row is a canonical papers alias. */
-function isCprPapersGroup(group: ModelProviderGroup): boolean {
-  return group.authMode === "api_key"
-    && group.models.length > 0
-    && group.models.every((row) => isCprPapersModel(row.model));
-}
-
-/**
- * Widen the dedicated papers group to the whole frozen alias table.
- *
- * Rows the user already has keep their id and settings, so the key, the stored
- * selection, and any per-row configuration survive; only missing aliases are
- * appended. Idempotent, and it never creates the group: a user who deleted it
- * has said so.
- */
-function extendCprPapersGroup(papers: ModelProviderGroup): void {
-  for (const model of CPR_PAPERS_MODELS) {
-    if (papers.models.some((row) => row.model === model)) continue;
-    papers.models.push(createProviderModelEntry(model, undefined, "responses_api"));
-  }
-}
-
 export function getModelProviderGroups(): ModelProviderGroup[] {
-  const groups = ensureModelProviderGroups();
-  if (getStringPref("cprPapersPublicConfigured") !== "1") {
-    let papers = groups.find(isCprPapersGroup);
-    if (!papers) {
-      papers = {
-        id: createId("provider"), apiBase: CPR_PAPERS_API_BASE, apiKey: "",
-        authMode: "api_key", providerProtocol: "responses_api",
-        models: CPR_PAPERS_MODELS.map((model) => createProviderModelEntry(model, undefined, "responses_api")),
-      };
-      groups.unshift(papers);
-    } else {
-      papers.apiBase = CPR_PAPERS_API_BASE;
-      papers.providerProtocol = "responses_api";
-      papers.models = papers.models.map((row) => ({...row, providerProtocol: "responses_api"}));
-      extendCprPapersGroup(papers);
-    }
-    storeModelProviderGroups(groups);
-    setPref(LAST_USED_MODEL_ENTRY_ID_PREF_KEY, papers.models[0].id);
-    setPref("cprPapersPublicConfigured", "1");
-    setPref(CPR_PAPERS_MODELS_VERSION_PREF_KEY, CPR_PAPERS_MODELS_VERSION);
-    return groups;
-  }
-  // Installed already: extend the dedicated group once from the frozen table.
-  // A group the user deleted stays deleted, and running this twice is a no-op.
-  const papers = groups.find(isCprPapersGroup);
-  if (
-    papers &&
-    getStringPref(CPR_PAPERS_MODELS_VERSION_PREF_KEY) !== CPR_PAPERS_MODELS_VERSION
-  ) {
-    extendCprPapersGroup(papers);
-    storeModelProviderGroups(groups);
-    setPref(CPR_PAPERS_MODELS_VERSION_PREF_KEY, CPR_PAPERS_MODELS_VERSION);
-  }
-  return groups;
+  return ensureModelProviderGroups();
 }
 
 /** Consume the one-time notice emitted after resetting stored caps to Auto. */
@@ -1061,6 +1015,8 @@ export function getRuntimeModelEntries(): RuntimeModelEntry[] {
           providerLabel: "Codex Direct (Legacy)",
           providerOrder: groupIndex,
           displayModelLabel: catalogModel?.displayName || modelName,
+          paperRegistry: false,
+          directWebPdf: false,
           advanced: normalizeAdvancedModelConfig(undefined, authMode),
           catalogAvailability:
             snapshot.status !== "ready"
@@ -1088,6 +1044,8 @@ export function getRuntimeModelEntries(): RuntimeModelEntry[] {
           providerLabel,
           providerOrder: groupIndex,
           displayModelLabel: `web/${modelName}`,
+          paperRegistry: false,
+          directWebPdf: false,
         });
       }
       continue;
@@ -1134,6 +1092,8 @@ export function getRuntimeModelEntries(): RuntimeModelEntry[] {
           duplicateCount > 1
             ? `${baseModelLabel} #${duplicateCount}`
             : baseModelLabel,
+        paperRegistry: group.paperRegistry === true,
+        directWebPdf: group.directWebPdf === true,
         advanced: normalizeAdvancedModelConfig(modelEntry),
       });
     }
@@ -1191,6 +1151,74 @@ export function getModelEntryById(
     getRuntimeModelEntries().find((entry) => entry.entryId === normalizedId) ||
     null
   );
+}
+
+export type ModelRouteCapabilities = {
+  paperRegistry: boolean;
+  directWebPdf: boolean;
+};
+
+export function getRuntimeModelCapabilities(
+  entry: RuntimeModelEntry | null | undefined,
+): ModelRouteCapabilities {
+  return {
+    paperRegistry: entry?.paperRegistry === true,
+    directWebPdf: entry?.directWebPdf === true,
+  };
+}
+
+/**
+ * Resolve the capabilities of the configured model row. This is a lookup of
+ * explicit provider-group configuration, not an inference from the model name
+ * or endpoint: an arbitrary alias on a capability-enabled route works, while a
+ * papers-shaped alias on a route without the bit does not.
+ */
+export function resolveConfiguredModelCapabilities(params: {
+  entryId?: string;
+  model?: string;
+  apiBase?: string;
+}): ModelRouteCapabilities {
+  let entries: RuntimeModelEntry[];
+  try {
+    entries = getRuntimeModelEntries();
+  } catch {
+    // Capability lookup is optional UI context. Outside a Zotero preference
+    // host (unit tests, early startup) fail closed instead of crashing the
+    // conversation, and never infer a route from the model name alone.
+    return { paperRegistry: false, directWebPdf: false };
+  }
+  const entryId = normalizeString(params.entryId);
+  if (entryId) {
+    const entry = entries.find((candidate) => candidate.entryId === entryId);
+    if (entry) return getRuntimeModelCapabilities(entry);
+  }
+
+  const model = normalizeString(params.model);
+  if (!model) return { paperRegistry: false, directWebPdf: false };
+  const apiBase = params.apiBase ? normalizeApiBase(params.apiBase) : "";
+  const matches = entries.filter(
+    (entry) =>
+      entry.model === model &&
+      (!apiBase || normalizeApiBase(entry.apiBase) === apiBase),
+  );
+  if (matches.length === 1) return getRuntimeModelCapabilities(matches[0]);
+
+  // Without an endpoint, only an unambiguous answer is safe. Two providers
+  // serving the same alias may expose different capabilities.
+  if (!apiBase && matches.length > 0) {
+    const first = matches[0];
+    const capabilities = getRuntimeModelCapabilities(first);
+    if (
+      matches.every(
+        (entry) =>
+          entry.paperRegistry === capabilities.paperRegistry &&
+          entry.directWebPdf === capabilities.directWebPdf,
+      )
+    ) {
+      return capabilities;
+    }
+  }
+  return { paperRegistry: false, directWebPdf: false };
 }
 
 export function getDefaultModelEntry(): RuntimeModelEntry | null {

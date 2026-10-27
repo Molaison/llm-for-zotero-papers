@@ -1,3 +1,13 @@
+import { readFileSync } from "node:fs";
+import { runInNewContext } from "node:vm";
+import ts from "typescript";
+import { assistantFailureTitle } from "../src/modules/contextPanel/assistantFailurePresentation";
+import { resolveStreamInterruptionOutcome } from "../src/modules/contextPanel/streamInterruption";
+import { sanitizeText } from "../src/utils/textSanitization";
+import { t } from "../src/utils/i18n";
+import type { Message } from "../src/modules/contextPanel/types";
+import { listAnnotationReplyCandidates, prepareAnnotationReplyBatch, settleAnnotationReplyBatch } from "../src/services/pdf/annotationReplyService";
+import { loadAnnotationReplyBatch } from "../src/utils/chatStore";
 import { assert } from "chai";
 import { DatabaseSync } from "node:sqlite";
 import {
@@ -172,6 +182,86 @@ describe("CPR conversation snapshot replacement", function () {
     resetConversationRegistryStoreInitForTests();
     resetRecentlyDeletedConversationsForTests();
     globalThis.Zotero = originalZotero;
+  });
+
+  // Execute the production send catch, with the existing real SQLite store as
+  // its persistence boundary. No provider call or native application is involved.
+  async function runSendCatch(error: Error, partialText = "", cancelled = false) {
+    const source = readFileSync("src/modules/contextPanel/chat.ts", "utf8");
+    const start = source.indexOf("    const isCancelled =", source.indexOf('setStatusSafely("批注已写回"'));
+    const end = source.indexOf("  } finally {", start);
+    assert.isAtLeast(start, 0); assert.isAbove(end, start);
+    const cancellation = source.slice(source.indexOf("function finalizeCancelledAssistantMessage("), source.indexOf("function applyWebChatAnswerSnapshot("));
+    const message: Message = {role:"assistant", text:partialText, timestamp:100, streaming:true};
+    let writes = 0;
+    const persist = async () => { writes++; await appendMessage(key, message); };
+    const context = {
+      err:error, assistantMessage:message, conversationKey:key, thisRequestId:1,
+      getCancelledRequestId:()=>cancelled ? 1 : 0, getAbortController:()=>undefined,
+      usageFlushReason:"", isCodexNativeTurn:false, imageCount:0,
+      resolveMultimodalRetryHint:()=>"", sanitizeText, resolveStreamInterruptionOutcome,
+      streamingResponse:{getStreamedText:()=>partialText, dispose:()=>{}},
+      codexActivityTrace:null, refreshChatSafely:()=>{}, setStatusSafely:()=>{},
+      persistAssistantOnce:persist,
+      markCancelled:async()=>{ finalizeCancelled(message); await persist(); },
+      opts:{onAnnotationReplyComplete:()=>{throw new Error("Failure must not call the structured reply router");}},
+    };
+    const transpile = (text:string) => ts.transpileModule(text,{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
+    const finalizeCancelled = runInNewContext(transpile(cancellation)+";finalizeCancelledAssistantMessage", {sanitizeText});
+    await runInNewContext(transpile("(async()=>{\n"+source.slice(start,end)+"\n})()"), context);
+    assert.equal(writes,1);
+    const stored = (await loadConversation(key,20)).at(-1)!;
+    const historyFn = source.slice(source.indexOf("function buildHistoryMessageForLLM("),source.indexOf("function buildLLMHistoryMessages("));
+    const toPayload = runInNewContext(transpile(historyFn)+";buildHistoryMessageForLLM",{sanitizeText});
+    assert.equal(JSON.stringify(toPayload(stored)), JSON.stringify({role:"assistant",content:sanitizeText(stored.text)}));
+    return {message,stored};
+  }
+
+  for (const errorText of ["HTTP 520", "Socket closed before any output"]) {
+    it(`canonical no-output failure persists ${errorText} without Web error evidence or claim release`, async function () {
+      const annotation = {id:12,parentID:11,libraryID:1,key:"ANN12",annotationComment:"Original question",annotationText:"Original quote",
+        annotationPosition:JSON.stringify({pageIndex:0,rects:[[10,20,100,40]]}),isAnnotation:()=>true,deleted:false};
+      const attachment = {id:11,libraryID:1,key:"PDF11",isAttachment:()=>true,attachmentContentType:"application/pdf",getField:()=>"Fixture",getAnnotations:()=>[annotation]};
+      Zotero.Items.get = ((id:number)=>id===11 ? attachment : id===12 ? annotation : false) as any;
+      const targets = (await listAnnotationReplyCandidates([11])).map(c=>c.target!);
+      const batch = await prepareAnnotationReplyBatch(targets,key,[{attachmentID:11,pageIndex:0,dataURL:"data:image/png;base64,AA==",context:"quote"}]);
+      const {stored} = await runSendCatch(new Error(errorText));
+      assert.equal(stored.text,`Error: ${errorText}`);
+      assert.equal(stored.completionStatus,"blocked"); assert.equal(stored.completionReason,"other");
+      assert.isUndefined(stored.webchatRunState); assert.isUndefined(stored.webchatCompletionReason);
+      assert.equal(assistantFailureTitle(stored as Message),t("Answer incomplete"));
+      assert.equal((await loadAnnotationReplyBatch(batch.id)).status,"inflight");
+      await settleAnnotationReplyBatch(batch.id,true);
+      const settled = await loadAnnotationReplyBatch(batch.id);
+      assert.equal(settled.status,"uncertain"); assert.isUndefined(settled.rawAnswer);
+      assert.deepEqual(settled.targets,batch.targets);
+      assert.equal(annotation.annotationComment,"Original question");
+      assert.isString((await listAnnotationReplyCandidates([11]))[0].blocked);
+      let rejected = false;
+      try { await prepareAnnotationReplyBatch(targets,key,[]); } catch { rejected = true; }
+      assert.isTrue(rejected,"the canonical display flag must not release the claimed version");
+    });
+  }
+  it("canonical no-output failure preserves partial output and user-stop semantics", async function () {
+    const partial = await runSendCatch(new Error("HTTP 520"),"Error: scientific uncertainty is not a transport failure");
+    assert.isTrue(partial.stored.interrupted);
+    assert.isUndefined(partial.stored.completionStatus);
+    assert.isUndefined(assistantFailureTitle(partial.stored as Message));
+    assert.equal(partial.stored.text,partial.message.text);
+    for (const [error,cancelled] of [[new Error("Stopped"),true],[Object.assign(new Error("aborted"),{name:"AbortError"}),false]] as const) {
+      const stopped = await runSendCatch(error,"",cancelled);
+      assert.equal(stopped.message.text,"[Cancelled]");
+      assert.isUndefined(stopped.message.completionStatus);
+      assert.isUndefined(assistantFailureTitle(stopped.message));
+    }
+  });
+  it("canonical no-output failure does not infer failure from successful or ordinary scientific Error text", async function () {
+    for (const completionStatus of [undefined,"complete"] as const) {
+      await appendMessage(key,{role:"assistant",text:"Error: measurement variance = 0.02",timestamp:200,completionStatus});
+      const stored = (await loadConversation(key,20)).at(-1)!;
+      assert.equal(stored.completionStatus,completionStatus);
+      assert.isUndefined(assistantFailureTitle(stored as Message));
+    }
   });
 
   it("imports into the portal conversation, preserves its identity and reloads the exact remote sequence", async function () {

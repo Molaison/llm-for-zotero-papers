@@ -11,17 +11,28 @@ const PAPER_ID = 4242;
 const history: CprPaperHistory = {
   paper_id: "doi:10.1000/xyz",
   thread_id: "thread-a",
-  conversation_url: "https://chatgpt.com/g/g-p-0123456789abcdef0123456789abcdef/c/abc",
+  conversation_url:
+    "https://chatgpt.com/g/g-p-0123456789abcdef0123456789abcdef/c/abc",
   title: "Remote paper chat",
   messages: [
-    { id: "m1", role: "user", text: "what is <img src=x onerror=alert(1)>?", created_at: 1_700_000_000_000 },
+    {
+      id: "m1",
+      role: "user",
+      text: "what is <img src=x onerror=alert(1)>?",
+      created_at: 1_700_000_000_000,
+    },
     { id: "m2", role: "assistant", text: "plain answer", created_at: null },
   ],
 };
 
 type Harness = {
   deps: CprPaperHistoryControllerDeps;
-  loads: Array<{ itemId: number; apiBase: string; apiKey: string; model: string }>;
+  loads: Array<{
+    itemId: number;
+    apiBase: string;
+    apiKey: string;
+    model: string;
+  }>;
   shown: CprPaperHistory[];
   statuses: Array<{ message: string; level: string; conversationUrl?: string }>;
   finished: () => number;
@@ -51,7 +62,9 @@ function createHarness(
       finish: () => {
         finishCount += 1;
       },
-      applyHistory: async (value) => { shown.push(value); },
+      applyHistory: async (value) => {
+        shown.push(value);
+      },
       ...attemptOverrides,
     }),
     loadHistory: (params) => {
@@ -70,7 +83,11 @@ function createHarness(
     },
     setBusy: () => {},
     setStatusMessage: (message, level, conversationUrl) => {
-      statuses.push({ message, level, ...(conversationUrl ? { conversationUrl } : {}) });
+      statuses.push({
+        message,
+        level,
+        ...(conversationUrl ? { conversationUrl } : {}),
+      });
     },
     logError: () => {},
   };
@@ -82,7 +99,12 @@ function createHarness(
     finished: () => finishCount,
     setNext: (value) => {
       next = value;
-      if (resolveLoad && value && !(value instanceof Error) && !(value instanceof Promise)) {
+      if (
+        resolveLoad &&
+        value &&
+        !(value instanceof Error) &&
+        !(value instanceof Promise)
+      ) {
         resolveLoad(value);
         resolveLoad = null;
       }
@@ -95,51 +117,43 @@ function createHarness(
 }
 
 describe("CPR remote paper history button visibility", function () {
-  it("offers the button only for an upstream papers chat bound to one paper", function () {
+  it("offers the button only for an upstream registry chat bound to one paper", function () {
     assert.isTrue(
       shouldOfferCprPaperHistory({
         conversationSystem: "upstream",
-        model: "papers/gpt-5.6-pro",
+        paperRegistry: true,
         paperItemId: PAPER_ID,
       }),
     );
     assert.isFalse(
       shouldOfferCprPaperHistory({
         conversationSystem: "claude_code",
-        model: "papers/gpt-5.6-pro",
+        paperRegistry: true,
         paperItemId: PAPER_ID,
       }),
     );
     assert.isFalse(
       shouldOfferCprPaperHistory({
         conversationSystem: "codex",
-        model: "papers/gpt-5.6-pro",
+        paperRegistry: true,
         paperItemId: PAPER_ID,
       }),
     );
     assert.isFalse(
       shouldOfferCprPaperHistory({
         conversationSystem: "upstream",
-        model: "gpt-5.6-pro",
+        paperRegistry: false,
         paperItemId: PAPER_ID,
       }),
     );
     assert.isFalse(
       shouldOfferCprPaperHistory({
         conversationSystem: "upstream",
-        model: "papers/unknown-alias",
-        paperItemId: PAPER_ID,
-      }),
-    );
-    assert.isFalse(
-      shouldOfferCprPaperHistory({
-        conversationSystem: "upstream",
-        model: "papers/gpt-5.6-pro",
+        paperRegistry: true,
         paperItemId: null,
       }),
     );
   });
-
 });
 
 describe("CPR remote paper history flow", function () {
@@ -162,7 +176,10 @@ describe("CPR remote paper history flow", function () {
     assert.isFalse(controller.isBusy());
     assert.equal(harness.shown.length, 1);
     assert.equal(harness.finished(), 1);
-    assert.equal(harness.statuses.at(-1)?.conversationUrl, history.conversation_url);
+    assert.equal(
+      harness.statuses.at(-1)?.conversationUrl,
+      history.conversation_url,
+    );
   });
 
   it("drops the answer of a paper the panel has left", async function () {
@@ -209,15 +226,21 @@ describe("CPR remote paper history flow", function () {
   });
   it("releases the request slot before re-enabling the button", async function () {
     let pending = true;
-    const harness = createHarness({finish: () => {pending = false;}});
-    harness.deps.setBusy = busy => {if (!busy) assert.isFalse(pending);};
+    const harness = createHarness({
+      finish: () => {
+        pending = false;
+      },
+    });
+    harness.deps.setBusy = (busy) => {
+      if (!busy) assert.isFalse(pending);
+    };
     harness.setNext(history);
     await createCprPaperHistoryController(harness.deps).open();
     assert.equal(harness.statuses.at(-1)?.level, "ready");
   });
   it("drops a response that completed after cancellation", async function () {
     const abort = new AbortController();
-    const harness = createHarness({signal: abort.signal});
+    const harness = createHarness({ signal: abort.signal });
     const run = createCprPaperHistoryController(harness.deps).open();
     abort.abort();
     harness.setNext(history);
@@ -231,7 +254,9 @@ describe("CPR remote paper history flow", function () {
 describe("CPR remote snapshot apply lifecycle", function () {
   it("keeps the request slot busy until asynchronous persistence finishes", async function () {
     let complete!: () => void;
-    const applying = new Promise<void>(resolve => { complete = resolve; });
+    const applying = new Promise<void>((resolve) => {
+      complete = resolve;
+    });
     const harness = createHarness({ applyHistory: () => applying });
     harness.setNext(history);
     const controller = createCprPaperHistoryController(harness.deps);
@@ -247,10 +272,16 @@ describe("CPR remote snapshot apply lifecycle", function () {
   });
 
   it("reports a persistence failure without reporting synchronization success", async function () {
-    const harness = createHarness({ applyHistory: async () => { throw new Error("Snapshot transaction failed"); } });
+    const harness = createHarness({
+      applyHistory: async () => {
+        throw new Error("Snapshot transaction failed");
+      },
+    });
     harness.setNext(history);
     await createCprPaperHistoryController(harness.deps).open();
-    assert.deepEqual(harness.statuses, [{ message: "Snapshot transaction failed", level: "error" }]);
+    assert.deepEqual(harness.statuses, [
+      { message: "Snapshot transaction failed", level: "error" },
+    ]);
     assert.equal(harness.finished(), 1);
   });
 
@@ -258,7 +289,9 @@ describe("CPR remote snapshot apply lifecycle", function () {
     let current = true;
     const harness = createHarness({
       isCurrent: () => current,
-      applyHistory: async () => { current = false; },
+      applyHistory: async () => {
+        current = false;
+      },
     });
     harness.setNext(history);
     await createCprPaperHistoryController(harness.deps).open();

@@ -1,7 +1,7 @@
 {
   "name": "llm-for-zotero",
   "type": "module",
-  "version": "3.10.3-papers.1",
+  "version": "3.14.8-papers.1",
   "description": "AI research agent rooted in your Zotero library",
   "config": {
     "addonName": "llm-for-zotero",

@@ -71,13 +71,20 @@ describe("runtime system control layout", function () {
       css,
       "#llmforzotero-standalone-chat-root",
     );
-    assert.include(tabRule, "font-size: var(--llm-standalone-ui-font-size)");
-    for (const declaration of [
+    assert.include(tabRule, "font-size: var(--llm-text-small)");
+    assert.include(
+      standaloneRootRule,
       "--llm-standalone-ui-font-size: var(--llm-fs-12);",
-      "--llm-standalone-ui-line-height: calc(20px * var(--llm-font-scale));",
-    ]) {
-      assert.include(standaloneRootRule, declaration);
-      assert.include(toggleRowRule, declaration);
+    );
+    assert.include(
+      toggleRowRule,
+      "--llm-standalone-ui-font-size: 1em;",
+    );
+    for (const rule of [standaloneRootRule, toggleRowRule]) {
+      assert.include(
+        rule,
+        "--llm-standalone-ui-line-height: calc(20px * var(--llm-font-scale));",
+      );
     }
 
     // No width breakpoint may pin it either: the compact header shrinks buttons
@@ -95,7 +102,7 @@ describe("runtime system control layout", function () {
       ".llm-mode-switch-sizer > span",
     ]) {
       const rule = cssRulesFor(css, selector).join("\n");
-      assert.include(rule, "font-size: var(--llm-fs-12)", selector);
+      assert.include(rule, "font: inherit;", selector);
       assert.include(rule, "font-weight: 600", selector);
     }
     assert.notMatch(
@@ -172,51 +179,46 @@ describe("runtime system control layout", function () {
     // menus (13, 14) and the composer's popups.
     assert.include(chip, "position: relative");
     assert.include(chip, "z-index: 12");
-    assert.include(chip, "--llm-mode-switch-duration: 300ms");
-    assert.include(
-      chip,
-      "--llm-mode-switch-ease: cubic-bezier(0.22, 1, 0.36, 1)",
-    );
-    // Dark is the default; Zotero 10 leaves --stroke-secondary unset.
+    assert.include(chip, "--llm-mode-switch-duration: 250ms");
+    assert.include(chip, "--llm-mode-switch-ease: ease-out");
+    // One Radix scale supplies track, thumb and edge in both host themes.
     for (const declaration of [
-      "--llm-mode-switch-track: color-mix(\n    in srgb,\n    var(--material-sidepane) 66%,\n    black 34%\n  )",
-      "--llm-mode-switch-thumb: color-mix(\n    in srgb,\n    var(--fill-primary) 11%,\n    var(--material-sidepane)\n  )",
-      "--llm-mode-switch-edge: var(--stroke-secondary, rgba(255, 255, 255, 0.1))",
+      "--llm-mode-switch-track: var(--llm-slate3)",
+      "--llm-mode-switch-thumb: var(--llm-slate3)",
+      "--llm-mode-switch-thumb-edge: var(--llm-slate7)",
+      "--llm-mode-switch-edge: var(--llm-slate7)",
     ]) {
       assert.include(chip, declaration);
     }
     const light = cssBlocks(css, "@media (prefers-color-scheme: light)")
       .map((block) => cssRulesFor(block, ".llm-mode-switch").join("\n"))
       .join("\n");
-    for (const declaration of [
-      "--llm-mode-switch-track: color-mix(\n      in srgb,\n      var(--material-sidepane) 88%,\n      black 12%\n    )",
-      "--llm-mode-switch-thumb: var(--material-background)",
-      "--llm-mode-switch-edge: var(--stroke-secondary, rgba(0, 0, 0, 0.09))",
-    ]) {
-      assert.include(light, declaration);
-    }
+    assert.include(light, "--llm-mode-switch-track: var(--llm-slate3)");
+    assert.include(light, "--llm-mode-switch-edge: var(--llm-slate7)");
 
-    // The open track: a 52px drop (two 22px rows, 2px apart, 3px padding)
-    // with an inner edge and a soft shadow.
+    // The open track: the 52px drop the design allows, with no shadow.
     const open = cssRulesFor(
       css,
       '.llm-mode-switch[data-expanded="true"] .llm-mode-switch-track',
     ).join("\n");
     assert.include(open, "height: 52px");
     assert.include(open, "opacity: 1");
-    assert.include(open, "inset 0 0 0 1px var(--llm-mode-switch-edge)");
-    assert.include(open, "0 6px 16px rgba(0, 0, 0, 0.28)");
+    assert.include(open, "box-shadow: none");
+    assert.include(
+      cssRulesFor(css, ".llm-mode-switch-track").join("\n"),
+      "transition: height 250ms ease-out",
+    );
     // Unselected text brightens on hover, only while the switch is open.
     assert.include(
       cssRulesFor(
         css,
         '.llm-mode-switch[data-expanded="true"] .llm-mode-switch-option:not([aria-pressed="true"]):hover',
       ).join("\n"),
-      "color: var(--fill-primary)",
+      "color: var(--llm-slate12)",
     );
     assert.include(
       cssRulesFor(css, ".llm-mode-switch-option").join("\n"),
-      "color: var(--fill-secondary)",
+      "color: var(--llm-slate12)",
     );
     // The selected pill keeps the chip's place; the other row is 24px lower.
     assert.include(
@@ -227,21 +229,16 @@ describe("runtime system control layout", function () {
       "transform: translate(3px, 27px)",
     );
     const option = cssRulesFor(css, ".llm-mode-switch-option").join("\n");
-    assert.include(option, "opacity 180ms ease");
-    assert.include(option, "color 200ms ease");
-    assert.include(option, "transform var(--llm-mode-switch-duration)");
+    assert.include(option, "transition: none");
 
-    // The chat settles in on a mode change, in the Stacked sidebar only.
+    // The switch is the only motion: the chat itself never animates.
     assert.include(
       cssRulesFor(
         css,
         `${STACKED} .llm-dedicated-chat-pane .llm-messages.llm-mode-switch-fade`,
       ).join("\n"),
-      "animation: llm-mode-switch-fade 260ms ease both",
+      "animation: none",
     );
-    const fade = cssBlock(css, "@keyframes llm-mode-switch-fade");
-    assert.include(fade, "transform: translateY(4px)");
-    assert.include(fade, "opacity: 0");
 
     // All of it stops under reduced motion.
     const reduced = cssBlocks(css, "@media (prefers-reduced-motion: reduce)")
@@ -271,18 +268,18 @@ describe("runtime system control layout", function () {
     // Row 1: the centered toggle, free of any divider or fixed height.
     assert.notInclude(toggleRowRule, "border");
     assert.notMatch(toggleRowRule, /(^|\s)height:/);
-    assert.include(toggleRowRule, "justify-content: center");
-    assert.include(toggleRowRule, "padding: 6px 0 8px");
-    assert.include(modeTabRule, "min-width: 64px");
-    assert.include(modeTabRule, "padding-inline: 12px");
+    assert.include(toggleRowRule, "justify-content: flex-start");
+    assert.include(toggleRowRule, "padding: 0");
+    assert.include(modeTabRule, "min-height: 36px");
+    assert.include(modeTabRule, "padding: 0 2px");
 
-    // Row 2: actions, with no divider under them (none above the chat).
-    assert.notInclude(navRowRule, "border-bottom");
+    // Row 2: actions, closed by the one hairline above the chat.
+    assert.include(navRowRule, "border-bottom: 0.5px solid var(--llm-slate6)");
     assert.include(dividerRule, "width: 1px");
     assert.include(dividerRule, "height: 16px");
     assert.include(
       dividerRule,
-      "border-inline-start: var(--material-panedivider)",
+      "border-inline-start: 0.5px solid var(--llm-slate6)",
     );
 
     // The items-list alignment is gone for good.

@@ -18,21 +18,16 @@ import { config } from "../../package.json";
 import type { ReasoningConfig } from "../shared/llm";
 import type { PaperContextRef } from "../shared/types";
 import {
-  CPR_PAPERS_API_BASE,
-  normalizeCprPapersTarget,
+  normalizePaperRouteTarget,
   normalizePaperDoi,
-  resolveCprPapersReasoningEffort,
+  resolvePaperReasoningEffort,
 } from "./cprPapers";
 import {
   createProviderOperationId,
   resolveProviderSessionId,
 } from "./providerSessionId";
 import type { ProviderRequestScope } from "./providerTransport";
-import {
-  isCprDirectWebModel as isCprDirectWebRoute,
-} from "./cprDirectWebTarget";
-
-export { CPR_DIRECT_WEB_API_BASE } from "./cprDirectWebTarget";
+import type { ModelProfileOverride } from "../modelCapabilities";
 
 /** Ceilings for one turn's new PDFs; order is preserved and never re-sorted. */
 const MAX_NEW_FILES = 8;
@@ -59,8 +54,6 @@ const PDF_MISSING = "PDF 尚未下载到本机，请先同步附件。";
 const PDF_INVALID = "附件不是有效的 PDF（缺少 %PDF- 头）；没有发送请求。";
 const IDENTITY_CHANGED =
   "同一 DOI 已登记不同的 PDF 指纹；已停止发送，避免把两篇不同 PDF 混进同一对话。";
-const NOT_DIRECT_WEB =
-  "CPR direct web 只用于 CPR papers 目标下的 chatgpt-web 模型；没有发送请求。";
 const SESSION_MISSING = "缺少稳定的 CPR direct web 会话 id；没有发送请求。";
 
 export type CprDirectWebUploadedFile = {
@@ -85,7 +78,7 @@ export type CprDirectWebPayload = {
   model: string;
   stream: boolean;
   prompt_cache_key: string;
-  reasoning: { effort: string };
+  reasoning?: { effort: string };
   client_metadata: { "x-codex-turn-metadata": string };
   input: Array<{
     type: "message";
@@ -118,6 +111,8 @@ export type CprDirectWebPrepareParams = {
   prompt: string;
   requestScope: ProviderRequestScope;
   reasoning?: ReasoningConfig;
+  /** User-authored capability override for this model, when present. */
+  profileOverride?: ModelProfileOverride;
   /** Defaults to true; the caller may override it on the returned payload. */
   stream?: boolean;
   readBytes: (path: string) => Promise<Uint8Array>;
@@ -142,16 +137,6 @@ type LedgerPrefs = {
   get?: (key: string, global?: boolean) => unknown;
   set?: (key: string, value: unknown, global?: boolean) => void;
 };
-
-/**
- * True only for the ChatGPT Web route on the CPR papers target. The route is
- * picked by the pair, never by the model name alone: the same alias served by
- * another gateway must not be treated as the direct web route, and a CPR papers
- * alias must keep using the papers registry.
- */
-export function isCprDirectWebModel(model: string, apiBase: string): boolean {
-  return isCprDirectWebRoute(model, apiBase);
-}
 
 /**
  * The conversation's direct web session, prefixed so it cannot be mistaken for
@@ -327,14 +312,17 @@ export async function prepareCprDirectWebRequest(
   params: CprDirectWebPrepareParams,
 ): Promise<CprDirectWebPreparedRequest> {
   const model = String(params.model || "").trim();
-  if (!isCprDirectWebModel(model, params.apiBase)) {
-    throw new Error(NOT_DIRECT_WEB);
-  }
+  if (!model) throw new Error("CPR direct web 请求缺少模型；没有发送请求。");
   // Resolved before any file is read: an unsupported level must fail untouched.
-  const effort = resolveCprPapersReasoningEffort(model, params.reasoning);
+  const effort = resolvePaperReasoningEffort({
+    model,
+    apiBase: params.apiBase,
+    reasoning: params.reasoning,
+    profileOverride: params.profileOverride,
+  });
   const sessionId = await resolveCprDirectWebSessionId(params.requestScope);
   if (!prefs()) throw new Error(PREFS_UNAVAILABLE);
-  const target = normalizeCprPapersTarget(String(params.apiBase || ""));
+  const target = normalizePaperRouteTarget(String(params.apiBase || ""));
   const ledgerKey = ledgerKeyFor(target, sessionId);
   const ledger = readLedger(ledgerKey);
   const registered = new Set(ledger.entries.map((entry) => entry.paperId));
@@ -443,7 +431,7 @@ export async function prepareCprDirectWebRequest(
     model,
     stream: params.stream ?? true,
     prompt_cache_key: sessionId,
-    reasoning: { effort },
+    ...(effort ? { reasoning: { effort } } : {}),
     client_metadata: {
       "x-codex-turn-metadata": JSON.stringify({
         thread_id: sessionId,

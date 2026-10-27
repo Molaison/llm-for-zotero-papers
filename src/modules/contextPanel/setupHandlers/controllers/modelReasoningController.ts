@@ -6,7 +6,7 @@ import {
   resolveProviderCapabilities,
   type PdfSupport,
 } from "../../../../providers";
-import { isCprDirectWebModel } from "../../../../utils/cprDirectWebTarget";
+import { resolveConfiguredModelCapabilities } from "../../../../utils/modelProviders";
 
 export function isScreenshotUnsupportedModel(
   modelName: string,
@@ -38,7 +38,10 @@ export function getModelPdfSupport(
   // UI's source picker aligned with the transport's actual contract.
   if (
     inputMode !== "text_only" &&
-    isCprDirectWebModel(modelName, apiBase || "")
+    resolveConfiguredModelCapabilities({
+      model: modelName,
+      apiBase: apiBase || "",
+    }).directWebPdf
   ) {
     return "native";
   }

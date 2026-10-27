@@ -19,14 +19,18 @@ describe("footer permission control", function () {
     assert.include(preferences, '.open(t("Enable Codex full access?"))');
   });
 
-  it("keeps the permission selector and context gauge together on the footer right", function () {
+  it("keeps the permission selector in the tools body and the context gauge with the model controls", function () {
     const buildUi = readFileSync("src/modules/contextPanel/buildUI.ts", "utf8");
 
     assert.include(
       buildUi,
-      "footerControls.append(permissionControl, contextUsageControl)",
+      "footerControls.append(permissionControl)",
     );
-    assert.include(buildUi, "statusBar.append(statusLine, footerControls)");
+    assert.include(buildUi, "statusBar.append(statusLine, statusToggle)");
+    assert.include(
+      buildUi,
+      "modelControls.append(modelDropdown, reasoningDropdown, contextUsageControl)",
+    );
     assert.notInclude(buildUi, "llm-claude-context-gauge");
   });
 
@@ -69,20 +73,24 @@ describe("footer permission control", function () {
     assert.equal(style.top, "374px");
   });
 
-  it("pins permission and context controls to the first status line", function () {
+  it("pins a compact status control in the toolbar and expands its text on demand", function () {
     const css = readFileSync("addon/content/zoteroPane.css", "utf8");
 
     assert.match(
       css,
-      /\.llm-status-bar\s*\{[\s\S]*?display: grid;[\s\S]*?grid-template-columns: minmax\(0, 1fr\) auto;[\s\S]*?align-items: baseline;/,
+      /\.llm-status-control\s*\{[^}]*display: flex;[^}]*align-items: center;/,
     );
     assert.match(
       css,
-      /\.llm-status\s*\{[\s\S]*?grid-column: 1;[\s\S]*?grid-row: 1;[\s\S]*?white-space: normal;/,
+      /\.llm-status-control > \.llm-status\s*\{[^}]*clip-path: inset\(50%\);[^}]*white-space: nowrap;/,
     );
     assert.match(
       css,
-      /\.llm-footer-controls\s*\{[\s\S]*?grid-column: 2;[\s\S]*?grid-row: 1;[\s\S]*?align-self: baseline;/,
+      /\.llm-status-control:hover > \.llm-status:not\(:empty\),\s*\.llm-status-control:focus-within > \.llm-status:not\(:empty\)\s*\{[^}]*white-space: normal;/,
+    );
+    assert.match(
+      css,
+      /\.llm-footer-controls\s*\{[^}]*display: flex;[^}]*align-items: center;/,
     );
   });
 });

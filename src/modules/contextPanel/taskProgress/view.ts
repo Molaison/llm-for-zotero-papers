@@ -411,11 +411,11 @@ function papersInScopeText(count: number): string {
 }
 
 /**
- * The row's count text, e.g. "37 of 200 read · 12 cited". A run with a part
+ * The row's count text, e.g. "37 of 200 read，12 cited". A run with a part
  * over every paper of its scope counts those papers on the part's own row,
- * so this names the scope the part froze: "2/4 steps · 212 papers in scope".
+ * so this names the scope the part froze: "2/4 steps，212 papers in scope".
  * With nothing attached, the papers read in depth and those only found are
- * counted apart, a zero left out: "2/2 steps · 3 read in depth · 15 found ·
+ * counted apart, a zero left out: "2/2 steps，3 read in depth，15 found ·
  * 2 cited".
  */
 export function formatTaskProgressCount(
@@ -436,14 +436,14 @@ export function formatTaskProgressCount(
   // A built-in action records no reads: the row says what it is doing.
   if (record?.checklist?.source === "action") {
     const parts = [stepsText, actionText(record)].filter(Boolean);
-    return parts.join(" · ");
+    return parts.join("，");
   }
   const scopePapers = scopeWidePapers(record);
   if (scopePapers) {
     const parts = state === "answering" ? [t("Answering…")] : [];
     if (stepsText) parts.push(stepsText);
     parts.push(papersInScopeText(scopePapers));
-    return parts.join(" · ");
+    return parts.join("，");
   }
   const papersKnown = counts.total > 0;
   if (!papersKnown) {
@@ -451,7 +451,7 @@ export function formatTaskProgressCount(
   }
   if (!recordsReads || state === "idle") {
     const inScope = papersInScopeText(counts.total);
-    return stepsText ? `${stepsText} · ${inScope}` : inScope;
+    return stepsText ? `${stepsText}，${inScope}` : inScope;
   }
   const parts: string[] = [];
   if (state === "answering") parts.push(t("Answering…"));
@@ -473,7 +473,7 @@ export function formatTaskProgressCount(
   }
   if (counts.cited)
     parts.push(format("{count} cited", { count: counts.cited }));
-  return parts.join(" · ");
+  return parts.join("，");
 }
 
 const GRANULARITY_LABELS: Record<TaskPaperReadEvent["granularity"], string> = {
@@ -563,7 +563,7 @@ function metaText(row: TaskProgressPaperRow): string {
   const who = [row.creator, row.year].filter(Boolean).join(" ");
   return [who, row.folders.join(", "), row.tags.join(", ")]
     .filter(Boolean)
-    .join(" · ");
+    .join("，");
 }
 
 /** Section names a targeted read gave: neither a page nor the paper's title. */
@@ -727,7 +727,7 @@ export function formatTaskPaperTail(row: TaskProgressPaperRow): string {
   if (citations.length) {
     parts.push(format("cited {count}", { count: citations.length }));
   }
-  return parts.join(" · ");
+  return parts.join("，");
 }
 
 /**
@@ -793,7 +793,7 @@ export function clipTaskQuestionWords(text: string | undefined): string {
 }
 
 /**
- * A section's name: "Question 2 · “<the user's words>”"; a built-in action
+ * A section's name: "Question 2，“<the user's words>”"; a built-in action
  * is named by its title, and the request typed with it when there was one.
  */
 export function formatTaskQuestionLabel(
@@ -804,7 +804,7 @@ export function formatTaskQuestionLabel(
 
 /**
  * A question's label in two parts: its name ("Question 2", or an action's
- * name) and its words (" · “…”", or "“…”" without a name).
+ * name) and its words ("，“…”", or "“…”" without a name).
  */
 export function splitTaskQuestionLabel(
   question: TaskProgressQuestion,
@@ -815,7 +815,7 @@ export function splitTaskQuestionLabel(
       : question.title || "";
   const words = clipTaskQuestionWords(question.text);
   if (!words) return [name, ""];
-  return [name, name ? ` · “${words}”` : `“${words}”`];
+  return [name, name ? `，“${words}”` : `“${words}”`];
 }
 
 /**
@@ -948,7 +948,7 @@ export function buildTaskProgressSections(
   return sections;
 }
 
-/** An earlier question's counts: "2/2 steps · 8 papers", a zero left out. */
+/** An earlier question's counts: "2/2 steps，8 papers", a zero left out. */
 export function formatTaskQuestionCounts(section: TaskProgressSection): string {
   const parts: string[] = [];
   const checklist = section.checklist;
@@ -968,7 +968,7 @@ export function formatTaskQuestionCounts(section: TaskProgressSection): string {
       }),
     );
   }
-  return parts.join(" · ");
+  return parts.join("，");
 }
 
 const STATE_LABELS: Record<TaskPaperState, string> = {
@@ -1206,7 +1206,7 @@ type QuestionHeadRefs = {
   label: HTMLElement;
   /** "Question 2", or an action's name: never cut. */
   name: HTMLElement;
-  /** " · “the user's words”": cut first when the drawer is narrow. */
+  /** "，“the user's words”": cut first when the drawer is narrow. */
   words: HTMLElement;
   pill: HTMLElement;
   counts: HTMLElement | null;

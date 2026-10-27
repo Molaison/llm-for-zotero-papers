@@ -85,7 +85,8 @@ describe("task progress looks for outcome states", function () {
         `.llm-task-progress-pill[data-tone="${tone}"]`,
       );
     }
-    assert.include(amber.body, "#d58a22");
+    assert.include(amber.body, "var(--llm-amber11)");
+    assert.include(amber.body, "var(--llm-amber3)");
   });
 });
 

@@ -1,9 +1,8 @@
 import { assert } from "chai";
-import { CPR_PAPERS_MODELS } from "../src/utils/cprPapers";
 import {
-  assertCprPapersProviderProtocol,
-  isCprPapersProviderTarget,
-  runCprPapersModelAccessTest,
+  assertPaperRegistryProviderProtocol,
+  isPaperRegistryProviderTarget,
+  runPaperRegistryModelAccessTest,
   runProviderConnectionTest,
   runProviderSettingsChecks,
 } from "../src/utils/providerConnectionTest";
@@ -390,10 +389,14 @@ describe("provider request contract across product entry points", function () {
   });
 });
 
-describe("papers provider configuration test", function () {
-  const papersBase = "https://cpr.molaisonz.dpdns.org/v1";
-  const papersModel = "papers/gpt-5.6-sol";
-  let calls: Array<{ url: string; method: string; authorization: string | null }>;
+describe("paper-registry provider configuration test", function () {
+  const registryBase = "http://127.0.0.1:18100/v1";
+  const registryModel = "arbitrary-reading-alias";
+  let calls: Array<{
+    url: string;
+    method: string;
+    authorization: string | null;
+  }>;
   let listStatus: number;
   let modelIds: string[];
   let fetchFn: typeof fetch;
@@ -401,7 +404,7 @@ describe("papers provider configuration test", function () {
   beforeEach(function () {
     calls = [];
     listStatus = 200;
-    modelIds = [papersModel];
+    modelIds = [registryModel];
     fetchFn = (async (url: string, init: RequestInit = {}) => {
       calls.push({
         url: String(url),
@@ -440,68 +443,71 @@ describe("papers provider configuration test", function () {
   }
 
   it("verifies the key and model with one GET and sends no inference request", async function () {
-    const result = await runCprPapersModelAccessTest({
+    const result = await runPaperRegistryModelAccessTest({
       fetchFn,
       authMode: "api_key",
-      apiBase: papersBase,
+      apiBase: registryBase,
       apiKey: "test-key",
-      modelName: papersModel,
+      modelName: registryModel,
     });
     assert.equal(result.modelCount, 1);
     assert.lengthOf(calls, 1);
     assert.equal(calls[0].method, "GET");
-    assert.equal(calls[0].url, "https://cpr.molaisonz.dpdns.org/v1/models");
+    assert.equal(calls[0].url, "http://127.0.0.1:18100/v1/models");
     assert.equal(calls[0].authorization, "Bearer test-key");
   });
 
-  it("recognizes the papers route despite an incorrectly selected protocol and fails before inference", function () {
-    assert.isTrue(isCprPapersProviderTarget({
-      apiBase: papersBase + "/responses",
-      modelName: papersModel,
-      protocol: "openai_chat_compat",
-    }));
-    assert.throws(() => assertCprPapersProviderProtocol("openai_chat_compat"), /仅支持 Responses API/);
-    assert.doesNotThrow(() => assertCprPapersProviderProtocol("responses_api"));
+  it("selects the registry path only from the explicit capability bit", function () {
+    assert.isFalse(
+      isPaperRegistryProviderTarget({
+        apiBase: registryBase + "/responses",
+        modelName: "papers/gpt-6-sol",
+        protocol: "responses_api",
+        paperRegistry: false,
+      }),
+    );
+    assert.isTrue(
+      isPaperRegistryProviderTarget({
+        apiBase: "https://api.openai.com/v1",
+        modelName: "gpt-5.6-sol",
+        protocol: "responses_api",
+        paperRegistry: true,
+      }),
+    );
+    assert.throws(
+      () => assertPaperRegistryProviderProtocol("openai_chat_compat"),
+      /仅支持 Responses API/,
+    );
+    assert.doesNotThrow(() =>
+      assertPaperRegistryProviderProtocol("responses_api"),
+    );
     assert.lengthOf(calls, 0);
   });
 
-  it("checks every canonical papers alias with one GET and no inference request", async function () {
-    for (const model of CPR_PAPERS_MODELS) {
-      calls = [];
-      modelIds = [model];
-      assert.isTrue(
-        isCprPapersProviderTarget({
-          apiBase: papersBase,
-          modelName: model,
-          protocol: "responses_api",
-        }),
-        model,
-      );
-      const result = await runCprPapersModelAccessTest({
-        fetchFn,
-        authMode: "api_key",
-        apiBase: papersBase,
-        apiKey: "test-key",
-        modelName: model,
-      });
-      assert.equal(result.modelCount, 1, model);
-      assert.deepEqual(
-        calls.map((call) => [call.method, call.url]),
-        [["GET", "https://cpr.molaisonz.dpdns.org/v1/models"]],
-        model,
-      );
-    }
+  it("checks an arbitrary alias with one GET and no inference request", async function () {
+    const result = await runPaperRegistryModelAccessTest({
+      fetchFn,
+      authMode: "api_key",
+      apiBase: registryBase,
+      apiKey: "test-key",
+      modelName: registryModel,
+    });
+    assert.equal(result.modelCount, 1);
+    assert.deepEqual(
+      calls.map((call) => [call.method, call.url]),
+      [["GET", "http://127.0.0.1:18100/v1/models"]],
+    );
   });
 
   it("fails when the server does not offer the selected model", async function () {
-    modelIds = ["gpt-5.6-sol"];
+    modelIds = ["another-model"];
     await rejects(
-      runCprPapersModelAccessTest({
+      runPaperRegistryModelAccessTest({
         fetchFn,
         authMode: "api_key",
-        apiBase: papersBase,
+        apiBase: registryBase,
         apiKey: "test-key",
-        modelName: papersModel,
+        modelName: registryModel,
       }),
       /not in the server model list/,
     );
@@ -510,32 +516,18 @@ describe("papers provider configuration test", function () {
   it("fails when the key is rejected", async function () {
     listStatus = 401;
     await rejects(
-      runCprPapersModelAccessTest({
+      runPaperRegistryModelAccessTest({
         fetchFn,
         authMode: "api_key",
-        apiBase: papersBase,
+        apiBase: registryBase,
         apiKey: "bad-key",
-        modelName: papersModel,
+        modelName: registryModel,
       }),
       /HTTP 401/,
     );
   });
 
   it("leaves the POST inference contract of other Responses providers alone", async function () {
-    assert.isFalse(
-      isCprPapersProviderTarget({
-        apiBase: "https://api.openai.com/v1",
-        modelName: "gpt-5.6-sol",
-        protocol: "responses_api",
-      }),
-    );
-    assert.isTrue(
-      isCprPapersProviderTarget({
-        apiBase: papersBase,
-        modelName: papersModel,
-        protocol: "responses_api",
-      }),
-    );
     const result = await runProviderConnectionTest({
       fetchFn,
       protocol: "responses_api",
@@ -550,13 +542,14 @@ describe("papers provider configuration test", function () {
     assert.equal(calls[0].url, "https://api.openai.com/v1/responses");
   });
 
-  it("keeps the ordinary Responses probe for a non-papers model on the CPR URL", async function () {
+  it("keeps the ordinary Responses probe when the capability bit is absent", async function () {
     for (const modelName of ["gpt-5.6-sol", "papers/gpt-5.6-sol-extra"]) {
       assert.isFalse(
-        isCprPapersProviderTarget({
-          apiBase: papersBase,
+        isPaperRegistryProviderTarget({
+          apiBase: registryBase,
           modelName,
           protocol: "responses_api",
+          paperRegistry: false,
         }),
         modelName,
       );
@@ -565,13 +558,13 @@ describe("papers provider configuration test", function () {
       fetchFn,
       protocol: "responses_api",
       authMode: "api_key",
-      apiBase: papersBase,
+      apiBase: registryBase,
       apiKey: "test-key",
       modelName: "gpt-5.6-sol",
     });
     assert.equal(result.reply, "OK");
     assert.lengthOf(calls, 1);
     assert.equal(calls[0].method, "POST");
-    assert.equal(calls[0].url, "https://cpr.molaisonz.dpdns.org/v1/responses");
+    assert.equal(calls[0].url, "http://127.0.0.1:18100/v1/responses");
   });
 });

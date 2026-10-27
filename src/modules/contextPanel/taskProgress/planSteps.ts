@@ -220,14 +220,14 @@ function outcomeDetailText(
   for (const entry of step.outcome?.excluded || []) {
     parts.push(withReason("Excluded: {reason}", targetsText(entry, options)));
   }
-  return parts.join(" · ");
+  return parts.join("，");
 }
 
 /**
  * A step row: badge, label, and, for an outcome, its reason and pill. A read,
  * a digest or a write over several targets counts them as evidence ticks
- * them, "Read each paper in Drift · 48 of 48", "Summarize each selected
- * paper · 7 of 12"; a part the answer completes ticks none. A part another
+ * them, "Read each paper in Drift，48 of 48", "Summarize each selected
+ * paper，7 of 12"; a part the answer completes ticks none. A part another
  * replaced reads "Replaced", not "Cancelled".
  */
 function buildChecklistRow(
@@ -258,7 +258,7 @@ function buildChecklistRow(
     outcome?.read || outcome?.write || outcome?.digest ? outcome.targets : 0;
   label.textContent =
     targets > 1
-      ? `${step.label} · ${t("{done} of {total}")
+      ? `${step.label}，${t("{done} of {total}")
           .replace("{done}", `${outcome!.doneTargets}`)
           .replace("{total}", `${targets}`)}`
       : step.label;
@@ -319,7 +319,7 @@ function buildNotDoneRow(
   detail.className = "llm-plan-task-original";
   detail.textContent = exceptions
     .map((entry) => targetsText(entry, options))
-    .join(" · ");
+    .join("，");
   content.append(label, detail);
   line.append(badge, content);
   row.appendChild(line);
@@ -343,7 +343,7 @@ function buildChecklistContent(
   const title = doc.createElement("h4");
   title.className = "llm-task-progress-steps-title";
   title.textContent = checklist.title
-    ? `${t("Steps")} · ${checklist.title}`
+    ? `${t("Steps")}，${checklist.title}`
     : t("Steps");
   heading.appendChild(title);
   const status = doc.createElement("span");

@@ -4090,7 +4090,7 @@ function imageArtifactTooltip(artifact: ImageAgentToolArtifact): string {
   ]
     .map((part) => sanitizeText(part || "").trim())
     .filter(Boolean);
-  return parts.join(" · ");
+  return parts.join("，");
 }
 
 function imageArtifactsToGeneratedImages(
@@ -4135,7 +4135,7 @@ export function isGenericAgentStatusText(text: string): boolean {
 }
 
 /**
- * A long job's progress, "Continuing agent (page 2 · 7 of 30)": the live
+ * A long job's progress, "Continuing agent (page 2，7 of 30)": the live
  * status shows it as written, and the trace does not repeat it every round.
  */
 export function isAgentPageProgressText(text: string): boolean {
@@ -5295,8 +5295,8 @@ function appendMaterialOutcomeFooter(ctx: AgentTraceAdapterContext): void {
         kind: "skip",
         icon: "!",
         text:
-          `Generated ${material.kind}: complete \u00b7 Note write: failed ` +
-          "\u00b7 Retry available using the same material",
+          `Generated ${material.kind}: complete，Note write: failed` +
+          "，Retry available using the same material",
       },
     });
   }
@@ -6063,7 +6063,7 @@ function renderPlanProposal(
       artifact.contract.effects?.libraryMutation
         ? `Library changes: ${artifact.contract.effects.libraryMutation.approval === "after_research" ? "review exact targets after research" : "within the approved scope"}`
         : "Library changes: none",
-    ].join(" · ");
+    ].join("，");
     markdown.appendChild(summary);
   }
   return markdown;
@@ -6156,7 +6156,7 @@ function renderPlanContainer(params: {
       snapshot.digest.length > 24
         ? `${snapshot.digest.slice(0, 16)}…${snapshot.digest.slice(-8)}`
         : snapshot.digest;
-    scope.textContent = `Frozen scope · ${snapshot.itemCount.toLocaleString()} items · ${createdAt} · policy v${snapshot.policyVersion} · ${shortDigest}`;
+    scope.textContent = `Frozen scope，${snapshot.itemCount.toLocaleString()} items，${createdAt}，policy v${snapshot.policyVersion}，${shortDigest}`;
     scope.title = `Scope snapshot ${snapshot.snapshotId}\nDigest: ${snapshot.digest}`;
     root.appendChild(scope);
   }
@@ -6239,8 +6239,8 @@ function renderCoverageInspector(
         void navigatePlanDocumentCitationSource(source);
       });
       const metadata = doc.createElement("span");
-      metadata.textContent = `${entry.status} · ${entry.evidenceDepth}${
-        entry.reason ? ` · ${entry.reason}` : ""
+      metadata.textContent = `${entry.status}，${entry.evidenceDepth}${
+        entry.reason ? `，${entry.reason}` : ""
       }`;
       row.append(link, metadata);
       list.appendChild(row);

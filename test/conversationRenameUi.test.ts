@@ -147,7 +147,7 @@ describe("conversation rename UI", function () {
 
     assert.isAtLeast(dialogRuleStart, 0);
     assert.include(dialogRule, "--llm-modal-control-background: var(");
-    assert.include(dialogRule, "--material-sidepane");
+    assert.include(dialogRule, "--llm-slate1");
     assert.include(dialogRule, "--llm-modal-control-border: var(");
     assert.isAtLeast(controlRuleStart, 0);
     assert.include(
@@ -156,7 +156,7 @@ describe("conversation rename UI", function () {
     );
     assert.include(
       controlRule,
-      "border: 1px solid var(--llm-modal-control-border)",
+      "border: 0.5px solid var(--llm-modal-control-border)",
     );
     assert.notInclude(controlRule, "background: var(--material-background)");
     assert.isAtLeast(focusRuleStart, 0);

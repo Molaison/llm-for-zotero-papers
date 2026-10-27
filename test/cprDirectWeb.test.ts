@@ -2,13 +2,13 @@ import { assert } from "chai";
 import { createHash } from "node:crypto";
 import {
   CPR_DIRECT_WEB_UNCERTAIN_MESSAGE,
-  isCprDirectWebModel,
   prepareCprDirectWebRequest,
   resolveCprDirectWebSessionId,
   type CprDirectWebPrepareParams,
   type CprDirectWebPayload,
 } from "../src/utils/cprDirectWeb";
-import { CPR_PAPERS_API_BASE } from "../src/utils/cprPapers";
+
+const TEST_API_BASE = "https://reading.example/v1";
 import { resetProviderSessionIdCacheForTests } from "../src/utils/providerSessionId";
 import type { PaperContextRef } from "../src/shared/types";
 
@@ -23,7 +23,11 @@ const pdfBytes = (marker: string, size = 0): Uint8Array => {
 };
 const digestOf = (bytes: Uint8Array): string =>
   createHash("sha256").update(bytes).digest("hex");
-const refOf = (itemId: number, contextItemId: number, title = "Paper"): PaperContextRef => ({
+const refOf = (
+  itemId: number,
+  contextItemId: number,
+  title = "Paper",
+): PaperContextRef => ({
   itemId,
   contextItemId,
   title,
@@ -40,11 +44,15 @@ describe("CPR direct web multi-PDF preparation", function () {
   let original: typeof Zotero;
   let prefs: Map<string, unknown>;
   let papers: Map<number, string>;
-  let attachments: Map<number, { parent: number; contentType: string; path: string }>;
+  let attachments: Map<
+    number,
+    { parent: number; contentType: string; path: string }
+  >;
   let files: Map<string, Uint8Array>;
   let reads: string[];
 
-  const addPaper = (itemId: number, doi: string): void => void papers.set(itemId, doi);
+  const addPaper = (itemId: number, doi: string): void =>
+    void papers.set(itemId, doi);
   const addAttachment = (
     id: number,
     parent: number,
@@ -64,7 +72,7 @@ describe("CPR direct web multi-PDF preparation", function () {
   ): ReturnType<typeof prepareCprDirectWebRequest> =>
     prepareCprDirectWebRequest({
       refs: [],
-      apiBase: CPR_PAPERS_API_BASE,
+      apiBase: TEST_API_BASE,
       model: WEB_MODEL,
       prompt: "总结这两篇",
       requestScope: { operationId: "op-1" },
@@ -87,7 +95,9 @@ describe("CPR direct web multi-PDF preparation", function () {
   const metadataOf = (payload: CprDirectWebPayload): Record<string, unknown> =>
     JSON.parse(payload.client_metadata["x-codex-turn-metadata"]);
   const ledgerKey = (sessionId?: string): string => {
-    const keys = [...prefs.keys()].filter((key) => key.includes(".cprDirectWebLedger."));
+    const keys = [...prefs.keys()].filter((key) =>
+      key.includes(".cprDirectWebLedger."),
+    );
     assert.lengthOf(keys, 1);
     if (sessionId) assert.include(keys[0], encodeURIComponent(sessionId));
     return keys[0];
@@ -172,7 +182,10 @@ describe("CPR direct web multi-PDF preparation", function () {
         ["doi:10.1000/bbb", 1],
       ],
     );
-    assert.match(textOf(prepared.payload), /1\. first\.pdf[\s\S]*2\. second\.pdf/);
+    assert.match(
+      textOf(prepared.payload),
+      /1\. first\.pdf[\s\S]*2\. second\.pdf/,
+    );
     assert.match(textOf(prepared.payload), /总结这两篇$/);
     assert.equal(prepared.payload.model, WEB_MODEL);
     assert.equal(prepared.payload.stream, true);
@@ -221,7 +234,10 @@ describe("CPR direct web multi-PDF preparation", function () {
     assert.deepEqual(second.reused, ["doi:10.1000/aaa"]);
     assert.deepEqual(contentTypes(second.payload), ["input_text"]);
     assert.equal(textOf(second.payload), "继续");
-    assert.equal(second.payload.prompt_cache_key, first.payload.prompt_cache_key);
+    assert.equal(
+      second.payload.prompt_cache_key,
+      first.payload.prompt_cache_key,
+    );
     assert.equal(second.sessionId, first.sessionId);
   });
 
@@ -289,11 +305,18 @@ describe("CPR direct web multi-PDF preparation", function () {
       },
     ]);
 
-    const followUp = await prepare({ refs, requestScope: scope, prompt: "继续" });
+    const followUp = await prepare({
+      refs,
+      requestScope: scope,
+      prompt: "继续",
+    });
     assert.lengthOf(reads, 1);
     assert.lengthOf(followUp.uploaded, 0);
     assert.deepEqual(contentTypes(followUp.payload), ["input_text"]);
-    assert.equal(followUp.payload.prompt_cache_key, first.payload.prompt_cache_key);
+    assert.equal(
+      followUp.payload.prompt_cache_key,
+      first.payload.prompt_cache_key,
+    );
     assert.deepEqual(followUp.uncertain, [
       {
         paperId: "doi:10.1000/aaa",
@@ -338,7 +361,10 @@ describe("CPR direct web multi-PDF preparation", function () {
     addPaper(12, "https://doi.org/10.1000/bbb");
     addAttachment(102, 12, "/library/second.pdf");
     files.set("/library/second.pdf", pdfBytes("B"));
-    const blocked = await prepare({ refs: [refOf(12, 102, "Second")], requestScope: scope });
+    const blocked = await prepare({
+      refs: [refOf(12, 102, "Second")],
+      requestScope: scope,
+    });
     blocked.markUncertain();
     const afterUnknown = ledgerOf(accepted.sessionId);
     assert.lengthOf(afterUnknown.entries, 1);
@@ -366,7 +392,11 @@ describe("CPR direct web multi-PDF preparation", function () {
     assert.match(first.sessionId, /^zotero-cpr-[a-f0-9]{32}$/);
     resetProviderSessionIdCacheForTests();
 
-    const afterReset = await prepare({ refs, requestScope: scope, prompt: "继续" });
+    const afterReset = await prepare({
+      refs,
+      requestScope: scope,
+      prompt: "继续",
+    });
     assert.equal(afterReset.sessionId, first.sessionId);
     assert.lengthOf(reads, 1);
     assert.lengthOf(afterReset.uploaded, 0);
@@ -396,10 +426,13 @@ describe("CPR direct web multi-PDF preparation", function () {
     assert.lengthOf([...prefs.keys()], 0);
   });
 
-  it("rejects a non-PDF payload and an unsupported model or effort before reading anything", async function () {
+  it("rejects a non-PDF payload before reading anything", async function () {
     addPaper(11, "https://doi.org/10.1000/aaa");
     addAttachment(101, 11, "/library/first.pdf");
-    files.set("/library/first.pdf", new TextEncoder().encode("not a pdf at all"));
+    files.set(
+      "/library/first.pdf",
+      new TextEncoder().encode("not a pdf at all"),
+    );
     let caught: unknown;
     try {
       await prepare({ refs: [refOf(11, 101)] });
@@ -407,22 +440,23 @@ describe("CPR direct web multi-PDF preparation", function () {
       caught = error;
     }
     assert.include(String(caught), "不是有效的 PDF");
+    assert.lengthOf(reads, 1);
+  });
 
-    for (const over of [
-      { model: "papers/gpt-6-sol" },
-      { apiBase: "https://api.openai.com/v1" },
-      { reasoning: { provider: "openai" as const, level: "high" as const, effort: "turbo" } },
-    ]) {
-      reads = [];
-      let refused: unknown;
-      try {
-        await prepare({ refs: [refOf(11, 101)], ...over });
-      } catch (error) {
-        refused = error;
-      }
-      assert.instanceOf(refused, Error);
-      assert.lengthOf(reads, 0);
-    }
+  it("does not gate the web PDF path on a model name or endpoint", async function () {
+    addPaper(11, "https://doi.org/10.1000/aaa");
+    addAttachment(101, 11, "/library/first.pdf");
+    files.set("/library/first.pdf", pdfBytes("web-alias"));
+    const prepared = await prepare({
+      refs: [refOf(11, 101)],
+      model: "papers/gpt-6-sol",
+      apiBase: "https://api.openai.com/v1",
+      reasoning: { provider: "openai", level: "turbo", effort: "turbo" },
+    });
+    assert.equal(prepared.payload.model, "papers/gpt-6-sol");
+    assert.equal(prepared.payload.reasoning.effort, "turbo");
+    assert.lengthOf(prepared.uploaded, 1);
+    assert.lengthOf(reads, 1);
   });
 
   it("names files by basename, caps the name and falls back to paper.pdf", async function () {
@@ -466,7 +500,10 @@ describe("CPR direct web multi-PDF preparation", function () {
       caught = error;
     }
     assert.include(String(caught), "超过 8 个上限");
-    assert.lengthOf([...prefs.keys()].filter((k) => k.includes("cprDirectWebLedger")), 0);
+    assert.lengthOf(
+      [...prefs.keys()].filter((k) => k.includes("cprDirectWebLedger")),
+      0,
+    );
 
     addPaper(11, "https://doi.org/10.1000/big");
     addAttachment(101, 11, "/library/big.pdf");
@@ -484,7 +521,10 @@ describe("CPR direct web multi-PDF preparation", function () {
       const id = 200 + index;
       addPaper(id, `https://doi.org/10.1000/wide${index}`);
       addAttachment(id * 10, id, `/library/wide${index}.pdf`);
-      files.set(`/library/wide${index}.pdf`, pdfBytes(`wide${index}`, 40 * MIB));
+      files.set(
+        `/library/wide${index}.pdf`,
+        pdfBytes(`wide${index}`, 40 * MIB),
+      );
       wideRefs.push(refOf(id, id * 10));
     }
     caught = undefined;
@@ -496,17 +536,11 @@ describe("CPR direct web multi-PDF preparation", function () {
     assert.include(String(caught), "合计超过 100 MiB");
   });
 
-  it("matches only the CPR papers target with a chatgpt-web model", function () {
-    assert.isTrue(isCprDirectWebModel(WEB_MODEL, CPR_PAPERS_API_BASE));
-    assert.isTrue(isCprDirectWebModel(` ${WEB_MODEL} `, "http://127.0.0.1:18082/v1"));
-    assert.isFalse(isCprDirectWebModel("papers/gpt-6-sol", CPR_PAPERS_API_BASE));
-    assert.isFalse(isCprDirectWebModel("gpt-5.6-sol", CPR_PAPERS_API_BASE));
-    assert.isFalse(isCprDirectWebModel("chatgpt-web", CPR_PAPERS_API_BASE));
-    assert.isFalse(isCprDirectWebModel(WEB_MODEL, "https://api.openai.com/v1"));
-  });
-
   it("refuses an empty session and keeps standalone and conversation ids distinct", async function () {
-    assert.equal(await resolveCprDirectWebSessionId({ operationId: "op-9" }), "zotero-cpr-op-9");
+    assert.equal(
+      await resolveCprDirectWebSessionId({ operationId: "op-9" }),
+      "zotero-cpr-op-9",
+    );
     for (const scope of [
       { conversationKey: "   " },
       { conversationKey: "" },
@@ -521,10 +555,15 @@ describe("CPR direct web multi-PDF preparation", function () {
       }
       assert.include(String(caught), "缺少稳定的 CPR direct web 会话 id");
     }
-    const conversation = await resolveCprDirectWebSessionId({ conversationKey: 3 });
+    const conversation = await resolveCprDirectWebSessionId({
+      conversationKey: 3,
+    });
     const other = await resolveCprDirectWebSessionId({ conversationKey: 4 });
     assert.notEqual(conversation, other);
-    assert.notEqual(conversation, await resolveCprDirectWebSessionId({ operationId: conversation }));
+    assert.notEqual(
+      conversation,
+      await resolveCprDirectWebSessionId({ operationId: conversation }),
+    );
   });
 
   it("fails closed on a corrupted ledger instead of re-uploading", async function () {

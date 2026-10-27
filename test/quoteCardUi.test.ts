@@ -156,7 +156,8 @@ describe("quote card UI contract", function () {
     assert.include(css, "-webkit-line-clamp: 2");
     assert.include(css, '.llm-quote-card[data-expanded="false"]:hover');
     assert.include(css, "--llm-quote-card-rail");
-    assert.include(css, "--llm-quote-card-rail: var(--color-accent)");
+    assert.include(css, "--llm-quote-card-rail: var(--llm-indigo9)");
+    assert.include(css, "border-left: 0.5px solid var(--llm-quote-card-rail)");
     assert.include(css, "border: none");
     assert.include(css, "justify-content: flex-end");
     assert.include(css, "background: transparent");
@@ -168,8 +169,8 @@ describe("quote card UI contract", function () {
 
     assert.include(css, '.llm-quote-card[data-quote-status="not-source"]');
     assert.include(css, '.llm-quote-card[data-quote-status="unresolved"]');
-    assert.include(css, "--llm-quote-card-rail: #f59e0b");
-    assert.include(css, "--llm-quote-card-rail: var(--fill-tertiary)");
+    assert.include(css, "--llm-quote-card-rail: var(--llm-amber9)");
+    assert.include(css, "--llm-quote-card-rail: var(--llm-slate9)");
     assert.include(css, "font-style: normal");
     assert.include(css, '[data-quote-interactive="false"]');
     assert.include(css, "cursor: default");

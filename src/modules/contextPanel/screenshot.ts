@@ -121,7 +121,7 @@ async function captureScreenshotSelection(win: Window): Promise<string | null> {
       height: "100vh",
       zIndex: "10000",
       cursor: "crosshair",
-      background: "rgba(0, 0, 0, 0.3)",
+      background: "color-mix(in srgb, var(--llm-slate12) 30%, transparent)",
     });
 
     // Instructions
@@ -131,11 +131,11 @@ async function captureScreenshotSelection(win: Window): Promise<string | null> {
       top: "20px",
       left: "50%",
       transform: "translateX(-50%)",
-      background: "rgba(0, 0, 0, 0.8)",
-      color: "white",
+      background: "var(--llm-slate12)",
+      color: "var(--llm-on-solid)",
       padding: "12px 20px",
-      borderRadius: "8px",
-      fontSize: "14px",
+      borderRadius: "4px",
+      fontSize: "var(--llm-text-body)",
       fontWeight: "500",
       zIndex: "10001",
       pointerEvents: "none",
@@ -153,12 +153,12 @@ async function captureScreenshotSelection(win: Window): Promise<string | null> {
       bottom: "20px",
       left: "50%",
       transform: "translateX(-50%)",
-      background: "#dc2626",
-      color: "white",
+      background: "var(--llm-red9)",
+      color: "var(--llm-on-solid)",
       border: "none",
       padding: "10px 24px",
-      borderRadius: "8px",
-      fontSize: "14px",
+      borderRadius: "4px",
+      fontSize: "var(--llm-text-body)",
       fontWeight: "500",
       cursor: "pointer",
       zIndex: "10001",
@@ -175,8 +175,8 @@ async function captureScreenshotSelection(win: Window): Promise<string | null> {
     const selection = doc.createElementNS(HTML_NS, "div") as HTMLDivElement;
     Object.assign(selection.style, {
       position: "absolute",
-      border: "2px dashed #2563eb",
-      background: "rgba(37, 99, 235, 0.2)",
+      border: "0.5px dashed var(--llm-indigo8)",
+      background: "color-mix(in srgb, var(--llm-indigo5) 20%, transparent)",
       pointerEvents: "none",
       display: "none",
     });

@@ -19,7 +19,7 @@ export function renderCprChartWidgets(host: HTMLElement, attachments: readonly C
     const chart = widget;
     const root = doc.createElement("section");
     root.className = "llm-cpr-rich-chart";
-    root.style.cssText = "margin:12px 0;padding:12px;border:1px solid var(--fill-quinary,#d4d4d8);border-radius:10px;max-width:100%;overflow:hidden";
+
     const heading = doc.createElement("div");
     heading.style.cssText = "display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:8px";
     const title = doc.createElement("strong");
@@ -30,12 +30,12 @@ export function renderCprChartWidgets(host: HTMLElement, attachments: readonly C
     chartRegion.style.cssText = "width:100%;overflow-x:auto";
     const table = doc.createElement("table");
     table.hidden = true;
-    table.style.cssText = "width:100%;border-collapse:collapse;font-size:12px";
+    table.className = "llm-cpr-chart-table";
     const headerRow = doc.createElement("tr");
     for (const label of [chart.xField, chart.yField, ...(chart.seriesField ? [chart.seriesField] : [])]) {
       const cell = doc.createElement("th");
       cell.textContent = label;
-      cell.style.cssText = "text-align:left;border-bottom:1px solid #888;padding:4px";
+
       headerRow.appendChild(cell);
     }
     const thead = doc.createElement("thead");
@@ -47,7 +47,7 @@ export function renderCprChartWidgets(host: HTMLElement, attachments: readonly C
       for (const cellText of [point.x, String(point.y), ...(chart.seriesField ? [point.series ?? ""] : [])]) {
         const cell = doc.createElement("td");
         cell.textContent = cellText;
-        cell.style.cssText = "padding:3px 4px;border-bottom:1px solid var(--fill-quinary,#ddd)";
+
         row.appendChild(cell);
       }
       tbody.appendChild(row);
@@ -55,15 +55,15 @@ export function renderCprChartWidgets(host: HTMLElement, attachments: readonly C
     table.appendChild(tbody);
     const status = doc.createElement("div");
     status.setAttribute("aria-live", "polite");
-    status.style.cssText = "font-size:12px;min-height:18px;opacity:.8;margin:4px 0";
-    status.textContent = "悬停或聚焦数据点可查看数值";
+    status.className = "llm-cpr-chart-status";
+
     const controls = doc.createElement("div");
     controls.style.cssText = "display:flex;gap:5px;flex-wrap:wrap;align-items:center";
     const button = (label: string, handler: () => void) => {
       const element = doc.createElement("button");
       element.type = "button";
       element.textContent = label;
-      element.style.cssText = "border:1px solid var(--fill-quinary,#aaa);border-radius:5px;padding:2px 7px;cursor:pointer;background:transparent";
+      element.className = "llm-cpr-chart-control";
       element.addEventListener("click", (event) => { event.preventDefault(); event.stopPropagation(); handler(); });
       controls.appendChild(element);
       return element;
@@ -101,7 +101,7 @@ export function renderCprChartWidgets(host: HTMLElement, attachments: readonly C
       for (let tick = 0; tick <= 4; tick += 1) {
         const value = minValue + span * tick / 4;
         const py = y(value);
-        append("line", { x1: String(left), y1: String(py), x2: String(left + width), y2: String(py), stroke: "#a1a1aa", "stroke-opacity": ".28" });
+        append("line", { x1: String(left), y1: String(py), x2: String(left + width), y2: String(py), stroke: "var(--llm-slate6)", "stroke-width": "0.5" });
         append("text", { x: String(left - 7), y: String(py + 4), "text-anchor": "end", fill: "currentColor", "font-size": "11" }, Number(value.toPrecision(3)).toString());
       }
       append("line", { x1: String(left), y1: String(top), x2: String(left), y2: String(top + height), stroke: "currentColor", "stroke-opacity": ".55" });
@@ -163,7 +163,11 @@ export function renderCprChartWidgets(host: HTMLElement, attachments: readonly C
         toggle.setAttribute("aria-pressed", String(enabled.has(name)));
         draw();
       });
-      toggle.style.borderLeft = `4px solid ${COLORS[index % COLORS.length]}`;
+      const swatch = doc.createElement("span");
+      swatch.className = "llm-cpr-chart-swatch";
+      swatch.setAttribute("aria-hidden", "true");
+      swatch.style.backgroundColor = COLORS[index % COLORS.length];
+      toggle.appendChild(swatch);
       toggle.setAttribute("aria-pressed", "true");
     }
     heading.appendChild(controls);

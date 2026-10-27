@@ -1,4 +1,5 @@
 import { assert } from "chai";
+import { t } from "../src/utils/i18n";
 import { createActionLayoutController } from "../src/modules/contextPanel/setupHandlers/controllers/actionLayoutController";
 
 function layoutFixture(initialWidth: number, connected = true) {
@@ -13,8 +14,11 @@ function layoutFixture(initialWidth: number, connected = true) {
       dataset: {} as Record<string, string>,
       textContent: label,
       title: "",
+      attributes: {} as Record<string,string>,
+      setAttribute(name: string,value: string) { this.attributes[name]=value; },
       parentElement: null,
       scrollWidth: 20,
+      minWidth: label === "Send" ? 64 : 0,
       get clientWidth() {
         geometryReads++;
         return width;
@@ -39,9 +43,9 @@ function layoutFixture(initialWidth: number, connected = true) {
           pendingFrames.push(callback);
           return pendingFrames.length;
         },
-        getComputedStyle() {
+        getComputedStyle(node: { minWidth?: number }) {
           styleReads++;
-          return { getPropertyValue: () => "0" };
+          return { getPropertyValue: (property: string) => property === "min-width" ? String(node.minWidth || 0) : "0" };
         },
       },
     },
@@ -123,15 +127,19 @@ describe("action layout lifetime", function () {
     assert.equal(fixture.modelBtn.textContent, "Example model");
     assert.equal(fixture.reasoningBtn.textContent, "High");
     assert.equal(fixture.sendBtn.textContent, "");
+    assert.equal(fixture.sendBtn.attributes["aria-label"], t("Send"));
+    assert.isTrue(fixture.sendBtn.classList.contains("llm-action-icon-only"));
     assert.equal(fixture.cancelBtn.textContent, "");
-    assert.equal(fixture.sendBtn.title, "Send");
-    assert.equal(fixture.cancelBtn.title, "Cancel");
+    assert.equal(fixture.sendBtn.title, t("Send"));
+    assert.equal(fixture.cancelBtn.title, t("Cancel"));
     assert.equal(fixture.panelRoot.dataset.llmActionLayoutMode, "full");
 
     fixture.setWidth(40);
     layout();
-    assert.equal(fixture.modelBtn.textContent, "");
+    assert.equal(fixture.modelBtn.textContent, fixture.modelBtn.dataset.modelLabel);
     assert.equal(fixture.sendBtn.textContent, "");
+    assert.equal(fixture.sendBtn.attributes["aria-label"], t("Send"));
+    assert.isTrue(fixture.sendBtn.classList.contains("llm-action-icon-only"));
     assert.equal(fixture.cancelBtn.textContent, "");
 
     fixture.setWidth(0);
@@ -143,4 +151,40 @@ describe("action layout lifetime", function () {
     assert.equal(fixture.panelRoot.dataset.llmActionLayoutMode, "full");
     assert.lengthOf(fixture.pendingFrames, 0);
   });
+  it("preserves localized Send through explicit icon/full refreshes", function () {
+    const fixture = layoutFixture(440);
+    for (const mode of ["icon", "full", "icon"] as const) {
+      fixture.controller.setSendButtonLabel(mode);
+      assert.equal(fixture.sendBtn.textContent, "");
+    assert.equal(fixture.sendBtn.attributes["aria-label"], t("Send"));
+      assert.isTrue(fixture.sendBtn.classList.contains("llm-action-icon-only"));
+      assert.equal(fixture.cancelBtn.textContent, "");
+      assert.isTrue(fixture.cancelBtn.classList.contains("llm-action-icon-only"));
+    }
+  });
+
+  it("retains full model labels for accessible ellipsis in the single toolbar", function () {
+    const fixture = layoutFixture(210);
+    fixture.modelBtn.dataset.modelLabel = "ExampleModel";
+    fixture.controller.applyResponsiveActionButtonsLayout();
+    // CSS truncates only the model text; native title/aria preserve its full name.
+    assert.equal(fixture.panelRoot.dataset.llmActionLayoutMode, "full");
+    assert.equal(fixture.modelBtn.textContent, fixture.modelBtn.dataset.modelLabel);
+    assert.equal(fixture.reasoningBtn.textContent, "High");
+    assert.equal(fixture.sendBtn.textContent, "");
+    assert.equal(fixture.sendBtn.attributes["aria-label"], t("Send"));
+  });
+
+  it("labels reasoning by localized function and actual tier without instruction copy", () => {
+    const fixture = layoutFixture(440);
+    fixture.reasoningBtn.dataset.reasoningLabel = "xhigh";
+    fixture.reasoningBtn.dataset.reasoningHint = t("Reasoning");
+    fixture.controller.applyResponsiveActionButtonsLayout();
+    assert.equal(fixture.reasoningBtn.title, `${t("Reasoning")}: xhigh`);
+    assert.equal(fixture.reasoningBtn.attributes["aria-label"], fixture.reasoningBtn.title);
+    fixture.reasoningBtn.dataset.reasoningHint = "Adjusted for this model";
+    fixture.controller.applyResponsiveActionButtonsLayout();
+    assert.include(fixture.reasoningBtn.title,"Adjusted for this model");
+  });
+
 });

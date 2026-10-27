@@ -1,8 +1,5 @@
 import type { ConversationSystem } from "../../shared/types";
-import {
-  isCprPapersModel,
-  type CprPaperHistory,
-} from "../../utils/cprPapers";
+import type { CprPaperHistory } from "../../utils/cprPapers";
 import { t } from "../../utils/i18n";
 
 /** The transport the button reuses: the current chat's own model settings. */
@@ -25,18 +22,18 @@ export type CprPaperHistoryAttempt = {
 };
 
 /**
- * Offer the button only for an upstream chat whose model is a papers alias and
- * whose conversation is bound to exactly one paper.
+ * Offer the button only for an upstream chat on a route that explicitly keeps
+ * a server-side paper registry and whose conversation is bound to one paper.
  */
 export function shouldOfferCprPaperHistory(params: {
   conversationSystem: ConversationSystem;
-  model: string;
+  paperRegistry: boolean;
   paperItemId: number | null | undefined;
 }): boolean {
   return (
     params.conversationSystem === "upstream" &&
     Boolean(params.paperItemId) &&
-    isCprPapersModel(params.model)
+    params.paperRegistry === true
   );
 }
 
@@ -47,7 +44,11 @@ export type CprPaperHistoryControllerDeps = {
     params: CprPaperHistoryRequest & { signal?: AbortSignal },
   ) => Promise<CprPaperHistory>;
   setBusy: (busy: boolean) => void;
-  setStatusMessage: (message: string, level: "ready" | "warning" | "error", conversationUrl?: string) => void;
+  setStatusMessage: (
+    message: string,
+    level: "ready" | "warning" | "error",
+    conversationUrl?: string,
+  ) => void;
   logError: (message: string, error: unknown) => void;
 };
 
@@ -73,7 +74,11 @@ export function createCprPaperHistoryController(
       if (attempt.signal.aborted || !attempt.isCurrent()) return;
       await attempt.applyHistory(history);
       if (attempt.signal.aborted || !attempt.isCurrent()) return;
-      deps.setStatusMessage(t("Remote conversation synchronized"), "ready", history.conversation_url);
+      deps.setStatusMessage(
+        t("Remote conversation synchronized"),
+        "ready",
+        history.conversation_url,
+      );
     } catch (error) {
       // Aborted or superseded: the panel already moved on, so say nothing.
       if (attempt.signal.aborted || !attempt.isCurrent()) return;
