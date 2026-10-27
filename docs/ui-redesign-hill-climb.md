@@ -122,9 +122,16 @@ History 保留原 clock button 和原 ID，同时在足够宽度显示短文本�
 - [Round 2 Before](../artifacts/round2-before.png) / [Round 2 After](../artifacts/round2-after.png)
 - [Round 3 Before](../artifacts/round3-before.png) / [Round 3 After](../artifacts/round3-after.png)
 - [Round 4 Before](../artifacts/round4-before.png) / [Round 4 After](../artifacts/round4-after.png)
+- [Round 5 Before](../artifacts/round5-before.png) / [Round 5 After](../artifacts/round5-after.png)
 - [Final Preferences](../artifacts/final-preferences.png) / [Final Standalone](../artifacts/final-standalone.png)
 
 这些文件命名、视口和渲染条件固定，便于后续用真实 Zotero 截图替换；不能把它们当作 Zotero runtime screenshot。
+
+### Round 5：空闲状态与上下文分组
+
+Round 5 的 A 是 Round 4 的 B。IA 和代码审查都发现：有 paper 但尚未运行时，空的 status strip 仍占据 composer 的横向和纵向空间；同时 Agent mode、已有 context chip、上传入口和文件预览直接混在一条 flex 流中。B 在 `buildUI.ts` 中为 status line 增加兼容 Gecko 的 `MutationObserver`，以 `llm-run-status-empty` 控制 idle 折叠；为 context tray 的现有节点增加 `data-context-group`，并加入 presentation-only 的 Current context / Add context 标签。没有移动任何原有节点，也没有引入 `:has()`。
+
+Round 5 的 B 更有利于实际任务：idle 时发送和模型控件得到完整宽度，运行中/错误/完成状态出现时仍可见；用户能先区分当前 scope，再识别要添加的上下文。B 没有改变 upload、history、runtime 或 context handler 的 ID 和节点关系，也没有增加第三个空状态 CTA。保留本轮改动。下一轮应在真实 Zotero runtime 观察 ready → sending → error → complete，以及多文件 upload 的 queued/running/failed/retry 状态。
 
 ## 已完成验证
 

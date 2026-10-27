@@ -16650,3 +16650,56 @@ item-pane-sidenav .llm-persistent-rail-entry[hidden] {
   .llm-history-toggle::after { display: none; }
 }
 
+/* Round 5: idle status should not reserve composer space. buildUI.ts keeps
+   this class in sync with the existing status node via MutationObserver, so
+   the rule remains compatible with Gecko versions where :has() is avoided. */
+.llm-run-status-strip.llm-run-status-empty {
+  display: none;
+}
+
+/* Round 5: give the context tray a readable order without wrapping or moving
+   any existing handler-owned nodes. Labels are presentation-only; the tray's
+   aria-label remains the accessible group name. */
+.llm-context-group-label {
+  flex: 0 0 100%;
+  min-width: 0;
+  margin: 3px 2px 0;
+  color: var(--llm-ui-muted);
+  font-size: var(--llm-text-small);
+  font-weight: 650;
+  letter-spacing: 0.03em;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.llm-context-group-label[data-context-group="add"] {
+  margin-top: 5px;
+  padding-top: 6px;
+  border-top: 1px solid var(--llm-redesign-border);
+}
+
+.llm-context-previews[data-scope="empty"] .llm-context-group-label {
+  display: none;
+}
+
+.llm-context-previews > [data-context-group="current"]:not(.llm-context-group-label) {
+  border-color: var(--llm-redesign-border-strong);
+  background: var(--llm-redesign-surface-raised);
+}
+
+.llm-context-previews > [data-context-group="added"] {
+  border-color: var(--llm-redesign-border);
+  background: var(--llm-redesign-surface-soft);
+}
+
+@media (max-width: 420px) {
+  .llm-context-group-label {
+    margin-inline: 0;
+  }
+
+  .llm-context-group-label[data-context-group="add"] {
+    margin-top: 3px;
+    padding-top: 4px;
+  }
+}
+
