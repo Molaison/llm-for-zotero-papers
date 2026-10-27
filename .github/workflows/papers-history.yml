@@ -1,6 +1,8 @@
 name: Papers History Safety
 
 on:
+  push:
+    branches: ["codex/papers"]
   pull_request:
     branches: ["codex/papers"]
 
@@ -28,3 +30,9 @@ jobs:
         run: npm run build
       - name: Architecture boundaries
         run: npm run check:architecture && npm run check:cycles
+      - name: Upload compiled Zotero add-on
+        uses: actions/upload-artifact@v4
+        with:
+          name: papers-build
+          path: .scaffold/build/
+          if-no-files-found: error
