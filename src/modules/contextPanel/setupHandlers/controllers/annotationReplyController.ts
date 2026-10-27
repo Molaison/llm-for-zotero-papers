@@ -134,8 +134,11 @@ export function createAnnotationReplyController(deps: {
   selectionSummary.setAttribute("aria-live", "polite");
   trigger.append(selectionSummary);
   const actions = deps.body.querySelector(".llm-actions-left");
+  const permission = deps.body.querySelector("#llm-permission-control");
   const source = actions?.querySelector("#llm-source-shortcut");
-  actions?.insertBefore(trigger, source || null);
+  // Keep the annotation entry beside permission mode in the composer footer.
+  // Fall back to the historical location if a host surface lacks that control.
+  if (actions) actions.insertBefore(trigger, permission || source || null);
   type View = "list" | "source" | "preview" | "history";
   let view: View = "list";
   let previewReturn: View = "source";
