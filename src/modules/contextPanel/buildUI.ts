@@ -893,6 +893,7 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
       title: t("Expand figures"),
     },
   );
+  imagePreviewMeta.setAttribute("aria-label", t("Expand figures"));
   const imagePreviewHeader = createElement(
     doc,
     "div",
@@ -960,6 +961,7 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
       title: t("Expand files"),
     },
   );
+  filePreviewMeta.setAttribute("aria-label", t("Expand files"));
   const filePreviewHeader = createElement(
     doc,
     "div",
@@ -974,6 +976,7 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
     textContent: "×",
     title: t("Clear uploaded files"),
   });
+  filePreviewClear.setAttribute("aria-label", t("Clear uploaded files"));
   filePreviewHeader.append(filePreviewMeta, filePreviewClear);
   const filePreviewExpanded = createElement(
     doc,
