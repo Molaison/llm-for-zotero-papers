@@ -53,6 +53,10 @@ import { ensureConversationLoaded, getConversationKey } from "./chat";
 import { renderShortcuts } from "./shortcuts";
 import { refreshChat } from "./chat";
 import {
+  installPaperWarmOnIntent,
+  type PaperWarmTarget,
+} from "./paperWarmOnIntent";
+import {
   beginChatRenderCycle,
   claimAsyncChatRender,
   claimDeferredChatRender,
@@ -542,6 +546,11 @@ export function registerReaderContextPanel() {
       setEnabled(true);
       // Skip full render when standalone window is active
       if (isStandaloneWindowActive()) return;
+      installPaperWarmOnIntent(
+        body,
+        resolveIntentPaperWarmTarget(body),
+        warmPanelPaper,
+      );
 
       const resolvedInitialState = resolveInitialPanelItemState(item);
       const resolvedItem = resolvedInitialState.item;
@@ -648,15 +657,34 @@ export function registerReaderContextPanel() {
         refreshChat(body, resolvedItem);
       }
       markCompletedPanelLifecycleSignature(body, lifecycleSignature);
-      // Defer content extraction so the panel becomes interactive sooner.
-      const activeContextItem = getActiveContextAttachmentFromTabs();
-      if (activeContextItem) {
-        void ensurePDFTextCached(activeContextItem);
-      } else if (item && (item as any).isNote?.()) {
-        void ensureNoteTextCached(item);
+      // Don't start a heavy PDF parse merely because Zotero opens a reader.
+      // The composer intent hook above warms on focus/input; sending still
+      // resolves its own PDF content when needed.
+      if (!getActiveContextAttachmentFromTabs() && (item as any)?.isNote?.()) {
+        void ensureNoteTextCached(item!);
       }
     },
   });
+}
+
+/** The PDF currently selected in the reader, resolved at chat intent time. */
+function resolveIntentPaperWarmTarget(
+  body: Element,
+): () => PaperWarmTarget | null {
+  return () => {
+    const contextItem = getActiveContextAttachmentFromTabs();
+    if (!contextItem) return null;
+    const panelItem = activeContextPanels.get(body)?.() || null;
+    return {
+      contextItemId: contextItem.id,
+      conversationKey: panelItem ? getConversationKey(panelItem) : 0,
+    };
+  };
+}
+
+function warmPanelPaper(target: PaperWarmTarget): void {
+  const contextItem = Zotero.Items.get(target.contextItemId);
+  if (contextItem) void ensurePDFTextCached(contextItem);
 }
 
 type ReaderTextSelectionPopupHandler =
