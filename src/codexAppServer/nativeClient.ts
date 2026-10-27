@@ -2663,7 +2663,10 @@ export async function listCodexAppServerModels(
   if (typeof limit === "number" && Number.isFinite(limit) && limit > 0) {
     requestParams.limit = Math.floor(limit);
   }
-  return proc.sendRequest("model/list", requestParams);
+  // UI-driven side read: a timeout must not kill a process a turn is using.
+  return proc.sendRequest("model/list", requestParams, undefined, {
+    failProcessOnTimeout: false,
+  });
 }
 
 /**

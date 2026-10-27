@@ -220,6 +220,53 @@ describe("codexAppServerProcess", function () {
       proc.destroy();
     }
   });
+  it("rejects only the timed-out request when failProcessOnTimeout is false", async function () {
+    let killed = false;
+    const proc = CodexAppServerProcess.forTest({
+      stdin: { write: () => {} },
+      kill: () => {
+        killed = true;
+      },
+    });
+    let closed = false;
+    proc.onClose(() => {
+      closed = true;
+    });
+    const other = proc.sendRequest("other/read", {}, 0);
+    let error: unknown;
+    try {
+      await proc.sendRequest("side/read", {}, 5, {
+        failProcessOnTimeout: false,
+      });
+    } catch (caught) {
+      error = caught;
+    }
+    assert.match(String(error), /Timed out waiting for codex app-server/);
+    assert.isFalse(killed);
+    assert.isFalse(closed);
+    (proc as any).handleMessage({ id: 1, result: { ok: true } });
+    assert.deepEqual(await other, { ok: true });
+    proc.destroy();
+  });
+  it("tells a running turn why the connection closed", async function () {
+    const proc = createProcess();
+    const turn = waitForCodexAppServerTurnCompletion({
+      proc,
+      threadId: "thread",
+      turnId: "turn",
+      timeoutMs: 0,
+    });
+    const settled = turn.then(
+      () => undefined,
+      (caught) => caught as Error,
+    );
+    await proc.sendRequest("slow/read", {}, 5).catch(() => undefined);
+    const error = await settled;
+    assert.match(
+      String(error?.message),
+      /^Codex app-server connection closed: Timed out waiting for codex app-server response to slow\/read/,
+    );
+  });
   it("settles a lost connection after pending proposal persistence finishes", async function () {
     const proc = createProcess();
     let persisted = false;

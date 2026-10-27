@@ -9,6 +9,8 @@ import type {
 const MARKER_PREFIX = "<!--llm-web-source:";
 const COMPLETE_MARKER_PATTERN = /<!--llm-web-source:([^<>]*?)-->/g;
 const SOURCE_ID_PATTERN = /^web_[a-z0-9]+$/;
+const MARKER_BEFORE_PUNCTUATION_PATTERN =
+  /[ \t]*<!--llm-web-source:[^<>]*?-->(?=[,.;:!?)\]，。；：！？）])/g;
 
 function findStreamingMarkerStart(line: string): number {
   const completePrefixStart = line.indexOf(MARKER_PREFIX);
@@ -453,10 +455,13 @@ export function stripWebSourceMarkersForDisplay(text: string): string {
       output += lineWithBreak;
       continue;
     }
-    const markerStart = findStreamingMarkerStart(line);
-    let cleanLine = line;
-    if (markerStart >= 0) cleanLine = line.slice(0, markerStart);
-    cleanLine = cleanLine.replace(COMPLETE_MARKER_PATTERN, "");
+    // Remove complete markers wherever they sit; only an unfinished marker,
+    // which can only be the end of the streamed text, cuts the line.
+    let cleanLine = line
+      .replace(MARKER_BEFORE_PUNCTUATION_PATTERN, "")
+      .replace(COMPLETE_MARKER_PATTERN, "");
+    const markerStart = findStreamingMarkerStart(cleanLine);
+    if (markerStart >= 0) cleanLine = cleanLine.slice(0, markerStart);
     output += cleanLine + (hasBreak ? "\n" : "");
   }
   return output;

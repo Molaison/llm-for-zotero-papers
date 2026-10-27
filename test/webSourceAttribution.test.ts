@@ -172,6 +172,17 @@ describe("web source attribution", function () {
     );
   });
 
+  it("keeps the text after a mid-line marker visible while streaming", function () {
+    // The repair moves mid-line markers only when the answer ends; until
+    // then the rest of the line was cut off at the marker (2026-10-21).
+    assert.equal(
+      stripWebSourceMarkersForDisplay(
+        "Claim <!--llm-web-source:web_abc1234--> and more, cited <!--llm-web-source:web_def5678-->. Next <!--llm-web",
+      ),
+      "Claim  and more, cited. Next ",
+    );
+  });
+
   it("restores anchors from terminal trace metadata and injects display tokens", function () {
     const anchors = [
       {
