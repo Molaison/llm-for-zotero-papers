@@ -22,7 +22,7 @@ export function syncSidebarSectionLayout(doc: Document): void {
     doc.querySelectorAll(".llm-dedicated-chat-pane > collapsible-section"),
   )) {
     const collapsible = section as Element & { collapsible: boolean };
-    section.setAttribute("data-llm-layout", layout);
+    collapsible.setAttribute("data-llm-layout", layout);
     collapsible.collapsible = stacked;
     if (!stacked) {
       collapsible.setAttribute("open", "true");
