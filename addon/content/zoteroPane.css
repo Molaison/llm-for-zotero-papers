@@ -16703,3 +16703,273 @@ item-pane-sidenav .llm-persistent-rail-entry[hidden] {
   }
 }
 
+
+
+/* Work-style composer refinement (Round 6).
+   Existing IDs and stateful controls are preserved; these are presentation-only
+   changes except for placing the existing permission control in the composer. */
+.llm-panel {
+  --llm-work-radius: 18px;
+  --llm-work-border: var(--llm-slate6);
+  --llm-work-soft: var(--llm-slate3);
+}
+
+.llm-header-nav-row {
+  min-height: 46px;
+  padding: 5px 8px;
+  border-color: transparent;
+  border-bottom: 1px solid var(--llm-work-border);
+  border-radius: 0;
+  background: transparent;
+}
+
+.llm-header-toggle-row .llm-header-mode-tabs {
+  gap: 5px;
+  padding: 3px;
+  border: 1px solid var(--llm-work-border);
+  border-radius: 999px;
+  background: var(--llm-work-soft);
+}
+
+.llm-header-toggle-row .llm-header-mode-tab {
+  min-height: 30px;
+  padding: 5px 12px;
+  border: 0;
+  border-radius: 999px;
+  color: var(--llm-ui-muted);
+}
+
+.llm-header-toggle-row .llm-header-mode-tab.active {
+  color: var(--llm-slate12);
+  background: var(--llm-slate1);
+  box-shadow: 0 1px 3px rgb(15 23 42 / 10%);
+}
+
+.llm-chat-shell {
+  border-color: transparent;
+  border-radius: 0;
+}
+
+.llm-messages {
+  gap: 22px;
+  padding: 18px clamp(12px, 3vw, 32px) 24px;
+}
+
+.llm-message-wrapper.user {
+  margin-inline-start: clamp(16px, 10%, 72px);
+}
+
+.llm-bubble.user {
+  padding: 12px 16px;
+  border: 1px solid transparent;
+  border-radius: 22px;
+  background: var(--llm-work-soft);
+}
+
+.llm-bubble.assistant {
+  max-width: 88ch;
+  line-height: 1.62;
+}
+
+.llm-message-meta {
+  min-height: 26px;
+  gap: 5px;
+}
+
+.llm-input-section {
+  padding: 0 8px 8px;
+}
+
+.llm-compose-area {
+  gap: 5px;
+  padding: 8px 10px 9px;
+  border: 1px solid var(--llm-work-border);
+  border-radius: var(--llm-work-radius);
+  background: var(--llm-slate1);
+  box-shadow: 0 3px 12px rgb(15 23 42 / 7%);
+}
+
+.llm-compose-area:focus-within {
+  border-color: var(--llm-work-border);
+  box-shadow: 0 3px 14px rgb(15 23 42 / 9%);
+}
+
+.llm-input {
+  min-height: 42px;
+  max-height: 180px;
+  padding: 9px 8px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  box-shadow: none;
+}
+
+.llm-input:focus {
+  outline: none;
+  box-shadow: none;
+}
+
+.llm-actions {
+  align-items: center;
+  min-height: 38px;
+  padding-top: 7px;
+  border-top: 0;
+}
+
+.llm-actions-left,
+.llm-actions-right {
+  align-items: center;
+  gap: 5px;
+}
+
+.llm-context-add-slot .llm-upload-file-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  min-width: 36px;
+  height: 36px;
+  min-height: 36px;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--llm-work-border);
+  border-radius: 50%;
+  color: var(--llm-slate12);
+  background: var(--llm-slate1);
+  font-size: 0;
+}
+
+.llm-context-add-slot .llm-upload-file-btn::before {
+  content: "+";
+  font-size: 23px;
+  font-weight: 400;
+  line-height: 1;
+}
+
+.llm-context-add-slot .llm-upload-file-btn:hover:not(:disabled) {
+  background: var(--llm-work-soft);
+}
+
+.llm-actions .llm-model-btn,
+.llm-actions .llm-reasoning-btn {
+  min-height: 34px;
+  border-color: transparent;
+  border-radius: 999px;
+  background: transparent;
+}
+
+.llm-actions .llm-model-btn:hover:not(:disabled),
+.llm-actions .llm-reasoning-btn:hover:not(:disabled) {
+  border-color: var(--llm-work-border);
+  background: var(--llm-work-soft);
+}
+
+.llm-actions-left > .llm-annotation-toggle,
+.llm-actions-left > #llm-permission-control {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+}
+
+.llm-actions-left > .llm-annotation-toggle {
+  order: 2;
+  width: 34px;
+  min-width: 34px;
+  height: 34px;
+  min-height: 34px;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid var(--llm-work-border);
+  border-radius: 50%;
+  background: var(--llm-slate1);
+}
+
+.llm-actions-left > #llm-permission-control {
+  order: 3;
+}
+
+.llm-actions-left > #llm-permission-control .llm-permission-toggle {
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  color: var(--llm-orange11, #c2410c);
+  background: transparent;
+}
+
+.llm-actions-left > #llm-permission-control .llm-permission-toggle:hover:not(:disabled) {
+  background: var(--llm-work-soft);
+}
+
+.llm-actions-left > .llm-source-shortcut {
+  order: 1;
+}
+
+.llm-annotation-toggle:hover,
+.llm-annotation-toggle[aria-expanded="true"] {
+  border-color: var(--llm-work-border);
+  background: var(--llm-work-soft);
+}
+
+.llm-annotation-selection-summary {
+  margin-inline-start: 3px;
+  font-size: 11px;
+}
+
+.llm-annotation-drawer {
+  border: 1px solid var(--llm-work-border);
+  border-radius: 16px;
+  background: var(--llm-slate1);
+  box-shadow: 0 8px 24px rgb(15 23 42 / 8%);
+}
+
+.llm-annotation-drawer-content {
+  gap: 12px;
+  padding: 14px;
+}
+
+.llm-annotation-row {
+  border: 1px solid var(--llm-work-border);
+  border-radius: 12px;
+  background: var(--llm-slate1);
+}
+
+.llm-annotation-row[data-selected="true"] {
+  border-color: var(--llm-indigo8);
+  background: var(--llm-indigo2);
+}
+
+.llm-annotation-detail,
+.llm-annotation-source-answer {
+  border: 1px solid var(--llm-work-border);
+  border-radius: 12px;
+  background: var(--llm-work-soft);
+}
+
+.llm-annotation-quote {
+  border-inline-start: 3px solid var(--llm-indigo8);
+  border-radius: 0 8px 8px 0;
+}
+
+.llm-panel :is(button, summary, select, textarea):focus-visible {
+  outline-offset: 2px;
+}
+
+@media (max-width: 520px) {
+  .llm-input-section { padding-inline: 3px; }
+  .llm-compose-area { padding: 6px 7px 7px; border-radius: 15px; }
+  .llm-input { min-height: 38px; }
+  .llm-actions { flex-wrap: wrap; }
+  .llm-actions-left { flex: 1 1 100%; }
+  .llm-actions-right { flex: 1 1 100%; justify-content: flex-end; }
+  .llm-actions-left > #llm-permission-control .llm-permission-toggle {
+    padding-inline: 7px;
+  }
+}
+
+@media (prefers-color-scheme: dark) {
+  .llm-compose-area,
+  .llm-annotation-drawer {
+    box-shadow: 0 4px 16px rgb(0 0 0 / 28%);
+  }
+}
