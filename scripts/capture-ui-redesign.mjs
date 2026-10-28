@@ -4,8 +4,10 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 
 const round = process.argv[2];
-if (!/^round-\d+$/.test(round || "")) {
-  throw new Error("Usage: node scripts/capture-ui-redesign.mjs round-N");
+if (!/^round-\d+(?:-stress)?$/.test(round || "")) {
+  throw new Error(
+    "Usage: node scripts/capture-ui-redesign.mjs round-N[-stress]",
+  );
 }
 const destination = `docs/design-review/evidence/${round}`;
 const sourceFiles = [
@@ -14,6 +16,12 @@ const sourceFiles = [
   "src/modules/contextPanel/chat.ts",
   "src/modules/contextPanel/standaloneWindow.ts",
   "src/modules/contextPanel/setupHandlers.ts",
+  "src/modules/contextPanel/setupHandlers/controllers/actionLayoutController.ts",
+  "src/modules/contextPanel/setupHandlers/controllers/historyLifecycleController.ts",
+  "src/modules/contextPanel/setupHandlers/controllers/historySearchController.ts",
+  "src/modules/contextPanel/setupHandlers/controllers/historySearchPopupController.ts",
+  "src/modules/contextPanel/workflowTestHarness.ts",
+  "src/modules/contextPanel/workflowTestTypes.ts",
   "src/utils/i18n.ts",
   "test-ui-redesign/uiRedesign.workflow.test.ts",
 ];

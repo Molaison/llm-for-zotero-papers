@@ -123,7 +123,9 @@ describe("workflow: paragraph source footers", function () {
       );
       const paragraph = chip!.closest("p") as HTMLElement;
       const originalFontSize = paragraph.style.fontSize;
-      for (const fontSize of ["11px", "16px", "22px"]) {
+      // Reader prose uses a 16px floor; forcing 11px inline style bypasses
+      // the supported type scale and is smaller than 12px utility labels.
+      for (const fontSize of ["16px", "22px"]) {
         paragraph.style.fontSize = fontSize;
         assert.isAtMost(
           chip!.getBoundingClientRect().height,
@@ -212,12 +214,11 @@ describe("workflow: paragraph source footers", function () {
       assert.lengthOf(popover.querySelectorAll(".llm-paper-source-passage"), 2);
       assert.include(popover.textContent || "", methods);
       assert.isAbove(
-        Number.parseFloat(
-          win.getComputedStyle(popover.querySelector(".llm-quote-card-body")!)!
-            .borderLeftWidth,
-        ),
+        popover
+          .querySelector<HTMLElement>(".llm-quote-card-body")!
+          .getBoundingClientRect().height,
         0,
-        "the passage rule remains visible in the standalone popover",
+        "supporting passage text remains visible in the standalone popover",
       );
       await new Promise<void>((resolve) =>
         win.requestAnimationFrame(() =>

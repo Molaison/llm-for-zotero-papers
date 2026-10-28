@@ -1,0 +1,38 @@
+npm warn Unknown env config "http-proxy". This will stop working in the next major version of npm.
+ ℹ Building version 3.14.8-papers.1 to .scaffold/build at 2026-10-28 09:06:53 in test mode.
+   → Preparing static assets
+   → Bundling scripts
+ ✔ Build finished in 0.534 s.
+ ℹ Installed /workspace/scratch/00a7879e879f/llm-for-zotero-papers/.scaffold/build/addon as a temporary add-on
+ ℹ Installed /workspace/scratch/00a7879e879f/llm-for-zotero-papers/.scaffold/test/resource as a temporary add-on
+
+   → workflow: Add Text lifecycle
+     ✔ repairs a listener lost after plugin startup 54ms
+     ✔ recovers the listener and routes popup text only to the active reader tab 3102ms
+     ✔ routes popup text to standalone chat while embedded reader panels are placeholders 1470ms
+     ✔ shows popup text immediately and preserves its page through the final request 2107ms
+     ✔ shows action-bar text immediately and preserves its page through the final request 2042ms
+   → workflow: native source-note copy
+     ✔ copies native content and owns copied embedded images without a confirmation or a second header 476ms
+   → workflow: background conversation activity
+     ✔ keeps the background run visible in the sidebar and open dropdown without moving the selected chat 811ms
+     ✔ counts live elapsed time beside Working through redraw and completion 2164ms
+     ✔ counts live elapsed time beside Planning through redraw and completion 2155ms
+     ✔ counts live elapsed time beside Executing plan through redraw and completion 2145ms
+   → workflow: paragraph source footers
+     ✔ reads full native PDFs, groups sources, reopens stored evidence and jumps to its passage 3324ms
+   → workflow: switching conversations during send preparation
+     ✔ finishes the request for its own conversation after the user switches away 822ms
+     ✔ still cancels when the user presses Cancel during preparation 637ms
+   → workflow: selected item context send
+     ✔ resolves a selected parent paper to its PDF context and captures it on send 481ms
+     ✔ sends Claude Code paper turns through the original agent-mode envelope 561ms
+     ✔ switches directly between both paper runtimes and returns to a fresh draft 2344ms
+     ✔ preserves a Chinese figure request at the normal-chat send boundary 463ms
+     ✔ preserves a Chinese full-read request at the Agent send boundary 500ms
+     ✔ renders quote anchors as original-language quote cards in Chinese answers 489ms
+     ✔ renders rejected quotes as amber cards without a visible status label 441ms
+     ✔ rerenders only the changed assistant wrapper in a long multi-quote conversation 638ms
+     ℹ keeps an expanded quote card open and in place across a targeted re-render pending
+
+ ✔ Test run completed - 21 passed

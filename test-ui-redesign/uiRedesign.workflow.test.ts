@@ -14,6 +14,7 @@ describe("workflow: UI redesign evidence", function () {
     const localePref = "extensions.zotero.llmforzotero.locale";
     const previousLocale = Zotero.Prefs.get(localePref, true);
     let emptyFixture: { body: HTMLElement; dispose: () => void } | undefined;
+    let restoreStressProfile: (() => Promise<void>) | undefined;
     const label = String(
       Zotero.Prefs.get(
         "extensions.zotero.llmforzotero.uiRedesignRound",
@@ -481,6 +482,12 @@ describe("workflow: UI redesign evidence", function () {
             {
               method:
                 "Actual mounted production embedded panel; native drawWindow crop",
+              componentOnly: panelId === null,
+              excludedFromProductAB: panelId === null,
+              initialization:
+                panelId === null
+                  ? "buildUI(null) + refreshChat(null); no setupHandlers or dedicated ancestor; not a demonstrated user entry"
+                  : "production buildUI + setupHandlers through renderPanelForItem",
               width: bounds.width,
               height: bounds.height,
               panelScrollWidth: target.scrollWidth,
@@ -755,9 +762,209 @@ describe("workflow: UI redesign evidence", function () {
         emptyFixture.body,
         null,
       );
+      emptyFixture.body.style.left = "-10000px";
+
+      // R4 A: keep production unchanged and expose the actual narrow search
+      // Delete state in both host themes, without activating the delete action.
+      Zotero.Prefs.set(localePref, "en-US", true);
+      api.refreshWorkflowLocale();
+      const deleteSearch = await openVisibleSearch();
+      deleteSearch.input.value = "evidence";
+      deleteSearch.input.dispatchEvent(
+        new (win as any).Event("input", { bubbles: true }),
+      );
+      await until(
+        () =>
+          Boolean(
+            deleteSearch.overlay.querySelector(
+              "mark.llm-history-search-highlight",
+            ),
+          ),
+        "Delete-focus fixture has actual filtered results",
+      );
+      await size(500);
+      for (const theme of ["light", "dark"] as const) {
+        Zotero.Prefs.set(themePref, theme === "dark" ? 0 : 1, true);
+        await until(
+          () =>
+            win.matchMedia("(prefers-color-scheme: dark)")?.matches ===
+            (theme === "dark"),
+          `${theme} host theme settles`,
+        );
+        const rows = Array.from(
+          deleteSearch.overlay.querySelectorAll(".llm-standalone-search-item"),
+        ) as HTMLElement[];
+        const row = rows[rows.length - 1];
+        const readDeleteFocusOrder = () =>
+          (
+            Array.from(
+              deleteSearch.overlay.querySelectorAll(
+                'button:not([disabled]), input:not([disabled]), [tabindex="0"]',
+              ),
+            ) as HTMLElement[]
+          ).filter(
+            (element) => !element.hidden && element.getClientRects().length > 0,
+          );
+        const beforeDeleteFocus = readDeleteFocusOrder();
+        const beforeDeleteFocusSnapshot = beforeDeleteFocus.map(describeFocus);
+        row.focus();
+        const deleteButton = row.querySelector<HTMLElement>(
+          ".llm-standalone-search-delete",
+        )!;
+        assert.isOk(deleteButton, "filtered result has its real Delete action");
+        deleteButton.focus();
+        const afterDeleteFocus = readDeleteFocusOrder();
+        assert.equal(
+          doc.activeElement,
+          deleteButton,
+          "actual Delete action receives keyboard focus",
+        );
+        const deleteStyle = win.getComputedStyle(deleteButton)!;
+        assert.notEqual(deleteStyle.display, "none");
+        assert.isAbove(
+          Number(deleteStyle.opacity),
+          0,
+          "focused Delete is visibly painted",
+        );
+        const deleteRect = deleteButton.getBoundingClientRect();
+        const popupRect = deleteSearch.overlay
+          .querySelector<HTMLElement>(".llm-standalone-search-popup")!
+          .getBoundingClientRect();
+        assert.isAtLeast(deleteRect.left, popupRect.left - 0.5);
+        assert.isAtMost(deleteRect.right, popupRect.right + 0.5);
+        assert.isAbove(deleteRect.width, 0);
+        await capture(`24-search-delete-focus-narrow-${theme}`);
+        await io.writeUTF8(
+          `${output}/24-search-delete-focus-${theme}.json`,
+          JSON.stringify(
+            {
+              actualWidth: win.innerWidth,
+              actualHeight: win.innerHeight,
+              activeClass: doc.activeElement?.className,
+              deleteRect: deleteRect.toJSON(),
+              popupRect: popupRect.toJSON(),
+              display: deleteStyle.display,
+              opacity: deleteStyle.opacity,
+              color: deleteStyle.color,
+              backgroundColor: deleteStyle.backgroundColor,
+              outline: deleteStyle.outline,
+              focusOrderBefore: beforeDeleteFocusSnapshot,
+              focusOrderAfter: afterDeleteFocus.map(describeFocus),
+              stableFocusSet:
+                beforeDeleteFocus.length === afterDeleteFocus.length &&
+                beforeDeleteFocus.every(
+                  (element, index) => element === afterDeleteFocus[index],
+                ),
+              focusSetMethod:
+                "Diagnostic A/B comparison; baseline focus-within growth is recorded rather than forced to fail",
+              method:
+                "Real filtered search result and focused Delete; action not activated",
+            },
+            null,
+            2,
+          ),
+        );
+      }
+      await size(1000);
+      deleteSearch.overlay.dispatchEvent(
+        new (win as any).KeyboardEvent("keydown", {
+          key: "Escape",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+      Zotero.Prefs.set(themePref, 1, true);
+
+      // R4 A: a real persisted profile fixture and plugin typography preference.
+      // The long model name is test configuration; no provider request is made.
+      const stressProfile = api.configureWorkflowUiStress(
+        "gpt-4o-mini-research-evidence-synthesis-long-context-2026-10",
+        150,
+      );
+      restoreStressProfile = stressProfile.restore;
+      const stress = await api.renderPanelForItem(fixture.parentItemId);
+      const stressHost = mainWin.document.querySelector<HTMLElement>(
+        `[data-workflow-panel-id="${stress.panelId}"]`,
+      )!;
+      Object.assign(stressHost.style, {
+        left: "0",
+        top: "0",
+        width: "380px",
+        height: "760px",
+        zIndex: "2147483647",
+        background: "var(--llm-slate1)",
+      });
+      const stressModel =
+        stressHost.querySelector<HTMLButtonElement>("#llm-model-toggle")!;
+      await until(
+        () => stressModel.textContent === stressProfile.modelLabel,
+        "production model control reads the persisted long profile",
+      );
+      await captureEmbeddedState(
+        "25-paper-long-model-font150-embedded-380",
+        "#llm-model-toggle",
+        stressHost,
+        stress.panelId,
+      );
+      const stressRoot = stressHost.querySelector<HTMLElement>("#llm-main")!;
+      const stressSend =
+        stressHost.querySelector<HTMLButtonElement>("#llm-send")!;
+      const stressBounds = stressHost.getBoundingClientRect();
+      const stressSendBounds = stressSend.getBoundingClientRect();
+      const stressStyle = mainWin.getComputedStyle(stressRoot)!;
+      const stressModelStyle = mainWin.getComputedStyle(stressModel)!;
+      await io.writeUTF8(
+        `${output}/25-stress-profile.json`,
+        JSON.stringify(
+          {
+            method:
+              "Actual persisted modelProviderGroups model-name fixture; real panelFontScale preference and production rerender; no LLM call",
+            modelLabel: stressProfile.modelLabel,
+            originalFontPercent: stressProfile.originalFontPercent,
+            actualPluginFontPref: Zotero.Prefs.get(
+              "extensions.zotero.llmforzotero.panelFontScale",
+              true,
+            ),
+            relativeToBaselinePercent:
+              (100 * stressProfile.fontPercent) /
+              stressProfile.originalFontPercent,
+            notOSZoom: true,
+            computedFontScale: stressStyle.getPropertyValue("--llm-font-scale"),
+            computedFontSize: stressStyle.fontSize,
+            modelRect: stressModel.getBoundingClientRect().toJSON(),
+            modelAccessibleName: stressModel.getAttribute("aria-label"),
+            textOverflow: stressModelStyle.textOverflow,
+            sendRect: stressSendBounds.toJSON(),
+            panelScrollWidth: stressHost.scrollWidth,
+            panelClientWidth: stressHost.clientWidth,
+          },
+          null,
+          2,
+        ),
+      );
+      assert.equal(
+        stressStyle.getPropertyValue("--llm-font-scale").trim(),
+        "1.5",
+      );
+      assert.include(
+        stressModel.getAttribute("aria-label"),
+        stressProfile.modelLabel,
+        "full model name remains accessible",
+      );
+      assert.isAtMost(
+        stressHost.scrollWidth,
+        stressHost.clientWidth + 1,
+        "stress panel has no horizontal page overflow",
+      );
+      assert.isAbove(stressSendBounds.width, 0);
+      assert.isAtLeast(stressSendBounds.left, stressBounds.left - 0.5);
+      assert.isAtMost(stressSendBounds.right, stressBounds.right + 0.5);
+      assert.isAtMost(stressSendBounds.bottom, stressBounds.bottom + 0.5);
+      stressHost.style.left = "-10000px";
       assert.isAtLeast(captures.length, 12);
       Zotero.debug(`UI_REDESIGN_EVIDENCE ${output}`);
     } finally {
+      await restoreStressProfile?.();
       emptyFixture?.dispose();
       if (previousLocale === undefined) Zotero.Prefs.clear(localePref, true);
       else Zotero.Prefs.set(localePref, previousLocale as never, true);

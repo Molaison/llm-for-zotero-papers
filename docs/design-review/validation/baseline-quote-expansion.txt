@@ -1,0 +1,15 @@
+npm warn Unknown env config "http-proxy". This will stop working in the next major version of npm.
+ ℹ Building version 3.14.8-papers.1 to .scaffold/build at 2026-10-28 08:59:53 in test mode.
+   → Preparing static assets
+   → Bundling scripts
+ ✔ Build finished in 0.962 s.
+ ℹ Installed /workspace/scratch/00a7879e879f/llm-ui-baseline/.scaffold/build/addon as a temporary add-on
+ ℹ Installed /workspace/scratch/00a7879e879f/llm-ui-baseline/.scaffold/test/resource as a temporary add-on
+
+   → workflow: selected item context send
+     ✖ keeps an expanded quote card open and in place across a targeted re-render, expanded card must stay expanded after the targeted re-render {"timeline":[{"label":"start","scrollTop":8479,"scrollHeight":9043,"wrapperTop":-2950.199951171875,"snapshot":"followBottom@8479"},{"label":"after-scroll-write","scrollTop":6563,"scrollHeight":9043,"wrapperTop":-1034.2000122070312,"snapshot":"followBottom@8479"},{"label":"after-frame-1","scrollTop":6563,"scrollHeight":9043,"wrapperTop":-1034.2000122070312,"snapshot":"manual@6563/quote:Q_perf_5_0"},{"label":"after-frame-2","scrollTop":6563,"scrollHeight":9043,"wrapperTop":-1034.2000122070312,"snapshot":"manual@6563/quote:Q_perf_5_0"},{"label":"after-click","scrollTop":6563,"scrollHeight":9081,"wrapperTop":-1034.2000122070312,"snapshot":"manual@6563/quote:Q_perf_5_0"},{"label":"after-click-frame","scrollTop":6563,"scrollHeight":9081,"wrapperTop":-1034.2000122070312,"snapshot":"manual@6563/quote:Q_perf_5_0"},{"label":"after-rerender-frame","scrollTop":6718,"scrollHeight":9198,"wrapperTop":-182,"snapshot":"manual@6718/quote:Q_perf_5_0"}],"sameCitationCards":2,"snapshotBefore":{"mode":"manual","scrollTop":6718,"anchor":{"kind":"quote","quoteCitationId":"Q_perf_5_0","quoteOrdinal":8,"messageAnchorKey":"assistant:1793163499410:11","messageRole":"assistant","messageTimestamp":"1793163499410","messageIndex":"11","viewportOffsetTop":-11.600006103515625}},"expandedWrapperReplaced":true,"expandedWrapperStillConnected":false,"cardAfterIsSameNode":false,"cardTopBefore":170.60000610351562,"cardTopAfter":170.39999389648438,"chatBoxTop":182,"scrollTopBefore":6563,"scrollTopAfter":6718,"scrollHeightAfter":9198,"clientHeight":564}: expected false to be true
+@chrome://zotero-plugin-scaffold-test-runner/content/units/baselineSelection.workflow.test.js:4544:14
+        Expected: true
+        Received: false
+
+ ✖ Test run completed - 0 passed, 1 failed

@@ -6475,7 +6475,7 @@ export function setupHandlers(
               )
             : "Not supported";
     const active = Boolean(available && activeThinking);
-    const reasoningLabel = resolvedReasoningLabel;
+    const reasoningLabel = t(resolvedReasoningLabel);
     const reasoningHint =
       reasoningBtn.dataset.reasoningAdjustment || t("Reasoning");
     if (
@@ -6522,8 +6522,8 @@ export function setupHandlers(
           type: "button",
           textContent:
             params.currentValue.toLowerCase() === choice.value.toLowerCase()
-              ? `\u2713 ${choice.label}`
-              : choice.label,
+              ? `\u2713 ${t(choice.label)}`
+              : t(choice.label),
         },
       );
       const applySelection = (event: Event) => {
@@ -6682,21 +6682,16 @@ export function setupHandlers(
     }
     for (const optionState of options) {
       const level = optionState.level;
+      const label = t(
+        getReasoningLevelDisplayLabel(level, provider, currentModel, options),
+      );
       const option = createElement(
         body.ownerDocument as Document,
         "button",
         "llm-response-menu-item llm-reasoning-option",
         {
           type: "button",
-          textContent:
-            selectedLevel === level
-              ? `\u2713 ${getReasoningLevelDisplayLabel(level, provider, currentModel, options)}`
-              : getReasoningLevelDisplayLabel(
-                  level,
-                  provider,
-                  currentModel,
-                  options,
-                ),
+          textContent: selectedLevel === level ? `\u2713 ${label}` : label,
         },
       );
       if (optionState.enabled) {

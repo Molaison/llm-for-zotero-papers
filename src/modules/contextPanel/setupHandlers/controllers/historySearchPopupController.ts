@@ -535,11 +535,13 @@ export function createHistorySearchPopupController(
       return;
     }
     if (keyboardEvent.key !== "Tab") return;
-    const focusable = (Array.from(
-      popup.querySelectorAll(
-        'button:not([disabled]), input:not([disabled]), [tabindex="0"]',
-      ),
-    ) as HTMLElement[]).filter(
+    const focusable = (
+      Array.from(
+        popup.querySelectorAll(
+          'button:not([disabled]), input:not([disabled]), [tabindex="0"]',
+        ),
+      ) as HTMLElement[]
+    ).filter(
       (element) => !element.hidden && element.getClientRects().length > 0,
     );
     const first = focusable[0] || input;

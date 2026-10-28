@@ -10569,7 +10569,10 @@ export function refreshChat(
             );
       notice.appendChild(message);
       if (historyLoadFailed && !historyLoading && !historyScopeBlocked) {
-        const retry = doc.createElement("button");
+        const retry = doc.createElementNS(
+          HTML_NS,
+          "button",
+        ) as HTMLButtonElement;
         retry.type = "button";
         retry.className = "llm-action-btn llm-action-btn-secondary";
         retry.textContent = t("Retry loading conversation");

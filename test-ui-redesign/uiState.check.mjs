@@ -1,8 +1,10 @@
+import console from "node:console";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
 import { FakeElement } from "../test/helpers/fakeDom.ts";
+import { HTML_NS } from "../src/utils/domHelpers.ts";
 import {
   getNoPaperStartPageHtml,
   getPaperChatStartPageHtml,
@@ -47,7 +49,11 @@ function fixture({
         : this.children.map((child) => child.findId(id)).find(Boolean) || null;
     }
   }
-  const doc = { createElement: (tag) => new Node(tag) };
+  const doc = {
+    createElement: (tag) => new Node(tag),
+    createElementNS: (namespace, tag) =>
+      Object.assign(new Node(tag), { namespaceURI: namespace }),
+  };
   const body = new Node("div"),
     box = new Node("div"),
     root = new Node("div");
@@ -62,6 +68,7 @@ function fixture({
   let retries = 0;
   runInNewContext(compiled, {
     exports,
+    HTML_NS,
     isPanelConversationCurrent: () => true,
     initializeChatScrollViewport() {},
     setPromptMenuTarget() {},
@@ -129,6 +136,11 @@ const failed = fixture({ failed: true });
 assert.equal(failed.box.children[0].getAttribute("role"), "alert");
 assert.match(failed.box.children[0].children[0].textContent, /Could not load/);
 const retry = failed.box.children[0].children[1];
+assert.equal(
+  retry.namespaceURI,
+  HTML_NS,
+  "history recovery uses an actual XHTML button namespace",
+);
 assert.equal(retry.textContent, "Retry loading conversation");
 await retry.dispatchFakeEventAsync("click");
 assert.equal(failed.retries(), 1);

@@ -67,14 +67,20 @@ describe("standalone window context preview fitting", function () {
     );
   });
 
-  it("bounds standalone context previews so expanded papers do not hide the input", function () {
+  it("bounds the source disclosure while keeping the composer context row visible", function () {
     const rule = extractCssRule(
       source("addon/content/zoteroPane.css"),
       '[data-standalone="true"] .llm-context-previews',
     );
 
-    assert.include(rule, "max-height: 420px;");
-    assert.include(rule, "overflow-y: auto;");
-    assert.notInclude(rule, "vh");
+    assert.include(rule, "max-height: none;");
+    assert.include(rule, "overflow: visible;");
+    const disclosure = extractCssRule(
+      source("addon/content/zoteroPane.css"),
+      ".llm-source-body",
+    );
+    assert.include(disclosure, "max-height: 40vh;");
+    assert.include(disclosure, "overflow: auto;");
+    assert.include(disclosure, "bottom: calc(100% + 8px);");
   });
 });

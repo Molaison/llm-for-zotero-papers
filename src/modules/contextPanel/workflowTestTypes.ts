@@ -578,6 +578,15 @@ export type WorkflowTestApi = {
   renderPanelForItem: (itemId: number) => Promise<WorkflowTestPanel>;
   renderEmptyPanel: () => { body: HTMLElement; dispose: () => void };
   refreshWorkflowLocale: () => void;
+  configureWorkflowUiStress: (
+    modelLabel: string,
+    fontPercent: number,
+  ) => {
+    originalFontPercent: number;
+    modelLabel: string;
+    fontPercent: number;
+    restore: () => Promise<void>;
+  };
   refreshActiveConversationPanels: (conversationKey?: number) => void;
   exerciseNativeQuestionReview: (
     panelId: string,

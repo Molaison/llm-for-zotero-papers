@@ -96,22 +96,10 @@ describe("paper sidebar polish CSS", function () {
       const css = readPanelCss();
       const panel = rule(css, ".llm-panel");
 
-      assert.include(
-        panel,
-        "--llm-status-ready-text: var(--llm-green11);",
-      );
-      assert.include(
-        panel,
-        "--llm-status-busy-text: var(--llm-slate11);",
-      );
-      assert.include(
-        panel,
-        "--llm-status-error-text: var(--llm-red11);",
-      );
-      assert.include(
-        panel,
-        "--llm-status-warning-text: var(--llm-amber11);",
-      );
+      assert.include(panel, "--llm-status-ready-text: var(--llm-green11);");
+      assert.include(panel, "--llm-status-busy-text: var(--llm-slate11);");
+      assert.include(panel, "--llm-status-error-text: var(--llm-red11);");
+      assert.include(panel, "--llm-status-warning-text: var(--llm-amber11);");
       // The hidden status text is announced through the toggle, whose glyph
       // carries the state colour in the toolbar.
       assert.include(
