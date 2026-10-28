@@ -159,6 +159,29 @@ const zhCN: Record<string, string> = {
   "Ask about this paper…": "询问这篇论文…",
   "Ask a research question…": "输入研究问题…",
   Paper: "论文",
+  Library: "文献库",
+  History: "历史记录",
+  Note: "笔记",
+  "More actions": "更多操作",
+  "Conversation controls": "对话操作",
+  "Model and reasoning": "模型与思考强度",
+  "Paper sources": "论文来源",
+  "Quick questions": "快捷提问",
+  "Loading model…": "正在加载模型…",
+  "Library scope is unavailable in this conversation.":
+    "此对话无法切换到文献库范围。",
+  "Conversation scope": "对话范围",
+  "Run status": "运行状态",
+  "Ready to chat": "开始对话",
+  "Your Zotero library": "你的 Zotero 文献库",
+  "Selected paper": "所选论文",
+  "Select a paper or open a PDF": "选择论文或打开 PDF",
+  "Loading conversation…": "正在加载对话…",
+  "Could not load this conversation. Retry to recover your history.":
+    "无法加载此对话。请重试以恢复历史记录。",
+  "This conversation is unavailable for the selected paper. Choose another conversation from History.":
+    "此对话不适用于所选论文。请从历史记录中选择其他对话。",
+  "Retry loading conversation": "重新加载对话",
   "Open a PDF first": "请先打开一个 PDF",
   "Include selected reader text": "包含选中的阅读器文本",
   "Select text in the reader first": "请先在阅读器中选择文本",
@@ -1571,35 +1594,21 @@ export function getWelcomeHtml(): string {
 
 export function getPaperChatStartPageHtml(): string {
   return getEffectiveLocale().startsWith("zh")
-    ? '<div class="llm-start-page"><p class="llm-start-page-subtitle">针对这篇论文提问，或选择批注一起讨论。</p></div>'
-    : '<div class="llm-start-page"><p class="llm-start-page-subtitle">Ask about this paper, or select annotations to discuss.</p></div>';
+    ? '<div class="llm-start-page"><p class="llm-start-page-subtitle">询问这篇论文的方法、发现或证据。</p></div>'
+    : '<div class="llm-start-page"><p class="llm-start-page-subtitle">Ask about this paper’s methods, findings, or evidence.</p></div>';
+}
+
+/** No paper has been selected; do not imply that a paper is attached. */
+export function getNoPaperStartPageHtml(): string {
+  return getEffectiveLocale().startsWith("zh")
+    ? '<div class="llm-start-page"><p class="llm-start-page-subtitle">选择一篇论文或打开 PDF，开始讨论。</p></div>'
+    : '<div class="llm-start-page"><p class="llm-start-page-subtitle">Select a paper or open a PDF to start a conversation.</p></div>';
 }
 
 export function getNoteEditingStartPageHtml(): string {
-  if (getEffectiveLocale().startsWith("zh")) {
-    return `
-      <div class="llm-start-page">
-        <div class="llm-start-page-title">LLM-for-Zotero</div>
-        <div class="llm-start-page-subtitle">一起写笔记，让想法进化</div>
-        <div class="llm-start-page-desc">
-          <p>选中一段文字，我可以帮你<strong>重写润色</strong>。</p>
-          <p>如果是条目笔记，论文上下文会<strong>自动预加载</strong>；如果是独立笔记，那就自由发挥吧。</p>
-          <p>重写后的内容会以 <strong>diff 模式</strong>显示，让你清楚看到每处改动，帮助你越写越好。</p>
-        </div>
-      </div>
-    `;
-  }
-  return `
-    <div class="llm-start-page">
-      <div class="llm-start-page-title">LLM-for-Zotero</div>
-      <div class="llm-start-page-subtitle">Write with me, evolve your ideas</div>
-      <div class="llm-start-page-desc">
-        <p>Select a text snippet, and I can <strong>rewrite</strong> it for you.</p>
-        <p>If it's an item note, the paper context will be <strong>automatically preloaded</strong> for you; if it's a standalone note, let's freestyle.</p>
-        <p>The rewritten note will show in <strong>diff mode</strong>, so you can see exactly what changed — helping you evolve to write better.</p>
-      </div>
-    </div>
-  `;
+  return getEffectiveLocale().startsWith("zh")
+    ? '<div class="llm-start-page"><p class="llm-start-page-subtitle">选中笔记段落以修改，或一起讨论你的想法。</p></div>'
+    : '<div class="llm-start-page"><p class="llm-start-page-subtitle">Select a passage to revise, or discuss your ideas.</p></div>';
 }
 
 export function getStandaloneLibraryChatStartPageHtml(): string {

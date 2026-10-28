@@ -9,6 +9,7 @@ import ts from "typescript";
 import { FakeElement } from "./helpers/fakeDom";
 import { createElement } from "../src/utils/domHelpers";
 import * as constants from "../src/modules/contextPanel/constants";
+import { conversationScopeLabel } from "../src/modules/contextPanel/standaloneTabLabel";
 
 // Execute the actual UI builder, isolating only Zotero conversation/runtime
 // resolution; the DOM hierarchy and action IDs come from production code.
@@ -20,11 +21,14 @@ function build(mode: "paper" | "global" = "paper", hasItem = true) {
   class Node extends FakeElement {
     get ownerDocument() { return doc; }
     focus() { focused = this; }
+    prepend(...children: FakeElement[]) {
+      for (const child of children.reverse()) this.insertBefore(child, this.children[0] || null);
+    }
   }
   const doc = { createElementNS: (_ns: string, tag: string) => new Node(tag), defaultView: { HTMLElement: Node } };
   const exports = {} as { buildUI: (body: unknown, item: unknown) => void };
   runInNewContext(compiled, {
-    ...constants, exports, createElement, HTMLElement: Node, t: (s: string) => s,
+    ...constants, exports, createElement, conversationScopeLabel, HTMLElement: Node, t: (s: string) => s,
     resolveActiveNoteSession: () => null,
     resolveDisplayConversationKind: () => mode,
     getConversationKey: () => 7,
@@ -69,7 +73,7 @@ describe("reading sidebar design system", () => {
   it("keeps every prompt action under a default-closed native disclosure", () => {
     const h = build(), disclosure = h.find("llm-shortcuts-disclosure");
     assert.isFalse(disclosure.open);
-    assert.equal(disclosure.children[0].textContent, "快捷提问");
+    assert.equal(disclosure.children[0].textContent, "Quick questions");
     assert.strictEqual(h.find("llm-shortcuts").parentElement, disclosure);
     assert.strictEqual(disclosure.parentElement!.parentElement, h.find("llm-conversation-tools"));
   });
@@ -77,8 +81,8 @@ describe("reading sidebar design system", () => {
     const h = build(), tools = h.find("llm-conversation-tools");
     assert.isFalse(tools.open);
     assert.equal(tools.children[0].textContent, "…");
-    assert.equal(tools.children[0].title, "更多");
-    assert.equal(tools.children[0].getAttribute("aria-label"), "更多");
+    assert.equal(tools.children[0].title, "More actions");
+    assert.equal(tools.children[0].getAttribute("aria-label"), "More actions");
     for (const id of ["llm-popout", "llm-settings", "llm-remote-history", "llm-restore-history", "llm-export", "llm-clear"])
       assert.strictEqual(h.find(id).parentElement!.parentElement, tools);
     tools.open = true;
@@ -102,10 +106,10 @@ describe("reading sidebar design system", () => {
     const config = /\.llm-model-controls\s*\{([^}]+)\}/.exec(css)![1];
     assert.include(config, "flex-wrap: nowrap");
     assert.match(css, /\.llm-actions\s*\{[^}]*grid-template-columns: auto minmax\(0, 1fr\) auto;/);
-    assert.match(css, /\.llm-compose-area\s*\{[^}]*border-radius: 8px/);
+    assert.match(css, /\.llm-compose-area\s*\{[^}]*border-radius: 20px/);
     assert.match(css, /\.llm-input\s*\{[^}]*appearance: none;[^}]*border: none;/);
     const primary = /\.llm-action-btn-primary\s*\{([^}]+)\}/.exec(css)![1];
-    assert.include(primary, "background: var(--llm-ui-accent)");
+    assert.include(primary, "background: var(--llm-slate12)");
     const bubble = /\.llm-bubble\.user\s*\{([^}]+)\}/.exec(css)![1];
     assert.include(bubble, "background: var(--llm-slate3)");
     assert.notInclude(css, ".llm-model-btn.llm-model-btn-collapsed::after");
@@ -128,7 +132,7 @@ describe("reading sidebar design system", () => {
       assert.include(hint, "opacity: 1");
     }
     assert.match(css, /\.llm-input\s*\{[^}]*color: var\(--llm-ui-ink\);[^}]*caret-color: var\(--llm-ui-ink\);/);
-    assert.include(body(".llm-action-btn-primary"), "color: var(--llm-on-solid)");
+    assert.include(body(".llm-action-btn-primary"), "color: var(--llm-slate1)");
   });
 
   it("keeps full model metadata in a folded footer rather than a heading above every answer", () => {

@@ -36,6 +36,7 @@ import {
   getWebChatWelcomeHtml,
   getStandaloneLibraryChatStartPageHtml,
   getPaperChatStartPageHtml,
+  getNoPaperStartPageHtml,
   getNoteEditingStartPageHtml,
 } from "../../utils/i18n";
 import {
@@ -532,6 +533,8 @@ async function awaitPendingTurnFinalize(
 }
 
 const blockedConversationLoadKeys = new Set<number>();
+// Presentation-only evidence of the existing history-load error callback.
+const conversationHistoryLoadErrors = new Set<number>();
 type AgentRunTraceLoader = typeof getAgentRunTrace;
 let agentRunTraceLoader: AgentRunTraceLoader = getAgentRunTrace;
 
@@ -572,6 +575,7 @@ function isolateWebChatConversationKey(
     chatHistory.set(key, []);
   }
   blockedConversationLoadKeys.delete(key);
+  conversationHistoryLoadErrors.delete(key);
   loadedConversationKeys.add(key);
 }
 
@@ -2375,6 +2379,7 @@ export async function replaceCurrentPaperChat(params: {
   chatHistory.set(conversationKey, stored.map(toPanelMessage));
   loadedConversationKeys.add(conversationKey);
   blockedConversationLoadKeys.delete(conversationKey);
+  conversationHistoryLoadErrors.delete(conversationKey);
   // Rendering the chat alone leaves the live draft, attachments and model controls intact.
   refreshChat(body, item);
 }
@@ -2407,6 +2412,7 @@ export async function restoreCurrentPaperChat(params: {
   chatHistory.set(conversationKey, stored.map(toPanelMessage));
   loadedConversationKeys.add(conversationKey);
   blockedConversationLoadKeys.delete(conversationKey);
+  conversationHistoryLoadErrors.delete(conversationKey);
   refreshChat(body, item);
 }
 
@@ -2595,6 +2601,7 @@ export async function ensureConversationLoaded(
         });
       }
       blockedConversationLoadKeys.delete(conversationKey);
+      conversationHistoryLoadErrors.delete(conversationKey);
       chatHistory.set(conversationKey, panelMessages);
       validateLoadedConversationQuoteMessages(panelMessages, conversationKey);
       await loadConversationForkLinkCache(conversationKey, loadGeneration);
@@ -2619,6 +2626,7 @@ export async function ensureConversationLoaded(
       if (!chatHistory.has(conversationKey)) {
         chatHistory.set(conversationKey, []);
       }
+      conversationHistoryLoadErrors.add(conversationKey);
       conversationForkLinks.delete(conversationKey);
       shouldMarkLoaded = true;
     } finally {
@@ -10453,7 +10461,7 @@ export function refreshChat(
     resolvePaperContextDisplayRef(paperContext, paperContextDisplayCache);
 
   if (!item) {
-    chatBox.innerHTML = getPaperChatStartPageHtml();
+    chatBox.innerHTML = getNoPaperStartPageHtml();
     const panelRoot = body.querySelector("#llm-main") as HTMLElement | null;
     if (panelRoot) panelRoot.dataset.startPageActive = "true";
     writeChatScrollTop(chatBox, 0);
@@ -10536,6 +10544,59 @@ export function refreshChat(
   }
 
   if (history.length === 0) {
+    const historyLoadFailed =
+      conversationHistoryLoadErrors.has(conversationKey);
+    const historyScopeBlocked =
+      blockedConversationLoadKeys.has(conversationKey);
+    const historyLoading = loadingConversationTasks.has(conversationKey);
+    if (historyLoadFailed || historyScopeBlocked || historyLoading) {
+      // A failed read is not an empty conversation. Keep recovery local to
+      // history loading and retain the existing source/conversation identity.
+      chatBox.replaceChildren();
+      const notice = doc.createElement("div");
+      notice.className = "llm-start-page";
+      notice.setAttribute("role", historyLoading ? "status" : "alert");
+      const message = doc.createElement("p");
+      message.className = "llm-start-page-subtitle";
+      message.textContent = historyLoading
+        ? t("Loading conversation…")
+        : historyScopeBlocked
+          ? t(
+              "This conversation is unavailable for the selected paper. Choose another conversation from History.",
+            )
+          : t(
+              "Could not load this conversation. Retry to recover your history.",
+            );
+      notice.appendChild(message);
+      if (historyLoadFailed && !historyLoading && !historyScopeBlocked) {
+        const retry = doc.createElement("button");
+        retry.type = "button";
+        retry.className = "llm-action-btn llm-action-btn-secondary";
+        retry.textContent = t("Retry loading conversation");
+        retry.addEventListener("click", async () => {
+          if (!isPanelConversationCurrent(body, item)) return;
+          retry.disabled = true;
+          loadedConversationKeys.delete(conversationKey);
+          chatHistory.delete(conversationKey);
+          conversationHistoryLoadErrors.delete(conversationKey);
+          notice.setAttribute("role", "status");
+          message.textContent = t("Loading conversation…");
+          try {
+            await ensureConversationLoaded(item);
+          } catch (error) {
+            conversationHistoryLoadErrors.add(conversationKey);
+            appLogger.warn("LLM: Failed to retry chat history loading", error);
+          } finally {
+            refreshChat(body, item);
+          }
+        });
+        notice.appendChild(retry);
+      }
+      chatBox.appendChild(notice);
+      if (panelRoot) panelRoot.dataset.startPageActive = "true";
+      syncConversationTurnNavigator(body, [], { conversationKey });
+      return;
+    }
     // [webchat] Show webchat-specific welcome instead of generic instructions
     const effectiveRequestConfig = resolveEffectiveRequestConfig({ item });
     if (effectiveRequestConfig.providerProtocol === "web_sync") {

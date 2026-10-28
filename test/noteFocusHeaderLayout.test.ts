@@ -19,16 +19,16 @@ describe("note focus header layout", function () {
     assert.include(buildUi, "headerInfo.append(title, headerRuntimeControls)");
     assert.include(buildUi, "headerActions.append(historyBar, conversationTools)");
     assert.include(buildUi, "headerTop.append(headerNavRow)");
-    assert.include(buildUi, "clearBtn, runtimeSystemControls.group)", "runtime systems remain reachable in More");
+    assert.match(buildUi, /clearBtn,\s*runtimeSystemControls\.group,?\s*\)/, "runtime systems remain reachable in More");
     assert.include(buildUi, "resolveSidebarChatModeToggleState");
     assert.include(setupHandlers, "resolveSidebarChatModeToggleState");
     // Both render paths label the paper slot through the shared resolver,
     // which yields "Note chat" for note sessions, in the tabs and the chip.
-    assert.include(buildUi, "t(chatModeToggle.paperTabLabel)");
-    assert.include(setupHandlers, "t(state.paperTabLabel)");
+    assert.include(buildUi, "t(conversationScopeLabel(chatModeToggle.paperTabLabel))");
+    assert.include(setupHandlers, "t(conversationScopeLabel(state.paperTabLabel))");
     assert.match(
       buildUi,
-      /createSidebarModeSwitch\(\s*doc,\s*\{[^}]*paperLabel: t\(chatModeToggle\.paperTabLabel\)/,
+      /createSidebarModeSwitch\(\s*doc,\s*\{[^}]*paperLabel: t\(conversationScopeLabel\(chatModeToggle\.paperTabLabel\)\)/,
       "the chip takes the paper slot's label from the same resolver",
     );
     assert.include(setupHandlers, "syncSidebarModeSwitch(modeSwitch, {");

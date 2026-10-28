@@ -107,7 +107,10 @@ import {
 } from "./setupHandlers/controllers/historySearchController";
 import { createHistorySearchPopupController } from "./setupHandlers/controllers/historySearchPopupController";
 import { primeHistoryNavigationMode } from "./historyNavigationModeSync";
-import { resolveStandalonePaperTabLabel } from "./standaloneTabLabel";
+import {
+  conversationScopeLabel,
+  resolveStandalonePaperTabLabel,
+} from "./standaloneTabLabel";
 import { resolveFreshConversationDraft } from "./freshConversationDraft";
 import { collapseDuplicateReusableConversationDrafts } from "./standaloneConversationResolution";
 import {
@@ -942,9 +945,11 @@ export function openStandaloneChat(options?: {
       paperTab.className = "llm-standalone-tab";
       paperTab.type = "button";
       paperTab.textContent = t(
-        resolveStandalonePaperTabLabel({
-          isNoteSession: Boolean(resolveActiveNoteSession(activeItem)),
-        }),
+        conversationScopeLabel(
+          resolveStandalonePaperTabLabel({
+            isNoteSession: Boolean(resolveActiveNoteSession(activeItem)),
+          }),
+        ),
       );
       paperTab.dataset.tab = "paper";
 
@@ -954,7 +959,7 @@ export function openStandaloneChat(options?: {
       ) as HTMLButtonElement;
       openTab.className = "llm-standalone-tab";
       openTab.type = "button";
-      openTab.textContent = t("Library chat");
+      openTab.textContent = t("Library");
       openTab.dataset.tab = "open";
 
       paperTab.classList.toggle("active", standaloneMode === "paper");
@@ -962,6 +967,8 @@ export function openStandaloneChat(options?: {
 
       const tabGroup = doc.createElementNS(HTML_NS, "div") as HTMLDivElement;
       tabGroup.className = "llm-standalone-tab-group";
+      tabGroup.setAttribute("role", "group");
+      tabGroup.setAttribute("aria-label", t("Conversation scope"));
       tabGroup.append(paperTab, openTab);
 
       const standaloneRuntimeSystemControls = createRuntimeSystemControls(doc, {
@@ -1266,10 +1273,12 @@ export function openStandaloneChat(options?: {
 
       const syncPaperTabLabel = () => {
         paperTab.textContent = t(
-          resolveStandalonePaperTabLabel({
-            isWebChat: isInWebChatMode,
-            isNoteSession: Boolean(resolveActiveNoteSession(activeItem)),
-          }),
+          conversationScopeLabel(
+            resolveStandalonePaperTabLabel({
+              isWebChat: isInWebChatMode,
+              isNoteSession: Boolean(resolveActiveNoteSession(activeItem)),
+            }),
+          ),
         );
       };
 
@@ -1794,6 +1803,22 @@ export function openStandaloneChat(options?: {
           updateContentTitle();
 
           buildUI(contentArea, mountedItem);
+
+          // The shared header owns the one visible conversation menu. Keep
+          // standalone-only tools in that menu, inside contentArea so existing
+          // ID-based handlers retain their original lookup boundary.
+          const sharedTools = contentArea.querySelector(
+            ".llm-conversation-tools-body",
+          );
+          if (sharedTools) {
+            iconTaskProgress.textContent = t("Task progress");
+            sharedTools.prepend(iconTaskProgress);
+            const innerRuntime = sharedTools.querySelector<HTMLElement>(
+              ".llm-panel-runtime-system-controls",
+            );
+            if (innerRuntime) innerRuntime.hidden = true;
+            sharedTools.append(standaloneRuntimeSystemControls.group);
+          }
 
           // The left tab represents the preserved paper-side slot, so do not
           // derive its label from a mounted global portal item.

@@ -27,9 +27,9 @@ describe("reading sidebar complete bounded style inventory", function () {
     assert.include(css,"--llm-primary-hover: #3358d4;");
   });
   it("limits chrome type to the host-scaled 12/14/16 system, removes shadows, and uses only necessary 250ms height motion", () => {
-    assert.include(css,"--llm-text-small: max(12px, calc(0.923077rem * var(--llm-font-scale, 1)))");
-    assert.include(css,"--llm-text-control: max(14px, calc(1.076923rem * var(--llm-font-scale, 1)))");
-    assert.include(css,"--llm-text-body: max(16px, calc(1.230769rem * var(--llm-font-scale, 1)))");
+    assert.include(css,"--llm-text-small: max(12px, calc(0.75rem * var(--llm-font-scale, 1)))");
+    assert.include(css,"--llm-text-control: max(14px, calc(0.875rem * var(--llm-font-scale, 1)))");
+    assert.include(css,"--llm-text-body: max(16px, calc(1rem * var(--llm-font-scale, 1)))");
     assert.include(css,"--llm-text-title: var(--llm-text-body)");
     assert.notMatch(css, /--llm-text-\w+:.*[\d]em\)/);
     for (const {selector,body} of rules) {

@@ -403,6 +403,7 @@ import {
   resolveSidebarChatModeToggleState,
   type SidebarChatModeTab,
 } from "./sidebarChatModeToggle";
+import { conversationScopeLabel } from "./standaloneTabLabel";
 import {
   playSidebarModeChangeFade,
   removeSidebarModeSwitchDot,
@@ -1994,14 +1995,25 @@ export function setupHandlers(
       isNoteSession: isNoteSession(),
       isWebChat: panelRoot.dataset.webchatMode === "true",
     });
-    const paperLabel =
-      state.paperTabLabel === "Note chat" ? t(state.paperTabLabel) : "Papers";
+    const paperLabel = t(conversationScopeLabel(state.paperTabLabel));
+    const libraryLabel = t("Library");
+    const availability = body.querySelector<HTMLElement>(
+      "#llm-scope-availability",
+    );
+    if (availability) availability.hidden = !state.disabled;
     if (chatModeTabs && paperChatTabBtn && libraryChatTabBtn) {
       chatModeTabs.dataset.mode = state.activeTab;
       const paperLabelEl = paperChatTabBtn.querySelector(
         ".llm-header-mode-tab-label",
       );
       if (paperLabelEl) paperLabelEl.textContent = paperLabel;
+      const libraryLabelEl = libraryChatTabBtn.querySelector(
+        ".llm-header-mode-tab-label",
+      );
+      if (libraryLabelEl) libraryLabelEl.textContent = libraryLabel;
+      libraryChatTabBtn.title = state.disabled
+        ? t("Library scope is unavailable in this conversation.")
+        : libraryLabel;
       paperChatTabBtn.title =
         state.showWebChatDot && webChatModeTabTitle
           ? webChatModeTabTitle
@@ -2020,7 +2032,7 @@ export function setupHandlers(
       syncSidebarModeSwitch(modeSwitch, {
         activeTab: state.activeTab,
         paperLabel: webChatSite || paperLabel,
-        libraryLabel: t(state.libraryTabLabel),
+        libraryLabel,
         disabled: state.disabled,
         paperTitle: webChatSite ? webChatModeTabTitle : "",
       });
@@ -4566,19 +4578,21 @@ export function setupHandlers(
       "#llm-source-shortcut",
     );
     if (paperBar) paperBar.hidden = !hasAnyContext;
-    if (sourceShortcut) sourceShortcut.hidden = !hasAnyContext;
+    // The source disclosure is next to the prompt; keep the legacy shortcut
+    // addressable for existing handlers without showing a duplicate control.
+    if (sourceShortcut) sourceShortcut.hidden = true;
     const primaryPaper = autoLoadedPaperContext || selectedPapers[0];
     const heading = body.querySelector<HTMLElement>("#llm-paper-heading");
     const mode = body.querySelector<HTMLElement>("#llm-paper-mode");
     if (heading) {
-      heading.textContent = primaryPaper?.title || "参考来源";
-      heading.title = heading.textContent;
+      heading.textContent = t("Paper sources");
+      heading.title = primaryPaper?.title || t("Paper sources");
     }
     if (mode)
       mode.textContent = primaryPaper
         ? resolvePaperContentSourceMode(itemId, primaryPaper) === "pdf"
           ? "PDF"
-          : "文本"
+          : t("Text")
         : "";
     const sourceControl = body.querySelector<HTMLDetailsElement>(
       "#llm-source-control",
