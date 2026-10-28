@@ -51,7 +51,7 @@ export function createActionLayoutController(deps: ActionLayoutControllerDeps) {
   };
   const applyResponsiveActionButtonsLayout = () => {
     if (!body.isConnected || !panelRoot.isConnected || !panelRoot.clientWidth) return;
-    setActionButtonLabel(uploadBtn, "+", "+", "full");
+    setActionButtonLabel(uploadBtn, t("Add"), t("Add"), "full");
     setActionButtonLabel(selectTextBtn, getSelectTextExpandedLabel(), getSelectTextExpandedLabel(), "full");
     setActionButtonLabel(screenshotBtn, getScreenshotExpandedLabel(), getScreenshotExpandedLabel(), "full");
     setSendButtonLabel("full");

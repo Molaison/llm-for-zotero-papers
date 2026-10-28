@@ -64,7 +64,8 @@ describe("reading sidebar design system", () => {
     assert.isTrue(config.parentElement!.classList.contains("llm-actions"));
     assert.strictEqual(config.parentElement!.parentElement, h.find("llm-compose-area"));
     assert.strictEqual(h.find("llm-context-previews").parentElement, h.find("llm-compose-area"));
-    assert.strictEqual(h.find("llm-input").nextSibling, config.parentElement);
+    assert.strictEqual(h.find("llm-input").nextSibling, h.find("llm-status").parentElement);
+    assert.strictEqual(h.find("llm-status").parentElement!.nextSibling, config.parentElement);
     assert.strictEqual(h.find("llm-history-bar").parentElement!.parentElement,
       h.find("llm-header-runtime-controls").parentElement!.parentElement);
     assert.isFalse(h.find("llm-model-dropdown").parentElement!.classList.contains("llm-actions-left"));
@@ -233,7 +234,7 @@ describe("reading sidebar design system", () => {
       assert.include(rule, declaration);
   });
 
-  it("keeps source, model, reasoning, usage, status and Send in one toolbar and moves capture actions into the existing menu", () => {
+  it("keeps request settings together and reserves a separate composer row for full status text", () => {
     const h = build(), config = h.find("llm-model-controls"), row = config.parentElement!;
     const usage = h.find("llm-context-gauge").parentElement!;
     assert.strictEqual(usage.parentElement, config);
@@ -245,7 +246,7 @@ describe("reading sidebar design system", () => {
     for (const id of ["llm-select-text", "llm-screenshot"])
       assert.strictEqual(h.find(id).parentElement!.parentElement, h.find("llm-slash-menu"));
     assert.strictEqual(h.find("llm-status").nextSibling, h.find("llm-status-toggle"));
-    assert.strictEqual(h.find("llm-status-toggle").parentElement!.parentElement!.parentElement, row);
+    assert.strictEqual(h.find("llm-status-toggle").parentElement!.parentElement, h.find("llm-compose-area"));
     assert.equal(h.find("llm-status-toggle").getAttribute("aria-describedby"), "llm-status");
     const source = h.find("llm-source-control"); source.open = true;
     source.dispatchFakeEvent("keydown", {key:"Escape"});

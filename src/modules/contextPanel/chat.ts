@@ -11906,17 +11906,25 @@ export function refreshChat(
 
       if (
         index === latestAssistantIndex &&
-        msg.text.trim() &&
+        (msg.text.trim() || msg.interrupted || assistantFailureTitle(msg)) &&
         msg.runMode !== "agent" &&
         renderProviderProtocol !== "web_sync" // [webchat] no retry in webchat mode
       ) {
-        appendMessageMetaActionButton({
+        const retry = appendMessageMetaActionButton({
           body,
           doc,
           actions,
           className: "llm-message-action-retry llm-retry-latest",
           title: "Retry response with another model",
         });
+        if (msg.interrupted || assistantFailureTitle(msg)) {
+          // Preserve the same delegated model-picker action; only make its
+          // recovery purpose visible instead of hiding it inside More.
+          retry.classList.add("llm-recovery-action");
+          retry.textContent = t("Retry…");
+          retry.title = t("Choose a model to retry");
+          retry.setAttribute("aria-label", retry.title);
+        }
       }
 
       if (actionContent && actionUserTimestamp > 0) {
@@ -12003,26 +12011,27 @@ export function refreshChat(
       more.className = "llm-answer-more";
       const summary = doc.createElement("summary");
       summary.textContent = "…";
-      summary.title = "回答操作";
-      summary.setAttribute("aria-label", "回答操作");
+      summary.title = t("Response actions");
+      summary.setAttribute("aria-label", t("Response actions"));
       const menu = doc.createElement("div");
       menu.className = "llm-answer-more-body";
       const actions = meta.querySelector<HTMLElement>(".llm-message-actions");
       for (const action of Array.from(actions?.children || [])) {
         if (
           action.classList.contains("llm-message-action-copy") ||
-          action.classList.contains("llm-message-action-note")
+          action.classList.contains("llm-message-action-note") ||
+          action.classList.contains("llm-recovery-action")
         )
           continue;
         const button = action as HTMLElement;
         button.textContent = button.classList.contains(
           "llm-message-action-retry",
         )
-          ? "选择模型重试"
+          ? t("Retry with another model")
           : button.classList.contains("llm-message-action-fork")
-            ? "分支对话"
+            ? t("Fork this turn")
             : button.classList.contains("llm-message-action-delete")
-              ? "删除此轮"
+              ? t("Delete this turn")
               : button.title;
         menu.append(button);
       }
@@ -12031,16 +12040,14 @@ export function refreshChat(
       more.append(summary, menu);
       attachAnswerMoreMenu(body, more, summary, menu);
       (actions || meta).append(more);
-      if (msg.runMode !== "agent") {
+      const failureTitle = assistantFailureTitle(msg);
+      if (msg.runMode !== "agent" && failureTitle) {
         const label = doc.createElement("div");
         label.className = "llm-answer-label";
-        const failureTitle = assistantFailureTitle(msg);
-        label.textContent = failureTitle || "回答";
+        label.textContent = failureTitle;
         bubble.insertBefore(label, bubble.firstChild);
-        if (failureTitle) {
-          bubble.classList.add("llm-answer-error");
-          label.setAttribute("role", "alert");
-        }
+        bubble.classList.add("llm-answer-error");
+        label.setAttribute("role", "alert");
       }
     }
 
@@ -12126,7 +12133,7 @@ export function refreshChat(
       interruptedRow.className = "llm-message-interrupted-row";
       const note = doc.createElement("span") as HTMLSpanElement;
       note.className = "llm-message-interrupted-note";
-      note.textContent = `⚠ ${getStreamInterruptionLabel()}`;
+      note.textContent = `⚠ ${t(getStreamInterruptionLabel())}`;
       interruptedRow.appendChild(note);
     }
 

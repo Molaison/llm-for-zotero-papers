@@ -6875,7 +6875,7 @@ export function setupHandlers(
     // The conversation trash action becomes "Exit" only in WebChat.
     if (clearBtn) {
       if (isWebChat) {
-        clearBtn.textContent = "Exit";
+        clearBtn.textContent = t("Exit");
         (clearBtn as HTMLButtonElement).disabled = false;
         clearBtn.style.opacity = "";
         clearBtn.title = t("Exit webchat and return to previous model");
@@ -6884,7 +6884,7 @@ export function setupHandlers(
           t("Exit webchat and return to previous model"),
         );
       } else {
-        clearBtn.textContent = "";
+        clearBtn.textContent = t("Delete conversation");
         clearBtn.title = t("Delete conversation");
         clearBtn.setAttribute("aria-label", t("Delete conversation"));
       }

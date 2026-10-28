@@ -1098,6 +1098,28 @@
   outline-offset: 1px;
 }
 
+/* The closed chip advertises its existing hover/focus scope switch. */
+.llm-mode-switch:not([data-static="true"]) .llm-mode-switch-sizer > span {
+  padding-inline-end: 23px;
+}
+.llm-mode-switch:not([data-static="true"]):not([data-expanded="true"])
+  .llm-mode-switch-option[aria-pressed="true"] {
+  padding-inline-end: 23px;
+}
+.llm-mode-switch:not([data-static="true"]):not([data-expanded="true"])
+  .llm-mode-switch-option[aria-pressed="true"]::after {
+  content: "";
+  position: absolute;
+  inset-inline-end: 9px;
+  top: 8px;
+  width: 5px;
+  height: 5px;
+  border-right: 0.5px solid currentColor;
+  border-bottom: 0.5px solid currentColor;
+  transform: rotate(45deg);
+  pointer-events: none;
+}
+
 /* Note sessions and WebChat: a static pill. */
 .llm-mode-switch[data-static="true"] .llm-mode-switch-option {
   cursor: default;
@@ -1651,7 +1673,8 @@
 }
 
 /* Hide popout button inside the standalone window */
-[data-standalone="true"] .llm-popout-btn {
+[data-standalone="true"] .llm-popout-btn,
+[data-standalone="true"] .llm-conversation-tools-body > button.llm-popout-btn {
   display: none;
 }
 
@@ -1678,9 +1701,17 @@
 }
 [data-standalone="true"] .llm-header-top .llm-header-toggle-row,
 [data-standalone="true"] .llm-header-info,
-[data-standalone="true"] .llm-history-bar,
 [data-standalone="true"] .llm-header-runtime-controls {
   display: none;
+}
+
+/* The expanded history rail already provides these two navigation actions. */
+#llmforzotero-standalone-chat-root:has(.llm-standalone-sidebar[data-sidebar-state="expanded"])
+  [data-standalone="true"] .llm-history-bar {
+  display: none !important;
+}
+[data-standalone="true"] .llm-panel-runtime-system-controls {
+  display: none !important;
 }
 
 /* =========================================================================
@@ -5495,6 +5526,28 @@
   cursor: pointer;
   opacity: 0.75;
   transition: none;
+}
+
+.llm-message-meta .llm-message-action.llm-recovery-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  width: auto;
+  min-width: 64px;
+  height: auto;
+  min-height: 32px;
+  padding: 4px 10px;
+  border: 0.5px solid var(--llm-slate7);
+  border-radius: 8px;
+  background: var(--llm-slate3);
+  color: var(--llm-slate12);
+  font: inherit;
+  font-size: var(--llm-text-small);
+  line-height: 1.2;
+}
+.llm-message-meta .llm-recovery-action:hover:not(:disabled) {
+  background: var(--llm-slate4);
 }
 
 .llm-message-action::before {
@@ -13816,8 +13869,8 @@ details.llm-agent-action-row[open] > summary .llm-agent-action-row-marker {
   overflow: hidden;
   white-space: nowrap;
 }
-.llm-status-control:hover > .llm-status:not(:empty),
-.llm-status-control:focus-within > .llm-status:not(:empty) {
+.llm-status-control:not(.llm-run-status-strip):hover > .llm-status:not(:empty),
+.llm-status-control:not(.llm-run-status-strip):focus-within > .llm-status:not(:empty) {
   z-index: 41;
   bottom: calc(100% + 8px);
   right: 0;
@@ -13838,25 +13891,31 @@ details.llm-agent-action-row[open] > summary .llm-agent-action-row-marker {
 }
 
 .llm-run-status-strip {
-  display: inline-flex;
-  align-items: center;
+  display: flex;
+  align-items: flex-start;
+  width: 100%;
   min-width: 0;
-  max-width: 16ch;
-  min-height: 28px;
-  padding-inline: 4px;
+  max-width: 100%;
+  min-height: 0;
+  box-sizing: border-box;
+  padding: 0 4px 4px;
   font-size: var(--llm-text-small);
+  line-height: 1.5;
   color: var(--llm-status-busy-text);
 }
+.llm-run-status-strip:has(> .llm-status:empty) { display: none; }
+.llm-run-status-strip > .llm-status-toggle { display: none; }
 .llm-run-status-strip > .llm-status {
   position: static;
   width: auto;
+  max-width: 100%;
   height: auto;
   padding: 0;
   clip-path: none;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow: visible;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 .llm-run-status-strip .llm-status-ready { color: var(--llm-status-ready-text); }
 .llm-run-status-strip .llm-status-sending { color: var(--llm-status-busy-text); }
@@ -14342,6 +14401,7 @@ details.llm-agent-action-row[open] > summary .llm-agent-action-row-marker {
   border-radius: 8px;
 }
 .llm-context-add-slot .llm-upload-file-btn::before { width: 16px; height: 16px; }
+.llm-context-add-slot .llm-upload-file-btn::after { display: none; }
 
 /* Single-line controls: model truncates, reasoning and usage stay adjacent. */
 .llm-model-controls {
@@ -16165,6 +16225,5 @@ item-pane-sidenav .llm-persistent-rail-entry[hidden] {
   .llm-messages { padding-inline: 8px; }
   .llm-message-wrapper.user { margin-inline-start: 16px; }
   .llm-scope-meta { display: none; }
-  .llm-run-status-strip { max-width: 10ch; }
   .llm-standalone-conversation-tools { justify-self: end; grid-column: 3; }
 }

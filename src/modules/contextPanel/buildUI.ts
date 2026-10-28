@@ -1221,7 +1221,7 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
     {
       id: "llm-upload-file",
       type: "button",
-      textContent: t("Add context"),
+      textContent: t("Add"),
       title: t("Add context"),
       disabled: !hasItem,
     },
@@ -1393,9 +1393,11 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
     selectTextBtn.style.display = "none";
     screenshotBtn.style.display = "none";
   }
-  actionsRight.append(statusBar, sendSlot);
+  actionsRight.append(sendSlot);
   actionsRow.append(actionsLeft, modelControls, actionsRight);
-  composeArea.appendChild(actionsRow);
+  // Status needs the composer's width for useful error and recovery text;
+  // it must not compete with the model picker or the send/stop target.
+  composeArea.append(statusBar, actionsRow);
   container.appendChild(inputSection);
 
   body.appendChild(container);
