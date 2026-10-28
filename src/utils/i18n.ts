@@ -67,6 +67,8 @@ const zhCN: Record<string, string> = {
   "Chat mode": "对话模式",
   "New chat": "新对话",
   "Search history": "搜索历史记录",
+  "No matching history": "没有匹配的历史记录",
+  "No conversations yet": "暂无对话",
   Skills: "技能",
   Preferences: "偏好设置",
   "Standalone navigation": "独立窗口导航",

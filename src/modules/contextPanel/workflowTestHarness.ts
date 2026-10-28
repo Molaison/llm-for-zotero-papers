@@ -50,6 +50,7 @@ import {
   exerciseLongJobReplay,
 } from "./longJobReplay";
 import { buildUI } from "./buildUI";
+import { initI18n } from "../../utils/i18n";
 import { getAgentRuntime } from "../../agent";
 import { normalizeExecutionOutput } from "../../agent/tools/execution/results";
 import {
@@ -5595,6 +5596,17 @@ export function installWorkflowTestHarness(targetAddon: {
     createItemNoteFixture,
     createStandaloneNoteFixture,
     renderPanelForItem,
+    renderEmptyPanel: () => {
+      assertWorkflowTestEnabled();
+      const body = appendHost(getWorkflowDocument());
+      buildUI(body, null);
+      refreshChat(body, null);
+      return { body, dispose: () => body.remove() };
+    },
+    refreshWorkflowLocale: () => {
+      assertWorkflowTestEnabled();
+      initI18n();
+    },
     refreshActiveConversationPanels,
     exerciseBackgroundAgentPublication,
     exerciseNativeQuestionReview: (panelId: string) => {

@@ -4298,6 +4298,15 @@ export function setupHandlers(
       buildPaperChipMenuCard(ownerDoc, paperContext, { contentSourceMode }),
     );
     chip.append(chipExpanded);
+    // The compact chip stays unchanged everywhere else. Inside the source
+    // disclosure, identify each paper before its existing mode controls.
+    if (list.closest("#llm-source-control")) {
+      chip.appendChild(
+        createElement(ownerDoc, "div", "llm-source-paper-title", {
+          textContent: paperContext.title,
+        }),
+      );
+    }
     chip.append(chipHeader);
 
     // Restore expanded (sticky) state after re-render

@@ -1510,7 +1510,7 @@ export function openStandaloneChat(options?: {
               getWebChatHistorySiteSyncEntry(snapshot, targetHostname),
             );
           } catch {
-            /* relay not reachable */
+            historyFetchFailed = true;
           }
 
           if (
@@ -2410,16 +2410,15 @@ export function openStandaloneChat(options?: {
         resolveLabel: (entry) =>
           isOrphanHistoryEntry(entry)
             ? t("Orphan")
-            : entry.kind === "paper"
-              ? resolvePaperLabel(entry.paperItemID)
-              : t("Library chat"),
+            : t(entry.kind === "paper" ? "Paper" : "Library"),
         resolveScopeLabel: (entry) =>
           entry.kind === "paper"
             ? resolvePaperSearchScopeLabel(entry.paperItemID, entry.sourceState)
-            : t("Library chat"),
+            : t("Library"),
       });
 
       iconSearch.addEventListener("click", () => {
+        iconSearch.focus({ preventScroll: true });
         searchPopupController.toggle();
       });
 

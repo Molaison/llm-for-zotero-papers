@@ -16,7 +16,7 @@ One consistent hierarchy: **Paper / Library scope → identifiable paper or libr
 - Keep actual Radix slate/indigo/status scales and map semantic roles: surfaces 1–3, selected 4–5, separators 6, input boundaries 7–8, secondary/primary text 11–12. Primary send uses slate12 and slate1; indigo remains for links/focus where appropriate. Dark roles resolve independently in the existing host theme.
 - Use the existing host-scaled 12/14/16 type tokens, 4/8/12/16/24 spacing, 0.5px separators, 2px functional focus outline. No decorative shadows/motion. Composer radius 20px, user bubble 16px, compact controls 8px; overlays have their own boundary.
 - English source strings pass through `t()`; new Chinese entries have one owner. Status is visible when actionable, including errors, pending work and stop; idle metadata stays quiet.
-- Narrow acceptance: 380px actual window, long title/model, no clipped send or horizontal page overflow. Wide acceptance: 1000×760, readable transcript width and persistent source identity. Include dark mode and expanded/history states.
+- Narrow acceptance: a real 380px embedded panel (standalone windows have a 500px native minimum), long title/model, no clipped send or horizontal page overflow. Wide acceptance: 1000×760, readable transcript width and persistent source identity. Include dark mode and expanded/history states.
 
 ## Ownership
 
@@ -32,3 +32,7 @@ Do not edit another owner's file. Send required shared strings/selectors to its 
 ## Validation boundary
 
 Native captures use an isolated Zotero profile and deterministic local paper/conversation fixtures. Pending sends are intercepted before a provider request. They prove the production UI is rendered in Gecko and the tested interactions work; they do not prove a paid model response or remote relay. Previous hand-drawn `ui-preview`/PIL images are not used as evidence.
+
+## Accepted round 3
+
+Keep full paper titles inside Sources and the history dialog changes: the native run completed 23 captures, with real query filtering/highlights, Tab boundary handling, Escape from a non-input and focus return. The 380px error remains fully readable with Send inside the viewport. Capture 23 exercises production component rendering without host setup; it is explicitly not evidence of the final no-selection user experience. Do not redesign that state from this fixture. Round 4 targets stable history action focus and verified narrow/font stress cases.

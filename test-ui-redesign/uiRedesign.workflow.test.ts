@@ -11,6 +11,9 @@ describe("workflow: UI redesign evidence", function () {
       .workflowTest as WorkflowTestApi;
     const themePref = "browser.theme.toolbar-theme";
     const previousTheme = Zotero.Prefs.get(themePref, true);
+    const localePref = "extensions.zotero.llmforzotero.locale";
+    const previousLocale = Zotero.Prefs.get(localePref, true);
+    let emptyFixture: { body: HTMLElement; dispose: () => void } | undefined;
     const label = String(
       Zotero.Prefs.get(
         "extensions.zotero.llmforzotero.uiRedesignRound",
@@ -38,6 +41,54 @@ describe("workflow: UI redesign evidence", function () {
           win.requestAnimationFrame(() => resolve()),
         ),
       );
+    }
+
+    async function until(check: () => boolean, message: string) {
+      const end = Date.now() + 10000;
+      while (!check() && Date.now() < end) await Zotero.Promise.delay(50);
+      assert.isTrue(check(), message);
+    }
+
+    function visibleSearchOverlay(): HTMLElement | undefined {
+      return (
+        Array.from(
+          win.document.querySelectorAll(".llm-standalone-search-overlay"),
+        ) as HTMLElement[]
+      ).find(
+        (element) =>
+          element.getBoundingClientRect().width > 0 &&
+          win.getComputedStyle(element)?.display !== "none",
+      )!;
+    }
+
+    async function openVisibleSearch() {
+      const trigger = win.document.querySelector<HTMLButtonElement>(
+        "[data-sidebar-action='search-history']",
+      )!;
+      assert.isAbove(
+        trigger.getBoundingClientRect().width,
+        0,
+        "visible sidebar Search history entry",
+      );
+      trigger.focus();
+      trigger.click();
+      await until(
+        () => Boolean(visibleSearchOverlay()),
+        "actual visible search overlay opens",
+      );
+      const overlay = visibleSearchOverlay()!;
+      const dialog = overlay.querySelector(".llm-standalone-search-popup")!;
+      assert.equal(dialog.getAttribute("role"), "dialog");
+      assert.equal(dialog.getAttribute("aria-modal"), "true");
+      const input = overlay.querySelector<HTMLInputElement>(
+        ".llm-standalone-search-input",
+      )!;
+      assert.equal(
+        win.document.activeElement,
+        input,
+        "visible search input receives focus",
+      );
+      return { trigger, overlay, input };
     }
 
     async function capture(name: string) {
@@ -131,6 +182,8 @@ describe("workflow: UI redesign evidence", function () {
     }
 
     try {
+      Zotero.Prefs.set(localePref, "en-US", true);
+      api.refreshWorkflowLocale();
       Zotero.Prefs.set(themePref, 1, true);
       await api.openStandaloneForItem(fixture.parentItemId);
       win = (Zotero as any).LLMForZotero.data.standaloneWindow as Window;
@@ -159,12 +212,16 @@ describe("workflow: UI redesign evidence", function () {
         },
       ]);
       await capture("02-paper-conversation-wide");
-      const history = win.document.querySelector<HTMLButtonElement>(
-        "#llm-history-toggle",
+      const history = await openVisibleSearch();
+      await until(
+        () =>
+          Boolean(history.overlay.querySelector(".llm-standalone-search-item")),
+        "initial history rows load",
       );
-      history?.click();
       await capture("03-paper-history-wide");
-      history?.click();
+      history.overlay
+        .querySelector<HTMLButtonElement>(".llm-standalone-search-close")!
+        .click();
       await size(380);
       await capture("04-paper-conversation-narrow");
 
@@ -402,9 +459,14 @@ describe("workflow: UI redesign evidence", function () {
 
       // Supplemental R3 evidence: actual 380px production disclosures, using
       // the same mounted embedded panel instead of shrinking a bitmap.
-      async function captureEmbeddedState(name: string, menuSelector: string) {
+      async function captureEmbeddedState(
+        name: string,
+        menuSelector: string,
+        target = host!,
+        panelId: string | null = embedded.panelId,
+      ) {
         await Zotero.Promise.delay(500);
-        const bounds = host!.getBoundingClientRect();
+        const bounds = target.getBoundingClientRect();
         assert.closeTo(bounds.width, 380, 0.5, "supplemental embedded width");
         ctx.drawWindow(mainWin, bounds.x, bounds.y, 380, 760, "#ffffff");
         const data = mainWin.atob(canvas.toDataURL("image/png").split(",")[1]);
@@ -412,7 +474,7 @@ describe("workflow: UI redesign evidence", function () {
           `${output}/${name}.png`,
           Uint8Array.from(data, (char) => char.charCodeAt(0)),
         );
-        const menu = host!.querySelector<HTMLElement>(menuSelector)!;
+        const menu = target.querySelector<HTMLElement>(menuSelector)!;
         await io.writeUTF8(
           `${output}/${name}.json`,
           JSON.stringify(
@@ -421,11 +483,11 @@ describe("workflow: UI redesign evidence", function () {
                 "Actual mounted production embedded panel; native drawWindow crop",
               width: bounds.width,
               height: bounds.height,
-              panelScrollWidth: host!.scrollWidth,
-              panelClientWidth: host!.clientWidth,
+              panelScrollWidth: target.scrollWidth,
+              panelClientWidth: target.clientWidth,
               menu: menu?.getBoundingClientRect().toJSON(),
               menuText: menu?.textContent,
-              diagnostics: await api.getDiagnostics(embedded.panelId),
+              diagnostics: panelId ? await api.getDiagnostics(panelId) : null,
             },
             null,
             2,
@@ -478,40 +540,228 @@ describe("workflow: UI redesign evidence", function () {
       assert.equal(mainWin.document.activeElement, embeddedMoreSummary);
       host!.style.left = "-10000px";
 
-      const search = doc.querySelector<HTMLButtonElement>(
-        "[data-sidebar-action='search-history']",
-      )!;
-      assert.isAbove(
-        search.getBoundingClientRect().width,
-        0,
-        "history search entry is visible",
+      const {
+        trigger: searchTrigger,
+        overlay: searchOverlay,
+        input: searchInput,
+      } = await openVisibleSearch();
+      searchInput.value = "no-match-ui-redesign-7f90bb";
+      searchInput.dispatchEvent(
+        new (win as any).Event("input", { bubbles: true }),
       );
-      search.click();
-      await settle();
-      const searchInput = doc.querySelector<HTMLInputElement>(
-        ".llm-standalone-search-input",
-      )!;
-      assert.isOk(searchInput, "real search dialog is mounted");
+      await until(
+        () =>
+          searchOverlay.querySelector(".llm-standalone-search-empty")
+            ?.textContent === "No matching history" &&
+          !searchOverlay.querySelector(".llm-standalone-search-item"),
+        "nonexistent query has no result rows",
+      );
       searchInput.value = "evidence";
       searchInput.dispatchEvent(
         new (win as any).Event("input", { bubbles: true }),
       );
-      const searchDeadline = Date.now() + 10000;
-      while (
-        !doc.querySelector(".llm-standalone-search-item") &&
-        Date.now() < searchDeadline
-      ) {
-        await Zotero.Promise.delay(50);
-      }
-      assert.isOk(
-        doc.querySelector(".llm-standalone-search-item"),
-        "stored fixture matches history query",
+      await until(
+        () =>
+          (
+            Array.from(
+              searchOverlay.querySelectorAll(
+                "mark.llm-history-search-highlight",
+              ),
+            ) as HTMLElement[]
+          ).some((mark) => mark.textContent?.toLowerCase() === "evidence"),
+        "stored fixture has an actual highlighted query match",
       );
+      assert.equal(doc.activeElement, searchInput);
       await size(500);
       await capture("20-history-search-narrow");
+      await size(1000);
+      const readFocusable = () =>
+        (
+          Array.from(
+            searchOverlay.querySelectorAll(
+              'button:not([disabled]), input:not([disabled]), [tabindex="0"]',
+            ),
+          ) as HTMLElement[]
+        ).filter(
+          (element) => !element.hidden && element.getClientRects().length > 0,
+        );
+      const describeFocus = (element: Element | null) =>
+        element && {
+          tag: element.tagName,
+          className: element.className,
+          text: element.textContent?.slice(0, 80),
+          rect: element.getBoundingClientRect().toJSON(),
+        };
+      const initialFocusable = readFocusable();
+      const initialFocusState = initialFocusable.map(describeFocus);
+      const first = initialFocusable[0];
+      initialFocusable[initialFocusable.length - 1].focus();
+      // Focusing a result reveals its Delete control through :focus-within.
+      // Re-read the actual tab boundary after that real state change.
+      const afterRowFocus = readFocusable();
+      const afterRowFocusState = afterRowFocus.map(describeFocus);
+      const last = afterRowFocus[afterRowFocus.length - 1];
+      assert.isTrue(
+        last.classList.contains("llm-standalone-search-delete"),
+        "focusing a result reveals its keyboard Delete action",
+      );
+      last.focus();
+      assert.equal(doc.activeElement, last, "revealed Delete is focusable");
+      const forwardTab = new (win as any).KeyboardEvent("keydown", {
+        key: "Tab",
+        bubbles: true,
+        cancelable: true,
+      });
+      last.dispatchEvent(forwardTab);
+      await io.writeUTF8(
+        `${output}/search-keyboard-diagnostics.json`,
+        JSON.stringify(
+          {
+            initialFocusable: initialFocusState,
+            afterRowFocus: afterRowFocusState,
+            forwardPrevented: forwardTab.defaultPrevented,
+            forwardActive: describeFocus(doc.activeElement),
+          },
+          null,
+          2,
+        ),
+      );
+      assert.isTrue(
+        forwardTab.defaultPrevented,
+        "dialog owns forward Tab at its actual boundary",
+      );
+      assert.equal(
+        doc.activeElement,
+        first,
+        "Tab wraps inside the actual search dialog",
+      );
+      // Delete hides again when focus leaves the result; reverse Tab must use
+      // the boundary that exists while the input is active.
+      const reverseFocusable = readFocusable();
+      const reverseLast = reverseFocusable[reverseFocusable.length - 1];
+      const reverseTab = new (win as any).KeyboardEvent("keydown", {
+        key: "Tab",
+        shiftKey: true,
+        bubbles: true,
+        cancelable: true,
+      });
+      first.dispatchEvent(reverseTab);
+      assert.isTrue(
+        reverseTab.defaultPrevented,
+        "dialog owns reverse Tab at its actual boundary",
+      );
+      assert.equal(
+        doc.activeElement,
+        reverseLast,
+        "Shift+Tab wraps inside the actual search dialog",
+      );
+      const closeSearch = searchOverlay.querySelector<HTMLButtonElement>(
+        ".llm-standalone-search-close",
+      )!;
+      closeSearch.focus();
+      closeSearch.dispatchEvent(
+        new (win as any).KeyboardEvent("keydown", {
+          key: "Escape",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+      assert.isFalse(
+        Boolean(visibleSearchOverlay()),
+        "Escape from a non-input closes search",
+      );
+      assert.equal(
+        doc.activeElement,
+        searchTrigger,
+        "search returns focus to its actual trigger",
+      );
+
+      host!.style.left = "0";
+      const longError =
+        "Connection interrupted while checking the selected evidence. Your question and partial answer are preserved. Choose Retry to select a model and continue the evidence check.";
+      const embeddedStatus = host!.querySelector<HTMLElement>("#llm-status")!;
+      setStatus(embeddedStatus, longError, "error");
+      await captureEmbeddedState("21-long-error-embedded-380", "#llm-status");
+      assert.equal(embeddedStatus.textContent, longError);
+      assert.isAtMost(
+        embeddedStatus.scrollWidth,
+        embeddedStatus.clientWidth + 1,
+        "380px error text wraps without clipping",
+      );
+      assert.isAbove(
+        embeddedStatus.getBoundingClientRect().height,
+        20,
+        "long error uses multiple lines",
+      );
+      const narrowSend = host!
+        .querySelector<HTMLElement>("#llm-send")!
+        .getBoundingClientRect();
+      assert.isAtMost(
+        narrowSend.right,
+        host!.getBoundingClientRect().right + 0.5,
+        "Send stays inside the 380px panel",
+      );
+      host!.style.left = "-10000px";
+
+      Zotero.Prefs.set(localePref, "zh-CN", true);
+      api.refreshWorkflowLocale();
+      const chinese = await api.renderPanelForItem(fixture.parentItemId);
+      const chineseHost = mainWin.document.querySelector<HTMLElement>(
+        `[data-workflow-panel-id="${chinese.panelId}"]`,
+      )!;
+      Object.assign(chineseHost.style, {
+        left: "0",
+        top: "0",
+        width: "380px",
+        height: "760px",
+        zIndex: "2147483647",
+        background: "var(--llm-slate1)",
+      });
+      assert.equal(
+        chineseHost.querySelector<HTMLTextAreaElement>("#llm-input")!
+          .placeholder,
+        "询问这篇论文…",
+        "Chinese comes from real locale pref and production rerender",
+      );
+      await captureEmbeddedState(
+        "22-chinese-paper-embedded-380",
+        ".llm-compose-area",
+        chineseHost,
+        chinese.panelId,
+      );
+      chineseHost.style.left = "-10000px";
+      emptyFixture = api.renderEmptyPanel();
+      Object.assign(emptyFixture.body.style, {
+        left: "0",
+        top: "0",
+        width: "380px",
+        height: "760px",
+        zIndex: "2147483647",
+        background: "var(--llm-slate1)",
+      });
+      assert.isTrue(
+        emptyFixture.body.querySelector<HTMLTextAreaElement>("#llm-input")!
+          .disabled,
+        "no-paper input is disabled",
+      );
+      assert.include(
+        emptyFixture.body.querySelector("#llm-chat-box")!.textContent,
+        "选择一篇论文或打开 PDF",
+        "real refreshChat(null) gives no-paper guidance",
+      );
+      await captureEmbeddedState(
+        "23-no-paper-chinese-embedded-380",
+        "#llm-chat-box",
+        emptyFixture.body,
+        null,
+      );
       assert.isAtLeast(captures.length, 12);
       Zotero.debug(`UI_REDESIGN_EVIDENCE ${output}`);
     } finally {
+      emptyFixture?.dispose();
+      if (previousLocale === undefined) Zotero.Prefs.clear(localePref, true);
+      else Zotero.Prefs.set(localePref, previousLocale as never, true);
+      api.refreshWorkflowLocale();
       await api.closeStandalone();
       await api.cleanupFixture(fixture);
       await api.reset();

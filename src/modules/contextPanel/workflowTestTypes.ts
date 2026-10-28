@@ -576,6 +576,8 @@ export type WorkflowTestApi = {
     noteHtml: string;
   }) => Promise<WorkflowTestStandaloneNoteFixture>;
   renderPanelForItem: (itemId: number) => Promise<WorkflowTestPanel>;
+  renderEmptyPanel: () => { body: HTMLElement; dispose: () => void };
+  refreshWorkflowLocale: () => void;
   refreshActiveConversationPanels: (conversationKey?: number) => void;
   exerciseNativeQuestionReview: (
     panelId: string,

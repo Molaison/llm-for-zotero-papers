@@ -178,6 +178,10 @@ export function createHistorySearchPopupController(
   overlay.style.display = "none";
 
   const popup = createElement(doc, "div", "llm-standalone-search-popup");
+  popup.setAttribute("role", "dialog");
+  popup.setAttribute("aria-modal", "true");
+  popup.setAttribute("aria-label", translate("Search history"));
+  popup.tabIndex = -1;
   const header = createElement(doc, "div", "llm-standalone-search-header");
   const input = createElement(doc, "input", "llm-standalone-search-input", {
     type: "text",
@@ -197,6 +201,7 @@ export function createHistorySearchPopupController(
       title: translate("Close"),
     },
   ) as HTMLButtonElement;
+  closeButton.setAttribute("aria-label", translate("Close"));
   const results = createElement(doc, "div", "llm-standalone-search-results");
   const disposeHistoryActivity = observeHistoryActivity(results);
 
@@ -208,6 +213,7 @@ export function createHistorySearchPopupController(
   let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
   let searchSeq = 0;
   let renderedEntriesByKey = new Map<number, ConversationHistoryEntry>();
+  let invokingControl: HTMLElement | null = null;
   const hiddenConversationKeys = new Set<number>();
 
   const syncThemeClass = () => {
@@ -246,6 +252,9 @@ export function createHistorySearchPopupController(
   };
 
   const clearResults = () => {
+    // Replacing a focused result (for example after deletion) must not leave
+    // keyboard focus on the document behind the modal.
+    if (results.contains(doc.activeElement)) input.focus();
     if (typeof (results as any).replaceChildren === "function") {
       (results as any).replaceChildren();
     } else {
@@ -259,9 +268,7 @@ export function createHistorySearchPopupController(
     if (getHistoryEntryLabelType(entry) === "orphan") {
       return translate("Orphan");
     }
-    return entry.kind === "paper"
-      ? entry.sectionTitle || translate("Paper chat")
-      : translate("Library chat");
+    return translate(entry.kind === "paper" ? "Paper" : "Library");
   };
 
   const resolveScopeLabel = (entry: ConversationHistoryEntry): string => {
@@ -271,8 +278,8 @@ export function createHistorySearchPopupController(
       return translate("Orphan");
     }
     return entry.kind === "paper"
-      ? entry.sectionTitle || translate("Paper chat")
-      : translate("Library chat");
+      ? entry.sectionTitle || translate("Paper")
+      : translate("Library");
   };
 
   const renderEntries = (
@@ -372,9 +379,7 @@ export function createHistorySearchPopupController(
           formatGlobalHistoryTimestamp(entry.lastActivityAt) ||
           entry.timestampText ||
           "";
-        const metaText = timestamp
-          ? `${scopeLabel}，${timestamp}`
-          : scopeLabel;
+        const metaText = timestamp ? `${scopeLabel}，${timestamp}` : scopeLabel;
         const meta = createElement(doc, "div", "llm-standalone-search-meta", {
           textContent: metaText,
         });
@@ -466,6 +471,11 @@ export function createHistorySearchPopupController(
 
   const controller: HistorySearchPopupController = {
     open: () => {
+      if (controller.isOpen()) {
+        input.focus();
+        return;
+      }
+      invokingControl = doc.activeElement as HTMLElement | null;
       overlay.style.display = "flex";
       syncThemeClass();
       input.value = "";
@@ -475,6 +485,7 @@ export function createHistorySearchPopupController(
       void runSearch("");
     },
     close: () => {
+      const wasOpen = controller.isOpen();
       searchSeq += 1;
       overlay.style.display = "none";
       input.value = "";
@@ -484,6 +495,10 @@ export function createHistorySearchPopupController(
         clearTimeout(searchDebounceTimer);
         searchDebounceTimer = null;
       }
+      if (wasOpen && invokingControl?.isConnected !== false) {
+        invokingControl?.focus?.({ preventScroll: true });
+      }
+      invokingControl = null;
     },
     toggle: () => {
       if (controller.isOpen()) {
@@ -511,11 +526,38 @@ export function createHistorySearchPopupController(
       void runSearch(input.value);
     }, 300);
   });
-  input.addEventListener("keydown", (event: Event) => {
+  popup.addEventListener("keydown", (event: Event) => {
     const keyboardEvent = event as KeyboardEvent;
-    if (keyboardEvent.key !== "Escape") return;
-    keyboardEvent.preventDefault();
-    controller.close();
+    if (keyboardEvent.key === "Escape") {
+      keyboardEvent.preventDefault();
+      keyboardEvent.stopPropagation();
+      controller.close();
+      return;
+    }
+    if (keyboardEvent.key !== "Tab") return;
+    const focusable = (Array.from(
+      popup.querySelectorAll(
+        'button:not([disabled]), input:not([disabled]), [tabindex="0"]',
+      ),
+    ) as HTMLElement[]).filter(
+      (element) => !element.hidden && element.getClientRects().length > 0,
+    );
+    const first = focusable[0] || input;
+    const last = focusable[focusable.length - 1] || input;
+    const active = doc.activeElement;
+    if (
+      keyboardEvent.shiftKey &&
+      (active === first || !popup.contains(active))
+    ) {
+      keyboardEvent.preventDefault();
+      last.focus();
+    } else if (
+      !keyboardEvent.shiftKey &&
+      (active === last || !popup.contains(active))
+    ) {
+      keyboardEvent.preventDefault();
+      first.focus();
+    }
   });
   const selectResultFromTarget = (target: Element | null): boolean => {
     const item = target?.closest(
