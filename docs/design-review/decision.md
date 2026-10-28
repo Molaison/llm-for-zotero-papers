@@ -8,6 +8,8 @@ The active task is reading a paper, asking a grounded question and following up 
 
 One consistent hierarchy: **Paper / Library scope → identifiable paper or library → conversation → context and composer**. History is navigation; provider/runtime is a request setting; source selection is the content of the next request. These must not look like competing destinations. Wide standalone windows retain the existing collapsible history sidebar; narrow views devote their width to the conversation.
 
+The primary reading surface is the native Zotero reader: **PDF on the left, question and answer sidebar on the right**. The standalone window extends this workflow; its left history navigation is not the reader's question sidebar. Preserve native pane resizing, per-reader ownership, and each user's Stacked/Independent preference. Evaluate the complete PDF + native section host, including the persistent composer, rather than treating a cropped mounted component as proof of the reading workflow. Independent offers the full-height conversation; Stacked remains available alongside native item sections.
+
 ## Shared contract
 
 - Existing IDs, conversation identity, persistence, handler ownership, source toggles, remote sync/restore, note/export, stop/retry and runtime behavior remain intact.

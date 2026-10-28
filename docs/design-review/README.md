@@ -2,11 +2,13 @@
 
 四轮真实 A/B 迭代后的设计：**论文 / 文献库作用域 → 当前资料 → 对话 → 来源与输入**。减少重复标题和框线，将低频操作收进 More；保留可见的资料身份、来源检查、模型选择、停止、重试、引文与笔记能力。
 
+**核心阅读场景是左侧 PDF、右侧问答侧栏。** 问答使用 Zotero 阅读器的原生右侧面板，独立窗口用于扩展工作区。完整阅读器入口、布局取舍及追加验证见[阅读器侧栏](reader-sidebar.md)；独立窗口左侧的历史导航是另一项功能。
+
 基线：`51c574544d860b670fb34000717c78f829e81f6e`，目标分支 `codex/papers`。三个 GPT‑6.1 sol 子代理分别完成参考研究、产品 IA、代码/状态审查，随后按文件所有权并行实现，并对每轮截图独立进行配对审查。主代理统一设计、集成与验收。没有更改会话存储结构、模型调用协议或发布版本号。
 
 ## 初始 A / 最终 B
 
-以下均为运行中的 Zotero 原生界面，使用同一论文与对话 fixture。不是 HTML 原型或手绘预览。
+以下均由运行中的 Zotero/Gecko 捕获，使用同一论文与对话 fixture。宽图为原生独立窗口；380px 图为挂在测试宿主上的生产组件裁剪，不能单独证明完整 PDF 阅读器中的侧栏布局。
 
 | 1000 × 760：论文对话 A | 1000 × 760：论文对话 B |
 | --- | --- |
@@ -22,6 +24,7 @@
 
 | 页面/状态 | 最终原生截图 |
 | --- | --- |
+| PDF 与原生右侧问答并排 | [堆叠布局](evidence/reader-sidebar/01-reader-stacked-full.png) · [全高布局](evidence/reader-sidebar/02-reader-independent-full.png) · [约 380px 侧栏](evidence/reader-sidebar/03-reader-independent-narrow-full.png) · [来源展开](evidence/reader-sidebar/04-reader-sources-expanded-full.png) |
 | 论文初始页、正常对话 | [初始页](evidence/round-4/01-paper-empty-wide.png) · [对话](evidence/round-4/02-paper-conversation-wide.png) · [500px 对话](evidence/round-4/04-paper-conversation-narrow.png) |
 | 文献库初始页、暗色 | [宽窗口](evidence/round-4/09-library-empty-wide.png) · [窄窗口](evidence/round-4/10-library-empty-narrow.png) · [暗色](evidence/round-4/11-library-empty-narrow-dark.png) |
 | 等待、停止与恢复 | [发送中](evidence/round-4/05-paper-running-wide.png) · [500px 错误](evidence/round-4/07-paper-error-narrow.png) · [Retry 模型菜单](evidence/round-4/16-retry-model-menu-wide.png) · [380px 长错误](evidence/round-4/21-long-error-embedded-380.png) |
@@ -74,7 +77,7 @@
 
 环境：Linux，Zotero **10.0.6 / Gecko 140**，1440×1000 虚拟显示器，独立测试 profile。截图通过运行中的 Gecko 原生窗口取得。PDF、论文条目、历史和待发送请求是确定性 fixture；没有使用用户资料或调用收费模型。
 
-- 独立窗口比较为 1000×760 和 500×760；系统将请求的更窄独立窗口限制为 500px。380×760 是真实嵌入面板，不冒称 380px 独立窗口。
+- 独立窗口比较为 1000×760 和 500×760；系统将请求的更窄独立窗口限制为 500px。380×760 是生产组件在测试宿主中的原生渲染裁剪，未走完整 reader section 生命周期；完整 PDF 与问答并排证据另见[追加侧栏验证](reader-sidebar.md)。
 - 第 1 轮前三张宽图高度曾为 779px，因此其主要配对结论使用尺寸一致的 500px/380px 图。后续与最终宽图已固定为 1000×760。
 - `23` 是生产组件的 null 分支检查，缺少宿主完整初始化，**不用于最终无选择界面的 A/B 结论**。
 - `24` 专门验证 Delete 焦点和暗色；背景出现的中英混排来自测试切换语言后旧窗口未整体重建，不用它做语言结论。语言验收使用 `22`。
@@ -87,6 +90,7 @@
 | --- | --- |
 | `npm run build`（production XPI + 两套 TypeScript 检查） | 通过；版本 `3.14.8-papers.1`，ZIP 完整性与 manifest 已检查。安装包 SHA-256 见 [artifact.json](validation/artifact.json)。 |
 | 原生 UI 场景 | 最终重跑通过，26 张截图；组件/语言过渡场景的限制见上文。 |
+| 追加原生阅读器侧栏 | **1 条连续工作流通过，8 张整窗截图**：1360×900 下 PDF 与问答并排、两种布局、原生宽度设置、来源/Escape、收起恢复、论文切换和对应草稿/历史恢复。[运行输出](validation/native-reader-sidebar.txt)及[取舍与边界](reader-sidebar.md)。 |
 | 核心原生工作流 | **21 通过，1 个明确跳过的既有失败**。实际读取 PDF、引用分组/重新打开/跳转并高亮原文、选中文本、带图笔记复制、模式切换、后台会话切换、取消和运行计时均通过。[运行输出](validation/native-workflows.txt)。 |
 | 7 类状态源码执行检查 | 无论文、论文、文献库、笔记、加载、作用域阻塞及历史失败恢复通过；包括 Retry 的 XHTML namespace。 |
 | 全量单元测试 | **8595 通过、1 pending、6 失败**，不是全绿。[完整失败摘要](validation/unit-summary.txt)。其中 5 项偏好设置断言在基线复现；1 项性能计时门槛在全量运行失败，单独重跑通过。没有为此改动被测性能代码。 |
@@ -111,6 +115,8 @@ npm ci
 npm run build
 # 使用可运行的本地 Zotero；Linux 无显示器时需在同一进程环境启动 Xvfb
 ZOTERO_PLUGIN_ZOTERO_BIN_PATH=/path/to/zotero node scripts/capture-ui-redesign.mjs round-4
+# 完整 PDF 阅读器 + 原生问答侧栏；输出完整窗口，不裁成组件
+ZOTERO_PLUGIN_ZOTERO_BIN_PATH=/path/to/zotero node scripts/capture-reader-sidebar.mjs
 node --import tsx test-ui-redesign/uiState.check.mjs
 # 核心流程子集（明确跳过已在基线复现的展开引文问题）
 ZOTERO_PLUGIN_ZOTERO_BIN_PATH=/path/to/zotero node scripts/run-ui-regression.mjs
