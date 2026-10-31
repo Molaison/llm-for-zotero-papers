@@ -141,26 +141,45 @@ describe("workflow: dedicated native chat pane", function () {
     };
   }
 
-  function stackedSectionDiagnostics(
-    previous: NativeCollapsibleSection | null,
-    current: NativeCollapsibleSection | null,
+  function collapsibleSectionDiagnostics(
+    section: NativeCollapsibleSection | null,
   ) {
     return {
-      sameElement: previous === current,
-      previous: elementGeometry(previous),
-      current: elementGeometry(current),
-      collapsible: current?.collapsible ?? null,
-      open: current?.open ?? null,
+      geometry: elementGeometry(section),
+      collapsible: section?.collapsible ?? null,
+      open: section?.open ?? null,
       openHeight:
-        current?.style.getPropertyValue("--open-height").trim() || null,
-      children: current
-        ? Array.from(current.children).map((child) => ({
+        section?.style.getPropertyValue("--open-height").trim() || null,
+      children: section
+        ? Array.from(section.children).map((child) => ({
             tag: child.tagName.toLowerCase(),
             id: child.id,
             className: child.getAttribute("class"),
-            ...elementGeometry(child),
+            geometry: elementGeometry(child),
           }))
         : [],
+    };
+  }
+
+  function stackedSectionDiagnostics(
+    previous: {
+      outer: HTMLElement;
+      collapsible: NativeCollapsibleSection | null;
+    },
+    currentOuter: HTMLElement | null,
+    currentCollapsible: NativeCollapsibleSection | null,
+  ) {
+    return {
+      outer: {
+        sameElement: previous.outer === currentOuter,
+        previous: elementGeometry(previous.outer),
+        current: elementGeometry(currentOuter),
+      },
+      collapsible: {
+        sameElement: previous.collapsible === currentCollapsible,
+        previous: elementGeometry(previous.collapsible),
+        current: collapsibleSectionDiagnostics(currentCollapsible),
+      },
     };
   }
 
@@ -177,22 +196,38 @@ describe("workflow: dedicated native chat pane", function () {
         new win.MouseEvent("click", { bubbles: true, detail: 1, button: 0 }),
       );
     }
-    let current = initial!;
-    await until(() => {
-      current = details.querySelector(
-        ".llm-dedicated-chat-pane > collapsible-section",
-      ) as NativeCollapsibleSection;
-      const panel = current?.querySelector("#llm-main") as HTMLElement | null;
-      return Boolean(
-        current?.isConnected &&
-        current.open &&
-        current.style.getPropertyValue("--open-height").trim() === "auto" &&
-        panel?.isConnected &&
-        panel.getBoundingClientRect().height > 0,
+    let current: NativeCollapsibleSection | null = initial;
+    try {
+      // Zotero 9.0.6 collapsibleSection.js clears the measured --open-height
+      // to auto only after the body's transitionend event:
+      // https://raw.githubusercontent.com/zotero/zotero/9.0.6/chrome/content/zotero/elements/collapsibleSection.js
+      await until(() => {
+        current = details.querySelector(
+          ".llm-dedicated-chat-pane > collapsible-section",
+        ) as NativeCollapsibleSection | null;
+        const panel = current?.querySelector("#llm-main") as HTMLElement | null;
+        return Boolean(
+          current?.isConnected &&
+          current.open &&
+          current.style.getPropertyValue("--open-height").trim() === "auto" &&
+          panel?.isConnected &&
+          panel.getBoundingClientRect().height > 0,
+        );
+      }, "stacked section finishes its native open transition");
+    } catch (error) {
+      const original =
+        error instanceof Error
+          ? `${error.name}: ${error.message}\n${error.stack || ""}`
+          : String(error);
+      const diagnostics = collapsibleSectionDiagnostics(current);
+      throw new AssertionError(
+        `${original}; stacked section transition state=${JSON.stringify(diagnostics)}`,
+        { cause: error, diagnostics },
       );
-    }, "stacked section finishes its native open transition");
+    }
     await waitForNativeLayoutFrame();
-    return { initial, current };
+    assert.isOk(current, "stacked collapsible section remains mounted");
+    return { initial, current: current! };
   }
 
   /**
@@ -1235,9 +1270,12 @@ describe("workflow: dedicated native chat pane", function () {
         "setting is in Customization",
       );
       await captureWindow(preferences, "sidebar-layout-customization.png");
-      const previousSection = section.querySelector(
-        ".llm-dedicated-chat-pane > collapsible-section",
-      ) as NativeCollapsibleSection | null;
+      const previousSection = {
+        outer: section as HTMLElement,
+        collapsible: section.querySelector(
+          ".llm-dedicated-chat-pane > collapsible-section",
+        ) as NativeCollapsibleSection | null,
+      };
       choose(select, "stacked");
       await until(
         () =>
@@ -1265,13 +1303,21 @@ describe("workflow: dedicated native chat pane", function () {
       preferences.close();
       await until(() => preferences.closed, "preferences close");
       await clickPane("llm-context-panel");
-      const { current: currentSection } =
+      const { current: currentCollapsible } =
         await ensureStackedSectionOpen(details);
+      const currentOuter = currentCollapsible.closest(
+        ".llm-dedicated-chat-pane",
+      ) as HTMLElement | null;
+      assert.isOk(currentOuter, "fresh stacked outer section is mounted");
       assert.isAbove(
-        currentSection.getBoundingClientRect().height,
+        currentOuter!.getBoundingClientRect().height,
         100,
         `stacked chat is visible after clicking its rail icon; state=${JSON.stringify(
-          stackedSectionDiagnostics(previousSection, currentSection),
+          stackedSectionDiagnostics(
+            previousSection,
+            currentOuter,
+            currentCollapsible,
+          ),
         )}`,
       );
       await captureWindow(win, "stacked-sidebar.png");
