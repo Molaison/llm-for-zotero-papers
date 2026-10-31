@@ -181,6 +181,8 @@ export type ChatFileAttachment = {
 
 export type ChatParams = {
   cprPaperItemId?: number;
+  /** Stable local-conversation identity for a server-side paper session. */
+  cprPaperSessionId?: string;
   /** Ordered PDFs selected for CPR's direct ChatGPT Web route. */
   cprPaperContexts?: readonly PaperContextRef[];
   prompt: string;
@@ -4626,6 +4628,7 @@ export async function callLLMStream(
     if (!params.apiBase || !params.apiKey) throw new Error("请配置 CPR API 地址和密钥。");
     const paperRequest = await prepareCprPaperRequest({
       itemId: params.cprPaperItemId, apiBase: params.apiBase, apiKey: params.apiKey,
+      paperSessionId: params.cprPaperSessionId,
       model: params.model, reasoning: params.reasoning,
       profileOverride: params.profileOverride,
       fetchFn: getFetch(), signal: params.signal,

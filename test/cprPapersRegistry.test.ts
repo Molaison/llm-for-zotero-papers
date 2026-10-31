@@ -6,17 +6,24 @@ import {
   prepareCprPaperRequest,
   normalizePaperDoi,
   cprPaperConversationTitle,
+  resolveCprPaperSessionId,
 } from "../src/utils/cprPapers";
 
 const TEST_API_BASE = "https://papers.example/v1";
 const TEST_MODELS = ["gpt-5.6-sol", "gpt-5.4", "gpt-5.6-pro"];
 import { resetProviderSessionIdCacheForTests } from "../src/utils/providerSessionId";
+import { config } from "../package.json";
 import {
   createPaperPortalItem,
   resolveConversationBaseItem,
 } from "../src/modules/contextPanel/portalScope";
 
-const ready = (paperId: string, status = "ready", extra = {}) =>
+const ready = (
+  paperId: string,
+  status = "ready",
+  extra = {},
+  paperSessionId = "",
+) =>
   new Response(
     JSON.stringify({
       status: "completed",
@@ -29,6 +36,8 @@ const ready = (paperId: string, status = "ready", extra = {}) =>
               type: "output_text",
               text: JSON.stringify({
                 paper_id: paperId,
+                paper_registry_version: 2,
+                paper_session_id: paperSessionId,
                 thread_id: "permanent-server-thread",
                 status,
                 upload_required: status === "missing",
@@ -348,7 +357,12 @@ describe("CPR server-owned paper registry client", function () {
           "x-codex-turn-metadata"
         ],
       ),
-      { paper_id: "doi:10.1234/abc", paper_operation: "history" },
+      {
+        paper_registry_version: 2,
+        paper_id: "doi:10.1234/abc",
+        paper_session_id: "",
+        paper_operation: "history",
+      },
     );
     assert.isString(bodies[0].input);
     assert.notProperty(bodies[0], "reasoning");
@@ -416,6 +430,8 @@ describe("CPR server-owned paper registry client", function () {
                     text: JSON.stringify({
                       ...base,
                       paper_id: "doi:10.1234/abc",
+                      paper_registry_version: 2,
+                      paper_session_id: "",
                       thread_id: "thread",
                       messages,
                     }),
@@ -435,6 +451,66 @@ describe("CPR server-owned paper registry client", function () {
     assert.throws(
       () => parseCprPaperHistory(value, "doi:10.1234/abc"),
       /不同的论文身份/,
+    );
+  });
+  it("accepts canonical non-project history URLs without relaxing identity checks", function () {
+    const parse = (conversationUrl: string) => {
+      const text = JSON.stringify({
+        paper_id: "doi:10.1234/abc",
+        paper_registry_version: 2,
+        paper_session_id: "session-a",
+        thread_id: "thread",
+        title: "Paper title",
+        conversation_url: conversationUrl,
+        messages: [],
+      });
+      return parseCprPaperHistory(
+        {
+          status: "completed",
+          output: [{ content: [{ type: "output_text", text }] }],
+        },
+        "doi:10.1234/abc",
+        "session-a",
+      );
+    };
+    for (const url of [
+      "https://chatgpt.com/g/g-p-6ac1534524788191a340f2407c76f370/c/test-chat",
+      "https://chatgpt.com/c/test-chat",
+    ]) {
+      assert.equal(parse(url).conversation_url, url);
+    }
+    for (const url of [
+      "http://chatgpt.com/c/test-chat",
+      "https://www.chatgpt.com/c/test-chat",
+      "https://chatgpt.com/c/",
+      "https://chatgpt.com/c/test-chat?view=full",
+      "https://chatgpt.com/c/test-chat#latest",
+      "https://chatgpt.com/c/test-chat/extra",
+      "https://chatgpt.com/g/g-p-not-a-project/c/test-chat",
+      "https://chatgpt.com/g/g-p-6ac1534524788191a340f2407c76f370/c/test-chat/extra",
+    ]) {
+      assert.throws(parse.bind(null, url), /无效的论文历史/);
+    }
+    const text = JSON.stringify({
+      paper_id: "doi:10.1234/abc",
+      paper_registry_version: 2,
+      paper_session_id: "session-a",
+      thread_id: "thread",
+      title: "Paper title",
+      conversation_url: "https://chatgpt.com/c/test-chat",
+      messages: [],
+    });
+    const value = {
+      status: "completed",
+      output: [{ content: [{ type: "output_text", text }] }],
+    };
+    assert.throws(
+      () => parseCprPaperHistory(value, "doi:10.1234/other", "session-a"),
+      /不同的论文身份/,
+    );
+    assert.throws(
+      () => parseCprPaperHistory(value, "doi:10.1234/abc", "session-b"),
+      /无效的论文历史/,
     );
   });
   it("reports an old server without retrying history as a chat", async function () {
@@ -793,6 +869,90 @@ describe("CPR server-owned paper registry client", function () {
       `sha256:${createHash("sha256").update(pdfBytes).digest("hex")}`,
     );
     assert.equal(req.payload.input[0].content.length, 1);
+  });
+  it("keeps a durable paper session per fresh local conversation and leaves legacy chats on the default session", function () {
+    assert.isUndefined(resolveCprPaperSessionId(41, false));
+    const first = resolveCprPaperSessionId(41, true);
+    assert.match(String(first), /^[a-f0-9]{32}$/);
+    assert.equal(resolveCprPaperSessionId(41, false), first);
+    assert.equal(resolveCprPaperSessionId(41, true), first);
+    const second = resolveCprPaperSessionId(42, true);
+    assert.match(String(second), /^[a-f0-9]{32}$/);
+    assert.notEqual(second, first);
+    assert.equal(
+      prefs.get(`${config.prefsPrefix}.cprPaperSession.41`),
+      first,
+    );
+    assert.equal(
+      prefs.get(`${config.prefsPrefix}.cprPaperSession.42`),
+      second,
+    );
+  });
+  it("scopes the registry, chat and upload reservation to the paper session", async function () {
+    const seen: Array<Record<string, unknown>> = [];
+    const tokens = new Map<string, string>();
+    const fetchFn: typeof fetch = async (_url, init) => {
+      const body = JSON.parse(String(init?.body));
+      const metadata = JSON.parse(
+        body.client_metadata["x-codex-turn-metadata"],
+      );
+      seen.push(metadata);
+      const token = `token-${metadata.paper_session_id}`;
+      tokens.set(String(metadata.paper_session_id), token);
+      return ready(
+        "doi:10.1234/abc",
+        "missing",
+        { upload_token: token },
+        String(metadata.paper_session_id),
+      );
+    };
+    const prepare = (paperSessionId: string) =>
+      prepareCprPaperRequest({
+        itemId,
+        apiBase: TEST_API_BASE,
+        apiKey: "test",
+        model: TEST_MODELS[0],
+        paperSessionId,
+        prompt: "question",
+        fetchFn,
+        readBytes: async () => new TextEncoder().encode("%PDF-session"),
+      });
+    const first = await prepare("session-a");
+    const second = await prepare("session-b");
+    assert.equal(first.registry.paper_session_id, "session-a");
+    assert.equal(second.registry.paper_session_id, "session-b");
+    assert.deepEqual(tokens, new Map([
+      ["session-a", "token-session-a"],
+      ["session-b", "token-session-b"],
+    ]));
+    assert.isTrue(
+      seen.every(
+        (metadata) =>
+          metadata.paper_registry_version === 2 &&
+          (metadata.paper_session_id === "session-a" ||
+            metadata.paper_session_id === "session-b"),
+      ),
+    );
+    for (const request of [first, second]) {
+      const metadata = JSON.parse(
+        request.payload.client_metadata["x-codex-turn-metadata"],
+      );
+      assert.equal(metadata.paper_registry_version, 2);
+      assert.equal(metadata.paper_session_id, request.registry.paper_session_id);
+    }
+    const reservations = [...prefs.entries()].filter(([key]) =>
+      key.includes(".cprPaperReservation."),
+    );
+    assert.lengthOf(reservations, 2);
+    assert.isTrue(
+      reservations.every(
+        ([key, value]) =>
+          (String(key).includes("session-a") &&
+            value === "token-session-a") ||
+          (String(key).includes("session-b") &&
+            value === "token-session-b"),
+      ),
+    );
   });
   it("does not upload when a different client is pending or the prior send is uncertain", async function () {
     for (const status of ["pending", "uncertain"]) {

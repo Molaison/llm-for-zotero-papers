@@ -401,7 +401,9 @@ describe("CPR conversation snapshot replacement", function () {
                   {
                     type: "output_text",
                     text: JSON.stringify({
+                      paper_registry_version: 2,
                       paper_id: "doi:10.1234/snapshot",
+                      paper_session_id: "",
                       thread_id: "same-server-thread",
                       status: "ready",
                       upload_required: false,

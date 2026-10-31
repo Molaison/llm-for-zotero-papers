@@ -349,6 +349,7 @@ import {
   isReasoningLevelActive,
   loadCprPaperHistory,
 } from "../../utils/llmClient";
+import { resolveCprPaperSessionId } from "../../utils/cprPapers";
 import type { ReasoningConfig as LLMReasoningConfig } from "../../utils/llmClient";
 import {
   browseAllItemCandidates,
@@ -947,6 +948,9 @@ export function setupHandlers(
       const paperItemId = target
         ? (resolveConversationBaseItem(target)?.id ?? null)
         : null;
+      const paperSessionId = target
+        ? resolveCprPaperSessionId(getConversationKey(target), false)
+        : undefined;
       const visible =
         Boolean(target) &&
         !resolveActiveNoteSession(target) &&
@@ -965,6 +969,7 @@ export function setupHandlers(
                 apiBase: profile.apiBase,
                 apiKey: profile.apiKey || "",
                 model,
+                ...(paperSessionId ? { paperSessionId } : {}),
               }
             : null,
       };
@@ -1041,7 +1046,8 @@ export function setupHandlers(
           current?.itemId === targetPaperId &&
           current.model === request.model &&
           current.apiBase === request.apiBase &&
-          current.apiKey === request.apiKey
+          current.apiKey === request.apiKey &&
+          current.paperSessionId === request.paperSessionId
         );
       };
       return {

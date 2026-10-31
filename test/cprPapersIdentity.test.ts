@@ -9,13 +9,18 @@ const hash = (value: string) => createHash("sha256").update(value).digest("hex")
 const paperId = "doi:10.1234/identity";
 const threadId = "existing-paper-thread";
 
-function resolution(extra: Record<string, unknown> = {}): Response {
+function resolution(
+  extra: Record<string, unknown> = {},
+  paperSessionId = "",
+): Response {
   return new Response(JSON.stringify({
     status: "completed",
     output: [{ type: "message", role: "assistant", content: [{
       type: "output_text",
       text: JSON.stringify({
         paper_id: paperId,
+        paper_registry_version: 2,
+        paper_session_id: paperSessionId,
         thread_id: threadId,
         status: "ready",
         upload_required: false,
@@ -29,6 +34,7 @@ describe("CPR papers existing PDF identity", function () {
   let original: typeof Zotero;
   let hasAttachment: boolean;
   let bestPath: string | false;
+  let bestContentType: string;
   let doi: string;
   let contents: Map<string, string>;
   let reads: string[];
@@ -41,13 +47,15 @@ describe("CPR papers existing PDF identity", function () {
     original = globalThis.Zotero;
     hasAttachment = true;
     bestPath = "/paper.pdf";
+    bestContentType = "application/pdf";
     doi = "10.1234/identity";
     contents = new Map([["/paper.pdf", "%PDF-A"], ["/selected.pdf", "%PDF-B"]]);
     reads = [];
     requests = [];
     const prefs = new Map<string, unknown>();
     const attachment = {
-      id: 8, parentID: 7, attachmentContentType: "application/pdf",
+      id: 8, parentID: 7,
+      get attachmentContentType() { return bestContentType; },
       isRegularItem: () => false, isAttachment: () => true,
       getFilePathAsync: async () => bestPath,
     };
@@ -70,7 +78,10 @@ describe("CPR papers existing PDF identity", function () {
       if (metadata.paper_pdf_sha256 && metadata.paper_pdf_sha256 !== hash("%PDF-A")) {
         return new Response(JSON.stringify({ error: { code: "paper_identity_conflict" } }), { status: 409 });
       }
-      return resolution({ paper_id: metadata.paper_id });
+      return resolution(
+        { paper_id: metadata.paper_id },
+        metadata.paper_session_id || "",
+      );
     };
     prepare = (overrides = {}) => prepareCprPaperRequest({
       itemId: 7, apiBase: TEST_API_BASE, apiKey: "fixture-only",
@@ -144,6 +155,17 @@ describe("CPR papers existing PDF identity", function () {
     contents.set("/paper.pdf", "this is not a PDF");
     await assert.rejects(prepare(), /有效的 PDF/);
     assert.equal(requests.length, 1);
+  });
+
+  it("rejects a ready remote paper when its local attachment is not a PDF", async function () {
+    bestContentType = "text/html";
+    await assert.rejects(prepare(), /没有 PDF 附件/);
+    assert.deepEqual(reads, []);
+    assert.equal(requests.length, 1);
+    assert.doesNotMatch(
+      JSON.stringify(requests[0]),
+      /paper_pdf_sha256/,
+    );
   });
 
   it("stops after a cancellation during the local read", async function () {
