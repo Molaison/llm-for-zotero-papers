@@ -495,7 +495,8 @@ describe("workflow: selected item context send", function () {
     );
     assert.isTrue(probe.expandedBeforeRerender, "card must expand on click");
     assert.isTrue(
-      probe.diagnostics.clickedCardConnectedBeforeRerender,
+      probe.diagnostics.clickedCardConnectedAtClick &&
+        probe.diagnostics.clickedCardConnectedBeforeRerender,
       `clicked card must still belong to the mounted message ${detail}`,
     );
     assert.isAtLeast(
