@@ -332,6 +332,28 @@ describe("workflow: dedicated native chat pane", function () {
       const details = win.document.getElementById("zotero-item-details");
       const section = details.querySelector(".llm-dedicated-chat-pane");
       const panel = () => section.querySelector("#llm-main");
+      const fixtureParentItemId = fixtures[0].parentItemId;
+      const fixturePdfAttachmentId = fixtures[0].pdfAttachmentId;
+      if (panel().dataset.conversationKind === "global")
+        pickMode(panel(), "paper");
+      await until(() => {
+        const current = panel();
+        const basePaperItemId = Number(current.dataset.basePaperItemId || 0);
+        const rawContextItemId = Number(current.dataset.rawContextItemId || 0);
+        const handlersInitialized = Number(
+          current.dataset.handlersInitialized || 0,
+        );
+        return (
+          current.dataset.conversationKind === "paper" &&
+          basePaperItemId === fixtureParentItemId &&
+          [fixtureParentItemId, fixturePdfAttachmentId].includes(
+            rawContextItemId,
+          ) &&
+          handlersInitialized > 0 &&
+          current.dataset.handlersInitialized ===
+            current.dataset.handlersAttached
+        );
+      }, `fresh paper panel for fixture ${fixtureParentItemId}/${fixturePdfAttachmentId}`);
       const previousKey = panel().dataset.itemId;
       const input = panel().querySelector("#llm-input");
       input.value = "Preserve the previous draft";
@@ -473,7 +495,7 @@ describe("workflow: dedicated native chat pane", function () {
       await win.ZoteroPane.selectItem(fixtures[0].parentItemId);
       await until(
         () => panel().dataset.itemId === previousKey,
-        "return to the original paper chat",
+        `return to the original paper chat; previousKey=${previousKey}; fixtures=${fixtures[0].parentItemId}/${fixtures[0].pdfAttachmentId}; current=${JSON.stringify(panel().dataset)}`,
       );
       assert.equal(
         panel().querySelector("#llm-input").value,
