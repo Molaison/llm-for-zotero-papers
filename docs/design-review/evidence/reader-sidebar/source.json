@@ -1,0 +1,20 @@
+{
+  "startedAt": "2026-10-28T05:55:35.302Z",
+  "commit": "24a43f91a9b661bf2a4ac25b12d88e35bc5611fc",
+  "sourceSha256": {
+    "addon/content/zoteroPane.css": "79ffb12c7537c5a0867ef4800f5ed784a045f6560949506ba8bd6eba9b4d2c54",
+    "src/modules/contextPanel/index.ts": "94cfe6b21bf711e2b6fe7652a5cce53c5c541474e2dda100b90692e0996ea393",
+    "src/modules/contextPanel/buildUI.ts": "7c4ee4e8186db1d154138ad925562c9a31e1a81b7e01dc9ab45b7d631f6dd732",
+    "src/modules/contextPanel/chat.ts": "f2abe7755a4cb8e01f96740b62dcff5396df938d84111928731a54aaef9f0175",
+    "src/modules/contextPanel/setupHandlers.ts": "8be81030026c9c1c7ed2ece9df8f159f819763da2ccdbd04da5548d263cb8e14",
+    "src/modules/contextPanel/dedicatedChatPane.ts": "04e589edd456643b6d807660ffd4ddf3e2882f952d1491aa06c6fe2a5ad029eb",
+    "src/modules/contextPanel/sidebarLayout.ts": "6e7b6d601f2fad905968ed12af6a21039b7079765c97cae1c075f813b52653c4",
+    "src/modules/contextPanel/readerPopupPanelRouting.ts": "9272981fa45b045b65d97e26ece9e6ed89623993133eb7c7039632608ae95632",
+    "src/modules/contextPanel/panelHostOwnership.ts": "f510095a21c0d586a3fb3ec0c8b0feac70f8c29cc51b5c068c987a0a94353b3a",
+    "src/modules/contextPanel/workflowTestHarness.ts": "33e2ed76d4be306389a8e861862c596ed38a1c050b9ecbc72b7fce12f5b33c05",
+    "src/modules/contextPanel/taskProgressReplay.ts": "aff03ebf85bfabe540df321f909078c4485cfd9e16144d9a5286c6e6ad96dd70",
+    "test-ui-reader/readerSidebar.workflow.test.ts": "61f7c53e274b08113ded5402dff4a415c46d3dd1a81277648f00545632faaa10",
+    "scripts/capture-reader-sidebar.mjs": "6b6254cbc2af72c6e202c6b8ccdfa8e14fe2e21eeab06d70e152ee7bfc19e5e8"
+  },
+  "validation": "Native isolated Zotero profile; real PDF reader and registered native sidebar; deterministic stored conversation; no live provider request"
+}

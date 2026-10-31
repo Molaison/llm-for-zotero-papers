@@ -111,6 +111,8 @@ body {
 .llm-task-progress-drawer { padding: 0 12px 10px; color: var(--muted); font-size: 11px; }
 .llm-input-section { display: flex; flex-direction: column; gap: 6px; }
 .llm-context-previews { flex-wrap: wrap; gap: 5px; min-height: 32px; }
+.llm-context-group-label { flex-basis: 100%; color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+.llm-context-group-label + .llm-context-group-label { margin-top: 4px; padding-top: 4px; border-top: 1px solid var(--border); }
 .llm-compose-area { display: flex; flex-direction: column; gap: 8px; padding: 9px; border-radius: 12px; box-shadow: 0 4px 14px rgb(23 35 52 / 7%); }
 .llm-input { width: 100%; min-height: 74px; resize: none; padding: 11px 12px; border: 1px solid var(--border); border-radius: 8px; color: var(--ink); background: var(--surface); font: inherit; font-size: 14px; }
 .llm-actions { justify-content: space-between; gap: 8px; padding-top: 7px; border-top: 1px solid var(--border); }

@@ -1,0 +1,157 @@
+{
+  "actualWidth": 500,
+  "actualHeight": 760,
+  "activeClass": "llm-standalone-search-delete",
+  "deleteRect": {
+    "x": 434,
+    "y": 195.1999969482422,
+    "width": 20,
+    "height": 20,
+    "top": 195.1999969482422,
+    "right": 454,
+    "bottom": 215.1999969482422,
+    "left": 434
+  },
+  "popupRect": {
+    "x": 25,
+    "y": 91.19999694824219,
+    "width": 450,
+    "height": 186.73333740234375,
+    "top": 91.19999694824219,
+    "right": 475,
+    "bottom": 277.93333435058594,
+    "left": 25
+  },
+  "display": "flex",
+  "opacity": "1",
+  "color": "rgb(158, 177, 255)",
+  "backgroundColor": "rgb(80, 15, 28)",
+  "outline": "rgb(67, 93, 177) solid 2px",
+  "focusOrderBefore": [
+    {
+      "tag": "input",
+      "className": "llm-standalone-search-input",
+      "text": "",
+      "rect": {
+        "x": 48,
+        "y": 114.80000305175781,
+        "width": 364,
+        "height": 18.800003051757812,
+        "top": 114.80000305175781,
+        "right": 412,
+        "bottom": 133.60000610351562,
+        "left": 48
+      }
+    },
+    {
+      "tag": "button",
+      "className": "llm-standalone-search-close",
+      "text": "×",
+      "rect": {
+        "x": 424,
+        "y": 108.19999694824219,
+        "width": 32,
+        "height": 32,
+        "top": 108.19999694824219,
+        "right": 456,
+        "bottom": 140.1999969482422,
+        "left": 424
+      }
+    },
+    {
+      "tag": "div",
+      "className": "llm-standalone-search-item",
+      "text": "PaperCheck the evidence for the retrieval claim.Retrieval-augmented generation f",
+      "rect": {
+        "x": 38,
+        "y": 188.1999969482422,
+        "width": 424,
+        "height": 72.73333740234375,
+        "top": 188.1999969482422,
+        "right": 462,
+        "bottom": 260.93333435058594,
+        "left": 38
+      }
+    },
+    {
+      "tag": "span",
+      "className": "llm-standalone-search-delete",
+      "text": "",
+      "rect": {
+        "x": 434,
+        "y": 195.1999969482422,
+        "width": 20,
+        "height": 20,
+        "top": 195.1999969482422,
+        "right": 454,
+        "bottom": 215.1999969482422,
+        "left": 434
+      }
+    }
+  ],
+  "focusOrderAfter": [
+    {
+      "tag": "input",
+      "className": "llm-standalone-search-input",
+      "text": "",
+      "rect": {
+        "x": 48,
+        "y": 114.80000305175781,
+        "width": 364,
+        "height": 18.800003051757812,
+        "top": 114.80000305175781,
+        "right": 412,
+        "bottom": 133.60000610351562,
+        "left": 48
+      }
+    },
+    {
+      "tag": "button",
+      "className": "llm-standalone-search-close",
+      "text": "×",
+      "rect": {
+        "x": 424,
+        "y": 108.19999694824219,
+        "width": 32,
+        "height": 32,
+        "top": 108.19999694824219,
+        "right": 456,
+        "bottom": 140.1999969482422,
+        "left": 424
+      }
+    },
+    {
+      "tag": "div",
+      "className": "llm-standalone-search-item",
+      "text": "PaperCheck the evidence for the retrieval claim.Retrieval-augmented generation f",
+      "rect": {
+        "x": 38,
+        "y": 188.1999969482422,
+        "width": 424,
+        "height": 72.73333740234375,
+        "top": 188.1999969482422,
+        "right": 462,
+        "bottom": 260.93333435058594,
+        "left": 38
+      }
+    },
+    {
+      "tag": "span",
+      "className": "llm-standalone-search-delete",
+      "text": "",
+      "rect": {
+        "x": 434,
+        "y": 195.1999969482422,
+        "width": 20,
+        "height": 20,
+        "top": 195.1999969482422,
+        "right": 454,
+        "bottom": 215.1999969482422,
+        "left": 434
+      }
+    }
+  ],
+  "stableFocusSet": true,
+  "focusSetMethod": "Diagnostic A/B comparison; baseline focus-within growth is recorded rather than forced to fail",
+  "method": "Real filtered search result and focused Delete; action not activated"
+}

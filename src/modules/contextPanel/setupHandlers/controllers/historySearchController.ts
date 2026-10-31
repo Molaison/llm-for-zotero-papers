@@ -1,5 +1,7 @@
 import { createElement } from "../../../../utils/domHelpers";
 import { sanitizeText } from "../../../../utils/textSanitization";
+import { marked, type Token, type Tokens } from "marked";
+import { parseFragment, type DefaultTreeAdapterMap } from "parse5";
 import type { ConversationHistoryEntry } from "./conversationHistoryController";
 import { formatHistoryRowDisplayTitle } from "./conversationHistoryController";
 
@@ -191,11 +193,85 @@ function scoreHistorySearchCandidate(
   return { matchCount, firstIndex };
 }
 
+/** Presentation only: searchable candidates and their scores stay untouched. */
+function historyPreviewPlainText(source: string): string {
+  const literals: string[] = [];
+  let marker = "LLMFORZOTEROMATH";
+  while (source.includes(marker)) marker += "X";
+  const protectedSource = source.replace(
+    /\$\$[\s\S]*?\$\$|\$[^\n$]+\$|\\\([\s\S]*?\\\)|\\\[[\s\S]*?\\\]/g,
+    (literal) => `${marker}${literals.push(literal) - 1}END`,
+  );
+  const htmlText = (value: string): string => {
+    const read = (node: DefaultTreeAdapterMap["node"]): string => {
+      if ("value" in node) return node.value;
+      if ("tagName" in node && /^(script|style|template)$/.test(node.tagName)) {
+        return "";
+      }
+      const text =
+        "childNodes" in node ? node.childNodes.map(read).join("") : "";
+      return "tagName" in node && /^(br|p|div|li|tr)$/.test(node.tagName)
+        ? `${text} `
+        : text;
+    };
+    return read(parseFragment(value));
+  };
+  const readTokens = (tokens: Token[]): string =>
+    tokens
+      .map((token) => {
+        if (token.type === "code") return `${token.text} `;
+        if (token.type === "codespan") return token.text;
+        if (
+          token.type === "space" ||
+          token.type === "br" ||
+          token.type === "hr"
+        ) {
+          return " ";
+        }
+        if (token.type === "def") return "";
+        if (token.type === "list") return readTokens(token.items);
+        if (token.type === "table") {
+          const table = token as Tokens.Table;
+          return [table.header, ...table.rows]
+            .map((row) => row.map((cell) => readTokens(cell.tokens)).join(" "))
+            .join(" ");
+        }
+        const children = "tokens" in token ? token.tokens : undefined;
+        const text = Array.isArray(children)
+          ? readTokens(children)
+          : htmlText(
+              "text" in token && typeof token.text === "string"
+                ? token.text
+                : token.raw,
+            );
+        return /^(paragraph|heading|blockquote|list_item)$/.test(token.type)
+          ? `${text} `
+          : text;
+      })
+      .join("");
+  try {
+    const text = readTokens(marked.lexer(protectedSource));
+    return text.replace(
+      new RegExp(`${marker}(\\d+)END`, "g"),
+      (_match, index) => literals[Number(index)] ?? _match,
+    );
+  } catch {
+    return source;
+  }
+}
+
 export function buildHistorySearchPreview(
   text: string,
   searchTokens: string[],
 ): { previewText: string; previewRanges: HistorySearchRange[] } {
-  const normalizedText = normalizeHistorySearchText(text);
+  const rawText = normalizeHistorySearchText(text);
+  const plainText = normalizeHistorySearchText(historyPreviewPlainText(text));
+  // A query for a URL or literal Markdown syntax should still explain its
+  // raw-text match even when that syntax has no plain-text representation.
+  const normalizedText = collectHistorySearchRanges(plainText, searchTokens)
+    .length
+    ? plainText
+    : rawText;
   if (!normalizedText) {
     return { previewText: "", previewRanges: [] };
   }

@@ -1,0 +1,20 @@
+{
+  "startedAt": "2026-10-28T05:08:56.991Z",
+  "commit": "e4a48700f873963d59d4cc0d3c2f563b1cd5e7cb",
+  "sourceSha256": {
+    "addon/content/zoteroPane.css": "79ffb12c7537c5a0867ef4800f5ed784a045f6560949506ba8bd6eba9b4d2c54",
+    "src/modules/contextPanel/buildUI.ts": "7c4ee4e8186db1d154138ad925562c9a31e1a81b7e01dc9ab45b7d631f6dd732",
+    "src/modules/contextPanel/chat.ts": "f2abe7755a4cb8e01f96740b62dcff5396df938d84111928731a54aaef9f0175",
+    "src/modules/contextPanel/standaloneWindow.ts": "d8447cac7af9c328821f30c238250f7b870865d422d768b35f60d0e6795a5fd2",
+    "src/modules/contextPanel/setupHandlers.ts": "8be81030026c9c1c7ed2ece9df8f159f819763da2ccdbd04da5548d263cb8e14",
+    "src/modules/contextPanel/setupHandlers/controllers/actionLayoutController.ts": "49738bbd9c5f8723e81ab20d18273f15df0dd9a24789ba69b31b84b10f7287b4",
+    "src/modules/contextPanel/setupHandlers/controllers/historyLifecycleController.ts": "b70e22e9685eba5ff24998b3ff1103ce62aaf8584613f9b1d4aaaa47ae60a631",
+    "src/modules/contextPanel/setupHandlers/controllers/historySearchController.ts": "115c5f5a21aeef3e66301ea6da7c1d47122784bcf2fec0fc74f638558abc64e7",
+    "src/modules/contextPanel/setupHandlers/controllers/historySearchPopupController.ts": "7299592dbdf1b588b0516547be9efcfb10783c70a2e83924922c36da39b5ae7e",
+    "src/modules/contextPanel/workflowTestHarness.ts": "33e2ed76d4be306389a8e861862c596ed38a1c050b9ecbc72b7fce12f5b33c05",
+    "src/modules/contextPanel/workflowTestTypes.ts": "c3dfe65851b5b242cb3a8914c1cd3ed1a208a709c7c24682a490ac5a2c3b9370",
+    "src/utils/i18n.ts": "29aff6af7f98b9a2184abce2ed80e6d5c4391d9c9da01b9e248fa82a626115f1",
+    "test-ui-redesign/uiRedesign.workflow.test.ts": "66c070656108318a85642db598fe2311069e4b83ab9b144dca00b7f6a0bb7c03"
+  },
+  "validation": "Native isolated Zotero profile; deterministic local fixtures; no live provider request"
+}

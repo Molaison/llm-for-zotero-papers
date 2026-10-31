@@ -1,0 +1,14 @@
+{
+  "startedAt": "2026-10-28T04:16:11.020Z",
+  "commit": "51c574544d860b670fb34000717c78f829e81f6e",
+  "sourceSha256": {
+    "addon/content/zoteroPane.css": "fb499c3f2ca9b686bfa9b9fd1d0ca9eb34cdf36c52ff6801c6dac3875b9dcdf6",
+    "src/modules/contextPanel/buildUI.ts": "81b523433042398da4132faf1d6466835dacda87103b39b2d2f7175b5813061a",
+    "src/modules/contextPanel/chat.ts": "aa7067067c6a6aba10cef37314b6bc9748a48564447324ae4d0b66b3badc70f2",
+    "src/modules/contextPanel/standaloneWindow.ts": "d99dd58be4b44ddedff85bbefe0749e74c224fe1260c90ab0456bbeb0fdb9b0d",
+    "src/modules/contextPanel/setupHandlers.ts": "8bfb5eddfe14de99bb88f884f34fb11163514714197462c488a5a97883df905f",
+    "src/utils/i18n.ts": "cddffbb7b5d8b88d8d8dd19855d909adc3b721e1bf0ad3d7aac3e199294de4c3",
+    "test-ui-redesign/uiRedesign.workflow.test.ts": "736af79bdce711c63023fffe0cf3ab3eaff6a3346ea94bcba8152b1fccceada4"
+  },
+  "validation": "Native isolated Zotero profile; deterministic local fixtures; no live provider request"
+}

@@ -37,6 +37,7 @@ import {
   getWebChatWelcomeHtml,
   getStandaloneLibraryChatStartPageHtml,
   getPaperChatStartPageHtml,
+  getNoPaperStartPageHtml,
   getNoteEditingStartPageHtml,
 } from "../../utils/i18n";
 import {
@@ -534,6 +535,8 @@ async function awaitPendingTurnFinalize(
 }
 
 const blockedConversationLoadKeys = new Set<number>();
+// Presentation-only evidence of the existing history-load error callback.
+const conversationHistoryLoadErrors = new Set<number>();
 type AgentRunTraceLoader = typeof getAgentRunTrace;
 let agentRunTraceLoader: AgentRunTraceLoader = getAgentRunTrace;
 
@@ -574,6 +577,7 @@ function isolateWebChatConversationKey(
     chatHistory.set(key, []);
   }
   blockedConversationLoadKeys.delete(key);
+  conversationHistoryLoadErrors.delete(key);
   loadedConversationKeys.add(key);
 }
 
@@ -2377,6 +2381,7 @@ export async function replaceCurrentPaperChat(params: {
   chatHistory.set(conversationKey, stored.map(toPanelMessage));
   loadedConversationKeys.add(conversationKey);
   blockedConversationLoadKeys.delete(conversationKey);
+  conversationHistoryLoadErrors.delete(conversationKey);
   // Rendering the chat alone leaves the live draft, attachments and model controls intact.
   refreshChat(body, item);
 }
@@ -2409,6 +2414,7 @@ export async function restoreCurrentPaperChat(params: {
   chatHistory.set(conversationKey, stored.map(toPanelMessage));
   loadedConversationKeys.add(conversationKey);
   blockedConversationLoadKeys.delete(conversationKey);
+  conversationHistoryLoadErrors.delete(conversationKey);
   refreshChat(body, item);
 }
 
@@ -2597,6 +2603,7 @@ export async function ensureConversationLoaded(
         });
       }
       blockedConversationLoadKeys.delete(conversationKey);
+      conversationHistoryLoadErrors.delete(conversationKey);
       chatHistory.set(conversationKey, panelMessages);
       validateLoadedConversationQuoteMessages(panelMessages, conversationKey);
       await loadConversationForkLinkCache(conversationKey, loadGeneration);
@@ -2621,6 +2628,7 @@ export async function ensureConversationLoaded(
       if (!chatHistory.has(conversationKey)) {
         chatHistory.set(conversationKey, []);
       }
+      conversationHistoryLoadErrors.add(conversationKey);
       conversationForkLinks.delete(conversationKey);
       shouldMarkLoaded = true;
     } finally {
@@ -10472,7 +10480,7 @@ export function refreshChat(
     resolvePaperContextDisplayRef(paperContext, paperContextDisplayCache);
 
   if (!item) {
-    chatBox.innerHTML = getPaperChatStartPageHtml();
+    chatBox.innerHTML = getNoPaperStartPageHtml();
     const panelRoot = body.querySelector("#llm-main") as HTMLElement | null;
     if (panelRoot) panelRoot.dataset.startPageActive = "true";
     writeChatScrollTop(chatBox, 0);
@@ -10555,6 +10563,62 @@ export function refreshChat(
   }
 
   if (history.length === 0) {
+    const historyLoadFailed =
+      conversationHistoryLoadErrors.has(conversationKey);
+    const historyScopeBlocked =
+      blockedConversationLoadKeys.has(conversationKey);
+    const historyLoading = loadingConversationTasks.has(conversationKey);
+    if (historyLoadFailed || historyScopeBlocked || historyLoading) {
+      // A failed read is not an empty conversation. Keep recovery local to
+      // history loading and retain the existing source/conversation identity.
+      chatBox.replaceChildren();
+      const notice = doc.createElement("div");
+      notice.className = "llm-start-page";
+      notice.setAttribute("role", historyLoading ? "status" : "alert");
+      const message = doc.createElement("p");
+      message.className = "llm-start-page-subtitle";
+      message.textContent = historyLoading
+        ? t("Loading conversation…")
+        : historyScopeBlocked
+          ? t(
+              "This conversation is unavailable for the selected paper. Choose another conversation from History.",
+            )
+          : t(
+              "Could not load this conversation. Retry to recover your history.",
+            );
+      notice.appendChild(message);
+      if (historyLoadFailed && !historyLoading && !historyScopeBlocked) {
+        const retry = doc.createElementNS(
+          HTML_NS,
+          "button",
+        ) as HTMLButtonElement;
+        retry.type = "button";
+        retry.className = "llm-action-btn llm-action-btn-secondary";
+        retry.textContent = t("Retry loading conversation");
+        retry.addEventListener("click", async () => {
+          if (!isPanelConversationCurrent(body, item)) return;
+          retry.disabled = true;
+          loadedConversationKeys.delete(conversationKey);
+          chatHistory.delete(conversationKey);
+          conversationHistoryLoadErrors.delete(conversationKey);
+          notice.setAttribute("role", "status");
+          message.textContent = t("Loading conversation…");
+          try {
+            await ensureConversationLoaded(item);
+          } catch (error) {
+            conversationHistoryLoadErrors.add(conversationKey);
+            appLogger.warn("LLM: Failed to retry chat history loading", error);
+          } finally {
+            refreshChat(body, item);
+          }
+        });
+        notice.appendChild(retry);
+      }
+      chatBox.appendChild(notice);
+      if (panelRoot) panelRoot.dataset.startPageActive = "true";
+      syncConversationTurnNavigator(body, [], { conversationKey });
+      return;
+    }
     // [webchat] Show webchat-specific welcome instead of generic instructions
     const effectiveRequestConfig = resolveEffectiveRequestConfig({ item });
     if (effectiveRequestConfig.providerProtocol === "web_sync") {
@@ -10640,6 +10704,11 @@ export function refreshChat(
     if (useTargetedRerender && !targetedMessageWrappers.has(msg)) {
       continue;
     }
+    // The answer can be moved into the new wrapper and re-rendered below.
+    // Capture reader state while the original cards still exist.
+    const expandedQuoteCards = useTargetedRerender
+      ? collectExpandedQuoteCardKeys(targetedMessageWrappers.get(msg))
+      : new Set<string>();
     const isUser = msg.role === "user";
     const assistantPairMsg = history[index + 1];
     const hasAssistantPair = isUser && assistantPairMsg?.role === "assistant";
@@ -11864,17 +11933,25 @@ export function refreshChat(
 
       if (
         index === latestAssistantIndex &&
-        msg.text.trim() &&
+        (msg.text.trim() || msg.interrupted || assistantFailureTitle(msg)) &&
         msg.runMode !== "agent" &&
         renderProviderProtocol !== "web_sync" // [webchat] no retry in webchat mode
       ) {
-        appendMessageMetaActionButton({
+        const retry = appendMessageMetaActionButton({
           body,
           doc,
           actions,
           className: "llm-message-action-retry llm-retry-latest",
           title: "Retry response with another model",
         });
+        if (msg.interrupted || assistantFailureTitle(msg)) {
+          // Preserve the same delegated model-picker action; only make its
+          // recovery purpose visible instead of hiding it inside More.
+          retry.classList.add("llm-recovery-action");
+          retry.textContent = t("Retry…");
+          retry.title = t("Choose a model to retry");
+          retry.setAttribute("aria-label", retry.title);
+        }
       }
 
       if (actionContent && actionUserTimestamp > 0) {
@@ -11961,26 +12038,27 @@ export function refreshChat(
       more.className = "llm-answer-more";
       const summary = doc.createElement("summary");
       summary.textContent = "…";
-      summary.title = "回答操作";
-      summary.setAttribute("aria-label", "回答操作");
+      summary.title = t("Response actions");
+      summary.setAttribute("aria-label", t("Response actions"));
       const menu = doc.createElement("div");
       menu.className = "llm-answer-more-body";
       const actions = meta.querySelector<HTMLElement>(".llm-message-actions");
       for (const action of Array.from(actions?.children || [])) {
         if (
           action.classList.contains("llm-message-action-copy") ||
-          action.classList.contains("llm-message-action-note")
+          action.classList.contains("llm-message-action-note") ||
+          action.classList.contains("llm-recovery-action")
         )
           continue;
         const button = action as HTMLElement;
         button.textContent = button.classList.contains(
           "llm-message-action-retry",
         )
-          ? "选择模型重试"
+          ? t("Retry with another model")
           : button.classList.contains("llm-message-action-fork")
-            ? "分支对话"
+            ? t("Fork this turn")
             : button.classList.contains("llm-message-action-delete")
-              ? "删除此轮"
+              ? t("Delete this turn")
               : button.title;
         menu.append(button);
       }
@@ -11989,16 +12067,14 @@ export function refreshChat(
       more.append(summary, menu);
       attachAnswerMoreMenu(body, more, summary, menu);
       (actions || meta).append(more);
-      if (msg.runMode !== "agent") {
+      const failureTitle = assistantFailureTitle(msg);
+      if (msg.runMode !== "agent" && failureTitle) {
         const label = doc.createElement("div");
         label.className = "llm-answer-label";
-        const failureTitle = assistantFailureTitle(msg);
-        label.textContent = failureTitle || "回答";
+        label.textContent = failureTitle;
         bubble.insertBefore(label, bubble.firstChild);
-        if (failureTitle) {
-          bubble.classList.add("llm-answer-error");
-          label.setAttribute("role", "alert");
-        }
+        bubble.classList.add("llm-answer-error");
+        label.setAttribute("role", "alert");
       }
     }
 
@@ -12084,7 +12160,7 @@ export function refreshChat(
       interruptedRow.className = "llm-message-interrupted-row";
       const note = doc.createElement("span") as HTMLSpanElement;
       note.className = "llm-message-interrupted-note";
-      note.textContent = `⚠ ${getStreamInterruptionLabel()}`;
+      note.textContent = `⚠ ${t(getStreamInterruptionLabel())}`;
       interruptedRow.appendChild(note);
     }
 
@@ -12176,9 +12252,6 @@ export function refreshChat(
         ".llm-assistant-answer",
       );
       if (previousAnswer) disposeStreamingMarkdown(previousAnswer);
-      const expandedQuoteCards = collectExpandedQuoteCardKeys(
-        existingTargetedWrapper,
-      );
       // A completed ordinary Chat turn is no longer a streaming view.
       // Do not retain its retired wrapper when a targeted refresh finalizes it.
       const mounted = mountedAssistantViews.get(chatBox);

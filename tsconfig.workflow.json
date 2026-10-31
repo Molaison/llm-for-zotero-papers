@@ -8,6 +8,8 @@
     "src",
     "typings",
     "test-workflows",
+    "test-ui-redesign",
+    "test-ui-reader",
     "test-live-loop",
     "test-live-mineru"
   ]

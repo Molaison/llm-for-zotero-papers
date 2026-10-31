@@ -1,0 +1,22 @@
+{
+  "method": "Actual mounted production embedded panel; native drawWindow crop",
+  "componentOnly": true,
+  "excludedFromProductAB": true,
+  "initialization": "buildUI(null) + refreshChat(null); no setupHandlers or dedicated ancestor; not a demonstrated user entry",
+  "width": 380,
+  "height": 760,
+  "panelScrollWidth": 380,
+  "panelClientWidth": 380,
+  "menu": {
+    "x": 8,
+    "y": 113,
+    "width": 364,
+    "height": 445,
+    "top": 113,
+    "right": 372,
+    "bottom": 558,
+    "left": 8
+  },
+  "menuText": "选择一篇论文或打开 PDF，开始讨论。",
+  "diagnostics": null
+}

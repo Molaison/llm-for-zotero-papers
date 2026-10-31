@@ -32,6 +32,7 @@ import { createSidebarModeSwitch } from "./sidebarModeSwitch";
 import { buildContextUsagePresentation } from "./textUtils";
 import { createChatLatestButton } from "./chatLatestButton";
 import { createTaskProgressCurtain } from "./taskProgress/view";
+import { conversationScopeLabel } from "./standaloneTabLabel";
 
 function createActionDropdown(doc: Document, spec: ActionDropdownSpec) {
   const slot = createElement(
@@ -78,7 +79,8 @@ function readScopeIdentity(item: Zotero.Item | null | undefined): {
     }
   };
   return {
-    title: readField("title") ||
+    title:
+      readField("title") ||
       (typeof candidate.title === "string" ? candidate.title.trim() : ""),
     creator: readField("firstCreator"),
     year: readField("year"),
@@ -213,13 +215,13 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
     doc,
     {
       activeTab: chatModeToggle.activeTab,
-      paperLabel: t(chatModeToggle.paperTabLabel),
-      libraryLabel: t(chatModeToggle.libraryTabLabel),
+      paperLabel: t(conversationScopeLabel(chatModeToggle.paperTabLabel)),
+      libraryLabel: t("Library"),
       disabled: chatModeToggle.disabled,
     },
     {
       ariaLabel: t("Chat mode"),
-      fitLabels: [t("Paper chat"), t("Library chat"), t("Note chat")],
+      fitLabels: [t("Paper"), t("Library"), t("Note"), t("Web chat")],
     },
   );
 
@@ -265,15 +267,11 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
     return button;
   };
   chatModeTabs.append(
-    createChatModeTab(
-      "library",
-      "llm-library-chat-tab",
-      "Chat",
-    ),
+    createChatModeTab("library", "llm-library-chat-tab", t("Library")),
     createChatModeTab(
       "paper",
       "llm-paper-chat-tab",
-      activeNoteSession ? t(chatModeToggle.paperTabLabel) : "Papers",
+      t(conversationScopeLabel(chatModeToggle.paperTabLabel)),
     ),
   );
 
@@ -326,6 +324,7 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
     },
   );
   exportBtn.setAttribute("aria-label", t("Export"));
+  exportBtn.setAttribute("aria-haspopup", "menu");
   const clearBtn = createElement(doc, "button", "llm-btn-icon llm-clear-btn", {
     id: "llm-clear",
     type: "button",
@@ -359,22 +358,69 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
   restoreHistoryBtn.style.display = "none";
   // Less frequent conversation tools share one native disclosure; their IDs
   // and handlers remain the same, including settings, pop-out and runtime systems.
-  const conversationTools = createElement(doc, "details", "llm-conversation-tools", {
-    id: "llm-conversation-tools",
-  });
+  const conversationTools = createElement(
+    doc,
+    "details",
+    "llm-conversation-tools",
+    {
+      id: "llm-conversation-tools",
+    },
+  );
   const toolsSummary = createElement(doc, "summary", undefined, {
     textContent: "…",
-    title: "更多",
+    title: t("More actions"),
   });
-  toolsSummary.setAttribute("aria-label", "更多");
+  toolsSummary.setAttribute("aria-label", t("More actions"));
+  toolsSummary.setAttribute("aria-controls", "llm-conversation-tools-body");
+  toolsSummary.setAttribute("aria-expanded", "false");
   const toolsBody = createElement(doc, "div", "llm-conversation-tools-body");
+  toolsBody.id = "llm-conversation-tools-body";
   toolsBody.setAttribute("role", "group");
-  toolsBody.setAttribute("aria-label", t("Context actions"));
-  for (const tool of [popoutBtn, settingsBtn, remoteHistoryBtn, restoreHistoryBtn, exportBtn, clearBtn]) {
+  toolsBody.setAttribute("aria-label", t("Conversation controls"));
+  for (const tool of [
+    popoutBtn,
+    settingsBtn,
+    remoteHistoryBtn,
+    restoreHistoryBtn,
+    exportBtn,
+    clearBtn,
+  ]) {
     tool.textContent = tool.getAttribute("aria-label") || tool.title;
   }
-  toolsBody.append(popoutBtn, settingsBtn, remoteHistoryBtn, restoreHistoryBtn, exportBtn, clearBtn, runtimeSystemControls.group);
+  toolsBody.append(
+    popoutBtn,
+    settingsBtn,
+    remoteHistoryBtn,
+    restoreHistoryBtn,
+    exportBtn,
+    clearBtn,
+    runtimeSystemControls.group,
+  );
   conversationTools.append(toolsSummary, toolsBody);
+  conversationTools.addEventListener("toggle", () => {
+    toolsSummary.setAttribute("aria-expanded", String(conversationTools.open));
+  });
+  container.addEventListener("mousedown", (event: MouseEvent) => {
+    if (
+      conversationTools.open &&
+      !conversationTools.contains(event.target as Node)
+    ) {
+      conversationTools.open = false;
+    }
+  });
+  toolsBody.addEventListener("click", (event: MouseEvent) => {
+    const target = event.target as Element | null;
+    // Controls with their own menus keep the disclosure open while picking.
+    const button = target?.closest("button");
+    if (
+      !button ||
+      button.getAttribute("aria-haspopup") ||
+      button.closest(".llm-shortcuts-disclosure, .llm-permission-control")
+    )
+      return;
+    conversationTools.open = false;
+    toolsSummary.focus({ preventScroll: true });
+  });
   conversationTools.addEventListener("keydown", (event: KeyboardEvent) => {
     if (event.key !== "Escape" || !conversationTools.open) return;
     event.preventDefault();
@@ -403,8 +449,10 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
       : hasItem
         ? "paper"
         : "empty";
-  scopeBar.dataset.itemId = conversationItemId > 0 ? `${conversationItemId}` : "";
-  scopeBar.dataset.basePaperItemId = basePaperItemId > 0 ? `${basePaperItemId}` : "";
+  scopeBar.dataset.itemId =
+    conversationItemId > 0 ? `${conversationItemId}` : "";
+  scopeBar.dataset.basePaperItemId =
+    basePaperItemId > 0 ? `${basePaperItemId}` : "";
   scopeBar.setAttribute("role", "group");
   scopeBar.setAttribute("aria-label", t("Conversation scope"));
   const scopeIcon = createElement(doc, "span", "llm-scope-icon");
@@ -412,14 +460,15 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
   const scopeCopy = createElement(doc, "span", "llm-scope-copy");
   const scopeKind = createElement(doc, "span", "llm-scope-kind", {
     textContent: activeNoteSession
-      ? t("Note chat")
+      ? t("Note")
       : isGlobalMode
-        ? t("Library chat")
+        ? t("Library")
         : hasItem
-          ? t("Paper chat")
+          ? t("Paper")
           : t("Ready to chat"),
   });
-  const scopeTitleText = activeNoteSession?.title ||
+  const scopeTitleText =
+    activeNoteSession?.title ||
     (isGlobalMode ? t("Your Zotero library") : scopeIdentity.title) ||
     (hasItem ? t("Selected paper") : t("Select a paper or open a PDF"));
   const scopeTitle = createElement(doc, "span", "llm-scope-title", {
@@ -429,7 +478,7 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
   scopeTitle.title = scopeTitleText;
   const scopeMetaText = [scopeIdentity.creator, scopeIdentity.year]
     .filter(Boolean)
-    .join(" · ");
+    .join(", ");
   const scopeMeta = createElement(doc, "span", "llm-scope-meta", {
     id: "llm-scope-meta",
     textContent: scopeMetaText,
@@ -438,6 +487,12 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
   scopeCopy.append(scopeKind, scopeTitle, scopeMeta);
   scopeBar.append(scopeIcon, scopeCopy);
   header.appendChild(scopeBar);
+  const scopeAvailability = createElement(doc, "p", "llm-scope-availability", {
+    id: "llm-scope-availability",
+    textContent: t("Library scope is unavailable in this conversation."),
+  });
+  scopeAvailability.hidden = !chatModeToggle.disabled;
+  header.appendChild(scopeAvailability);
   const historyMenu = createElement(doc, "div", "llm-history-menu", {
     id: "llm-history-menu",
   });
@@ -491,7 +546,7 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
 
   container.appendChild(header);
 
-  header.setAttribute("aria-label", t("Conversation history"));
+  header.setAttribute("aria-label", t("Conversation controls"));
 
   // Chat display area
   const chatShell = createElement(doc, "div", "llm-chat-shell", {
@@ -520,7 +575,9 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
     chatResizeHandle.setAttribute("aria-hidden", "true");
     chatShell.appendChild(chatResizeHandle);
   }
-  const workspace = createElement(doc, "div", "llm-reading-workspace", { id: "llm-reading-workspace" });
+  const workspace = createElement(doc, "div", "llm-reading-workspace", {
+    id: "llm-reading-workspace",
+  });
   workspace.dataset.view = "reading";
   workspace.append(chatShell);
   container.appendChild(workspace);
@@ -529,11 +586,18 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
   const shortcutsRow = createElement(doc, "div", "llm-shortcuts", {
     id: "llm-shortcuts",
   });
-  const shortcutsDisclosure = createElement(doc, "details", "llm-shortcuts-disclosure", {
-    id: "llm-shortcuts-disclosure",
-  });
+  const shortcutsDisclosure = createElement(
+    doc,
+    "details",
+    "llm-shortcuts-disclosure",
+    {
+      id: "llm-shortcuts-disclosure",
+    },
+  );
   shortcutsDisclosure.append(
-    createElement(doc, "summary", undefined, { textContent: "快捷提问" }),
+    createElement(doc, "summary", undefined, {
+      textContent: t("Quick questions"),
+    }),
     shortcutsRow,
   );
   toolsBody.appendChild(shortcutsDisclosure);
@@ -772,6 +836,7 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
       disabled: !hasItem,
     },
   );
+  runtimeModeBtn.dataset.contextGroup = "current";
   runtimeModeBtn.setAttribute("aria-label", t("Switch to Agent mode"));
   runtimeModeBtn.setAttribute("aria-pressed", "false");
   runtimeModeBtn.dataset.location = "composer-context-tray";
@@ -799,13 +864,43 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
     },
   );
   selectedContextList.style.display = "none";
-  contextPreviews.dataset.scope = isGlobalMode ? "library" : hasItem ? "paper" : "empty";
+  selectedContextList.dataset.contextGroup = "added";
+  const currentContextLabel = createElement(
+    doc,
+    "span",
+    "llm-context-group-label",
+    { textContent: t("Current context") },
+  );
+  currentContextLabel.dataset.contextGroup = "current";
+  currentContextLabel.setAttribute("aria-hidden", "true");
+  currentContextLabel.hidden = !hasItem;
+  const addedContextLabel = createElement(
+    doc,
+    "span",
+    "llm-context-group-label",
+    { textContent: t("Add context") },
+  );
+  addedContextLabel.dataset.contextGroup = "add";
+  addedContextLabel.setAttribute("aria-hidden", "true");
+  addedContextLabel.hidden = !hasItem;
+  contextPreviews.dataset.scope = isGlobalMode
+    ? "library"
+    : hasItem
+      ? "paper"
+      : "empty";
   contextPreviews.dataset.hasPaperContext = hasPaperContext ? "true" : "false";
-  contextPreviews.setAttribute("aria-label", t("Current context and context actions"));
+  contextPreviews.setAttribute(
+    "aria-label",
+    t("Current context and context actions"),
+  );
   // Agent mode is a composer concern: keep the same node and ID, but make it
   // visible beside the context chips instead of hiding it in the header menu.
-  contextPreviews.appendChild(runtimeModeBtn);
-  contextPreviews.appendChild(selectedContextList);
+  contextPreviews.append(
+    currentContextLabel,
+    runtimeModeBtn,
+    selectedContextList,
+    addedContextLabel,
+  );
 
   const paperPreview = createElement(doc, "div", "llm-paper-context-inline", {
     id: "llm-paper-context-preview",
@@ -820,34 +915,69 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
     },
   );
   paperPreview.append(paperPreviewList);
-  const sourceControl = createElement(doc, "details", "llm-source-control", { id: "llm-source-control" });
-  sourceControl.hidden = true;
-  const sourceToggle = createElement(doc, "summary", "llm-toolbar-icon llm-source-toggle", {
-    title: "论文来源", id: "llm-source-toggle",
+  const sourceControl = createElement(doc, "details", "llm-source-control", {
+    id: "llm-source-control",
   });
-  sourceToggle.setAttribute("aria-label", "论文来源");
+  sourceControl.hidden = true;
+  const sourceToggle = createElement(
+    doc,
+    "summary",
+    "llm-toolbar-icon llm-source-toggle",
+    {
+      title: t("Paper sources"),
+      id: "llm-source-toggle",
+    },
+  );
+  sourceToggle.setAttribute("aria-label", t("Paper sources"));
+  sourceToggle.setAttribute("aria-controls", "llm-paper-context-preview");
+  sourceToggle.setAttribute("aria-expanded", "false");
   const sourceBody = createElement(doc, "div", "llm-source-body");
   sourceBody.append(paperPreview);
-  const paperHeading = createElement(doc, "span", "llm-paper-heading", { id: "llm-paper-heading", textContent: "论文来源" });
-  const paperMode = createElement(doc, "span", "llm-paper-mode", { id: "llm-paper-mode" });
+  const paperHeading = createElement(doc, "span", "llm-paper-heading", {
+    id: "llm-paper-heading",
+    textContent: t("Paper sources"),
+  });
+  const paperMode = createElement(doc, "span", "llm-paper-mode", {
+    id: "llm-paper-mode",
+  });
   sourceToggle.append(paperHeading, paperMode);
   sourceControl.append(sourceToggle, sourceBody);
-  const paperBar = createElement(doc, "div", "llm-paper-bar", { id: "llm-paper-bar" });
+  const paperBar = createElement(doc, "div", "llm-paper-bar", {
+    id: "llm-paper-bar",
+  });
   paperBar.hidden = true;
   paperBar.append(sourceControl);
-  header.append(paperBar);
-  const sourceShortcut = createElement(doc, "button", "llm-toolbar-icon llm-source-shortcut", {
-    id: "llm-source-shortcut", type: "button", title: "论文来源",
-  });
-  sourceShortcut.setAttribute("aria-label", "论文来源");
+  contextPreviews.prepend(paperBar);
+  const sourceShortcut = createElement(
+    doc,
+    "button",
+    "llm-toolbar-icon llm-source-shortcut",
+    {
+      id: "llm-source-shortcut",
+      type: "button",
+      title: t("Paper sources"),
+    },
+  );
+  sourceShortcut.setAttribute("aria-label", t("Paper sources"));
+  sourceShortcut.setAttribute("aria-hidden", "true");
+  sourceShortcut.tabIndex = -1;
   sourceShortcut.setAttribute("aria-controls", "llm-source-control");
   sourceShortcut.setAttribute("aria-expanded", "false");
   sourceShortcut.hidden = true;
-  sourceShortcut.addEventListener("click", () => { sourceControl.open = !sourceControl.open; if (sourceControl.open) sourceToggle.focus({preventScroll: true}); });
-  sourceControl.addEventListener("toggle", () => sourceShortcut.setAttribute("aria-expanded", String(sourceControl.open)));
+  sourceShortcut.addEventListener("click", () => {
+    sourceControl.open = !sourceControl.open;
+    if (sourceControl.open) sourceToggle.focus({ preventScroll: true });
+  });
+  sourceControl.addEventListener("toggle", () => {
+    sourceShortcut.setAttribute("aria-expanded", String(sourceControl.open));
+    sourceToggle.setAttribute("aria-expanded", String(sourceControl.open));
+  });
   sourceControl.addEventListener("keydown", (event: KeyboardEvent) => {
     if (event.key === "Escape" && sourceControl.open) {
-      event.preventDefault(); event.stopPropagation(); sourceControl.open = false; sourceToggle.focus();
+      event.preventDefault();
+      event.stopPropagation();
+      sourceControl.open = false;
+      sourceToggle.focus();
     }
   });
 
@@ -855,6 +985,7 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
   const imagePreview = createElement(doc, "div", "llm-image-preview", {
     id: "llm-image-preview",
   });
+  imagePreview.dataset.contextGroup = "added";
   imagePreview.style.display = "none";
 
   const imagePreviewMeta = createElement(
@@ -868,6 +999,7 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
       title: t("Expand figures"),
     },
   );
+  imagePreviewMeta.setAttribute("aria-label", t("Expand figures"));
   const imagePreviewHeader = createElement(
     doc,
     "div",
@@ -922,6 +1054,7 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
   const filePreview = createElement(doc, "div", "llm-image-preview", {
     id: "llm-file-context-preview",
   });
+  filePreview.dataset.contextGroup = "added";
   filePreview.style.display = "none";
   const filePreviewMeta = createElement(
     doc,
@@ -934,6 +1067,7 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
       title: t("Expand files"),
     },
   );
+  filePreviewMeta.setAttribute("aria-label", t("Expand files"));
   const filePreviewHeader = createElement(
     doc,
     "div",
@@ -948,6 +1082,7 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
     textContent: "×",
     title: t("Clear uploaded files"),
   });
+  filePreviewClear.setAttribute("aria-label", t("Clear uploaded files"));
   filePreviewHeader.append(filePreviewMeta, filePreviewClear);
   const filePreviewExpanded = createElement(
     doc,
@@ -974,7 +1109,6 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
   paperPickerList.setAttribute("role", "listbox");
   paperPicker.appendChild(paperPickerList);
   inputSection.appendChild(paperPicker);
-
 
   const composeArea = createElement(doc, "div", "llm-compose-area", {
     id: "llm-compose-area",
@@ -1076,7 +1210,7 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
     id: "llm-model-controls",
   });
   modelControls.setAttribute("role", "group");
-  modelControls.setAttribute("aria-label", t("Reasoning"));
+  modelControls.setAttribute("aria-label", t("Model and reasoning"));
   // Actions row
   const actionsRow = createElement(doc, "div", "llm-actions");
   const actionsLeft = createElement(doc, "div", "llm-actions-left");
@@ -1116,7 +1250,7 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
     {
       id: "llm-upload-file",
       type: "button",
-      textContent: t("Add context"),
+      textContent: t("Add"),
       title: t("Add context"),
       disabled: !hasItem,
     },
@@ -1145,7 +1279,7 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
     buttonId: "llm-model-toggle",
     buttonClassName:
       "llm-shortcut-btn llm-action-btn llm-action-btn-secondary llm-model-btn",
-    buttonText: "Model: ...",
+    buttonText: t("Select model"),
     menuId: "llm-model-menu",
     menuClassName: "llm-model-menu",
     disabled: !hasItem,
@@ -1202,6 +1336,32 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
     id: "llm-status",
     textContent: hasItem ? "" : t("Select an item or open a PDF"),
   });
+  // Keep idle status out of the composer footprint. Existing handlers update
+  // this node outside the builder, so observe it instead of using :has(),
+  // which the stylesheet avoids for older Gecko versions.
+  const syncStatusVisibility = () => {
+    const visible = hasItem && Boolean(statusLine.textContent?.trim());
+    statusBar.classList.toggle("llm-run-status-empty", !visible);
+    statusBar.dataset.state = visible ? "visible" : "empty";
+    if (visible) statusBar.removeAttribute("aria-hidden");
+    else statusBar.setAttribute("aria-hidden", "true");
+  };
+  syncStatusVisibility();
+  const mutationObserverConstructor =
+    doc.defaultView?.MutationObserver ||
+    (typeof MutationObserver === "function" ? MutationObserver : undefined);
+  if (mutationObserverConstructor) {
+    const statusObserver = new mutationObserverConstructor(
+      syncStatusVisibility,
+    );
+    statusObserver.observe(statusLine, {
+      attributes: true,
+      attributeFilter: ["class", "style"],
+      characterData: true,
+      childList: true,
+      subtree: true,
+    });
+  }
   const footerControls = createElement(doc, "div", "llm-footer-controls");
   const permissionControl = createElement(
     doc,
@@ -1263,9 +1423,11 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
   statusLine.setAttribute("role", "status");
   statusLine.setAttribute("aria-live", "polite");
   const statusToggle = createElement(doc, "button", "llm-status-toggle", {
-    id: "llm-status-toggle", type: "button", title: "状态",
+    id: "llm-status-toggle",
+    type: "button",
+    title: t("Status"),
   });
-  statusToggle.setAttribute("aria-label", "状态");
+  statusToggle.setAttribute("aria-label", t("Status"));
   statusToggle.setAttribute("aria-describedby", "llm-status");
   statusToggle.addEventListener("keydown", (event: KeyboardEvent) => {
     if (event.key === "Escape") statusToggle.blur();
@@ -1276,18 +1438,22 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
   modelControls.append(modelDropdown, reasoningDropdown, contextUsageControl);
   // Keep Add context in the same visible tray as Agent mode and selected
   // context. Moving the existing node preserves its event-handler contract.
-  contextPreviews.insertBefore(uploadSlot, contextPreviews.firstChild);
+  uploadSlot.dataset.contextGroup = "add";
+  contextPreviews.insertBefore(uploadSlot, addedContextLabel.nextSibling);
   actionsLeft.append(sourceShortcut);
-  for (const button of [selectTextBtn, screenshotBtn]) button.setAttribute("data-slash-base-item", "true");
+  for (const button of [selectTextBtn, screenshotBtn])
+    button.setAttribute("data-slash-base-item", "true");
   slashList.append(selectTextBtn, screenshotBtn);
   // Hide PDF-reader-specific buttons in standalone library chat
   if (isStandaloneBody && isGlobalMode) {
     selectTextBtn.style.display = "none";
     screenshotBtn.style.display = "none";
   }
-  actionsRight.append(statusBar, sendSlot);
+  actionsRight.append(sendSlot);
   actionsRow.append(actionsLeft, modelControls, actionsRight);
-  composeArea.appendChild(actionsRow);
+  // Status needs the composer's width for useful error and recovery text;
+  // it must not compete with the model picker or the send/stop target.
+  composeArea.append(statusBar, actionsRow);
   container.appendChild(inputSection);
 
   body.appendChild(container);
