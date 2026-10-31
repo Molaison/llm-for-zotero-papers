@@ -1,4 +1,4 @@
-import { assert } from "chai";
+import { AssertionError, assert } from "chai";
 import type { WorkflowTestApi } from "../src/modules/contextPanel/workflowTestTypes";
 import { getReaderContextPanelForTab } from "../src/modules/contextPanel/readerPopupPanelRouting";
 
@@ -319,196 +319,253 @@ describe("workflow: dedicated native chat pane", function () {
 
   for (const layout of ["independent", "stacked"] as const) {
     it(`drops multiple papers into a fresh sidebar Library chat in ${layout} layout`, async function () {
-      Zotero.Prefs.set(layoutPref, layout, true);
-      await until(
-        () =>
-          win.document.documentElement.getAttribute(
-            "data-llm-sidebar-layout",
-          ) === layout,
-        "requested layout applies",
-      );
-      await win.ZoteroPane.selectItem(fixtures[0].parentItemId);
-      await openChatPane();
-      const details = win.document.getElementById("zotero-item-details");
-      const section = details.querySelector(".llm-dedicated-chat-pane");
-      const panel = () => section.querySelector("#llm-main");
-      const fixtureParentItemId = fixtures[0].parentItemId;
-      const fixturePdfAttachmentId = fixtures[0].pdfAttachmentId;
-      if (panel().dataset.conversationKind === "global")
-        pickMode(panel(), "paper");
-      await until(() => {
-        const current = panel();
-        const basePaperItemId = Number(current.dataset.basePaperItemId || 0);
-        const rawContextItemId = Number(current.dataset.rawContextItemId || 0);
-        const handlersInitialized = Number(
-          current.dataset.handlersInitialized || 0,
+      let previousKey: string | undefined;
+      try {
+        Zotero.Prefs.set(layoutPref, layout, true);
+        await until(
+          () =>
+            win.document.documentElement.getAttribute(
+              "data-llm-sidebar-layout",
+            ) === layout,
+          "requested layout applies",
         );
-        return (
-          current.dataset.conversationKind === "paper" &&
-          basePaperItemId === fixtureParentItemId &&
-          [fixtureParentItemId, fixturePdfAttachmentId].includes(
-            rawContextItemId,
-          ) &&
-          handlersInitialized > 0 &&
-          current.dataset.handlersInitialized ===
-            current.dataset.handlersAttached
+        await win.ZoteroPane.selectItem(fixtures[0].parentItemId);
+        await openChatPane();
+        const details = win.document.getElementById(
+          "zotero-item-details",
+        ) as HTMLElement;
+        const section = details.querySelector(
+          ".llm-dedicated-chat-pane",
+        ) as HTMLElement;
+        const panel = () =>
+          section.querySelector("#llm-main") as HTMLElement | null;
+        const requirePanel = (): HTMLElement => {
+          const current = panel();
+          assert.isOk(current, "the dedicated chat panel remains mounted");
+          return current!;
+        };
+        const fixtureParentItemId = fixtures[0].parentItemId;
+        const fixturePdfAttachmentId = fixtures[0].pdfAttachmentId;
+        const initialPanel = panel();
+        if (initialPanel?.dataset.conversationKind === "global")
+          pickMode(initialPanel, "paper");
+        await until(() => {
+          const current = panel();
+          if (!current) return false;
+          const basePaperItemId = Number(current.dataset.basePaperItemId || 0);
+          const rawContextItemId = Number(
+            current.dataset.rawContextItemId || 0,
+          );
+          const handlersInitialized = Number(
+            current.dataset.handlersInitialized || 0,
+          );
+          return (
+            current.dataset.conversationKind === "paper" &&
+            basePaperItemId === fixtureParentItemId &&
+            [fixtureParentItemId, fixturePdfAttachmentId].includes(
+              rawContextItemId,
+            ) &&
+            handlersInitialized > 0 &&
+            current.dataset.handlersInitialized ===
+              current.dataset.handlersAttached
+          );
+        }, `fresh paper panel for fixture ${fixtureParentItemId}/${fixturePdfAttachmentId}`);
+        previousKey = requirePanel().dataset.itemId;
+        const input =
+          requirePanel().querySelector<HTMLTextAreaElement>("#llm-input")!;
+        input.value = "Preserve the previous draft";
+        input.dispatchEvent(new win.Event("input", { bubbles: true }));
+        await win.ZoteroPane.selectItems(fixtures.map((f) => f.parentItemId));
+        await until(
+          () => !libraryIcon().hasAttribute("disabled"),
+          "multiple selection enables rail",
         );
-      }, `fresh paper panel for fixture ${fixtureParentItemId}/${fixturePdfAttachmentId}`);
-      const previousKey = panel().dataset.itemId;
-      const input = panel().querySelector("#llm-input");
-      input.value = "Preserve the previous draft";
-      input.dispatchEvent(new win.Event("input", { bubbles: true }));
-      await win.ZoteroPane.selectItems(fixtures.map((f) => f.parentItemId));
-      await until(
-        () => !libraryIcon().hasAttribute("disabled"),
-        "multiple selection enables rail",
-      );
-      await openChatPane();
-      const transfer = new win.DataTransfer();
-      transfer.setData(
-        "zotero/item",
-        fixtures.map((f) => f.parentItemId).join(","),
-      );
-      // Cover both the body shown in the request and the existing composer target.
-      const dropInput = panel().querySelector("#llm-input");
-      if (dropInput.disabled) {
-        assert.equal(
-          win.getComputedStyle(dropInput).pointerEvents,
-          "none",
-          "disabled textarea lets native drops reach the composer surface",
+        await openChatPane();
+        const transfer = new win.DataTransfer();
+        transfer.setData(
+          "zotero/item",
+          fixtures.map((f) => f.parentItemId).join(","),
         );
-      }
-      const inputRect = dropInput.getBoundingClientRect();
-      const dropTarget =
-        layout === "independent"
-          ? section
-          : win.document.elementFromPoint(
-              inputRect.left + inputRect.width / 2,
-              inputRect.top + inputRect.height / 2,
-            );
-      for (const type of ["dragenter", "dragover"]) {
+        // Cover both the body shown in the request and the existing composer target.
+        const dropInput =
+          requirePanel().querySelector<HTMLTextAreaElement>("#llm-input")!;
+        if (dropInput.disabled) {
+          assert.equal(
+            win.getComputedStyle(dropInput).pointerEvents,
+            "none",
+            "disabled textarea lets native drops reach the composer surface",
+          );
+        }
+        const inputRect = dropInput.getBoundingClientRect();
+        const dropTarget =
+          layout === "independent"
+            ? section
+            : win.document.elementFromPoint(
+                inputRect.left + inputRect.width / 2,
+                inputRect.top + inputRect.height / 2,
+              );
+        for (const type of ["dragenter", "dragover"]) {
+          dropTarget.dispatchEvent(
+            new win.DragEvent(type, {
+              bubbles: true,
+              cancelable: true,
+              dataTransfer: transfer,
+            }),
+          );
+        }
+        assert.isOk(requirePanel().querySelector(".llm-input-drop-active"));
         dropTarget.dispatchEvent(
-          new win.DragEvent(type, {
+          new win.DragEvent("drop", {
             bubbles: true,
             cancelable: true,
             dataTransfer: transfer,
           }),
         );
+        await until(() => {
+          const current = panel();
+          return Boolean(
+            current &&
+            current.dataset.conversationKind === "global" &&
+            current.querySelectorAll("[data-paper-context-item-id]").length ===
+              2,
+          );
+        }, "drop prepares a library chat and renders both context chips");
+        // The header shows the moment the library chat lands, before any
+        // history refresh: the mode control and the history bar never diverge.
+        for (const selector of [
+          ...(layout === "independent"
+            ? [".llm-header-toggle-row", "#llm-library-chat-tab"]
+            : ["#llm-mode-capsule", "#llm-mode-option-library"]),
+          "#llm-history-bar",
+          "#llm-history-new",
+        ]) {
+          const rect = requirePanel()
+            .querySelector(selector)!
+            .getBoundingClientRect();
+          assert.isAbove(rect.height, 0, `${selector} is visible (${layout})`);
+        }
+        assert.isTrue(
+          requirePanel()
+            .querySelector("#llm-library-chat-tab")!
+            .classList.contains("active"),
+          "Library chat is the active tab",
+        );
+        assert.equal(
+          requirePanel()
+            .querySelector("#llm-mode-option-library")!
+            .getAttribute("aria-pressed"),
+          "true",
+          "the chip shows Library chat",
+        );
+        assertHeaderRows(details, layout);
+        await until(
+          () => Boolean(panel()?.querySelector(".llm-standalone-start-page")),
+          "the fresh Library chat shows the Library start page",
+        );
+        assert.isNull(
+          requirePanel().querySelector(".llm-start-page"),
+          `no Paper chat start page in a Library chat (${layout})`,
+        );
+        const key = requirePanel().dataset.itemId;
+        assert.isNull(
+          requirePanel().querySelector(".llm-input-drop-active"),
+          "drop feedback clears",
+        );
+        const persisted = await api.getWorkflowConversationPersistenceSnapshot(
+          "upstream",
+          Number(key),
+        );
+        assert.equal(
+          persisted.catalogRows,
+          1,
+          "new chat has a native catalog row",
+        );
+        assert.equal(persisted.messageRows, 0, "drop does not send a question");
+        assert.notEqual(key, previousKey, "drop creates its own conversation");
+        assert.sameMembers(
+          Array.from(
+            requirePanel().querySelectorAll("[data-paper-context-item-id]"),
+          ).map((chip: any) => Number(chip.dataset.paperContextItemId)),
+          fixtures.map((f) => f.pdfAttachmentId),
+        );
+        assert.equal(
+          requirePanel().querySelector<HTMLTextAreaElement>("#llm-input")!
+            .value,
+          "",
+        );
+        assert.isFalse(
+          requirePanel().querySelector<HTMLTextAreaElement>("#llm-input")!
+            .disabled,
+        );
+        assert.strictEqual(
+          win.document.activeElement,
+          requirePanel().querySelector<HTMLTextAreaElement>("#llm-input"),
+        );
+        await captureWindow(win, `multi-paper-sidebar-${layout}.png`);
+        win.ZoteroPane.itemsView.selection.clearSelection();
+        await until(
+          () => Boolean(libraryIcon()?.hasAttribute("disabled")),
+          "clearing selection disables rail",
+        );
+        await win.ZoteroPane.selectItem(fixtures[1].parentItemId);
+        await openChatPane();
+        await until(
+          () => panel()?.dataset.itemId === key,
+          "prepared library chat survives selection changes",
+        );
+        assert.lengthOf(
+          requirePanel().querySelectorAll("[data-paper-context-item-id]"),
+          2,
+        );
+        pickMode(requirePanel(), "paper");
+        await until(
+          () => panel()?.dataset.conversationKind === "paper",
+          "paper mode remains available",
+        );
+        await win.ZoteroPane.selectItem(fixtures[0].parentItemId);
+        await until(
+          () => panel()?.dataset.itemId === previousKey,
+          `return to the original paper chat; previousKey=${previousKey}; fixtures=${fixtures[0].parentItemId}/${fixtures[0].pdfAttachmentId}`,
+        );
+        assert.equal(
+          requirePanel().querySelector<HTMLTextAreaElement>("#llm-input")!
+            .value,
+          "Preserve the previous draft",
+        );
+        Zotero.Prefs.set(layoutPref, "independent", true);
+        await until(
+          () =>
+            win.document.documentElement.getAttribute(
+              "data-llm-sidebar-layout",
+            ) === "independent",
+          "independent layout is restored",
+        );
+      } catch (error) {
+        const mountedNodes = win.document.querySelectorAll(
+          "#llm-main",
+        ) as NodeListOf<HTMLElement>;
+        const mountedPanels = (Array.from(mountedNodes) as HTMLElement[]).map(
+          (node) => ({
+            ...node.dataset,
+            height: node.getBoundingClientRect().height,
+          }),
+        );
+        const original =
+          error instanceof Error
+            ? `${error.name}: ${error.message}\n${error.stack || ""}`
+            : String(error);
+        throw new AssertionError(
+          `${original}; layout=${layout}; previousKey=${previousKey ?? "<unset>"}; fixtures=${fixtures[0].parentItemId}/${fixtures[0].pdfAttachmentId}; selected=${win.Zotero_Tabs.selectedID}; view=${win.document.documentElement.getAttribute("data-llm-pane-view")}; collapsed=${activeDetails()?.sidenav?._collapsed}; mounted=${JSON.stringify(mountedPanels)}`,
+          {
+            cause: error,
+            previousKey,
+            layout,
+            fixtureParentItemId: fixtures[0].parentItemId,
+            fixturePdfAttachmentId: fixtures[0].pdfAttachmentId,
+            mountedPanels,
+          },
+        );
       }
-      assert.isOk(panel().querySelector(".llm-input-drop-active"));
-      dropTarget.dispatchEvent(
-        new win.DragEvent("drop", {
-          bubbles: true,
-          cancelable: true,
-          dataTransfer: transfer,
-        }),
-      );
-      await until(
-        () =>
-          panel().dataset.conversationKind === "global" &&
-          panel().querySelectorAll("[data-paper-context-item-id]").length === 2,
-        "drop prepares a library chat and renders both context chips",
-      );
-      // The header shows the moment the library chat lands, before any
-      // history refresh: the mode control and the history bar never diverge.
-      for (const selector of [
-        ...(layout === "independent"
-          ? [".llm-header-toggle-row", "#llm-library-chat-tab"]
-          : ["#llm-mode-capsule", "#llm-mode-option-library"]),
-        "#llm-history-bar",
-        "#llm-history-new",
-      ]) {
-        const rect = panel().querySelector(selector).getBoundingClientRect();
-        assert.isAbove(rect.height, 0, `${selector} is visible (${layout})`);
-      }
-      assert.isTrue(
-        panel()
-          .querySelector("#llm-library-chat-tab")
-          .classList.contains("active"),
-        "Library chat is the active tab",
-      );
-      assert.equal(
-        panel()
-          .querySelector("#llm-mode-option-library")
-          .getAttribute("aria-pressed"),
-        "true",
-        "the chip shows Library chat",
-      );
-      assertHeaderRows(details, layout);
-      await until(
-        () => Boolean(panel().querySelector(".llm-standalone-start-page")),
-        "the fresh Library chat shows the Library start page",
-      );
-      assert.isNull(
-        panel().querySelector(".llm-start-page"),
-        `no Paper chat start page in a Library chat (${layout})`,
-      );
-      const key = panel().dataset.itemId;
-      assert.isNull(
-        panel().querySelector(".llm-input-drop-active"),
-        "drop feedback clears",
-      );
-      const persisted = await api.getWorkflowConversationPersistenceSnapshot(
-        "upstream",
-        Number(key),
-      );
-      assert.equal(
-        persisted.catalogRows,
-        1,
-        "new chat has a native catalog row",
-      );
-      assert.equal(persisted.messageRows, 0, "drop does not send a question");
-      assert.notEqual(key, previousKey, "drop creates its own conversation");
-      assert.sameMembers(
-        Array.from(
-          panel().querySelectorAll("[data-paper-context-item-id]"),
-        ).map((chip: any) => Number(chip.dataset.paperContextItemId)),
-        fixtures.map((f) => f.pdfAttachmentId),
-      );
-      assert.equal(panel().querySelector("#llm-input").value, "");
-      assert.isFalse(panel().querySelector("#llm-input").disabled);
-      assert.strictEqual(
-        win.document.activeElement,
-        panel().querySelector("#llm-input"),
-      );
-      await captureWindow(win, `multi-paper-sidebar-${layout}.png`);
-      win.ZoteroPane.itemsView.selection.clearSelection();
-      await until(
-        () => Boolean(libraryIcon()?.hasAttribute("disabled")),
-        "clearing selection disables rail",
-      );
-      await win.ZoteroPane.selectItem(fixtures[1].parentItemId);
-      await openChatPane();
-      await until(
-        () => panel().dataset.itemId === key,
-        "prepared library chat survives selection changes",
-      );
-      assert.lengthOf(
-        panel().querySelectorAll("[data-paper-context-item-id]"),
-        2,
-      );
-      pickMode(panel(), "paper");
-      await until(
-        () => panel().dataset.conversationKind === "paper",
-        "paper mode remains available",
-      );
-      await win.ZoteroPane.selectItem(fixtures[0].parentItemId);
-      await until(
-        () => panel().dataset.itemId === previousKey,
-        `return to the original paper chat; previousKey=${previousKey}; fixtures=${fixtures[0].parentItemId}/${fixtures[0].pdfAttachmentId}; current=${JSON.stringify(panel().dataset)}`,
-      );
-      assert.equal(
-        panel().querySelector("#llm-input").value,
-        "Preserve the previous draft",
-      );
-      Zotero.Prefs.set(layoutPref, "independent", true);
-      await until(
-        () =>
-          win.document.documentElement.getAttribute(
-            "data-llm-sidebar-layout",
-          ) === "independent",
-        "independent layout is restored",
-      );
     });
   }
 
