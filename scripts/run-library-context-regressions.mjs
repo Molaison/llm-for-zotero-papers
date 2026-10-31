@@ -9,6 +9,7 @@ await writeFile(
   `${directory}/flows.workflow.test.ts`,
   [
     "dedicatedChatPane",
+    "questionCardReadability",
     "standaloneResponsiveChrome",
     "sectionHeadAlignment",
     "sidebarChatModeToggle",
