@@ -2976,10 +2976,6 @@ async function probeTargetedRerenderScrollStability(params: {
     params.wrappers,
     params.expandedMessage,
   );
-  const earlierWrapper = wrapperForMessage(
-    params.wrappers,
-    params.earlierMessage,
-  );
   const conversationKey = getConversationKey(params.item);
   const timeline: Array<Record<string, unknown>> = [];
   const record = (label: string) => {
@@ -3032,7 +3028,22 @@ async function probeTargetedRerenderScrollStability(params: {
   const expandedBeforeRerender = card.dataset.expanded === "true";
   const scrollTopBefore = chatBox.scrollTop;
   const cardTopBefore = card.getBoundingClientRect().top;
-  const earlierHeightBefore = earlierWrapper.getBoundingClientRect().height;
+  // Quote validation can replace wrappers while the animation frames above
+  // settle. Measure the mounted message, not a retired wrapper reference.
+  const mountedMessageWrapper = (message: Message) =>
+    wrapperForMessage(
+      Array.from(
+        chatBox.querySelectorAll(
+          ".llm-message-wrapper[data-message-timestamp]",
+        ),
+      ) as HTMLElement[],
+      message,
+    );
+  const earlierWrapperBefore = mountedMessageWrapper(params.earlierMessage);
+  const earlierHeightBefore =
+    earlierWrapperBefore.getBoundingClientRect().height;
+  const clickedCardConnectedBeforeRerender = card.isConnected;
+  const earlierWrapperConnectedBefore = earlierWrapperBefore.isConnected;
 
   // An earlier message changes height above the viewport while the expanded
   // message is re-rendered with identical content under new citation identity.
@@ -3070,9 +3081,16 @@ async function probeTargetedRerenderScrollStability(params: {
     ),
   ) as HTMLElement[];
   const cardAfter = cardsAfter[cardsAfter.length - 1] || null;
+  const earlierWrapperAfter = mountedMessageWrapper(params.earlierMessage);
+  const earlierHeightAfter = earlierWrapperAfter.getBoundingClientRect().height;
   const diagnostics: Record<string, unknown> = {
     timeline,
     sameCitationCards,
+    clickedCardConnectedBeforeRerender,
+    earlierHeightBefore,
+    earlierHeightAfter,
+    earlierWrapperConnectedBefore,
+    earlierWrapperConnectedAfter: earlierWrapperAfter.isConnected,
     snapshotBefore: snapshotBefore
       ? {
           mode: snapshotBefore.mode,
@@ -3094,8 +3112,7 @@ async function probeTargetedRerenderScrollStability(params: {
   return {
     diagnostics,
     chatBoxScrollable: chatBox.scrollHeight > chatBox.clientHeight + 1,
-    earlierWrapperHeightDelta:
-      earlierWrapper.getBoundingClientRect().height - earlierHeightBefore,
+    earlierWrapperHeightDelta: earlierHeightAfter - earlierHeightBefore,
     expandedBeforeRerender,
     expandedAfterRerender: cardAfter?.dataset.expanded === "true",
     expandedBodyTextAfterRerender: (

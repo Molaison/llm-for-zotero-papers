@@ -483,19 +483,26 @@ describe("workflow: selected item context send", function () {
 
     // The probe only proves something when the chat really scrolls and the
     // earlier message really changed height above the reader.
-    assert.isTrue(probe.chatBoxScrollable, "chat box must be scrollable");
+    const detail = JSON.stringify(probe.diagnostics);
+    assert.isTrue(
+      probe.chatBoxScrollable,
+      `chat box must be scrollable ${detail}`,
+    );
     assert.notEqual(
       probe.earlierWrapperHeightDelta,
       0,
-      "earlier message must change height",
+      `earlier message must change height ${detail}`,
     );
     assert.isTrue(probe.expandedBeforeRerender, "card must expand on click");
+    assert.isTrue(
+      probe.diagnostics.clickedCardConnectedBeforeRerender,
+      `clicked card must still belong to the mounted message ${detail}`,
+    );
     assert.isAtLeast(
       probe.sameCitationCards,
       2,
       "the clicked card must share its citation id with an earlier card",
     );
-    const detail = JSON.stringify(probe.diagnostics);
     assert.isAtMost(
       Math.abs(probe.settleDrift),
       1,
