@@ -10,6 +10,7 @@ await writeFile(
   [
     "dedicatedChatPane",
     "questionCardReadability",
+    "selectedItemContext",
     "standaloneResponsiveChrome",
     "sectionHeadAlignment",
     "sidebarChatModeToggle",
