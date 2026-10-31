@@ -16,6 +16,11 @@ describe("workflow: dedicated native chat pane", function () {
   const GEOMETRY_PRECISION = 0.05;
   let originalLayout: unknown;
 
+  type NativeCollapsibleSection = HTMLElement & {
+    collapsible: boolean;
+    open: boolean;
+  };
+
   async function until(check: () => boolean, message: string) {
     const deadline = Date.now() + 10000;
     while (!check() && Date.now() < deadline) await Zotero.Promise.delay(50);
@@ -124,33 +129,70 @@ describe("workflow: dedicated native chat pane", function () {
     return details;
   }
 
+  function elementGeometry(node: Element | null) {
+    if (!node) return null;
+    const rect = node.getBoundingClientRect();
+    return {
+      connected: node.isConnected,
+      left: rect.left,
+      top: rect.top,
+      width: rect.width,
+      height: rect.height,
+    };
+  }
+
+  function stackedSectionDiagnostics(
+    previous: NativeCollapsibleSection | null,
+    current: NativeCollapsibleSection | null,
+  ) {
+    return {
+      sameElement: previous === current,
+      previous: elementGeometry(previous),
+      current: elementGeometry(current),
+      collapsible: current?.collapsible ?? null,
+      open: current?.open ?? null,
+      openHeight:
+        current?.style.getPropertyValue("--open-height").trim() || null,
+      children: current
+        ? Array.from(current.children).map((child) => ({
+            tag: child.tagName.toLowerCase(),
+            id: child.id,
+            className: child.getAttribute("class"),
+            ...elementGeometry(child),
+          }))
+        : [],
+    };
+  }
+
   async function ensureStackedSectionOpen(details: Element) {
-    const section = details.querySelector(
+    const initial = details.querySelector(
       ".llm-dedicated-chat-pane > collapsible-section",
-    ) as (HTMLElement & { collapsible: boolean; open: boolean }) | null;
-    assert.isOk(section, "stacked collapsible section is mounted");
-    assert.isTrue(section!.collapsible, "stacked section is collapsible");
-    if (!section!.open) {
-      const head = section!.querySelector(":scope > .head") as HTMLElement;
+    ) as NativeCollapsibleSection | null;
+    assert.isOk(initial, "stacked collapsible section is mounted");
+    assert.isTrue(initial!.collapsible, "stacked section is collapsible");
+    if (!initial!.open) {
+      const head = initial!.querySelector(":scope > .head") as HTMLElement;
       assert.isOk(head, "stacked section head is visible");
       head.dispatchEvent(
         new win.MouseEvent("click", { bubbles: true, detail: 1, button: 0 }),
       );
     }
+    let current = initial!;
     await until(() => {
-      const current = details.querySelector(
+      current = details.querySelector(
         ".llm-dedicated-chat-pane > collapsible-section",
-      ) as (HTMLElement & { open: boolean }) | null;
+      ) as NativeCollapsibleSection;
       const panel = current?.querySelector("#llm-main") as HTMLElement | null;
       return Boolean(
         current?.isConnected &&
         current.open &&
+        current.style.getPropertyValue("--open-height").trim() === "auto" &&
         panel?.isConnected &&
         panel.getBoundingClientRect().height > 0,
       );
-    }, "stacked section opens to the mounted plugin panel");
+    }, "stacked section finishes its native open transition");
     await waitForNativeLayoutFrame();
-    return section!;
+    return { initial, current };
   }
 
   /**
@@ -1193,6 +1235,9 @@ describe("workflow: dedicated native chat pane", function () {
         "setting is in Customization",
       );
       await captureWindow(preferences, "sidebar-layout-customization.png");
+      const previousSection = section.querySelector(
+        ".llm-dedicated-chat-pane > collapsible-section",
+      ) as NativeCollapsibleSection | null;
       choose(select, "stacked");
       await until(
         () =>
@@ -1220,11 +1265,14 @@ describe("workflow: dedicated native chat pane", function () {
       preferences.close();
       await until(() => preferences.closed, "preferences close");
       await clickPane("llm-context-panel");
-      await ensureStackedSectionOpen(details);
+      const { current: currentSection } =
+        await ensureStackedSectionOpen(details);
       assert.isAbove(
-        section.getBoundingClientRect().height,
+        currentSection.getBoundingClientRect().height,
         100,
-        "stacked chat is visible after clicking its rail icon",
+        `stacked chat is visible after clicking its rail icon; state=${JSON.stringify(
+          stackedSectionDiagnostics(previousSection, currentSection),
+        )}`,
       );
       await captureWindow(win, "stacked-sidebar.png");
       select = await openPreferences();
