@@ -43,7 +43,7 @@ describe("paper sidebar polish CSS", function () {
           scopeRule,
           "--llm-focus-ring-color: var(--llm-indigo8);",
         );
-        assert.include(scopeRule, "--llm-focus-ring-width: 0.5px;");
+        assert.include(scopeRule, "--llm-focus-ring-width: 2px;");
       }
     });
 
@@ -55,7 +55,7 @@ describe("paper sidebar polish CSS", function () {
       );
 
       assert.include(flatFocus, "outline:");
-      assert.include(flatFocus, "outline: 0.5px solid var(--llm-slate8)");
+      assert.include(flatFocus, "outline: 2px solid var(--llm-indigo8)");
       assert.include(flatFocus, "--llm-focus-ring-width, 2px");
       // The actions row clips overflow, so an outer ring would be cut off.
       assert.include(
@@ -96,22 +96,10 @@ describe("paper sidebar polish CSS", function () {
       const css = readPanelCss();
       const panel = rule(css, ".llm-panel");
 
-      assert.include(
-        panel,
-        "--llm-status-ready-text: var(--llm-green11);",
-      );
-      assert.include(
-        panel,
-        "--llm-status-busy-text: var(--llm-slate11);",
-      );
-      assert.include(
-        panel,
-        "--llm-status-error-text: var(--llm-red11);",
-      );
-      assert.include(
-        panel,
-        "--llm-status-warning-text: var(--llm-amber11);",
-      );
+      assert.include(panel, "--llm-status-ready-text: var(--llm-green11);");
+      assert.include(panel, "--llm-status-busy-text: var(--llm-slate11);");
+      assert.include(panel, "--llm-status-error-text: var(--llm-red11);");
+      assert.include(panel, "--llm-status-warning-text: var(--llm-amber11);");
       // The hidden status text is announced through the toggle, whose glyph
       // carries the state colour in the toolbar.
       assert.include(

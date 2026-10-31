@@ -26,11 +26,21 @@ type ActionLayoutControllerDeps = {
   cancelBtn: HTMLButtonElement | null;
 };
 
-
 /** CSS keeps one toolbar row; only model text may shrink with ellipsis. */
 export function createActionLayoutController(deps: ActionLayoutControllerDeps) {
-  const { body, panelRoot, modelBtn, modelSlot, reasoningBtn, reasoningSlot,
-    uploadBtn, selectTextBtn, screenshotBtn, sendBtn, cancelBtn } = deps;
+  const {
+    body,
+    panelRoot,
+    modelBtn,
+    modelSlot,
+    reasoningBtn,
+    reasoningSlot,
+    uploadBtn,
+    selectTextBtn,
+    screenshotBtn,
+    sendBtn,
+    cancelBtn,
+  } = deps;
   const setActionButtonLabel = (
     button: HTMLButtonElement | null,
     expandedLabel: string,
@@ -50,10 +60,21 @@ export function createActionLayoutController(deps: ActionLayoutControllerDeps) {
     if (cancelBtn) cancelBtn.title = t("Cancel");
   };
   const applyResponsiveActionButtonsLayout = () => {
-    if (!body.isConnected || !panelRoot.isConnected || !panelRoot.clientWidth) return;
-    setActionButtonLabel(uploadBtn, "+", "+", "full");
-    setActionButtonLabel(selectTextBtn, getSelectTextExpandedLabel(), getSelectTextExpandedLabel(), "full");
-    setActionButtonLabel(screenshotBtn, getScreenshotExpandedLabel(), getScreenshotExpandedLabel(), "full");
+    if (!body.isConnected || !panelRoot.isConnected || !panelRoot.clientWidth)
+      return;
+    setActionButtonLabel(uploadBtn, t("Add"), t("Add"), "full");
+    setActionButtonLabel(
+      selectTextBtn,
+      getSelectTextExpandedLabel(),
+      getSelectTextExpandedLabel(),
+      "full",
+    );
+    setActionButtonLabel(
+      screenshotBtn,
+      getScreenshotExpandedLabel(),
+      getScreenshotExpandedLabel(),
+      "full",
+    );
     setSendButtonLabel("full");
     for (const [button, slot, kind] of [
       [modelBtn, modelSlot, "model"],
@@ -66,12 +87,19 @@ export function createActionLayoutController(deps: ActionLayoutControllerDeps) {
       slot?.classList.toggle(`llm-${kind}-dropdown-collapsed`, false);
       button.classList.toggle("llm-model-btn-wrap-2line", false);
       button.textContent = label;
-      button.title = kind === "reasoning"
-        ? `${t("Reasoning")}: ${label}${hint && hint !== t("Reasoning") ? `\n${hint}` : ""}`
-        : hint ? `${label}\n${hint}` : label;
+      button.title =
+        kind === "reasoning"
+          ? `${t("Reasoning")}: ${label}${hint && hint !== t("Reasoning") ? `\n${hint}` : ""}`
+          : hint
+            ? `${label}\n${hint}`
+            : label;
       button.setAttribute("aria-label", button.title);
     }
     panelRoot.dataset.llmActionLayoutMode = "full";
   };
-  return { setActionButtonLabel, setSendButtonLabel, applyResponsiveActionButtonsLayout };
+  return {
+    setActionButtonLabel,
+    setSendButtonLabel,
+    applyResponsiveActionButtonsLayout,
+  };
 }

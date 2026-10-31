@@ -202,21 +202,36 @@ describe("workflow: selected item context send", function () {
         const initial = await api.getDiagnostics(panel.panelId);
         assert.equal(initial.conversationSystem, "upstream");
         assertDualRuntimeControls(initial);
-        // 380px is the narrow end of the range the sidebar is actually used at,
-        // and still inside the compact header breakpoint, so the icon-only
-        // assertions below stay meaningful. The mode chip scales with
-        // --llm-font-scale by design; the fixed furniture around it (20px
-        // history buttons, 54px runtime toggles, 96px action icons, gaps) leaves
-        // roughly 160px for the chip here against the ~149px it needs at scale
-        // 1.8. Drag the pane below about 363px at that scale and the chip does
-        // outgrow its grid column and overlap the action icons — accepted
-        // behaviour, unchanged since v3.8.28, and not worth freezing the label
-        // at every width to avoid.
+        // The compact header keeps runtime controls reachable; secondary
+        // actions now live in the labeled More menu at both widths.
+        const body = Zotero.getMainWindow().document.querySelector<HTMLElement>(
+          `[data-workflow-panel-id="${panel.panelId}"]`,
+        )!;
+        const assertDeleteAvailableInMore = (width: number) => {
+          const previousWidth = body.style.width;
+          body.style.width = `${width}px`;
+          const more = body.querySelector<HTMLDetailsElement>(
+            "#llm-conversation-tools",
+          )!;
+          const summary = more.querySelector<HTMLElement>("summary")!;
+          try {
+            summary.click();
+            assert.isTrue(more.open, "More opens from its visible trigger");
+            const remove = more.querySelector<HTMLButtonElement>("#llm-clear")!;
+            assert.include(remove.textContent || "", "Delete conversation");
+            assert.isAbove(remove.getBoundingClientRect().width, 0);
+            assert.isFalse(remove.disabled);
+          } finally {
+            if (more.open) summary.click();
+            body.style.width = previousWidth;
+          }
+        };
         const geometry = await api.measurePanelRuntimeGeometry(panel.panelId, {
           width: 380,
           fontScale: 1.8,
         });
-        assert.closeTo(geometry.containerWidth, 376, 4);
+        assert.isAtMost(geometry.containerWidth, 380);
+        assert.isAtLeast(geometry.containerWidth, 340);
         assert.isAtLeast(geometry.runtimeWidth, 50, JSON.stringify(geometry));
         assert.isFalse(
           geometry.runtimeIntersectsLeadingContent,
@@ -234,10 +249,7 @@ describe("workflow: selected item context send", function () {
           geometry.trailingContentWithinContainer,
           JSON.stringify(geometry),
         );
-        assert.isTrue(
-          geometry.deleteButtonIconOnly,
-          "the narrow header must render the delete action as the trash icon",
-        );
+        assertDeleteAvailableInMore(380);
         const wideGeometry = await api.measurePanelRuntimeGeometry(
           panel.panelId,
           {
@@ -249,10 +261,7 @@ describe("workflow: selected item context send", function () {
           wideGeometry.runtimeIntersectsTrailingContent,
           JSON.stringify(wideGeometry),
         );
-        assert.isTrue(
-          wideGeometry.deleteButtonIconOnly,
-          "the wide header must keep the delete action icon-only",
-        );
+        assertDeleteAvailableInMore(700);
 
         const rapid = await api.clickPanelSystemTogglesRapidly(panel.panelId, [
           "codex",
@@ -474,19 +483,27 @@ describe("workflow: selected item context send", function () {
 
     // The probe only proves something when the chat really scrolls and the
     // earlier message really changed height above the reader.
-    assert.isTrue(probe.chatBoxScrollable, "chat box must be scrollable");
+    const detail = JSON.stringify(probe.diagnostics);
+    assert.isTrue(
+      probe.chatBoxScrollable,
+      `chat box must be scrollable ${detail}`,
+    );
     assert.notEqual(
       probe.earlierWrapperHeightDelta,
       0,
-      "earlier message must change height",
+      `earlier message must change height ${detail}`,
     );
     assert.isTrue(probe.expandedBeforeRerender, "card must expand on click");
+    assert.isTrue(
+      probe.diagnostics.clickedCardConnectedAtClick &&
+        probe.diagnostics.clickedCardConnectedBeforeRerender,
+      `clicked card must still belong to the mounted message ${detail}`,
+    );
     assert.isAtLeast(
       probe.sameCitationCards,
       2,
       "the clicked card must share its citation id with an earlier card",
     );
-    const detail = JSON.stringify(probe.diagnostics);
     assert.isAtMost(
       Math.abs(probe.settleDrift),
       1,

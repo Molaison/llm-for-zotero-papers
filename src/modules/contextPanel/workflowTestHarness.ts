@@ -50,6 +50,7 @@ import {
   exerciseLongJobReplay,
 } from "./longJobReplay";
 import { buildUI } from "./buildUI";
+import { initI18n } from "../../utils/i18n";
 import { getAgentRuntime } from "../../agent";
 import { normalizeExecutionOutput } from "../../agent/tools/execution/results";
 import {
@@ -76,6 +77,8 @@ import {
   selectedTagContextCache,
   initializedConversationComposeContextKeys,
   isRequestPending,
+  panelFontScalePercent,
+  setPanelFontScalePercent,
 } from "./state";
 import type { ResolvedContextSource, SendQuestionOptions } from "./types";
 import type {
@@ -188,6 +191,8 @@ import {
   getModelProviderGroups,
   setModelProviderGroups,
   getModelEntryById,
+  getLastUsedModelEntryId,
+  setLastUsedModelEntryId,
 } from "../../utils/modelProviders";
 import type { RuntimeConversationSystem } from "./runtimeSystemControls";
 import { collectReaderSelectionDocuments } from "./readerSelection";
@@ -473,6 +478,7 @@ async function clickStandalonePermissionOption(
 import {
   removeLastUsedUpstreamConversationMode,
   removeLastUsedUpstreamGlobalConversationKey,
+  setFontScalePref,
 } from "./prefHelpers";
 
 async function appendWorkflowStoredMessage(
@@ -1935,6 +1941,11 @@ async function clickPanelSystemToggle(
   if (!button) {
     throw new Error(`Panel ${system} system toggle was not rendered`);
   }
+  const tools = button.closest<HTMLDetailsElement>(".llm-conversation-tools");
+  if (tools && !tools.open)
+    tools.querySelector<HTMLElement>("summary")?.click();
+  if (!button.getBoundingClientRect().width)
+    throw new Error(`Panel ${system} system toggle is not visible in More`);
   const before = await getDiagnostics(panelId);
   const expectedSystem =
     before.conversationSystem === system ? "upstream" : system;
@@ -1971,6 +1982,11 @@ async function clickPanelSystemTogglesRapidly(
     if (!button) {
       throw new Error(`Panel ${system} system toggle was not rendered`);
     }
+    const tools = button.closest<HTMLDetailsElement>(".llm-conversation-tools");
+    if (tools && !tools.open)
+      tools.querySelector<HTMLElement>("summary")?.click();
+    if (!button.getBoundingClientRect().width)
+      throw new Error(`Panel ${system} system toggle is not visible in More`);
     if (eventCtor) {
       button.dispatchEvent(
         new eventCtor("click", { bubbles: true, cancelable: true }),
@@ -2050,6 +2066,14 @@ async function measurePanelRuntimeGeometry(
     throw new Error("Panel runtime geometry targets were not rendered");
   }
 
+  // Runtime choices now live in More. Measure the visible menu the user
+  // opens, rather than comparing its children with the old header slot.
+  const tools = runtimeControls.closest<HTMLDetailsElement>(
+    ".llm-conversation-tools",
+  );
+  const toolsSummary = tools?.querySelector<HTMLElement>("summary");
+  const wasOpen = tools?.open;
+  if (tools && !wasOpen) toolsSummary?.click();
   const previousWidth = panel.body.style.width;
   const previousScale = panelRoot.style.getPropertyValue("--llm-font-scale");
   panel.body.style.width = `${input.width}px`;
@@ -2058,6 +2082,11 @@ async function measurePanelRuntimeGeometry(
   try {
     const containerRect = header.getBoundingClientRect();
     const runtimeRect = getVisibleRuntimeControlsRect(runtimeControls);
+    const runtimeContainer = runtimeControls.closest<HTMLElement>(
+      ".llm-conversation-tools-body",
+    );
+    const runtimeContainerRect =
+      runtimeContainer?.getBoundingClientRect() || containerRect;
     const runtimeButtonWidths = getVisibleRuntimeButtonRects(
       runtimeControls,
     ).map((rect) => rect.width);
@@ -2085,7 +2114,10 @@ async function measurePanelRuntimeGeometry(
         0,
         runtimeRect.right - actionsRect.left,
       ),
-      runtimeWithinContainer: rectWithinContainer(runtimeRect, containerRect),
+      runtimeWithinContainer: rectWithinContainer(
+        runtimeRect,
+        runtimeContainerRect,
+      ),
       trailingContentWithinContainer: rectWithinContainer(
         actionsRect,
         containerRect,
@@ -2100,6 +2132,7 @@ async function measurePanelRuntimeGeometry(
       ),
     };
   } finally {
+    if (tools?.open && !wasOpen) toolsSummary?.click();
     panel.body.style.width = previousWidth;
     if (previousScale) {
       panelRoot.style.setProperty("--llm-font-scale", previousScale);
@@ -2939,14 +2972,25 @@ async function probeTargetedRerenderScrollStability(params: {
   const nextFrame = () =>
     new Promise<void>((resolve) => win.requestAnimationFrame(() => resolve()));
 
-  const expandedWrapper = wrapperForMessage(
-    params.wrappers,
-    params.expandedMessage,
-  );
-  const earlierWrapper = wrapperForMessage(
-    params.wrappers,
-    params.earlierMessage,
-  );
+  const mountedMessageWrapper = (message: Message) =>
+    wrapperForMessage(
+      Array.from(
+        chatBox.querySelectorAll(
+          ".llm-message-wrapper[data-message-timestamp]",
+        ),
+      ) as HTMLElement[],
+      message,
+    );
+  const mountedCard = () => {
+    const wrapper = mountedMessageWrapper(params.expandedMessage);
+    const cards = wrapper.querySelectorAll<HTMLElement>(
+      '.llm-quote-card[data-quote-interactive="true"]',
+    );
+    const card = cards[cards.length - 1];
+    if (!card) throw new Error("Expanded message rendered no interactive card");
+    return { wrapper, card };
+  };
+  let { wrapper: expandedWrapper, card } = mountedCard();
   const conversationKey = getConversationKey(params.item);
   const timeline: Array<Record<string, unknown>> = [];
   const record = (label: string) => {
@@ -2956,42 +3000,44 @@ async function probeTargetedRerenderScrollStability(params: {
       scrollTop: chatBox.scrollTop,
       scrollHeight: chatBox.scrollHeight,
       wrapperTop:
-        expandedWrapper.getBoundingClientRect().top -
-        chatBox.getBoundingClientRect().top,
+        mountedMessageWrapper(params.expandedMessage).getBoundingClientRect()
+          .top - chatBox.getBoundingClientRect().top,
       snapshot: snapshot
         ? `${snapshot.mode}@${snapshot.scrollTop}${snapshot.anchor ? `/${snapshot.anchor.kind}:${snapshot.anchor.quoteCitationId || snapshot.anchor.messageAnchorKey}` : ""}`
         : null,
     });
   };
   record("start");
-  // The reader is on the last card of the later message: the repeated quote,
-  // whose citation id also belongs to an earlier card in the same message.
-  const interactiveCards = Array.from(
-    expandedWrapper.querySelectorAll(
-      '.llm-quote-card[data-quote-interactive="true"]',
-    ),
-  ) as HTMLElement[];
-  const card = interactiveCards[interactiveCards.length - 1];
-  if (!card) throw new Error("Expanded message rendered no interactive card");
-  // The card straddles the top edge, as a card the reader has just scrolled
-  // past does; the anchor search prefers exactly that card.
-  chatBox.scrollTop +=
-    card.getBoundingClientRect().top - chatBox.getBoundingClientRect().top + 12;
-  record("after-scroll-write");
-  const cardTopAfterScrollWrite = card.getBoundingClientRect().top;
-  await nextFrame();
-  record("after-frame-1");
-  await nextFrame();
-  record("after-frame-2");
-  // Nothing has been clicked yet: the view must still be where the reader
-  // put it once the panel's deferred scroll work has run.
+  // Source validation may replace cards during the initial render frames.
+  // A native reader clicks the mounted card; never act on a retired node.
+  let cardTopAfterScrollWrite = 0;
+  const settleDeadline = Date.now() + 5000;
+  for (;;) {
+    ({ wrapper: expandedWrapper, card } = mountedCard());
+    chatBox.scrollTop +=
+      card.getBoundingClientRect().top -
+      chatBox.getBoundingClientRect().top +
+      12;
+    record("after-scroll-write");
+    cardTopAfterScrollWrite = card.getBoundingClientRect().top;
+    await nextFrame();
+    record("after-frame-1");
+    await nextFrame();
+    record("after-frame-2");
+    if (card.isConnected && mountedCard().card === card) break;
+    if (Date.now() >= settleDeadline)
+      throw new Error("Quote cards did not settle before native interaction");
+  }
   const settleDrift =
     card.getBoundingClientRect().top - cardTopAfterScrollWrite;
-
+  const clickedCardConnectedAtClick = card.isConnected;
   card.click();
   record("after-click");
   await nextFrame();
   record("after-click-frame");
+  // A background update can also run after the click. Inspect the live state
+  // that must retain the reader's expansion through any such update.
+  ({ wrapper: expandedWrapper, card } = mountedCard());
   const citationId = card.dataset.quoteCitationId || "";
   const sameCitationCards = expandedWrapper.querySelectorAll(
     `.llm-quote-card[data-quote-citation-id="${citationId}"]`,
@@ -2999,7 +3045,11 @@ async function probeTargetedRerenderScrollStability(params: {
   const expandedBeforeRerender = card.dataset.expanded === "true";
   const scrollTopBefore = chatBox.scrollTop;
   const cardTopBefore = card.getBoundingClientRect().top;
-  const earlierHeightBefore = earlierWrapper.getBoundingClientRect().height;
+  const earlierWrapperBefore = mountedMessageWrapper(params.earlierMessage);
+  const earlierHeightBefore =
+    earlierWrapperBefore.getBoundingClientRect().height;
+  const clickedCardConnectedBeforeRerender = card.isConnected;
+  const earlierWrapperConnectedBefore = earlierWrapperBefore.isConnected;
 
   // An earlier message changes height above the viewport while the expanded
   // message is re-rendered with identical content under new citation identity.
@@ -3037,9 +3087,17 @@ async function probeTargetedRerenderScrollStability(params: {
     ),
   ) as HTMLElement[];
   const cardAfter = cardsAfter[cardsAfter.length - 1] || null;
+  const earlierWrapperAfter = mountedMessageWrapper(params.earlierMessage);
+  const earlierHeightAfter = earlierWrapperAfter.getBoundingClientRect().height;
   const diagnostics: Record<string, unknown> = {
     timeline,
     sameCitationCards,
+    clickedCardConnectedBeforeRerender,
+    clickedCardConnectedAtClick,
+    earlierHeightBefore,
+    earlierHeightAfter,
+    earlierWrapperConnectedBefore,
+    earlierWrapperConnectedAfter: earlierWrapperAfter.isConnected,
     snapshotBefore: snapshotBefore
       ? {
           mode: snapshotBefore.mode,
@@ -3061,8 +3119,7 @@ async function probeTargetedRerenderScrollStability(params: {
   return {
     diagnostics,
     chatBoxScrollable: chatBox.scrollHeight > chatBox.clientHeight + 1,
-    earlierWrapperHeightDelta:
-      earlierWrapper.getBoundingClientRect().height - earlierHeightBefore,
+    earlierWrapperHeightDelta: earlierHeightAfter - earlierHeightBefore,
     expandedBeforeRerender,
     expandedAfterRerender: cardAfter?.dataset.expanded === "true",
     expandedBodyTextAfterRerender: (
@@ -5595,6 +5652,53 @@ export function installWorkflowTestHarness(targetAddon: {
     createItemNoteFixture,
     createStandaloneNoteFixture,
     renderPanelForItem,
+    renderEmptyPanel: () => {
+      assertWorkflowTestEnabled();
+      const body = appendHost(getWorkflowDocument());
+      buildUI(body, null);
+      refreshChat(body, null);
+      return { body, dispose: () => body.remove() };
+    },
+    refreshWorkflowLocale: () => {
+      assertWorkflowTestEnabled();
+      initI18n();
+    },
+    configureWorkflowUiStress: (modelLabel, fontPercent) => {
+      assertWorkflowTestEnabled();
+      const groups = getModelProviderGroups();
+      const originalGroups = JSON.parse(JSON.stringify(groups));
+      const originalEntryId = getLastUsedModelEntryId();
+      const originalFont = panelFontScalePercent;
+      const fontPref = `${config.prefsPrefix}.panelFontScale`;
+      const originalFontPref = Zotero.Prefs.get(fontPref, true);
+      const group = groups.find(
+        (candidate) => candidate.authMode === "api_key",
+      );
+      const model =
+        group?.models.find((candidate) => candidate.id === originalEntryId) ||
+        group?.models[0];
+      if (!model)
+        throw new Error("UI stress fixture needs a configured API-key model");
+      model.model = modelLabel;
+      setModelProviderGroups(groups);
+      setLastUsedModelEntryId(model.id);
+      setPanelFontScalePercent(fontPercent);
+      setFontScalePref(fontPercent);
+      return {
+        originalFontPercent: originalFont,
+        modelLabel,
+        fontPercent,
+        restore: async () => {
+          setModelProviderGroups(originalGroups);
+          setLastUsedModelEntryId(originalEntryId);
+          setPanelFontScalePercent(originalFont);
+          await Zotero.Promise.delay(0);
+          if (originalFontPref === undefined)
+            Zotero.Prefs.clear(fontPref, true);
+          else Zotero.Prefs.set(fontPref, originalFontPref as never, true);
+        },
+      };
+    },
     refreshActiveConversationPanels,
     exerciseBackgroundAgentPublication,
     exerciseNativeQuestionReview: (panelId: string) => {

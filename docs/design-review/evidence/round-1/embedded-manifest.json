@@ -1,0 +1,294 @@
+{
+  "method": "Actual Zotero main-window production buildUI + setupHandlers; 380px mounted host; drawWindow crop",
+  "width": 380,
+  "height": 760,
+  "panelScrollWidth": 380,
+  "panelClientWidth": 380,
+  "input": {
+    "x": 17,
+    "y": 640,
+    "width": 346,
+    "height": 64,
+    "top": 640,
+    "right": 363,
+    "bottom": 704,
+    "left": 17
+  },
+  "send": {
+    "x": 331,
+    "y": 710,
+    "width": 32,
+    "height": 32,
+    "top": 710,
+    "right": 363,
+    "bottom": 742,
+    "left": 331
+  },
+  "diagnostics": {
+    "panelId": "workflow-panel-1",
+    "activeItemId": 1,
+    "conversationKey": 1,
+    "panelConversationKey": 1,
+    "conversationKind": "paper",
+    "runtimeMode": "chat",
+    "conversationSystem": "upstream",
+    "contextSnapshot": {
+      "contextItem": {
+        "key": "N4RFBFUG",
+        "version": 0,
+        "itemType": "attachment",
+        "title": "Scientific evidence synthesis — full text",
+        "parentItem": "EE7KIY8C",
+        "linkMode": "imported_file",
+        "contentType": "application/pdf",
+        "charset": "",
+        "filename": "llm-for-zotero-workflow-1793160975458-paper.pdf",
+        "tags": [],
+        "relations": {},
+        "dateAdded": "2026-10-28T04:16:15Z",
+        "dateModified": "2026-10-28T04:16:15Z"
+      },
+      "statusText": "using Zotero best attachment Scientific evidence synthesis — full text from Retrieval-augmented generation for scientific evidence synthesis as context",
+      "sourceKind": "best-attachment",
+      "rawItem": {
+        "key": "EE7KIY8C",
+        "version": 0,
+        "itemType": "journalArticle",
+        "title": "Retrieval-augmented generation for scientific evidence synthesis",
+        "creators": [],
+        "tags": [],
+        "collections": [],
+        "relations": {},
+        "dateAdded": "2026-10-28T04:16:15Z",
+        "dateModified": "2026-10-28T04:16:15Z"
+      },
+      "ownerItem": {
+        "key": "EE7KIY8C",
+        "version": 0,
+        "itemType": "journalArticle",
+        "title": "Retrieval-augmented generation for scientific evidence synthesis",
+        "creators": [],
+        "tags": [],
+        "collections": [],
+        "relations": {},
+        "dateAdded": "2026-10-28T04:16:15Z",
+        "dateModified": "2026-10-28T04:16:15Z"
+      },
+      "ownerItemId": 1,
+      "contextItemId": 2,
+      "support": {
+        "kind": "pdf",
+        "attachmentType": "pdf",
+        "readableVia": "paper_read"
+      },
+      "paperContext": {
+        "libraryID": 1,
+        "itemId": 1,
+        "contextItemId": 2,
+        "title": "Retrieval-augmented generation for scientific evidence synthesis",
+        "attachmentTitle": "Scientific evidence synthesis — full text"
+      },
+      "supportKind": "pdf",
+      "requiresAsyncResolution": false,
+      "isAsyncFinal": true
+    },
+    "chipText": [
+      "Paper - Text"
+    ],
+    "composerPaperContextKeys": [
+      "1:2"
+    ],
+    "selectedContextLabels": [],
+    "composerCollectionLabels": [],
+    "composerTagLabels": [],
+    "sentContextBadgeLabels": [],
+    "sentContextItemLabels": [],
+    "historyNewVisible": true,
+    "historyToggleVisible": true,
+    "runtimeSystemToggles": [
+      {
+        "system": "codex",
+        "visible": false,
+        "active": false,
+        "disabled": false,
+        "ariaPressed": false
+      },
+      {
+        "system": "claude_code",
+        "visible": false,
+        "active": false,
+        "disabled": false,
+        "ariaPressed": false
+      }
+    ],
+    "webChatMode": false,
+    "modelButtonDisabled": false,
+    "inputValue": "Check the evidence for the retrieval claim.",
+    "startPageActive": false,
+    "statusBarVisible": false,
+    "permissionControlVisible": false,
+    "permissionModeFontSize": "14px",
+    "statusFontSize": "12px",
+    "contextGaugeWidth": 12,
+    "contextGaugeHeight": 12,
+    "contextGaugeInnerWidth": 5.2,
+    "contextGaugeInnerBackground": "rgb(240, 240, 243)",
+    "panelBackground": "rgb(252, 252, 253)",
+    "tokenUsageText": "46 / 128k (0%)",
+    "messageText": "Check the evidence for the retrieval claim.◷04:00 10/28/26回答The methods suggest improved grounding, but the response was interrupted before the evidence check finished.…选择模型重试分支对话删除此轮Open response in larger view◷04:00 10/28/26⚠ Response interrupted before it finished — retry to continue.",
+    "lastSend": {
+      "body": {
+        "__llmQueuedFollowUpRegisteredThreadKey": "upstream:1"
+      },
+      "item": {
+        "key": "EE7KIY8C",
+        "version": 0,
+        "itemType": "journalArticle",
+        "title": "Retrieval-augmented generation for scientific evidence synthesis",
+        "creators": [],
+        "tags": [],
+        "collections": [],
+        "relations": {},
+        "dateAdded": "2026-10-28T04:16:15Z",
+        "dateModified": "2026-10-28T04:16:15Z"
+      },
+      "requestId": 1,
+      "contextSource": {
+        "contextItem": {
+          "key": "N4RFBFUG",
+          "version": 0,
+          "itemType": "attachment",
+          "title": "Scientific evidence synthesis — full text",
+          "parentItem": "EE7KIY8C",
+          "linkMode": "imported_file",
+          "contentType": "application/pdf",
+          "charset": "",
+          "filename": "llm-for-zotero-workflow-1793160975458-paper.pdf",
+          "tags": [],
+          "relations": {},
+          "dateAdded": "2026-10-28T04:16:15Z",
+          "dateModified": "2026-10-28T04:16:15Z"
+        },
+        "statusText": "using Zotero best attachment Scientific evidence synthesis — full text from Retrieval-augmented generation for scientific evidence synthesis as context",
+        "sourceKind": "best-attachment",
+        "rawItem": {
+          "key": "EE7KIY8C",
+          "version": 0,
+          "itemType": "journalArticle",
+          "title": "Retrieval-augmented generation for scientific evidence synthesis",
+          "creators": [],
+          "tags": [],
+          "collections": [],
+          "relations": {},
+          "dateAdded": "2026-10-28T04:16:15Z",
+          "dateModified": "2026-10-28T04:16:15Z"
+        },
+        "ownerItem": {
+          "key": "EE7KIY8C",
+          "version": 0,
+          "itemType": "journalArticle",
+          "title": "Retrieval-augmented generation for scientific evidence synthesis",
+          "creators": [],
+          "tags": [],
+          "collections": [],
+          "relations": {},
+          "dateAdded": "2026-10-28T04:16:15Z",
+          "dateModified": "2026-10-28T04:16:15Z"
+        },
+        "ownerItemId": 1,
+        "contextItemId": 2,
+        "support": {
+          "kind": "pdf",
+          "attachmentType": "pdf",
+          "readableVia": "paper_read"
+        },
+        "paperContext": {
+          "libraryID": 1,
+          "itemId": 1,
+          "contextItemId": 2,
+          "title": "Retrieval-augmented generation for scientific evidence synthesis",
+          "attachmentTitle": "Scientific evidence synthesis — full text"
+        },
+        "supportKind": "pdf",
+        "requiresAsyncResolution": false,
+        "isAsyncFinal": true
+      },
+      "question": "Check the evidence for the retrieval claim.",
+      "images": [],
+      "model": "gpt-4o-mini",
+      "apiBase": "http://127.0.0.1:9/v1",
+      "apiKey": "workflow-test-key",
+      "authMode": "api_key",
+      "providerProtocol": "openai_chat_compat",
+      "modelEntryId": "model-1793160974139-q7qffciu",
+      "modelProviderLabel": "Provider 1",
+      "reasoning": {
+        "provider": "customized",
+        "level": "auto"
+      },
+      "advanced": {
+        "temperature": 0.3,
+        "outputTokenLimit": {
+          "mode": "auto"
+        }
+      },
+      "displayQuestion": "Check the evidence for the retrieval claim.",
+      "conversationKey": 1,
+      "paperContexts": [],
+      "pdfPaperContexts": [],
+      "fullTextPaperContexts": [],
+      "selectedCollectionContexts": [],
+      "selectedTagContexts": [],
+      "runtimeMode": "chat",
+      "webchatSendPdf": false,
+      "webchatPdfPaperContexts": [],
+      "webchatForceNewChat": false
+    },
+    "lastFinalRequest": {
+      "prompt": "Check the evidence for the retrieval claim.",
+      "historyTexts": [
+        "Which claims are supported by the ablation, and what are its limitations?",
+        "The ablation supports **better evidence precision** when the citation-aware reranker is enabled.\n\n1. Retrieval improves factual grounding.\n2. The reranker helps select relevant evidence.\n\nThe small evaluation set limits generalization. Treat this as directional evidence and check the full methods before comparing effect sizes."
+      ],
+      "combinedContext": "Paper coverage ledger:\n- Paper 1: (Retrieval-augmented generation for scientific evidence synthesis, n.d.); retrieved snippets: 1\n\n---\n\nPaper synthesis digest:\nUse this digest as the first-pass synthesis ledger before writing the final answer. Support IDs point to retrieved snippets below; cite papers normally in prose and use quote cards only for verified exact wording.\n- Paper 1: (Retrieval-augmented generation for scientific evidence synthesis, n.d.); coverage: body evidence; sections: body; support: P1.S1; contribution: Retrieval improves factual grounding. We compare the baseline and a citation-aware reranker on twelve research questions. The ablation supports a directional improvement in evidence precision. Sample size limits gener...\n\n---\n\nRetrieved Evidence:\n\nPaper citation data:\n- Each evidence record supplies its own sourceLabel and may supply a verified quote anchor.\nThe full paper remains available in paper chat.\nFor this reply, prioritize these retrieved snippets as the primary evidence pack.\nFor broad synthesis, work from the paper ledger and snippets first; do not turn snippets into quote cards unless verified quote anchors are provided and exact wording is useful.\nDo not use snippets from references as empirical evidence.\nIf support is weak or indirect, say so instead of overstating the claim.\n\n---\n\nPaper 1\nTitle: Retrieval-augmented generation for scientific evidence synthesis\nSource label: (Retrieval-augmented generation for scientific evidence synthesis, n.d.)\n\nEvidence:\nEvidence snippet 1 (P1.S1)\nSection: Unlabeled body text\nSource label: (Retrieval-augmented generation for scientific evidence synthesis, n.d.)\nQuoted evidence:\n> Retrieval improves factual grounding. We compare the baseline and a citation-aware reranker on twelve research questions. The ablation supports a directional improvement in evidence precision. Sample size limits generalization to other domains.",
+      "strategy": "paper-followup-retrieval",
+      "systemMessages": [
+        "Paper chat has access to the paper's full text. The retrieved snippets in this request are a focused grounding subset chosen for this answer, not a statement about limited access. Never say that you do not have full access to the paper or that you only have the provided snippets. If the user asks about access, say that you can access the full paper and that this answer is grounded in the most relevant retrieved chunks.",
+        "Describe reading coverage from the supplied evidence and coverage receipt. Do not claim to have read unavailable or unread text.",
+        "Reading receipt:\n- Strategy: deep_synthesis\n- Answer style: concise_overview\n- Planned papers: 1\n- Body evidence read: 1\n- Metadata/abstract only: 0\n- Stop reason: enough_evidence\n- Coverage frontier: none\nUse this receipt to calibrate the answer's certainty and coverage.\nIf coverage is partial, say which parts are grounded and which would need closer reading."
+      ],
+      "inputCap": {
+        "limitTokens": 128000,
+        "limitSource": "bundled",
+        "estimatedAfterTokens": 2113
+      },
+      "inputCapEffects": {
+        "documentContextTrimmed": false,
+        "documentContextDropped": false,
+        "promptTrimmed": false,
+        "historyDropped": false
+      },
+      "readStrategy": {
+        "resolvedStrategy": "deep_synthesis",
+        "answerStyle": "concise_overview",
+        "strategyReason": "Bounded multi-paper synthesis should read body evidence across every readable paper.",
+        "papersPlanned": 1,
+        "papersBodyRead": 1,
+        "papersMetadataOnly": 0,
+        "unreadableReasons": [],
+        "stopReason": "enough_evidence",
+        "coverageFrontier": []
+      },
+      "coverageReceipt": {
+        "text": "Reading receipt:\n- Strategy: deep_synthesis\n- Answer style: concise_overview\n- Planned papers: 1\n- Body evidence read: 1\n- Metadata/abstract only: 0\n- Stop reason: enough_evidence\n- Coverage frontier: none",
+        "resolvedStrategy": "deep_synthesis",
+        "answerStyle": "concise_overview",
+        "papersPlanned": 1,
+        "papersBodyRead": 1,
+        "papersMetadataOnly": 0,
+        "stopReason": "enough_evidence",
+        "coverageFrontier": []
+      }
+    }
+  }
+}

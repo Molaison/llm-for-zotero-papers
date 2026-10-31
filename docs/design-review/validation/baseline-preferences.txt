@@ -1,0 +1,74 @@
+
+
+  Agent preference tab layout
+    1) presents every group as one collapsible row
+    2) enables all three runtimes with the same switch idiom
+    3) keeps shared tools outside runtime rows without duplicate permission controls
+    4) folds runtime detail into a per-row advanced drawer
+    ✔ addresses its icons absolutely, because Zotero inlines this markup
+
+  AI Providers tab layout
+    ✔ dresses the rows in icons the plugin already ships
+    5) paints its cards so they sit above the pane Zotero actually draws
+
+
+  2 passing (16ms)
+  5 failing
+
+  1) Agent preference tab layout
+       presents every group as one collapsible row:
+
+      agent panel precedes the MinerU panel
+      + expected - actual
+
+      -22302
+      +49800
+
+      at agentPanel (test/agentTabLayout.test.ts:25:10)
+      at Context.<anonymous> (test/agentTabLayout.test.ts:40:19)
+      at process.processImmediate (node:internal/timers:574:21)
+
+  2) Agent preference tab layout
+       enables all three runtimes with the same switch idiom:
+
+      agent panel precedes the MinerU panel
+      + expected - actual
+
+      -22302
+      +49800
+
+      at agentPanel (test/agentTabLayout.test.ts:25:10)
+      at Context.<anonymous> (test/agentTabLayout.test.ts:62:19)
+      at process.processImmediate (node:internal/timers:574:21)
+
+  3) Agent preference tab layout
+       keeps shared tools outside runtime rows without duplicate permission controls:
+
+      agent panel precedes the MinerU panel
+      + expected - actual
+
+      -22302
+      +49800
+
+      at agentPanel (test/agentTabLayout.test.ts:25:10)
+      at Context.<anonymous> (test/agentTabLayout.test.ts:77:19)
+      at process.processImmediate (node:internal/timers:574:21)
+
+  4) Agent preference tab layout
+       folds runtime detail into a per-row advanced drawer:
+
+      agent panel precedes the MinerU panel
+      + expected - actual
+
+      -22302
+      +49800
+
+      at agentPanel (test/agentTabLayout.test.ts:25:10)
+      at Context.<anonymous> (test/agentTabLayout.test.ts:95:19)
+      at process.processImmediate (node:internal/timers:574:21)
+
+  5) AI Providers tab layout
+       paints its cards so they sit above the pane Zotero actually draws:
+     AssertionError: expected '<html:style> .llm-mineru-page-limit {…' to not include 'background: Field'
+      at Context.<anonymous> (test/aiProviderTabLayout.test.ts:81:12)
+      at process.processImmediate (node:internal/timers:574:21)
