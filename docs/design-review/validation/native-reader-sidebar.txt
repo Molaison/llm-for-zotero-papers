@@ -1,0 +1,13 @@
+npm warn Unknown env config "http-proxy". This will stop working in the next major version of npm.
+ ℹ Building version 3.14.8-papers.1 to .scaffold/build at 2026-10-28 09:55:36 in test mode.
+   → Preparing static assets
+   → Bundling scripts
+ ✔ Build finished in 0.587 s.
+ ℹ Installed /workspace/scratch/00a7879e879f/llm-for-zotero-papers/.scaffold/build/addon as a temporary add-on
+ ℹ Installed /workspace/scratch/00a7879e879f/llm-for-zotero-papers/.scaffold/test/resource as a temporary add-on
+
+   → workflow: native PDF and chat sidebar evidence
+     ✔ keeps the paper, conversation and draft usable in the native sidebar 15475ms
+
+ ✔ Test run completed - 1 passed
+Native reader evidence saved: docs/design-review/evidence/reader-sidebar

@@ -185,9 +185,10 @@ describe("workflow: background conversation activity", function () {
         12,
         "uses the run start rather than mount time",
       );
-      assert.equal(
-        win.getComputedStyle(words)!.animationName,
-        "llm-planning-text-shimmer",
+      assert.isAbove(
+        words.getBoundingClientRect().width,
+        0,
+        "the active status remains visible without decorative shimmer",
       );
       assert.equal(
         win.getComputedStyle(summary, "::after")!.animationName,

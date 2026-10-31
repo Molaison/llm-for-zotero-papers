@@ -1,0 +1,7 @@
+
+
+  tool result preview cost
+    ✔ previews 3,000 rows of five-entry arrays and a 1,000-item listing in linear time (318ms)
+
+
+  1 passing (321ms)

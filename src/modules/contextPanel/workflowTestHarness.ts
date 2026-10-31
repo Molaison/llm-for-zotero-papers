@@ -50,6 +50,7 @@ import {
   exerciseLongJobReplay,
 } from "./longJobReplay";
 import { buildUI } from "./buildUI";
+import { initI18n } from "../../utils/i18n";
 import { getAgentRuntime } from "../../agent";
 import { normalizeExecutionOutput } from "../../agent/tools/execution/results";
 import {
@@ -76,6 +77,8 @@ import {
   selectedTagContextCache,
   initializedConversationComposeContextKeys,
   isRequestPending,
+  panelFontScalePercent,
+  setPanelFontScalePercent,
 } from "./state";
 import type { ResolvedContextSource, SendQuestionOptions } from "./types";
 import type {
@@ -188,6 +191,8 @@ import {
   getModelProviderGroups,
   setModelProviderGroups,
   getModelEntryById,
+  getLastUsedModelEntryId,
+  setLastUsedModelEntryId,
 } from "../../utils/modelProviders";
 import type { RuntimeConversationSystem } from "./runtimeSystemControls";
 import { collectReaderSelectionDocuments } from "./readerSelection";
@@ -473,6 +478,7 @@ async function clickStandalonePermissionOption(
 import {
   removeLastUsedUpstreamConversationMode,
   removeLastUsedUpstreamGlobalConversationKey,
+  setFontScalePref,
 } from "./prefHelpers";
 
 async function appendWorkflowStoredMessage(
@@ -1935,6 +1941,11 @@ async function clickPanelSystemToggle(
   if (!button) {
     throw new Error(`Panel ${system} system toggle was not rendered`);
   }
+  const tools = button.closest<HTMLDetailsElement>(".llm-conversation-tools");
+  if (tools && !tools.open)
+    tools.querySelector<HTMLElement>("summary")?.click();
+  if (!button.getBoundingClientRect().width)
+    throw new Error(`Panel ${system} system toggle is not visible in More`);
   const before = await getDiagnostics(panelId);
   const expectedSystem =
     before.conversationSystem === system ? "upstream" : system;
@@ -1971,6 +1982,11 @@ async function clickPanelSystemTogglesRapidly(
     if (!button) {
       throw new Error(`Panel ${system} system toggle was not rendered`);
     }
+    const tools = button.closest<HTMLDetailsElement>(".llm-conversation-tools");
+    if (tools && !tools.open)
+      tools.querySelector<HTMLElement>("summary")?.click();
+    if (!button.getBoundingClientRect().width)
+      throw new Error(`Panel ${system} system toggle is not visible in More`);
     if (eventCtor) {
       button.dispatchEvent(
         new eventCtor("click", { bubbles: true, cancelable: true }),
@@ -2050,6 +2066,14 @@ async function measurePanelRuntimeGeometry(
     throw new Error("Panel runtime geometry targets were not rendered");
   }
 
+  // Runtime choices now live in More. Measure the visible menu the user
+  // opens, rather than comparing its children with the old header slot.
+  const tools = runtimeControls.closest<HTMLDetailsElement>(
+    ".llm-conversation-tools",
+  );
+  const toolsSummary = tools?.querySelector<HTMLElement>("summary");
+  const wasOpen = tools?.open;
+  if (tools && !wasOpen) toolsSummary?.click();
   const previousWidth = panel.body.style.width;
   const previousScale = panelRoot.style.getPropertyValue("--llm-font-scale");
   panel.body.style.width = `${input.width}px`;
@@ -2058,6 +2082,11 @@ async function measurePanelRuntimeGeometry(
   try {
     const containerRect = header.getBoundingClientRect();
     const runtimeRect = getVisibleRuntimeControlsRect(runtimeControls);
+    const runtimeContainer = runtimeControls.closest<HTMLElement>(
+      ".llm-conversation-tools-body",
+    );
+    const runtimeContainerRect =
+      runtimeContainer?.getBoundingClientRect() || containerRect;
     const runtimeButtonWidths = getVisibleRuntimeButtonRects(
       runtimeControls,
     ).map((rect) => rect.width);
@@ -2085,7 +2114,10 @@ async function measurePanelRuntimeGeometry(
         0,
         runtimeRect.right - actionsRect.left,
       ),
-      runtimeWithinContainer: rectWithinContainer(runtimeRect, containerRect),
+      runtimeWithinContainer: rectWithinContainer(
+        runtimeRect,
+        runtimeContainerRect,
+      ),
       trailingContentWithinContainer: rectWithinContainer(
         actionsRect,
         containerRect,
@@ -2100,6 +2132,7 @@ async function measurePanelRuntimeGeometry(
       ),
     };
   } finally {
+    if (tools?.open && !wasOpen) toolsSummary?.click();
     panel.body.style.width = previousWidth;
     if (previousScale) {
       panelRoot.style.setProperty("--llm-font-scale", previousScale);
@@ -5595,6 +5628,53 @@ export function installWorkflowTestHarness(targetAddon: {
     createItemNoteFixture,
     createStandaloneNoteFixture,
     renderPanelForItem,
+    renderEmptyPanel: () => {
+      assertWorkflowTestEnabled();
+      const body = appendHost(getWorkflowDocument());
+      buildUI(body, null);
+      refreshChat(body, null);
+      return { body, dispose: () => body.remove() };
+    },
+    refreshWorkflowLocale: () => {
+      assertWorkflowTestEnabled();
+      initI18n();
+    },
+    configureWorkflowUiStress: (modelLabel, fontPercent) => {
+      assertWorkflowTestEnabled();
+      const groups = getModelProviderGroups();
+      const originalGroups = JSON.parse(JSON.stringify(groups));
+      const originalEntryId = getLastUsedModelEntryId();
+      const originalFont = panelFontScalePercent;
+      const fontPref = `${config.prefsPrefix}.panelFontScale`;
+      const originalFontPref = Zotero.Prefs.get(fontPref, true);
+      const group = groups.find(
+        (candidate) => candidate.authMode === "api_key",
+      );
+      const model =
+        group?.models.find((candidate) => candidate.id === originalEntryId) ||
+        group?.models[0];
+      if (!model)
+        throw new Error("UI stress fixture needs a configured API-key model");
+      model.model = modelLabel;
+      setModelProviderGroups(groups);
+      setLastUsedModelEntryId(model.id);
+      setPanelFontScalePercent(fontPercent);
+      setFontScalePref(fontPercent);
+      return {
+        originalFontPercent: originalFont,
+        modelLabel,
+        fontPercent,
+        restore: async () => {
+          setModelProviderGroups(originalGroups);
+          setLastUsedModelEntryId(originalEntryId);
+          setPanelFontScalePercent(originalFont);
+          await Zotero.Promise.delay(0);
+          if (originalFontPref === undefined)
+            Zotero.Prefs.clear(fontPref, true);
+          else Zotero.Prefs.set(fontPref, originalFontPref as never, true);
+        },
+      };
+    },
     refreshActiveConversationPanels,
     exerciseBackgroundAgentPublication,
     exerciseNativeQuestionReview: (panelId: string) => {

@@ -76,10 +76,7 @@ describe("runtime system control layout", function () {
       standaloneRootRule,
       "--llm-standalone-ui-font-size: var(--llm-fs-12);",
     );
-    assert.include(
-      toggleRowRule,
-      "--llm-standalone-ui-font-size: 1em;",
-    );
+    assert.include(toggleRowRule, "--llm-standalone-ui-font-size: 1em;");
     for (const rule of [standaloneRootRule, toggleRowRule]) {
       assert.include(
         rule,
@@ -345,7 +342,7 @@ describe("runtime system control layout", function () {
     assert.notInclude(standaloneSource, "20.998 10.949");
   });
 
-  it("uses the existing compact trash icon at every sidebar width", function () {
+  it("keeps the existing trash asset and a named action inside More", function () {
     const css = source("addon/content/zoteroPane.css");
     const sidebarSource = source("src/modules/contextPanel/buildUI.ts");
     const handlerSource = source("src/modules/contextPanel/setupHandlers.ts");
@@ -353,7 +350,9 @@ describe("runtime system control layout", function () {
       "src/modules/contextPanel/standaloneWindow.ts",
     );
     const deleteButtonRule = cssRulesFor(css, ".llm-clear-btn").join("\n");
-    const deleteIconRule = cssRulesFor(css, ".llm-clear-btn::before").join("\n");
+    const deleteIconRule = cssRulesFor(css, ".llm-clear-btn::before").join(
+      "\n",
+    );
 
     assert.include(sidebarSource, "llm-btn-icon llm-clear-btn");
     assert.include(sidebarSource, 'title: t("Delete conversation")');
@@ -374,7 +373,14 @@ describe("runtime system control layout", function () {
     );
     assert.notInclude(handlerSource, "syncResponsiveHeaderClearButton");
     assert.notInclude(handlerSource, "shouldCompactHeaderClearButton");
-    assert.include(handlerSource, 'clearBtn.textContent = ""');
+    assert.include(
+      handlerSource,
+      'clearBtn.textContent = t("Delete conversation")',
+    );
+    assert.include(
+      css,
+      ".llm-header-actions .llm-conversation-tools-body > button",
+    );
     assert.include(handlerSource, 't("Delete conversation")');
     assert.include(
       standaloneSource,

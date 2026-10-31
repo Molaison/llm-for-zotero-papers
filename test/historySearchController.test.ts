@@ -2,6 +2,7 @@ import { assert } from "chai";
 import type { ConversationHistoryEntry } from "../src/modules/contextPanel/setupHandlers/controllers/conversationHistoryController";
 import {
   buildHistorySearchResults,
+  buildHistorySearchPreview,
   collectHistorySearchRanges,
   createHistorySearchDocumentFingerprint,
   createHistorySearchDocument,
@@ -42,6 +43,59 @@ describe("historySearchController", function () {
     assert.deepEqual(collectHistorySearchRanges("Paper", ["paper", "pap"]), [
       { start: 0, end: 5 },
     ]);
+  });
+
+  it("shows plain Markdown preview text with highlights at the displayed offsets", function () {
+    const { previewText, previewRanges } = buildHistorySearchPreview(
+      "The **evidence** supports [grounding](https://example.org).",
+      ["evidence"],
+    );
+    assert.equal(previewText, "The evidence supports grounding.");
+    assert.deepEqual(previewRanges, [{ start: 4, end: 12 }]);
+  });
+
+  it("extracts safe HTML text and decodes prose entities without rendering HTML", function () {
+    const { previewText } = buildHistorySearchPreview(
+      "<b>evidence &amp; proof</b> &lt;limit&gt; &#x3b1;",
+      ["evidence"],
+    );
+    assert.equal(previewText, "evidence & proof <limit> α");
+  });
+
+  it("preserves literal code and math in previews", function () {
+    for (const source of [
+      "`**evidence** &lt;x&gt;`",
+      "```txt\n**evidence** &lt;x&gt;\n```",
+    ]) {
+      assert.equal(
+        buildHistorySearchPreview(source, ["evidence"]).previewText,
+        "**evidence** &lt;x&gt;",
+      );
+    }
+    const math = "Evidence uses \\(a_i ** b_j\\) and $$x * y$$.";
+    assert.equal(
+      buildHistorySearchPreview(math, ["evidence"]).previewText,
+      math,
+    );
+  });
+
+  it("keeps raw syntax and URL queries explainable without changing search candidates", function () {
+    const raw = "The **evidence** is [linked](https://example.org).";
+    assert.include(
+      buildHistorySearchPreview(raw, ["example.org"]).previewText,
+      "https://example.org",
+    );
+    assert.include(buildHistorySearchPreview(raw, ["**"]).previewText, "**");
+    const entry = historyEntry(105, "A result", 100);
+    const document = createHistorySearchDocument(entry, [{ text: raw }]);
+    assert.equal(document.candidates.at(-1)?.text, raw);
+    const [result] = buildHistorySearchResults(
+      [entry],
+      "evidence",
+      new Map([[entry.conversationKey, document]]),
+    );
+    assert.equal(result.matchCount, 1);
+    assert.notInclude(result.previewText, "**");
   });
 
   it("fingerprints documents by key, kind, source label, and activity", function () {

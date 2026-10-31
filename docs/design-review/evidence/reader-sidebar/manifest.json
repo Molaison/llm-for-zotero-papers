@@ -1,0 +1,1033 @@
+{
+  "method": "Actual native Zotero PDF reader and registered per-tab item-details sidebar; full main-window privileged drawWindow; no synthetic panel host",
+  "zoteroVersion": "10.0.6",
+  "requestedWindow": {
+    "width": 1360,
+    "height": 900
+  },
+  "fixtureTitles": [
+    "Retrieval-augmented generation for scientific evidence synthesis",
+    "Independent replication and the limits of evidence precision"
+  ],
+  "captures": [
+    {
+      "name": "01-reader-stacked-full",
+      "selectedTabId": "tab-32Sn7YbW",
+      "readerTabId": "tab-32Sn7YbW",
+      "attachmentItemId": 2,
+      "contextOwnerItemId": "1",
+      "conversationKind": "paper",
+      "sidebarLayout": "stacked",
+      "nativeZoteroLayout": "standard",
+      "paneView": "stacked",
+      "collapsed": false,
+      "window": {
+        "width": 1360,
+        "height": 900,
+        "dpr": 1
+      },
+      "nativePane": {
+        "x": 1003,
+        "y": 73,
+        "width": 357,
+        "height": 827,
+        "top": 73,
+        "right": 1360,
+        "bottom": 900,
+        "left": 1003
+      },
+      "pdfBrowser": {
+        "x": 0,
+        "y": 73,
+        "width": 1003,
+        "height": 827,
+        "top": 73,
+        "right": 1003,
+        "bottom": 900,
+        "left": 0
+      },
+      "panel": {
+        "x": 1011,
+        "y": 160.1666717529297,
+        "width": 304,
+        "height": 731,
+        "top": 160.1666717529297,
+        "right": 1315,
+        "bottom": 891.1666717529297,
+        "left": 1011
+      },
+      "input": {
+        "x": 1030,
+        "y": 765.1666870117188,
+        "width": 266,
+        "height": 64,
+        "top": 765.1666870117188,
+        "right": 1296,
+        "bottom": 829.1666870117188,
+        "left": 1030
+      },
+      "send": {
+        "x": 1264,
+        "y": 835.1666870117188,
+        "width": 32,
+        "height": 32,
+        "top": 835.1666870117188,
+        "right": 1296,
+        "bottom": 867.1666870117188,
+        "left": 1264
+      },
+      "panelScrollWidth": 304,
+      "panelClientWidth": 304,
+      "draft": "Check whether the evidence supports this interpretation.",
+      "sourcesOpen": false,
+      "panelFontScale": "1.2",
+      "locale": "en-US",
+      "dark": false,
+      "nativeEntryActions": [
+        {
+          "action": "visible-reader-context-toggle-click",
+          "tabId": "tab-32Sn7YbW",
+          "selector": "button.context-pane-toggle",
+          "readerLocalBounds": {
+            "x": 1328,
+            "y": 6,
+            "width": 28,
+            "height": 28,
+            "top": 6,
+            "right": 1356,
+            "bottom": 34,
+            "left": 1328
+          }
+        },
+        {
+          "action": "visible-chat-rail-click",
+          "tabId": "tab-32Sn7YbW",
+          "bounds": {
+            "x": 1328,
+            "y": 324,
+            "width": 28,
+            "height": 28,
+            "top": 324,
+            "right": 1356,
+            "bottom": 352,
+            "left": 1328
+          }
+        }
+      ]
+    },
+    {
+      "name": "02-reader-independent-full",
+      "selectedTabId": "tab-32Sn7YbW",
+      "readerTabId": "tab-32Sn7YbW",
+      "attachmentItemId": 2,
+      "contextOwnerItemId": "1",
+      "conversationKind": "paper",
+      "sidebarLayout": "independent",
+      "nativeZoteroLayout": "standard",
+      "paneView": "chat",
+      "collapsed": false,
+      "window": {
+        "width": 1360,
+        "height": 900,
+        "dpr": 1
+      },
+      "nativePane": {
+        "x": 1003,
+        "y": 73,
+        "width": 357,
+        "height": 827,
+        "top": 73,
+        "right": 1360,
+        "bottom": 900,
+        "left": 1003
+      },
+      "pdfBrowser": {
+        "x": 0,
+        "y": 73,
+        "width": 1003,
+        "height": 827,
+        "top": 73,
+        "right": 1003,
+        "bottom": 900,
+        "left": 0
+      },
+      "panel": {
+        "x": 1003,
+        "y": 73,
+        "width": 320,
+        "height": 819,
+        "top": 73,
+        "right": 1323,
+        "bottom": 892,
+        "left": 1003
+      },
+      "input": {
+        "x": 1022,
+        "y": 766,
+        "width": 282,
+        "height": 64,
+        "top": 766,
+        "right": 1304,
+        "bottom": 830,
+        "left": 1022
+      },
+      "send": {
+        "x": 1272,
+        "y": 836,
+        "width": 32,
+        "height": 32,
+        "top": 836,
+        "right": 1304,
+        "bottom": 868,
+        "left": 1272
+      },
+      "panelScrollWidth": 320,
+      "panelClientWidth": 320,
+      "draft": "Check whether the evidence supports this interpretation.",
+      "sourcesOpen": false,
+      "panelFontScale": "1.2",
+      "locale": "en-US",
+      "dark": false,
+      "nativeEntryActions": [
+        {
+          "action": "visible-reader-context-toggle-click",
+          "tabId": "tab-32Sn7YbW",
+          "selector": "button.context-pane-toggle",
+          "readerLocalBounds": {
+            "x": 1328,
+            "y": 6,
+            "width": 28,
+            "height": 28,
+            "top": 6,
+            "right": 1356,
+            "bottom": 34,
+            "left": 1328
+          }
+        },
+        {
+          "action": "visible-chat-rail-click",
+          "tabId": "tab-32Sn7YbW",
+          "bounds": {
+            "x": 1328,
+            "y": 324,
+            "width": 28,
+            "height": 28,
+            "top": 324,
+            "right": 1356,
+            "bottom": 352,
+            "left": 1328
+          }
+        }
+      ]
+    },
+    {
+      "name": "03-reader-independent-narrow-full",
+      "selectedTabId": "tab-32Sn7YbW",
+      "readerTabId": "tab-32Sn7YbW",
+      "attachmentItemId": 2,
+      "contextOwnerItemId": "1",
+      "conversationKind": "paper",
+      "sidebarLayout": "independent",
+      "nativeZoteroLayout": "standard",
+      "paneView": "chat",
+      "collapsed": false,
+      "window": {
+        "width": 1360,
+        "height": 900,
+        "dpr": 1
+      },
+      "nativePane": {
+        "x": 946,
+        "y": 73,
+        "width": 414,
+        "height": 827,
+        "top": 73,
+        "right": 1360,
+        "bottom": 900,
+        "left": 946
+      },
+      "pdfBrowser": {
+        "x": 0,
+        "y": 73,
+        "width": 946,
+        "height": 827,
+        "top": 73,
+        "right": 946,
+        "bottom": 900,
+        "left": 0
+      },
+      "panel": {
+        "x": 946,
+        "y": 73,
+        "width": 377,
+        "height": 819,
+        "top": 73,
+        "right": 1323,
+        "bottom": 892,
+        "left": 946
+      },
+      "input": {
+        "x": 965,
+        "y": 766,
+        "width": 339,
+        "height": 64,
+        "top": 766,
+        "right": 1304,
+        "bottom": 830,
+        "left": 965
+      },
+      "send": {
+        "x": 1272,
+        "y": 836,
+        "width": 32,
+        "height": 32,
+        "top": 836,
+        "right": 1304,
+        "bottom": 868,
+        "left": 1272
+      },
+      "panelScrollWidth": 377,
+      "panelClientWidth": 377,
+      "draft": "Check whether the evidence supports this interpretation.",
+      "sourcesOpen": false,
+      "panelFontScale": "1.2",
+      "locale": "en-US",
+      "dark": false,
+      "narrowRequest": {
+        "requestedPanelWidth": 380,
+        "requestedNativeWidth": 414,
+        "method": "Native context-pane width attribute plus ZoteroContextPane.update()",
+        "actualPanelWidth": 377
+      },
+      "nativeEntryActions": [
+        {
+          "action": "visible-reader-context-toggle-click",
+          "tabId": "tab-32Sn7YbW",
+          "selector": "button.context-pane-toggle",
+          "readerLocalBounds": {
+            "x": 1328,
+            "y": 6,
+            "width": 28,
+            "height": 28,
+            "top": 6,
+            "right": 1356,
+            "bottom": 34,
+            "left": 1328
+          }
+        },
+        {
+          "action": "visible-chat-rail-click",
+          "tabId": "tab-32Sn7YbW",
+          "bounds": {
+            "x": 1328,
+            "y": 324,
+            "width": 28,
+            "height": 28,
+            "top": 324,
+            "right": 1356,
+            "bottom": 352,
+            "left": 1328
+          }
+        }
+      ]
+    },
+    {
+      "name": "04-reader-sources-expanded-full",
+      "selectedTabId": "tab-32Sn7YbW",
+      "readerTabId": "tab-32Sn7YbW",
+      "attachmentItemId": 2,
+      "contextOwnerItemId": "1",
+      "conversationKind": "paper",
+      "sidebarLayout": "independent",
+      "nativeZoteroLayout": "standard",
+      "paneView": "chat",
+      "collapsed": false,
+      "window": {
+        "width": 1360,
+        "height": 900,
+        "dpr": 1
+      },
+      "nativePane": {
+        "x": 946,
+        "y": 73,
+        "width": 414,
+        "height": 827,
+        "top": 73,
+        "right": 1360,
+        "bottom": 900,
+        "left": 946
+      },
+      "pdfBrowser": {
+        "x": 0,
+        "y": 73,
+        "width": 946,
+        "height": 827,
+        "top": 73,
+        "right": 946,
+        "bottom": 900,
+        "left": 0
+      },
+      "panel": {
+        "x": 946,
+        "y": 73,
+        "width": 377,
+        "height": 819,
+        "top": 73,
+        "right": 1323,
+        "bottom": 892,
+        "left": 946
+      },
+      "input": {
+        "x": 965,
+        "y": 766,
+        "width": 339,
+        "height": 64,
+        "top": 766,
+        "right": 1304,
+        "bottom": 830,
+        "left": 965
+      },
+      "send": {
+        "x": 1272,
+        "y": 836,
+        "width": 32,
+        "height": 32,
+        "top": 836,
+        "right": 1304,
+        "bottom": 868,
+        "left": 1272
+      },
+      "panelScrollWidth": 377,
+      "panelClientWidth": 377,
+      "draft": "Check whether the evidence supports this interpretation.",
+      "sourcesOpen": true,
+      "panelFontScale": "1.2",
+      "locale": "en-US",
+      "dark": false,
+      "narrowRequest": {
+        "requestedPanelWidth": 380,
+        "requestedNativeWidth": 414,
+        "method": "Native context-pane width attribute plus ZoteroContextPane.update()",
+        "actualPanelWidth": 377
+      },
+      "nativeEntryActions": [
+        {
+          "action": "visible-reader-context-toggle-click",
+          "tabId": "tab-32Sn7YbW",
+          "selector": "button.context-pane-toggle",
+          "readerLocalBounds": {
+            "x": 1328,
+            "y": 6,
+            "width": 28,
+            "height": 28,
+            "top": 6,
+            "right": 1356,
+            "bottom": 34,
+            "left": 1328
+          }
+        },
+        {
+          "action": "visible-chat-rail-click",
+          "tabId": "tab-32Sn7YbW",
+          "bounds": {
+            "x": 1328,
+            "y": 324,
+            "width": 28,
+            "height": 28,
+            "top": 324,
+            "right": 1356,
+            "bottom": 352,
+            "left": 1328
+          }
+        }
+      ]
+    },
+    {
+      "name": "05-reader-chat-collapsed-full",
+      "selectedTabId": "tab-32Sn7YbW",
+      "readerTabId": "tab-32Sn7YbW",
+      "attachmentItemId": 2,
+      "contextOwnerItemId": "1",
+      "conversationKind": "paper",
+      "sidebarLayout": "independent",
+      "nativeZoteroLayout": "standard",
+      "paneView": "details",
+      "collapsed": true,
+      "window": {
+        "width": 1360,
+        "height": 900,
+        "dpr": 1
+      },
+      "nativePane": {
+        "x": 1360,
+        "y": 73,
+        "width": 0,
+        "height": 0,
+        "top": 73,
+        "right": 1360,
+        "bottom": 73,
+        "left": 1360
+      },
+      "pdfBrowser": {
+        "x": 0,
+        "y": 73,
+        "width": 1360,
+        "height": 827,
+        "top": 73,
+        "right": 1360,
+        "bottom": 900,
+        "left": 0
+      },
+      "panel": {
+        "x": 0,
+        "y": 0,
+        "width": 0,
+        "height": 0,
+        "top": 0,
+        "right": 0,
+        "bottom": 0,
+        "left": 0
+      },
+      "input": {
+        "x": 0,
+        "y": 0,
+        "width": 0,
+        "height": 0,
+        "top": 0,
+        "right": 0,
+        "bottom": 0,
+        "left": 0
+      },
+      "send": {
+        "x": 0,
+        "y": 0,
+        "width": 0,
+        "height": 0,
+        "top": 0,
+        "right": 0,
+        "bottom": 0,
+        "left": 0
+      },
+      "panelScrollWidth": 0,
+      "panelClientWidth": 0,
+      "draft": "Check whether the evidence supports this interpretation.",
+      "sourcesOpen": false,
+      "panelFontScale": "1.2",
+      "locale": "en-US",
+      "dark": false,
+      "narrowRequest": {
+        "requestedPanelWidth": 380,
+        "requestedNativeWidth": 414,
+        "method": "Native context-pane width attribute plus ZoteroContextPane.update()",
+        "actualPanelWidth": 377
+      },
+      "nativeEntryActions": [
+        {
+          "action": "visible-reader-context-toggle-click",
+          "tabId": "tab-32Sn7YbW",
+          "selector": "button.context-pane-toggle",
+          "readerLocalBounds": {
+            "x": 1328,
+            "y": 6,
+            "width": 28,
+            "height": 28,
+            "top": 6,
+            "right": 1356,
+            "bottom": 34,
+            "left": 1328
+          }
+        },
+        {
+          "action": "visible-chat-rail-click",
+          "tabId": "tab-32Sn7YbW",
+          "bounds": {
+            "x": 1328,
+            "y": 324,
+            "width": 28,
+            "height": 28,
+            "top": 324,
+            "right": 1356,
+            "bottom": 352,
+            "left": 1328
+          }
+        },
+        {
+          "action": "visible-chat-rail-click",
+          "tabId": "tab-32Sn7YbW",
+          "bounds": {
+            "x": 1328,
+            "y": 324,
+            "width": 28,
+            "height": 28,
+            "top": 324,
+            "right": 1356,
+            "bottom": 352,
+            "left": 1328
+          }
+        }
+      ]
+    },
+    {
+      "name": "06-reader-chat-restored-full",
+      "selectedTabId": "tab-32Sn7YbW",
+      "readerTabId": "tab-32Sn7YbW",
+      "attachmentItemId": 2,
+      "contextOwnerItemId": "1",
+      "conversationKind": "paper",
+      "sidebarLayout": "independent",
+      "nativeZoteroLayout": "standard",
+      "paneView": "chat",
+      "collapsed": false,
+      "window": {
+        "width": 1360,
+        "height": 900,
+        "dpr": 1
+      },
+      "nativePane": {
+        "x": 946,
+        "y": 73,
+        "width": 414,
+        "height": 827,
+        "top": 73,
+        "right": 1360,
+        "bottom": 900,
+        "left": 946
+      },
+      "pdfBrowser": {
+        "x": 0,
+        "y": 73,
+        "width": 946,
+        "height": 827,
+        "top": 73,
+        "right": 946,
+        "bottom": 900,
+        "left": 0
+      },
+      "panel": {
+        "x": 946,
+        "y": 73,
+        "width": 377,
+        "height": 819,
+        "top": 73,
+        "right": 1323,
+        "bottom": 892,
+        "left": 946
+      },
+      "input": {
+        "x": 965,
+        "y": 766,
+        "width": 339,
+        "height": 64,
+        "top": 766,
+        "right": 1304,
+        "bottom": 830,
+        "left": 965
+      },
+      "send": {
+        "x": 1272,
+        "y": 836,
+        "width": 32,
+        "height": 32,
+        "top": 836,
+        "right": 1304,
+        "bottom": 868,
+        "left": 1272
+      },
+      "panelScrollWidth": 377,
+      "panelClientWidth": 377,
+      "draft": "Check whether the evidence supports this interpretation.",
+      "sourcesOpen": false,
+      "panelFontScale": "1.2",
+      "locale": "en-US",
+      "dark": false,
+      "narrowRequest": {
+        "requestedPanelWidth": 380,
+        "requestedNativeWidth": 414,
+        "method": "Native context-pane width attribute plus ZoteroContextPane.update()",
+        "actualPanelWidth": 377
+      },
+      "nativeEntryActions": [
+        {
+          "action": "visible-reader-context-toggle-click",
+          "tabId": "tab-32Sn7YbW",
+          "selector": "button.context-pane-toggle",
+          "readerLocalBounds": {
+            "x": 1328,
+            "y": 6,
+            "width": 28,
+            "height": 28,
+            "top": 6,
+            "right": 1356,
+            "bottom": 34,
+            "left": 1328
+          }
+        },
+        {
+          "action": "visible-chat-rail-click",
+          "tabId": "tab-32Sn7YbW",
+          "bounds": {
+            "x": 1328,
+            "y": 324,
+            "width": 28,
+            "height": 28,
+            "top": 324,
+            "right": 1356,
+            "bottom": 352,
+            "left": 1328
+          }
+        },
+        {
+          "action": "visible-chat-rail-click",
+          "tabId": "tab-32Sn7YbW",
+          "bounds": {
+            "x": 1328,
+            "y": 324,
+            "width": 28,
+            "height": 28,
+            "top": 324,
+            "right": 1356,
+            "bottom": 352,
+            "left": 1328
+          }
+        },
+        {
+          "action": "visible-reader-context-toggle-click",
+          "tabId": "tab-32Sn7YbW",
+          "selector": "button.context-pane-toggle",
+          "readerLocalBounds": {
+            "x": 1328,
+            "y": 6,
+            "width": 28,
+            "height": 28,
+            "top": 6,
+            "right": 1356,
+            "bottom": 34,
+            "left": 1328
+          }
+        },
+        {
+          "action": "visible-chat-rail-click",
+          "tabId": "tab-32Sn7YbW",
+          "bounds": {
+            "x": 1328,
+            "y": 324,
+            "width": 28,
+            "height": 28,
+            "top": 324,
+            "right": 1356,
+            "bottom": 352,
+            "left": 1328
+          }
+        }
+      ]
+    },
+    {
+      "name": "07-reader-paper-b-full",
+      "selectedTabId": "tab-iunWtl9S",
+      "readerTabId": "tab-iunWtl9S",
+      "attachmentItemId": 4,
+      "contextOwnerItemId": "3",
+      "conversationKind": "paper",
+      "sidebarLayout": "independent",
+      "nativeZoteroLayout": "standard",
+      "paneView": "chat",
+      "collapsed": false,
+      "window": {
+        "width": 1360,
+        "height": 900,
+        "dpr": 1
+      },
+      "nativePane": {
+        "x": 946,
+        "y": 73,
+        "width": 414,
+        "height": 827,
+        "top": 73,
+        "right": 1360,
+        "bottom": 900,
+        "left": 946
+      },
+      "pdfBrowser": {
+        "x": 0,
+        "y": 73,
+        "width": 946,
+        "height": 827,
+        "top": 73,
+        "right": 946,
+        "bottom": 900,
+        "left": 0
+      },
+      "panel": {
+        "x": 946,
+        "y": 73,
+        "width": 377,
+        "height": 819,
+        "top": 73,
+        "right": 1323,
+        "bottom": 892,
+        "left": 946
+      },
+      "input": {
+        "x": 965,
+        "y": 766,
+        "width": 339,
+        "height": 64,
+        "top": 766,
+        "right": 1304,
+        "bottom": 830,
+        "left": 965
+      },
+      "send": {
+        "x": 1272,
+        "y": 836,
+        "width": 32,
+        "height": 32,
+        "top": 836,
+        "right": 1304,
+        "bottom": 868,
+        "left": 1272
+      },
+      "panelScrollWidth": 377,
+      "panelClientWidth": 377,
+      "draft": "",
+      "sourcesOpen": false,
+      "panelFontScale": "1.2",
+      "locale": "en-US",
+      "dark": false,
+      "narrowRequest": {
+        "requestedPanelWidth": 380,
+        "requestedNativeWidth": 414,
+        "method": "Native context-pane width attribute plus ZoteroContextPane.update()",
+        "actualPanelWidth": 377
+      },
+      "nativeEntryActions": [
+        {
+          "action": "visible-reader-context-toggle-click",
+          "tabId": "tab-32Sn7YbW",
+          "selector": "button.context-pane-toggle",
+          "readerLocalBounds": {
+            "x": 1328,
+            "y": 6,
+            "width": 28,
+            "height": 28,
+            "top": 6,
+            "right": 1356,
+            "bottom": 34,
+            "left": 1328
+          }
+        },
+        {
+          "action": "visible-chat-rail-click",
+          "tabId": "tab-32Sn7YbW",
+          "bounds": {
+            "x": 1328,
+            "y": 324,
+            "width": 28,
+            "height": 28,
+            "top": 324,
+            "right": 1356,
+            "bottom": 352,
+            "left": 1328
+          }
+        },
+        {
+          "action": "visible-chat-rail-click",
+          "tabId": "tab-32Sn7YbW",
+          "bounds": {
+            "x": 1328,
+            "y": 324,
+            "width": 28,
+            "height": 28,
+            "top": 324,
+            "right": 1356,
+            "bottom": 352,
+            "left": 1328
+          }
+        },
+        {
+          "action": "visible-reader-context-toggle-click",
+          "tabId": "tab-32Sn7YbW",
+          "selector": "button.context-pane-toggle",
+          "readerLocalBounds": {
+            "x": 1328,
+            "y": 6,
+            "width": 28,
+            "height": 28,
+            "top": 6,
+            "right": 1356,
+            "bottom": 34,
+            "left": 1328
+          }
+        },
+        {
+          "action": "visible-chat-rail-click",
+          "tabId": "tab-32Sn7YbW",
+          "bounds": {
+            "x": 1328,
+            "y": 324,
+            "width": 28,
+            "height": 28,
+            "top": 324,
+            "right": 1356,
+            "bottom": 352,
+            "left": 1328
+          }
+        }
+      ]
+    },
+    {
+      "name": "08-reader-paper-a-restored-full",
+      "selectedTabId": "tab-32Sn7YbW",
+      "readerTabId": "tab-32Sn7YbW",
+      "attachmentItemId": 2,
+      "contextOwnerItemId": "1",
+      "conversationKind": "paper",
+      "sidebarLayout": "independent",
+      "nativeZoteroLayout": "standard",
+      "paneView": "chat",
+      "collapsed": false,
+      "window": {
+        "width": 1360,
+        "height": 900,
+        "dpr": 1
+      },
+      "nativePane": {
+        "x": 946,
+        "y": 73,
+        "width": 414,
+        "height": 827,
+        "top": 73,
+        "right": 1360,
+        "bottom": 900,
+        "left": 946
+      },
+      "pdfBrowser": {
+        "x": 0,
+        "y": 73,
+        "width": 946,
+        "height": 827,
+        "top": 73,
+        "right": 946,
+        "bottom": 900,
+        "left": 0
+      },
+      "panel": {
+        "x": 946,
+        "y": 73,
+        "width": 377,
+        "height": 819,
+        "top": 73,
+        "right": 1323,
+        "bottom": 892,
+        "left": 946
+      },
+      "input": {
+        "x": 965,
+        "y": 766,
+        "width": 339,
+        "height": 64,
+        "top": 766,
+        "right": 1304,
+        "bottom": 830,
+        "left": 965
+      },
+      "send": {
+        "x": 1272,
+        "y": 836,
+        "width": 32,
+        "height": 32,
+        "top": 836,
+        "right": 1304,
+        "bottom": 868,
+        "left": 1272
+      },
+      "panelScrollWidth": 377,
+      "panelClientWidth": 377,
+      "draft": "Check whether the evidence supports this interpretation.",
+      "sourcesOpen": false,
+      "panelFontScale": "1.2",
+      "locale": "en-US",
+      "dark": false,
+      "narrowRequest": {
+        "requestedPanelWidth": 380,
+        "requestedNativeWidth": 414,
+        "method": "Native context-pane width attribute plus ZoteroContextPane.update()",
+        "actualPanelWidth": 377
+      },
+      "nativeEntryActions": [
+        {
+          "action": "visible-reader-context-toggle-click",
+          "tabId": "tab-32Sn7YbW",
+          "selector": "button.context-pane-toggle",
+          "readerLocalBounds": {
+            "x": 1328,
+            "y": 6,
+            "width": 28,
+            "height": 28,
+            "top": 6,
+            "right": 1356,
+            "bottom": 34,
+            "left": 1328
+          }
+        },
+        {
+          "action": "visible-chat-rail-click",
+          "tabId": "tab-32Sn7YbW",
+          "bounds": {
+            "x": 1328,
+            "y": 324,
+            "width": 28,
+            "height": 28,
+            "top": 324,
+            "right": 1356,
+            "bottom": 352,
+            "left": 1328
+          }
+        },
+        {
+          "action": "visible-chat-rail-click",
+          "tabId": "tab-32Sn7YbW",
+          "bounds": {
+            "x": 1328,
+            "y": 324,
+            "width": 28,
+            "height": 28,
+            "top": 324,
+            "right": 1356,
+            "bottom": 352,
+            "left": 1328
+          }
+        },
+        {
+          "action": "visible-reader-context-toggle-click",
+          "tabId": "tab-32Sn7YbW",
+          "selector": "button.context-pane-toggle",
+          "readerLocalBounds": {
+            "x": 1328,
+            "y": 6,
+            "width": 28,
+            "height": 28,
+            "top": 6,
+            "right": 1356,
+            "bottom": 34,
+            "left": 1328
+          }
+        },
+        {
+          "action": "visible-chat-rail-click",
+          "tabId": "tab-32Sn7YbW",
+          "bounds": {
+            "x": 1328,
+            "y": 324,
+            "width": 28,
+            "height": 28,
+            "top": 324,
+            "right": 1356,
+            "bottom": 352,
+            "left": 1328
+          }
+        }
+      ]
+    }
+  ]
+}

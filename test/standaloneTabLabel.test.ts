@@ -1,6 +1,9 @@
 import { assert } from "chai";
 import { readFileSync } from "node:fs";
-import { resolveStandalonePaperTabLabel } from "../src/modules/contextPanel/standaloneTabLabel";
+import {
+  conversationScopeLabel,
+  resolveStandalonePaperTabLabel,
+} from "../src/modules/contextPanel/standaloneTabLabel";
 import { resolveActiveNoteSession } from "../src/modules/contextPanel/portalScope";
 import { createNoteConversationItem } from "../src/services/notes/conversationItem";
 import { t } from "../src/utils/i18n";
@@ -22,8 +25,8 @@ describe("standaloneTabLabel", function () {
     const originalZotero = (globalThis as any).Zotero;
     try {
       for (const [locale, expected] of [
-        ["zh-CN", "论文对话"],
-        ["en-US", "Paper chat"],
+        ["zh-CN", "论文"],
+        ["en-US", "Paper"],
       ]) {
         (globalThis as any).Zotero = {
           locale,
@@ -32,6 +35,7 @@ describe("standaloneTabLabel", function () {
         for (const assignment of assignments) {
           const render = new Function(
             "resolveStandalonePaperTabLabel",
+            "conversationScopeLabel",
             "t",
             "isInWebChatMode",
             "resolveActiveNoteSession",
@@ -41,6 +45,7 @@ describe("standaloneTabLabel", function () {
           assert.equal(
             render(
               resolveStandalonePaperTabLabel,
+              conversationScopeLabel,
               t,
               false,
               resolveActiveNoteSession,
@@ -55,7 +60,7 @@ describe("standaloneTabLabel", function () {
     }
   });
 
-  it("renders Note chat on creation and refresh for note conversations", function () {
+  it("renders the short Note label on creation and refresh for note conversations", function () {
     const source = readFileSync(
       new URL(
         "../src/modules/contextPanel/standaloneWindow.ts",
@@ -84,8 +89,8 @@ describe("standaloneTabLabel", function () {
           1_000_004_070,
         );
         for (const [locale, expected] of [
-          ["en-US", "Note chat"],
-          ["zh-CN", "笔记对话"],
+          ["en-US", "Note"],
+          ["zh-CN", "笔记"],
         ]) {
           (globalThis as any).Zotero = {
             locale,
@@ -94,6 +99,7 @@ describe("standaloneTabLabel", function () {
           for (const assignment of assignments) {
             const render = new Function(
               "resolveStandalonePaperTabLabel",
+              "conversationScopeLabel",
               "t",
               "isInWebChatMode",
               "resolveActiveNoteSession",
@@ -103,6 +109,7 @@ describe("standaloneTabLabel", function () {
             assert.equal(
               render(
                 resolveStandalonePaperTabLabel,
+                conversationScopeLabel,
                 t,
                 false,
                 resolveActiveNoteSession,

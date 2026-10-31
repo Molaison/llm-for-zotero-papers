@@ -1,0 +1,31 @@
+{
+  "actualWidth": 500,
+  "actualHeight": 760,
+  "activeClass": "llm-standalone-search-delete",
+  "deleteRect": {
+    "x": 434,
+    "y": 195.1999969482422,
+    "width": 20,
+    "height": 20,
+    "top": 195.1999969482422,
+    "right": 454,
+    "bottom": 215.1999969482422,
+    "left": 434
+  },
+  "popupRect": {
+    "x": 25,
+    "y": 91.19999694824219,
+    "width": 450,
+    "height": 186.73333740234375,
+    "top": 91.19999694824219,
+    "right": 475,
+    "bottom": 277.93333435058594,
+    "left": 25
+  },
+  "display": "flex",
+  "opacity": "1",
+  "color": "rgb(58, 91, 199)",
+  "backgroundColor": "rgb(255, 219, 220)",
+  "outline": "rgb(58, 91, 199) auto 1px",
+  "method": "Real filtered search result and focused Delete; action not activated"
+}

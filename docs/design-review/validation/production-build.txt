@@ -1,0 +1,14 @@
+npm warn Unknown env config "http-proxy". This will stop working in the next major version of npm.
+
+> llm-for-zotero@3.14.8-papers.1 build
+> zotero-plugin build && npm run typecheck
+
+ ℹ Building version 3.14.8-papers.1 to .scaffold/build at 2026-10-28 09:10:29 in production mode.
+   → Preparing static assets
+   → Bundling scripts
+   → Packing plugin
+ ✔ Build finished in 1.052 s.
+npm warn Unknown env config "http-proxy". This will stop working in the next major version of npm.
+
+> llm-for-zotero@3.14.8-papers.1 typecheck
+> tsc --noEmit && tsc --noEmit -p tsconfig.workflow.json

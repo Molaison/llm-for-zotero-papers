@@ -1,0 +1,14 @@
+{
+  "commit": "51c574544d860b670fb34000717c78f829e81f6e",
+  "sourceSha256": {
+    "addon/content/zoteroPane.css": "1be18e9f56f4e6a71eda7947d65c4e3b1a9e4988e23bc016ed5a1f46c94d2b00",
+    "src/modules/contextPanel/buildUI.ts": "5a9c88628b2f41a7b6e023e34e998966dd95e080ba0bbd10e38c3f0360c5955b",
+    "src/modules/contextPanel/chat.ts": "5ed0f69b3bacf4b457597594152bdd4bed43abd282339359f0001990d945d6ae",
+    "src/modules/contextPanel/standaloneWindow.ts": "0081e9a54fc12d8eb89fe688e471a8e94eef46761d473c5569265fe82997d0ef",
+    "src/modules/contextPanel/setupHandlers.ts": "fbead975b7d20511d0eaefc5ec8ba31d38be9103f6e70c047c1890c8a9170d29",
+    "src/utils/i18n.ts": "cb4c1a460c2321f06726133e5fdccadb9874db1d48e6e65b86cff7f898293649",
+    "test-ui-redesign/uiRedesign.workflow.test.ts": "1d543ab0945dcb9ded772869382fb277505abb8689e5b23eb79220b25d774150"
+  },
+  "runtime": "Zotero 10.0.6 / Gecko 140 / Linux Xvfb",
+  "validation": "13 native captures; baseline suite passed; no live provider request"
+}

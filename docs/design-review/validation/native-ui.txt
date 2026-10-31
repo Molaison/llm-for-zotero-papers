@@ -1,0 +1,13 @@
+npm warn Unknown env config "http-proxy". This will stop working in the next major version of npm.
+ ℹ Building version 3.14.8-papers.1 to .scaffold/build at 2026-10-28 09:08:57 in test mode.
+   → Preparing static assets
+   → Bundling scripts
+ ✔ Build finished in 0.551 s.
+ ℹ Installed /workspace/scratch/00a7879e879f/llm-for-zotero-papers/.scaffold/build/addon as a temporary add-on
+ ℹ Installed /workspace/scratch/00a7879e879f/llm-for-zotero-papers/.scaffold/test/resource as a temporary add-on
+
+   → workflow: UI redesign evidence
+     ✔ captures fixed paper, library, history, pending and recovery states 32068ms
+
+ ✔ Test run completed - 1 passed
+Native UI evidence saved: docs/design-review/evidence/round-4

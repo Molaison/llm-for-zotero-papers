@@ -151,7 +151,6 @@ import { getRegisteredConversationScope } from "../../../../shared/conversationR
 import {
   formatGlobalHistoryTimestamp,
   formatHistoryRowDisplayTitle,
-  formatHistoryPaperScopeLabel,
   getHistoryEntryLabelType,
   groupHistoryEntriesByDay,
   isOrphanHistoryEntry,
@@ -727,14 +726,7 @@ export function createHistoryLifecycleController(
     entry: ConversationHistoryEntry,
   ): string => {
     if (isOrphanHistoryEntry(entry)) return t("Orphan");
-    if (entry.kind !== "paper") return t("Library chat");
-    return formatHistoryPaperScopeLabel(
-      resolveHistoryEntryPaperDisplayMetadata(
-        entry,
-        (id) => Zotero.Items.get(id) as Zotero.Item | null,
-      ),
-      t("Paper chat"),
-    );
+    return t(entry.kind === "paper" ? "Paper" : "Library");
   };
 
   const createHistorySearchEntry = (params: {
@@ -4428,10 +4420,12 @@ export function createHistoryLifecycleController(
           return;
         }
         if (!historyMenu) return;
+        historySearchExpanded = true;
         renderGlobalHistoryMenu();
         positionMenuBelowButton(body, historyMenu, historyToggleBtn);
         historyMenu.style.display = "flex";
         historyToggleBtn.setAttribute("aria-expanded", "true");
+        restoreHistorySearchInputFocus();
       })();
     });
   }
@@ -4465,6 +4459,8 @@ export function createHistoryLifecycleController(
       keyboardEvent.preventDefault();
       keyboardEvent.stopPropagation();
       collapseHistorySearch();
+      closeHistoryMenu();
+      historyToggleBtn?.focus({ preventScroll: true });
     });
 
     historyMenu.addEventListener("click", (e: Event) => {
@@ -4480,6 +4476,7 @@ export function createHistoryLifecycleController(
         e.preventDefault();
         e.stopPropagation();
         closeHistoryMenu();
+        historyToggleBtn?.focus({ preventScroll: true });
         historySearchPopupController.open();
         return;
       }

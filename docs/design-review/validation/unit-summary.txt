@@ -1,0 +1,79 @@
+      ✔ reports a tag that does not exist instead of writing
+      ✔ colours a tag that does not exist yet
+      ✔ asks for the colour rather than guessing one
+      ✔ reports a build without a tag API instead of throwing
+
+
+  8595 passing (2m)
+  1 pending
+  6 failing
+
+  1) tool result preview cost
+       previews 3,000 rows of five-entry arrays and a 1,000-item listing in linear time:
+
+      3,000 rows 20.5 ms vs 1,000 rows 3.5 ms
+      + expected - actual
+
+      -20.471204999999827
+      +14.00063599999703
+
+      at Context.<anonymous> (test/agentStageTraceStore.test.ts:591:12)
+      at process.processImmediate (node:internal/timers:574:21)
+
+  2) Agent preference tab layout
+       presents every group as one collapsible row:
+
+      agent panel precedes the MinerU panel
+      + expected - actual
+
+      -22302
+      +49800
+
+      at agentPanel (test/agentTabLayout.test.ts:25:10)
+      at Context.<anonymous> (test/agentTabLayout.test.ts:40:19)
+      at process.processImmediate (node:internal/timers:574:21)
+
+  3) Agent preference tab layout
+       enables all three runtimes with the same switch idiom:
+
+      agent panel precedes the MinerU panel
+      + expected - actual
+
+      -22302
+      +49800
+
+      at agentPanel (test/agentTabLayout.test.ts:25:10)
+      at Context.<anonymous> (test/agentTabLayout.test.ts:62:19)
+      at process.processImmediate (node:internal/timers:574:21)
+
+  4) Agent preference tab layout
+       keeps shared tools outside runtime rows without duplicate permission controls:
+
+      agent panel precedes the MinerU panel
+      + expected - actual
+
+      -22302
+      +49800
+
+      at agentPanel (test/agentTabLayout.test.ts:25:10)
+      at Context.<anonymous> (test/agentTabLayout.test.ts:77:19)
+      at process.processImmediate (node:internal/timers:574:21)
+
+  5) Agent preference tab layout
+       folds runtime detail into a per-row advanced drawer:
+
+      agent panel precedes the MinerU panel
+      + expected - actual
+
+      -22302
+      +49800
+
+      at agentPanel (test/agentTabLayout.test.ts:25:10)
+      at Context.<anonymous> (test/agentTabLayout.test.ts:95:19)
+      at process.processImmediate (node:internal/timers:574:21)
+
+  6) AI Providers tab layout
+       paints its cards so they sit above the pane Zotero actually draws:
+     AssertionError: expected '<html:style> .llm-mineru-page-limit {…' to not include 'background: Field'
+      at Context.<anonymous> (test/aiProviderTabLayout.test.ts:81:12)
+      at process.processImmediate (node:internal/timers:574:21)
