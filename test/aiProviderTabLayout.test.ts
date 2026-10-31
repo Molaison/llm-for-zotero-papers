@@ -78,7 +78,14 @@ describe("AI Providers tab layout", function () {
     // system colour is near-black in dark chrome, so a card painted with it
     // sank below the pane instead of sitting above it.
     assert.notInclude(flat, "--stroke-secondary");
-    assert.notInclude(flat, "background: Field");
+    const selectedTabRule =
+      /#__addonRef__-pref-tab-bar > \[data-pref-tab\]\[aria-selected="true"\] \{[^}]*background: Field !important;[^}]*\}/;
+    assert.match(flat, selectedTabRule);
+    assert.notInclude(
+      flat.replace(selectedTabRule, ""),
+      "background: Field",
+      "only the selected tab control may use Zotero's dark Field colour",
+    );
 
     // Zotero paints the preferences content area with
     // `#prefs-outer-container { background-color: var(--material-sidepane) }`

@@ -32,6 +32,12 @@ jobs:
           test/codexZoteroMcpServer.test.ts test/codexAppServerProcess.test.ts
           test/codexAppServerNativeClient.test.ts test/codexQuota.test.ts
           test/webSourceAttribution.test.ts test/paperWarmOnIntent.test.ts
+      - name: Library context regressions
+        run: >-
+          node --import tsx node_modules/mocha/bin/mocha.js --require ./test/register.cjs
+          test/contextSelectionActions.test.ts test/libraryChatAutoLock.test.ts
+          test/zoteroItemContextMenu.test.ts test/paperPickerController.test.ts
+          test/referenceSelectorArchitecture.test.ts
       - name: Build and typecheck
         run: npm run build
       - name: Architecture boundaries

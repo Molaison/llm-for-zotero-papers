@@ -555,7 +555,7 @@
   --llm-standalone-ui-line-height: calc(20px * var(--llm-font-scale));
   --llm-standalone-chrome-gap: 4px;
   display: flex;
-  justify-content: flex-start;
+  justify-content: center;
   align-items: center;
   min-width: 0;
   padding: 0;
@@ -877,8 +877,11 @@
 /* The sidebar toggle reuses the standalone segmented tabs. It has no flyout
  * to rise above, so header menus keep painting over it. */
 .llm-header-toggle-row .llm-header-mode-tabs {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(64px, 1fr));
   gap: 18px;
+  width: 100%;
+  max-width: 280px;
   padding: 0;
   border: none;
   background: transparent;
@@ -889,6 +892,7 @@
 .llm-header-toggle-row .llm-header-mode-tab {
   height: auto;
   min-height: 36px;
+  min-width: 0;
   padding: 0 2px;
   border: none;
   border-bottom: 0.5px solid transparent;

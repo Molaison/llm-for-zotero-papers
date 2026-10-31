@@ -248,6 +248,10 @@ describe("runtime system control layout", function () {
   it("lays the Independent header out as the mode toggle, then actions", function () {
     const css = source("addon/content/zoteroPane.css");
     const toggleRowRule = extractCssRule(css, ".llm-header-toggle-row");
+    const modeTabsRule = extractCssRule(
+      css,
+      ".llm-header-toggle-row .llm-header-mode-tabs",
+    );
     const modeTabRule = extractCssRule(
       css,
       ".llm-header-toggle-row .llm-header-mode-tab",
@@ -265,9 +269,15 @@ describe("runtime system control layout", function () {
     // Row 1: the centered toggle, free of any divider or fixed height.
     assert.notInclude(toggleRowRule, "border");
     assert.notMatch(toggleRowRule, /(^|\s)height:/);
-    assert.include(toggleRowRule, "justify-content: flex-start");
+    assert.include(toggleRowRule, "justify-content: center");
     assert.include(toggleRowRule, "padding: 0");
+    assert.include(modeTabsRule, "display: grid");
+    assert.include(
+      modeTabsRule,
+      "grid-template-columns: repeat(2, minmax(64px, 1fr))",
+    );
     assert.include(modeTabRule, "min-height: 36px");
+    assert.include(modeTabRule, "min-width: 0");
     assert.include(modeTabRule, "padding: 0 2px");
 
     // Row 2: actions, closed by the one hairline above the chat.

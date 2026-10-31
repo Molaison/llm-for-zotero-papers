@@ -189,6 +189,36 @@ describe("library chat auto lock for a prepared sidebar drop", function () {
     assert.equal(getLockedGlobalConversationKey(LIBRARY_ID), MANUAL_KEY);
   });
 
+  it("does not release an auto lock taken by another prepared attempt", function () {
+    const owner = {
+      libraryID: LIBRARY_ID,
+      conversationKey: PREPARED_KEY,
+    };
+    const failed = {
+      libraryID: LIBRARY_ID,
+      conversationKey: PREPARED_KEY,
+    };
+
+    assert.isTrue(lockPreparedLibraryChat(lockState, owner));
+    assert.isFalse(
+      lockPreparedLibraryChat(lockState, failed),
+      "first lock wins for the same key",
+    );
+    assert.isFalse(
+      releasePreparedLibraryChat(lockState, failed),
+      "a failed attempt cannot release the owner's lock",
+    );
+    assert.equal(getLockedGlobalConversationKey(LIBRARY_ID), PREPARED_KEY);
+    assert.isTrue(
+      isAutoLockedGlobalConversation(PREPARED_KEY),
+      "the owner's auto flag remains",
+    );
+
+    assert.isTrue(releasePreparedLibraryChat(lockState, owner));
+    assert.isNull(getLockedGlobalConversationKey(LIBRARY_ID));
+    assert.isFalse(isAutoLockedGlobalConversation(PREPARED_KEY));
+  });
+
   it("leaves no auto lock when the drop does not land", function () {
     // The sidebar prepared a conversation, then the add reported no change.
     const prepared = {
@@ -208,13 +238,12 @@ describe("library chat auto lock for a prepared sidebar drop", function () {
     );
 
     // A lock that was taken and then rolled back is released completely.
-    assert.isTrue(
-      lockPreparedLibraryChat(lockState, {
-        libraryID: LIBRARY_ID,
-        conversationKey: PREPARED_KEY,
-      }),
-    );
+    assert.isTrue(lockPreparedLibraryChat(lockState, prepared));
     assert.isTrue(releasePreparedLibraryChat(lockState, prepared));
+    assert.isFalse(
+      releasePreparedLibraryChat(lockState, prepared),
+      "a consumed attempt cannot release twice",
+    );
     assert.isNull(getLockedGlobalConversationKey(LIBRARY_ID));
     assert.isFalse(isAutoLockedGlobalConversation(PREPARED_KEY));
     assert.equal(resolvedPaneConversationKey(), REMEMBERED_KEY);

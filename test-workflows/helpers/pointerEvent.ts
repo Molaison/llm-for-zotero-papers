@@ -1,10 +1,27 @@
 type MouseEventType = "mousemove" | "mousedown" | "mouseup";
 
 type MouseEventWindow = {
-  document: Document;
-  MouseEvent: typeof MouseEvent;
-  PointerEvent?: typeof PointerEvent;
+  MouseEvent: typeof MouseEvent & { readonly MOZ_SOURCE_MOUSE: number };
+  navigator?: { userAgent?: string };
+  synthesizeMouseEvent?: (
+    type: string,
+    x: number,
+    y: number,
+    eventData: {
+      button: number;
+      clickCount: number;
+      modifiers: number;
+      inputSource: number;
+      identifier: number;
+    },
+    options: {
+      isDOMEventSynthesized: boolean;
+      isWidgetEventSynthesized: boolean;
+      isAsyncEnabled: boolean;
+    },
+  ) => boolean;
   windowUtils?: {
+    DEFAULT_MOUSE_POINTER_ID: number;
     sendMouseEvent?: (
       type: string,
       x: number,
@@ -16,52 +33,13 @@ type MouseEventWindow = {
   };
 };
 
-const previousTargets = new WeakMap<object, Element>();
-const pressedTargets = new WeakMap<object, Element>();
-
-function eventChain(target: Element): Element[] {
-  const chain: Element[] = [];
-  for (let node: Element | null = target; node; node = node.parentElement) {
-    chain.push(node);
-  }
-  return chain;
-}
-
-function dispatch(
-  win: MouseEventWindow,
-  type: string,
-  target: Element,
-  x: number,
-  y: number,
-  button: number,
-  buttons: number,
-  clickCount: number,
-  pointer: boolean,
-) {
-  const EventCtor = pointer
-    ? (win.PointerEvent ?? win.MouseEvent)
-    : win.MouseEvent;
-  const init: MouseEventInit & { pointerId?: number; pointerType?: string } = {
-    bubbles: true,
-    cancelable: true,
-    composed: true,
-    view: win as unknown as Window,
-    clientX: x,
-    clientY: y,
-    screenX: x,
-    screenY: y,
-    button,
-    buttons,
-    detail: clickCount,
-    ...(pointer ? { pointerId: 1, pointerType: "mouse" } : {}),
-  };
-  target.dispatchEvent(new EventCtor(type, init));
-}
-
 /**
- * Drive a pointer with Zotero's native injector when it is available. Newer
- * Gecko test windows omit sendMouseEvent, so preserve the same browser event
- * sequence with DOM events instead of silently skipping the interaction.
+ * Drive a pointer through Gecko's native injector. DOM events cannot update
+ * browser hit-test state, so they cannot establish the CSS `:hover` state that
+ * the native sidebar tests verify.
+ *
+ * Primary API:
+ * https://searchfox.org/firefox-main/source/dom/webidl/Window.webidl#1270
  */
 export function sendMouseEvent(
   win: MouseEventWindow,
@@ -72,53 +50,40 @@ export function sendMouseEvent(
   clickCount = 0,
   modifiers = 0,
 ): void {
-  const nativeSend = win.windowUtils?.sendMouseEvent;
-  if (typeof nativeSend === "function") {
-    nativeSend.call(win.windowUtils, type, x, y, button, clickCount, modifiers);
+  const utils = win.windowUtils;
+  if (
+    typeof win.synthesizeMouseEvent === "function" &&
+    typeof utils?.DEFAULT_MOUSE_POINTER_ID === "number"
+  ) {
+    win.synthesizeMouseEvent(
+      type,
+      x,
+      y,
+      {
+        button,
+        clickCount,
+        modifiers,
+        inputSource: win.MouseEvent.MOZ_SOURCE_MOUSE,
+        identifier: utils.DEFAULT_MOUSE_POINTER_ID,
+      },
+      {
+        isDOMEventSynthesized: true,
+        isWidgetEventSynthesized: false,
+        isAsyncEnabled: false,
+      },
+    );
     return;
   }
-
-  const target = win.document.elementFromPoint(x, y);
-  if (!target) {
-    throw new Error(`No pointer target at (${x}, ${y})`);
-  }
-  const previous = previousTargets.get(win);
-  const buttons = type === "mousedown" ? 1 : 0;
-
-  if (type === "mousemove") {
-    if (previous && previous !== target) {
-      dispatch(win, "pointerout", previous, x, y, 0, 0, 0, true);
-      dispatch(win, "mouseout", previous, x, y, 0, 0, 0, false);
-      for (const node of eventChain(previous)) {
-        dispatch(win, "pointerleave", node, x, y, 0, 0, 0, true);
-        dispatch(win, "mouseleave", node, x, y, 0, 0, 0, false);
-      }
-    }
-    if (!previous || previous !== target) {
-      dispatch(win, "pointerover", target, x, y, 0, 0, 0, true);
-      dispatch(win, "mouseover", target, x, y, 0, 0, 0, false);
-      for (const node of eventChain(target)) {
-        dispatch(win, "pointerenter", node, x, y, 0, 0, 0, true);
-        dispatch(win, "mouseenter", node, x, y, 0, 0, 0, false);
-      }
-    }
-    dispatch(win, "pointermove", target, x, y, 0, 0, 0, true);
-    dispatch(win, "mousemove", target, x, y, 0, 0, 0, false);
-    previousTargets.set(win, target);
+  if (typeof utils?.sendMouseEvent === "function") {
+    utils.sendMouseEvent.call(utils, type, x, y, button, clickCount, modifiers);
     return;
   }
-
-  if (type === "mousedown") {
-    pressedTargets.set(win, target);
-    dispatch(win, "pointerdown", target, x, y, button, 1, 1, true);
-    dispatch(win, "mousedown", target, x, y, button, 1, 1, false);
-    return;
-  }
-
-  dispatch(win, "pointerup", target, x, y, button, 0, clickCount, true);
-  dispatch(win, "mouseup", target, x, y, button, 0, clickCount, false);
-  if (clickCount > 0) {
-    dispatch(win, "click", target, x, y, button, 0, clickCount, false);
-  }
-  pressedTargets.delete(win);
+  const diagnostics = {
+    synthesizeMouseEvent: typeof win.synthesizeMouseEvent === "function",
+    sendMouseEvent: typeof utils?.sendMouseEvent === "function",
+    gecko: win.navigator?.userAgent ?? "unavailable",
+  };
+  throw new Error(
+    `This Gecko test window has no native mouse-event injector; DOM events cannot establish :hover (${JSON.stringify(diagnostics)})`,
+  );
 }

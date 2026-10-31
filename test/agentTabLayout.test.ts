@@ -19,8 +19,8 @@ function source(path: string): string {
  */
 function agentPanel(): string {
   const markup = source("addon/content/preferences.xhtml");
-  const start = markup.indexOf('data-pref-panel="agent"');
-  const end = markup.indexOf('data-pref-panel="mineru"');
+  const start = markup.indexOf('id="__addonRef__-pref-panel-agent"');
+  const end = markup.indexOf('id="__addonRef__-pref-panel-mineru"');
   assert.isAtLeast(start, 0, "agent panel is present");
   assert.isAbove(end, start, "agent panel precedes the MinerU panel");
   return markup.slice(start, end);

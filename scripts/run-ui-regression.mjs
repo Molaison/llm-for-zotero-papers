@@ -14,6 +14,7 @@ await writeFile(
     "paragraphCitations",
     "backgroundSendSwitch",
     "selectedItemContext",
+    "dedicatedChatPane",
   ]
     .map((name) => `import "../../test-workflows/${name}.workflow.test";`)
     .join("\n"),
