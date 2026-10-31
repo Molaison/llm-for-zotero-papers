@@ -7,7 +7,12 @@ const directory = ".scaffold/pr8-library-regression";
 await mkdir(directory, { recursive: true });
 await writeFile(
   `${directory}/flows.workflow.test.ts`,
-  ["dedicatedChatPane", "sectionHeadAlignment", "sidebarChatModeToggle"]
+  [
+    "dedicatedChatPane",
+    "standaloneResponsiveChrome",
+    "sectionHeadAlignment",
+    "sidebarChatModeToggle",
+  ]
     .map((name) => `import "../../test-workflows/${name}.workflow.test";`)
     .join("\n"),
 );
