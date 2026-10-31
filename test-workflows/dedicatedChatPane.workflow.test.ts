@@ -78,6 +78,41 @@ describe("workflow: dedicated native chat pane", function () {
     return details;
   }
 
+  async function waitForSidebarLayout(layout: "independent" | "stacked") {
+    await until(() => {
+      const root = win.document.documentElement;
+      return (
+        root.getAttribute("data-llm-sidebar-layout") === layout &&
+        root.getAttribute("data-llm-pane-view") ===
+          (layout === "stacked" ? "stacked" : "chat")
+      );
+    }, `${layout} layout applies`);
+  }
+
+  async function waitForMountedChat(
+    layout: "independent" | "stacked",
+  ): Promise<Element> {
+    await waitForSidebarLayout(layout);
+    await until(() => {
+      const details = activeDetails();
+      const panel = details?.querySelector(
+        ".llm-dedicated-chat-pane #llm-main",
+      ) as HTMLElement | null;
+      const composer = panel?.querySelector(":scope > .llm-input-section");
+      return Boolean(
+        details?.isConnected &&
+        !details.sidenav._collapsed &&
+        panel?.isConnected &&
+        composer?.isConnected &&
+        panel.getBoundingClientRect().height > 0 &&
+        composer.getBoundingClientRect().width > 0,
+      );
+    }, `${layout} chat and composer are mounted`);
+    const details = activeDetails();
+    assert.isOk(details, `${layout} sidebar host is mounted`);
+    return details;
+  }
+
   /**
    * Independent: the toggle row, then the actions row. Stacked: one row, with
    * the mode chip in the actions row and no toggle row. Neither has a docked
@@ -162,40 +197,184 @@ describe("workflow: dedicated native chat pane", function () {
     ).click();
   }
 
-  function assertSidebarGaps(details: Element) {
-    const panel = details.querySelector(".llm-panel")!;
-    const chip = panel.querySelector(".llm-shortcuts > .llm-shortcut-btn")!;
-    assert.isAbove(
-      chip.getBoundingClientRect().width,
+  function assertComposerGeometry(
+    details: Element,
+    layout: "independent" | "stacked",
+  ) {
+    assert.equal(
+      win.document.documentElement.getAttribute("data-llm-sidebar-layout"),
+      layout,
+      `measure the ${layout} layout`,
+    );
+    const panel = details.querySelector(".llm-dedicated-chat-pane .llm-panel")!;
+    const panelRect = panel.getBoundingClientRect();
+    const composer = panel.querySelector(
+      ":scope > .llm-input-section",
+    ) as HTMLElement;
+    const composerRect = composer.getBoundingClientRect();
+    assert.isAbove(composerRect.width, 0, "composer is visible");
+    assert.closeTo(
+      composerRect.left - panelRect.left,
       0,
-      "shortcut is visible",
+      0.05,
+      "composer left edge is flush with the panel",
     );
     assert.closeTo(
-      chip.getBoundingClientRect().left - panel.getBoundingClientRect().left,
-      5,
-      0.05,
-      "shortcut outer edge is 5px from the Independent sidebar boundary",
-    );
-    const composer = panel.querySelector(":scope > .llm-input-section")!;
-    assert.isAbove(
-      composer.getBoundingClientRect().width,
+      panelRect.right - composerRect.right,
       0,
-      "composer is visible",
-    );
-    assert.closeTo(
-      composer.getBoundingClientRect().left -
-        panel.getBoundingClientRect().left,
-      5,
       0.05,
-      "composer outer edge aligns with the shortcuts at 5px",
+      "composer right edge is flush with the panel",
     );
-    assert.closeTo(
-      panel.getBoundingClientRect().right -
-        composer.getBoundingClientRect().right,
-      5,
-      0.05,
-      "composer right edge is 5px from the Independent sidebar boundary",
+    const style = win.getComputedStyle(composer);
+    const expectedInlinePadding = panelRect.width <= 500 ? 10 : 14;
+    assert.equal(style.paddingTop, "0px", "composer has no top padding");
+    assert.equal(
+      style.paddingBottom,
+      "14px",
+      "composer keeps its bottom breathing room",
     );
+    assert.equal(
+      style.paddingLeft,
+      `${expectedInlinePadding}px`,
+      "composer left padding follows the active container width",
+    );
+    assert.equal(
+      style.paddingRight,
+      `${expectedInlinePadding}px`,
+      "composer right padding follows the active container width",
+    );
+    const contentLeft = composerRect.left + parseFloat(style.paddingLeft);
+    const contentRight = composerRect.right - parseFloat(style.paddingRight);
+    const contentTop = composerRect.top + parseFloat(style.paddingTop);
+    const contentBottom = composerRect.bottom - parseFloat(style.paddingBottom);
+    for (const [name, node] of [
+      ["compose area", composer.querySelector(":scope > .llm-compose-area")],
+      ["input", composer.querySelector("#llm-input")],
+      ["Send", composer.querySelector("#llm-send")],
+    ] as const) {
+      const rect = node!.getBoundingClientRect();
+      assert.isAbove(rect.width, 0, `${name} is visible`);
+      assert.isAbove(rect.height, 0, `${name} has height`);
+      assert.isAtLeast(rect.left, contentLeft, `${name} starts inside padding`);
+      assert.isAtMost(rect.right, contentRight, `${name} ends inside padding`);
+      assert.isAtLeast(
+        rect.top,
+        contentTop,
+        `${name} starts below top padding`,
+      );
+      assert.isAtMost(
+        rect.bottom,
+        contentBottom,
+        `${name} ends above bottom padding`,
+      );
+    }
+  }
+
+  async function assertQuickQuestions(details: Element) {
+    const panel = details.querySelector(".llm-dedicated-chat-pane .llm-panel")!;
+    const tools = panel.querySelector(
+      ".llm-conversation-tools",
+    ) as HTMLDetailsElement;
+    const more = tools.querySelector(":scope > summary") as HTMLElement;
+    const toolsBody = tools.querySelector(
+      ".llm-conversation-tools-body",
+    ) as HTMLElement;
+    const disclosure = tools.querySelector(
+      "#llm-shortcuts-disclosure",
+    ) as HTMLDetailsElement;
+    const quickQuestions = disclosure.querySelector(
+      ":scope > summary",
+    ) as HTMLElement;
+    const shortcuts = disclosure.querySelector("#llm-shortcuts") as HTMLElement;
+    const original = { tools: tools.open, disclosure: disclosure.open };
+    try {
+      assert.isFalse(tools.open, "More starts closed");
+      assert.isFalse(disclosure.open, "Quick questions starts closed");
+      assert.isAbove(more.getBoundingClientRect().width, 0, "More is visible");
+      assert.isAbove(more.getBoundingClientRect().height, 0, "More has height");
+
+      more.click();
+      await until(
+        () =>
+          tools.open &&
+          toolsBody.getBoundingClientRect().width > 0 &&
+          toolsBody.getBoundingClientRect().height > 0,
+        "More opens",
+      );
+      quickQuestions.click();
+      await until(() => {
+        const buttons = Array.from(
+          shortcuts.querySelectorAll(":scope > .llm-shortcut-btn"),
+        ) as HTMLElement[];
+        return (
+          disclosure.open &&
+          shortcuts.isConnected &&
+          buttons.length > 0 &&
+          buttons.every((button) => {
+            const rect = button.getBoundingClientRect();
+            return rect.width > 0 && rect.height > 0;
+          })
+        );
+      }, "Quick questions opens with visible prompt buttons");
+
+      const buttons = Array.from(
+        shortcuts.querySelectorAll(":scope > .llm-shortcut-btn"),
+      ) as HTMLElement[];
+      const toolsRect = toolsBody.getBoundingClientRect();
+      const disclosureRect = disclosure.getBoundingClientRect();
+      const shortcutsRect = shortcuts.getBoundingClientRect();
+      assert.isAtMost(
+        toolsBody.scrollWidth,
+        toolsBody.clientWidth,
+        "More does not overflow horizontally",
+      );
+      assert.isAtMost(
+        disclosure.scrollWidth,
+        disclosure.clientWidth,
+        "Quick questions does not overflow its disclosure",
+      );
+      assert.isAtMost(
+        shortcuts.scrollWidth,
+        shortcuts.clientWidth,
+        "prompt rows do not overflow horizontally",
+      );
+      for (const [index, button] of buttons.entries()) {
+        const rect = button.getBoundingClientRect();
+        assert.isAtLeast(
+          rect.left,
+          disclosureRect.left,
+          `prompt ${index} starts inside Quick questions`,
+        );
+        assert.isAtMost(
+          rect.right,
+          disclosureRect.right,
+          `prompt ${index} ends inside Quick questions`,
+        );
+        assert.isAtLeast(
+          rect.left,
+          shortcutsRect.left,
+          `prompt ${index} starts inside the prompt row`,
+        );
+        assert.isAtMost(
+          rect.right,
+          shortcutsRect.right,
+          `prompt ${index} ends inside the prompt row`,
+        );
+        assert.isAtLeast(
+          rect.left,
+          toolsRect.left,
+          `prompt ${index} stays inside More`,
+        );
+        assert.isAtMost(
+          rect.right,
+          toolsRect.right,
+          `prompt ${index} stays inside More`,
+        );
+      }
+    } finally {
+      tools.open = original.tools;
+      disclosure.open = original.disclosure;
+    }
   }
 
   async function captureWindow(target: any, filename: string) {
@@ -256,17 +435,16 @@ describe("workflow: dedicated native chat pane", function () {
     ) as any;
   }
 
-  it("aligns shortcuts and the composer at a 5px left gap after switching sidebar layouts", async function () {
-    const details = await openChatPane();
-    assertSidebarGaps(details);
+  it("keeps More > Quick questions controls and composer geometry across sidebar layouts", async function () {
+    Zotero.Prefs.set(layoutPref, "independent", true);
+    await waitForSidebarLayout("independent");
+    await openChatPane();
+    let details = await waitForMountedChat("independent");
+    await assertQuickQuestions(details);
     assertHeaderRows(details, "independent");
+    assertComposerGeometry(details, "independent");
     Zotero.Prefs.set(layoutPref, "stacked", true);
-    await until(
-      () =>
-        win.document.documentElement.getAttribute("data-llm-pane-view") ===
-        "stacked",
-      "Stacked layout applies",
-    );
+    details = await waitForMountedChat("stacked");
     await until(
       () =>
         ((
@@ -277,9 +455,13 @@ describe("workflow: dedicated native chat pane", function () {
       "stacked chat header is laid out",
     );
     assertHeaderRows(details, "stacked");
+    assertComposerGeometry(details, "stacked");
     Zotero.Prefs.set(layoutPref, "independent", true);
+    await waitForSidebarLayout("independent");
     await openChatPane();
-    assertSidebarGaps(details);
+    details = await waitForMountedChat("independent");
+    assertHeaderRows(details, "independent");
+    assertComposerGeometry(details, "independent");
   });
 
   it("greys out the library rail with no selection and blocks activation", async function () {
@@ -903,7 +1085,7 @@ describe("workflow: dedicated native chat pane", function () {
         String(fixtures[1].parentItemId),
       `paper B context follows its tab; selected=${win.Zotero_Tabs.selectedID}, roots=${JSON.stringify(Array.from(win.document.querySelectorAll("#llm-main")).map((node: any) => ({ ...node.dataset })))}`,
     );
-    assertSidebarGaps(activeDetails());
+    assertComposerGeometry(activeDetails(), "independent");
     win.Zotero_Tabs.select(readers[0].tabID);
     await until(
       () =>
