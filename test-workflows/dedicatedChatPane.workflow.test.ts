@@ -87,6 +87,12 @@ describe("workflow: dedicated native chat pane", function () {
     }, `${layout} layout applies`);
   }
 
+  async function waitForNativeLayoutFrame() {
+    await new Promise<void>((resolve) => {
+      win.requestAnimationFrame(() => resolve());
+    });
+  }
+
   async function waitForMountedChat(
     layout: "independent" | "stacked",
   ): Promise<Element> {
@@ -109,20 +115,23 @@ describe("workflow: dedicated native chat pane", function () {
         composer.getBoundingClientRect().width > 0,
       );
     }, `${layout} chat and composer are mounted`);
+    await waitForNativeLayoutFrame();
     const details = activeDetails();
     assert.isOk(details, `${layout} sidebar host is mounted`);
     return details;
   }
 
   /**
-   * Independent: the toggle row, then the actions row. Stacked: one row, with
-   * the mode chip in the actions row and no toggle row. Neither has a docked
-   * title row or a divider under the header.
+   * Both layouts keep the header info and actions in one nav row. Independent
+   * shows the toggle controls and hides the chip; Stacked does the reverse.
+   * The responsive grid puts actions below info only when it marks the nav
+   * wrapped; otherwise both cells remain side by side.
    */
-  function assertHeaderRows(
+  async function assertHeaderRows(
     details: Element,
     layout: "independent" | "stacked",
   ) {
+    await waitForNativeLayoutFrame();
     const section = details.querySelector(".llm-dedicated-chat-pane")!;
     assert.isNull(
       section.querySelector(".llm-docked-title-row"),
@@ -131,14 +140,18 @@ describe("workflow: dedicated native chat pane", function () {
     const toggleRow = section.querySelector(".llm-header-toggle-row")!;
     const navRow = section.querySelector(".llm-header-nav-row")!;
     const chip = section.querySelector("#llm-mode-capsule")!;
-    const firstRow = layout === "independent" ? toggleRow : navRow;
+    const headerInfo = navRow.querySelector(
+      ":scope > .llm-header-info",
+    ) as HTMLElement;
+    const headerActions = navRow.querySelector(
+      ":scope > .llm-header-actions",
+    ) as HTMLElement;
+    assert.isOk(headerInfo, "header info is in the nav row");
+    assert.isOk(headerActions, "header actions are in the nav row");
+    assert.isTrue(navRow.contains(toggleRow), "toggle row is in the nav row");
+    assert.isTrue(navRow.contains(chip), "mode chip is in the nav row");
     if (layout === "independent") {
       assert.isAbove(toggleRow.getBoundingClientRect().height, 0);
-      assert.isAtMost(
-        toggleRow.getBoundingClientRect().bottom,
-        navRow.getBoundingClientRect().top + 0.5,
-        `the toggle row sits above the actions row (${layout})`,
-      );
       assert.equal(
         chip.getBoundingClientRect().width,
         0,
@@ -157,18 +170,60 @@ describe("workflow: dedicated native chat pane", function () {
       );
       assert.isTrue(navRow.contains(chip), `the chip is in the one row`);
     }
+
+    const navRect = navRow.getBoundingClientRect();
+    const infoRect = headerInfo.getBoundingClientRect();
+    const actionsRect = headerActions.getBoundingClientRect();
+    const modeControl =
+      layout === "independent" ? toggleRow : (chip as HTMLElement);
+    const modeRect = modeControl.getBoundingClientRect();
+    for (const [name, rect] of [
+      ["mode controls", modeRect],
+      ["header info", infoRect],
+      ["header actions", actionsRect],
+    ] as const) {
+      assert.isAtLeast(rect.left, navRect.left, `${name} stay in nav row`);
+      assert.isAtMost(rect.right, navRect.right, `${name} stay in nav row`);
+      assert.isAtLeast(rect.top, navRect.top, `${name} stay in nav row`);
+      assert.isAtMost(rect.bottom, navRect.bottom, `${name} stay in nav row`);
+    }
+    if (navRow.classList.contains("llm-header-nav-wrapped")) {
+      assert.isAtLeast(
+        actionsRect.top,
+        infoRect.bottom,
+        `wrapped ${layout} actions follow the info row`,
+      );
+    } else {
+      assert.isAtMost(
+        infoRect.right,
+        actionsRect.left,
+        `unwrapped ${layout} info and actions do not overlap`,
+      );
+    }
+
+    const navStyle = win.getComputedStyle(navRow);
     assert.equal(
-      win.getComputedStyle(navRow).borderBottomStyle,
-      "none",
-      `no divider under the actions row (${layout})`,
+      navStyle.borderBottomStyle,
+      "solid",
+      `the nav row closes with the design divider (${layout})`,
     );
-    // The first row opens the header, a few pixels under the panel's top.
-    const panelTop = section
-      .querySelector(".llm-panel")!
-      .getBoundingClientRect().top;
-    const gap = firstRow.getBoundingClientRect().top - panelTop;
-    assert.isAtLeast(gap, 0, `first row starts inside the panel (${layout})`);
-    assert.isAtMost(gap, 12, `first row leads the header (${layout})`);
+    const dividerWidth = parseFloat(navStyle.borderBottomWidth);
+    assert.isTrue(Number.isFinite(dividerWidth) && dividerWidth > 0);
+    assert.notEqual(navStyle.borderBottomColor, "transparent");
+    assert.notEqual(navStyle.borderBottomColor, "rgba(0, 0, 0, 0)");
+
+    const panel = section.querySelector(".llm-panel") as HTMLElement;
+    const header = section.querySelector(".llm-header") as HTMLElement;
+    const headerPaddingTop = parseFloat(
+      win.getComputedStyle(header).paddingTop,
+    );
+    assert.equal(headerPaddingTop, 0, "header has no invented top padding");
+    assert.closeTo(
+      navRect.top - panel.getBoundingClientRect().top,
+      headerPaddingTop,
+      0.5,
+      `the nav row is the first header content (${layout})`,
+    );
   }
 
   /**
@@ -378,6 +433,62 @@ describe("workflow: dedicated native chat pane", function () {
     }
   }
 
+  async function assertAdvancedMoreActions(details: Element) {
+    const panel = details.querySelector(".llm-dedicated-chat-pane .llm-panel")!;
+    const tools = panel.querySelector(
+      ".llm-conversation-tools",
+    ) as HTMLDetailsElement;
+    const more = tools.querySelector(":scope > summary") as HTMLElement;
+    const toolsBody = tools.querySelector(
+      ".llm-conversation-tools-body",
+    ) as HTMLElement;
+    const original = tools.open;
+    try {
+      assert.isFalse(tools.open, "More starts closed before advanced actions");
+      more.click();
+      await until(() => {
+        const actions = [
+          "llm-popout",
+          "llm-settings",
+          "llm-export",
+          "llm-clear",
+        ]
+          .map((id) => tools.querySelector<HTMLElement>(`#${id}`))
+          .filter((node): node is HTMLElement => Boolean(node));
+        return Boolean(
+          tools.open &&
+          toolsBody.getBoundingClientRect().width > 0 &&
+          actions.length === 4 &&
+          actions.every((action) => {
+            const rect = action.getBoundingClientRect();
+            return rect.width > 0 && rect.height > 0;
+          }),
+        );
+      }, "More exposes its advanced actions");
+      assert.isAtMost(
+        toolsBody.scrollWidth,
+        toolsBody.clientWidth,
+        "More advanced actions do not overflow horizontally",
+      );
+      const bounds = toolsBody.getBoundingClientRect();
+      for (const id of [
+        "llm-popout",
+        "llm-settings",
+        "llm-export",
+        "llm-clear",
+      ]) {
+        const action = tools.querySelector(`#${id}`)!;
+        const rect = action.getBoundingClientRect();
+        assert.isAtLeast(rect.left, bounds.left, `${id} stays inside More`);
+        assert.isAtMost(rect.right, bounds.right, `${id} stays inside More`);
+        assert.isAtLeast(rect.top, bounds.top, `${id} stays inside More`);
+        assert.isAtMost(rect.bottom, bounds.bottom, `${id} stays inside More`);
+      }
+    } finally {
+      tools.open = original;
+    }
+  }
+
   async function captureWindow(target: any, filename: string) {
     const canvas = target.document.createElementNS(
       "http://www.w3.org/1999/xhtml",
@@ -442,7 +553,7 @@ describe("workflow: dedicated native chat pane", function () {
     await openChatPane();
     let details = await waitForMountedChat("independent");
     await assertQuickQuestions(details);
-    assertHeaderRows(details, "independent");
+    await assertHeaderRows(details, "independent");
     assertComposerGeometry(details, "independent");
     Zotero.Prefs.set(layoutPref, "stacked", true);
     details = await waitForMountedChat("stacked");
@@ -455,13 +566,13 @@ describe("workflow: dedicated native chat pane", function () {
         )?.getBoundingClientRect().width ?? 0) > 0,
       "stacked chat header is laid out",
     );
-    assertHeaderRows(details, "stacked");
+    await assertHeaderRows(details, "stacked");
     assertComposerGeometry(details, "stacked");
     Zotero.Prefs.set(layoutPref, "independent", true);
     await waitForSidebarLayout("independent");
     await openChatPane();
     details = await waitForMountedChat("independent");
-    assertHeaderRows(details, "independent");
+    await assertHeaderRows(details, "independent");
     assertComposerGeometry(details, "independent");
   });
 
@@ -640,7 +751,7 @@ describe("workflow: dedicated native chat pane", function () {
           "true",
           "the chip shows Library chat",
         );
-        assertHeaderRows(details, layout);
+        await assertHeaderRows(details, layout);
         await until(
           () => Boolean(panel()?.querySelector(".llm-standalone-start-page")),
           "the fresh Library chat shows the Library start page",
@@ -853,12 +964,19 @@ describe("workflow: dedicated native chat pane", function () {
       "composer stays in the pane",
     );
     const root = section.querySelector("#llm-main");
-    const toolbar = section.querySelector(".llm-header-top");
-    assertHeaderRows(details, "independent");
+    await assertHeaderRows(details, "independent");
     const navRow = section.querySelector(".llm-header-nav-row");
+    const panel = section.querySelector(".llm-panel") as HTMLElement;
+    const headerRoot = section.querySelector(".llm-header") as HTMLElement;
+    const panelStyle = win.getComputedStyle(panel);
+    const headerStyle = win.getComputedStyle(headerRoot);
+    assert.equal(panelStyle.paddingLeft, "0px");
+    assert.equal(panelStyle.paddingRight, "0px");
+    assert.equal(headerStyle.paddingLeft, "0px");
+    assert.equal(headerStyle.paddingRight, "0px");
     assert.closeTo(
       navRow.getBoundingClientRect().width,
-      root.getBoundingClientRect().width,
+      panel.getBoundingClientRect().width,
       0.5,
       "the header divider spans the whole panel",
     );
@@ -875,18 +993,15 @@ describe("workflow: dedicated native chat pane", function () {
       "llm-history-toggle",
       "llm-paper-chat-tab",
       "llm-library-chat-tab",
-      "llm-popout",
-      "llm-settings",
-      "llm-export",
-      "llm-clear",
     ]) {
-      const action = toolbar.querySelector(`#${id}`);
+      const action = section.querySelector(`#${id}`)!;
       assert.isAbove(
         action.getBoundingClientRect().width,
         0,
-        `${id} is visible in the classic toolbar`,
+        `${id} is visible in the pinned header`,
       );
     }
+    await assertAdvancedMoreActions(details);
     // With no docked close button, the plugin's rail icon closes the chat.
     const icon: any = Array.from(
       details.sidenav.querySelectorAll("[data-pane]"),
@@ -1019,7 +1134,7 @@ describe("workflow: dedicated native chat pane", function () {
         0,
         "native details return",
       );
-      assertHeaderRows(details, "stacked");
+      await assertHeaderRows(details, "stacked");
       assert.isTrue(
         section.querySelector("collapsible-section").collapsible,
         "stacked section is collapsible",
@@ -1048,7 +1163,7 @@ describe("workflow: dedicated native chat pane", function () {
           "chat",
         "independent layout returns",
       );
-      assertHeaderRows(details, "independent");
+      await assertHeaderRows(details, "independent");
       assert.equal(
         details.querySelector("item-pane-header").getBoundingClientRect()
           .height,
@@ -1077,7 +1192,7 @@ describe("workflow: dedicated native chat pane", function () {
       await reader._waitForReader();
     }
     await openChatPane();
-    assertHeaderRows(activeDetails(), "independent");
+    await assertHeaderRows(activeDetails(), "independent");
     const panel = () =>
       activeDetails().querySelector("#llm-main") as HTMLElement;
     await until(
