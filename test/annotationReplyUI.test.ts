@@ -26,7 +26,7 @@ import {
   renderAnnotationChatAnswer,
   annotationUserTurnText,
 } from "../src/modules/contextPanel/annotationReplyPresentation";
-import { createAnnotationReplyController } from "../src/modules/contextPanel/setupHandlers/controllers/annotationReplyController";
+import { createAnnotationReplyController, installAnnotationReplyLayout } from "../src/modules/contextPanel/setupHandlers/controllers/annotationReplyController";
 import type { AnnotationReplyBatch } from "../src/shared/types";
 import { renderAssistantRichText } from "../src/modules/contextPanel/assistantRichText";
 
@@ -404,6 +404,56 @@ describe("annotation research drawer presentation", () => {
     controller.dispose();
     assert.isNull(body.querySelector("#llm-annotation-selection-summary"));
     assert.isNull(body.querySelector("#llm-annotation-toggle"));
+  });
+  it("uses the visible native viewport when the panel starts below it and keeps the last valid height", () => {
+    const viewport = new Node("div"), panel = new Node("div"), root = new Node("details");
+    viewport.className = "zotero-view-item"; panel.className = "llm-panel";
+    viewport.append(panel); panel.append(root);
+    Object.defineProperty(root, "isConnected", {configurable:true, get:() => true});
+    let viewportRect = {top:200, bottom:1152, width:800, height:952};
+    let panelRect = {top:1326, bottom:1326, width:800, height:0};
+    viewport.getBoundingClientRect = () => viewportRect;
+    panel.getBoundingClientRect = () => panelRect;
+    const styles = new Map<string,string>();
+    panel.style = {setProperty:(name:string,value:string) => styles.set(name,value),
+      removeProperty:(name:string) => styles.delete(name)} as unknown as CSSStyleDeclaration;
+    const frames = new Map<number,FrameRequestCallback>();
+    let nextFrame = 1, observerCallback: (() => void) | null = null;
+    class TestResizeObserver {
+      constructor(callback: () => void) { observerCallback = callback; }
+      observe() {} disconnect() {}
+    }
+    const originalView = (doc as unknown as {defaultView: Window | null}).defaultView;
+    (doc as unknown as {defaultView: Window}).defaultView = {
+      innerHeight:1152, innerWidth:1200, ResizeObserver:TestResizeObserver,
+      requestAnimationFrame(callback:FrameRequestCallback) {
+        const id = nextFrame++; frames.set(id,callback); return id;
+      },
+      cancelAnimationFrame(id:number) { frames.delete(id); },
+      addEventListener() {}, removeEventListener() {},
+    } as unknown as Window;
+    const flushFrame = () => {
+      const callbacks = Array.from(frames.values()); frames.clear();
+      for (const callback of callbacks) callback(performance.now());
+    };
+    const dispose = installAnnotationReplyLayout(root as unknown as HTMLDetailsElement);
+    try {
+      assert.equal(styles.get("--llm-workspace-height"),"944px",
+        "panel below the native viewport receives its complete positive budget");
+      panelRect = {top:700, bottom:700, width:800, height:0};
+      observerCallback!(); flushFrame();
+      assert.equal(styles.get("--llm-workspace-height"),"444px",
+        "partially visible panel keeps its position-specific budget");
+      viewportRect = {top:0, bottom:0, width:0, height:0};
+      observerCallback!(); flushFrame();
+      assert.equal(styles.get("--llm-workspace-height"),"444px",
+        "a hidden viewport must not overwrite the last valid height with zero");
+    } finally {
+      dispose();
+      (doc as unknown as {defaultView: Window | null}).defaultView = originalView;
+    }
+    assert.isFalse(styles.has("--llm-workspace-height"));
+    assert.isNull(root.getAttribute("data-reading-workspace"));
   });
   it("keeps one workspace view while bulk selection, source, history and Escape preserve the composer", async () => {
     const body = host(), workspace = host(), chat = host(), compose = host(), actions = host();

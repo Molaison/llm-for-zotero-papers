@@ -56,5 +56,6 @@ jobs:
           test/noteFocusHeaderLayout.test.ts test/footerPermissionControl.test.ts
           test/historySearchController.test.ts test/historySearchPopupController.test.ts
           test/standaloneTabLabel.test.ts test/standaloneWindowContextFitSource.test.ts
+          test/annotationReplyUI.test.ts
       - name: Native reading workflows including quote expansion
         run: node scripts/run-ui-regression.mjs

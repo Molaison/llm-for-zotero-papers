@@ -36,11 +36,20 @@ export function installAnnotationReplyLayout(
     frame = undefined;
     if (!root.isConnected) return;
     const bounds = viewport.getBoundingClientRect();
-    const top = Math.max(bounds.top, panel.getBoundingClientRect().top, 0);
-    const height = Math.max(
-      0,
-      Math.floor(Math.min(win.innerHeight, bounds.bottom) - top - 8),
+    const viewportWidth = Number(bounds.width);
+    if (!Number.isFinite(viewportWidth) || viewportWidth <= 0) return;
+    const innerHeight = Number(win.innerHeight);
+    if (!Number.isFinite(innerHeight) || innerHeight <= 0) return;
+    const visibleTop = Math.max(bounds.top, 0);
+    const visibleBottom = Math.min(innerHeight, bounds.bottom);
+    const viewportBudget = Math.floor(visibleBottom - visibleTop - 8);
+    if (!Number.isFinite(viewportBudget) || viewportBudget <= 0) return;
+    const panelBudget = Math.floor(
+      visibleBottom -
+        Math.max(visibleTop, panel.getBoundingClientRect().top) -
+        8,
     );
+    const height = panelBudget > 0 ? panelBudget : viewportBudget;
     panel.style.setProperty("--llm-workspace-height", `${height}px`);
   };
   const schedule = () => {
