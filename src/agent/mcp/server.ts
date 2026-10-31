@@ -2473,6 +2473,11 @@ async function handleRequest(
       return makeJsonRpcNotificationResponse();
     }
 
+    // MCP base protocol: clients such as AnythingLLM use ping as a health check.
+    if (method === MCP_METHODS.PING) {
+      return makeJsonRpcHttpResponse(makeResult(id ?? null, {}));
+    }
+
     if (method === MCP_METHODS.TOOLS_LIST) {
       const result = handleToolsList(
         deps.toolRegistry,

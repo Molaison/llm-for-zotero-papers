@@ -1,10 +1,5 @@
 import { resolveEndpoint, usesMaxCompletionTokens } from "./apiHelpers";
 import {
-  CPR_PAPERS_API_BASE,
-  isCprPapersModel,
-  normalizeCprPapersTarget,
-} from "./cprPapers";
-import {
   isRecord,
   normalizeProfileOverride,
   profileOverrideAppliesTo,
@@ -472,43 +467,43 @@ export async function runCodexDirectConnectionTest(
   }
 }
 
-/** `/v1/models` is the one endpoint the papers route serves without a paper. */
+/** `/v1/models` is the one endpoint a paper-registry route serves without a paper. */
 const MODELS_ENDPOINT = "/v1/models";
 
 /**
- * The papers route rejects anonymous inference: `/v1/responses` requires
+ * A paper-registry route rejects anonymous inference: `/v1/responses` requires
  * `paper_id` and `paper_operation`, so the usual "Say OK" probe comes back
  * 400 paper_id_required. Configuration can still be checked without a paper,
  * because `GET /v1/models` only needs the API key.
  *
- * Only the frozen papers aliases are exempt. Another model served from the
- * same CPR URL would still be reached by the ordinary Responses probe, so
- * neither the URL nor a papers-shaped name alone may switch the check.
+ * The route capability is explicit. Neither a papers-shaped model name nor a
+ * particular host may switch this check.
  */
-export function isCprPapersProviderTarget(params: {
+export function isPaperRegistryProviderTarget(params: {
   apiBase: string;
   modelName: string;
   protocol: ProviderProtocol;
+  paperRegistry: boolean;
 }): boolean {
-  return (
-    isCprPapersModel(params.modelName) &&
-    normalizeCprPapersTarget(params.apiBase) === CPR_PAPERS_API_BASE
-  );
+  void params.apiBase;
+  void params.modelName;
+  void params.protocol;
+  return params.paperRegistry === true;
 }
 
-export function assertCprPapersProviderProtocol(protocol: ProviderProtocol): void {
+export function assertPaperRegistryProviderProtocol(protocol: ProviderProtocol): void {
   if (protocol !== "responses_api" && protocol !== "codex_responses") {
-    throw new Error("CPR papers 仅支持 Responses API；请把这个模型的协议设为 Responses API。未发送匿名推理请求。");
+    throw new Error("论文登记路由仅支持 Responses API；请把这个模型的协议设为 Responses API。未发送匿名推理请求。");
   }
 }
 
 /**
- * Verify the papers API key and model entitlement by listing models.
+ * Verify a paper-registry route's API key and model entitlement by listing models.
  *
  * Deliberately sends no inference request and creates no paper, thread, or
  * upload: it must not be mistaken for a successful paper turn.
  */
-export async function runCprPapersModelAccessTest(params: {
+export async function runPaperRegistryModelAccessTest(params: {
   requestScope?: ProviderRequestScope;
   fetchFn: typeof fetch;
   authMode: ModelProviderAuthMode;

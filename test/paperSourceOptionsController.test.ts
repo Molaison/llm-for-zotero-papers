@@ -4,6 +4,7 @@ import {
   buildPaperSourceOptions,
   canRevealMineruCacheForSourceOption,
   filterPaperSourceOptionsForWebChat,
+  resolvePaperPdfTransportSourceMode,
   resolvePaperPdfSupportForConversation,
   shouldDowngradePdfSourceForConversation,
   resolveMineruSourceOptionState,
@@ -56,6 +57,8 @@ function makeAttachment(params: {
 function buildOptionsForItems(params: {
   paperContext: PaperContextRef;
   items: Zotero.Item[];
+  modelName?: string;
+  paperRegistry?: boolean;
   webChatMode?: boolean;
   mineruCachedIds?: number[];
   pdfSupport?: PdfSupport;
@@ -64,6 +67,8 @@ function buildOptionsForItems(params: {
   return buildPaperSourceOptions({
     paperContext: params.paperContext,
     getItemById: (itemId) => itemsById.get(itemId) || null,
+    modelName: params.modelName,
+    paperRegistry: params.paperRegistry,
     webChatMode: params.webChatMode === true,
     pdfSupport: params.pdfSupport || "native",
     isMineruEnabled: true,
@@ -131,6 +136,116 @@ describe("paper source MinerU option state", function () {
         isCodex: false,
       }),
     );
+  });
+
+  it("treats a paper-registry route as a native PDF transport for real PDF contexts", function () {
+    const modelName = "arbitrary-reading-alias";
+
+    assert.equal(
+      resolvePaperPdfSupportForConversation({
+        basePdfSupport: "none",
+        isClaudeCode: false,
+        isCodex: false,
+        modelName,
+        paperRegistry: true,
+      }),
+      "native",
+    );
+    assert.isFalse(
+      shouldDowngradePdfSourceForConversation({
+        basePdfSupport: "none",
+        isClaudeCode: false,
+        isCodex: false,
+        modelName,
+        paperRegistry: true,
+      }),
+    );
+    assert.equal(
+      resolvePaperPdfTransportSourceMode({
+        modelName,
+        paperRegistry: true,
+        isPdfAttachment: true,
+        mode: "text",
+      }),
+      "pdf",
+    );
+    assert.equal(
+      resolvePaperPdfTransportSourceMode({
+        modelName,
+        paperRegistry: true,
+        isPdfAttachment: false,
+        mode: "markdown",
+      }),
+      "markdown",
+    );
+    // A papers-shaped name alone does not select the route.
+    assert.equal(
+      resolvePaperPdfSupportForConversation({
+        basePdfSupport: "none",
+        isClaudeCode: false,
+        isCodex: false,
+        modelName: "papers/gpt-6-sol",
+        paperRegistry: false,
+      }),
+      "none",
+    );
+    assert.equal(
+      resolvePaperPdfTransportSourceMode({
+        modelName: "papers/gpt-6-sol",
+        paperRegistry: false,
+        isPdfAttachment: true,
+        mode: "text",
+      }),
+      "text",
+    );
+  });
+
+  it("offers only the PDF row for paper-registry PDF contexts and keeps non-PDF sources unchanged", function () {
+    const modelName = "arbitrary-reading-alias";
+    const pdfParent = makeParentItem({ id: 40, attachmentIds: [41] });
+    const pdf = makeAttachment({
+      id: 41,
+      parentID: 40,
+      filename: "paper.pdf",
+      contentType: "application/pdf",
+    });
+    const pdfOptions = buildOptionsForItems({
+      paperContext: { itemId: 40, contextItemId: 41, title: "Paper" },
+      items: [pdfParent, pdf],
+      modelName,
+      paperRegistry: true,
+    });
+
+    assert.deepEqual(
+      pdfOptions.map((option) => option.mode),
+      ["pdf"],
+    );
+    assert.deepEqual(
+      pdfOptions.map((option) => option.badge),
+      ["PDF"],
+    );
+    assert.equal(pdfOptions[0].paperContext.contentSourceMode, "pdf");
+    assert.isUndefined(pdfOptions[0].disabledReason);
+
+    const textParent = makeParentItem({ id: 50, attachmentIds: [51] });
+    const markdown = makeAttachment({
+      id: 51,
+      parentID: 50,
+      filename: "notes.md",
+      contentType: "text/markdown",
+    });
+    const textOptions = buildOptionsForItems({
+      paperContext: { itemId: 50, contextItemId: 51, title: "Paper" },
+      items: [textParent, markdown],
+      modelName,
+      paperRegistry: true,
+    });
+
+    assert.deepEqual(
+      textOptions.map((option) => option.mode),
+      ["markdown"],
+    );
+    assert.isFalse(textOptions.some((option) => option.mode === "pdf"));
   });
 
   it("enables the PDF source for local-path agent runtimes", function () {

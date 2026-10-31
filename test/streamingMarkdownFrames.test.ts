@@ -1,26 +1,15 @@
+import { readFileSync } from "node:fs";
 import { assert } from "chai";
 import {
   disposeStreamingMarkdown,
+  finishStreamingMarkdownInto,
   renderStreamingMarkdownInto,
 } from "../src/modules/contextPanel/streamingMarkdown";
 import { FakeElement } from "./helpers/fakeDom";
 
-class StreamingElement extends FakeElement {
-  get isConnected() {
-    return true;
-  }
+import { MarkdownNode as StreamingElement } from "./helpers/markdownDom";
 
-  replaceWith(...elements: StreamingElement[]) {
-    const parent = this.parentElement;
-    if (!parent) return;
-    for (const element of elements) parent.insertBefore(element, this);
-    parent.removeChild(this);
-  }
-}
-
-function htmlOf(element: FakeElement): string {
-  return element.innerHTML + element.children.map(htmlOf).join("");
-}
+function htmlOf(element: FakeElement): string { return element.innerHTML; }
 
 describe("streaming Markdown frame consistency", function () {
   const targets: HTMLElement[] = [];
@@ -65,6 +54,7 @@ describe("streaming Markdown frame consistency", function () {
       get html() {
         return htmlOf(target as unknown as FakeElement);
       },
+      finish(source: string) { finishStreamingMarkdownInto(target, source, doc, () => resized++); },
       render(source: string) {
         renderStreamingMarkdownInto(target, source, doc, () => resized++);
       },
@@ -151,6 +141,17 @@ describe("streaming Markdown frame consistency", function () {
     assert.equal(view.timers.size, 0);
   });
 
+  it("uses boxless tails and the same paragraph/whitespace rules through completion", () => {
+    const view = fixture(); view.render("First $x$ paragraph\n\nSecond"); view.flush();
+    assert.equal((view.target.children[view.target.children.length - 1] as HTMLElement).style.display, "contents");
+    const css = readFileSync("addon/content/zoteroPane.css", "utf8");
+    assert.match(css, /\.llm-assistant-answer\s*\{[^}]*white-space:\s*normal/);
+    assert.notMatch(css, /\.llm-rendered-markdown p:last-child\s*\{[^}]*margin-bottom:\s*0/);
+    const math = view.target.querySelector(".katex");
+    view.finish("First $x$ paragraph\n\nSecond");
+    assert.strictEqual(view.target.querySelector(".katex"), math);
+  });
+
   it("renders an explicit empty restart in its scheduled frame", function () {
     const view = fixture();
     view.render("Visible passage");
@@ -161,4 +162,55 @@ describe("streaming Markdown frame consistency", function () {
     assert.notInclude(view.html, "Visible passage");
     assert.equal(view.frames.size, 0);
   });
+  for (const math of ["$x^2$", "$$\n\\frac{a}{b}\n$$", "\\[\n\\begin{aligned}a&=b\\\\c&=d\\end{aligned}\n\\]"]) {
+    it(`retains closed formula and paragraph nodes across tail append, promotion and final: ${math}`, () => {
+      const view = fixture();
+      const initial = math.startsWith("$") && !math.startsWith("$$") ? `Before ${math} after` : `Before\n\n${math}\n\nAfter`;
+      view.render(initial); view.flush();
+      const formula = view.target.querySelector(".katex");
+      assert.exists(formula);
+      const tails = [initial + " more", initial + " more words", initial + " more words\n\nNext", initial + " more words\n\nNext\n\nLast"];
+      for (const source of tails) {
+        view.render(source); view.flush();
+        assert.strictEqual(view.target.querySelector(".katex"), formula);
+      }
+      view.finish(tails.at(-1)!);
+      assert.strictEqual(view.target.querySelector(".katex"), formula);
+      assert.equal(view.frames.size, 0);
+      assert.include(view.html, "Last");
+    });
+  }
+  it("updates text in the same paragraph node and replaces genuinely changed math", () => {
+    const view = fixture(); view.render("Before $x$ after"); view.flush();
+    const tail = view.target.firstChild!;
+    const paragraph = tail.firstChild;
+    const formula = view.target.querySelector(".katex");
+    view.render("Before $x$ after a longer sentence"); view.flush();
+    assert.strictEqual(view.target.firstChild!.firstChild, paragraph);
+    assert.strictEqual(view.target.querySelector(".katex"), formula);
+    view.render("Before $y$ after"); view.flush();
+    assert.notStrictEqual(view.target.querySelector(".katex"), formula);
+  });
+  it("renders incomplete math immediately then retains it only after its source closes", () => {
+    const view = fixture(); view.render("Before $x"); view.flush();
+    assert.include(view.html, "$x");
+    view.render("Before $x$ after"); view.flush();
+    const formula = view.target.querySelector(".katex"); assert.exists(formula);
+    view.finish("Before $x$ after completed");
+    assert.strictEqual(view.target.querySelector(".katex"), formula);
+    assert.include(view.html, "completed");
+  });
+
+  it("finishes a queued last chunk without a stale animation frame replacing the final answer", () => {
+    const view = fixture(); view.render("Before $x$ after"); view.flush();
+    const formula = view.target.querySelector(".katex");
+    view.render("Before $x$ after queued");
+    view.finish("Before $x$ after queued and final");
+    assert.equal(view.frames.size, 0);
+    assert.equal(view.timers.size, 0);
+    view.flush();
+    assert.strictEqual(view.target.querySelector(".katex"), formula);
+    assert.include(view.html, "queued and final");
+  });
+
 });

@@ -90,6 +90,8 @@ export async function renderShortcuts(
   const isCurrentRender = () =>
     shortcutRenderGeneration.get(body) === renderGeneration;
   shortcutRenderItemState.set(body, item);
+  const disclosure = body.querySelector<HTMLElement>("#llm-shortcuts-disclosure");
+  if (disclosure) disclosure.hidden = mode === "library" || !!resolveActiveNoteSession(item);
 
   // Library chat mode and note-editing mode: no shortcut buttons (actions
   // available via / menu). Note-editing is detected from the item itself so
@@ -410,7 +412,9 @@ export async function renderShortcuts(
       "span",
     ) as HTMLSpanElement;
     label.className = "llm-shortcut-label";
-    label.textContent = shortcut.label;
+    label.textContent = shortcut.kind === "builtin" && !labelOverrides[shortcut.id]
+      ? t(shortcut.label)
+      : shortcut.label;
     btn.appendChild(label);
 
     container.appendChild(btn);

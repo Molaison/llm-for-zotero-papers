@@ -7,7 +7,7 @@ const COLORS = ["#2563eb", "#dc2626", "#16a34a", "#9333ea", "#ea580c", "#0891b2"
 function chartShell(host: HTMLElement, title: string, doc: Document) {
   const root = doc.createElement("section");
   root.className = "llm-cpr-rich-chart";
-  root.style.cssText = "margin:12px 0;padding:12px;border:1px solid var(--fill-quinary,#d4d4d8);border-radius:10px;max-width:100%;overflow:hidden";
+
   const heading = doc.createElement("strong");
   heading.textContent = title;
   const controls = doc.createElement("div");
@@ -16,15 +16,15 @@ function chartShell(host: HTMLElement, title: string, doc: Document) {
   plot.style.cssText = "width:100%;overflow-x:auto";
   const status = doc.createElement("div");
   status.setAttribute("aria-live", "polite");
-  status.style.cssText = "font-size:12px;min-height:18px;margin:5px 0";
+  status.className = "llm-cpr-chart-status";
   const table = doc.createElement("table");
   table.hidden = true;
-  table.style.cssText = "font-size:12px;border-collapse:collapse;max-width:100%;overflow-wrap:anywhere";
+  table.className = "llm-cpr-chart-table";
   const button = (label: string, onClick: () => void) => {
     const element = doc.createElement("button");
     element.type = "button";
     element.textContent = label;
-    element.style.cssText = "padding:2px 7px;border:1px solid #a1a1aa;border-radius:5px;background:transparent;cursor:pointer";
+    element.className = "llm-cpr-chart-control";
     element.addEventListener("click", (event) => {
       event.preventDefault(); event.stopPropagation(); onClick();
     });
@@ -38,7 +38,7 @@ function chartShell(host: HTMLElement, title: string, doc: Document) {
     for (const column of columns) {
       const th = doc.createElement("th");
       th.textContent = column;
-      th.style.cssText = "padding:4px;border-bottom:1px solid #aaa;text-align:left";
+
       header.appendChild(th);
     }
     thead.appendChild(header);
@@ -48,7 +48,7 @@ function chartShell(host: HTMLElement, title: string, doc: Document) {
       for (const value of values) {
         const td = doc.createElement("td");
         td.textContent = value;
-        td.style.cssText = "padding:3px 5px;border-bottom:1px solid var(--fill-quinary,#ddd)";
+
         tr.appendChild(td);
       }
       tbody.appendChild(tr);
@@ -127,7 +127,11 @@ export function renderCprPieChart(host: HTMLElement, chart: CprPieChartWidget, d
         draw();
       });
       toggle.setAttribute("aria-pressed", "true");
-      toggle.style.borderLeft = `4px solid ${COLORS[index % COLORS.length]}`;
+      const swatch = doc.createElement("span");
+      swatch.className = "llm-cpr-chart-swatch";
+      swatch.setAttribute("aria-hidden", "true");
+      swatch.style.backgroundColor = COLORS[index % COLORS.length];
+      toggle.appendChild(swatch);
     }
   }
   draw();
@@ -176,7 +180,7 @@ export function renderCprHeatmapChart(host: HTMLElement, chart: CprHeatmapChartW
         "text-anchor": "end", fill: "currentColor", "font-size": "10" }, text);
     });
     ui.plot.replaceChildren(plot);
-    ui.status.textContent = `X ${xPage + 1}/${Math.ceil(xs.length / 12)} · Y ${yPage + 1}/${Math.ceil(ys.length / 10)}`;
+    ui.status.textContent = `X ${xPage + 1}/${Math.ceil(xs.length / 12)}，Y ${yPage + 1}/${Math.ceil(ys.length / 10)}`;
   };
   if (xs.length > 12) {
     ui.button("X ←", () => { xPage = Math.max(0, xPage - 1); draw(); });

@@ -91,9 +91,9 @@ import {
   type ProviderProtocol,
 } from "../utils/providerProtocol";
 import {
-  isCprPapersProviderTarget,
-  assertCprPapersProviderProtocol,
-  runCprPapersModelAccessTest,
+  isPaperRegistryProviderTarget,
+  assertPaperRegistryProviderProtocol,
+  runPaperRegistryModelAccessTest,
   runProviderConnectionTest,
   runProviderSettingsChecks,
   runCodexAppServerConnectionTest,
@@ -1374,22 +1374,51 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
     `#${config.addonRef}-pref-tab-bar`,
   ) as HTMLElement | null;
   if (tabBar) {
+    // Keep the existing data-pref-* selectors as the event contract, while
+    // exposing a real tablist to keyboard and assistive-technology users.
+    tabBar.setAttribute("role", "tablist");
+    tabBar.setAttribute("aria-label", t("Preference sections"));
+    const tabButtons = Array.from(
+      tabBar.querySelectorAll("[data-pref-tab]"),
+    ) as HTMLElement[];
+    for (const button of tabButtons) {
+      const tabId = button.getAttribute("data-pref-tab") || "models";
+      const panelId = `${config.addonRef}-pref-panel-${tabId}`;
+      button.id ||= `${config.addonRef}-pref-tab-${tabId}`;
+      button.setAttribute("role", "tab");
+      button.setAttribute("aria-controls", panelId);
+      button.setAttribute("aria-selected", "false");
+      button.tabIndex = -1;
+      const panel = doc.getElementById(panelId);
+      panel?.setAttribute("role", "tabpanel");
+      panel?.setAttribute("aria-labelledby", button.id);
+      panel?.setAttribute("tabindex", "0");
+    }
+
     const switchTab = (tabId: string) => {
       // Hide all panels
       const panels = doc.querySelectorAll("[data-pref-panel]");
       for (let i = 0; i < panels.length; i++) {
-        (panels[i] as HTMLElement).style.display = "none";
+        const panel = panels[i] as HTMLElement;
+        panel.style.display = "none";
+        panel.setAttribute("aria-hidden", "true");
       }
       // Show target panel
       const target = doc.querySelector(
         `[data-pref-panel="${tabId}"]`,
       ) as HTMLElement | null;
-      if (target) target.style.display = "flex";
+      if (target) {
+        target.style.display = "flex";
+        target.setAttribute("aria-hidden", "false");
+      }
       // Update tab button styles
       const tabs = tabBar.querySelectorAll("[data-pref-tab]");
       for (let i = 0; i < tabs.length; i++) {
         const btn = tabs[i] as HTMLElement;
-        if (btn.getAttribute("data-pref-tab") === tabId) {
+        const active = btn.getAttribute("data-pref-tab") === tabId;
+        btn.setAttribute("aria-selected", String(active));
+        btn.tabIndex = active ? 0 : -1;
+        if (active) {
           btn.style.color = "FieldText";
           btn.style.background = "Field";
           btn.style.fontWeight = "600";
@@ -1409,9 +1438,37 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
       btn.addEventListener("click", () => {
         switchTab(btn.getAttribute("data-pref-tab") || "models");
       });
+      btn.addEventListener("keydown", (event) => {
+        const key = (event as KeyboardEvent).key;
+        const currentIndex = tabButtons.indexOf(btn);
+        if (currentIndex < 0) return;
+        let nextIndex = currentIndex;
+        if (key === "ArrowRight" || key === "ArrowDown") {
+          nextIndex = (currentIndex + 1) % tabButtons.length;
+        } else if (key === "ArrowLeft" || key === "ArrowUp") {
+          nextIndex = (currentIndex - 1 + tabButtons.length) % tabButtons.length;
+        } else if (key === "Home") {
+          nextIndex = 0;
+        } else if (key === "End") {
+          nextIndex = tabButtons.length - 1;
+        } else if (key === "Enter" || key === " ") {
+          switchTab(btn.getAttribute("data-pref-tab") || "models");
+          event.preventDefault();
+          return;
+        } else {
+          return;
+        }
+        event.preventDefault();
+        const next = tabButtons[nextIndex];
+        next.focus();
+        switchTab(next.getAttribute("data-pref-tab") || "models");
+      });
     }
-    // Activate first tab
-    switchTab("models");
+    // Deep links remain stable through the data-pref-* values. Accept both a
+    // short `#preferences-agent` anchor and the full panel id.
+    const hash = _window.location.hash.replace(/^#/, "");
+    const hashTab = hash.match(/(?:preferences-|pref-panel-)(models|customization|agent|mineru|usage)$/)?.[1];
+    switchTab(hashTab || "models");
   }
 
   const modelSections = doc.querySelector(
@@ -2823,14 +2880,15 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
             // GET /v1/models instead: key and model entitlement only, no
             // inference, and nothing is created on the server.
             if (
-              isCprPapersProviderTarget({
+              isPaperRegistryProviderTarget({
                 apiBase,
                 modelName,
                 protocol: providerProtocol,
+                paperRegistry: group.paperRegistry === true,
               })
             ) {
-              assertCprPapersProviderProtocol(providerProtocol);
-              const papers = await runCprPapersModelAccessTest({
+              assertPaperRegistryProviderProtocol(providerProtocol);
+              const papers = await runPaperRegistryModelAccessTest({
                 requestScope,
                 fetchFn,
                 authMode,
@@ -2933,15 +2991,55 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
           modelsWrap,
         );
       } else {
-        cardBody.append(
-          connectionSection(doc, [
-            authModeWrap,
-            providerPresetWrap,
-            apiUrlWrap,
-            apiKeyWrap,
-          ]),
-          modelsWrap,
-        );
+        const connectionFields = [
+          authModeWrap,
+          providerPresetWrap,
+          apiUrlWrap,
+          apiKeyWrap,
+        ];
+        if (group.authMode === "api_key") {
+          const { wrap: capabilitiesWrap, control: capabilitiesControl } =
+            prefField(doc, t("Route capabilities"));
+          const capabilityToggle = (
+            key: "paperRegistry" | "directWebPdf",
+            title: string,
+            hint: string,
+          ) => {
+            const label = createElement(doc, "label");
+            label.style.cssText =
+              "display: flex; align-items: center; gap: 8px; cursor: pointer;";
+            const checkbox = createElement(doc, "input");
+            checkbox.type = "checkbox";
+            checkbox.checked = group[key] === true;
+            checkbox.addEventListener("change", () => {
+              if (checkbox.checked) group[key] = true;
+              else delete group[key];
+              persistGroups(groups);
+              syncAddProviderBtn();
+            });
+            label.append(
+              checkbox,
+              createElement(doc, "span", undefined, { textContent: title }),
+            );
+            capabilitiesControl.append(label, prefHint(doc, hint));
+          };
+          capabilityToggle(
+            "paperRegistry",
+            t("Server-side paper registry"),
+            t(
+              "Send PDFs to this route's paper registry. Explicitly configured; a model name or host never selects this path.",
+            ),
+          );
+          capabilityToggle(
+            "directWebPdf",
+            t("Direct ChatGPT Web PDF"),
+            t(
+              "Send inline PDF parts to a web-backed route that remembers them per conversation.",
+            ),
+          );
+          connectionFields.push(capabilitiesWrap);
+        }
+        cardBody.append(connectionSection(doc, connectionFields), modelsWrap);
       }
       finishProviderRow();
     });

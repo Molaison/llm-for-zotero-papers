@@ -51,7 +51,12 @@ export function resolvePaperPdfSupportForConversation(params: {
   basePdfSupport: PdfSupport;
   isClaudeCode: boolean;
   isCodex: boolean;
+  modelName?: string;
+  paperRegistry?: boolean;
 }): PdfSupport {
+  // Papers conversations use the paper's PDF through their own transport,
+  // regardless of the generic provider's file-input capability.
+  if (params.paperRegistry === true) return "native";
   return params.isClaudeCode || params.isCodex
     ? "local_path"
     : params.basePdfSupport;
@@ -61,9 +66,27 @@ export function shouldDowngradePdfSourceForConversation(params: {
   basePdfSupport: PdfSupport;
   isClaudeCode: boolean;
   isCodex: boolean;
+  modelName?: string;
+  paperRegistry?: boolean;
 }): boolean {
   const support = resolvePaperPdfSupportForConversation(params);
   return support !== "native" && support !== "local_path";
+}
+
+/**
+ * Papers models use a real PDF even when the ordinary lane defaults to
+ * extracted text. Only a real PDF attachment becomes the PDF source; text-like
+ * attachments keep their own source mode.
+ */
+export function resolvePaperPdfTransportSourceMode(params: {
+  modelName?: string;
+  paperRegistry?: boolean;
+  isPdfAttachment: boolean;
+  mode: PaperContentSourceMode;
+}): PaperContentSourceMode {
+  return params.paperRegistry === true && params.isPdfAttachment
+    ? "pdf"
+    : params.mode;
 }
 
 export function canRevealMineruCacheForSourceOption(
@@ -83,6 +106,8 @@ export function canRevealMineruCacheForSourceOption(
 export type BuildPaperSourceOptionsParams = {
   paperContext: PaperContextRef;
   getItemById: (itemId: number) => Zotero.Item | null | undefined;
+  modelName?: string;
+  paperRegistry?: boolean;
   webChatMode: boolean;
   pdfSupport: PdfSupport;
   isMineruEnabled: boolean;
@@ -325,7 +350,9 @@ function buildPdfAttachmentSourceOptions(params: {
         ? undefined
         : picker.fullPdfUnsupportedMessage,
   };
-  if (picker.webChatMode) return [pdfOption];
+  if (picker.webChatMode || picker.paperRegistry === true) {
+    return [pdfOption];
+  }
 
   const mineruOptionState = resolveMineruOptionState(baseContext, picker);
   const mineruDisabledReason = shouldDisableMineruParsingAction({

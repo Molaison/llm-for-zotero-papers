@@ -109,6 +109,101 @@ describe("pdfPaperModelInputController", function () {
     });
   });
 
+  it("shows a neutral Papers status before ready reuse or first upload", async function () {
+    let resolvedPaperPdf = false;
+    const deps = createDeps({
+      getModelPdfSupport: () => "none",
+      resolvePdfPaperAttachments: async () => {
+        resolvedPaperPdf = true;
+        return [paperPdf];
+      },
+    });
+
+    const result = await resolvePdfModeModelInputs({
+      deps,
+      paperContexts: [paperContext],
+      selectedBaseFiles: [],
+      selectedImageCountForBudget: 0,
+      profile: {
+        model: "arbitrary-reading-alias",
+        authMode: "api_key",
+        paperRegistry: true,
+      },
+      currentModelName: "arbitrary-reading-alias",
+    });
+
+    assert.isTrue(result.ok);
+    if (!result.ok) return;
+    assert.isFalse(resolvedPaperPdf);
+    assert.deepEqual(result.selectedFiles, []);
+    assert.deepEqual(result.modelFiles, []);
+    assert.deepEqual(result.localDocuments, []);
+    assert.deepInclude(deps.statuses, {
+      message:
+        "Preparing PDF context for the papers route to arbitrary-reading-alias...",
+      level: "ready",
+    });
+    assert.notMatch(deps.statuses[0].message, /upload|sending/i);
+  });
+
+  it("does not claim every selected paper PDF is sent on the Papers route", async function () {
+    const deps = createDeps({
+      getModelPdfSupport: () => "none",
+    });
+
+    const result = await resolvePdfModeModelInputs({
+      deps,
+      paperContexts: [
+        paperContext,
+        { itemId: 30, contextItemId: 40, title: "Second paper" },
+      ],
+      selectedBaseFiles: [],
+      selectedImageCountForBudget: 0,
+      profile: {
+        model: "arbitrary-reading-alias",
+        authMode: "api_key",
+        paperRegistry: true,
+      },
+      currentModelName: "arbitrary-reading-alias",
+    });
+
+    assert.isTrue(result.ok);
+    if (!result.ok) return;
+    assert.deepEqual(result.selectedFiles, []);
+    assert.deepInclude(deps.statuses, {
+      message:
+        "Papers route uses only the current paper's PDF; other selected paper PDFs are not sent this turn.",
+      level: "warning",
+    });
+  });
+
+  it("does not select the paper route from a papers-shaped model name", async function () {
+    const deps = createDeps({ getModelPdfSupport: () => "native" });
+
+    const result = await resolvePdfModeModelInputs({
+      deps,
+      paperContexts: [paperContext],
+      selectedBaseFiles: [],
+      selectedImageCountForBudget: 0,
+      profile: {
+        model: "papers/gpt-6-sol",
+        authMode: "api_key",
+        paperRegistry: false,
+      },
+      currentModelName: "papers/gpt-6-sol",
+    });
+
+    assert.isTrue(result.ok);
+    if (!result.ok) return;
+    // The generic native path resolves the paper PDF itself, whereas the
+    // paper-registry branch deliberately hands the PDF to llmClient instead.
+    assert.deepEqual(result.selectedFiles, [paperPdf]);
+    assert.deepEqual(result.modelFiles, [paperPdf]);
+    assert.isFalse(
+      deps.statuses.some((entry) => entry.message.includes("papers route")),
+    );
+  });
+
   it("blocks direct uploaded PDFs for non-native providers", async function () {
     const deps = createDeps({ getModelPdfSupport: () => "none" });
 

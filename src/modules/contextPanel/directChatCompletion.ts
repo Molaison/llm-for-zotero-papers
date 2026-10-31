@@ -76,6 +76,7 @@ export async function callDirectChatTurnWithRecovery(params: {
   onReasoning?: (event: ReasoningEvent) => void;
   onUsage?: (usage: UsageStats) => void;
   call?: typeof callLLMStream;
+  allowAutomaticRecovery?: boolean;
 }): Promise<ModelTurnOutcome> {
   const call = params.call ?? callLLMStream;
   const first = await call(
@@ -85,6 +86,7 @@ export async function callDirectChatTurnWithRecovery(params: {
     params.onUsage,
   );
   if (
+    params.allowAutomaticRecovery === false ||
     first.completion.status !== "incomplete" ||
     first.completion.reason !== "output_limit" ||
     first.text.trim()

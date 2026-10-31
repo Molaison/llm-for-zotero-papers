@@ -181,6 +181,7 @@ export function attachComposeCaptureController(
       event.stopPropagation();
 
       if (!captureOwnershipLease("add-reader-text")) return;
+      deps.closeSlashMenu();
 
       const currentItem = activeContextPanels.get(body)?.() ?? deps.getItem();
       const root = body.querySelector("#llm-main") as HTMLDivElement | null;
@@ -248,6 +249,7 @@ export function attachComposeCaptureController(
     screenshotBtn.addEventListener("click", async (event: Event) => {
       event.preventDefault();
       event.stopPropagation();
+      deps.closeSlashMenu();
       const ownership = captureOwnershipLease("capture-screenshot");
       if (!ownership) return;
       const { item } = ownership;
@@ -363,6 +365,17 @@ export function attachComposeCaptureController(
       "ready",
     );
   };
+
+  // Escape belongs to the open add menu, not the surrounding request controls.
+  const closeAddMenuOnEscape = (event: KeyboardEvent) => {
+    if (event.key !== "Escape" || !isFloatingMenuOpen(slashMenu)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    deps.closeSlashMenu();
+    uploadBtn?.focus({ preventScroll: true });
+  };
+  uploadBtn?.addEventListener("keydown", closeAddMenuOnEscape);
+  slashMenu?.addEventListener("keydown", closeAddMenuOnEscape);
 
   if (uploadBtn && uploadInput) {
     uploadBtn.addEventListener("click", (event: Event) => {

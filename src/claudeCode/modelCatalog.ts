@@ -313,6 +313,8 @@ function createRuntimeModelEntry(params: {
     providerProtocol: "anthropic_messages",
     providerLabel: CLAUDE_RUNTIME_PROVIDER_LABEL,
     providerOrder: params.providerOrder,
+    paperRegistry: false,
+    directWebPdf: false,
     displayModelLabel: params.displayName || params.model,
     advanced: {
       temperature: 0.7,

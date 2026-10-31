@@ -1,3 +1,6 @@
+import { runInNewContext } from "node:vm";
+import ts from "typescript";
+import { FakeElement } from "./helpers/fakeDom";
 import { assert } from "chai";
 import { describe, it } from "mocha";
 import { readFileSync } from "node:fs";
@@ -60,6 +63,35 @@ function matchIndex(text: string, pattern: RegExp): number {
 }
 
 describe("chat streaming-response wiring", function () {
+  it("keeps the live answer across targeted final wrappers and starts incremental rendering on its first paint", () => {
+    const source = readChatSource();
+    const construction = sliceBetween(source, "const retainedAnswer =", "if (fromCprChartAttachments(msg.attachments).length)");
+    assert.match(
+      construction,
+      /targetedMessageWrappers\s*\.get\(msg\)\s*\?\.querySelector<HTMLElement>\("\.llm-assistant-answer"\)/,
+    );
+    assert.include(construction, 'answerHost = retainedAnswer || doc.createElement("div")');
+    assert.include(construction, 'bubble.appendChild(answerHost)');
+    assert.include(construction, 'incremental: true');
+    const replacement = source.slice(source.indexOf('const existingTargetedWrapper = targetedMessageWrappers.get(msg)'));
+    assert.isBelow(replacement.indexOf('existingTargetedWrapper.querySelector<HTMLElement>'), replacement.indexOf('existingTargetedWrapper.replaceWith(wrapper)'));
+  });
+  it("the actual targeted caller transfers the same live answer before disposing the old wrapper", () => {
+    const source = readChatSource();
+    const block = sliceBetween(source, "const retainedAnswer =", 'if (msg.streaming) bubble.classList.add("streaming")');
+    const doc = {createElement: (tag: string) => new FakeElement(tag)};
+    const oldWrapper = new FakeElement("div"), newBubble = new FakeElement("div");
+    const answer = new FakeElement("div"); answer.className = "llm-assistant-answer";
+    const formula = new FakeElement("span"); formula.className = "katex";
+    answer.append(formula); oldWrapper.append(answer);
+    const msg = {};
+    const context = {useTargetedRerender:true, msg, targetedMessageWrappers:new Map([[msg, oldWrapper]]), doc, bubble:newBubble, answerHost:null};
+    runInNewContext(ts.transpileModule(block, {compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText, context);
+    assert.strictEqual(context.answerHost, answer);
+    assert.strictEqual(answer.parentElement, newBubble);
+    assert.strictEqual(answer.firstChild, formula);
+    assert.isNull(oldWrapper.querySelector(".llm-assistant-answer"), "old-wrapper disposal cannot reach the transferred stream");
+  });
   describe("flow order", function () {
     it("wires a streaming response in both the retry and the send flow", function () {
       const source = readChatSource();

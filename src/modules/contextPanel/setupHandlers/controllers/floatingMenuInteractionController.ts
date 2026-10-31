@@ -37,6 +37,7 @@ type FloatingMenuInteractionControllerDeps = {
   clearInlineEdit: () => void;
   closePromptMenu: () => void;
   closeRetryModelMenu: () => void;
+  getRetryMenuAnchor: () => HTMLButtonElement | null;
   closePaperPicker: () => void;
   closeHistoryRowMenu: () => void;
   openRetryModelMenu: (anchor: HTMLButtonElement) => void;
@@ -224,6 +225,20 @@ export function attachFloatingMenuInteractionController(
   }
   const dismissShortcutMenuOnEscape = (event: KeyboardEvent) => {
     if (event.key !== "Escape") return;
+    if (retryModelMenu && isFloatingMenuOpen(retryModelMenu) &&
+        event.target && retryModelMenu.contains(event.target as Node)) {
+      event.preventDefault();
+      event.stopPropagation();
+      const anchor = deps.getRetryMenuAnchor();
+      // More has closed by now, so its Retry action is normally hidden.
+      const summary = anchor?.closest(".llm-answer-more")?.querySelector<HTMLElement>("summary");
+      deps.closeRetryModelMenu();
+      const returnTarget = [anchor, summary, body.querySelector<HTMLElement>("#llm-input")]
+        .find(target => target?.isConnected && target.getClientRects().length &&
+          !target.hasAttribute("disabled") && panelDoc.defaultView?.getComputedStyle(target)?.visibility !== "hidden");
+      returnTarget?.focus({preventScroll: true});
+      return;
+    }
     let closed = false;
     const shortcutMenus = Array.from(
       panelDoc.querySelectorAll("#llm-shortcut-menu"),
@@ -242,7 +257,9 @@ export function attachFloatingMenuInteractionController(
     dismissShortcutMenuOnEscape;
 
   if (chatBox) {
-    chatBox.addEventListener("click", (event: Event) => {
+    body.addEventListener("click", (event: Event) => {
+      const origin = event.target as Element | null;
+      if (!origin || (!chatBox.contains(origin) && !origin.closest(".llm-answer-more-body"))) return;
       if (deps.getInlineEditTarget()) {
         const isInsideEdit = (event.target as Element | null)?.closest(
           ".llm-inline-edit-wrapper",

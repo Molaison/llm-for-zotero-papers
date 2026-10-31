@@ -1,4 +1,5 @@
 import { appLogger } from "../../core/logging";
+import { annotationBatchIdFromTurn, renderAnnotationChatAnswer } from "./annotationReplyPresentation";
 import type { Message } from "./types";
 import type { WebSourceAnchor } from "../../webAccess/types";
 import { stripWebSourceMarkersForDisplay } from "../../webAccess/attribution";
@@ -20,6 +21,7 @@ import {
 import { renderRenderedMarkdownInto } from "./renderedMarkdown";
 import {
   disposeStreamingMarkdown,
+  finishStreamingMarkdownInto,
   renderStreamingMarkdownInto,
 } from "./streamingMarkdown";
 
@@ -68,6 +70,7 @@ export function decorateCompletedAssistantCitationLinks(
   },
 ): void {
   const { assistantMessage, bubble, webSourceAnchors = [] } = params;
+  if (annotationBatchIdFromTurn(params.pairedUserMessage?.text || "")) return;
   if (assistantMessage.streaming || assistantMessage.compactMarker) return;
   if (!sanitizeText(bubble.textContent || assistantMessage.text || "").trim())
     return;
@@ -89,6 +92,12 @@ export function renderAssistantRichText(
     onContentRendered?: () => void;
   },
 ): void {
+  if (annotationBatchIdFromTurn(params.pairedUserMessage?.text || "")) {
+    disposeStreamingMarkdown(params.bubble);
+    renderAnnotationChatAnswer(params.bubble, params.pairedUserMessage!.text,
+      params.assistantMessage.text, Boolean(params.assistantMessage.streaming), params.onContentRendered);
+    return;
+  }
   const doc = params.bubble.ownerDocument;
   const anchors = params.webSourceAnchors || [];
   const source = buildAssistantDisplayMarkdownForRender(
@@ -104,6 +113,10 @@ export function renderAssistantRichText(
       decorate();
       params.onContentRendered?.();
     });
+  } else if (!params.assistantMessage.streaming && finishStreamingMarkdownInto(
+    params.bubble, source, doc, params.onContentRendered,
+  )) {
+    decorate();
   } else {
     disposeStreamingMarkdown(params.bubble);
     renderRenderedMarkdownInto(params.bubble, source, doc, {

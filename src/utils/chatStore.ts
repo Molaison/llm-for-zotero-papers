@@ -4661,3 +4661,16 @@ export async function deleteUpstreamConversationLocalRows(
     rememberConversationKeyRetired(normalizedKey);
   }
 }
+
+// Annotation delivery keeps its own module so the presentation layer can read
+// a batch without pulling the chat store and the agent tool stack in.
+export {
+  initAnnotationReplyStore,
+  loadAnnotationReplyBatches,
+  loadAnnotationReplyBatch,
+  saveAnnotationReplyBatch,
+  getAnnotationReplyClaims,
+  reserveAnnotationReplyBatch,
+  releaseUnsentAnnotationReplyBatch,
+  recordAnnotationReplyBlock,
+} from "./annotationReplyStore";

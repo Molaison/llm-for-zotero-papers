@@ -1434,7 +1434,7 @@ describe("agentTrace render", function () {
     }
   });
 
-  it("phase-anchors every reconstructed continuous progress animation", function () {
+  it("disables continuous decorative progress animation", function () {
     const css = readFileSync("addon/content/zoteroPane.css", "utf8");
     const relevantSelector =
       /(?:llm-at-(?:row-)?planning|llm-text-shimmer|llm-typing-dot|llm-task-progress-ring|llm-plan-task-badge-in_progress|llm-compact-marker-pending)/;
@@ -1450,14 +1450,7 @@ describe("agentTrace render", function () {
       return [{ selector, body: css.slice(blockStart + 1, blockEnd) }];
     });
 
-    assert.lengthOf(infiniteRules, 7);
-    for (const { selector, body } of infiniteRules) {
-      assert.include(
-        body,
-        "--llm-stable-animation-delay",
-        `missing stable phase for ${selector.trim()}`,
-      );
-    }
+    assert.isEmpty(infiniteRules);
   });
   it("formats compact Codex-style activity durations", function () {
     assert.equal(formatAgentActivityDuration(250), "1s");
@@ -2011,7 +2004,7 @@ describe("agentTrace render", function () {
     }
   });
 
-  it("shimmers only the active status words and stops on the retained completed header", function () {
+  it("keeps active status words readable without shimmer and retains the completed header", function () {
     const message = {
       role: "assistant" as const,
       text: "",
@@ -2056,7 +2049,7 @@ describe("agentTrace render", function () {
     assert.isFalse(summary.classList.contains("llm-text-shimmer"));
     assert.match(summary.textContent, /^Worked for /);
     const css = readFileSync("addon/content/zoteroPane.css", "utf8");
-    assert.match(css, /\.llm-text-shimmer\s*\{[^}]*llm-planning-text-shimmer/);
+    assert.match(css, /\.llm-text-shimmer\s*\{[^}]*color: var\(--llm-slate11\);[^}]*animation: none/);
     assert.match(
       css,
       /prefers-reduced-motion: reduce[\s\S]*\.llm-text-shimmer/,
@@ -4789,11 +4782,11 @@ describe("agentTrace render", function () {
 
     assert.include(
       actionTexts,
-      "Generated summary: complete · Note write: failed · Retry available using the same material",
+      "Generated summary: complete，Note write: failed，Retry available using the same material",
     );
     assert.equal(
       actionTexts[actionTexts.length - 1],
-      "Generated summary: complete · Note write: failed · Retry available using the same material",
+      "Generated summary: complete，Note write: failed，Retry available using the same material",
       "the mixed outcome closes the trace",
     );
   });
@@ -11598,7 +11591,7 @@ describe("agent trace action summary card", function () {
     const row = card.findByClass("llm-agent-action-summary-item")!;
     assert.include(
       collectFakeText(row.findByClass("llm-at-row-skip")!),
-      "Skipped Item 2 · already in Reviews",
+      "Skipped Item 2，already in Reviews",
       "the refusal is stated under the row that owns it",
     );
   });

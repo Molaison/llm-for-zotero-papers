@@ -4,6 +4,8 @@ export {
   capturePdfPageToDataUrl,
   getPdfPageRenderScaleForCount,
   getPdfViewerApplication,
+  getPdfPageTextContent,
+  type PdfPageTextContent,
   renderPdfPageToBytes,
   renderPdfPageToDataUrl,
   type PdfJsPageRenderOptions,

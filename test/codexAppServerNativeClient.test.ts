@@ -1670,6 +1670,31 @@ describe("Codex app-server native client", function () {
     });
   });
 
+  it("does not kill the shared process when model/list times out", async function () {
+    const processKey = "native-model-list-timeout-test";
+    const originalSpawn = CodexAppServerProcess.spawn;
+    const proc = CodexAppServerProcess.forTest({
+      stdin: { write: () => {} },
+      kill: () => {},
+    });
+    const calls: unknown[][] = [];
+    (proc as any).sendRequest = async (...args: unknown[]) => {
+      calls.push(args);
+      return { data: [] };
+    };
+    CodexAppServerProcess.spawn = async () => proc;
+    try {
+      await listCodexAppServerModels({ processKey, codexPath: "codex" });
+    } finally {
+      CodexAppServerProcess.spawn = originalSpawn;
+      destroyCachedCodexAppServerProcess(processKey, proc, {
+        codexPath: "codex",
+      });
+    }
+    assert.equal(calls[0][0], "model/list");
+    assert.deepEqual(calls[0][3], { failProcessOnTimeout: false });
+  });
+
   it("forks a thread with the target conversation's scope header, not the source's", async function () {
     const processKey = "native-fork-scope-header";
     const originalSpawn = CodexAppServerProcess.spawn;

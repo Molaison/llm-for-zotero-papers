@@ -2,13 +2,13 @@ import { assert } from "chai";
 import { createHash } from "node:crypto";
 import {
   CPR_DIRECT_WEB_UNCERTAIN_MESSAGE,
-  isCprDirectWebModel,
   prepareCprDirectWebRequest,
   resolveCprDirectWebSessionId,
   type CprDirectWebPrepareParams,
   type CprDirectWebPayload,
 } from "../src/utils/cprDirectWeb";
-import { CPR_PAPERS_API_BASE } from "../src/utils/cprPapers";
+
+const TEST_API_BASE = "https://reading.example/v1";
 import { resetProviderSessionIdCacheForTests } from "../src/utils/providerSessionId";
 import { callLLMStream } from "../src/utils/llmClient";
 import type { PaperContextRef } from "../src/shared/types";
@@ -73,7 +73,7 @@ describe("CPR direct web multi-PDF preparation", function () {
   ): ReturnType<typeof prepareCprDirectWebRequest> =>
     prepareCprDirectWebRequest({
       refs: [],
-      apiBase: CPR_PAPERS_API_BASE,
+      apiBase: TEST_API_BASE,
       model: WEB_MODEL,
       prompt: "总结这两篇",
       requestScope: { operationId: "op-1" },
@@ -428,7 +428,7 @@ describe("CPR direct web multi-PDF preparation", function () {
     assert.lengthOf([...prefs.keys()], 0);
   });
 
-  it("rejects a non-PDF payload and an unsupported model or effort before reading anything", async function () {
+  it("rejects a non-PDF payload before reading anything", async function () {
     addPaper(11, "https://doi.org/10.1000/aaa");
     addAttachment(101, 11, "/library/first.pdf");
     files.set(
@@ -442,28 +442,23 @@ describe("CPR direct web multi-PDF preparation", function () {
       caught = error;
     }
     assert.include(String(caught), "不是有效的 PDF");
+    assert.lengthOf(reads, 1);
+  });
 
-    for (const over of [
-      { model: "papers/gpt-6-sol" },
-      { apiBase: "https://api.openai.com/v1" },
-      {
-        reasoning: {
-          provider: "openai" as const,
-          level: "high" as const,
-          effort: "turbo",
-        },
-      },
-    ]) {
-      reads = [];
-      let refused: unknown;
-      try {
-        await prepare({ refs: [refOf(11, 101)], ...over });
-      } catch (error) {
-        refused = error;
-      }
-      assert.instanceOf(refused, Error);
-      assert.lengthOf(reads, 0);
-    }
+  it("does not gate the web PDF path on a model name or endpoint", async function () {
+    addPaper(11, "https://doi.org/10.1000/aaa");
+    addAttachment(101, 11, "/library/first.pdf");
+    files.set("/library/first.pdf", pdfBytes("web-alias"));
+    const prepared = await prepare({
+      refs: [refOf(11, 101)],
+      model: "papers/gpt-6-sol",
+      apiBase: "https://api.openai.com/v1",
+      reasoning: { provider: "openai", level: "turbo", effort: "turbo" },
+    });
+    assert.equal(prepared.payload.model, "papers/gpt-6-sol");
+    assert.equal(prepared.payload.reasoning.effort, "turbo");
+    assert.lengthOf(prepared.uploaded, 1);
+    assert.lengthOf(reads, 1);
   });
 
   it("names files by basename, caps the name and falls back to paper.pdf", async function () {
@@ -541,19 +536,6 @@ describe("CPR direct web multi-PDF preparation", function () {
       caught = error;
     }
     assert.include(String(caught), "合计超过 100 MiB");
-  });
-
-  it("matches only the CPR papers target with a chatgpt-web model", function () {
-    assert.isTrue(isCprDirectWebModel(WEB_MODEL, CPR_PAPERS_API_BASE));
-    assert.isTrue(
-      isCprDirectWebModel(` ${WEB_MODEL} `, "http://127.0.0.1:18082/v1"),
-    );
-    assert.isFalse(
-      isCprDirectWebModel("papers/gpt-6-sol", CPR_PAPERS_API_BASE),
-    );
-    assert.isFalse(isCprDirectWebModel("gpt-5.6-sol", CPR_PAPERS_API_BASE));
-    assert.isFalse(isCprDirectWebModel("chatgpt-web", CPR_PAPERS_API_BASE));
-    assert.isFalse(isCprDirectWebModel(WEB_MODEL, "https://api.openai.com/v1"));
   });
 
   it("refuses an empty session and keeps standalone and conversation ids distinct", async function () {
@@ -770,11 +752,12 @@ describe("CPR direct web multi-PDF preparation", function () {
           await callLLMStream(
             {
               model: WEB_MODEL,
-              apiBase: CPR_PAPERS_API_BASE,
+              apiBase: TEST_API_BASE,
               apiKey: "test-only",
               prompt: "summarize",
               requestScope: { operationId: "op-1" },
               cprPaperContexts: [refOf(11, 101)],
+              directWebPdf: true,
               signal: controller.signal,
             },
             () => {},

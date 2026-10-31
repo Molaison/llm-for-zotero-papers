@@ -294,3 +294,35 @@ export type CodexConversationSummary = {
   effort?: string;
   userTurnCount: number;
 };
+
+/** Frozen, library-qualified identity and user-authored version for PDF replies. */
+export type AnnotationReplyTarget = {
+  identity: string;
+  version: string;
+  libraryID: number;
+  attachmentID: number;
+  attachmentKey: string;
+  annotationID: number;
+  annotationKey: string;
+  title: string;
+  comment: string;
+  quotedText: string;
+  position: { pageIndex: number; rects: number[][]; nextPageRects?: number[][] };
+};
+export type AnnotationReplyPage = {
+  attachmentID: number;
+  pageIndex: number;
+  dataURL: string;
+  context: string;
+};
+export type AnnotationReplyBatch = {
+  id: string;
+  protocol: "zotero-annotation-replies/v1";
+  conversationKey: number;
+  createdAt: number;
+  status: "inflight" | "uncertain" | "answered" | "invalid" | "applied" | "not-sent";
+  targets: AnnotationReplyTarget[];
+  pages: AnnotationReplyPage[];
+  rawAnswer?: string;
+  error?: string;
+};

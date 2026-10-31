@@ -1,3 +1,7 @@
+import { assistantFailureTitle } from "./assistantFailurePresentation";
+import { attachAnswerMoreMenu, closeAnswerMoreMenu } from "./answerMoreMenu";
+import { isAnnotationReplyTurn } from "../../services/pdf/annotationReplyService";
+import { annotationUserTurnText } from "./annotationReplyPresentation";
 import { appLogger } from "../../core/logging";
 import {
   readNativeQuestions,
@@ -18,8 +22,12 @@ import { codexPlanTaskSteps } from "./taskProgress/codexPlan";
 import { paperLedgerUpdateFromMcpActivity } from "../../agent/context/taskPaperLedgerRecorder";
 import { createProviderRequestScope } from "../../utils/providerTransport";
 import { renderMarkdownForNote } from "../../utils/markdown";
-import { isCprPapersModel } from "../../utils/cprPapers";
-import { CPR_RICH_CHART_MIME, fromCprChartAttachments, toCprChartAttachments } from "../../utils/cprRichWidgets";
+import { resolveConfiguredModelCapabilities } from "../../utils/modelProviders";
+import {
+  CPR_RICH_CHART_MIME,
+  fromCprChartAttachments,
+  toCprChartAttachments,
+} from "../../utils/cprRichWidgets";
 import { renderCprChartWidgets } from "./cprChartRenderer";
 import { HTML_NS } from "../../utils/domHelpers";
 import {
@@ -2316,19 +2324,31 @@ export async function replaceCurrentPaperChat(params: {
     : null;
   if (!validation?.valid)
     throw new Error("The original paper conversation scope is unavailable");
-  const priorCharts = new Map<string, ReturnType<typeof toCprChartAttachments>>();
+  const priorCharts = new Map<
+    string,
+    ReturnType<typeof toCprChartAttachments>
+  >();
   const localMessages = chatHistory.get(conversationKey) || [];
   const remoteCounts = new Map<string, number>();
   const localCounts = new Map<string, number>();
   for (const message of params.messages) {
-    if (message.role === "assistant") remoteCounts.set(message.text, (remoteCounts.get(message.text) || 0) + 1);
+    if (message.role === "assistant")
+      remoteCounts.set(message.text, (remoteCounts.get(message.text) || 0) + 1);
   }
   for (const message of localMessages) {
-    if (message.role === "assistant") localCounts.set(message.text, (localCounts.get(message.text) || 0) + 1);
+    if (message.role === "assistant")
+      localCounts.set(message.text, (localCounts.get(message.text) || 0) + 1);
   }
   for (const message of localMessages) {
-    if (message.role !== "assistant" || remoteCounts.get(message.text) !== 1 || localCounts.get(message.text) !== 1) continue;
-    const charts = toCprChartAttachments(fromCprChartAttachments(message.attachments));
+    if (
+      message.role !== "assistant" ||
+      remoteCounts.get(message.text) !== 1 ||
+      localCounts.get(message.text) !== 1
+    )
+      continue;
+    const charts = toCprChartAttachments(
+      fromCprChartAttachments(message.attachments),
+    );
     if (charts.length) priorCharts.set(message.text, charts);
   }
   const stored = await replaceStoredConversationMessages(
@@ -2337,12 +2357,18 @@ export async function replaceCurrentPaperChat(params: {
       role: message.role,
       text: message.text,
       timestamp: message.created_at,
-      ...(message.role === "assistant" ? {
-        attachments: (() => {
-          const fromRemote = toCprChartAttachments(message.rich_widgets ?? []);
-          return fromRemote.length ? fromRemote : priorCharts.get(message.text);
-        })(),
-      } : {}),
+      ...(message.role === "assistant"
+        ? {
+            attachments: (() => {
+              const fromRemote = toCprChartAttachments(
+                message.rich_widgets ?? [],
+              );
+              return fromRemote.length
+                ? fromRemote
+                : priorCharts.get(message.text);
+            })(),
+          }
+        : {}),
     })),
     { expectedGeneration, isCurrent },
   );
@@ -4718,6 +4744,7 @@ function createQueuedRefresh(
 }
 
 export function disposeChatRendering(body: Element): void {
+  closeAnswerMoreMenu(body);
   for (const scheduler of queuedPanelRefreshes.get(body) || [])
     scheduler.cancel();
   queuedPanelRefreshes.delete(body);
@@ -5834,6 +5861,16 @@ export async function editLatestUserMessageAndRetry(
   );
   const retryPair = findLatestRetryPair(history);
   if (!retryPair) return "missing";
+  if (isAnnotationReplyTurn(retryPair.userMessage.text)) {
+    const ui = getPanelRequestUI(body);
+    if (ui.status)
+      setStatus(
+        ui.status,
+        "批注批次不能编辑重发；请在批注问答中只重新解析已存答案，或编辑原批注后新建批次。",
+        "error",
+      );
+    return "stale";
+  }
   if (retryPair.assistantMessage.streaming) return "stale";
   const retryRequestConfig = resolveEffectiveRequestConfig({
     item,
@@ -6259,6 +6296,16 @@ export async function retryLatestAssistantResponse(
     getConversationKey(item),
   );
 
+  if (isAnnotationReplyTurn(retryPair.userMessage.text)) {
+    if (ui.status)
+      setStatus(
+        ui.status,
+        "批注批次不会重新调用模型；请打开批注问答，使用只重新解析。",
+        "error",
+      );
+    releaseRequest();
+    return;
+  }
   const assistantMessage = retryPair.assistantMessage;
   let codexActivityTrace: CodexNativeActivityTraceController | null = null;
   const assistantSnapshot = takeAssistantSnapshot(assistantMessage);
@@ -6916,9 +6963,17 @@ export async function retryLatestAssistantResponse(
       return;
     }
 
-    if (isCprPapersModel(effectiveRequestConfig.model)) {
+    if (
+      resolveConfiguredModelCapabilities({
+        entryId: effectiveRequestConfig.modelEntryId,
+        model: effectiveRequestConfig.model,
+        apiBase: effectiveRequestConfig.apiBase,
+      }).paperRegistry
+    ) {
       assistantMessage.attachments = [
-        ...(assistantMessage.attachments || []).filter((entry) => entry.mimeType !== CPR_RICH_CHART_MIME),
+        ...(assistantMessage.attachments || []).filter(
+          (entry) => entry.mimeType !== CPR_RICH_CHART_MIME,
+        ),
         ...toCprChartAttachments(modelOutcome.richWidgets || []),
       ];
     }
@@ -9669,6 +9724,14 @@ export async function sendQuestion(
     if (await stopInactiveRequest()) return;
 
     // Models resolved as image-disabled reject image_url content, so drop all images.
+    if (
+      opts.annotationReplyBatchId &&
+      !supportsImageInputs(effectiveRequestConfig)
+    ) {
+      throw new Error(
+        "当前模型禁用图片；批注页面图不能被静默丢弃。请选择支持图片的 Chat / Papers 模型。",
+      );
+    }
     const allSendImages = supportsImageInputs(effectiveRequestConfig)
       ? [...(images || []), ...(contextPlan.modelImages || [])]
       : [];
@@ -9847,6 +9910,7 @@ export async function sendQuestion(
           };
         })()
       : await callDirectChatTurnWithRecovery({
+          allowAutomaticRecovery: !opts.annotationReplyBatchId,
           request: {
             ...requestParams,
             systemMessages,
@@ -9864,9 +9928,17 @@ export async function sendQuestion(
       return;
     }
 
-    if (isCprPapersModel(effectiveRequestConfig.model)) {
+    if (
+      resolveConfiguredModelCapabilities({
+        entryId: effectiveRequestConfig.modelEntryId,
+        model: effectiveRequestConfig.model,
+        apiBase: effectiveRequestConfig.apiBase,
+      }).paperRegistry
+    ) {
       assistantMessage.attachments = [
-        ...(assistantMessage.attachments || []).filter((entry) => entry.mimeType !== CPR_RICH_CHART_MIME),
+        ...(assistantMessage.attachments || []).filter(
+          (entry) => entry.mimeType !== CPR_RICH_CHART_MIME,
+        ),
         ...toCprChartAttachments(modelOutcome.richWidgets || []),
       ];
     }
@@ -9946,7 +10018,7 @@ export async function sendQuestion(
 
     // Codex app-server owns model-visible history in native mode, so avoid a
     // background summarizer that would spin up a second app-server request.
-    if (!isCodexNativeTurn) {
+    if (!isCodexNativeTurn && !opts.annotationReplyBatchId) {
       scheduleLLMSummary(conversationKey, rawLLMHistory, {
         model: effectiveRequestConfig.model,
         apiBase: effectiveRequestConfig.apiBase,
@@ -9958,6 +10030,18 @@ export async function sendQuestion(
     }
 
     setStatusSafely("Ready", "ready");
+    if (opts.onAnnotationReplyComplete) {
+      try {
+        await opts.onAnnotationReplyComplete(
+          modelOutcome.text,
+          modelOutcome.completion.status === "complete",
+        );
+        setStatusSafely("批注已写回", "ready");
+      } catch (error) {
+        setStatusSafely(`批注未回写：${String(error)}`, "error");
+      }
+      refreshChatSafely();
+    }
   } catch (err) {
     const isCancelled =
       getCancelledRequestId(conversationKey) >= thisRequestId ||
@@ -9988,6 +10072,11 @@ export async function sendQuestion(
     });
     assistantMessage.text = outcome.text;
     assistantMessage.interrupted = outcome.interrupted;
+    if (!outcome.interrupted) {
+      // Local terminal failure, not evidence of a Web page error or non-dispatch.
+      assistantMessage.completionStatus = "blocked";
+      assistantMessage.completionReason = "other";
+    }
     assistantMessage.streaming = false;
     codexActivityTrace?.flushBufferedProgress("error");
     refreshChatSafely();
@@ -10565,6 +10654,7 @@ export function refreshChat(
         msg.waitingAnimationStartedAt || msg.timestamp,
       );
     }
+    let modelDetails: HTMLDetailsElement | null = null;
     let inlineEditEl: HTMLElement | null = null;
     let responseWebSourceAnchors: readonly WebSourceAnchor[] = [];
 
@@ -10966,7 +11056,7 @@ export function refreshChat(
             paperContext.firstCreator || "",
             paperContext.year || "",
           ].filter(Boolean);
-          paperMeta.textContent = metaParts.join(" · ") || "Supplemental paper";
+          paperMeta.textContent = metaParts.join("，") || "Supplemental paper";
           paperMeta.title = paperMeta.textContent;
 
           const attachmentTitle =
@@ -11105,7 +11195,7 @@ export function refreshChat(
 
           const fileMeta = doc.createElement("span") as HTMLSpanElement;
           fileMeta.className = "llm-user-files-item-meta";
-          fileMeta.textContent = `${attachment.mimeType || "application/octet-stream"} · ${(attachment.sizeBytes / 1024 / 1024).toFixed(2)} MB`;
+          fileMeta.textContent = `${attachment.mimeType || "application/octet-stream"}，${(attachment.sizeBytes / 1024 / 1024).toFixed(2)} MB`;
 
           fileInfo.append(fileName, fileMeta);
           fileItem.append(fileType, fileInfo);
@@ -11279,7 +11369,11 @@ export function refreshChat(
           conversationKey,
         );
       } else {
-        renderUserBubbleContent(bubble, sanitizeText(msg.text || ""), doc);
+        renderUserBubbleContent(
+          bubble,
+          annotationUserTurnText(sanitizeText(msg.text || "")),
+          doc,
+        );
         bubble.classList.toggle("llm-bubble-editable", canEditUserPrompt);
         if (hasAssistantPair) {
           bubble.addEventListener("click", (e: Event) => {
@@ -11432,7 +11526,15 @@ export function refreshChat(
           msg,
           webSourceAnchors,
         );
-        answerHost = doc.createElement("div");
+        // A targeted completion may rebuild footer/actions, but the live answer
+        // retains its streaming tree (and closed KaTeX nodes) through that move.
+        const retainedAnswer =
+          useTargetedRerender && !msg.compactMarker
+            ? targetedMessageWrappers
+                .get(msg)
+                ?.querySelector<HTMLElement>(".llm-assistant-answer")
+            : null;
+        answerHost = retainedAnswer || doc.createElement("div");
         answerHost.className = "llm-assistant-answer";
         bubble.appendChild(answerHost);
         if (msg.streaming) bubble.classList.add("streaming");
@@ -11453,6 +11555,7 @@ export function refreshChat(
               assistantMessage: msg,
               pairedUserMessage: previousUserMessage,
               webSourceAnchors,
+              incremental: true,
               onContentRendered: () => {
                 scheduleChatScrollReconciliation(conversationKey, chatBox);
               },
@@ -11474,8 +11577,12 @@ export function refreshChat(
         !msg.compactMarker &&
         !agentTraceReplacesAssistantTurn
       ) {
-        const modelHeader = doc.createElement("div") as HTMLDivElement;
+        const modelHeader = doc.createElement("details") as HTMLDetailsElement;
         modelHeader.className = "llm-model-header";
+        const modelSummary = doc.createElement("summary");
+        modelSummary.className = "llm-model-meta-toggle";
+        modelSummary.setAttribute("aria-label", t("Model"));
+        modelHeader.appendChild(modelSummary);
 
         const modelName = doc.createElement("div") as HTMLDivElement;
         modelName.className = "llm-model-name";
@@ -11487,6 +11594,7 @@ export function refreshChat(
               resolveConversationSystemForItem(item) === "claude_code",
           },
         );
+        modelSummary.title = modelName.textContent || t("Model");
         modelHeader.appendChild(modelName);
 
         if (!hasAnswerText && msg.streaming && isClaudeStreamingConversation) {
@@ -11496,10 +11604,10 @@ export function refreshChat(
             roseLoader,
             msg.waitingAnimationStartedAt || msg.timestamp || Date.now(),
           );
-          modelHeader.appendChild(roseLoader);
+          bubbleHeaderNodes.push(roseLoader);
         }
 
-        bubbleHeaderNodes.push(modelHeader);
+        modelDetails = modelHeader;
       }
 
       const hasReasoningSummary = Boolean(msg.reasoningSummary?.trim());
@@ -11688,10 +11796,15 @@ export function refreshChat(
     const meta = doc.createElement("div") as HTMLDivElement;
     meta.className = "llm-message-meta";
 
-    const time = doc.createElement("span") as HTMLSpanElement;
+    const time = doc.createElement("details") as HTMLDetailsElement;
     time.className = "llm-message-time";
-    time.textContent = formatTime(msg.timestamp);
+    const timeSummary = doc.createElement("summary");
+    timeSummary.textContent = "◷";
+    timeSummary.title = formatTime(msg.timestamp);
+    timeSummary.setAttribute("aria-label", formatTime(msg.timestamp));
+    time.append(timeSummary, doc.createTextNode(formatTime(msg.timestamp)));
     meta.appendChild(time);
+    if (modelDetails) meta.appendChild(modelDetails);
     if (isUser && shouldShowUserFooterCopyAction(msg)) {
       const actions = doc.createElement("div") as HTMLDivElement;
       actions.className = "llm-message-actions";
@@ -11824,6 +11937,53 @@ export function refreshChat(
 
       if (actions.childElementCount > 0) {
         meta.appendChild(actions);
+      }
+    }
+
+    if (!isUser && !msg.compactMarker) {
+      // Keep the two frequent actions visible; move existing action nodes, not handlers.
+      const more = doc.createElement("details");
+      more.className = "llm-answer-more";
+      const summary = doc.createElement("summary");
+      summary.textContent = "…";
+      summary.title = "回答操作";
+      summary.setAttribute("aria-label", "回答操作");
+      const menu = doc.createElement("div");
+      menu.className = "llm-answer-more-body";
+      const actions = meta.querySelector<HTMLElement>(".llm-message-actions");
+      for (const action of Array.from(actions?.children || [])) {
+        if (
+          action.classList.contains("llm-message-action-copy") ||
+          action.classList.contains("llm-message-action-note")
+        )
+          continue;
+        const button = action as HTMLElement;
+        button.textContent = button.classList.contains(
+          "llm-message-action-retry",
+        )
+          ? "选择模型重试"
+          : button.classList.contains("llm-message-action-fork")
+            ? "分支对话"
+            : button.classList.contains("llm-message-action-delete")
+              ? "删除此轮"
+              : button.title;
+        menu.append(button);
+      }
+      menu.append(time);
+      if (modelDetails) menu.append(modelDetails);
+      more.append(summary, menu);
+      attachAnswerMoreMenu(body, more, summary, menu);
+      (actions || meta).append(more);
+      if (msg.runMode !== "agent") {
+        const label = doc.createElement("div");
+        label.className = "llm-answer-label";
+        const failureTitle = assistantFailureTitle(msg);
+        label.textContent = failureTitle || "回答";
+        bubble.insertBefore(label, bubble.firstChild);
+        if (failureTitle) {
+          bubble.classList.add("llm-answer-error");
+          label.setAttribute("role", "alert");
+        }
       }
     }
 

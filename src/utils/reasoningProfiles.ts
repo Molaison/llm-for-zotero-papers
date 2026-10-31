@@ -308,64 +308,6 @@ const OPENAI_GPT56_PROFILE: ProviderProfile = {
   },
 };
 
-/**
- * Papers aliases have separate effort ladders. GPT-5.6 Sol defaults to high,
- * GPT-6 Sol defaults to medium, Instant to low, and Pro to max. Ids are matched
- * exactly, so a plain `gpt-5.6-sol` served by another provider keeps its own
- * documented ladder.
- */
-const OPENAI_PAPERS_SOL_PROFILE: ProviderProfile = {
-  supportsReasoning: true,
-  defaultLevel: "high",
-  options: [option("high"), option("medium"), option("xhigh")],
-  openai: {
-    defaultEffort: "high",
-    levelToEffort: {
-      high: "high",
-      medium: "medium",
-      xhigh: "xhigh",
-    },
-  },
-};
-
-const OPENAI_PAPERS_GPT6_SOL_PROFILE: ProviderProfile = {
-  supportsReasoning: true,
-  defaultLevel: "medium",
-  options: [option("medium"), option("high"), option("xhigh")],
-  openai: {
-    defaultEffort: "medium",
-    levelToEffort: {
-      medium: "medium",
-      high: "high",
-      xhigh: "xhigh",
-    },
-  },
-};
-
-const OPENAI_PAPERS_INSTANT_PROFILE: ProviderProfile = {
-  supportsReasoning: true,
-  defaultLevel: "low",
-  options: [option("low")],
-  openai: {
-    defaultEffort: "low",
-    levelToEffort: {
-      low: "low",
-    },
-  },
-};
-
-const OPENAI_PAPERS_MAX_PROFILE: ProviderProfile = {
-  supportsReasoning: true,
-  defaultLevel: "max",
-  options: [option("max")],
-  openai: {
-    defaultEffort: "max",
-    levelToEffort: {
-      max: "max",
-    },
-  },
-};
-
 // https://docs.x.ai/docs/guides/reasoning — grok-4.6 and grok-4.20-multi-agent
 // take low | medium | high (default) | xhigh; grok-4.5 stops at high. Reasoning
 // cannot be disabled on any of them, so there is no off level.
@@ -880,32 +822,6 @@ const PROFILE_RULES: Record<
       {
         match: /^gpt-5\.(?:2|3)-codex(?:\b|[.-])/,
         profile: OPENAI_GPT5_CODEX_PROFILE,
-      },
-      {
-        // Canonical papers aliases (`papers/<model>`) only: the plain name is
-        // a different deployment with its own documented ladder.
-        match: /^papers\/gpt-6-sol-instant$/,
-        profile: OPENAI_PAPERS_INSTANT_PROFILE,
-      },
-      {
-        match: /^papers\/gpt-6-sol$/,
-        profile: OPENAI_PAPERS_GPT6_SOL_PROFILE,
-      },
-      {
-        match: /^papers\/gpt-5\.6-sol-instant$/,
-        profile: OPENAI_PAPERS_INSTANT_PROFILE,
-      },
-      {
-        match: /^papers\/gpt-5\.6-sol$/,
-        profile: OPENAI_PAPERS_SOL_PROFILE,
-      },
-      {
-        match: /^papers\/gpt-5\.6-pro$/,
-        profile: OPENAI_PAPERS_MAX_PROFILE,
-      },
-      {
-        match: /^papers\/gpt-6-pro$/,
-        profile: OPENAI_PAPERS_MAX_PROFILE,
       },
       {
         match: /^gpt-5\.6(?:\b|[.-])/,

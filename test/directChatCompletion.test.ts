@@ -20,6 +20,13 @@ describe("direct chat completion recovery", function () {
     outputTokenLimit: { mode: "auto" },
   };
 
+  it("never silently continues an annotation batch after empty output", async function () {
+    let calls=0;
+    const result = await callDirectChatTurnWithRecovery({request:baseRequest, allowAutomaticRecovery:false, onDelta:()=>{},
+      call:async()=>{calls++;return {text:"",completion:{status:"incomplete",reason:"output_limit"}};}});
+    assert.equal(calls,1);assert.equal(result.completion.status,"incomplete");
+  });
+
   it("preserves a visible partial response without silently retrying", async function () {
     let calls = 0;
     const result = await callDirectChatTurnWithRecovery({

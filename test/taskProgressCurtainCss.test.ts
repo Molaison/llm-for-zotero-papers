@@ -48,17 +48,10 @@ describe("task progress curtain css", function () {
     }
   });
 
-  it("moves the gap only while the row moves, with the row's own timing", function () {
-    const moving = rules.filter((rule) =>
-      /transition:\s*margin-top/.test(rule.body),
-    );
-    assert.lengthOf(moving, 1);
-    assert.sameMembers(moving[0].selectors, [
-      '.llm-chat-shell[data-task-progress-curtain="opening"]',
-      '.llm-chat-shell[data-task-progress-curtain="closing"]',
-    ]);
-    assert.include(moving[0].body, "var(--llm-task-progress-curtain-duration)");
-    assert.include(moving[0].body, "var(--llm-task-progress-curtain-ease)");
+  it("does not animate the header gap independently of the necessary curtain height", function () {
+    assert.isEmpty(rules.filter(rule => /transition:\s*margin-top/.test(rule.body)));
+    const curtain = rules.find(rule => rule.selectors.includes(".llm-task-progress-curtain"));
+    assert.include(curtain!.body, "transition: height 250ms ease-out");
   });
 
   it("uses the sidebar header mode switch's motion", function () {
@@ -66,10 +59,10 @@ describe("task progress curtain css", function () {
       rule.body.includes("--llm-task-progress-curtain-duration:"),
     );
     assert.isOk(tokens);
-    assert.match(tokens!.body, /--llm-task-progress-curtain-duration:\s*300ms/);
+    assert.match(tokens!.body, /--llm-task-progress-curtain-duration:\s*250ms/);
     assert.match(
       tokens!.body,
-      /--llm-task-progress-curtain-ease:\s*cubic-bezier\(0\.22, 1, 0\.36, 1\)/,
+      /--llm-task-progress-curtain-ease:\s*ease-out/,
     );
   });
 

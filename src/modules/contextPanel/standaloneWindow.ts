@@ -397,12 +397,12 @@ export function renderStandalonePlaceholder(body: Element): void {
   const wrap = createElement(doc, "div", "llm-standalone-placeholder");
   wrap.style.cssText =
     "display:flex;flex-direction:column;align-items:center;justify-content:center;" +
-    "height:100%;gap:12px;padding:24px;text-align:center;color:var(--fill-secondary);";
+    "height:100%;gap:12px;padding:24px;text-align:center;color:var(--llm-slate11);";
 
   const msg = createElement(doc, "div", "", {
     textContent: t("Chat is open in a separate window"),
   });
-  msg.style.cssText = "font-size:13px;";
+  msg.style.cssText = "font-size:var(--llm-text-small);";
 
   const focusBtn = createElement(doc, "button", "llm-btn llm-btn-primary", {
     textContent: t("Focus Window"),
@@ -410,8 +410,8 @@ export function renderStandalonePlaceholder(body: Element): void {
   });
   focusBtn.style.cssText =
     "display:flex;align-items:center;justify-content:center;" +
-    "padding:6px 16px;border-radius:6px;cursor:pointer;font-size:12px;" +
-    "background:var(--color-accent,#2563eb);color:#fff;border:none;";
+    "padding:6px 16px;border-radius:4px;cursor:pointer;font-size:var(--llm-text-small);" +
+    "background:var(--llm-indigo9);color:var(--llm-on-solid);border:none;";
   focusBtn.addEventListener("click", () => {
     getStandaloneSessionWindow()?.focus();
   });
@@ -422,8 +422,8 @@ export function renderStandalonePlaceholder(body: Element): void {
   });
   closeBtn.style.cssText =
     "display:flex;align-items:center;justify-content:center;" +
-    "padding:6px 16px;border-radius:6px;cursor:pointer;font-size:12px;" +
-    "background:none;color:var(--fill-secondary);border:1px solid var(--stroke-secondary,#888);";
+    "padding:6px 16px;border-radius:4px;cursor:pointer;font-size:var(--llm-text-small);" +
+    "background:none;color:var(--llm-slate11);border:0.5px solid var(--llm-slate7);";
   closeBtn.addEventListener("click", () => {
     try {
       const win =
@@ -2522,8 +2522,8 @@ export function openStandaloneChat(options?: {
             // a stronger amber cue so the user notices they should restore.
             if (entry.source === "customized") {
               item.style.borderColor = entry.managedBlockOutdated
-                ? "#d97706"
-                : "var(--color-accent, #2563eb)";
+                ? "var(--llm-amber11)"
+                : "var(--llm-indigo9)";
             }
 
             const icon = doc.createElementNS(
@@ -4287,7 +4287,7 @@ export function openStandaloneChat(options?: {
           ) as HTMLDivElement;
           msg.style.cssText =
             "display:flex;align-items:center;justify-content:center;" +
-            "height:100%;color:#f87171;font-size:14px;padding:24px;text-align:center;";
+            "height:100%;color:var(--llm-red11);font-size:var(--llm-text-body);padding:24px;text-align:center;";
           msg.textContent =
             "Failed to initialize chat window. Check the error console for details.";
           target.appendChild(msg);

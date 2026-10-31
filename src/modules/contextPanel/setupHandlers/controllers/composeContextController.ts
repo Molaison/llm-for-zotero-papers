@@ -1,3 +1,4 @@
+import { t } from "../../../../utils/i18n";
 import { normalizePaperContextRefs } from "../../../../services/context/normalizers";
 import {
   isTextLikeAttachmentSourceMode,
@@ -198,6 +199,7 @@ export function formatPaperContextChipLabel(
   const base = buildCreatorYearBase(paperContext);
   const sourceLabel = getPaperContextChipSourceLabel(contentSourceMode);
   if (sourceLabel) {
+    if (base === "Paper" && contentSourceMode === "pdf") return `${t("Paper")}/PDF`;
     return base === "Paper" && isTextLikeAttachmentSourceMode(contentSourceMode)
       ? `Attachment - ${sourceLabel}`
       : `${base} - ${sourceLabel}`;
@@ -232,7 +234,7 @@ export function formatPaperContextChipTitle(
   const metadata = resolvePaperContextDisplayMetadata(paperContext);
   const meta = [metadata.firstCreator || "", metadata.year || ""]
     .filter(Boolean)
-    .join(" · ");
+    .join("，");
   const modeLabel = getContextSourceModeSourceTitle(contentSourceMode);
   const attachmentTitle = formatPaperContextCardAttachmentLine(
     paperContext,

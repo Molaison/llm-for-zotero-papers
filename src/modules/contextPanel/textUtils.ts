@@ -359,12 +359,22 @@ export function getAttachmentTypeLabel(entry: {
   return "FILE";
 }
 
+/** Clear only the initial library hint when a paper becomes active. */
+export function clearInactivePaperContextHint(statusEl: HTMLElement) {
+  if (
+    statusEl.className === "llm-status" &&
+    statusEl.textContent === t("No active paper context. Type / to add papers.")
+  ) {
+    setStatus(statusEl, t("Ready"), "ready");
+  }
+}
+
 export function setStatus(
   statusEl: HTMLElement,
   text: string,
   variant: "ready" | "sending" | "error" | "warning",
 ) {
-  statusEl.textContent = text;
+  statusEl.textContent = variant === "ready" && text === t("Ready") ? "" : text;
   statusEl.className = `llm-status llm-status-${variant}`;
 }
 
@@ -509,7 +519,7 @@ export function setTokenUsage(
     el.style.display = "";
     if (gaugeEl) {
       gaugeEl.style.display = "inline-block";
-      gaugeEl.style.background = `conic-gradient(${percentage > 80 ? "#f39c12" : "var(--fill-secondary, #7c7c7c)"} ${percentage * 3.6}deg, color-mix(in srgb, var(--fill-secondary, #7c7c7c) 22%, transparent) 0deg)`;
+      gaugeEl.style.background = `conic-gradient(${percentage > 80 ? "var(--llm-amber9)" : "var(--llm-slate9)"} ${percentage * 3.6}deg, var(--llm-slate4) 0deg)`;
       gaugeEl.dataset.warning = presentation.warning ? "true" : "false";
       gaugeEl.title = presentation.title;
       gaugeEl.setAttribute("aria-label", presentation.title);
@@ -531,7 +541,7 @@ export function setTokenUsage(
   if (gaugeEl) {
     gaugeEl.style.display = "inline-block";
     gaugeEl.style.background =
-      "color-mix(in srgb, var(--fill-secondary, #7c7c7c) 45%, transparent)";
+      "var(--llm-slate4)";
     delete gaugeEl.dataset.warning;
     gaugeEl.title = presentation.title;
     gaugeEl.setAttribute("aria-label", presentation.title);

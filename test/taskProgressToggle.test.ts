@@ -538,8 +538,8 @@ describe("task progress button", function () {
       )?.[0];
       assert.isOk(rule);
       assert.include(rule, '.llm-standalone-title-action[aria-pressed="true"]');
-      assert.include(rule, "background: var(--fill-quinary)");
-      assert.include(rule, "color: var(--fill-primary)");
+      assert.include(rule, "background: var(--llm-slate4)");
+      assert.include(rule, "color: var(--llm-slate12)");
     });
   });
 });

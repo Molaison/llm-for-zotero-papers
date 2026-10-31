@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>LLM for Zotero · After</title>
+    <link rel="stylesheet" href="preview.css" />
+  </head>
+  <body>
+    <main class="preview-window">
+      <p class="preview-label">B · After redesign · paper chat</p>
+      <section class="llm-panel preview-after" aria-label="Chat panel">
+        <header class="llm-header">
+          <div class="llm-header-nav-row">
+            <div class="llm-header-info">
+              <div class="llm-header-mode-tabs">
+                <button class="llm-header-mode-tab active">Chat</button>
+                <button class="llm-header-mode-tab">Papers</button>
+              </div>
+            </div>
+            <div class="llm-header-actions">
+              <div class="llm-history-bar"><button title="New chat">＋</button><button title="History">◷ History</button></div>
+              <button aria-label="More">•••</button>
+            </div>
+          </div>
+          <div class="llm-scope-bar" role="group" aria-label="Conversation scope">
+            <span class="llm-scope-icon" aria-hidden="true"></span>
+            <span class="llm-scope-copy"><span class="llm-scope-kind">Paper chat</span><span class="llm-scope-title">Protein language models for generative design</span><span class="llm-scope-meta">Lin et al. · 2024</span></span>
+          </div>
+        </header>
+        <div class="llm-chat-shell">
+          <div class="llm-messages">
+            <div class="llm-message-wrapper user">
+              <div class="llm-bubble user">Which claims are supported by the ablation in Figure 2?</div>
+              <div class="llm-message-meta">You · 10:42</div>
+            </div>
+            <div class="llm-message-wrapper assistant">
+              <div class="llm-bubble assistant"><strong>The ablation supports two claims.</strong><br />Removing the retrieval step reduces answer grounding, while the citation-aware reranker improves evidence precision. The result is directional evidence rather than a causal estimate because the comparison changes two components at once.</div>
+              <div class="llm-message-meta"><span class="llm-source-chip">↗ p. 4</span><span class="llm-source-chip">↗ Fig. 2</span><button>Copy</button><button>Save note</button></div>
+            </div>
+            <div class="llm-task-progress-card">
+              <div class="llm-task-progress"><span>Reviewing 4 papers</span><span class="llm-task-progress-status">Complete</span></div>
+              <div class="llm-task-progress-drawer">Evidence checked · 4 papers · 12 citations · click a source chip to jump back to Zotero.</div>
+            </div>
+          </div>
+        </div>
+        <div class="llm-input-section">
+          <div class="llm-context-previews" aria-label="Current context and context actions">
+            <button class="llm-action-btn">Agent mode</button>
+            <button class="llm-action-btn">＋ Add context</button>
+            <span class="llm-context-chip">Selected text</span>
+            <span class="llm-context-chip">Figure screenshot</span>
+            <span class="llm-context-chip">3 references</span>
+          </div>
+          <div class="llm-compose-area">
+            <textarea class="llm-input" placeholder="Ask about this paper…"></textarea>
+            <div class="llm-actions">
+              <div class="llm-actions-left"><button class="llm-action-btn">Select text</button><button class="llm-action-btn">Screenshot</button></div>
+              <div class="llm-actions-right"><button class="llm-action-btn">GPT-6 · Balanced</button><span class="llm-status-control">Ready</span><button class="llm-send-btn">Send</button></div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

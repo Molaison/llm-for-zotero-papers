@@ -1,4 +1,5 @@
 import { appLogger } from "../../core/logging";
+import { version } from "../../../package.json";
 import { getSidebarLayout } from "./sidebarLayout";
 /**
  * Context Panel Module
@@ -51,6 +52,10 @@ import { setupHandlers } from "./setupHandlers";
 import { ensureConversationLoaded, getConversationKey } from "./chat";
 import { renderShortcuts } from "./shortcuts";
 import { refreshChat } from "./chat";
+import {
+  installPaperWarmOnIntent,
+  type PaperWarmTarget,
+} from "./paperWarmOnIntent";
 import {
   beginChatRenderCycle,
   claimAsyncChatRender,
@@ -150,17 +155,19 @@ import {
 
 export function registerLLMStyles(win: _ZoteroTypes.MainWindow) {
   const doc = win.document;
-  if (doc.getElementById(`${config.addonRef}-styles`)) return;
-
-  // Main styles
-  const link = doc.createElement("link") as HTMLLinkElement;
+  // Update retained windows as well as new ones; a fixed chrome URL can keep
+  // the previous addon stylesheet cached across a hot upgrade.
+  const href = `chrome://${config.addonRef}/content/zoteroPane.css?v=${encodeURIComponent(version)}`;
+  const existing = doc.getElementById(`${config.addonRef}-styles`) as HTMLLinkElement | null;
+  const link = existing || doc.createElement("link") as HTMLLinkElement;
   link.id = `${config.addonRef}-styles`;
   link.rel = "stylesheet";
   link.type = "text/css";
-  link.href = `chrome://${config.addonRef}/content/zoteroPane.css`;
-  doc.documentElement?.appendChild(link);
+  if (link.href !== href) link.href = href;
+  if (!existing) doc.documentElement?.appendChild(link);
 
   // KaTeX styles for math rendering
+  if (doc.getElementById(`${config.addonRef}-katex-styles`)) return;
   const katexLink = doc.createElement("link") as HTMLLinkElement;
   katexLink.id = `${config.addonRef}-katex-styles`;
   katexLink.rel = "stylesheet";
@@ -539,6 +546,11 @@ export function registerReaderContextPanel() {
       setEnabled(true);
       // Skip full render when standalone window is active
       if (isStandaloneWindowActive()) return;
+      installPaperWarmOnIntent(
+        body,
+        resolveIntentPaperWarmTarget(body),
+        warmPanelPaper,
+      );
 
       const resolvedInitialState = resolveInitialPanelItemState(item);
       const resolvedItem = resolvedInitialState.item;
@@ -645,15 +657,34 @@ export function registerReaderContextPanel() {
         refreshChat(body, resolvedItem);
       }
       markCompletedPanelLifecycleSignature(body, lifecycleSignature);
-      // Defer content extraction so the panel becomes interactive sooner.
-      const activeContextItem = getActiveContextAttachmentFromTabs();
-      if (activeContextItem) {
-        void ensurePDFTextCached(activeContextItem);
-      } else if (item && (item as any).isNote?.()) {
-        void ensureNoteTextCached(item);
+      // Don't start a heavy PDF parse merely because Zotero opens a reader.
+      // The composer intent hook above warms on focus/input; sending still
+      // resolves its own PDF content when needed.
+      if (!getActiveContextAttachmentFromTabs() && (item as any)?.isNote?.()) {
+        void ensureNoteTextCached(item!);
       }
     },
   });
+}
+
+/** The PDF currently selected in the reader, resolved at chat intent time. */
+function resolveIntentPaperWarmTarget(
+  body: Element,
+): () => PaperWarmTarget | null {
+  return () => {
+    const contextItem = getActiveContextAttachmentFromTabs();
+    if (!contextItem) return null;
+    const panelItem = activeContextPanels.get(body)?.() || null;
+    return {
+      contextItemId: contextItem.id,
+      conversationKey: panelItem ? getConversationKey(panelItem) : 0,
+    };
+  };
+}
+
+function warmPanelPaper(target: PaperWarmTarget): void {
+  const contextItem = Zotero.Items.get(target.contextItemId);
+  if (contextItem) void ensurePDFTextCached(contextItem);
 }
 
 type ReaderTextSelectionPopupHandler =
@@ -889,12 +920,12 @@ function getReaderSelectionTrackingHandler(): ReaderTextSelectionPopupHandler {
             "margin:0",
             "padding:6px 8px",
             "box-sizing:border-box",
-            "border:1px solid rgba(130,130,130,0.38)",
-            "border-radius:6px",
-            "background:rgba(255,255,255,0.04)",
+            "border:0.5px solid var(--llm-slate7)",
+            "border-radius:4px",
+            "background:var(--llm-slate3)",
             // Keep text readable across light/dark themes.
             "color:inherit",
-            "font-size:12px",
+            "font-size:var(--llm-text-small)",
             "line-height:1.25",
             "text-align:center",
             "cursor:pointer",

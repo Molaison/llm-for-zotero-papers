@@ -285,6 +285,86 @@
     none; } .llm-pref-panel .llm-pref-add-card:hover, .llm-pref-panel
     .llm-pref-add-card:active, .llm-pref-panel .llm-pref-add-card:hover
     .llm-pref-add-card-plus { transform: none; } }
+    /* ── Research workspace information architecture ─────────────────────
+       Keep the existing data-pref-* contract, but make the five destinations
+       read like a task flow instead of implementation names. */
+    #__addonRef__-pref-tab-bar {
+      display: grid !important;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 3px !important;
+      padding: 4px !important;
+      margin: 0 0 16px !important;
+      border: 1px solid var(--llm-pref-stroke);
+      background: var(--llm-pref-surface);
+      border-radius: 10px;
+      box-shadow: 0 2px 10px color-mix(in srgb, currentColor 8%, transparent);
+    }
+    #__addonRef__-pref-tab-bar > [data-pref-tab] {
+      min-width: 0;
+      min-height: 34px;
+      padding: 5px 8px !important;
+      border-radius: 7px !important;
+      line-height: 1.15;
+      text-align: center;
+      white-space: normal;
+      overflow-wrap: normal;
+      word-break: keep-all;
+      transition: background-color 120ms ease, color 120ms ease, box-shadow 120ms ease;
+    }
+    #__addonRef__-pref-tab-bar > [data-pref-tab]:hover {
+      background: color-mix(in srgb, currentColor 8%, transparent) !important;
+      color: FieldText !important;
+    }
+    #__addonRef__-pref-tab-bar > [data-pref-tab][aria-selected="true"] {
+      color: FieldText !important;
+      background: Field !important;
+      font-weight: 650 !important;
+      box-shadow: 0 1px 4px color-mix(in srgb, currentColor 16%, transparent) !important;
+    }
+    #__addonRef__-pref-tab-bar > [data-pref-tab]:focus-visible {
+      outline: 2px solid var(--color-accent, #2563eb);
+      outline-offset: -2px;
+    }
+    .llm-pref-panel-intro {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      margin: 0 0 2px;
+      padding: 2px 2px 8px;
+      border-bottom: 1px solid var(--llm-pref-stroke);
+    }
+    .llm-pref-panel-intro-title {
+      font-size: 15px;
+      font-weight: 750;
+      line-height: 1.25;
+      color: FieldText;
+    }
+    .llm-pref-panel-intro-copy {
+      max-width: 72ch;
+      font-size: 11.5px;
+      line-height: 1.5;
+      color: var(--fill-secondary, #888);
+    }
+    .llm-pref-panel[data-pref-panel] {
+      min-width: 0;
+    }
+    .llm-pref-panel[data-pref-panel="mineru"] {
+      gap: 12px !important;
+    }
+    #__addonRef__-usage-root {
+      padding: 0 !important;
+    }
+    @media (max-width: 760px) {
+      #__addonRef__-pref-tab-bar {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+      #__addonRef__-pref-tab-bar > [data-pref-tab]:last-child {
+        grid-column: 1 / -1;
+      }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      #__addonRef__-pref-tab-bar > [data-pref-tab] { transition: none; }
+    }
   </html:style>
   <groupbox>
     <html:div style="display: flex; flex-direction: column; padding: 10px">
@@ -320,7 +400,7 @@
             align-items: center;
             justify-content: center;
           "
-          >AI Providers</html:button
+          >Connections</html:button
         >
         <html:button
           data-pref-tab="customization"
@@ -339,7 +419,7 @@
             align-items: center;
             justify-content: center;
           "
-          >Customization</html:button
+          >Chat experience</html:button
         >
         <html:button
           data-pref-tab="agent"
@@ -358,7 +438,7 @@
             align-items: center;
             justify-content: center;
           "
-          >Agent</html:button
+          >Agent &amp; permissions</html:button
         >
         <html:button
           data-pref-tab="mineru"
@@ -377,7 +457,7 @@
             align-items: center;
             justify-content: center;
           "
-          >MinerU</html:button
+          >PDF &amp; context</html:button
         >
         <html:button
           data-pref-tab="usage"
@@ -396,7 +476,7 @@
             align-items: center;
             justify-content: center;
           "
-          >Usage</html:button
+          >Usage &amp; diagnostics</html:button
         >
       </html:div>
 
@@ -407,6 +487,12 @@
         data-pref-panel="models"
         style="display: flex; flex-direction: column"
       >
+        <html:div class="llm-pref-panel-intro">
+          <html:span class="llm-pref-panel-intro-title">Connections</html:span>
+          <html:span class="llm-pref-panel-intro-copy">
+            Connect the model providers and web runtimes you use for research. Pick a default model after the connection is ready.
+          </html:span>
+        </html:div>
         <html:div
           id="__addonRef__-model-sections"
           style="display: flex; flex-direction: column; gap: 14px"
@@ -420,6 +506,12 @@
         data-pref-panel="customization"
         style="display: none; flex-direction: column; gap: 18px"
       >
+        <html:div class="llm-pref-panel-intro">
+          <html:span class="llm-pref-panel-intro-title">Chat experience</html:span>
+          <html:span class="llm-pref-panel-intro-copy">
+            Shape how the chat reads, how it opens beside your library, and how much context the composer shows at once.
+          </html:span>
+        </html:div>
         <html:div style="display: flex; flex-direction: column; gap: 4px">
           <html:label
             for="__addonRef__-sidebar-layout"
@@ -1102,6 +1194,12 @@
           Three runtimes can answer in the chat panel. Turn on the ones you
           want; the runtime you pick in the chat header answers a given turn.
         </html:p>
+        <html:div class="llm-pref-panel-intro">
+          <html:span class="llm-pref-panel-intro-title">Agent &amp; permissions</html:span>
+          <html:span class="llm-pref-panel-intro-copy">
+            Enable runtimes and review what each one may do before it changes your library, files, or external services.
+          </html:span>
+        </html:div>
 
         <html:div class="llm-pref-group">
           <html:span class="llm-pref-group-title">Runtimes</html:span>
@@ -2055,6 +2153,12 @@
         data-pref-panel="mineru"
         style="display: none; flex-direction: column; gap: 18px"
       >
+        <html:div class="llm-pref-panel-intro">
+          <html:span class="llm-pref-panel-intro-title">PDF &amp; context</html:span>
+          <html:span class="llm-pref-panel-intro-copy">
+            Improve PDF extraction and manage the local context files that feed paper conversations.
+          </html:span>
+        </html:div>
         <html:div style="display: flex; flex-direction: column; gap: 8px">
           <html:div style="display: flex; flex-direction: column; gap: 2px">
             <html:span
@@ -3082,6 +3186,12 @@
         data-pref-panel="usage"
         style="display: none; flex-direction: column; gap: 18px"
       >
+        <html:div class="llm-pref-panel-intro">
+          <html:span class="llm-pref-panel-intro-title">Usage &amp; diagnostics</html:span>
+          <html:span class="llm-pref-panel-intro-copy">
+            Review activity, token usage, and runtime health so you can spot a problem before it interrupts a research session.
+          </html:span>
+        </html:div>
         <html:div
           id="__addonRef__-usage-root"
           style="

@@ -5,9 +5,13 @@
  */
 
 import { ResponsesText, type ResponsesTextPosition } from "./responsesText";
-import { fetchCprPaperHistory, isCprPapersModel, prepareCprPaperRequest } from "./cprPapers";
 import {
-  isCprDirectWebModel,
+  describeCprPapersHttpFailure,
+  encodeCprPapersRequestBody,
+  fetchCprPaperHistory,
+  prepareCprPaperRequest,
+} from "./cprPapers";
+import {
   prepareCprDirectWebRequest,
   resolveCprDirectWebSessionId,
   CPR_DIRECT_WEB_UNCERTAIN_MESSAGE,
@@ -87,6 +91,7 @@ import {
   getDefaultModelEntry,
   getDefaultProviderGroup,
   getModelProviderGroups,
+  resolveConfiguredModelCapabilities,
   type ModelProviderAuthMode,
 } from "./modelProviders";
 import {
@@ -222,7 +227,27 @@ export type ChatParams = {
    * same picture the preferences pane showed.
    */
   profileOverride?: ModelProfileOverride;
+  /** Explicit route capability of the selected model entry. */
+  paperRegistry?: boolean;
+  directWebPdf?: boolean;
+  /** Selected model row, used to disambiguate route capability lookup. */
+  modelEntryId?: string;
 };
+
+function resolveChatRouteCapabilities(params: ChatParams): {
+  paperRegistry: boolean;
+  directWebPdf: boolean;
+} {
+  const configured = resolveConfiguredModelCapabilities({
+    entryId: params.modelEntryId,
+    model: params.model,
+    apiBase: params.apiBase,
+  });
+  return {
+    paperRegistry: params.paperRegistry ?? configured.paperRegistry,
+    directWebPdf: params.directWebPdf ?? configured.directWebPdf,
+  };
+}
 
 /**
  * CPR's generic ChatGPT Web route is persistent by its opaque thread key.
@@ -234,7 +259,7 @@ async function addCprDirectWebSessionHint(
   params: ChatParams,
   requestScope: ProviderRequestScope,
 ): Promise<ChatParams> {
-  if (!isCprDirectWebModel(params.model || "", params.apiBase || "")) {
+  if (!resolveChatRouteCapabilities(params).directWebPdf) {
     return params;
   }
   const promptCacheKey = await resolveCprDirectWebSessionId(requestScope);
@@ -4354,10 +4379,10 @@ async function callNativeProtocol(params: {
  * Call LLM API (non-streaming)
  */
 export async function callLLM(params: ChatParams): Promise<ModelTurnOutcome> {
+  const routeCapabilities = resolveChatRouteCapabilities(params);
   if (
-    isCprPapersModel(params.model || "") ||
-    (isCprDirectWebModel(params.model || "", params.apiBase || "") &&
-      params.cprPaperContexts?.length)
+    routeCapabilities.paperRegistry ||
+    (routeCapabilities.directWebPdf && params.cprPaperContexts?.length)
   ) {
     return callLLMStream(params, () => {});
   }
@@ -4534,6 +4559,7 @@ async function callCprDirectWebStream(
     model: params.model || "",
     apiBase: params.apiBase,
     reasoning: params.reasoning,
+    profileOverride: params.profileOverride,
     prompt: params.prompt,
     refs: [...(params.cprPaperContexts || [])],
     requestScope,
@@ -4595,26 +4621,57 @@ export async function callLLMStream(
   onReasoning?: (event: ReasoningEvent) => void,
   onUsage?: (usage: UsageStats) => void,
 ): Promise<ModelTurnOutcome> {
-  if (isCprPapersModel(params.model || "")) {
+  const routeCapabilities = resolveChatRouteCapabilities(params);
+  if (routeCapabilities.paperRegistry) {
     if (!params.apiBase || !params.apiKey) throw new Error("请配置 CPR API 地址和密钥。");
     const paperRequest = await prepareCprPaperRequest({
       itemId: params.cprPaperItemId, apiBase: params.apiBase, apiKey: params.apiKey,
       model: params.model, reasoning: params.reasoning,
+      profileOverride: params.profileOverride,
       fetchFn: getFetch(), signal: params.signal,
-      prompt: params.prompt, readBytes: readLocalFileBytes,
+      prompt: params.prompt, images: params.images, readBytes: readLocalFileBytes,
     });
+    const encodedRequest = encodeCprPapersRequestBody(paperRequest.payload);
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${params.apiKey}`,
+    };
+    if (encodedRequest.contentEncoding === "gzip") {
+      headers["Content-Encoding"] = "gzip";
+    }
     const response = await getFetch()(resolveEndpoint(params.apiBase, "/v1/responses"), {
-      method: "POST", headers: {"Content-Type": "application/json", Authorization: `Bearer ${params.apiKey}`},
-      body: JSON.stringify(paperRequest.payload), signal: params.signal,
+      method: "POST", headers,
+      body: encodedRequest.body, signal: params.signal,
     });
-    if (!response.ok) throw new Error(`CPR papers HTTP ${response.status}: ${(await response.text()).slice(0, 600)}`);
-    if (!response.body) throw new Error("CPR papers 未返回事件流；未自动重发。");
+    if (!response.ok) {
+      const failure = describeCprPapersHttpFailure({
+        status: response.status,
+        bodyText: await response.text(),
+        cfRay: response.headers.get("cf-ray"),
+        requestId: response.headers.get("x-request-id"),
+        wireBytes: encodedRequest.wireBytes,
+        contentEncoding: encodedRequest.contentEncoding,
+      });
+      appLogger.warn("CPR papers request failed", {
+        status: failure.status,
+        wireBytes: failure.wireBytes,
+        encoding: failure.contentEncoding,
+        cfRay: failure.cfRay || "",
+        requestId: failure.requestId || "",
+        model: params.model || "",
+        message: failure.responseMessage || "",
+      });
+      throw new Error(failure.error);
+    }
+    if (!response.body) {
+      throw new Error(`CPR papers 未返回事件流（HTTP ${response.status}；wire=${encodedRequest.wireBytes} bytes；encoding=${encodedRequest.contentEncoding}）；未自动重发。`);
+    }
     const outcome = await parseResponsesStream(response.body, onDelta, onReasoning, onUsage, { requireCompleted: true, collectRichWidgets: true });
     if (outcome.completion.status === "complete") paperRequest.accept();
     return outcome;
   }
   if (
-    isCprDirectWebModel(params.model || "", params.apiBase || "") &&
+    routeCapabilities.directWebPdf &&
     params.cprPaperContexts?.length
   ) {
     return callCprDirectWebStream(params, onDelta, onReasoning, onUsage);

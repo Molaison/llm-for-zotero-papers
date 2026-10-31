@@ -1,3 +1,4 @@
+import { createAnnotationReplyController } from "./setupHandlers/controllers/annotationReplyController";
 import { appLogger } from "../../core/logging";
 import { copyNoteEditingSelectedTextContext } from "./noteEditing/selectionController";
 import {
@@ -26,6 +27,7 @@ import {
   getLastUsedModelEntryId,
   getModelEntryById,
   getModelProviderGroups,
+  resolveConfiguredModelCapabilities,
 } from "../../utils/modelProviders";
 import {
   buildQueuedFollowUpThreadKey,
@@ -131,6 +133,7 @@ import {
 import { pdfTextCache } from "../../services/paperContent/contextCache";
 import {
   setStatus,
+  clearInactivePaperContextHint,
   buildQuestionWithSelectedTextContexts,
   buildModelPromptWithFileContext,
   resolvePromptText,
@@ -524,6 +527,7 @@ import {
 import {
   buildPaperSourceOptions as buildPaperSourceOptionsController,
   canRevealMineruCacheForSourceOption,
+  resolvePaperPdfTransportSourceMode,
   resolvePaperPdfSupportForConversation,
   shouldDowngradePdfSourceForConversation,
   type MineruSourceAction,
@@ -949,7 +953,7 @@ export function setupHandlers(
         getCurrentRuntimeMode() === "chat" &&
         shouldOfferCprPaperHistory({
           conversationSystem: getConversationSystem(),
-          model,
+          paperRegistry: profile?.paperRegistry === true,
           paperItemId,
         });
       return {
@@ -1080,7 +1084,7 @@ export function setupHandlers(
         event.preventDefault();
         Zotero.launchURL(conversationUrl);
       });
-      status.append(" · ", link);
+      status.append("，", link);
     },
     logError: (message, error) => {
       appLogger.debug(message, error);
@@ -1184,7 +1188,7 @@ export function setupHandlers(
     if (sendBtn) {
       sendBtn.style.display = isCurrentConversationPending ? "none" : "";
       sendBtn.disabled = !item;
-      sendBtn.title = "Send";
+      sendBtn.title = t("Send");
     }
     if (cancelBtn) {
       cancelBtn.style.display = isCurrentConversationPending ? "" : "none";
@@ -1990,7 +1994,8 @@ export function setupHandlers(
       isNoteSession: isNoteSession(),
       isWebChat: panelRoot.dataset.webchatMode === "true",
     });
-    const paperLabel = t(state.paperTabLabel);
+    const paperLabel =
+      state.paperTabLabel === "Note chat" ? t(state.paperTabLabel) : "Papers";
     if (chatModeTabs && paperChatTabBtn && libraryChatTabBtn) {
       chatModeTabs.dataset.mode = state.activeTab;
       const paperLabelEl = paperChatTabBtn.querySelector(
@@ -2167,11 +2172,12 @@ export function setupHandlers(
       // Its label is static "Conversation history" — no text update needed.
     }
     syncChatModeTabs();
+    if (mode === "paper" && status) clearInactivePaperContextHint(status);
     if (inputBox && !noteSession) {
       inputBox.placeholder =
         mode === "global"
-          ? t("Ask anything... Type / for actions, @ to add papers")
-          : t("Ask about this paper... Type / for actions, @ to add papers");
+          ? t("Ask a research question…")
+          : t("Ask about this paper…");
     }
     updateRuntimeModeButton();
     updateRuntimeSystemToggles();
@@ -2582,7 +2588,7 @@ export function setupHandlers(
     if (!target) return;
     const isInteractive = Boolean(
       target.closest(
-        "input, textarea, button, select, option, a[href], [contenteditable='true']",
+        "input, textarea, button, select, option, summary, a[href], [contenteditable='true']",
       ),
     );
     if (!isInteractive) {
@@ -2691,29 +2697,47 @@ export function setupHandlers(
   // setPaperContentSourceOverride, clearPaperContentSourceOverrides
   // → imported from ./contexts/paperContextState
 
+  const resolveCurrentModelName = (): string =>
+    (
+      getSelectedProfile()?.model ||
+      getSelectedModelInfo().currentModel ||
+      ""
+    ).trim();
+
   const resolvePaperContentSourceMode = (
     itemId: number,
     paperContext: PaperContextRef,
   ): PaperContentSourceMode => {
     const explicit = getPaperContentSourceOverride(itemId, paperContext);
+    const modelName = resolveCurrentModelName();
+    const webChatMode = isWebChatMode();
+    const paperAttachment =
+      webChatMode || getSelectedProfile()?.paperRegistry === true
+        ? Zotero.Items.get(paperContext.contextItemId)
+        : null;
+    const isPdfAttachment = isZoteroPdfAttachmentCandidate(paperAttachment);
+    let mode: PaperContentSourceMode;
     // WebChat uploads only genuine PDF attachments. Retained Markdown, HTML,
     // DOCX, and other text-like contexts must not be coerced into this lane.
-    if (isWebChatMode()) {
-      const attachment = Zotero.Items.get(paperContext.contextItemId);
-      if (isZoteroPdfAttachmentCandidate(attachment)) return "pdf";
-      return (
+    if (webChatMode) {
+      if (isPdfAttachment) return "pdf";
+      mode =
         (explicit === "pdf" ? undefined : explicit) ||
         (paperContext.contentSourceMode === "pdf"
           ? undefined
           : paperContext.contentSourceMode) ||
-        (isPaperContextMineru(paperContext) ? "mineru" : "text")
-      );
+        (isPaperContextMineru(paperContext) ? "mineru" : "text");
+    } else {
+      mode =
+        explicit ||
+        paperContext.contentSourceMode ||
+        (isPaperContextMineru(paperContext) ? "mineru" : "text");
     }
-    return (
-      explicit ||
-      paperContext.contentSourceMode ||
-      (isPaperContextMineru(paperContext) ? "mineru" : "text")
-    );
+    return resolvePaperPdfTransportSourceMode({
+      modelName,
+      isPdfAttachment,
+      mode,
+    });
   };
 
   const withResolvedPaperContentSourceMode = (
@@ -3300,16 +3324,12 @@ export function setupHandlers(
     year?: string;
   }): string => {
     const parts = [paper.firstCreator || "", paper.year || ""].filter(Boolean);
-    return parts.join(" · ");
+    return parts.join("，");
   };
 
   const resolveCurrentPdfSupport = () => {
     const selectedProfile = getSelectedProfile();
-    const modelName = (
-      selectedProfile?.model ||
-      getSelectedModelInfo().currentModel ||
-      ""
-    ).trim();
+    const modelName = resolveCurrentModelName();
     const inputMode = getAdvancedModelParamsForEntry(
       selectedProfile?.entryId,
     )?.inputMode;
@@ -3323,6 +3343,8 @@ export function setupHandlers(
       ),
       isClaudeCode: isClaudeConversationSystem(),
       isCodex: isCodexConversationSystem(),
+      modelName,
+      paperRegistry: selectedProfile?.paperRegistry === true,
     });
   };
 
@@ -3335,6 +3357,8 @@ export function setupHandlers(
     return buildPaperSourceOptionsController({
       paperContext,
       getItemById: (itemId) => Zotero.Items.get(itemId) || null,
+      modelName: resolveCurrentModelName(),
+      paperRegistry: getSelectedProfile()?.paperRegistry === true,
       webChatMode: isWebChatMode(),
       pdfSupport: resolveCurrentPdfSupport(),
       isMineruEnabled: isMineruEnabled(),
@@ -4404,7 +4428,7 @@ export function setupHandlers(
   /** A folder or tag chip's name, with the papers removed in Task progress. */
   const withExcludedCount = (name: string, excluded?: number[]) =>
     excluded?.length
-      ? `${name} · ${
+      ? `${name}，${
           excluded.length === 1
             ? t("1 excluded")
             : t("{count} excluded").replace("{count}", `${excluded.length}`)
@@ -4537,6 +4561,32 @@ export function setupHandlers(
       selectedCollections.length > 0 ||
       selectedTags.length > 0 ||
       !!autoLoadedPaperContext;
+    const paperBar = body.querySelector<HTMLElement>("#llm-paper-bar");
+    const sourceShortcut = body.querySelector<HTMLButtonElement>(
+      "#llm-source-shortcut",
+    );
+    if (paperBar) paperBar.hidden = !hasAnyContext;
+    if (sourceShortcut) sourceShortcut.hidden = !hasAnyContext;
+    const primaryPaper = autoLoadedPaperContext || selectedPapers[0];
+    const heading = body.querySelector<HTMLElement>("#llm-paper-heading");
+    const mode = body.querySelector<HTMLElement>("#llm-paper-mode");
+    if (heading) {
+      heading.textContent = primaryPaper?.title || "参考来源";
+      heading.title = heading.textContent;
+    }
+    if (mode)
+      mode.textContent = primaryPaper
+        ? resolvePaperContentSourceMode(itemId, primaryPaper) === "pdf"
+          ? "PDF"
+          : "文本"
+        : "";
+    const sourceControl = body.querySelector<HTMLDetailsElement>(
+      "#llm-source-control",
+    );
+    if (sourceControl) {
+      sourceControl.hidden = !hasAnyContext;
+      if (!hasAnyContext) sourceControl.open = false;
+    }
     if (!hasAnyContext) {
       paperPreview.style.display = "none";
       paperPreviewList.innerHTML = "";
@@ -4685,7 +4735,7 @@ export function setupHandlers(
         "span",
         "llm-file-context-meta-info",
         {
-          textContent: `${attachment.mimeType || "application/octet-stream"} · ${(attachment.sizeBytes / 1024 / 1024).toFixed(2)} MB`,
+          textContent: `${attachment.mimeType || "application/octet-stream"}，${(attachment.sizeBytes / 1024 / 1024).toFixed(2)} MB`,
         },
       );
       const removeBtn = createElement(
@@ -5357,7 +5407,7 @@ export function setupHandlers(
     const currentModelDisplay =
       selectedEntry?.displayModelLabel || currentModel;
     const currentModelHint = selectedEntry
-      ? `${selectedEntry.providerLabel} · ${selectedEntry.displayModelLabel || selectedEntry.model}`
+      ? `${selectedEntry.providerLabel}，${selectedEntry.displayModelLabel || selectedEntry.model}`
       : currentModel;
     return {
       selectedEntryId: selectedEntry?.entryId || "",
@@ -5592,7 +5642,7 @@ export function setupHandlers(
 
   const getModelOptionTitle = (entry: RuntimeModelEntry): string => {
     if (!isClaudeConversationSystem()) {
-      return `${entry.providerLabel} · ${entry.model}`;
+      return `${entry.providerLabel}，${entry.model}`;
     }
     const catalogModel =
       claudeModelCatalogModels.find((model) => model.value === entry.model) ||
@@ -5600,7 +5650,7 @@ export function setupHandlers(
         (model) => model.resolvedModel === entry.model,
       );
     return [
-      `${entry.providerLabel} · ${entry.model}`,
+      `${entry.providerLabel}，${entry.model}`,
       catalogModel?.resolvedModel && catalogModel.resolvedModel !== entry.model
         ? `${t("Resolves to")}: ${catalogModel.resolvedModel}`
         : "",
@@ -5744,6 +5794,8 @@ export function setupHandlers(
             ),
             isClaudeCode: isClaudeConversationSystem(),
             isCodex: isCodexConversationSystem(),
+            modelName: entry.model,
+            paperRegistry: entry.paperRegistry,
           });
           if (shouldDowngrade) {
             const papers = getManualPaperContextsForItem(
@@ -6402,8 +6454,7 @@ export function setupHandlers(
     const active = Boolean(available && activeThinking);
     const reasoningLabel = resolvedReasoningLabel;
     const reasoningHint =
-      reasoningBtn.dataset.reasoningAdjustment ||
-      "Click to adjust reasoning level";
+      reasoningBtn.dataset.reasoningAdjustment || t("Reasoning");
     if (
       onlyIfChanged &&
       reasoningBtn.style.display === "" &&
@@ -7396,7 +7447,28 @@ export function setupHandlers(
   });
   const localPdfResourceResolver = createLocalPdfResourceResolver();
 
+  const annotationReplies = createAnnotationReplyController({
+    body,
+    onRepliesChanged: refreshChatPreservingScroll,
+    getScope: async () => {
+      const source = await resolveAutoLoadedContextSourceAsync();
+      const papers = item
+        ? getManualPaperContextsForItem(item.id, source?.paperContext || null)
+        : [];
+      return {
+        conversationKey: item ? getConversationKey(item) : 0,
+        attachmentIDs: [
+          ...new Set([
+            ...papers.map((p) => p.contextItemId),
+            ...(source?.contextItem ? [source.contextItem.id] : []),
+          ]),
+        ],
+      };
+    },
+  });
+  panelLifecycle.add(annotationReplies.dispose);
   const sendFlowController = createSendFlowController({
+    annotationReplies,
     body,
     inputBox,
     getItem: () => item,
@@ -7455,6 +7527,10 @@ export function setupHandlers(
         ),
         isClaudeCode: isClaudeConversationSystem(),
         isCodex: isCodexConversationSystem(),
+        paperRegistry: resolveConfiguredModelCapabilities({
+          model: modelName,
+          apiBase,
+        }).paperRegistry,
       }),
     uploadPdfForProvider: pdfPaperResolver.uploadPdfForProvider,
     resolvePdfBytes: pdfPaperResolver.resolvePdfBytes,
@@ -7687,6 +7763,10 @@ export function setupHandlers(
               ),
               isClaudeCode: isClaudeConversationSystem(),
               isCodex: isCodexConversationSystem(),
+              paperRegistry: resolveConfiguredModelCapabilities({
+                model: modelName,
+                apiBase,
+              }).paperRegistry,
             }),
           resolvePdfPaperAttachments:
             pdfPaperResolver.resolvePdfPaperAttachments,
@@ -8228,6 +8308,11 @@ export function setupHandlers(
     retryMenuAnchor = anchor;
     positionFloatingMenu(body, retryModelMenu, anchor);
     setFloatingMenuOpen(retryModelMenu, RETRY_MODEL_MENU_OPEN_CLASS, true);
+    const focusTarget =
+      retryModelMenu.querySelector<HTMLElement>("button:not(:disabled)") ||
+      retryModelMenu;
+    if (focusTarget === retryModelMenu) retryModelMenu.tabIndex = -1;
+    focusTarget.focus({ preventScroll: true });
   };
 
   attachFloatingMenuInteractionController({
@@ -8261,6 +8346,7 @@ export function setupHandlers(
     },
     closePromptMenu,
     closeRetryModelMenu,
+    getRetryMenuAnchor: () => retryMenuAnchor,
     closePaperPicker,
     closeHistoryRowMenu,
     openRetryModelMenu,

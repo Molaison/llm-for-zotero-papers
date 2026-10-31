@@ -313,6 +313,8 @@ export type CodexPaperPortalItem = {
 import type { ReasoningConfig as LLMReasoningConfig } from "../../utils/llmClient";
 
 export type SendQuestionOptions = {
+  annotationReplyBatchId?: string;
+  onAnnotationReplyComplete?: (rawAnswer: string, complete: boolean) => Promise<void>;
   body: Element;
   item: Zotero.Item;
   /** Existing conversation request ownership claimed by the compose flow. */

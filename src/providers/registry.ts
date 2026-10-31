@@ -8,7 +8,7 @@ import * as thirdParty from "./tiers/thirdParty";
 import { resolvePromptCacheCapability } from "../contextCache/manager";
 import { resolveModelInputMode } from "../utils/modelInputMode";
 import { getModelCapabilities } from "../modelCapabilities/service";
-import { isCprDirectWebModel } from "../utils/cprDirectWebTarget";
+import { resolveConfiguredModelCapabilities } from "../utils/modelProviders";
 
 // Evaluate in priority order: auth-mode tiers (copilot, codex) must come
 // before protocol-based tiers (native) so that e.g. copilot+responses_api
@@ -30,7 +30,10 @@ export function resolveProviderCapabilities(
   const inputMode = resolveModelInputMode(params.inputMode);
   const cprDirectWebPdf =
     inputMode !== "text_only" &&
-    isCprDirectWebModel(params.model, params.apiBase || "");
+    resolveConfiguredModelCapabilities({
+      model: params.model,
+      apiBase: params.apiBase || "",
+    }).directWebPdf;
   const pdfDisabled =
     inputMode === "text_only" ||
     (inputMode === "auto" && isTextOnlyModel(params.model));

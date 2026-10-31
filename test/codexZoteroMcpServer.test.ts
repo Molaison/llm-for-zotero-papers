@@ -1220,6 +1220,26 @@ describe("Zotero MCP server", function () {
     assert.equal(payload.result.protocolVersion, "2025-06-18");
   });
 
+  it("answers an MCP ping with an empty result (#523)", async function () {
+    const registry = new AgentToolRegistry(
+      new ActionContractService({ getItem: () => null } as never),
+    );
+    registerMcpServer({
+      toolRegistry: registry,
+      zoteroGateway: {} as never,
+    });
+
+    const response = await invokeMcpEndpoint({
+      token: getOrCreateZoteroMcpBearerToken(),
+      body: { jsonrpc: "2.0", id: 7, method: "ping" },
+    });
+    assert.equal(response[0], 200);
+    const payload = JSON.parse(response[2]);
+    assert.equal(payload.id, 7);
+    assert.isUndefined(payload.error);
+    assert.deepEqual(payload.result, {});
+  });
+
   it("lists curated read tools and built-in write tools without self-confirmation", async function () {
     const registry = new AgentToolRegistry(
       new ActionContractService({ getItem: () => null } as never),

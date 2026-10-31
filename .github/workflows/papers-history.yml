@@ -1,6 +1,8 @@
 name: Papers History Safety
 
 on:
+  push:
+    branches: ["codex/papers"]
   pull_request:
     branches: ["codex/papers"]
 
@@ -24,7 +26,19 @@ jobs:
           test/cprPaperHistoryDialog.test.ts test/cprLocalHistoryRecovery.test.ts
           test/chatStore.cprSnapshot.test.ts
           test/conversationStoreMechanics.test.ts test/conversationKeyLedger.test.ts
+      - name: Selected upstream compatibility regressions
+        run: >-
+          node --import tsx node_modules/mocha/bin/mocha.js --require ./test/register.cjs
+          test/codexZoteroMcpServer.test.ts test/codexAppServerProcess.test.ts
+          test/codexAppServerNativeClient.test.ts test/codexQuota.test.ts
+          test/webSourceAttribution.test.ts test/paperWarmOnIntent.test.ts
       - name: Build and typecheck
         run: npm run build
       - name: Architecture boundaries
         run: npm run check:architecture && npm run check:cycles
+      - name: Upload compiled Zotero add-on
+        uses: actions/upload-artifact@v4
+        with:
+          name: papers-build
+          path: .scaffold/build/
+          if-no-files-found: error

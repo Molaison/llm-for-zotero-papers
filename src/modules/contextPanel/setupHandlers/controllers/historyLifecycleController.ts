@@ -1490,7 +1490,7 @@ export function createHistoryLifecycleController(
               body.ownerDocument as Document,
               "div",
               "llm-history-item-meta",
-              { textContent: metaParts.join(" · ") },
+              { textContent: metaParts.join("，") },
             );
             item.appendChild(meta);
           }

@@ -14,20 +14,12 @@ describe("note focus header layout", function () {
     const buildUi = source("src/modules/contextPanel/buildUI.ts");
     const setupHandlers = source("src/modules/contextPanel/setupHandlers.ts");
 
-    assert.include(
-      buildUi,
-      "historyBar.append(historyNewBtn, historyToggle, headerRuntimeControls)",
-      "note focus must keep the same +, history, runtime order as normal chat",
-    );
-    // Independent: the divider, then the runtime icons (the toggle is its own
-    // row above). Stacked: the mode chip in the divider's place, one row.
-    // Both are always built; CSS picks one from the root layout attribute.
-    assert.match(
-      buildUi,
-      /headerRuntimeControls\.append\(\s*runtimeDivider,\s*modeSwitch,\s*runtimeSystemControls\.group,?\s*\)/,
-      "runtime icons must follow the divider (Independent) or the chip (Stacked)",
-    );
-    assert.include(buildUi, "headerTop.append(toggleRow, headerNavRow)");
+    assert.include(buildUi, "historyBar.append(historyNewBtn, historyToggle)");
+    assert.include(buildUi, "headerRuntimeControls.append(toggleRow, modeSwitch)");
+    assert.include(buildUi, "headerInfo.append(title, headerRuntimeControls)");
+    assert.include(buildUi, "headerActions.append(historyBar, conversationTools)");
+    assert.include(buildUi, "headerTop.append(headerNavRow)");
+    assert.include(buildUi, "clearBtn, runtimeSystemControls.group)", "runtime systems remain reachable in More");
     assert.include(buildUi, "resolveSidebarChatModeToggleState");
     assert.include(setupHandlers, "resolveSidebarChatModeToggleState");
     // Both render paths label the paper slot through the shared resolver,

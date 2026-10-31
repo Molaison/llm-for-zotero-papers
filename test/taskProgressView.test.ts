@@ -392,14 +392,14 @@ describe("task progress view", function () {
     markTaskAnswering(KEY, "run-a");
     harness.view.flush();
     assert.equal(harness.row.dataset.state, "answering");
-    assert.equal(harness.count(), "Answering… · 2 of 200 read");
+    assert.equal(harness.count(), "Answering…，2 of 200 read");
     completeTaskRun(KEY, {
       runId: "run-a",
       quoteCitations: [quoteCitation("q1", 1)],
     });
     harness.view.flush();
     assert.equal(harness.row.dataset.state, "completed");
-    assert.equal(harness.count(), "2 of 200 read · 1 cited");
+    assert.equal(harness.count(), "2 of 200 read，1 cited");
     const pill = () => harness.row.findByClass("llm-task-progress-pill") as any;
     assert.isFalse(pill().hidden);
     assert.equal(pill().textContent, "Completed");
@@ -516,7 +516,7 @@ describe("task progress view", function () {
     );
     assert.equal(
       second.findByClass("llm-task-paper-meta-text")!.textContent,
-      "Smith 2021 · Drift · drift",
+      "Smith 2021，Drift，drift",
     );
     const summary = second.findByClass("llm-task-paper-summary")!;
     summary.dispatchFakeEvent("click");
@@ -678,7 +678,7 @@ describe("task progress view", function () {
       formatTaskPaperTail(
         row([{ granularity: "full", snippet: "Body." }], { citations: 2 }),
       ),
-      "Full text · cited 2",
+      "Full text，cited 2",
     );
     assert.equal(
       cleanTaskPaperSnippet("[chunk 0] # Title\nBody"),
@@ -926,7 +926,7 @@ describe("task progress view", function () {
     assert.equal(paper.dataset.state, "cited");
     assert.equal(
       paper.findByClass("llm-task-paper-tail")!.textContent,
-      "Results · cited 2",
+      "Results，cited 2",
     );
     paper.findByClass("llm-task-paper-summary")!.dispatchFakeEvent("click");
     const details = paper.findByClass("llm-task-paper-details")!;
@@ -1158,7 +1158,7 @@ describe("task progress view", function () {
     assert.equal(item.dataset.state, "cited");
     assert.equal(
       item.findByClass("llm-task-paper-tail")!.textContent,
-      "Results · cited 1",
+      "Results，cited 1",
     );
     item.findByClass("llm-task-paper-summary")!.dispatchFakeEvent("click");
     const link = item.findByClass("llm-task-paper-citation")!;
@@ -1296,10 +1296,10 @@ describe("task progress view", function () {
     harness.view.flush();
     assert.isFalse((harness.row as any).hidden);
     assert.equal(harness.row.dataset.state, "working");
-    assert.equal(harness.count(), "0/3 steps · Reading papers");
+    assert.equal(harness.count(), "0/3 steps，Reading papers");
     setTaskActionSummary(KEY, "action-1", "Read 4 papers");
     harness.view.flush();
-    assert.equal(harness.count(), "0/3 steps · Read 4 papers");
+    assert.equal(harness.count(), "0/3 steps，Read 4 papers");
     harness.row.dispatchFakeEvent("click");
     const steps = harness.drawer.findByClass("llm-task-progress-steps")!;
     assert.isFalse((steps as any).hidden);
@@ -1310,7 +1310,7 @@ describe("task progress view", function () {
     endTaskAction(KEY, "action-1", "completed", "Tagged 3 items");
     harness.view.flush();
     assert.equal(harness.row.dataset.state, "completed");
-    assert.equal(harness.count(), "3/3 steps · Tagged 3 items");
+    assert.equal(harness.count(), "3/3 steps，Tagged 3 items");
     assert.include(collectFakeText(steps), "Tagged 3 items");
     assert.isFalse((harness.row as any).hidden, "the row stays afterwards");
   });
@@ -1327,7 +1327,7 @@ describe("task progress view", function () {
     endTaskAction(KEY, "action-2", "failed", "Auto Tag failed: offline");
     harness.view.flush();
     assert.equal(harness.row.dataset.state, "failed");
-    assert.equal(harness.count(), "1/3 steps · Auto Tag failed: offline");
+    assert.equal(harness.count(), "1/3 steps，Auto Tag failed: offline");
     harness.row.dispatchFakeEvent("click");
     const failure = harness.drawer.findByClass("llm-plan-task-failure");
     assert.equal(failure?.textContent, "Auto Tag failed: offline");
@@ -1348,7 +1348,7 @@ describe("task progress view", function () {
     });
     applyTaskPaperUpdate(KEY, ledgerDelta("m1", [[1, "read"]]), "codex-1");
     harness.view.flush();
-    assert.equal(harness.count(), "1/3 steps · 1 of 6 read");
+    assert.equal(harness.count(), "1/3 steps，1 of 6 read");
     harness.row.dispatchFakeEvent("click");
     const steps = harness.drawer.findByClass("llm-task-progress-steps")!;
     assert.isFalse((steps as any).hidden);
@@ -1823,7 +1823,7 @@ describe("task progress view of an outcome ledger", function () {
     harness.view.flush();
     assert.isTrue(pill(harness).hidden);
     assert.equal(harness.row.dataset.state, "working");
-    assert.equal(harness.count(), "1/2 steps · 0 of 200 read");
+    assert.equal(harness.count(), "1/2 steps，0 of 200 read");
     const steps = openSteps(harness);
     assert.equal(headerStatus(steps), "In progress");
     assert.include(collectFakeText(steps), "Steps");
@@ -1859,7 +1859,7 @@ describe("task progress view of an outcome ledger", function () {
     assert.equal(harness.row.dataset.state, "waiting");
     assert.equal(pill(harness).textContent, "Needs input");
     assert.equal(pill(harness).dataset.tone, "waiting");
-    assert.equal(harness.count(), "0/1 steps · 0 of 200 read");
+    assert.equal(harness.count(), "0/1 steps，0 of 200 read");
     markTaskWaiting(KEY, "run-a", false);
     harness.view.flush();
     assert.isTrue(pill(harness).hidden);
@@ -1912,7 +1912,7 @@ describe("task progress view of an outcome ledger", function () {
     assert.equal(harness.row.dataset.state, "completed_with_exceptions");
     assert.equal(pill(harness).textContent, "Partly done");
     assert.equal(pill(harness).dataset.tone, "completed_with_exceptions");
-    assert.match(harness.count(), /^2\/2 steps · /);
+    assert.match(harness.count(), /^2\/2 steps，/);
     assert.equal(
       harness.row.getAttribute("aria-label"),
       `Task progress, Partly done, ${harness.count()}`,
@@ -1924,13 +1924,13 @@ describe("task progress view of an outcome ledger", function () {
       "completed_with_exceptions",
     );
     const [saveRow, hostRow, notDone] = rows(steps);
-    assert.equal(labelOf(saveRow), "Save the summary as a note · 2 of 2");
-    assert.equal(labelOf(hostRow), "Added tags · 1 of 4");
+    assert.equal(labelOf(saveRow), "Save the summary as a note，2 of 2");
+    assert.equal(labelOf(hostRow), "Added tags，1 of 4");
     assert.equal(notDone.findByClass("llm-plan-task-badge")!.textContent, "!");
     assert.equal(labelOf(notDone), "3 not done");
     assert.equal(
       detailOf(notDone),
-      "In a group library you cannot edit: (Lee, 2020), item:99 · Not applied: file:/tmp/export.csv",
+      "In a group library you cannot edit: (Lee, 2020), item:99，Not applied: file:/tmp/export.csv",
     );
   });
 
@@ -1966,7 +1966,7 @@ describe("task progress view of an outcome ledger", function () {
     );
     completeTaskRun(KEY, { runId: "run-a" });
     harness.view.flush();
-    assert.match(harness.count(), /^8 of 10 done · /);
+    assert.match(harness.count(), /^8 of 10 done，/);
   });
 
   it("counts a step's targets only when there are several, and counts targets only for an exception", function () {
@@ -1992,7 +1992,7 @@ describe("task progress view of an outcome ledger", function () {
     completeTaskRun(KEY, { runId: "run-a" });
     harness.view.flush();
     assert.equal(pill(harness).textContent, "Completed");
-    assert.match(harness.count(), /^1\/1 steps · /);
+    assert.match(harness.count(), /^1\/1 steps，/);
     const [row] = rows(openSteps(harness));
     assert.equal(labelOf(row), "Added tags");
   });
@@ -2088,7 +2088,7 @@ describe("task progress view of an outcome ledger", function () {
       harness.view.flush();
       assert.equal(pill(harness).textContent, "Completed");
       assert.notEqual(pill(harness).textContent, "Partly done");
-      assert.match(harness.count(), /^1\/1 steps · /);
+      assert.match(harness.count(), /^1\/1 steps，/);
       const steps = openSteps(harness);
       assert.equal(headerStatus(steps), "Completed");
       assert.lengthOf(rows(steps), 1, "excluded papers make no not-done row");
@@ -2097,7 +2097,7 @@ describe("task progress view of an outcome ledger", function () {
       assert.equal(pillOf(row), "Done");
       assert.equal(
         detailOf(row),
-        "Excluded: Off the question: (Author 2, 2020), (Author 3, 2020), (Author 4, 2020), (Author 5, 2020), (Author 6, 2020) and 1 more · Excluded: A methods note: (Author 8, 2020)",
+        "Excluded: Off the question: (Author 2, 2020), (Author 3, 2020), (Author 4, 2020), (Author 5, 2020), (Author 6, 2020) and 1 more，Excluded: A methods note: (Author 8, 2020)",
       );
     });
 
@@ -2230,7 +2230,7 @@ describe("task progress view of an outcome ledger", function () {
       assert.equal(pill(harness).textContent, "Completed");
       assert.match(
         harness.count(),
-        /^1\/1 steps · /,
+        /^1\/1 steps，/,
         "a replaced part is no step left open",
       );
       const steps = openSteps(harness);
@@ -2241,7 +2241,7 @@ describe("task progress view of an outcome ledger", function () {
       );
       assert.lengthOf(rows(steps), 2);
       const [oldRow, newRow] = rows(steps);
-      assert.equal(labelOf(oldRow), "Read each paper on drift · 1 of 3");
+      assert.equal(labelOf(oldRow), "Read each paper on drift，1 of 3");
       assert.equal(pillOf(oldRow), "Replaced");
       assert.equal(
         detailOf(oldRow),
@@ -2295,7 +2295,7 @@ describe("task progress view of an outcome ledger", function () {
       const [row] = rows(openSteps(harness));
       assert.equal(pillOf(row), "Cancelled");
       assert.equal(detailOf(row), "The user stopped it");
-      assert.match(harness.count(), /^0\/1 steps · /);
+      assert.match(harness.count(), /^0\/1 steps，/);
     });
   });
 
@@ -2320,7 +2320,7 @@ describe("task progress view of an outcome ledger", function () {
         doneTargets: done,
       });
 
-    it("counts done of total on its row: Read each paper in Drift · 48 of 48", function () {
+    it("counts done of total on its row: Read each paper in Drift，48 of 48", function () {
       seedScope(48);
       const harness = track(mount());
       beginTaskRun(KEY, { runId: "run-a" });
@@ -2334,15 +2334,15 @@ describe("task progress view of an outcome ledger", function () {
       );
       harness.view.flush();
       const [readRow, noteRow] = rows(openSteps(harness));
-      assert.equal(labelOf(readRow), "Read each paper in Drift · 48 of 48");
-      assert.equal(labelOf(noteRow), "Write a note on each paper · 20 of 48");
+      assert.equal(labelOf(readRow), "Read each paper in Drift，48 of 48");
+      assert.equal(labelOf(noteRow), "Write a note on each paper，20 of 48");
       assert.equal(
         readRow.findByClass("llm-plan-task-pill")!.textContent,
         "Done",
       );
     });
 
-    it("names the papers in scope in the row: 2/4 steps · 212 papers in scope", function () {
+    it("names the papers in scope in the row: 2/4 steps，212 papers in scope", function () {
       seedScope(200);
       const harness = track(mount());
       beginTaskRun(KEY, { runId: "run-a" });
@@ -2365,12 +2365,12 @@ describe("task progress view of an outcome ledger", function () {
       );
       harness.view.flush();
       // The frozen part, not the listing, sizes the scope.
-      assert.equal(harness.count(), "2/4 steps · 212 papers in scope");
+      assert.equal(harness.count(), "2/4 steps，212 papers in scope");
       markTaskAnswering(KEY, "run-a");
       harness.view.flush();
       assert.equal(
         harness.count(),
-        "Answering… · 2/4 steps · 212 papers in scope",
+        "Answering…，2/4 steps，212 papers in scope",
       );
     });
 
@@ -2379,7 +2379,7 @@ describe("task progress view of an outcome ledger", function () {
       beginTaskRun(KEY, { runId: "run-a" });
       setTaskOutcomes(KEY, "run-a", outcomeCheckpoint([readAll(items(1), [])]));
       harness.view.flush();
-      assert.equal(harness.count(), "0/1 steps · 1 paper in scope");
+      assert.equal(harness.count(), "0/1 steps，1 paper in scope");
       const [row] = rows(openSteps(harness));
       assert.equal(
         labelOf(row),
@@ -2432,9 +2432,9 @@ describe("task progress view of an outcome ledger", function () {
         ]),
       );
       harness.view.flush();
-      assert.equal(harness.count(), "0/1 steps · 0 of 200 read");
+      assert.equal(harness.count(), "0/1 steps，0 of 200 read");
       const [row] = rows(openSteps(harness));
-      assert.equal(labelOf(row), "Read both papers · 1 of 2");
+      assert.equal(labelOf(row), "Read both papers，1 of 2");
     });
   });
 
@@ -2455,7 +2455,7 @@ describe("task progress view of an outcome ledger", function () {
     assert.equal(harness.row.dataset.state, "blocked");
     assert.equal(pill(harness).textContent, "Needs input");
     assert.equal(pill(harness).dataset.tone, "blocked");
-    assert.match(harness.count(), /^0\/1 steps · /);
+    assert.match(harness.count(), /^0\/1 steps，/);
     const steps = openSteps(harness);
     assert.equal(headerStatus(steps), "Needs your decision");
     assert.equal(
@@ -2484,7 +2484,7 @@ describe("task progress view of an outcome ledger", function () {
     assert.equal(harness.row.dataset.state, "interrupted");
     assert.equal(pill(harness).textContent, "Interrupted");
     assert.equal(pill(harness).dataset.tone, "interrupted");
-    assert.match(harness.count(), /^1\/2 steps · /);
+    assert.match(harness.count(), /^1\/2 steps，/);
     const steps = openSteps(harness);
     assert.equal(headerStatus(steps), "Interrupted");
     assert.include(collectFakeText(steps), "Say “continue” to resume.");
@@ -2526,14 +2526,14 @@ describe("task progress view of an outcome ledger", function () {
       return row.findByClass("llm-task-paper-details")!;
     }
 
-    it("counts its papers on its row: Summarize each selected paper · 7 of 12", function () {
+    it("counts its papers on its row: Summarize each selected paper，7 of 12", function () {
       seedScope(12);
       const harness = track(mount());
       beginTaskRun(KEY, { runId: "run-d" });
       setTaskOutcomes(KEY, "run-d", outcomeCheckpoint([summaries(7)]));
       harness.view.flush();
       const [row] = rows(openSteps(harness));
-      assert.equal(labelOf(row), "Summarize each selected paper · 7 of 12");
+      assert.equal(labelOf(row), "Summarize each selected paper，7 of 12");
     });
 
     it("a digested paper's row counts its evidence passages and shows the summary and its evidence by section", function () {
@@ -2655,7 +2655,7 @@ describe("task progress view of an outcome ledger", function () {
         { citationId: "d1", libraryID: 1, itemKey: "P1", itemId: 1 },
       ]);
       harness.row.dispatchFakeEvent("click");
-      assert.equal(tailOf(paperRow(harness, "1:1")), "Full text · cited 1");
+      assert.equal(tailOf(paperRow(harness, "1:1")), "Full text，cited 1");
     });
 
     it("a failed digest shows its reason on the row", function () {
@@ -3397,7 +3397,7 @@ describe("task progress row count with nothing attached", function () {
     runOverLibrary(harness.view);
     assert.equal(
       harness.count(),
-      "2/2 steps · 5 read in depth · 13 found · 2 cited",
+      "2/2 steps，5 read in depth，13 found，2 cited",
     );
   });
 
@@ -3443,7 +3443,7 @@ describe("task progress row count with nothing attached", function () {
     );
     markTaskAnswering(KEY, "run-w");
     harness.view.flush();
-    assert.equal(harness.count(), "Answering… · 2/2 steps · 2 found");
+    assert.equal(harness.count(), "Answering…，2/2 steps，2 found");
   });
 
   it("counts the latest question only", function () {
@@ -3464,7 +3464,7 @@ describe("task progress row count with nothing attached", function () {
     seedScope(20);
     const harness = track(mount());
     runOverLibrary(harness.view);
-    assert.equal(harness.count(), "2/2 steps · 18 of 20 read · 2 cited");
+    assert.equal(harness.count(), "2/2 steps，18 of 20 read，2 cited");
   });
 
   describe("in Chinese", function () {
@@ -3487,7 +3487,7 @@ describe("task progress row count with nothing attached", function () {
       seedWholeLibrary();
       const harness = track(mount(library));
       runOverLibrary(harness.view);
-      assert.equal(harness.count(), "2/2 步 · 精读 5 · 检索到 13 · 引用 2");
+      assert.equal(harness.count(), "2/2 步，精读 5，检索到 13，引用 2");
     });
   });
 });
@@ -3616,7 +3616,7 @@ describe("task progress history by question", function () {
     const current = currentHead(harness)!;
     assert.isOk(current, "the current question has a header");
     assert.notEqual(current.tagName, "button", "it is not a control");
-    assert.equal(labelOf(current), `Question 2 · “${GAZE}”`);
+    assert.equal(labelOf(current), `Question 2，“${GAZE}”`);
     assert.equal(pillOf(current).textContent, "Completed");
     assert.equal(
       harness.drawer.findByClass("llm-task-progress-papers-title")!.textContent,
@@ -3630,11 +3630,11 @@ describe("task progress history by question", function () {
     assert.equal(head.getAttribute("aria-expanded"), "false");
     assert.equal(
       labelOf(head),
-      "Question 1 · “Write a review on path integration in the entorhinal…”",
+      "Question 1，“Write a review on path integration in the entorhinal…”",
     );
     assert.equal(pillOf(head).textContent, "Completed");
     assert.equal(pillOf(head).dataset.tone, "completed");
-    assert.equal(countsOf(head), "2/2 steps · 2 papers");
+    assert.equal(countsOf(head), "2/2 steps，2 papers");
     assert.lengthOf(
       earlier.findAllByClass("llm-task-paper"),
       0,
@@ -3751,19 +3751,19 @@ describe("task progress history by question", function () {
     harness.row.dispatchFakeEvent("click");
     assert.equal(
       labelOf(currentHead(harness)!),
-      "Auto Tag · “tag the drift papers”",
+      "Auto Tag，“tag the drift papers”",
     );
     askSecond();
     harness.view.flush();
     const [action, question] = sectionsOf(harness);
-    assert.equal(labelOf(headOf(action)), "Auto Tag · “tag the drift papers”");
+    assert.equal(labelOf(headOf(action)), "Auto Tag，“tag the drift papers”");
     assert.equal(pillOf(headOf(action)).textContent, "Completed");
     assert.equal(countsOf(headOf(action)), "1/1 steps");
-    assert.match(labelOf(headOf(question)), /^Question 1 · /);
+    assert.match(labelOf(headOf(question)), /^Question 1，/);
     headOf(action).dispatchFakeEvent("click");
     assert.include(
       collectFakeText(action.findByClass("llm-task-progress-steps")),
-      "Steps · Auto Tag",
+      "Steps，Auto Tag",
     );
     assert.lengthOf(action.findAllByClass("llm-task-paper"), 0);
   });
@@ -3810,11 +3810,11 @@ describe("task progress history by question", function () {
       const head = headOf(sectionsOf(harness)[0]);
       assert.equal(
         labelOf(head),
-        "第 1 个问题 · “Write a review on path integration in the entorhinal…”",
+        "第 1 个问题，“Write a review on path integration in the entorhinal…”",
       );
       assert.equal(pillOf(head).textContent, "已完成");
-      assert.equal(countsOf(head), "2/2 步 · 2 篇论文");
-      assert.equal(labelOf(currentHead(harness)!), `第 2 个问题 · “${GAZE}”`);
+      assert.equal(countsOf(head), "2/2 步，2 篇论文");
+      assert.equal(labelOf(currentHead(harness)!), `第 2 个问题，“${GAZE}”`);
       const text = collectFakeText(harness.drawer);
       assert.equal(
         text.split("第 1 个问题").length - 1,

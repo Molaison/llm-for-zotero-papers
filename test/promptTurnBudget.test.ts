@@ -9,6 +9,7 @@ import {
   renderAgentPromptEnvelope,
   stringifyMessageContent,
 } from "../src/agent/model/messageBuilder";
+import { buildRuntimePlatformGuidanceText } from "../src/utils/runtimePlatform";
 
 /**
  * Per-turn prompt budget: serialized tools + fixed system prompt + the
@@ -16,7 +17,10 @@ import {
  * the three common turn shapes, with the bundled skill inventory installed. The
  * caps are what this same measurement gives at ff8eaf7e (the commit before the
  * agent tool consolidation), so moving always-on rules into per-turn guidance
- * cannot silently grow a turn. The global and collection caps were raised on
+ * cannot silently grow a turn. The measurement leaves out the host-specific
+ * `Local shell environment` block, whose shell examples differ between hosts
+ * (Linux's `find` example alone is 10 characters longer than macOS's), so one
+ * set of caps holds everywhere. The global and collection caps were raised on
  * purpose by the workflow sentence that asks for a digest part when the work
  * needs one result per paper (274 characters, 2026-10-02), and again by
  * submit_document's excluded list, which records the papers a document
@@ -26,9 +30,9 @@ import {
  * outside the library only on request (324 tool characters, 2026-10-03).
  */
 const TURN_BUDGETS: Record<string, number> = {
-  global: 35_474,
-  paper: 34_764,
-  collection: 35_572,
+  global: 35_133,
+  paper: 34_423,
+  collection: 35_231,
 };
 
 const TURNS: Record<string, Record<string, unknown>> = {
@@ -81,7 +85,12 @@ async function measureTurn(input: Record<string, unknown>) {
     registry.listToolDefinitionsForRequest(request),
     [],
   );
-  const fixedPrompt = rendered.inventory.fixedPrompt.length;
+  // The local shell block varies with the host platform, so it is not part of
+  // the budget this test pins.
+  const fixedPromptWithoutHost = rendered.inventory.fixedPrompt.replace(
+    buildRuntimePlatformGuidanceText(),
+    "",
+  ).length;
   // The whole per-turn user message: dynamic tool guidance, permission-mode
   // guidance, resource context and the request itself.
   const turnMessage = stringifyMessageContent(
@@ -89,10 +98,10 @@ async function measureTurn(input: Record<string, unknown>) {
   ).length;
   return {
     toolCharacters,
-    fixedPrompt,
+    fixedPrompt: fixedPromptWithoutHost,
     dynamicGuidance: (rendered.inventory.dynamicGuidance || "").length,
     turnMessage,
-    total: toolCharacters + fixedPrompt + turnMessage,
+    total: toolCharacters + fixedPromptWithoutHost + turnMessage,
   };
 }
 

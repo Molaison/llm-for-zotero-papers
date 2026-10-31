@@ -5020,7 +5020,7 @@ function createParagraphCitationFooter(params: {
         const sectionLabel = sanitizeText(
           citation.sourceSectionLabel || "",
         ).trim();
-        if (sectionLabel) heading.append(` · ${sectionLabel}`);
+        if (sectionLabel) heading.append(`，${sectionLabel}`);
         const card = createQuoteCitationAnchorElement({
           ...params,
           quoteCitation: citation,

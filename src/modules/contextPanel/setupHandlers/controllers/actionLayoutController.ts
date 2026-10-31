@@ -1,23 +1,14 @@
 import {
-  ACTION_LAYOUT_CONTEXT_ICON_WIDTH_PX,
-  ACTION_LAYOUT_DROPDOWN_ICON_WIDTH_PX,
-  ACTION_LAYOUT_MODEL_FULL_MAX_LINES,
-  ACTION_LAYOUT_MODEL_WRAP_MIN_CHARS,
-  REASONING_COMPACT_LABEL,
   SCREENSHOT_COMPACT_LABEL,
   SELECT_TEXT_COMPACT_LABEL,
+  getSelectTextExpandedLabel,
+  getScreenshotExpandedLabel,
   UPLOAD_FILE_COMPACT_LABEL,
   UPLOAD_FILE_EXPANDED_LABEL,
 } from "../../constants";
+import { t } from "../../../../utils/i18n";
 
 type ActionLabelMode = "icon" | "full";
-type ModelLabelMode = "icon" | "full-single" | "full-wrap2";
-type ActionLayoutMode = "icon" | "half" | "full";
-type ActionRevealState = {
-  send: ActionLabelMode;
-  reasoning: ActionLabelMode;
-  model: ModelLabelMode;
-};
 
 type ActionLayoutControllerDeps = {
   body: Element;
@@ -35,34 +26,11 @@ type ActionLayoutControllerDeps = {
   cancelBtn: HTMLButtonElement | null;
 };
 
-export function createActionLayoutController(
-  deps: ActionLayoutControllerDeps,
-): {
-  setActionButtonLabel: (
-    button: HTMLButtonElement | null,
-    expandedLabel: string,
-    compactLabel: string,
-    mode: ActionLabelMode,
-  ) => void;
-  setSendButtonLabel: (mode: ActionLabelMode) => void;
-  applyResponsiveActionButtonsLayout: () => void;
-} {
-  const {
-    body,
-    panelRoot,
-    actionsRow,
-    actionsLeft,
-    modelBtn,
-    modelSlot,
-    reasoningBtn,
-    reasoningSlot,
-    uploadBtn,
-    selectTextBtn,
-    screenshotBtn,
-    sendBtn,
-    cancelBtn,
-  } = deps;
 
+/** CSS keeps one toolbar row; only model text may shrink with ellipsis. */
+export function createActionLayoutController(deps: ActionLayoutControllerDeps) {
+  const { body, panelRoot, modelBtn, modelSlot, reasoningBtn, reasoningSlot,
+    uploadBtn, selectTextBtn, screenshotBtn, sendBtn, cancelBtn } = deps;
   const setActionButtonLabel = (
     button: HTMLButtonElement | null,
     expandedLabel: string,
@@ -70,413 +38,40 @@ export function createActionLayoutController(
     mode: ActionLabelMode,
   ) => {
     if (!button) return;
-    const nextLabel = mode === "icon" ? compactLabel : expandedLabel;
-    if (button.textContent !== nextLabel) {
-      button.textContent = nextLabel;
-    }
+    const label = mode === "icon" ? compactLabel : expandedLabel;
+    if (button.textContent !== label) button.textContent = label;
     button.classList.toggle("llm-action-icon-only", mode === "icon");
   };
-
-  // Send and Cancel are always round icon buttons (arrow / stop square);
-  // the name lives in title + aria-label, so every width mode is the same.
   const setSendButtonLabel = (_mode: ActionLabelMode) => {
     setActionButtonLabel(sendBtn, "", "", "icon");
-    sendBtn.title = "Send";
+    sendBtn.setAttribute("aria-label", t("Send"));
+    sendBtn.title = t("Send");
     setActionButtonLabel(cancelBtn, "", "", "icon");
-    if (cancelBtn) {
-      cancelBtn.title = "Cancel";
-    }
+    if (cancelBtn) cancelBtn.title = t("Cancel");
   };
-
-  const setPanelActionLayoutMode = (mode: ActionLayoutMode) => {
-    if (panelRoot.dataset.llmActionLayoutMode !== mode) {
-      panelRoot.dataset.llmActionLayoutMode = mode;
-    }
-  };
-
-  const textMeasureContext = (() => {
-    const canvas = body.ownerDocument?.createElement(
-      "canvas",
-    ) as HTMLCanvasElement | null;
-    return (
-      (canvas?.getContext("2d") as CanvasRenderingContext2D | null) || null
-    );
-  })();
-
   const applyResponsiveActionButtonsLayout = () => {
-    if (
-      !body.isConnected ||
-      !panelRoot.isConnected ||
-      !modelBtn ||
-      !actionsLeft
-    )
-      return;
-    const modelLabel = modelBtn.dataset.modelLabel || "default";
-    const modelHint = modelBtn.dataset.modelHint || "";
-    const modelCanUseTwoLineWrap =
-      [...(modelLabel || "").trim()].length >
-      ACTION_LAYOUT_MODEL_WRAP_MIN_CHARS;
-    const reasoningLabel =
-      reasoningBtn?.dataset.reasoningLabel ||
-      reasoningBtn?.textContent ||
-      "off";
-    const reasoningHint = reasoningBtn?.dataset.reasoningHint || "";
-
-    const immediateAvailableWidth = (() => {
-      const rowWidth = actionsRow?.clientWidth || 0;
-      if (rowWidth > 0) return rowWidth;
-      const leftWidth = actionsLeft.clientWidth || 0;
-      if (leftWidth > 0) return leftWidth;
-      return panelRoot?.clientWidth || 0;
-    })();
-    // Retained native tabs can stay hidden indefinitely. Their ResizeObserver
-    // requests layout when they become measurable again; do not poll frames.
-    if (immediateAvailableWidth <= 0) return;
-
-    const getComputedSizePx = (
-      style: CSSStyleDeclaration | null | undefined,
-      property: string,
-      fallback = 0,
-    ) => {
-      if (!style) return fallback;
-      const value = Number.parseFloat(style.getPropertyValue(property));
-      return Number.isFinite(value) ? value : fallback;
-    };
-
-    const measureLabelTextWidth = (
-      button: HTMLButtonElement | null,
-      label: string,
-    ) => {
-      if (!button || !label) return 0;
-      const view = body.ownerDocument?.defaultView;
-      const style = view?.getComputedStyle(button);
-      if (textMeasureContext && style) {
-        const font =
-          style.font && style.font !== ""
-            ? style.font
-            : `${style.fontWeight || "400"} ${style.fontSize || "12px"} ${style.fontFamily || "sans-serif"}`;
-        textMeasureContext.font = font;
-        return textMeasureContext.measureText(label).width;
-      }
-      return label.length * 8;
-    };
-
-    const getElementGapPx = (element: HTMLElement | null) => {
-      if (!element) return 0;
-      const view = body.ownerDocument?.defaultView;
-      const style = view?.getComputedStyle(element);
-      const columnGap = getComputedSizePx(style, "column-gap", NaN);
-      if (Number.isFinite(columnGap)) return columnGap;
-      return getComputedSizePx(style, "gap", 0);
-    };
-
-    const getButtonNaturalWidth = (
-      button: HTMLButtonElement | null,
-      label: string,
-      maxLines = 1,
-    ) => {
-      if (!button) return 0;
-      const view = body.ownerDocument?.defaultView;
-      const style = view?.getComputedStyle(button);
-      const textWidth = measureLabelTextWidth(button, label);
-      const normalizedMaxLines = Math.max(1, Math.floor(maxLines));
-      const wrappedTextWidth =
-        normalizedMaxLines > 1
-          ? (() => {
-              const segments = label
-                .split(/[\s._-]+/g)
-                .map((segment) => segment.trim())
-                .filter(Boolean);
-              const longestSegmentWidth = segments.reduce((max, segment) => {
-                return Math.max(max, measureLabelTextWidth(button, segment));
-              }, 0);
-              return Math.max(
-                textWidth / normalizedMaxLines,
-                longestSegmentWidth,
-              );
-            })()
-          : textWidth;
-      const paddingWidth =
-        getComputedSizePx(style, "padding-left") +
-        getComputedSizePx(style, "padding-right");
-      const borderWidth =
-        getComputedSizePx(style, "border-left-width") +
-        getComputedSizePx(style, "border-right-width");
-      const chevronAllowance =
-        button === modelBtn || button === reasoningBtn ? 16 : 0;
-      return Math.ceil(
-        wrappedTextWidth + paddingWidth + borderWidth + chevronAllowance,
-      );
-    };
-
-    const getSlotWidthBounds = (slot: HTMLElement | null) => {
-      const view = body.ownerDocument?.defaultView;
-      const style = slot ? view?.getComputedStyle(slot) : null;
-      const minWidth = getComputedSizePx(style, "min-width", 0);
-      const maxRaw = getComputedSizePx(
-        style,
-        "max-width",
-        Number.POSITIVE_INFINITY,
-      );
-      const maxWidth = Number.isFinite(maxRaw)
-        ? maxRaw
-        : Number.POSITIVE_INFINITY;
-      return { minWidth, maxWidth };
-    };
-
-    const getFullSlotRequiredWidth = (
-      slot: HTMLElement | null,
-      button: HTMLButtonElement | null,
-      label: string,
-      maxLines = 1,
-    ) => {
-      if (!button) return 0;
-      const naturalWidth = getButtonNaturalWidth(button, label, maxLines);
-      if (!slot) return naturalWidth;
-      const { minWidth, maxWidth } = getSlotWidthBounds(slot);
-      return Math.min(maxWidth, Math.max(minWidth, naturalWidth));
-    };
-
-    const getRenderedWidthPx = (
-      element: HTMLElement | null,
-      fallback: number,
-    ) => {
-      const width = element?.getBoundingClientRect?.().width || 0;
-      return width > 0 ? Math.ceil(width) : fallback;
-    };
-
-    const getAvailableRowWidth = () => {
-      const hostWidth = Math.ceil(
-        (body as HTMLElement | null)?.getBoundingClientRect?.().width || 0,
-      );
-      const rowWidth = actionsRow?.clientWidth || 0;
-      if (rowWidth > 0)
-        return hostWidth > 0 ? Math.min(rowWidth, hostWidth) : rowWidth;
-      const panelWidth = panelRoot?.clientWidth || 0;
-      if (panelWidth > 0)
-        return hostWidth > 0 ? Math.min(panelWidth, hostWidth) : panelWidth;
-      const leftWidth = actionsLeft.clientWidth || 0;
-      if (leftWidth > 0)
-        return hostWidth > 0 ? Math.min(leftWidth, hostWidth) : leftWidth;
-      return hostWidth;
-    };
-
-    const uploadSlot = uploadBtn?.parentElement as HTMLElement | null;
-
-    const getModelWidth = (mode: ModelLabelMode) => {
-      if (!modelBtn) return 0;
-      if (mode === "icon") return ACTION_LAYOUT_DROPDOWN_ICON_WIDTH_PX;
-      const maxLines =
-        mode === "full-wrap2" ? ACTION_LAYOUT_MODEL_FULL_MAX_LINES : 1;
-      return getFullSlotRequiredWidth(
-        modelSlot,
-        modelBtn,
-        modelLabel,
-        maxLines,
-      );
-    };
-
-    const getReasoningWidth = (mode: ActionLabelMode) => {
-      if (!reasoningBtn) return 0;
-      return mode === "full"
-        ? getFullSlotRequiredWidth(reasoningSlot, reasoningBtn, reasoningLabel)
-        : ACTION_LAYOUT_DROPDOWN_ICON_WIDTH_PX;
-    };
-
-    const getSendWidth = (_mode: ActionLabelMode) =>
-      sendBtn ? ACTION_LAYOUT_CONTEXT_ICON_WIDTH_PX : 0;
-
-    const getRequiredWidth = (state: ActionRevealState) => {
-      const leftSlotWidths = [
-        uploadBtn
-          ? getRenderedWidthPx(
-              uploadSlot || uploadBtn,
-              Math.max(
-                uploadBtn.scrollWidth || 0,
-                ACTION_LAYOUT_CONTEXT_ICON_WIDTH_PX,
-              ),
-            )
-          : 0,
-        selectTextBtn ? ACTION_LAYOUT_CONTEXT_ICON_WIDTH_PX : 0,
-        screenshotBtn ? ACTION_LAYOUT_CONTEXT_ICON_WIDTH_PX : 0,
-        getModelWidth(state.model),
-        getReasoningWidth(state.reasoning),
-      ].filter((width) => width > 0);
-      const leftGap = getElementGapPx(actionsLeft);
-      const leftRequiredWidth =
-        leftSlotWidths.reduce((sum, width) => sum + width, 0) +
-        Math.max(0, leftSlotWidths.length - 1) * leftGap;
-      const rightRequiredWidth = getSendWidth(state.send);
-      const rowGap = getElementGapPx(actionsRow);
-      return leftRequiredWidth + rightRequiredWidth + rowGap;
-    };
-
-    const doesStateFit = (state: ActionRevealState) =>
-      getAvailableRowWidth() + 1 >= getRequiredWidth(state);
-
-    const getPanelLayoutMode = (state: ActionRevealState): ActionLayoutMode => {
-      if (
-        state.send === "full" &&
-        state.model !== "icon" &&
-        state.reasoning === "full"
-      ) {
-        return "full";
-      }
-      if (
-        state.send === "full" &&
-        (state.model !== "icon" || state.reasoning === "full")
-      ) {
-        return "half";
-      }
-      return "icon";
-    };
-
-    const applyMeasurementBaseline = () => {
-      setActionButtonLabel(
-        uploadBtn,
-        UPLOAD_FILE_EXPANDED_LABEL,
-        UPLOAD_FILE_COMPACT_LABEL,
-        "icon",
-      );
-      setActionButtonLabel(
-        selectTextBtn,
-        SELECT_TEXT_COMPACT_LABEL,
-        SELECT_TEXT_COMPACT_LABEL,
-        "icon",
-      );
-      setActionButtonLabel(
-        screenshotBtn,
-        SCREENSHOT_COMPACT_LABEL,
-        SCREENSHOT_COMPACT_LABEL,
-        "icon",
-      );
-      setSendButtonLabel("full");
-
-      modelBtn.classList.toggle("llm-model-btn-collapsed", false);
-      modelSlot?.classList.toggle("llm-model-dropdown-collapsed", false);
-      modelBtn.classList.toggle("llm-model-btn-wrap-2line", false);
-      modelBtn.textContent = modelLabel;
-      modelBtn.title = modelHint;
-
-      if (reasoningBtn) {
-        reasoningBtn.classList.toggle("llm-reasoning-btn-collapsed", false);
-        reasoningSlot?.classList.toggle(
-          "llm-reasoning-dropdown-collapsed",
-          false,
-        );
-        reasoningBtn.textContent = reasoningLabel;
-        reasoningBtn.title = reasoningHint;
-      }
-    };
-
-    const applyState = (state: ActionRevealState) => {
-      setActionButtonLabel(
-        uploadBtn,
-        UPLOAD_FILE_EXPANDED_LABEL,
-        UPLOAD_FILE_COMPACT_LABEL,
-        "icon",
-      );
-      setActionButtonLabel(
-        selectTextBtn,
-        SELECT_TEXT_COMPACT_LABEL,
-        SELECT_TEXT_COMPACT_LABEL,
-        "icon",
-      );
-      setActionButtonLabel(
-        screenshotBtn,
-        SCREENSHOT_COMPACT_LABEL,
-        SCREENSHOT_COMPACT_LABEL,
-        "icon",
-      );
-      setSendButtonLabel(state.send);
-
-      const modelCollapsed = state.model === "icon";
-      modelBtn.classList.toggle("llm-model-btn-collapsed", modelCollapsed);
-      modelSlot?.classList.toggle(
-        "llm-model-dropdown-collapsed",
-        modelCollapsed,
-      );
-      modelBtn.classList.toggle(
-        "llm-model-btn-wrap-2line",
-        state.model === "full-wrap2",
-      );
-      if (modelCollapsed) {
-        modelBtn.textContent = "";
-        modelBtn.title = modelHint ? `${modelLabel}\n${modelHint}` : modelLabel;
-      } else {
-        modelBtn.textContent = modelLabel;
-        modelBtn.title = modelHint;
-      }
-
-      if (reasoningBtn) {
-        const reasoningCollapsed = state.reasoning === "icon";
-        reasoningBtn.classList.toggle(
-          "llm-reasoning-btn-collapsed",
-          reasoningCollapsed,
-        );
-        reasoningSlot?.classList.toggle(
-          "llm-reasoning-dropdown-collapsed",
-          reasoningCollapsed,
-        );
-        if (!reasoningCollapsed) {
-          reasoningBtn.textContent = reasoningLabel;
-          reasoningBtn.title = reasoningHint;
-        } else {
-          reasoningBtn.textContent = REASONING_COMPACT_LABEL;
-          reasoningBtn.title = reasoningHint
-            ? `${reasoningLabel}\n${reasoningHint}`
-            : reasoningLabel;
-        }
-      }
-
-      setPanelActionLayoutMode(getPanelLayoutMode(state));
-    };
-
-    const fullState: ActionRevealState = {
-      send: "full",
-      reasoning: "full",
-      model: "full-single",
-    };
-    const reasoningState: ActionRevealState = {
-      send: "full",
-      reasoning: "full",
-      model: "icon",
-    };
-    const sendState: ActionRevealState = {
-      send: "full",
-      reasoning: "icon",
-      model: "icon",
-    };
-    const iconOnlyState: ActionRevealState = {
-      send: "icon",
-      reasoning: "icon",
-      model: "icon",
-    };
-
-    const candidateStates: ActionRevealState[] = [
-      fullState,
-      reasoningState,
-      sendState,
-      iconOnlyState,
-    ];
-
-    if (modelCanUseTwoLineWrap) {
-      candidateStates.splice(1, 0, { ...fullState, model: "full-wrap2" });
+    if (!body.isConnected || !panelRoot.isConnected || !panelRoot.clientWidth) return;
+    setActionButtonLabel(uploadBtn, "+", "+", "full");
+    setActionButtonLabel(selectTextBtn, getSelectTextExpandedLabel(), getSelectTextExpandedLabel(), "full");
+    setActionButtonLabel(screenshotBtn, getScreenshotExpandedLabel(), getScreenshotExpandedLabel(), "full");
+    setSendButtonLabel("full");
+    for (const [button, slot, kind] of [
+      [modelBtn, modelSlot, "model"],
+      [reasoningBtn, reasoningSlot, "reasoning"],
+    ] as const) {
+      if (!button) continue;
+      const label = button.dataset[`${kind}Label`] || button.textContent || "";
+      const hint = button.dataset[`${kind}Hint`] || "";
+      button.classList.toggle(`llm-${kind}-btn-collapsed`, false);
+      slot?.classList.toggle(`llm-${kind}-dropdown-collapsed`, false);
+      button.classList.toggle("llm-model-btn-wrap-2line", false);
+      button.textContent = label;
+      button.title = kind === "reasoning"
+        ? `${t("Reasoning")}: ${label}${hint && hint !== t("Reasoning") ? `\n${hint}` : ""}`
+        : hint ? `${label}\n${hint}` : label;
+      button.setAttribute("aria-label", button.title);
     }
-
-    applyMeasurementBaseline();
-    for (const state of candidateStates) {
-      if (!doesStateFit(state)) continue;
-      applyState(state);
-      return;
-    }
-
-    applyState(iconOnlyState);
+    panelRoot.dataset.llmActionLayoutMode = "full";
   };
-
-  return {
-    setActionButtonLabel,
-    setSendButtonLabel,
-    applyResponsiveActionButtonsLayout,
-  };
+  return { setActionButtonLabel, setSendButtonLabel, applyResponsiveActionButtonsLayout };
 }

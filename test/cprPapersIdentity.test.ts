@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import {
-  CPR_PAPERS_API_BASE,
-  prepareCprPaperRequest,
-} from "../src/utils/cprPapers";
+import { prepareCprPaperRequest } from "../src/utils/cprPapers";
 import { resetProviderSessionIdCacheForTests } from "../src/utils/providerSessionId";
 
+const TEST_API_BASE = "https://papers.example/v1";
+const TEST_MODEL = "arbitrary-reading-alias";
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 const paperId = "doi:10.1234/identity";
 const threadId = "existing-paper-thread";
@@ -74,8 +73,8 @@ describe("CPR papers existing PDF identity", function () {
       return resolution({ paper_id: metadata.paper_id });
     };
     prepare = (overrides = {}) => prepareCprPaperRequest({
-      itemId: 7, apiBase: CPR_PAPERS_API_BASE, apiKey: "fixture-only",
-      model: "papers/gpt-6-sol", prompt: "Question",
+      itemId: 7, apiBase: TEST_API_BASE, apiKey: "fixture-only",
+      model: TEST_MODEL, prompt: "Question",
       readBytes: async path => {
         reads.push(path);
         const content = contents.get(path);

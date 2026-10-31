@@ -219,7 +219,7 @@ describe("web source UI contract", function () {
     );
     assert.match(
       css,
-      /\.llm-web-source-favicon\s*\{[^}]*background:\s*var\(--material-background\)/s,
+      /\.llm-web-source-favicon\s*\{[^}]*background:\s*var\(--llm-slate3\)/s,
     );
     assert.include(css, ".llm-agent-trace-timeline-icon-has-favicon::before");
     assert.include(css, ".llm-web-source-site-icon-has-favicon::before");

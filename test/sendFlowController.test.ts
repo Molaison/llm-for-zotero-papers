@@ -1,3 +1,8 @@
+import { installAnnotationReplyTestDB } from "./helpers/annotationReplyDb";
+import {
+  listAnnotationReplyCandidates,
+  prepareAnnotationReplyBatch,
+} from "../src/services/pdf/annotationReplyService";
 import { createNoteConversationItem } from "../src/services/notes/conversationItem";
 import { getConversationKey } from "../src/modules/contextPanel/conversationIdentity";
 import {
@@ -66,6 +71,68 @@ describe("sendFlowController", function () {
 
   afterEach(function () {
     setUserSkills([]);
+  });
+
+  it("sends selected annotation PNG and versioned prompt through the actual compose contract", async function () {
+    const env = installAnnotationReplyTestDB();
+    try {
+      env.attachment(1);
+      env.annotation(12, 1, "Why this result?");
+      const targets = (await listAnnotationReplyCandidates([1])).map(
+        (c) => c.target!,
+      );
+      const batch = await prepareAnnotationReplyBatch(targets, 101, [
+        {
+          attachmentID: 1,
+          pageIndex: 0,
+          dataURL: "data:image/png;base64,AA==",
+          context: "source page",
+        },
+      ]);
+      let sent: any;
+      const h = createBaseDeps({
+        annotationReplies: {
+          hasSelection: () => true,
+          prepare: async () => batch,
+          settled: async () => {},
+        },
+        sendQuestion: async (opts: any) => {
+          sent = opts;
+          opts.onProviderDispatch();
+        },
+      });
+      await h.controller.doSend();
+      assert.include(sent.images, "data:image/png;base64,AA==");
+      assert.include(sent.question, batch.protocol);
+      assert.include(sent.question, targets[0].identity);
+      assert.include(sent.displayQuestion, batch.id);
+      assert.equal(sent.annotationReplyBatchId, batch.id);
+      assert.isFunction(sent.onAnnotationReplyComplete);
+      assert.equal(
+        env.saves(),
+        0,
+        "dispatch/streaming must never write a comment",
+      );
+    } finally {
+      env.restore();
+    }
+  });
+
+  it("blocks annotation sends for image-disabled models before preparing a batch", async function () {
+    let prepared = 0;
+    const h = createBaseDeps({
+      annotationReplies: {
+        hasSelection: () => true,
+        prepare: async () => {
+          prepared++;
+        },
+        settled: async () => {},
+      },
+      isScreenshotUnsupportedModel: () => true,
+    });
+    await h.controller.doSend();
+    assert.equal(prepared, 0);
+    assert.equal(h.getCounts().sendCalled, 0);
   });
 
   function makeTestSkill(
@@ -1486,6 +1553,51 @@ describe("sendFlowController", function () {
     await controller.doSend();
 
     assert.equal(getLastEditRuntimeMode(), "agent");
+  });
+
+  it("sends a Papers PDF-only turn without creating a generic PDF attachment", async function () {
+    const pdf: PaperContextRef = {
+      itemId: 10,
+      contextItemId: 102,
+      title: "Papers PDF",
+      contentSourceMode: "pdf",
+    };
+    const { controller, getCounts, getLastSend } = createBaseDeps({
+      inputBox: { value: "", dataset: {} } as HTMLTextAreaElement,
+      getSelectedPaperContexts: () => [pdf],
+      getPdfModePaperContexts: () => [pdf],
+      getFullTextPaperContexts: () => [],
+      getSelectedFiles: () => [],
+      getSelectedImages: () => [],
+      getSelectedProfile: () => ({
+        entryId: "papers",
+        model: "papers/gpt-6-sol",
+        apiBase: "https://cpr.molaisonz.dpdns.org/v1",
+        apiKey: "test-key",
+        providerLabel: "Papers",
+        authMode: "api_key",
+        providerProtocol: "responses_api",
+        paperRegistry: true,
+      }),
+      getModelPdfSupport: () => "none" as const,
+      resolvePdfPaperAttachments: async () => {
+        throw new Error("should not create a generic PDF attachment");
+      },
+      resolvePromptText: (
+        text: string,
+        selectedText: string,
+        hasAttachments: boolean,
+      ) =>
+        String(text || "").trim() ||
+        (String(selectedText || "").trim() ? "selected text" : "") ||
+        (hasAttachments ? "Please analyze the selected papers." : ""),
+    });
+
+    await controller.doSend();
+
+    assert.equal(getCounts().sendCalled, 1);
+    assert.deepEqual(getLastSend().lastSentPdfPaperContexts, [pdf]);
+    assert.isUndefined(getLastSend().lastSentAttachments);
   });
 
   it("blocks provider-upload full-PDF mode in latest-turn edit retries", async function () {

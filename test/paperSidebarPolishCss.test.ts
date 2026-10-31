@@ -39,9 +39,11 @@ describe("paper sidebar polish CSS", function () {
         "#llmforzotero-standalone-chat-root",
       ]) {
         const scopeRule = rule(css, scope);
-        assert.include(scopeRule, "--llm-focus-ring-color:");
-        assert.include(scopeRule, "--llm-focus-ring-width: 2px;");
-        assert.include(scopeRule, "var(--color-accent");
+        assert.include(
+          scopeRule,
+          "--llm-focus-ring-color: var(--llm-indigo8);",
+        );
+        assert.include(scopeRule, "--llm-focus-ring-width: 0.5px;");
       }
     });
 
@@ -53,7 +55,7 @@ describe("paper sidebar polish CSS", function () {
       );
 
       assert.include(flatFocus, "outline:");
-      assert.include(flatFocus, "var(--llm-focus-ring-color");
+      assert.include(flatFocus, "outline: 0.5px solid var(--llm-slate8)");
       assert.include(flatFocus, "--llm-focus-ring-width, 2px");
       // The actions row clips overflow, so an outer ring would be cut off.
       assert.include(
@@ -92,22 +94,33 @@ describe("paper sidebar polish CSS", function () {
   describe("composer status colours", function () {
     it("reads the ready, busy, error and warning colours from tokens", function () {
       const css = readPanelCss();
+      const panel = rule(css, ".llm-panel");
 
       assert.include(
-        rule(css, ".llm-status-ready"),
-        "color: var(--llm-status-ready-text",
+        panel,
+        "--llm-status-ready-text: var(--llm-green11);",
       );
       assert.include(
-        rule(css, ".llm-status-sending"),
-        "color: var(--llm-status-busy-text",
+        panel,
+        "--llm-status-busy-text: var(--llm-slate11);",
       );
       assert.include(
-        rule(css, ".llm-status-error"),
-        "color: var(--llm-status-error-text",
+        panel,
+        "--llm-status-error-text: var(--llm-red11);",
       );
       assert.include(
-        rule(css, ".llm-status-warning"),
-        "color: var(--llm-status-warning-text",
+        panel,
+        "--llm-status-warning-text: var(--llm-amber11);",
+      );
+      // The hidden status text is announced through the toggle, whose glyph
+      // carries the state colour in the toolbar.
+      assert.include(
+        rule(css, ".llm-status-error + .llm-status-toggle"),
+        "color: var(--llm-red11);",
+      );
+      assert.include(
+        rule(css, ".llm-status-warning + .llm-status-toggle"),
+        "color: var(--llm-amber11);",
       );
     });
 
@@ -115,15 +128,20 @@ describe("paper sidebar polish CSS", function () {
       const css = readPanelCss();
       const panel = rule(css, ".llm-panel");
 
-      assert.include(panel, "--llm-status-error-text: #c0392b;");
-      assert.include(panel, "--llm-status-warning-text: #b26a00;");
+      assert.include(panel, "--llm-status-error-text: var(--llm-red11);");
+      assert.include(panel, "--llm-status-warning-text: var(--llm-amber11);");
 
       const darkCss = css.slice(
         css.indexOf(".window-is-dark .llm-panel"),
         css.indexOf(".window-is-dark .llm-mermaid-viewer"),
       );
-      assert.include(darkCss, "--llm-status-error-text: #ff9d93;");
-      assert.include(darkCss, "--llm-status-warning-text: #f5c04a;");
+      assert.include(darkCss, "--llm-status-error-text: var(--llm-red11);");
+      assert.include(darkCss, "--llm-status-warning-text: var(--llm-amber11);");
+      // Radix step 11 is the readable text step, and it differs per theme.
+      assert.include(css, "--llm-red11: #ce2c31;");
+      assert.include(css, "--llm-red11: #ff9592;");
+      assert.include(css, "--llm-amber11: #ab6400;");
+      assert.include(css, "--llm-amber11: #ffca16;");
     });
 
     it("no longer hard-codes the light-only red and amber in the composer", function () {
@@ -191,7 +209,7 @@ describe("paper sidebar polish CSS", function () {
         const headerRule = rule(css, selector);
         assert.include(
           headerRule,
-          `border: 1px solid var(${borderToken});`,
+          `border: 0.5px solid var(${borderToken});`,
           selector,
         );
         assert.notInclude(
@@ -218,12 +236,17 @@ describe("paper sidebar polish CSS", function () {
         ".llm-input-section",
         ".llm-input",
         ".llm-actions",
-        ".llm-status-bar",
-        ".llm-status",
+        ".llm-status-control",
         ".llm-message-wrapper",
       ]) {
         assert.notEqual(rule(css, selector), "", `${selector} disappeared`);
       }
+
+      assert.notEqual(
+        rule(css, ".llm-status-control > .llm-status"),
+        "",
+        ".llm-status disappeared",
+      );
 
       assert.include(
         rule(
