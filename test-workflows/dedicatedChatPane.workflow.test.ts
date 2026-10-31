@@ -11,6 +11,9 @@ describe("workflow: dedicated native chat pane", function () {
   >[];
   const readers: any[] = [];
   const layoutPref = "extensions.zotero.llmforzotero.sidebarLayout";
+  // Gecko returns subpixel geometry; keep the precision already used by the
+  // sidebar's outer-edge assertions without hiding a real 0.5px overflow.
+  const GEOMETRY_PRECISION = 0.05;
   let originalLayout: unknown;
 
   async function until(check: () => boolean, message: string) {
@@ -182,21 +185,37 @@ describe("workflow: dedicated native chat pane", function () {
       ["header info", infoRect],
       ["header actions", actionsRect],
     ] as const) {
-      assert.isAtLeast(rect.left, navRect.left, `${name} stay in nav row`);
-      assert.isAtMost(rect.right, navRect.right, `${name} stay in nav row`);
-      assert.isAtLeast(rect.top, navRect.top, `${name} stay in nav row`);
-      assert.isAtMost(rect.bottom, navRect.bottom, `${name} stay in nav row`);
+      assert.isAtLeast(
+        rect.left,
+        navRect.left - GEOMETRY_PRECISION,
+        `${name} stay in nav row`,
+      );
+      assert.isAtMost(
+        rect.right,
+        navRect.right + GEOMETRY_PRECISION,
+        `${name} stay in nav row`,
+      );
+      assert.isAtLeast(
+        rect.top,
+        navRect.top - GEOMETRY_PRECISION,
+        `${name} stay in nav row`,
+      );
+      assert.isAtMost(
+        rect.bottom,
+        navRect.bottom + GEOMETRY_PRECISION,
+        `${name} stay in nav row`,
+      );
     }
     if (navRow.classList.contains("llm-header-nav-wrapped")) {
       assert.isAtLeast(
         actionsRect.top,
-        infoRect.bottom,
+        infoRect.bottom - GEOMETRY_PRECISION,
         `wrapped ${layout} actions follow the info row`,
       );
     } else {
       assert.isAtMost(
         infoRect.right,
-        actionsRect.left,
+        actionsRect.left + GEOMETRY_PRECISION,
         `unwrapped ${layout} info and actions do not overlap`,
       );
     }
@@ -221,7 +240,7 @@ describe("workflow: dedicated native chat pane", function () {
     assert.closeTo(
       navRect.top - panel.getBoundingClientRect().top,
       headerPaddingTop,
-      0.5,
+      GEOMETRY_PRECISION,
       `the nav row is the first header content (${layout})`,
     );
   }
@@ -272,13 +291,13 @@ describe("workflow: dedicated native chat pane", function () {
     assert.closeTo(
       composerRect.left - panelRect.left,
       0,
-      0.05,
+      GEOMETRY_PRECISION,
       "composer left edge is flush with the panel",
     );
     assert.closeTo(
       panelRect.right - composerRect.right,
       0,
-      0.05,
+      GEOMETRY_PRECISION,
       "composer right edge is flush with the panel",
     );
     const style = win.getComputedStyle(composer);
@@ -311,16 +330,24 @@ describe("workflow: dedicated native chat pane", function () {
       const rect = node!.getBoundingClientRect();
       assert.isAbove(rect.width, 0, `${name} is visible`);
       assert.isAbove(rect.height, 0, `${name} has height`);
-      assert.isAtLeast(rect.left, contentLeft, `${name} starts inside padding`);
-      assert.isAtMost(rect.right, contentRight, `${name} ends inside padding`);
+      assert.isAtLeast(
+        rect.left,
+        contentLeft - GEOMETRY_PRECISION,
+        `${name} starts inside padding`,
+      );
+      assert.isAtMost(
+        rect.right,
+        contentRight + GEOMETRY_PRECISION,
+        `${name} ends inside padding`,
+      );
       assert.isAtLeast(
         rect.top,
-        contentTop,
+        contentTop - GEOMETRY_PRECISION,
         `${name} starts below top padding`,
       );
       assert.isAtMost(
         rect.bottom,
-        contentBottom,
+        contentBottom + GEOMETRY_PRECISION,
         `${name} ends above bottom padding`,
       );
     }
@@ -398,32 +425,32 @@ describe("workflow: dedicated native chat pane", function () {
         const rect = button.getBoundingClientRect();
         assert.isAtLeast(
           rect.left,
-          disclosureRect.left,
+          disclosureRect.left - GEOMETRY_PRECISION,
           `prompt ${index} starts inside Quick questions`,
         );
         assert.isAtMost(
           rect.right,
-          disclosureRect.right,
+          disclosureRect.right + GEOMETRY_PRECISION,
           `prompt ${index} ends inside Quick questions`,
         );
         assert.isAtLeast(
           rect.left,
-          shortcutsRect.left,
+          shortcutsRect.left - GEOMETRY_PRECISION,
           `prompt ${index} starts inside the prompt row`,
         );
         assert.isAtMost(
           rect.right,
-          shortcutsRect.right,
+          shortcutsRect.right + GEOMETRY_PRECISION,
           `prompt ${index} ends inside the prompt row`,
         );
         assert.isAtLeast(
           rect.left,
-          toolsRect.left,
+          toolsRect.left - GEOMETRY_PRECISION,
           `prompt ${index} stays inside More`,
         );
         assert.isAtMost(
           rect.right,
-          toolsRect.right,
+          toolsRect.right + GEOMETRY_PRECISION,
           `prompt ${index} stays inside More`,
         );
       }
@@ -479,10 +506,26 @@ describe("workflow: dedicated native chat pane", function () {
       ]) {
         const action = tools.querySelector(`#${id}`)!;
         const rect = action.getBoundingClientRect();
-        assert.isAtLeast(rect.left, bounds.left, `${id} stays inside More`);
-        assert.isAtMost(rect.right, bounds.right, `${id} stays inside More`);
-        assert.isAtLeast(rect.top, bounds.top, `${id} stays inside More`);
-        assert.isAtMost(rect.bottom, bounds.bottom, `${id} stays inside More`);
+        assert.isAtLeast(
+          rect.left,
+          bounds.left - GEOMETRY_PRECISION,
+          `${id} stays inside More`,
+        );
+        assert.isAtMost(
+          rect.right,
+          bounds.right + GEOMETRY_PRECISION,
+          `${id} stays inside More`,
+        );
+        assert.isAtLeast(
+          rect.top,
+          bounds.top - GEOMETRY_PRECISION,
+          `${id} stays inside More`,
+        );
+        assert.isAtMost(
+          rect.bottom,
+          bounds.bottom + GEOMETRY_PRECISION,
+          `${id} stays inside More`,
+        );
       }
     } finally {
       tools.open = original;
