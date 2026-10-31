@@ -22,6 +22,11 @@ export type PreparedLibraryChat = {
   conversationKey: number;
 };
 
+const acquiredLocks = new WeakMap<
+  PreparedLibraryChat,
+  { libraryID: number; conversationKey: number }
+>();
+
 function normalizeId(value: unknown): number {
   const numeric = Math.floor(Number(value));
   return Number.isFinite(numeric) && numeric > 0 ? numeric : 0;
@@ -42,6 +47,7 @@ export function lockPreparedLibraryChat(
   if (state.getLockedKey(libraryID) !== null) return false;
   state.setLockedKey(libraryID, conversationKey);
   state.addAutoLockedKey(conversationKey);
+  acquiredLocks.set(prepared, { libraryID, conversationKey });
   return true;
 }
 
@@ -56,10 +62,19 @@ export function releasePreparedLibraryChat(
   const libraryID = normalizeId(prepared.libraryID);
   const conversationKey = normalizeId(prepared.conversationKey);
   if (!libraryID || !conversationKey) return false;
-  if (!state.isAutoLockedKey(conversationKey)) return false;
-  state.removeAutoLockedKey(conversationKey);
-  if (state.getLockedKey(libraryID) === conversationKey) {
-    state.setLockedKey(libraryID, null);
+  const acquired = acquiredLocks.get(prepared);
+  if (
+    !acquired ||
+    acquired.libraryID !== libraryID ||
+    acquired.conversationKey !== conversationKey ||
+    !state.isAutoLockedKey(conversationKey)
+  ) {
+    return false;
+  }
+  acquiredLocks.delete(prepared);
+  state.removeAutoLockedKey(acquired.conversationKey);
+  if (state.getLockedKey(acquired.libraryID) === acquired.conversationKey) {
+    state.setLockedKey(acquired.libraryID, null);
   }
   return true;
 }
