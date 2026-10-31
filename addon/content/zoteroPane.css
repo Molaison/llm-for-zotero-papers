@@ -643,7 +643,7 @@
  * sidebar is too narrow for both. Scoped to the row to outrank the shared
  * .llm-standalone-tab padding. */
 .llm-header-toggle-row .llm-header-mode-tab {
-  flex: 0 1 auto;
+  flex: 1 1 0;
   min-width: 64px;
   padding-inline: 12px;
 }

@@ -351,7 +351,7 @@ export async function setTaskProgressComposerContexts(
     copy(input.collectionContexts),
   );
   composeContextStore.tags.replace(item.id, copy(input.tagContexts));
-  composeContextStore.initializedConversations.mark(item.id);
+  composeContextStore.initializedConversations.mark(getConversationKey(item));
   // The panel state too: the chips redraw, and Task progress follows them
   // through the same sync a chip added by hand goes through.
   refreshConversationPanels(body, item, { includePanelState: true });

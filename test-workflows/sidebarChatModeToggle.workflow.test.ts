@@ -18,6 +18,7 @@ import type {
   WorkflowTestFixture,
   WorkflowTestNoteFixture,
 } from "../src/modules/contextPanel/workflowTestTypes";
+import { sendMouseEvent } from "./helpers/pointerEvent";
 
 type Tab = "paper" | "library";
 
@@ -259,7 +260,7 @@ describe("workflow: sidebar chat mode toggle", function () {
 
     /** A native mouse move: real hover, :hover and pointer events. */
     function movePointer(x: number, y: number) {
-      win.windowUtils.sendMouseEvent("mousemove", x, y, 0, 0, 0);
+      sendMouseEvent(win, "mousemove", x, y, 0, 0, 0);
     }
 
     function hover(element: Element) {
@@ -272,8 +273,8 @@ describe("workflow: sidebar chat mode toggle", function () {
       const rect = element.getBoundingClientRect();
       const x = rect.left + rect.width / 2;
       const y = rect.top + rect.height / 2;
-      win.windowUtils.sendMouseEvent("mousedown", x, y, 0, 1, 0);
-      win.windowUtils.sendMouseEvent("mouseup", x, y, 0, 1, 0);
+      sendMouseEvent(win, "mousedown", x, y, 0, 1, 0);
+      sendMouseEvent(win, "mouseup", x, y, 0, 1, 0);
     }
 
     /** Rest the pointer on the chat, well clear of the chip's column. */

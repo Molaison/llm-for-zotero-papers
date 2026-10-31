@@ -13,8 +13,8 @@
  * - selected texts and their expanded-index / note-expanded flags are keyed
  *   by the text-context conversation key (callers name the parameter
  *   `itemId`, but they pass the conversation key);
- * - the initialized-conversation set receives both item ids and
- *   conversation keys, depending on the writer;
+ * - the initialized-conversation set is keyed by conversation key; older
+ *   entries keyed by item id remain readable during restoration;
  * - per-paper send-mode and source-mode overrides are keyed by
  *   `ownerScopedPaperKey(ownerItemId, paper)`.
  */
@@ -169,8 +169,7 @@ export const composeContextStore = {
 
   /**
    * Owners whose paper/collection/tag composer state is set up. Membership
-   * counts even when every list is empty. Writers mark item ids and
-   * conversation keys.
+   * counts even when every list is empty. New writes use conversation keys.
    */
   initializedConversations: {
     has: (key: number): boolean =>

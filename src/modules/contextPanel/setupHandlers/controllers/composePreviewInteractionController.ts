@@ -1,5 +1,6 @@
 import { t } from "../../../../utils/i18n";
 import { clearUserAddedContextForItem } from "../../contextSelectionActions";
+import { getConversationKey } from "../../conversationIdentity";
 import {
   getActiveContextAttachmentFromTabs,
   getSelectedTextContextEntries,
@@ -146,6 +147,7 @@ export function attachComposePreviewInteractionController(
     removeUnmanagedSelectedFileCopies(item.id);
     const result = clearUserAddedContextForItem({
       itemId: item.id,
+      conversationKey: getConversationKey(item),
       textContextKey: deps.getTextContextConversationKey(),
     });
     deps.closePaperChipMenu();
@@ -393,7 +395,9 @@ export function attachComposePreviewInteractionController(
             (_, itemIndex) => itemIndex !== index,
           );
           composeContextStore.collections.replace(item.id, next);
-          composeContextStore.initializedConversations.mark(item.id);
+          composeContextStore.initializedConversations.mark(
+            getConversationKey(item),
+          );
           deps.updatePaperPreviewPreservingScroll();
           setStatus(t("Collection context removed."), "ready");
         }
@@ -411,7 +415,9 @@ export function attachComposePreviewInteractionController(
         if (Number.isFinite(index) && index >= 0 && index < tags.length) {
           const next = tags.filter((_, itemIndex) => itemIndex !== index);
           composeContextStore.tags.replace(item.id, next);
-          composeContextStore.initializedConversations.mark(item.id);
+          composeContextStore.initializedConversations.mark(
+            getConversationKey(item),
+          );
           deps.updatePaperPreviewPreservingScroll();
           setStatus(t("Tag context removed."), "ready");
         }
@@ -451,7 +457,9 @@ export function attachComposePreviewInteractionController(
       } else {
         clearSelectedPaperState(item.id);
       }
-      composeContextStore.initializedConversations.mark(item.id);
+      composeContextStore.initializedConversations.mark(
+        getConversationKey(item),
+      );
       deps.updatePaperPreviewPreservingScroll();
       setStatus(`Paper context removed (${nextPapers.length})`, "ready");
       deps.closePaperChipMenu();

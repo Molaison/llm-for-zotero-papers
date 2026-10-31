@@ -72,6 +72,13 @@ describe("workflow: standalone responsive chrome", function () {
         "#llm-header-runtime-controls",
       ) as HTMLElement;
       runtimeWrapper.style.display = "";
+      // The source header is standalone, where this embedded button is hidden.
+      // Restore the normal embedded Paper-chat state before measuring it.
+      const taskProgressToggle = header.querySelector(
+        "#llm-task-progress-toggle",
+      ) as HTMLElement;
+      assert.isOk(taskProgressToggle, "the task progress toggle is rendered");
+      taskProgressToggle.style.display = "";
       for (const label of ["Paper chat", "Note chat", "Web chat"]) {
         paperTabLabel.textContent = label;
         for (const scale of [0.8, 1.2, 1.8]) {
@@ -97,6 +104,16 @@ describe("workflow: standalone responsive chrome", function () {
             )
               .map((button) => button.getBoundingClientRect())
               .filter((rect) => rect.width > 0 && rect.height > 0);
+            const visibleButtonIds = (
+              Array.from(
+                header.querySelectorAll("button"),
+              ) as HTMLButtonElement[]
+            )
+              .filter((button) => {
+                const rect = button.getBoundingClientRect();
+                return rect.width > 0 && rect.height > 0;
+              })
+              .map((button) => button.id);
             const context = `${label}, ${width}px, scale ${scale}`;
             for (const button of Array.from(
               header.querySelectorAll(".llm-header-actions button"),
@@ -105,7 +122,7 @@ describe("workflow: standalone responsive chrome", function () {
                 button.getBoundingClientRect().width,
                 bounds.width <= 380 ? 24 : 28,
                 0.5,
-                `Action-button padding must be preserved: ${context}`,
+                `Action-button padding must be preserved: ${context}, ${button.id}`,
               );
             }
             for (const button of Array.from(
@@ -135,8 +152,25 @@ describe("workflow: standalone responsive chrome", function () {
             );
             assert.lengthOf(
               buttons,
-              10,
+              11,
               `All header controls visible: ${context}`,
+            );
+            assert.sameMembers(
+              visibleButtonIds,
+              [
+                "llm-paper-chat-tab",
+                "llm-library-chat-tab",
+                "llm-history-new",
+                "llm-history-toggle",
+                "llm-codex-system-toggle",
+                "llm-claude-system-toggle",
+                "llm-task-progress-toggle",
+                "llm-popout",
+                "llm-settings",
+                "llm-export",
+                "llm-clear",
+              ],
+              `Every embedded header control is present: ${context}`,
             );
             const toggleRowRect = toggleRow.getBoundingClientRect();
             const navRowRect = navRow.getBoundingClientRect();

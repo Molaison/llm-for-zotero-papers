@@ -3099,14 +3099,25 @@ async function probeTargetedRerenderScrollStability(params: {
   const nextFrame = () =>
     new Promise<void>((resolve) => win.requestAnimationFrame(() => resolve()));
 
-  const expandedWrapper = wrapperForMessage(
-    params.wrappers,
-    params.expandedMessage,
-  );
-  const earlierWrapper = wrapperForMessage(
-    params.wrappers,
-    params.earlierMessage,
-  );
+  const mountedMessageWrapper = (message: Message) =>
+    wrapperForMessage(
+      Array.from(
+        chatBox.querySelectorAll(
+          ".llm-message-wrapper[data-message-timestamp]",
+        ),
+      ) as HTMLElement[],
+      message,
+    );
+  const mountedCard = () => {
+    const wrapper = mountedMessageWrapper(params.expandedMessage);
+    const cards = wrapper.querySelectorAll<HTMLElement>(
+      '.llm-quote-card[data-quote-interactive="true"]',
+    );
+    const card = cards[cards.length - 1];
+    if (!card) throw new Error("Expanded message rendered no interactive card");
+    return { wrapper, card };
+  };
+  let { wrapper: expandedWrapper, card } = mountedCard();
   const conversationKey = getConversationKey(params.item);
   const timeline: Array<Record<string, unknown>> = [];
   const record = (label: string) => {
@@ -3116,42 +3127,45 @@ async function probeTargetedRerenderScrollStability(params: {
       scrollTop: chatBox.scrollTop,
       scrollHeight: chatBox.scrollHeight,
       wrapperTop:
-        expandedWrapper.getBoundingClientRect().top -
-        chatBox.getBoundingClientRect().top,
+        mountedMessageWrapper(params.expandedMessage).getBoundingClientRect()
+          .top - chatBox.getBoundingClientRect().top,
       snapshot: snapshot
         ? `${snapshot.mode}@${snapshot.scrollTop}${snapshot.anchor ? `/${snapshot.anchor.kind}:${snapshot.anchor.quoteCitationId || snapshot.anchor.messageAnchorKey}` : ""}`
         : null,
     });
   };
   record("start");
-  // The reader is on the last card of the later message: the repeated quote,
-  // whose citation id also belongs to an earlier card in the same message.
-  const interactiveCards = Array.from(
-    expandedWrapper.querySelectorAll(
-      '.llm-quote-card[data-quote-interactive="true"]',
-    ),
-  ) as HTMLElement[];
-  const card = interactiveCards[interactiveCards.length - 1];
-  if (!card) throw new Error("Expanded message rendered no interactive card");
-  // The card straddles the top edge, as a card the reader has just scrolled
-  // past does; the anchor search prefers exactly that card.
-  chatBox.scrollTop +=
-    card.getBoundingClientRect().top - chatBox.getBoundingClientRect().top + 12;
-  record("after-scroll-write");
-  const cardTopAfterScrollWrite = card.getBoundingClientRect().top;
-  await nextFrame();
-  record("after-frame-1");
-  await nextFrame();
-  record("after-frame-2");
-  // Nothing has been clicked yet: the view must still be where the reader
-  // put it once the panel's deferred scroll work has run.
+  // Source validation may replace cards during the initial render frames.
+  // A native reader clicks the mounted card; never act on a retired node.
+  let cardTopAfterScrollWrite = 0;
+  const settleDeadline = Date.now() + 5000;
+  for (;;) {
+    ({ wrapper: expandedWrapper, card } = mountedCard());
+    chatBox.scrollTop +=
+      card.getBoundingClientRect().top -
+      chatBox.getBoundingClientRect().top +
+      12;
+    record("after-scroll-write");
+    cardTopAfterScrollWrite = card.getBoundingClientRect().top;
+    await nextFrame();
+    record("after-frame-1");
+    await nextFrame();
+    record("after-frame-2");
+    if (card.isConnected && mountedCard().card === card) break;
+    if (Date.now() >= settleDeadline)
+      throw new Error("Quote cards did not settle before native interaction");
+  }
   const settleDrift =
     card.getBoundingClientRect().top - cardTopAfterScrollWrite;
 
+  const clickedCardConnectedAtClick = card.isConnected;
   card.click();
   record("after-click");
   await nextFrame();
   record("after-click-frame");
+  // A background update can also run after the click. Inspect the live state
+  // that must retain the reader's expansion through any such update.
+  ({ wrapper: expandedWrapper, card } = mountedCard());
   const citationId = card.dataset.quoteCitationId || "";
   const sameCitationCards = expandedWrapper.querySelectorAll(
     `.llm-quote-card[data-quote-citation-id="${citationId}"]`,
@@ -3159,7 +3173,11 @@ async function probeTargetedRerenderScrollStability(params: {
   const expandedBeforeRerender = card.dataset.expanded === "true";
   const scrollTopBefore = chatBox.scrollTop;
   const cardTopBefore = card.getBoundingClientRect().top;
-  const earlierHeightBefore = earlierWrapper.getBoundingClientRect().height;
+  const earlierWrapperBefore = mountedMessageWrapper(params.earlierMessage);
+  const earlierHeightBefore =
+    earlierWrapperBefore.getBoundingClientRect().height;
+  const clickedCardConnectedBeforeRerender = card.isConnected;
+  const earlierWrapperConnectedBefore = earlierWrapperBefore.isConnected;
 
   // An earlier message changes height above the viewport while the expanded
   // message is re-rendered with identical content under new citation identity.
@@ -3197,9 +3215,17 @@ async function probeTargetedRerenderScrollStability(params: {
     ),
   ) as HTMLElement[];
   const cardAfter = cardsAfter[cardsAfter.length - 1] || null;
+  const earlierWrapperAfter = mountedMessageWrapper(params.earlierMessage);
+  const earlierHeightAfter = earlierWrapperAfter.getBoundingClientRect().height;
   const diagnostics: Record<string, unknown> = {
     timeline,
     sameCitationCards,
+    clickedCardConnectedBeforeRerender,
+    clickedCardConnectedAtClick,
+    earlierHeightBefore,
+    earlierHeightAfter,
+    earlierWrapperConnectedBefore,
+    earlierWrapperConnectedAfter: earlierWrapperAfter.isConnected,
     snapshotBefore: snapshotBefore
       ? {
           mode: snapshotBefore.mode,
@@ -3221,8 +3247,7 @@ async function probeTargetedRerenderScrollStability(params: {
   return {
     diagnostics,
     chatBoxScrollable: chatBox.scrollHeight > chatBox.clientHeight + 1,
-    earlierWrapperHeightDelta:
-      earlierWrapper.getBoundingClientRect().height - earlierHeightBefore,
+    earlierWrapperHeightDelta: earlierHeightAfter - earlierHeightBefore,
     expandedBeforeRerender,
     expandedAfterRerender: cardAfter?.dataset.expanded === "true",
     expandedBodyTextAfterRerender: (

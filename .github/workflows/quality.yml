@@ -68,6 +68,8 @@ jobs:
           cache: npm
       - name: Install dependencies
         run: npm ci
+      - name: Run affected library-context native preflight
+        run: node scripts/run-library-context-regressions.mjs
       - name: Run workflow tests
         run: npm run test:workflow
 

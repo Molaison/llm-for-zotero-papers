@@ -27,6 +27,7 @@ import {
   normalizeReferenceSelectorTagIdentityName,
 } from "./referenceSelector/model";
 import { composeContextStore } from "./contexts/composeContextStore";
+import { getConversationKey } from "./conversationIdentity";
 import type {
   CollectionContextRef,
   OtherContextRef,
@@ -129,7 +130,7 @@ export function upsertPaperContext(
     },
   ];
   composeContextStore.papers.set(item.id, nextPapers);
-  composeContextStore.initializedConversations.mark(item.id);
+  composeContextStore.initializedConversations.mark(getConversationKey(item));
   setPaperModeOverride(item.id, nextPapers[nextPapers.length - 1], "full-next");
   composeContextStore.paperPreviewExpanded.set(item.id, false);
   deps.updatePaperPreviewPreservingScroll();
@@ -295,13 +296,16 @@ export function hasUserAddedContextForItem(params: {
 
 export function clearUserAddedContextForItem(params: {
   itemId: number;
+  conversationKey?: number;
   textContextKey?: number | null;
 }): ContextSelectionActionResult {
   const itemId = normalizePositiveItemId(params.itemId);
   if (!itemId) return unchanged();
   const textContextKey = normalizePositiveItemId(params.textContextKey);
   const hadContext = hasUserAddedContextForItem({ itemId, textContextKey });
-  composeContextStore.initializedConversations.mark(itemId);
+  composeContextStore.initializedConversations.mark(
+    normalizePositiveItemId(params.conversationKey) || itemId,
+  );
 
   const removedPapers = composeContextStore.papers.list(itemId);
   composeContextStore.papers.delete(itemId);
@@ -424,7 +428,9 @@ export function removeReferenceAttachmentContext(params: {
       }
       composeContextStore.paperPreviewExpanded.set(item.id, false);
       deps.updatePaperPreviewPreservingScroll();
-      composeContextStore.initializedConversations.mark(item.id);
+      composeContextStore.initializedConversations.mark(
+        getConversationKey(item),
+      );
       removed = true;
     }
   } else if (kind === "note") {
@@ -489,7 +495,7 @@ export function removeReferenceGroupContexts(params: {
       clearPaperOverridesForItem(item.id, paper);
     }
     composeContextStore.paperPreviewExpanded.set(item.id, false);
-    composeContextStore.initializedConversations.mark(item.id);
+    composeContextStore.initializedConversations.mark(getConversationKey(item));
     removed = true;
   }
 
@@ -538,12 +544,12 @@ export function toggleCollectionContext(params: {
   if (existingIndex >= 0) {
     const next = existing.filter((_, index) => index !== existingIndex);
     composeContextStore.collections.replace(item.id, next);
-    composeContextStore.initializedConversations.mark(item.id);
+    composeContextStore.initializedConversations.mark(getConversationKey(item));
     deps.updatePaperPreviewPreservingScroll();
     return changed(t("Collection context removed."), "ready");
   }
   composeContextStore.collections.set(item.id, [...existing, ref]);
-  composeContextStore.initializedConversations.mark(item.id);
+  composeContextStore.initializedConversations.mark(getConversationKey(item));
   deps.updatePaperPreviewPreservingScroll();
   return changed(t("Collection context added."), "ready");
 }
@@ -600,12 +606,12 @@ export function toggleTagContext(params: {
   if (existingIndex >= 0) {
     const next = existing.filter((_, index) => index !== existingIndex);
     composeContextStore.tags.replace(item.id, next);
-    composeContextStore.initializedConversations.mark(item.id);
+    composeContextStore.initializedConversations.mark(getConversationKey(item));
     deps.updatePaperPreviewPreservingScroll();
     return changed(t("Tag context removed."), "ready");
   }
   composeContextStore.tags.set(item.id, [...existing, normalizedRef]);
-  composeContextStore.initializedConversations.mark(item.id);
+  composeContextStore.initializedConversations.mark(getConversationKey(item));
   deps.updatePaperPreviewPreservingScroll();
   return changed(t("Tag context added."), "ready");
 }

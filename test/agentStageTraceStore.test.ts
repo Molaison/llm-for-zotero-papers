@@ -547,17 +547,25 @@ describe("tool results in the trace store", function () {
 });
 
 describe("tool result preview cost", function () {
-  /** The median of seven runs, in milliseconds, after a warm-up run. */
+  const BATCH_SIZE = 3;
+  const SAMPLES = 9;
+
+  function median(values: readonly number[]): number {
+    const sorted = [...values].sort((left, right) => left - right);
+    return sorted[Math.floor(sorted.length / 2)];
+  }
+
+  /** Time a batch so timer and scheduling noise is small relative to the work. */
   function timed(content: unknown): { ms: number; preview: unknown } {
-    let preview = buildToolResultPreview(content);
-    const runs: number[] = [];
-    for (let run = 0; run < 7; run += 1) {
-      const start = performance.now();
+    const start = performance.now();
+    let preview: unknown;
+    for (let run = 0; run < BATCH_SIZE; run += 1) {
       preview = buildToolResultPreview(content);
-      runs.push(performance.now() - start);
     }
-    runs.sort((left, right) => left - right);
-    return { ms: runs[3], preview };
+    return {
+      ms: (performance.now() - start) / BATCH_SIZE,
+      preview,
+    };
   }
 
   const rows = (count: number) => ({
@@ -583,21 +591,51 @@ describe("tool result preview cost", function () {
   });
 
   it("previews 3,000 rows of five-entry arrays and a 1,000-item listing in linear time", function () {
-    const big = timed(rows(3_000));
-    const small = timed(rows(1_000));
-    const items = timed(listing(1_000));
-    assert.isBelow(big.ms, 50, `3,000 rows took ${big.ms.toFixed(1)} ms`);
-    assert.isBelow(items.ms, 30, `1,000 items took ${items.ms.toFixed(1)} ms`);
-    assert.isBelow(
-      big.ms,
-      4 * Math.max(small.ms, 1),
-      `3,000 rows ${big.ms.toFixed(1)} ms vs 1,000 rows ${small.ms.toFixed(1)} ms`,
+    this.timeout(10_000);
+    const bigContent = rows(3_000);
+    const smallContent = rows(1_000);
+    const itemContent = listing(1_000);
+    // Warm both sides of the ratio and the listing before taking any sample.
+    for (const content of [bigContent, smallContent, itemContent])
+      timed(content);
+
+    const bigRuns: number[] = [];
+    const smallRuns: number[] = [];
+    const ratios: number[] = [];
+    for (let sample = 0; sample < SAMPLES; sample += 1) {
+      // Alternate order so a cache/JIT/GC shift cannot bias one side.
+      const bigFirst = sample % 2 === 0;
+      const first = timed(bigFirst ? bigContent : smallContent);
+      const second = timed(bigFirst ? smallContent : bigContent);
+      const big = bigFirst ? first : second;
+      const small = bigFirst ? second : first;
+      bigRuns.push(big.ms);
+      smallRuns.push(small.ms);
+      ratios.push(big.ms / Math.max(small.ms, 0.001));
+    }
+    const itemRuns = Array.from(
+      { length: SAMPLES },
+      () => timed(itemContent).ms,
     );
-    for (const { preview } of [big, small, items]) {
+    const bigMs = median(bigRuns);
+    const smallMs = median(smallRuns);
+    const itemMs = median(itemRuns);
+    const ratio = median(ratios);
+    const previews = [bigContent, smallContent, itemContent].map((content) =>
+      buildToolResultPreview(content),
+    );
+    assert.isBelow(bigMs, 50, `3,000 rows took ${bigMs.toFixed(1)} ms`);
+    assert.isBelow(itemMs, 30, `1,000 items took ${itemMs.toFixed(1)} ms`);
+    assert.isBelow(
+      ratio,
+      4,
+      `3,000 rows ${bigMs.toFixed(1)} ms vs 1,000 rows ${smallMs.toFixed(1)} ms; median ratio ${ratio.toFixed(2)}`,
+    );
+    for (const preview of previews) {
       assert.exists(preview);
       assert.isAtMost(JSON.stringify(preview).length, PREVIEW_MAX_BYTES);
     }
-    const listed = items.preview as ReturnType<typeof listing>;
+    const listed = previews[2] as ReturnType<typeof listing>;
     assert.equal(listed.mode, "list");
     assert.equal(listed.totalCount, 1_000);
     assert.isAtLeast(listed.items.length, 3);

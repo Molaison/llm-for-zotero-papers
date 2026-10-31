@@ -99,7 +99,10 @@ function installItems(items: Zotero.Item[]): void {
 
 function makeDeps(ownerItemId: number): ContextSelectionActionDeps {
   return {
-    item: { id: ownerItemId } as Zotero.Item,
+    item: {
+      id: ownerItemId,
+      isAttachment: () => false,
+    } as Zotero.Item,
     resolveAutoLoadedPaperContext: () => null,
     getManualPaperContextsForItem: () =>
       selectedPaperContextCache.get(ownerItemId) || [],
