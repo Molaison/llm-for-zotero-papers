@@ -405,27 +405,57 @@ describe("annotation research drawer presentation", () => {
     assert.isNull(body.querySelector("#llm-annotation-selection-summary"));
     assert.isNull(body.querySelector("#llm-annotation-toggle"));
   });
-  it("uses the visible native viewport when the panel starts below it and keeps the last valid height", () => {
-    const viewport = new Node("div"), panel = new Node("div"), root = new Node("details");
-    viewport.className = "zotero-view-item"; panel.className = "llm-panel";
-    viewport.append(panel); panel.append(root);
+  function annotationLayoutHarness(withNativeSection: boolean) {
+    const viewport = new Node("div"), nativeSection = new Node("collapsible-section");
+    const nativeHead = new Node("div"), panel = new Node("div"), root = new Node("details");
+    viewport.className = "zotero-view-item";
+    nativeHead.className = "head";
+    panel.className = "llm-panel";
+    if (withNativeSection) {
+      nativeSection.append(nativeHead, panel);
+      viewport.append(nativeSection);
+      const inheritedClosest = panel.closest.bind(panel);
+      panel.closest = ((selector: string) =>
+        selector === "collapsible-section"
+          ? nativeSection
+          : inheritedClosest(selector)) as typeof panel.closest;
+    } else {
+      viewport.append(panel);
+    }
+    panel.append(root);
     Object.defineProperty(root, "isConnected", {configurable:true, get:() => true});
-    let viewportRect = {top:200, bottom:1152, width:800, height:952};
-    let panelRect = {top:1326, bottom:1326, width:800, height:0};
+    let viewportRect = withNativeSection
+      ? {top:489, bottom:600, width:800, height:111}
+      : {top:200, bottom:1152, width:800, height:952};
+    let nativeRect = {top:542.616, bottom:595.616, width:304, height:53};
+    let panelRect = withNativeSection
+      ? {top:572.616, bottom:591.616, width:304, height:19}
+      : {top:1326, bottom:1326, width:800, height:0};
     viewport.getBoundingClientRect = () => viewportRect;
+    nativeSection.getBoundingClientRect = () => nativeRect;
     panel.getBoundingClientRect = () => panelRect;
     const styles = new Map<string,string>();
     panel.style = {setProperty:(name:string,value:string) => styles.set(name,value),
       removeProperty:(name:string) => styles.delete(name)} as unknown as CSSStyleDeclaration;
     const frames = new Map<number,FrameRequestCallback>();
     let nextFrame = 1, observerCallback: (() => void) | null = null;
+    let disconnectCount = 0;
+    const observedNodes: Node[] = [];
     class TestResizeObserver {
       constructor(callback: () => void) { observerCallback = callback; }
-      observe() {} disconnect() {}
+      observe(node: Node) { observedNodes.push(node); }
+      disconnect() { disconnectCount++; }
     }
+    let innerHeight = withNativeSection ? 600 : 1152;
     const originalView = (doc as unknown as {defaultView: Window | null}).defaultView;
     (doc as unknown as {defaultView: Window}).defaultView = {
-      innerHeight:1152, innerWidth:1200, ResizeObserver:TestResizeObserver,
+      get innerHeight() { return innerHeight; },
+      innerWidth:1200,
+      ResizeObserver:TestResizeObserver,
+      getComputedStyle(node: Element) {
+        assert.strictEqual(node, nativeSection);
+        return {paddingBottom:"4px"} as CSSStyleDeclaration;
+      },
       requestAnimationFrame(callback:FrameRequestCallback) {
         const id = nextFrame++; frames.set(id,callback); return id;
       },
@@ -437,23 +467,68 @@ describe("annotation research drawer presentation", () => {
       for (const callback of callbacks) callback(performance.now());
     };
     const dispose = installAnnotationReplyLayout(root as unknown as HTMLDetailsElement);
+    return {
+      viewport, nativeSection, nativeHead, panel, root, styles, observedNodes,
+      disconnectCount: () => disconnectCount,
+      setViewportRect: (rect: typeof viewportRect) => { viewportRect = rect; },
+      moveNativeContent: (delta: number) => {
+        nativeRect = {...nativeRect, top:nativeRect.top + delta, bottom:nativeRect.bottom + delta};
+        panelRect = {...panelRect, top:panelRect.top + delta, bottom:panelRect.bottom + delta};
+      },
+      setPanelTop: (top: number) => { panelRect = {...panelRect, top, bottom:top + panelRect.height}; },
+      setInnerHeight: (value: number) => { innerHeight = value; },
+      resize: () => observerCallback!(),
+      flush: flushFrame,
+      dispose,
+      restoreWindow: () => {
+        (doc as unknown as {defaultView: Window | null}).defaultView = originalView;
+      },
+    };
+  }
+
+  it("keeps a stable viewport budget across native panel scroll and preserves it when the viewport is invalid", () => {
+    const h = annotationLayoutHarness(true);
     try {
-      assert.equal(styles.get("--llm-workspace-height"),"944px",
-        "panel below the native viewport receives its complete positive budget");
-      panelRect = {top:700, bottom:700, width:800, height:0};
-      observerCallback!(); flushFrame();
-      assert.equal(styles.get("--llm-workspace-height"),"444px",
-        "partially visible panel keeps its position-specific budget");
-      viewportRect = {top:0, bottom:0, width:0, height:0};
-      observerCallback!(); flushFrame();
-      assert.equal(styles.get("--llm-workspace-height"),"444px",
-        "a hidden viewport must not overwrite the last valid height with zero");
+      assert.equal(h.styles.get("--llm-workspace-height"), "69px",
+        "partial panel uses the complete viewport minus stable native chrome");
+      assert.sameMembers(h.observedNodes, [h.viewport, h.panel, h.nativeSection, h.nativeHead],
+        "native section and head join the viewport and panel observations");
+      h.moveNativeContent(-40);
+      h.resize(); h.flush();
+      assert.equal(h.styles.get("--llm-workspace-height"), "69px",
+        "scrolling changes panel top but keeps the same viewport budget");
+      h.setViewportRect({top:489, bottom:600, width:0, height:111});
+      h.resize(); h.flush();
+      assert.equal(h.styles.get("--llm-workspace-height"), "69px",
+        "a hidden viewport retains the last positive height");
+      h.setViewportRect({top:NaN, bottom:NaN, width:800, height:NaN});
+      h.resize(); h.flush();
+      assert.equal(h.styles.get("--llm-workspace-height"), "69px",
+        "invalid viewport geometry retains the last positive height");
     } finally {
-      dispose();
-      (doc as unknown as {defaultView: Window | null}).defaultView = originalView;
+      h.dispose();
+      h.restoreWindow();
     }
-    assert.isFalse(styles.has("--llm-workspace-height"));
-    assert.isNull(root.getAttribute("data-reading-workspace"));
+    assert.equal(h.disconnectCount(), 1);
+    assert.isFalse(h.styles.has("--llm-workspace-height"));
+    assert.isNull(h.root.getAttribute("data-reading-workspace"));
+  });
+
+  it("uses the whole viewport budget when Independent has no native collapsible chrome", () => {
+    const h = annotationLayoutHarness(false);
+    try {
+      assert.equal(h.styles.get("--llm-workspace-height"), "944px",
+        "panel below the native viewport receives the complete viewport budget");
+      h.setPanelTop(700);
+      h.resize(); h.flush();
+      assert.equal(h.styles.get("--llm-workspace-height"), "944px",
+        "Independent panel position does not reduce the stable viewport budget");
+      assert.sameMembers(h.observedNodes, [h.viewport, h.panel],
+        "without a native section only the viewport and panel are observed");
+    } finally {
+      h.dispose();
+      h.restoreWindow();
+    }
   });
   it("keeps one workspace view while bulk selection, source, history and Escape preserve the composer", async () => {
     const body = host(), workspace = host(), chat = host(), compose = host(), actions = host();

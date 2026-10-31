@@ -23,7 +23,7 @@ import {
   renderAnnotationBatchAnswers,
 } from "../../annotationReplyPresentation";
 
-/** Bound the single reading workspace to the native viewport, including its composer. */
+/** Bound the single reading workspace to the native viewport and section chrome. */
 export function installAnnotationReplyLayout(
   root: HTMLDetailsElement,
 ): () => void {
@@ -31,6 +31,14 @@ export function installAnnotationReplyLayout(
   const viewport = root.closest<HTMLElement>(".zotero-view-item");
   const win = root.ownerDocument.defaultView;
   if (!panel || !viewport || !win) return () => {};
+  const nativeSection =
+    typeof panel.closest === "function"
+      ? panel.closest<HTMLElement>("collapsible-section")
+      : null;
+  const nativeHeader =
+    nativeSection?.querySelector<HTMLElement>(":scope > .head") ||
+    nativeSection?.querySelector<HTMLElement>(".head") ||
+    null;
   let frame: number | undefined;
   const measure = () => {
     frame = undefined;
@@ -42,14 +50,23 @@ export function installAnnotationReplyLayout(
     if (!Number.isFinite(innerHeight) || innerHeight <= 0) return;
     const visibleTop = Math.max(bounds.top, 0);
     const visibleBottom = Math.min(innerHeight, bounds.bottom);
-    const viewportBudget = Math.floor(visibleBottom - visibleTop - 8);
+    const viewportBudget = visibleBottom - visibleTop - 8;
     if (!Number.isFinite(viewportBudget) || viewportBudget <= 0) return;
-    const panelBudget = Math.floor(
-      visibleBottom -
-        Math.max(visibleTop, panel.getBoundingClientRect().top) -
-        8,
-    );
-    const height = panelBudget > 0 ? panelBudget : viewportBudget;
+    let nativeChromeInset = 0;
+    const section = nativeSection;
+    if (section) {
+      const panelTop = Number(panel.getBoundingClientRect().top);
+      const nativeTop = Number(section.getBoundingClientRect().top);
+      if (!Number.isFinite(panelTop) || !Number.isFinite(nativeTop)) return;
+      const nativeStyle = win.getComputedStyle(section);
+      if (!nativeStyle) return;
+      const paddingBottom = Number.parseFloat(nativeStyle.paddingBottom);
+      nativeChromeInset =
+        Math.max(0, panelTop - nativeTop) +
+        (Number.isFinite(paddingBottom) ? Math.max(0, paddingBottom) : 0);
+    }
+    const height = Math.floor(viewportBudget - nativeChromeInset);
+    if (!Number.isFinite(height) || height <= 0) return;
     panel.style.setProperty("--llm-workspace-height", `${height}px`);
   };
   const schedule = () => {
@@ -69,6 +86,8 @@ export function installAnnotationReplyLayout(
   panel.setAttribute("data-reading-workspace", "true");
   observer.observe(viewport);
   observer.observe(panel);
+  if (nativeSection) observer.observe(nativeSection);
+  if (nativeHeader) observer.observe(nativeHeader);
   win.addEventListener("resize", schedule);
   viewport.addEventListener("scroll", schedule);
   return reset;

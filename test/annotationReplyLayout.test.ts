@@ -8,17 +8,25 @@ function harness() {
   let resize: () => void = () => {};
   let frame: (() => void) | undefined;
   let observed = 0;
+  const nativeHead = {};
+  const nativeSection = {
+    getBoundingClientRect: () => ({ top: 113.8 }),
+    querySelector: (selector: string) =>
+      selector === ":scope > .head" || selector === ".head" ? nativeHead : null,
+  };
   const panel = {
     style: { setProperty: (k: string, v: string) => props.set(k, v), removeProperty: (k: string) => props.delete(k) },
     setAttribute: (k: string, v: string) => attrs.set(k, v),
     removeAttribute: (k: string) => attrs.delete(k),
     getBoundingClientRect: () => ({ top: 143.8 }),
+    closest: (selector: string) => selector === "collapsible-section" ? nativeSection : null,
   };
   const viewport = Object.assign(new EventTarget(), {
-    getBoundingClientRect: () => ({ top: 113.8, bottom: 1151.2 }),
+    getBoundingClientRect: () => ({ top: 113.8, bottom: 1151.2, width: 800 }),
   });
   const win = Object.assign(new EventTarget(), {
     innerHeight: 1151,
+    getComputedStyle: () => ({ paddingBottom: "0px" }),
     ResizeObserver: class {
       constructor(callback: () => void) { resize = callback; }
       observe() { observed++; }
@@ -44,7 +52,7 @@ describe("single reading workspace native viewport contract", () => {
     h.toggle(true);
     assert.equal(h.props.get("--llm-workspace-height"), "999px");
     assert.equal(h.attrs.get("data-reading-workspace"), "true");
-    assert.equal(h.observed(), 2);
+    assert.equal(h.observed(), 4);
     h.win.innerHeight = 900;
     h.win.dispatchEvent(new Event("resize")); h.flush();
     assert.equal(h.props.get("--llm-workspace-height"), "748px");
@@ -58,7 +66,7 @@ describe("single reading workspace native viewport contract", () => {
     const h = harness();
     h.toggle(true); h.resize(); h.toggle(false); h.flush();
     assert.equal(h.props.get("--llm-workspace-height"), "999px");
-    assert.equal(h.observed(), 2);
+    assert.equal(h.observed(), 4);
     h.toggle(true); h.resize(); h.dispose(); h.flush();
     h.toggle(true);
     assert.equal(h.props.size, 0); assert.equal(h.attrs.size, 0);
