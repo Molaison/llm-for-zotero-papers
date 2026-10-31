@@ -772,6 +772,7 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
       disabled: !hasItem,
     },
   );
+  runtimeModeBtn.dataset.contextGroup = "current";
   runtimeModeBtn.setAttribute("aria-label", t("Switch to Agent mode"));
   runtimeModeBtn.setAttribute("aria-pressed", "false");
   runtimeModeBtn.dataset.location = "composer-context-tray";
@@ -799,13 +800,36 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
     },
   );
   selectedContextList.style.display = "none";
+  selectedContextList.dataset.contextGroup = "added";
+  const currentContextLabel = createElement(
+    doc,
+    "span",
+    "llm-context-group-label",
+    { textContent: t("Current context") },
+  );
+  currentContextLabel.dataset.contextGroup = "current";
+  currentContextLabel.setAttribute("aria-hidden", "true");
+  currentContextLabel.hidden = !hasItem;
+  const addedContextLabel = createElement(
+    doc,
+    "span",
+    "llm-context-group-label",
+    { textContent: t("Add context") },
+  );
+  addedContextLabel.dataset.contextGroup = "add";
+  addedContextLabel.setAttribute("aria-hidden", "true");
+  addedContextLabel.hidden = !hasItem;
   contextPreviews.dataset.scope = isGlobalMode ? "library" : hasItem ? "paper" : "empty";
   contextPreviews.dataset.hasPaperContext = hasPaperContext ? "true" : "false";
   contextPreviews.setAttribute("aria-label", t("Current context and context actions"));
   // Agent mode is a composer concern: keep the same node and ID, but make it
   // visible beside the context chips instead of hiding it in the header menu.
-  contextPreviews.appendChild(runtimeModeBtn);
-  contextPreviews.appendChild(selectedContextList);
+  contextPreviews.append(
+    currentContextLabel,
+    runtimeModeBtn,
+    selectedContextList,
+    addedContextLabel,
+  );
 
   const paperPreview = createElement(doc, "div", "llm-paper-context-inline", {
     id: "llm-paper-context-preview",
@@ -855,6 +879,7 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
   const imagePreview = createElement(doc, "div", "llm-image-preview", {
     id: "llm-image-preview",
   });
+  imagePreview.dataset.contextGroup = "added";
   imagePreview.style.display = "none";
 
   const imagePreviewMeta = createElement(
@@ -868,6 +893,7 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
       title: t("Expand figures"),
     },
   );
+  imagePreviewMeta.setAttribute("aria-label", t("Expand figures"));
   const imagePreviewHeader = createElement(
     doc,
     "div",
@@ -922,6 +948,7 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
   const filePreview = createElement(doc, "div", "llm-image-preview", {
     id: "llm-file-context-preview",
   });
+  filePreview.dataset.contextGroup = "added";
   filePreview.style.display = "none";
   const filePreviewMeta = createElement(
     doc,
@@ -934,6 +961,7 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
       title: t("Expand files"),
     },
   );
+  filePreviewMeta.setAttribute("aria-label", t("Expand files"));
   const filePreviewHeader = createElement(
     doc,
     "div",
@@ -948,6 +976,7 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
     textContent: "×",
     title: t("Clear uploaded files"),
   });
+  filePreviewClear.setAttribute("aria-label", t("Clear uploaded files"));
   filePreviewHeader.append(filePreviewMeta, filePreviewClear);
   const filePreviewExpanded = createElement(
     doc,
@@ -1202,6 +1231,30 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
     id: "llm-status",
     textContent: hasItem ? "" : t("Select an item or open a PDF"),
   });
+  // Keep idle status out of the composer footprint. Existing handlers update
+  // this node outside the builder, so observe it instead of using :has(),
+  // which the stylesheet avoids for older Gecko versions.
+  const syncStatusVisibility = () => {
+    const visible = hasItem && Boolean(statusLine.textContent?.trim());
+    statusBar.classList.toggle("llm-run-status-empty", !visible);
+    statusBar.dataset.state = visible ? "visible" : "empty";
+    if (visible) statusBar.removeAttribute("aria-hidden");
+    else statusBar.setAttribute("aria-hidden", "true");
+  };
+  syncStatusVisibility();
+  const mutationObserverConstructor =
+    doc.defaultView?.MutationObserver ||
+    (typeof MutationObserver === "function" ? MutationObserver : undefined);
+  if (mutationObserverConstructor) {
+    const statusObserver = new mutationObserverConstructor(syncStatusVisibility);
+    statusObserver.observe(statusLine, {
+      attributes: true,
+      attributeFilter: ["class", "style"],
+      characterData: true,
+      childList: true,
+      subtree: true,
+    });
+  }
   const footerControls = createElement(doc, "div", "llm-footer-controls");
   const permissionControl = createElement(
     doc,
@@ -1276,7 +1329,8 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
   modelControls.append(modelDropdown, reasoningDropdown, contextUsageControl);
   // Keep Add context in the same visible tray as Agent mode and selected
   // context. Moving the existing node preserves its event-handler contract.
-  contextPreviews.insertBefore(uploadSlot, contextPreviews.firstChild);
+  uploadSlot.dataset.contextGroup = "add";
+  contextPreviews.insertBefore(uploadSlot, addedContextLabel.nextSibling);
   actionsLeft.append(sourceShortcut);
   for (const button of [selectTextBtn, screenshotBtn]) button.setAttribute("data-slash-base-item", "true");
   slashList.append(selectTextBtn, screenshotBtn);
