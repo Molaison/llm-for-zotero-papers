@@ -80,11 +80,9 @@ describe("workflow: dedicated native chat pane", function () {
 
   async function waitForSidebarLayout(layout: "independent" | "stacked") {
     await until(() => {
-      const root = win.document.documentElement;
       return (
-        root.getAttribute("data-llm-sidebar-layout") === layout &&
-        root.getAttribute("data-llm-pane-view") ===
-          (layout === "stacked" ? "stacked" : "chat")
+        win.document.documentElement.getAttribute("data-llm-sidebar-layout") ===
+        layout
       );
     }, `${layout} layout applies`);
   }
@@ -93,6 +91,7 @@ describe("workflow: dedicated native chat pane", function () {
     layout: "independent" | "stacked",
   ): Promise<Element> {
     await waitForSidebarLayout(layout);
+    const expectedView = layout === "stacked" ? "stacked" : "chat";
     await until(() => {
       const details = activeDetails();
       const panel = details?.querySelector(
@@ -100,6 +99,8 @@ describe("workflow: dedicated native chat pane", function () {
       ) as HTMLElement | null;
       const composer = panel?.querySelector(":scope > .llm-input-section");
       return Boolean(
+        win.document.documentElement.getAttribute("data-llm-pane-view") ===
+          expectedView &&
         details?.isConnected &&
         !details.sidenav._collapsed &&
         panel?.isConnected &&
