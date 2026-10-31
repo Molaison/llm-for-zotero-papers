@@ -141,16 +141,14 @@ describe("workflow: dedicated native chat pane", function () {
       const current = details.querySelector(
         ".llm-dedicated-chat-pane > collapsible-section",
       ) as (HTMLElement & { open: boolean }) | null;
-      const body = current?.querySelector(
-        ':scope > [data-type="body"]',
-      ) as HTMLElement | null;
+      const panel = current?.querySelector("#llm-main") as HTMLElement | null;
       return Boolean(
         current?.isConnected &&
         current.open &&
-        body?.isConnected &&
-        body.getBoundingClientRect().height > 0,
+        panel?.isConnected &&
+        panel.getBoundingClientRect().height > 0,
       );
-    }, "stacked section opens to a visible body");
+    }, "stacked section opens to the mounted plugin panel");
     await waitForNativeLayoutFrame();
     return section!;
   }
