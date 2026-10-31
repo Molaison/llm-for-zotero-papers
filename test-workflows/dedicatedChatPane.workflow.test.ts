@@ -124,6 +124,37 @@ describe("workflow: dedicated native chat pane", function () {
     return details;
   }
 
+  async function ensureStackedSectionOpen(details: Element) {
+    const section = details.querySelector(
+      ".llm-dedicated-chat-pane > collapsible-section",
+    ) as (HTMLElement & { collapsible: boolean; open: boolean }) | null;
+    assert.isOk(section, "stacked collapsible section is mounted");
+    assert.isTrue(section!.collapsible, "stacked section is collapsible");
+    if (!section!.open) {
+      const head = section!.querySelector(":scope > .head") as HTMLElement;
+      assert.isOk(head, "stacked section head is visible");
+      head.dispatchEvent(
+        new win.MouseEvent("click", { bubbles: true, detail: 1, button: 0 }),
+      );
+    }
+    await until(() => {
+      const current = details.querySelector(
+        ".llm-dedicated-chat-pane > collapsible-section",
+      ) as (HTMLElement & { open: boolean }) | null;
+      const body = current?.querySelector(
+        ':scope > [data-type="body"]',
+      ) as HTMLElement | null;
+      return Boolean(
+        current?.isConnected &&
+        current.open &&
+        body?.isConnected &&
+        body.getBoundingClientRect().height > 0,
+      );
+    }, "stacked section opens to a visible body");
+    await waitForNativeLayoutFrame();
+    return section!;
+  }
+
   /**
    * Both layouts keep the header info and actions in one nav row. Independent
    * shows the toggle controls and hides the chip; Stacked does the reverse.
@@ -1191,6 +1222,7 @@ describe("workflow: dedicated native chat pane", function () {
       preferences.close();
       await until(() => preferences.closed, "preferences close");
       await clickPane("llm-context-panel");
+      await ensureStackedSectionOpen(details);
       assert.isAbove(
         section.getBoundingClientRect().height,
         100,
@@ -1293,6 +1325,7 @@ describe("workflow: dedicated native chat pane", function () {
     try {
       Zotero.Prefs.set(key, "stacked", true);
       await clickPane("llm-context-panel");
+      await ensureStackedSectionOpen(activeDetails());
       const panel = () => activeDetails().querySelector("#llm-main");
       assert.equal(
         win.document.documentElement.getAttribute("data-llm-pane-view"),
