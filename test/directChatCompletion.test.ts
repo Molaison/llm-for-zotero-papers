@@ -1,9 +1,11 @@
 import { assert } from "chai";
 import type { ChatParams, ModelTurnOutcome } from "../src/utils/llmClient";
+import { parseResponsesStream } from "../src/utils/llmClient";
 import {
   appendContinuationText,
   callDirectChatTurnWithRecovery,
   EMPTY_OUTPUT_LIMIT_MESSAGE,
+  resolveDirectChatResponseText,
   resolveEmptyModelOutcomeMessage,
 } from "../src/modules/contextPanel/directChatCompletion";
 
@@ -139,6 +141,61 @@ describe("direct chat completion recovery", function () {
         reason: "refusal",
       }),
       "refused",
+    );
+  });
+
+  it("uses the final Responses text to replace a streamed draft, including an empty answer", async function () {
+    for (const finalText of ["corrected answer", ""]) {
+      let streamedText = "";
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(
+            new TextEncoder().encode(
+              [
+                { type: "response.output_text.delta", delta: "draft" },
+                {
+                  type: "response.completed",
+                  response: { status: "completed", output_text: finalText },
+                },
+              ]
+                .map((event) => `data: ${JSON.stringify(event)}\n\n`)
+                .join(""),
+            ),
+          );
+          controller.close();
+        },
+      });
+      const outcome = await parseResponsesStream(body, (delta) => {
+        streamedText += delta;
+      });
+      assert.equal(streamedText, "draft");
+      const visibleText = resolveDirectChatResponseText(outcome, streamedText);
+      assert.equal(visibleText, finalText);
+      if (!finalText) {
+        assert.equal(
+          visibleText || resolveEmptyModelOutcomeMessage(outcome.completion),
+          "The model completed without producing visible text.",
+        );
+      }
+    }
+  });
+
+  it("preserves document output and incomplete stream evidence when no final text is returned", function () {
+    const complete: ModelTurnOutcome = {
+      text: "",
+      completion: { status: "complete" },
+    };
+    const incomplete: ModelTurnOutcome = {
+      text: "",
+      completion: { status: "incomplete", reason: "stream_interrupted" },
+    };
+    assert.equal(
+      resolveDirectChatResponseText(complete, "document content", true),
+      "document content",
+    );
+    assert.equal(
+      resolveDirectChatResponseText(incomplete, "partial answer"),
+      "partial answer",
     );
   });
 });

@@ -1,4 +1,8 @@
 import {
+  buildAgentRecoveryInstruction,
+  resolveAgentRecoverableCompletion,
+} from "./completion";
+import {
   buildReasoningPayload,
   buildPromptCachePayloadHints,
   postWithReasoningFallback,
@@ -170,6 +174,22 @@ export class CodexResponsesAgentAdapter implements AgentModelAdapter {
           (await response.json()) as ResponsesPayload,
         );
 
+    const recoveryReason = resolveAgentRecoverableCompletion(
+      normalized.completion,
+    );
+    if (recoveryReason) {
+      return {
+        kind: "incomplete",
+        reason: recoveryReason,
+        providerReason: normalized.completion.providerReason,
+        text: normalized.text,
+        recoveryInstruction: buildAgentRecoveryInstruction(
+          recoveryReason,
+          "tool call",
+        ),
+        assistantMessage: { role: "assistant", content: normalized.text },
+      };
+    }
     this.conversationItems = [...inputItems, ...normalized.outputItems];
 
     if (normalized.toolCalls.length) {

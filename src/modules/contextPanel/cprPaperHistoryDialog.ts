@@ -8,6 +8,7 @@ export type CprPaperHistoryRequest = {
   apiBase: string;
   apiKey: string;
   model: string;
+  paperSessionId?: string;
 };
 
 /** One click's request, plus what tells a late answer whether it is still valid. */

@@ -18,6 +18,26 @@ export function cprPaperConversationTitle(
   return Array.from(value.replace(/\s+/g, " ")).slice(0, 80).join("");
 }
 
+/**
+ * Fresh Zotero paper conversations get a durable server-side session token.
+ * Existing conversations without one remain on the legacy paper session so
+ * upgrading the plugin does not silently move their remote history.
+ */
+export function resolveCprPaperSessionId(
+  conversationKey: number | null | undefined,
+  fresh: boolean,
+): string | undefined {
+  const normalizedKey = Number(conversationKey);
+  if (!Number.isFinite(normalizedKey) || normalizedKey <= 0) return undefined;
+  const prefKey = `${config.prefsPrefix}.cprPaperSession.${Math.floor(normalizedKey)}`;
+  const stored = Zotero.Prefs.get(prefKey, true);
+  if (typeof stored === "string" && stored.trim()) return stored.trim();
+  if (!fresh) return undefined;
+  const sessionId = createProviderOperationId();
+  Zotero.Prefs.set(prefKey, sessionId, true);
+  return sessionId;
+}
+
 /** Compress only first-turn PDF bodies above this serialized UTF-8 size. */
 export const CPR_PAPERS_GZIP_THRESHOLD_BYTES = 256 * 1024;
 
@@ -287,22 +307,28 @@ function getCprPaper(itemId?: number) {
   return { item, paper };
 }
 
-async function readCprPaperPdf(
-  item: Zotero.Item | undefined,
-  paper: Zotero.Item,
-  readBytes: (path: string) => Promise<Uint8Array>,
-) {
-  const attachment =
-    item?.isAttachment() && item.attachmentContentType === "application/pdf"
-      ? item
-      : await paper.getBestAttachment();
-  if (!attachment || attachment.attachmentContentType !== "application/pdf") {
-    throw new Error(
-      "这篇论文没有 PDF 附件；请先添加或下载 PDF，不会改用摘要。",
-    );
+type CprPaperPdf = { path: string; bytes: Uint8Array; hash: string };
+
+async function readCprPaperPdf(item: Zotero.Item | undefined, paper: Zotero.Item,
+  readBytes: (path: string) => Promise<Uint8Array>): Promise<CprPaperPdf>;
+async function readCprPaperPdf(item: Zotero.Item | undefined, paper: Zotero.Item,
+  readBytes: (path: string) => Promise<Uint8Array>, allowMissing: true): Promise<CprPaperPdf | undefined>;
+async function readCprPaperPdf(item: Zotero.Item | undefined, paper: Zotero.Item,
+  readBytes: (path: string) => Promise<Uint8Array>, allowMissing = false): Promise<CprPaperPdf | undefined> {
+  const attachment = item?.isAttachment() && item.attachmentContentType === "application/pdf"
+    ? item : await paper.getBestAttachment();
+  if (!attachment) {
+    if (allowMissing) return undefined;
+    throw new Error("这篇论文没有 PDF 附件；请先添加或下载 PDF，不会改用摘要。");
+  }
+  if (attachment.attachmentContentType !== "application/pdf") {
+    throw new Error("这篇论文没有 PDF 附件；请先添加或下载 PDF，不会改用摘要。");
   }
   const path = await attachment.getFilePathAsync();
-  if (!path) throw new Error("PDF 尚未下载到本机，请先同步附件。");
+  if (!path) {
+    if (allowMissing) return undefined;
+    throw new Error("PDF 尚未下载到本机，请先同步附件。");
+  }
   const bytes = await readBytes(path);
   return { path, bytes, hash: await sha256(bytes) };
 }
@@ -323,20 +349,28 @@ export type CprPaperHistory = {
   messages: CprPaperHistoryMessage[];
 };
 
+function isCprPaperConversationUrl(value: string): boolean {
+  return (
+    /^https:\/\/chatgpt\.com\/g\/g-p-[a-f0-9]{32}\/c\/[^/?#]+$/.test(value) ||
+    /^https:\/\/chatgpt\.com\/c\/[^/?#]+$/.test(value)
+  );
+}
+
 export function parseCprPaperHistory(
   value: unknown,
   paperId: string,
+  expectedSessionId = "",
 ): CprPaperHistory {
   const result = parsePaperOutput(value);
   if (
     !isRecord(result) ||
     result.paper_id !== paperId ||
+    result.paper_registry_version !== 2 ||
+    result.paper_session_id !== expectedSessionId ||
     typeof result.thread_id !== "string" ||
     !result.thread_id ||
     typeof result.conversation_url !== "string" ||
-    !/^https:\/\/chatgpt\.com\/g\/g-p-[a-f0-9]{32}\/c\/[^/?#]+$/.test(
-      result.conversation_url,
-    ) ||
+    !isCprPaperConversationUrl(result.conversation_url) ||
     typeof result.title !== "string" ||
     !Array.isArray(result.messages)
   ) {
@@ -392,6 +426,7 @@ export async function fetchCprPaperHistory(params: {
   apiBase: string;
   apiKey: string;
   model: string;
+  paperSessionId?: string;
   signal?: AbortSignal;
   readBytes: (path: string) => Promise<Uint8Array>;
   fetchFn: typeof fetch;
@@ -417,7 +452,9 @@ export async function fetchCprPaperHistory(params: {
         input: "paper history lookup",
         client_metadata: {
           "x-codex-turn-metadata": JSON.stringify({
+            paper_registry_version: 2,
             paper_id: paperId,
+            paper_session_id: params.paperSessionId || "",
             paper_operation: "history",
           }),
         },
@@ -439,7 +476,11 @@ export async function fetchCprPaperHistory(params: {
     }
     throw new Error(`读取远端记录 HTTP ${response.status}: ${detail}`);
   }
-  return parseCprPaperHistory(await response.json(), paperId);
+  return parseCprPaperHistory(
+    await response.json(),
+    paperId,
+    params.paperSessionId || "",
+  );
 }
 
 /** Resolve the server's permanent paper binding before reading or uploading a PDF. */
@@ -447,6 +488,7 @@ export async function prepareCprPaperRequest(params: {
   itemId?: number;
   apiBase: string;
   apiKey: string;
+  paperSessionId?: string;
   /** Alias configured on the capability-enabled route. */
   model?: string;
   /** Effort selection for the chat turn; the lookup carries none. */
@@ -483,6 +525,7 @@ export async function prepareCprPaperRequest(params: {
     reasoning: params.reasoning,
     profileOverride: params.profileOverride,
   });
+  params.signal?.throwIfAborted();
   const { item, paper } = getCprPaper(params.itemId);
   const paperTitle = cprPaperConversationTitle(
     String(paper.getField("shortTitle") || ""),
@@ -491,20 +534,28 @@ export async function prepareCprPaperRequest(params: {
   let path: string | undefined;
   let bytes: Uint8Array | undefined;
   let pdfHash: string | undefined;
-  const loadPdf = async () => {
+  const loadPdf = async (required = true) => {
     if (bytes) return;
-    const pdf = await readCprPaperPdf(item, paper, params.readBytes);
-    path = pdf.path;
-    bytes = pdf.bytes;
-    pdfHash = pdf.hash;
+    const pdf = required
+      ? await readCprPaperPdf(item, paper, params.readBytes)
+      : await readCprPaperPdf(item, paper, params.readBytes, true);
+    params.signal?.throwIfAborted();
+    if (!pdf) return;
+    const magic = [0x25, 0x50, 0x44, 0x46, 0x2d];
+    if (pdf.bytes.length < magic.length || magic.some((byte, index) => pdf.bytes[index] !== byte)) {
+      throw new Error("附件不是有效的 PDF（缺少 %PDF- 头）；没有发送聊天请求。");
+    }
+    path = pdf.path; bytes = pdf.bytes; pdfHash = pdf.hash;
   };
   let paperId = normalizePaperDoi(String(paper.getField("DOI") || ""));
   if (!paperId) {
     await loadPdf();
+    if (!pdfHash) throw new Error("无法读取 PDF；没有发送请求。");
     paperId = `sha256:${pdfHash}`;
   }
   const target = normalizePaperRouteTarget(params.apiBase);
-  const reservationKey = `${config.prefsPrefix}.cprPaperReservation.${encodeURIComponent(target + ":" + paperId)}`;
+  const paperSessionId = params.paperSessionId?.trim() || undefined;
+  const reservationKey = `${config.prefsPrefix}.cprPaperReservation.${encodeURIComponent(target + ":" + paperId + (paperSessionId ? ":" + paperSessionId : ""))}`;
   const cachedToken = Zotero.Prefs.get(reservationKey, true);
   // Local salt is retained only to adopt an existing v1/v2 chat. It no longer selects new chats.
   const legacy = await resolveProviderSessionId(
@@ -520,16 +571,20 @@ export async function prepareCprPaperRequest(params: {
     typeof legacyTarget === "string" &&
     normalizePaperRouteTarget(legacyTarget) === target;
   const lookupIdentity = {
+    paper_registry_version: 2,
     paper_id: paperId,
+    paper_session_id: paperSessionId || "",
     paper_operation: "resolve",
+    ...(pdfHash ? { paper_pdf_sha256: pdfHash } : {}),
     ...(typeof cachedToken === "string" && cachedToken
       ? { paper_upload_token: cachedToken }
       : {}),
-    ...(legacyUploaded
+    ...(legacyUploaded && !paperSessionId
       ? { paper_legacy_thread_id: legacy, paper_legacy_uploaded: true }
       : {}),
   };
   const resolveRegistry = async (identity: Record<string, unknown>) => {
+    params.signal?.throwIfAborted();
     const response = await params.fetchFn(
       resolveEndpoint(params.apiBase, RESPONSES_ENDPOINT),
       {
@@ -556,9 +611,29 @@ export async function prepareCprPaperRequest(params: {
     const result = parsePaperResolution(await response.json());
     if (result.paper_id !== paperId)
       throw new Error("CPR 返回了不同的论文身份；已停止发送。");
+    if (
+      result.paper_registry_version !== 2 ||
+      result.paper_session_id !== (paperSessionId || "")
+    )
+      throw new Error(
+        "CPR 未确认论文会话身份；请先升级服务端，已停止发送。",
+      );
     return result;
   };
   let registry = await resolveRegistry(lookupIdentity);
+  if (registry.status === "ready" && registry.upload_required === false && !pdfHash) {
+    // A remote-ready DOI remains usable on a device without a local PDF. When
+    // bytes are available, however, the current attachment must agree with the
+    // server's saved content before this question can reuse that conversation.
+    const originalThread = registry.thread_id;
+    await loadPdf(false);
+    if (pdfHash) {
+      registry = await resolveRegistry({...lookupIdentity, paper_pdf_sha256: pdfHash});
+      if (registry.status !== "ready" || registry.upload_required !== false || registry.thread_id !== originalThread) {
+        throw new Error("论文会话或状态在内容校验期间发生变化；已停止发送，不会自动重新上传 PDF。");
+      }
+    }
+  }
   // A DOI added on another device must reuse an existing hash-only binding before uploading bytes.
   if (
     paperId.startsWith("doi:") &&
@@ -636,14 +711,15 @@ export async function prepareCprPaperRequest(params: {
       ...(reasoningEffort ? { reasoning: { effort: reasoningEffort } } : {}),
       client_metadata: {
         "x-codex-turn-metadata": JSON.stringify({
+          paper_registry_version: 2,
           thread_id: registry.thread_id,
           turn_id: turn,
           paper_id: paperId,
+          paper_session_id: paperSessionId || "",
           paper_operation: "chat",
           ...(paperTitle ? { paper_title: paperTitle } : {}),
-          ...(uploadToken
-            ? { paper_upload_token: uploadToken, paper_pdf_sha256: pdfHash }
-            : {}),
+          ...(uploadToken ? { paper_upload_token: uploadToken } : {}),
+          ...(pdfHash ? { paper_pdf_sha256: pdfHash } : {}),
         }),
       },
       input: [{ type: "message", role: "user", id: `paper-${turn}`, content }],

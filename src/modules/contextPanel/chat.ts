@@ -28,6 +28,7 @@ import {
   fromCprChartAttachments,
   toCprChartAttachments,
 } from "../../utils/cprRichWidgets";
+import { resolveCprPaperSessionId } from "../../utils/cprPapers";
 import { renderCprChartWidgets } from "./cprChartRenderer";
 import { HTML_NS } from "../../utils/domHelpers";
 import {
@@ -129,6 +130,7 @@ import {
   appendContinuationText,
   callDirectChatTurnWithRecovery,
   EMPTY_OUTPUT_LIMIT_MESSAGE,
+  resolveDirectChatResponseText,
   resolveEmptyModelOutcomeMessage,
 } from "./directChatCompletion";
 import {
@@ -6680,6 +6682,12 @@ export async function retryLatestAssistantResponse(
       if (stopRetryPreparation()) return;
     }
     const llmHistory = buildLLMHistoryMessages(historyForLLM);
+    const cprPaperSessionId = resolveCprPaperSessionId(
+      conversationKey,
+      !llmHistory.some(
+        (message) => message.role === "user" || message.role === "assistant",
+      ),
+    );
     const recentPaperContexts = collectRecentPaperContexts(historyForLLM);
     if (effectiveConversationSystem === "upstream") {
       await preflightRequestModelCapabilities({
@@ -6789,6 +6797,7 @@ export async function retryLatestAssistantResponse(
       contextCache: contextPlan.contextCache,
       requestScope: createProviderRequestScope(conversationKey),
       cprPaperItemId: resolveConversationBaseItem(item)?.id,
+      cprPaperSessionId,
       cprPaperContexts: pdfPaperContexts,
     };
     const { finalPrepared, systemMessages, workflowTestIntercepted } =
@@ -6992,10 +7001,10 @@ export async function retryLatestAssistantResponse(
     const outputLimited =
       modelOutcome.completion.status === "incomplete" &&
       modelOutcome.completion.reason === "output_limit";
-    const responseText =
-      sanitizeText(modelOutcome.text) ||
-      streamingResponse.getStreamedText() ||
-      "";
+    const responseText = resolveDirectChatResponseText(
+      modelOutcome,
+      streamingResponse.getStreamedText(),
+    );
     const visibleResponseText = continueIncomplete
       ? appendContinuationText(assistantSnapshot.text, responseText)
       : responseText;
@@ -9629,6 +9638,12 @@ export async function sendQuestion(
     // Apply auto-summary compression when the history grows long.
     const llmHistory =
       applyHistoryCompression(conversationKey, rawLLMHistory) ?? rawLLMHistory;
+    const cprPaperSessionId = resolveCprPaperSessionId(
+      conversationKey,
+      !llmHistory.some(
+        (message) => message.role === "user" || message.role === "assistant",
+      ),
+    );
     const recentPaperContexts = collectRecentPaperContexts(historyForLLM);
 
     if (effectiveConversationSystem === "upstream") {
@@ -9763,6 +9778,7 @@ export async function sendQuestion(
       contextCache: contextPlan.contextCache,
       requestScope: createProviderRequestScope(conversationKey),
       cprPaperItemId: resolveConversationBaseItem(item)?.id,
+      cprPaperSessionId,
       cprPaperContexts: normalizedPdfPaperContexts,
     };
     const { finalPrepared, systemMessages, workflowTestIntercepted } =
@@ -9958,8 +9974,11 @@ export async function sendQuestion(
       modelOutcome.completion.status === "incomplete" &&
       modelOutcome.completion.reason === "output_limit";
     assistantMessage.text =
-      sanitizeText(modelOutcome.text) ||
-      assistantMessage.text ||
+      resolveDirectChatResponseText(
+        modelOutcome,
+        assistantMessage.text,
+        Boolean(assistantMessage.documentId || assistantMessage.planDocumentId),
+      ) ||
       (hasGeneratedOutput
         ? ""
         : outputLimited

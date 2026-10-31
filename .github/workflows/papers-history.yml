@@ -22,7 +22,7 @@ jobs:
       - name: Papers history and storage regressions
         run: >-
           node --import tsx node_modules/mocha/bin/mocha.js --require ./test/register.cjs
-          test/cprPapersConfig.test.ts test/cprPapersRegistry.test.ts
+          test/cprPapersConfig.test.ts test/cprPapersRegistry.test.ts test/cprPapersIdentity.test.ts
           test/cprPaperHistoryDialog.test.ts test/cprLocalHistoryRecovery.test.ts
           test/chatStore.cprSnapshot.test.ts
           test/conversationStoreMechanics.test.ts test/conversationKeyLedger.test.ts

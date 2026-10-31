@@ -93,10 +93,14 @@ export type CprDirectWebPreparedRequest = {
   sessionId: string;
   /** Newly uploaded files, in the order they appear in `payload`. */
   uploaded: CprDirectWebUploadedFile[];
-  /** Identities already registered upstream: served without reading bytes. */
+  /** Identities already registered upstream with the same PDF fingerprint. */
   reused: string[];
   /** Identities an earlier turn left unresolved: no automatic re-upload. */
   uncertain: CprDirectWebUncertainEntry[];
+  /** Mark immediately before dispatch; a later failure may have reached upstream. */
+  markDispatched: () => void;
+  /** Release this request's claim only while it is known not to have been sent. */
+  releaseUnsent: () => void;
   /** Call once the response completed, so later turns skip the upload. */
   accept: () => void;
   /** Call when the response failed or was incomplete; blocks a re-upload. */
@@ -115,6 +119,7 @@ export type CprDirectWebPrepareParams = {
   profileOverride?: ModelProfileOverride;
   /** Defaults to true; the caller may override it on the returned payload. */
   stream?: boolean;
+  signal?: AbortSignal;
   readBytes: (path: string) => Promise<Uint8Array>;
 };
 
@@ -124,6 +129,7 @@ type LedgerEntry = {
   filename: string;
   order?: number;
   reason?: string;
+  owner?: string;
 };
 
 type Ledger = {
@@ -181,7 +187,9 @@ function parseEntry(value: unknown): LedgerEntry {
     !value.filename.trim() ||
     (value.order !== undefined &&
       (typeof value.order !== "number" || !Number.isFinite(value.order))) ||
-    (value.reason !== undefined && typeof value.reason !== "string")
+    (value.reason !== undefined && typeof value.reason !== "string") ||
+    (value.owner !== undefined &&
+      (typeof value.owner !== "string" || !value.owner.trim()))
   ) {
     throw new Error(LEDGER_BROKEN);
   }
@@ -191,6 +199,7 @@ function parseEntry(value: unknown): LedgerEntry {
     filename: value.filename,
     ...(value.order === undefined ? {} : { order: value.order }),
     ...(value.reason === undefined ? {} : { reason: value.reason }),
+    ...(value.owner === undefined ? {} : { owner: value.owner }),
   };
 }
 
@@ -259,9 +268,13 @@ function pdfFilename(path: string): string {
 }
 
 function requirePaper(ref: PaperContextRef): Zotero.Item {
-  const paper = ref.itemId ? Zotero.Items.get(ref.itemId) || undefined : undefined;
+  const paper = ref.itemId
+    ? Zotero.Items.get(ref.itemId) || undefined
+    : undefined;
   if (!paper || !paper.isRegularItem()) {
-    throw new Error("CPR direct web 需要上下文里的父条目仍在当前资料库；不会改用其他条目。");
+    throw new Error(
+      "CPR direct web 需要上下文里的父条目仍在当前资料库；不会改用其他条目。",
+    );
   }
   return paper;
 }
@@ -281,7 +294,9 @@ function requirePdfAttachment(ref: PaperContextRef): Zotero.Item {
     attachment.attachmentContentType !== "application/pdf" ||
     attachment.parentID !== ref.itemId
   ) {
-    throw new Error("所选上下文不是该论文的 application/pdf 附件；不会回退到其他附件。");
+    throw new Error(
+      "所选上下文不是该论文的 application/pdf 附件；不会回退到其他附件。",
+    );
   }
   return attachment;
 }
@@ -291,10 +306,13 @@ type PdfPayload = { path: string; bytes: Uint8Array; hash: string };
 async function readPdf(
   attachment: Zotero.Item,
   readBytes: (path: string) => Promise<Uint8Array>,
+  signal?: AbortSignal,
 ): Promise<PdfPayload> {
   const path = await attachment.getFilePathAsync();
+  signal?.throwIfAborted();
   if (!path) throw new Error(PDF_MISSING);
   const bytes = await readBytes(path);
+  signal?.throwIfAborted();
   assertPdfBytes(bytes);
   return { path, bytes, hash: await sha256(bytes) };
 }
@@ -303,7 +321,7 @@ async function readPdf(
  * Build the direct web request for one turn.
  *
  * A PDF travels exactly once per identity and session: a registered identity is
- * served without reading its bytes, an unresolved one is never re-sent, and a
+ * checked against the selected bytes, an unresolved one is never re-sent, and a
  * new one is uploaded once and recorded as pending before this function
  * returns. The returned payload carries no previous response id, so the caller
  * decides how far back upstream should look.
@@ -311,6 +329,7 @@ async function readPdf(
 export async function prepareCprDirectWebRequest(
   params: CprDirectWebPrepareParams,
 ): Promise<CprDirectWebPreparedRequest> {
+  params.signal?.throwIfAborted();
   const model = String(params.model || "").trim();
   if (!model) throw new Error("CPR direct web 请求缺少模型；没有发送请求。");
   // Resolved before any file is read: an unsupported level must fail untouched.
@@ -321,6 +340,7 @@ export async function prepareCprDirectWebRequest(
     profileOverride: params.profileOverride,
   });
   const sessionId = await resolveCprDirectWebSessionId(params.requestScope);
+  params.signal?.throwIfAborted();
   if (!prefs()) throw new Error(PREFS_UNAVAILABLE);
   const target = normalizePaperRouteTarget(String(params.apiBase || ""));
   const ledgerKey = ledgerKeyFor(target, sessionId);
@@ -333,37 +353,49 @@ export async function prepareCprDirectWebRequest(
     ledger.uncertain.map((entry) => [entry.paperId, entry]),
   );
   const known = new Map<string, LedgerEntry>();
-  for (const entry of [...ledger.entries, ...ledger.pending, ...ledger.uncertain]) {
+  for (const entry of [
+    ...ledger.entries,
+    ...ledger.pending,
+    ...ledger.uncertain,
+  ]) {
     known.set(entry.paperId, entry);
   }
 
   const reused: string[] = [];
   const uncertain: CprDirectWebUncertainEntry[] = [];
-  const uploads: Array<CprDirectWebUploadedFile & { bytes: Uint8Array }> = [];
-  const seen = new Set<string>();
+  let uploads: Array<CprDirectWebUploadedFile & { bytes: Uint8Array }> = [];
+  const seen = new Map<string, string>();
   let totalBytes = 0;
 
   for (const ref of params.refs) {
     const paper = requirePaper(ref);
     const attachment = requirePdfAttachment(ref);
-    let pdf: PdfPayload | undefined;
-    const loadPdf = async () => (pdf ??= await readPdf(attachment, params.readBytes));
-    let paperId = normalizePaperDoi(String(paper.getField("DOI") || ""));
-    // Without a DOI the bytes are the identity, so they have to be read — even
-    // for an already registered PDF, which is the only case that reads twice.
-    if (!paperId) paperId = `sha256:${(await loadPdf()).hash}`;
-    if (seen.has(paperId)) continue;
-    seen.add(paperId);
+    params.signal?.throwIfAborted();
+    const resolvedPdf = await readPdf(
+      attachment,
+      params.readBytes,
+      params.signal,
+    );
+    params.signal?.throwIfAborted();
+    const paperId =
+      normalizePaperDoi(String(paper.getField("DOI") || "")) ||
+      `sha256:${resolvedPdf.hash}`;
+    const earlier = known.get(paperId);
+    const seenHash = seen.get(paperId);
+    if (
+      (earlier && earlier.pdfSha256 !== resolvedPdf.hash) ||
+      (seenHash && seenHash !== resolvedPdf.hash)
+    ) {
+      throw new Error(IDENTITY_CHANGED);
+    }
+    if (seenHash) continue;
+    seen.set(paperId, resolvedPdf.hash);
     if (registered.has(paperId)) {
       reused.push(paperId);
       continue;
     }
     const inFlight = pending.get(paperId);
     if (inFlight) {
-      const resolvedPendingPdf = await loadPdf();
-      if (inFlight.pdfSha256 !== resolvedPendingPdf.hash) {
-        throw new Error(IDENTITY_CHANGED);
-      }
       uncertain.push({
         paperId,
         filename: inFlight.filename,
@@ -379,11 +411,6 @@ export async function prepareCprDirectWebRequest(
         message: CPR_DIRECT_WEB_UNCERTAIN_MESSAGE,
       });
       continue;
-    }
-    const resolvedPdf = await loadPdf();
-    const earlier = known.get(paperId);
-    if (earlier && earlier.pdfSha256 !== resolvedPdf.hash) {
-      throw new Error(IDENTITY_CHANGED);
     }
     if (resolvedPdf.bytes.length > MAX_FILE_BYTES) {
       throw new Error("单个 PDF 超过 50 MiB 上限；没有发送请求。");
@@ -403,6 +430,41 @@ export async function prepareCprDirectWebRequest(
       bytes: resolvedPdf.bytes,
     });
   }
+
+  params.signal?.throwIfAborted();
+  const current = readLedger(ledgerKey);
+  const currentReady = new Map(
+    current.entries.map((entry) => [entry.paperId, entry]),
+  );
+  const currentUnresolved = new Map(
+    [...current.pending, ...current.uncertain].map((entry) => [
+      entry.paperId,
+      entry,
+    ]),
+  );
+  // Nothing awaits between this recheck and the claim written below.
+  for (const [paperId, pdfSha256] of seen) {
+    const existing =
+      currentReady.get(paperId) ?? currentUnresolved.get(paperId);
+    if (existing && existing.pdfSha256 !== pdfSha256)
+      throw new Error(IDENTITY_CHANGED);
+  }
+  uploads = uploads
+    .filter((file) => {
+      const ready = currentReady.get(file.paperId);
+      const unresolved = currentUnresolved.get(file.paperId);
+      const existing = ready ?? unresolved;
+      if (!existing) return true;
+      if (ready) reused.push(file.paperId);
+      else
+        uncertain.push({
+          paperId: file.paperId,
+          filename: existing.filename,
+          message: CPR_DIRECT_WEB_UNCERTAIN_MESSAGE,
+        });
+      return false;
+    })
+    .map((file, order) => ({ ...file, order }));
 
   const content: ContentPart[] = uploads.map((file) => ({
     type: "input_file",
@@ -444,35 +506,63 @@ export async function prepareCprDirectWebRequest(
       }),
     },
     input: [
-      { type: "message", role: "user", id: `cpr-direct-web-${turnId}`, content },
+      {
+        type: "message",
+        role: "user",
+        id: `cpr-direct-web-${turnId}`,
+        content,
+      },
     ],
   };
 
-  const pendingIds = new Set(uploaded.map((file) => file.paperId));
   if (uploaded.length) {
     // Written before anything is sent: a turn that never reports back stays
     // pending rather than looking like it uploaded nothing.
-    const current = readLedger(ledgerKey);
     writeLedger(ledgerKey, {
       version: 1,
       entries: current.entries,
       pending: [
-        ...current.pending.filter((entry) => !pendingIds.has(entry.paperId)),
-        ...uploaded,
+        ...current.pending,
+        ...uploaded.map((file) => ({ ...file, owner: turnId })),
       ],
       uncertain: current.uncertain,
     });
   }
+  let phase: "prepared" | "dispatched" | "settled" = "prepared";
+  const ownedIds = (ledger: Ledger): Set<string> =>
+    new Set(
+      ledger.pending
+        .filter((entry) => entry.owner === turnId)
+        .map((entry) => entry.paperId),
+    );
+  const releaseUnsent = (): void => {
+    if (phase !== "prepared") return;
+    if (uploaded.length) {
+      const current = readLedger(ledgerKey);
+      writeLedger(ledgerKey, {
+        ...current,
+        pending: current.pending.filter((entry) => entry.owner !== turnId),
+      });
+    }
+    phase = "settled";
+  };
   const settle = (status: "ready" | "uncertain", reason?: string): void => {
-    if (!uploaded.length) return;
+    if (phase === "settled" || !uploaded.length) return;
     const current = readLedger(ledgerKey);
+    const pendingIds = ownedIds(current);
+    if (!pendingIds.size) {
+      phase = "settled";
+      return;
+    }
     const keep = (entry: LedgerEntry) => !pendingIds.has(entry.paperId);
-    const settled = uploaded.map((file) => ({
-      ...file,
-      ...(status === "uncertain"
-        ? { reason: reason?.trim() || CPR_DIRECT_WEB_UNCERTAIN_MESSAGE }
-        : {}),
-    }));
+    const settled = uploaded
+      .filter((file) => pendingIds.has(file.paperId))
+      .map((file) => ({
+        ...file,
+        ...(status === "uncertain"
+          ? { reason: reason?.trim() || CPR_DIRECT_WEB_UNCERTAIN_MESSAGE }
+          : {}),
+      }));
     if (status === "ready") {
       writeLedger(ledgerKey, {
         version: 1,
@@ -480,6 +570,7 @@ export async function prepareCprDirectWebRequest(
         pending: current.pending.filter(keep),
         uncertain: current.uncertain.filter(keep),
       });
+      phase = "settled";
       return;
     }
     const ready = new Set(current.entries.map((entry) => entry.paperId));
@@ -494,6 +585,7 @@ export async function prepareCprDirectWebRequest(
         ...settled.filter((file) => !ready.has(file.paperId)),
       ],
     });
+    phase = "settled";
   };
 
   return {
@@ -502,6 +594,18 @@ export async function prepareCprDirectWebRequest(
     uploaded,
     reused,
     uncertain,
+    markDispatched: () => {
+      if (phase === "dispatched") return;
+      const owned = ownedIds(readLedger(ledgerKey));
+      if (
+        phase !== "prepared" ||
+        uploaded.some((file) => !owned.has(file.paperId))
+      ) {
+        throw new Error("PDF 上传认领已失效；没有发送请求。");
+      }
+      phase = "dispatched";
+    },
+    releaseUnsent,
     accept: () => settle("ready"),
     markUncertain: (reason?: string) => settle("uncertain", reason),
   };
