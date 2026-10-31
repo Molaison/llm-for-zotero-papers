@@ -352,7 +352,10 @@ describe("context selection actions", function () {
 
   function makeDeps() {
     return {
-      item: { id: ownerItemId } as Zotero.Item,
+      item: {
+        id: ownerItemId,
+        isAttachment: () => false,
+      } as Zotero.Item,
       resolveAutoLoadedPaperContext: () => null,
       getManualPaperContextsForItem: () =>
         selectedPaperContextCache.get(ownerItemId) || [],
