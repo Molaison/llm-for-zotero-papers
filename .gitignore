@@ -1,0 +1,49 @@
+# dot files
+.DS_Store
+
+# Node.js
+node_modules
+pnpm-lock.yaml
+yarn.lock
+
+# TSC
+tsconfig.tsbuildinfo
+
+# Scaffold
+.env
+.env.*
+!.env.example
+.scaffold
+build
+logs
+tmp/
+
+# Merge and patch leftovers
+*.orig
+*.rej
+*.diff
+*.patch
+
+# Ignore all contents inside a folder
+.claude/
+.codex/
+.agents/
+AGENTS.md
+CLAUDE.md
+skills-lock.json
+
+# Test data built from a real Zotero library: never tracked, at any depth
+*.sqlite
+*.sqlite-*
+*.db
+*.xpi
+*shots/
+realchat*
+hl-corpus*
+.private-test-data/
+
+# Development documentation and planning files: never tracked, at any depth
+docs/
+doc/
+superpowers/
+.superpowers/

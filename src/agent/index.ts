@@ -1,0 +1,458 @@
+import { getClaudeCommandCatalog } from "../claudeCode/commandCatalog";
+import type { ClaudeBridgeGateOptions } from "./externalBackendBridge";
+import {
+  getConversationSystemPref,
+  isClaudeCodeModeEnabled,
+} from "../claudeCode/prefs";
+import {
+  getClaudeBridgeRuntime,
+  resetClaudeBridgeRuntime,
+} from "../claudeCode/runtime";
+import { clearCodexZoteroMcpPreflightCache } from "../codexAppServer/mcpSetup";
+import { getConversationWriteGeneration } from "../shared/conversationWriteFence";
+import { libraryIndexService } from "../services/libraryIndexService";
+import { createBuiltInActionRegistry, type ActionRegistry } from "./actions";
+import { undoNoteChange } from "./actions/undoNoteChange";
+import { initAgentEvidenceStore } from "./context/cacheManagement";
+import { initAgentCoverageStore } from "./context/coverageLedger";
+import { setLibraryOverviewGateway } from "./context/libraryOverview";
+import { setOutsidePaperPrefetchLookup } from "./context/outsidePaperRecords";
+import {
+  resolveTaskPaperScopeSet,
+  taskPaperScopeContextsOf,
+  withScopeItemKeys,
+} from "./context/taskPaperScopeListing";
+import { initPlanDocumentStore } from "./documents/store";
+import { registerMcpServer, unregisterMcpServer } from "./mcp/server";
+import { createAgentModelAdapter } from "./model/factory";
+import { initDormantPlanTables } from "./store/dormantPlanTables";
+import { initDormantResearchTables } from "./store/dormantResearchTables";
+import { AgentRuntime } from "./runtime";
+import { LiteratureSearchService } from "./services/literatureSearchService";
+import { PdfPageService } from "./services/pdfPageService";
+import { PdfService } from "./services/pdfService";
+import { RetrievalService } from "./services/retrievalService";
+import { ZoteroGateway } from "./services/zoteroGateway";
+import {
+  initAgentBatchJobStore,
+  sweepInterruptedBatchJobs,
+} from "./store/batchJobStore";
+import { initAgentBatchItemStore } from "./store/batchItemStore";
+import { initAgentChangeJournal } from "./store/changeJournal";
+import { initConversationMemoryStore } from "./store/conversationMemory";
+import { initAgentToolResultHandleStore } from "./store/toolResultHandles";
+import { getAgentRunTrace, initAgentTraceStore } from "./store/traceStore";
+import { initAgentTranscriptStore } from "./store/transcriptStore";
+import { createBuiltInToolRegistry } from "./tools";
+import { createLibraryBatchTool } from "./tools/write/libraryBatch";
+import type {
+  AgentConfirmationResolution,
+  AgentEvent,
+  AgentRuntimeOutcome,
+  AgentRuntimeRequestInput,
+  AgentRuntimeUnansweredOutcome,
+  AgentToolDefinition,
+} from "./types";
+import { unansweredTurnError } from "./execution/unansweredTurn";
+
+let runtime: AgentRuntime | null = null;
+let runtimeInitTask: Promise<AgentRuntime> | null = null;
+let agentLifecycleGeneration = 0;
+let _actionRegistry: ActionRegistry | null = null;
+let _toolRegistry: ReturnType<typeof createBuiltInToolRegistry> | null = null;
+
+// Hoisted so getAgentApi() can expose them to third-party plugin authors.
+let _zoteroGateway: ZoteroGateway | null = null;
+
+class AgentSubsystemInitializationCancelledError extends Error {
+  constructor() {
+    super("Agent subsystem initialization was cancelled");
+    this.name = "AgentSubsystemInitializationCancelledError";
+  }
+}
+
+function assertAgentInitCurrent(generation: number): void {
+  if (generation !== agentLifecycleGeneration) {
+    throw new AgentSubsystemInitializationCancelledError();
+  }
+}
+
+function createToolRegistry(zoteroGateway: ZoteroGateway) {
+  const pdfService = new PdfService();
+  const pdfPageService = new PdfPageService(pdfService, zoteroGateway);
+  const retrievalService = new RetrievalService(pdfService);
+  return createBuiltInToolRegistry({
+    zoteroGateway,
+    pdfService,
+    pdfPageService,
+    retrievalService,
+  });
+}
+
+async function createAgentSubsystemRuntime(
+  generation: number,
+): Promise<AgentRuntime> {
+  await initAgentTraceStore();
+  assertAgentInitCurrent(generation);
+  await initConversationMemoryStore();
+  assertAgentInitCurrent(generation);
+  await initAgentTranscriptStore();
+  assertAgentInitCurrent(generation);
+  await initAgentToolResultHandleStore();
+  assertAgentInitCurrent(generation);
+  await initAgentEvidenceStore();
+  assertAgentInitCurrent(generation);
+  await initAgentCoverageStore();
+  assertAgentInitCurrent(generation);
+  await initDormantPlanTables();
+  assertAgentInitCurrent(generation);
+  await initDormantResearchTables();
+  assertAgentInitCurrent(generation);
+  await initPlanDocumentStore();
+  assertAgentInitCurrent(generation);
+
+  const zoteroGateway = new ZoteroGateway();
+  const toolRegistry = createToolRegistry(zoteroGateway);
+  const nextRuntime = new AgentRuntime({
+    registry: toolRegistry,
+    adapterFactory: (request) => createAgentModelAdapter(request),
+    paperContextResolver: (selector) =>
+      zoteroGateway.resolvePaperContextTarget(selector),
+    resolveTurnScopePapers: async (request) => {
+      const libraryID = request.turnPaperScope.libraryID || request.libraryID;
+      if (!libraryID) return undefined;
+      return withScopeItemKeys(
+        resolveTaskPaperScopeSet(
+          await libraryIndexService.getSnapshot(libraryID),
+          taskPaperScopeContextsOf(request.turnPaperScope),
+        ),
+        (itemId) => zoteroGateway.getItem(itemId)?.key,
+      );
+    },
+  });
+  const actionRegistry = createBuiltInActionRegistry();
+
+  // Registered here rather than inside createBuiltInToolRegistry: the batch
+  // tool needs both registries, and the action registry is built after the
+  // tool one. Wiring it this way keeps the two from depending on each other.
+  toolRegistry.register(
+    createLibraryBatchTool({
+      actionRegistry,
+      toolRegistry,
+      zoteroGateway,
+    }),
+  );
+  await initAgentBatchJobStore();
+  // The per-item rows of a note batch live beside its job row, so both tables
+  // must exist before any batch can record what it wrote.
+  await initAgentBatchItemStore();
+  // Claim abandoned rows before the runtime is published. A deferred sweep
+  // can race with a newly started job and misclassify live work as failed.
+  await sweepInterruptedBatchJobs({ now: Date.now() });
+  await initAgentChangeJournal();
+
+  assertAgentInitCurrent(generation);
+  registerMcpServer({
+    toolRegistry,
+    zoteroGateway,
+  });
+
+  assertAgentInitCurrent(generation);
+  _zoteroGateway = zoteroGateway;
+  // The prompt layer cannot import this module without creating a cycle,
+  // so the gateway is pushed to it instead.
+  setLibraryOverviewGateway(zoteroGateway);
+  // Recording an outside paper cannot import the search service without a
+  // cycle, so the lookup it starts in the background is installed here: the
+  // Crossref citation lookup submit_document uses by default.
+  const citationLookup = new LiteratureSearchService(zoteroGateway);
+  setOutsidePaperPrefetchLookup((doi) =>
+    citationLookup.lookupCitationMetadataByDoi(doi),
+  );
+  _toolRegistry = toolRegistry;
+  runtime = nextRuntime;
+  _actionRegistry = actionRegistry;
+
+  return nextRuntime;
+}
+
+export async function initAgentSubsystem(): Promise<AgentRuntime> {
+  if (runtime) return runtime;
+  if (!runtimeInitTask) {
+    const generation = agentLifecycleGeneration;
+    const task = createAgentSubsystemRuntime(generation);
+    runtimeInitTask = task;
+    void task
+      .finally(() => {
+        if (runtimeInitTask === task) {
+          runtimeInitTask = null;
+        }
+      })
+      .catch(() => undefined);
+  }
+  return runtimeInitTask;
+}
+
+export function shutdownAgentSubsystem(): void {
+  agentLifecycleGeneration += 1;
+  unregisterMcpServer();
+  clearCodexZoteroMcpPreflightCache();
+  runtimeInitTask = null;
+  _actionRegistry = null;
+  _toolRegistry = null;
+  resetClaudeBridgeRuntime();
+  runtime = null;
+  _zoteroGateway = null;
+  setLibraryOverviewGateway(null);
+  setOutsidePaperPrefetchLookup(null);
+}
+
+export function getCoreAgentRuntime(): AgentRuntime {
+  if (!runtime) {
+    throw new Error("Agent subsystem is not initialized");
+  }
+  return runtime;
+}
+
+export function getAgentRuntime(): AgentRuntime {
+  const coreRuntime = getCoreAgentRuntime();
+  if (
+    getConversationSystemPref() === "claude_code" &&
+    isClaudeCodeModeEnabled()
+  ) {
+    return getClaudeBridgeRuntime(coreRuntime) as unknown as AgentRuntime;
+  }
+  return coreRuntime;
+}
+
+/**
+ * Returns the shared ZoteroGateway instance for use outside the agent runtime
+ * (e.g. UI components that need to trigger Zotero operations directly).
+ */
+export function getSharedZoteroGateway(): ZoteroGateway {
+  if (!_zoteroGateway) {
+    throw new Error("Agent subsystem is not initialized");
+  }
+  return _zoteroGateway;
+}
+
+export function getAgentApi() {
+  return {
+    undoNoteChange: (card: import("./types").AgentNoteChangeResultCard) => {
+      if (!_toolRegistry || !_zoteroGateway)
+        throw new Error("Agent subsystem is not initialized");
+      return undoNoteChange(_toolRegistry, _zoteroGateway, card);
+    },
+    // ── Core turn API ──────────────────────────────────────────────────────
+    /**
+     * Runs one agent turn. `options.signal` is the caller's Stop: aborting it
+     * ends the run as the panel's Stop button does (cancelled, resumable on
+     * "continue"). Without it the turn runs to its own end, as before.
+     *
+     * Resolves to a completed or fallback outcome. A stopped turn rejects
+     * with what the stopped run threw, or `Error("Aborted")`; a turn that an
+     * error escaped (a provider error the runtime does not retry, such as a
+     * 401 or a 400) rejects with that error.
+     *
+     * A turn the runtime ended by one of its own stop rules resolves with
+     * the stop text as `text`, not a verdict: `runStatus: "failed"` marks
+     * `connection_lost` (a network, rate-limit or 5xx error after its
+     * retries), `budget_reached` (a per-turn safety limit),
+     * `prompt_budget_exceeded`, and the failure rules such as
+     * `repeated_tool_errors` or `segment_without_progress`;
+     * `search_exhausted` resolves with `runStatus` unset and an answer that
+     * says what was not confirmed. The rule is the `agent_run_stop`
+     * provider event the turn emits (`payload.rule`), also in its trace.
+     */
+    runTurn: async (
+      request: AgentRuntimeRequestInput,
+      onEvent?: (event: AgentEvent) => void | Promise<void>,
+      options?: { signal?: AbortSignal },
+    ): Promise<Exclude<AgentRuntimeOutcome, AgentRuntimeUnansweredOutcome>> => {
+      const outcome = await getAgentRuntime().runTurn({
+        request:
+          request.conversationGeneration === undefined
+            ? {
+                ...request,
+                conversationGeneration: getConversationWriteGeneration(
+                  request.conversationKey,
+                ),
+              }
+            : request,
+        onEvent,
+        // The wait for a stopped prior run reaches the caller as a status.
+        onWaiting: (text) => onEvent?.({ type: "status", text }),
+        ...(options?.signal ? { signal: options.signal } : {}),
+      });
+      if (outcome.kind === "cancelled" || outcome.kind === "failed")
+        throw unansweredTurnError(outcome);
+      return outcome;
+    },
+    listTools: () => getAgentRuntime().listTools(),
+    getToolDefinition: (name: string) =>
+      getAgentRuntime().getToolDefinition(name),
+    getCapabilities: (request: AgentRuntimeRequestInput) =>
+      getAgentRuntime().getCapabilities(request),
+    getRunTrace: (runId: string) => getAgentRunTrace(runId),
+    resolveConfirmation: (
+      requestId: string,
+      approved: boolean | AgentConfirmationResolution,
+      data?: unknown,
+    ) => getAgentRuntime().resolveConfirmation(requestId, approved, data),
+
+    /**
+     * Registers an external pending confirmation so that `resolveConfirmation`
+     * can settle it.  Used by the action-picker UI to wire action HITL cards
+     * into the same resolution path as agent-turn confirmations.
+     */
+    registerPendingConfirmation: (
+      requestId: string,
+      resolve: (resolution: AgentConfirmationResolution) => void,
+    ) => getAgentRuntime().registerPendingConfirmation(requestId, resolve),
+    /**
+     * Claude Code's slash commands. A panel names its own conversation
+     * system; without one, the saved system decides.
+     */
+    listSlashCommands: (options?: ClaudeBridgeGateOptions) =>
+      getClaudeCommandCatalog(getCoreAgentRuntime(), options),
+
+    // ── Extension API ──────────────────────────────────────────────────────
+    /**
+     * Register a custom tool with the agent.  The tool is available immediately
+     * for all subsequent `runTurn` calls.  Registering a tool whose name
+     * matches an existing built-in tool replaces that built-in after validation.
+     * This synchronous call throws before registration when a model-visible
+     * input schema lacks an object root or uses root-level `oneOf`, `allOf`, or
+     * `anyOf`. Put alternatives inside properties and enforce cross-field rules
+     * in the tool's `validate()` function.
+     *
+     * See `src/agent/extensionApi.ts` for the full set of types and helpers
+     * available to third-party tool authors.
+     *
+     * @example
+     * ```ts
+     * import type { AgentToolDefinition } from "llm-for-zotero/src/agent/extensionApi";
+     * import { ok, fail } from "llm-for-zotero/src/agent/extensionApi";
+     *
+     * addon.api.agent.registerTool({
+     *   spec: {
+     *     name: "my_custom_tool",
+     *     description: "Does something custom",
+     *     inputSchema: { type: "object", properties: { query: { type: "string" } } },
+     *     executionClass: "read",
+     *     workCategory: "retrieval",
+     *   },
+     *   validate: (args) => {
+     *     if (!args || typeof args !== "object") return fail("Expected object");
+     *     return ok(args as { query?: string });
+     *   },
+     *   execute: async (input) => ({ result: `Got: ${input.query}` }),
+     * });
+     * ```
+     */
+    registerTool: <TInput, TResult>(
+      tool: AgentToolDefinition<TInput, TResult>,
+    ): void => getAgentRuntime().registerTool(tool),
+
+    /**
+     * Remove a previously registered tool by name.  Returns `true` if the
+     * tool existed and was removed, `false` if it was not found.
+     */
+    unregisterTool: (name: string) => getAgentRuntime().unregisterTool(name),
+
+    /**
+     * Returns the shared `ZoteroGateway` instance.  Custom tools can use this
+     * to query the Zotero library (items, collections, tags, notes, …) without
+     * having to instantiate their own copy.
+     *
+     * Only available after `initAgentSubsystem()` has resolved.
+     */
+    getZoteroGateway: (): ZoteroGateway => {
+      if (!_zoteroGateway) {
+        throw new Error("Agent subsystem is not initialized");
+      }
+      return _zoteroGateway;
+    },
+
+    // ── Action API ─────────────────────────────────────────────────────────
+    /**
+     * List all registered actions (name, description, inputSchema).
+     */
+    listActions: (mode?: "paper" | "library") => {
+      if (!_actionRegistry)
+        throw new Error("Agent subsystem is not initialized");
+      return _actionRegistry.listActions(mode);
+    },
+    getPaperScopedActionProfile: (name: string) => {
+      if (!_actionRegistry)
+        throw new Error("Agent subsystem is not initialized");
+      return _actionRegistry.getPaperScopedActionProfile(name);
+    },
+
+    /**
+     * Run a named action programmatically.
+     *
+     * @example
+     * ```ts
+     * const result = await addon.api.agent.runAction("audit_library", {
+     *   scope: "all",
+     *   saveNote: true,
+     * }, {
+     *   libraryID: Zotero.Libraries.userLibraryID,
+     *   confirmationMode: "automatic",
+     *   onProgress: (event) => console.log(event),
+     *   requestConfirmation: async (_id, _action) => ({ approved: true }),
+     * });
+     * ```
+     */
+    runAction: (
+      name: string,
+      input: unknown,
+      opts: {
+        libraryID?: number;
+        requestContext?: import("./actions").ActionRequestContext;
+        conversationKey?: number;
+        confirmationMode?: import("./actions").ActionConfirmationMode;
+        onProgress?: (event: import("./actions").ActionProgressEvent) => void;
+        requestConfirmation?: (
+          requestId: string,
+          action: import("./types").AgentPendingAction,
+        ) => Promise<import("./types").AgentConfirmationResolution>;
+        /** LLM credentials for actions that propose per-item suggestions. */
+        llm?: import("./actions").ActionLLMConfig;
+        /** Cancels a long batched run part-way through. */
+        signal?: AbortSignal;
+      } = {},
+    ) => {
+      if (!_actionRegistry || !_toolRegistry)
+        throw new Error("Agent subsystem is not initialized");
+      if (!_zoteroGateway)
+        throw new Error("Agent subsystem is not initialized");
+      const libraryID =
+        opts.libraryID ??
+        (Zotero as unknown as { Libraries: { userLibraryID: number } })
+          .Libraries.userLibraryID;
+      const ctx: import("./actions").ActionExecutionContext = {
+        registry: _toolRegistry,
+        // Without this, every change an action makes is journalled under
+        // conversation 0 and neither undo path can find it.
+        conversationKey: opts.conversationKey,
+        zoteroGateway: _zoteroGateway,
+        libraryID,
+        confirmationMode: opts.confirmationMode ?? "native_ui",
+        onProgress: opts.onProgress ?? (() => {}),
+        requestConfirmation:
+          opts.requestConfirmation ??
+          (async () => {
+            throw new Error(
+              "This action requires review, but no confirmation surface is available.",
+            );
+          }),
+        llm: opts.llm,
+        requestContext: opts.requestContext,
+        signal: opts.signal,
+      };
+      return _actionRegistry.run(name, input, ctx);
+    },
+  };
+}

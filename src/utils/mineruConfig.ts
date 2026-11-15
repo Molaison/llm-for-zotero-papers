@@ -1,0 +1,426 @@
+import { config } from "../../package.json";
+
+const MINERU_ENABLED_KEY = `${config.prefsPrefix}.mineruEnabled`;
+const MINERU_API_KEY_KEY = `${config.prefsPrefix}.mineruApiKey`;
+const MINERU_MODE_KEY = `${config.prefsPrefix}.mineruMode`;
+const MINERU_CLOUD_MODEL_KEY = `${config.prefsPrefix}.mineruCloudModel`;
+const MINERU_LOCAL_API_BASE_KEY = `${config.prefsPrefix}.mineruLocalApiBase`;
+const MINERU_LOCAL_BACKEND_KEY = `${config.prefsPrefix}.mineruLocalBackend`;
+const MINERU_FORCE_OCR_KEY = `${config.prefsPrefix}.mineruForceOcr`;
+const MINERU_AUTO_WATCH_KEY = `${config.prefsPrefix}.mineruAutoWatchCollections`;
+const MINERU_GLOBAL_AUTO_PARSE_KEY = `${config.prefsPrefix}.mineruGlobalAutoParse`;
+const MINERU_SYNC_ENABLED_KEY = `${config.prefsPrefix}.mineruSyncEnabled`;
+const MINERU_MAX_AUTO_PAGES_KEY = `${config.prefsPrefix}.mineruMaxAutoPages`;
+const MINERU_EXCLUDE_PATTERNS_KEY = `${config.prefsPrefix}.mineruExcludePatterns`;
+const MINERU_LOCAL_SERVER_COMMAND_KEY = `${config.prefsPrefix}.mineruLocalServerCommand`;
+const MINERU_LOCAL_SERVER_IDLE_MINUTES_KEY = `${config.prefsPrefix}.mineruLocalServerIdleMinutes`;
+
+export const DEFAULT_MINERU_LOCAL_API_BASE = "http://127.0.0.1:8000";
+export const DEFAULT_MINERU_CLOUD_MODEL: MineruCloudModel = "vlm";
+export const DEFAULT_MINERU_LOCAL_BACKEND: MineruLocalBackend = "pipeline";
+export const DEFAULT_MINERU_FORCE_OCR = false;
+export const DEFAULT_MINERU_LOCAL_SERVER_IDLE_MINUTES = 10;
+export const DEFAULT_MINERU_MAX_AUTO_PAGES = 200;
+export const MAX_MINERU_FILENAME_PATTERN_LENGTH = 256;
+
+export type MineruMode = "cloud" | "local";
+
+export type MineruCloudModel = "pipeline" | "vlm";
+
+export type MineruLocalBackend =
+  | "pipeline"
+  | "vlm"
+  | "hybrid"
+  | "vlm-http-client"
+  | "hybrid-http-client";
+
+export const MINERU_LOCAL_TIERS = [
+  "auto",
+  "flash",
+  "basic",
+  "standard",
+  "advanced",
+] as const;
+export type MineruLocalTier = (typeof MINERU_LOCAL_TIERS)[number];
+export type MineruLocalOptions = {
+  tier: MineruLocalTier;
+  effort: "medium" | "high";
+  imageAnalysis: boolean;
+  serverUrl: string;
+  apiKey: string;
+};
+
+export function getMineruLocalOptions(): MineruLocalOptions {
+  const read = (name: string) =>
+    Zotero.Prefs.get(`${config.prefsPrefix}.mineruLocal${name}`, true);
+  const tier = read("Tier");
+  return {
+    tier: MINERU_LOCAL_TIERS.includes(tier as MineruLocalTier)
+      ? (tier as MineruLocalTier)
+      : "auto",
+    effort: read("Effort") === "high" ? "high" : "medium",
+    imageAnalysis: read("ImageAnalysis") !== false,
+    serverUrl: String(read("ServerUrl") || "").trim(),
+    apiKey: String(read("ApiKey") || "").trim(),
+  };
+}
+
+export function setMineruLocalOption<K extends keyof MineruLocalOptions>(
+  key: K,
+  value: MineruLocalOptions[K],
+): void {
+  const suffix = key[0].toUpperCase() + key.slice(1);
+  Zotero.Prefs.set(`${config.prefsPrefix}.mineruLocal${suffix}`, value, true);
+}
+
+export type MineruFilenameMatcher = {
+  matches: (filename: string) => boolean;
+};
+
+type MineruFilenamePatternRule =
+  | { kind: "substring"; value: string }
+  | { kind: "regex"; value: RegExp };
+
+export const MINERU_LOCAL_BACKENDS: readonly MineruLocalBackend[] = [
+  "pipeline",
+  "vlm",
+  "hybrid",
+  "vlm-http-client",
+  "hybrid-http-client",
+] as const;
+
+export const MINERU_CLOUD_MODELS: readonly MineruCloudModel[] = [
+  "pipeline",
+  "vlm",
+] as const;
+
+const MINERU_BACKEND_API_VALUES: Record<MineruLocalBackend, string> = {
+  pipeline: "pipeline",
+  vlm: "vlm-auto-engine",
+  hybrid: "hybrid-auto-engine",
+  "vlm-http-client": "vlm-http-client",
+  "hybrid-http-client": "hybrid-http-client",
+};
+
+export function toMineruApiBackend(
+  backend: MineruLocalBackend,
+  serverVersion?: string,
+): string {
+  const [major, minor] = (serverVersion || "").split(".").map(Number);
+  if (
+    (major > 3 || (major === 3 && minor >= 4)) &&
+    (backend === "vlm" || backend === "hybrid")
+  )
+    return `${backend}-engine`;
+  return MINERU_BACKEND_API_VALUES[backend];
+}
+
+export function isMineruEnabled(): boolean {
+  const value = Zotero.Prefs.get(MINERU_ENABLED_KEY, true);
+  return value === true || `${value || ""}`.toLowerCase() === "true";
+}
+
+export function getMineruApiKey(): string {
+  const value = Zotero.Prefs.get(MINERU_API_KEY_KEY, true);
+  return typeof value === "string" ? value : "";
+}
+
+export function setMineruEnabled(value: boolean): void {
+  Zotero.Prefs.set(MINERU_ENABLED_KEY, value, true);
+}
+
+export function setMineruApiKey(value: string): void {
+  Zotero.Prefs.set(MINERU_API_KEY_KEY, value, true);
+}
+
+export function normalizeMineruMode(value: unknown): MineruMode {
+  return value === "local" ? "local" : "cloud";
+}
+
+export function getMineruMode(): MineruMode {
+  return normalizeMineruMode(Zotero.Prefs.get(MINERU_MODE_KEY, true));
+}
+
+export function setMineruMode(value: MineruMode): void {
+  Zotero.Prefs.set(MINERU_MODE_KEY, normalizeMineruMode(value), true);
+}
+
+export function normalizeMineruCloudModel(value: unknown): MineruCloudModel {
+  return MINERU_CLOUD_MODELS.includes(value as MineruCloudModel)
+    ? (value as MineruCloudModel)
+    : DEFAULT_MINERU_CLOUD_MODEL;
+}
+
+export function getMineruCloudModel(): MineruCloudModel {
+  return normalizeMineruCloudModel(
+    Zotero.Prefs.get(MINERU_CLOUD_MODEL_KEY, true),
+  );
+}
+
+export function setMineruCloudModel(value: MineruCloudModel): void {
+  Zotero.Prefs.set(
+    MINERU_CLOUD_MODEL_KEY,
+    normalizeMineruCloudModel(value),
+    true,
+  );
+}
+
+export function normalizeMineruLocalApiBase(value: unknown): string {
+  const raw = typeof value === "string" ? value.trim() : "";
+  if (!raw) return DEFAULT_MINERU_LOCAL_API_BASE;
+  try {
+    const url = new URL(raw);
+    if ((url.protocol === "http:" || url.protocol === "https:") && url.host) {
+      const path = url.pathname.replace(/\/+$/, "");
+      return `${url.origin}${path}`;
+    }
+  } catch {
+    /* fall back to default */
+  }
+  return DEFAULT_MINERU_LOCAL_API_BASE;
+}
+
+export function getMineruLocalApiBase(): string {
+  return normalizeMineruLocalApiBase(
+    Zotero.Prefs.get(MINERU_LOCAL_API_BASE_KEY, true),
+  );
+}
+
+export function setMineruLocalApiBase(value: string): void {
+  Zotero.Prefs.set(
+    MINERU_LOCAL_API_BASE_KEY,
+    normalizeMineruLocalApiBase(value),
+    true,
+  );
+}
+
+export function normalizeMineruLocalServerCommand(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+export function getMineruLocalServerCommand(): string {
+  return normalizeMineruLocalServerCommand(
+    Zotero.Prefs.get(MINERU_LOCAL_SERVER_COMMAND_KEY, true),
+  );
+}
+
+export function setMineruLocalServerCommand(value: string): void {
+  Zotero.Prefs.set(
+    MINERU_LOCAL_SERVER_COMMAND_KEY,
+    normalizeMineruLocalServerCommand(value),
+    true,
+  );
+}
+
+export function normalizeMineruLocalServerIdleMinutes(value: unknown): number {
+  const num =
+    typeof value === "number"
+      ? value
+      : Number.parseInt(String(value ?? ""), 10);
+  if (!Number.isFinite(num) || num < 1) {
+    return DEFAULT_MINERU_LOCAL_SERVER_IDLE_MINUTES;
+  }
+  return Math.floor(num);
+}
+
+export function getMineruLocalServerIdleMinutes(): number {
+  return normalizeMineruLocalServerIdleMinutes(
+    Zotero.Prefs.get(MINERU_LOCAL_SERVER_IDLE_MINUTES_KEY, true),
+  );
+}
+
+export function setMineruLocalServerIdleMinutes(value: number): void {
+  Zotero.Prefs.set(
+    MINERU_LOCAL_SERVER_IDLE_MINUTES_KEY,
+    normalizeMineruLocalServerIdleMinutes(value),
+    true,
+  );
+}
+
+export function normalizeMineruLocalBackend(
+  value: unknown,
+): MineruLocalBackend {
+  return MINERU_LOCAL_BACKENDS.includes(value as MineruLocalBackend)
+    ? (value as MineruLocalBackend)
+    : DEFAULT_MINERU_LOCAL_BACKEND;
+}
+
+export function getMineruLocalBackend(): MineruLocalBackend {
+  return normalizeMineruLocalBackend(
+    Zotero.Prefs.get(MINERU_LOCAL_BACKEND_KEY, true),
+  );
+}
+
+export function setMineruLocalBackend(value: MineruLocalBackend): void {
+  Zotero.Prefs.set(
+    MINERU_LOCAL_BACKEND_KEY,
+    normalizeMineruLocalBackend(value),
+    true,
+  );
+}
+
+export function normalizeMineruForceOcr(value: unknown): boolean {
+  if (value === true) return true;
+  if (value === false || value === undefined || value === null) {
+    return DEFAULT_MINERU_FORCE_OCR;
+  }
+  return `${value}`.trim().toLowerCase() === "true";
+}
+
+export function isMineruForceOcrEnabled(): boolean {
+  return normalizeMineruForceOcr(Zotero.Prefs.get(MINERU_FORCE_OCR_KEY, true));
+}
+
+export function setMineruForceOcrEnabled(value: boolean): void {
+  Zotero.Prefs.set(MINERU_FORCE_OCR_KEY, normalizeMineruForceOcr(value), true);
+}
+
+// ── Global Auto-Parse Configuration ──────────────────────────────────────────
+
+export function isGlobalAutoParseEnabled(): boolean {
+  const value = Zotero.Prefs.get(MINERU_GLOBAL_AUTO_PARSE_KEY, true);
+  return value === true || `${value || ""}`.toLowerCase() === "true";
+}
+
+export function setGlobalAutoParseEnabled(value: boolean): void {
+  Zotero.Prefs.set(MINERU_GLOBAL_AUTO_PARSE_KEY, value, true);
+}
+
+// ── Automatic/Bulk Parse Filters ────────────────────────────────────────────
+
+export function normalizeMineruMaxAutoPages(value: unknown): number {
+  if (value === undefined || value === null || value === false) {
+    return DEFAULT_MINERU_MAX_AUTO_PAGES;
+  }
+  const raw = typeof value === "string" ? value.trim() : value;
+  if (raw === "") return DEFAULT_MINERU_MAX_AUTO_PAGES;
+  const num = Number(raw);
+  if (!Number.isFinite(num) || num < 0) return DEFAULT_MINERU_MAX_AUTO_PAGES;
+  return Math.floor(num);
+}
+
+export function getMineruMaxAutoPages(): number {
+  return normalizeMineruMaxAutoPages(
+    Zotero.Prefs.get(MINERU_MAX_AUTO_PAGES_KEY, true),
+  );
+}
+
+export function setMineruMaxAutoPages(value: number): void {
+  Zotero.Prefs.set(
+    MINERU_MAX_AUTO_PAGES_KEY,
+    normalizeMineruMaxAutoPages(value),
+    true,
+  );
+}
+
+// ── Zotero File Sync Configuration ──────────────────────────────────────────
+
+export function isMineruSyncEnabled(): boolean {
+  const value = Zotero.Prefs.get(MINERU_SYNC_ENABLED_KEY, true);
+  return value === true || `${value || ""}`.toLowerCase() === "true";
+}
+
+export function setMineruSyncEnabled(value: boolean): void {
+  Zotero.Prefs.set(MINERU_SYNC_ENABLED_KEY, value, true);
+}
+
+// ── Auto-Watch Collections Configuration ─────────────────────────────────────
+
+export function getAutoWatchCollectionIds(): Set<number> {
+  const value = Zotero.Prefs.get(MINERU_AUTO_WATCH_KEY, true);
+  const str = typeof value === "string" ? value : "";
+  if (!str) return new Set();
+  const ids = str
+    .split(",")
+    .map((s) => parseInt(s.trim(), 10))
+    .filter((id) => Number.isFinite(id) && id > 0);
+  return new Set(ids);
+}
+
+export function setAutoWatchCollectionIds(ids: Set<number>): void {
+  const str = Array.from(ids).join(",");
+  Zotero.Prefs.set(MINERU_AUTO_WATCH_KEY, str, true);
+}
+
+export function addAutoWatchCollection(collectionId: number): void {
+  const ids = getAutoWatchCollectionIds();
+  ids.add(collectionId);
+  setAutoWatchCollectionIds(ids);
+}
+
+export function removeAutoWatchCollection(collectionId: number): void {
+  const ids = getAutoWatchCollectionIds();
+  ids.delete(collectionId);
+  setAutoWatchCollectionIds(ids);
+}
+
+export function isAutoWatchCollection(collectionId: number): boolean {
+  return getAutoWatchCollectionIds().has(collectionId);
+}
+
+// ── Filename Exclusion Patterns ─────────────────────────────────────────────
+
+export function getMineruExcludePatterns(): string[] {
+  const raw = Zotero.Prefs.get(MINERU_EXCLUDE_PATTERNS_KEY, true);
+  const str = typeof raw === "string" ? raw : "";
+  if (!str) return [];
+  try {
+    const parsed = JSON.parse(str);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((v): v is string => typeof v === "string" && v.trim() !== "")
+      .map((v) => v.trim());
+  } catch {
+    return [];
+  }
+}
+
+export function setMineruExcludePatterns(patterns: string[]): void {
+  Zotero.Prefs.set(MINERU_EXCLUDE_PATTERNS_KEY, JSON.stringify(patterns), true);
+}
+
+export function buildMineruFilenameMatcher(
+  patterns: string[] = getMineruExcludePatterns(),
+): MineruFilenameMatcher {
+  const rules: MineruFilenamePatternRule[] = [];
+  for (const pat of patterns) {
+    const trimmed = pat.trim();
+    if (!trimmed || trimmed.length > MAX_MINERU_FILENAME_PATTERN_LENGTH) {
+      continue;
+    }
+    if (
+      trimmed.startsWith("/") &&
+      trimmed.endsWith("/") &&
+      trimmed.length > 2
+    ) {
+      try {
+        rules.push({
+          kind: "regex",
+          value: new RegExp(trimmed.slice(1, -1), "i"),
+        });
+      } catch {
+        /* invalid regex — skip */
+      }
+    } else {
+      rules.push({ kind: "substring", value: trimmed.toLowerCase() });
+    }
+  }
+  return {
+    matches(filename: string): boolean {
+      if (!filename || rules.length === 0) return false;
+      const lower = filename.toLowerCase();
+      for (const rule of rules) {
+        if (rule.kind === "substring") {
+          if (lower.includes(rule.value)) return true;
+        } else if (rule.value.test(filename)) {
+          return true;
+        }
+      }
+      return false;
+    },
+  };
+}
+
+export function isFilenameExcluded(filename: string): boolean {
+  return buildMineruFilenameMatcher().matches(filename);
+}

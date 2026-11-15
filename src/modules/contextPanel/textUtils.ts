@@ -1,0 +1,700 @@
+import { appLogger } from "../../core/logging";
+import {
+  SELECTED_TEXT_MAX_LENGTH,
+  SIDECHAT_SELECTED_TEXT_MAX_LENGTH,
+} from "./constants";
+import { synthesizeSelectedTextContexts } from "../../services/context/normalizers";
+import type {
+  PaperContextRef,
+  ResolvedSelectedTextAnchor,
+  SelectedTextContext,
+  SelectedTextSource,
+} from "./types";
+import {
+  buildPaperQuoteCitationGuidance,
+  formatPaperCitationLabel,
+  formatPaperSourceLabel,
+} from "../../services/paperContent/paperAttribution";
+import {
+  buildQuoteAnchorPromptBlock,
+  buildSelectedTextQuoteCitations,
+} from "../../services/quotes/quoteCitations";
+import {
+  formatSelectedTextLocator,
+  formatSelectedTextQuestionSuffix,
+  isPromptOnlySelectedTextQuestions,
+  joinSelectedTextQuestions,
+  renderSelectedTextAnchorContext,
+  SELECTED_TEXT_QUESTIONS_INSTRUCTION,
+} from "../../services/context/selectedTextAnchorFormatting";
+import { t } from "../../utils/i18n";
+import { sanitizeText } from "../../utils/textSanitization";
+
+export const DEFAULT_SELECTED_TEXT_PROMPT =
+  "Please explain this selected text.";
+export const DEFAULT_FILE_ANALYSIS_PROMPT = "Please analyze attached files.";
+
+/**
+ * The block that closes a selected-text prompt. When the prompt is only the
+ * chip questions (empty composer), each question already follows its quote,
+ * so a short instruction replaces the repeated "User question:" block.
+ */
+function formatUserQuestionBlock(
+  normalizedPrompt: string,
+  contexts: readonly Pick<SelectedTextContext, "userQuery">[],
+): string {
+  return isPromptOnlySelectedTextQuestions(
+    normalizedPrompt,
+    contexts,
+    sanitizeText,
+  )
+    ? SELECTED_TEXT_QUESTIONS_INSTRUCTION
+    : `User question:\n${normalizedPrompt}`;
+}
+
+function buildQuestionWithSelectedNoteText(
+  selectedText: string,
+  userPrompt: string,
+  userQuery?: string,
+): string {
+  const normalizedPrompt = userPrompt.trim() || DEFAULT_SELECTED_TEXT_PROMPT;
+  return [
+    "Selected text from a Zotero note:",
+    `"""\n${selectedText}\n"""${formatSelectedTextQuestionSuffix(userQuery)}`,
+    "",
+    formatUserQuestionBlock(normalizedPrompt, [{ userQuery }]),
+  ].join("\n");
+}
+
+function buildQuestionWithNoteEditingText(
+  selectedText: string,
+  userPrompt: string,
+  userQuery?: string,
+): string {
+  const normalizedPrompt = userPrompt.trim() || DEFAULT_SELECTED_TEXT_PROMPT;
+  return [
+    "Selected text from the current Zotero note editor (editing focus):",
+    `"""\n${selectedText}\n"""${formatSelectedTextQuestionSuffix(userQuery)}`,
+    "The user selected this snippet inside the active note and wants help editing it in place.",
+    "",
+    formatUserQuestionBlock(normalizedPrompt, [{ userQuery }]),
+  ].join("\n");
+}
+
+export function normalizeSelectedText(
+  text: string,
+  source?: SelectedTextSource,
+): string {
+  const sanitized = sanitizeText(text);
+  // Editing needs the selected characters, including paragraph boundaries;
+  // a side-chat transcript keeps its Q:/A: lines.
+  const keepsLineBreaks = source === "note-edit" || source === "sidechat";
+  const normalized = keepsLineBreaks
+    ? sanitized.replace(/\r\n?/g, "\n")
+    : sanitized.replace(/\s+/g, " ");
+  return normalized
+    .trim()
+    .slice(
+      0,
+      source === "sidechat"
+        ? SIDECHAT_SELECTED_TEXT_MAX_LENGTH
+        : SELECTED_TEXT_MAX_LENGTH,
+    );
+}
+
+export function isLikelyCorruptedSelectedText(text: string): boolean {
+  const sample = sanitizeText(text || "");
+  if (!sample) return false;
+
+  // Most common hard signal of broken extraction/encoding.
+  if (sample.includes("\uFFFD") || sample.includes("�")) return true;
+  if (/[□▢▣▤▥▦▧▨▩▯]/u.test(sample)) return true;
+
+  // Typical UTF-8/Latin-1 mojibake markers.
+  if (/Ã.|Â.|â(?:€|€™|€œ|€|€˜|€¦)/.test(sample)) return true;
+
+  // Heuristic: math-heavy English text unexpectedly mixed with a small amount
+  // of CJK/Hangul often indicates corrupted glyph extraction in PDFs.
+  const hasMathLikeContext = /[=+\-*/^_(){}\\]|[∑∏√∞≤≥≈≠±→↔]|[α-ωΑ-Ωµμ]/u.test(
+    sample,
+  );
+  const latinCount = (sample.match(/[A-Za-z]/g) || []).length;
+  const cjkLikeMatches =
+    sample.match(
+      /[\u1100-\u11FF\u3130-\u318F\uAC00-\uD7AF\u3040-\u30FF\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]/gu,
+    ) || [];
+  const hanMatches = sample.match(/\p{Script=Han}/gu) || [];
+  const cjkLikeCount = Math.max(cjkLikeMatches.length, hanMatches.length);
+
+  if (
+    hasMathLikeContext &&
+    latinCount >= 8 &&
+    cjkLikeCount > 0 &&
+    cjkLikeCount < latinCount
+  ) {
+    return true;
+  }
+
+  // Heuristic: runs like "� � � �" in math context are typically broken
+  // glyph extraction from PDFs, not intentional math operators.
+  if (hasMathLikeContext) {
+    const suspiciousSymbolRun =
+      /(?:^|\s)(?:[^\p{L}\p{N}\s])(?:\s+[^\p{L}\p{N}\s]){2,}(?=\s|$)/u;
+    if (suspiciousSymbolRun.test(sample)) {
+      return true;
+    }
+
+    // Mixed CJK and Latin variable fragments near math operators are a
+    // common artifact of broken PDF extraction (e.g. "Φ(刺j, 组 + Bj, 组)").
+    const mixedToken =
+      /(?:\p{Script=Han}[A-Za-z]|[A-Za-z]\p{Script=Han})/u.test(sample);
+    const cjkNearMath =
+      /\p{Script=Han}[^A-Za-z0-9]{0,2}[+\-*/=,()ΣΦΠ∑]/u.test(sample) ||
+      /[+\-*/=,()ΣΦΠ∑][^A-Za-z0-9]{0,2}\p{Script=Han}/u.test(sample);
+    const greekWithMixedContext =
+      /[ΣΦΠ∑]/u.test(sample) &&
+      cjkLikeCount >= 1 &&
+      latinCount >= 2 &&
+      (mixedToken || cjkNearMath);
+    if (
+      ((mixedToken || cjkNearMath) && cjkLikeCount >= 1 && latinCount >= 2) ||
+      greekWithMixedContext
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+export function buildQuestionWithSelectedText(
+  selectedText: string,
+  userPrompt: string,
+  userQuery?: string,
+): string {
+  const normalizedPrompt = userPrompt.trim() || DEFAULT_SELECTED_TEXT_PROMPT;
+  return `Selected text from the PDF reader:\n"""\n${selectedText}\n"""${formatSelectedTextQuestionSuffix(userQuery)}\n\n${formatUserQuestionBlock(normalizedPrompt, [{ userQuery }])}`;
+}
+
+export function buildQuestionWithSelectedTextContexts(
+  selectedTexts: string[],
+  selectedTextSources: SelectedTextSource[] | undefined,
+  userPrompt: string,
+  options?: {
+    selectedTextPaperContexts?: (PaperContextRef | undefined)[];
+    selectedTextContexts?: SelectedTextContext[];
+    resolvedSelectedTextAnchors?: ResolvedSelectedTextAnchor[];
+    includeAnchorContext?: boolean;
+    includePaperAttribution?: boolean;
+  },
+): string {
+  const normalizedPrompt = userPrompt.trim() || DEFAULT_SELECTED_TEXT_PROMPT;
+  const contexts = synthesizeSelectedTextContexts({
+    selectedTextContexts: options?.selectedTextContexts,
+    selectedTexts,
+    selectedTextSources,
+    selectedTextPaperContexts: options?.selectedTextPaperContexts,
+    sanitizeText,
+  });
+  if (!contexts.length) {
+    return `User question:\n${normalizedPrompt}`;
+  }
+  const normalizedTexts = contexts.map((context) => context.text);
+  const normalizedSources = contexts.map((context) => context.source);
+  const selectedTextPaperContexts = contexts.map(
+    (context) => context.paperContext,
+  );
+  const anchorsByContextIndex = new Map(
+    (options?.resolvedSelectedTextAnchors || []).map((anchor) => [
+      anchor.contextIndex,
+      anchor,
+    ]),
+  );
+  const includePaperAttribution =
+    options?.includePaperAttribution === true &&
+    selectedTextPaperContexts.some((entry) => Boolean(entry));
+  if (
+    normalizedTexts.length === 1 &&
+    normalizedSources[0] === "pdf" &&
+    !includePaperAttribution &&
+    !formatSelectedTextLocator(contexts[0], anchorsByContextIndex.get(0))
+  ) {
+    return buildQuestionWithSelectedText(
+      normalizedTexts[0],
+      normalizedPrompt,
+      contexts[0].userQuery,
+    );
+  }
+  if (normalizedTexts.length === 1 && normalizedSources[0] === "note-edit") {
+    return buildQuestionWithNoteEditingText(
+      normalizedTexts[0],
+      normalizedPrompt,
+      contexts[0].userQuery,
+    );
+  }
+  if (normalizedTexts.length === 1 && normalizedSources[0] === "note") {
+    return buildQuestionWithSelectedNoteText(
+      normalizedTexts[0],
+      normalizedPrompt,
+      contexts[0].userQuery,
+    );
+  }
+  const contextBlocks = normalizedTexts.map((text, index) => {
+    const source = normalizedSources[index];
+    const sourceLabel =
+      source === "model"
+        ? "model_response"
+        : source === "note"
+          ? "zotero_note"
+          : source === "note-edit"
+            ? "note_editor"
+            : source === "sidechat"
+              ? "side_chat_transcript"
+              : "pdf_reader";
+    const paperLabel =
+      includePaperAttribution && source === "pdf"
+        ? formatPaperCitationLabel(selectedTextPaperContexts[index])
+        : "";
+    const sourceCitationLabel =
+      includePaperAttribution && source === "pdf"
+        ? formatPaperSourceLabel(selectedTextPaperContexts[index])
+        : "";
+    const paperPart = paperLabel ? ` [paper=${paperLabel}]` : "";
+    const citationPart = sourceCitationLabel
+      ? ` [source_label=${sourceCitationLabel}]`
+      : "";
+    const locator = formatSelectedTextLocator(
+      contexts[index],
+      anchorsByContextIndex.get(index),
+    );
+    const locatorPart = locator ? ` ${locator}` : "";
+    const questionPart = formatSelectedTextQuestionSuffix(
+      contexts[index].userQuery,
+    );
+    return `Text Context ${index + 1} [source=${sourceLabel}]${paperPart}${citationPart}${locatorPart}:\n"""\n${text}\n"""${questionPart}`;
+  });
+  const selectedTextQuoteCitations = includePaperAttribution
+    ? buildSelectedTextQuoteCitations(
+        normalizedTexts,
+        normalizedSources,
+        selectedTextPaperContexts,
+      )
+    : [];
+  const anchorGuidance = buildQuoteAnchorPromptBlock(
+    selectedTextQuoteCitations,
+  );
+  const guidanceLines =
+    includePaperAttribution &&
+    selectedTextPaperContexts.some((entry) => !!entry)
+      ? [
+          ...anchorGuidance,
+          ...(anchorGuidance.length ? [""] : []),
+          ...buildPaperQuoteCitationGuidance(),
+        ]
+      : [];
+  const guidance = guidanceLines.length
+    ? `${guidanceLines.join("\n")}\n\n`
+    : "";
+  const anchorContext = options?.includeAnchorContext
+    ? renderSelectedTextAnchorContext({
+        selectedTextContexts: contexts,
+        anchors: options.resolvedSelectedTextAnchors || [],
+      })
+    : "";
+  const question = `Selected text contexts with explicit sources:\n${guidance}${contextBlocks.join(
+    "\n\n",
+  )}\n\n${formatUserQuestionBlock(normalizedPrompt, contexts)}`;
+  return anchorContext ? `${question}\n\n${anchorContext}` : question;
+}
+
+/**
+ * The user-question text for a send. Composer text wins; with an empty
+ * composer, the questions attached to selected-text chips (in chip order,
+ * blank-line separated) replace the default selected-text prompt (D3).
+ */
+export function resolvePromptText(
+  userInput: string,
+  selectedText: string,
+  hasAttachments: boolean,
+  selectedTextContexts?: readonly SelectedTextContext[],
+): string {
+  const normalizedInput = sanitizeText(userInput).trim();
+  if (normalizedInput) return normalizedInput;
+  const chipQuestions = joinSelectedTextQuestions(
+    selectedTextContexts,
+    sanitizeText,
+  );
+  if (chipQuestions) return chipQuestions;
+  if (sanitizeText(selectedText).trim()) return DEFAULT_SELECTED_TEXT_PROMPT;
+  if (hasAttachments) return DEFAULT_FILE_ANALYSIS_PROMPT;
+  return "";
+}
+
+type FileContextAttachment = {
+  id?: string;
+  name: string;
+  mimeType?: string;
+  sizeBytes: number;
+  textContent?: string;
+};
+
+export function buildModelPromptWithFileContext(
+  baseQuestion: string,
+  fileAttachments: FileContextAttachment[],
+): string {
+  if (!fileAttachments.length) return baseQuestion;
+  const textBlocks: string[] = [];
+  const metaBlocks: string[] = [];
+  for (const attachment of fileAttachments) {
+    // PDF-paper attachments are sent as binary file_ref — skip text metadata
+    if (
+      typeof attachment.id === "string" &&
+      (attachment.id.startsWith("pdf-paper-") ||
+        attachment.id.startsWith("pdf-page-"))
+    )
+      continue;
+    metaBlocks.push(
+      `- ${attachment.name} (${attachment.mimeType || "application/octet-stream"}, ${(attachment.sizeBytes / 1024 / 1024).toFixed(2)} MB)`,
+    );
+    if (attachment.textContent) {
+      const clipped = attachment.textContent.slice(0, 12000);
+      textBlocks.push(`### ${attachment.name}\n${clipped}`);
+    }
+  }
+  const blocks: string[] = [baseQuestion];
+  if (metaBlocks.length) {
+    blocks.push(`\nAttached files:\n${metaBlocks.join("\n")}`);
+  }
+  if (textBlocks.length) {
+    blocks.push(`\nAttached file contents:\n${textBlocks.join("\n\n")}`);
+  }
+  return blocks.join("\n");
+}
+
+export function formatTime(timestamp: number) {
+  if (!timestamp) return "";
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return "";
+  const hour = `${date.getHours()}`.padStart(2, "0");
+  const minute = `${date.getMinutes()}`.padStart(2, "0");
+  const month = `${date.getMonth() + 1}`.padStart(2, "0");
+  const day = `${date.getDate()}`.padStart(2, "0");
+  const year = `${date.getFullYear() % 100}`.padStart(2, "0");
+  return `${hour}:${minute} ${month}/${day}/${year}`;
+}
+
+export function getAttachmentTypeLabel(entry: {
+  name?: string;
+  mimeType?: string;
+  category?: string;
+}): string {
+  const name = (entry.name || "").trim().toLowerCase();
+  const mimeType = (entry.mimeType || "").trim().toLowerCase();
+  const category = (entry.category || "").trim().toLowerCase();
+
+  if (
+    category === "pdf" ||
+    mimeType === "application/pdf" ||
+    name.endsWith(".pdf")
+  )
+    return "PDF";
+  if (
+    category === "markdown" ||
+    name.endsWith(".md") ||
+    name.endsWith(".markdown")
+  )
+    return "MD";
+  if (category === "text") return "TXT";
+
+  const dotIndex = name.lastIndexOf(".");
+  if (dotIndex > -1 && dotIndex < name.length - 1) {
+    const ext = name.slice(dotIndex + 1).replace(/[^a-z0-9]/g, "");
+    if (ext) return ext.slice(0, 4).toUpperCase();
+  }
+
+  if (mimeType.startsWith("text/")) return "TXT";
+  if (category === "code") return "CODE";
+  return "FILE";
+}
+
+/**
+ * Sets the footer status line. The idle "Ready" line takes the plain style
+ * a freshly mounted panel shows; other messages keep their variant's colour.
+ */
+export function setStatus(
+  statusEl: HTMLElement,
+  text: string,
+  variant: "ready" | "sending" | "error" | "warning",
+) {
+  const idle = variant === "ready" && (text === "Ready" || text === t("Ready"));
+  if (idle) {
+    setNeutralStatus(statusEl, text);
+    return;
+  }
+  statusEl.textContent = text;
+  statusEl.className = `llm-status llm-status-${variant}`;
+}
+
+/** A steady status label in the plain (mounted-panel) style. */
+export function setNeutralStatus(statusEl: HTMLElement, text: string) {
+  statusEl.textContent = text;
+  statusEl.className = "llm-status";
+}
+
+export function formatTokenCount(tokens: number): string {
+  if (tokens < 0) return "0";
+  if (tokens < 1000) return `${tokens}`;
+  if (tokens < 1_000_000) {
+    if (tokens < 10_000)
+      return `${(tokens / 1000).toFixed(1).replace(/\.0$/, "")}k`;
+    return `${Math.round(tokens / 1000)}k`;
+  }
+  if (tokens < 10_000_000)
+    return `${(tokens / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
+  return `${Math.round(tokens / 1_000_000)}M`;
+}
+
+export type ContextUsagePresentation = Readonly<{
+  text: string;
+  title: string;
+  label: string;
+  summary: string;
+  detail: string;
+  warning: boolean;
+}>;
+
+export function buildContextUsagePresentation(params: {
+  sessionTokens: number;
+  contextWindow?: number;
+  estimated?: boolean;
+  cacheLines?: readonly string[];
+}): ContextUsagePresentation {
+  const normalizedTokens = Math.max(0, params.sessionTokens);
+  if (
+    typeof params.contextWindow !== "number" ||
+    !Number.isFinite(params.contextWindow) ||
+    params.contextWindow <= 0 ||
+    normalizedTokens <= 0
+  ) {
+    return {
+      text: "",
+      title: t("Context window usage unavailable"),
+      label: t("Context window:"),
+      summary: t("Usage unavailable"),
+      detail: t("Send a message to measure usage"),
+      warning: false,
+    };
+  }
+  const percentage = Math.max(
+    0,
+    Math.min(100, Math.round((normalizedTokens / params.contextWindow) * 100)),
+  );
+  const prefix = params.estimated
+    ? t("Estimated active context window usage")
+    : t("Active context window usage");
+  const title =
+    percentage > 80
+      ? `${prefix}: ${formatTokenCount(normalizedTokens)} / ${formatTokenCount(params.contextWindow)} input tokens — approaching limit, run /compact`
+      : `${prefix}: ${formatTokenCount(normalizedTokens)} / ${formatTokenCount(params.contextWindow)} input tokens`;
+  return {
+    text: `${formatTokenCount(normalizedTokens)} / ${formatTokenCount(params.contextWindow)} (${percentage}%)`,
+    title: params.cacheLines?.length
+      ? `${title}\n${params.cacheLines.join("\n")}`
+      : title,
+    label: t("Context window:"),
+    summary: `${percentage}% ${t("used")} (${100 - percentage}% ${t("left")})`,
+    detail: `${formatTokenCount(normalizedTokens)} / ${formatTokenCount(params.contextWindow)} ${t("tokens used")}`,
+    warning: percentage > 80,
+  };
+}
+
+export function setTokenUsage(
+  el: HTMLElement,
+  sessionTokens: number,
+  contextWindow?: number,
+  gaugeEl?: HTMLElement | null,
+  options: {
+    estimated?: boolean;
+    cacheReadTokens?: number;
+    cacheWriteTokens?: number;
+    cacheMissTokens?: number;
+    cacheHitRatio?: number;
+    cacheProvider?: string;
+  } = {},
+): void {
+  if (
+    typeof options.cacheHitRatio === "number" &&
+    Number.isFinite(options.cacheHitRatio)
+  ) {
+    const percent = Math.round(
+      Math.max(0, Math.min(1, options.cacheHitRatio)) * 100,
+    );
+    el.dataset.cache = `${t("Cache hit")} ${percent}%`;
+  } else {
+    delete el.dataset.cache;
+  }
+  const normalizedTokens = Math.max(0, sessionTokens);
+  if (
+    typeof contextWindow === "number" &&
+    Number.isFinite(contextWindow) &&
+    contextWindow > 0 &&
+    normalizedTokens > 0
+  ) {
+    const percentage = Math.max(
+      0,
+      Math.min(100, Math.round((normalizedTokens / contextWindow) * 100)),
+    );
+    const cacheLines: string[] = [];
+    if (
+      typeof options.cacheReadTokens === "number" &&
+      options.cacheReadTokens > 0
+    ) {
+      const provider = options.cacheProvider ? `${options.cacheProvider} ` : "";
+      cacheLines.push(
+        `${provider}cache read: ${formatTokenCount(options.cacheReadTokens)} input tokens`,
+      );
+    }
+    if (
+      typeof options.cacheMissTokens === "number" &&
+      options.cacheMissTokens > 0
+    ) {
+      cacheLines.push(
+        `Cache miss: ${formatTokenCount(options.cacheMissTokens)} input tokens`,
+      );
+    }
+    if (
+      typeof options.cacheWriteTokens === "number" &&
+      options.cacheWriteTokens > 0
+    ) {
+      cacheLines.push(
+        `Cache write: ${formatTokenCount(options.cacheWriteTokens)} input tokens`,
+      );
+    }
+    if (
+      typeof options.cacheHitRatio === "number" &&
+      Number.isFinite(options.cacheHitRatio)
+    ) {
+      cacheLines.push(
+        `Cache hit ratio: ${Math.round(options.cacheHitRatio * 100)}%`,
+      );
+    }
+    const presentation = buildContextUsagePresentation({
+      sessionTokens: normalizedTokens,
+      contextWindow,
+      estimated: options.estimated,
+      cacheLines,
+    });
+    el.textContent = presentation.text;
+    el.title = presentation.title;
+    el.dataset.label = presentation.label;
+    el.dataset.summary = presentation.summary;
+    el.dataset.detail = presentation.detail;
+    el.dataset.warning = presentation.warning ? "true" : "false";
+    el.style.display = "";
+    if (gaugeEl) {
+      gaugeEl.style.display = "inline-block";
+      gaugeEl.style.background = `conic-gradient(${percentage > 80 ? "#f39c12" : "var(--fill-secondary, #7c7c7c)"} ${percentage * 3.6}deg, color-mix(in srgb, var(--fill-secondary, #7c7c7c) 22%, transparent) 0deg)`;
+      gaugeEl.dataset.warning = presentation.warning ? "true" : "false";
+      gaugeEl.title = presentation.title;
+      gaugeEl.setAttribute("aria-label", presentation.title);
+    }
+    return;
+  }
+  const presentation = buildContextUsagePresentation({
+    sessionTokens: normalizedTokens,
+    contextWindow,
+    estimated: options.estimated,
+  });
+  el.textContent = presentation.text;
+  el.title = presentation.title;
+  el.dataset.label = presentation.label;
+  el.dataset.summary = presentation.summary;
+  el.dataset.detail = presentation.detail;
+  delete el.dataset.warning;
+  delete el.dataset.cache;
+  el.style.display = "";
+  if (gaugeEl) {
+    gaugeEl.style.display = "inline-block";
+    gaugeEl.style.background =
+      "color-mix(in srgb, var(--fill-secondary, #7c7c7c) 45%, transparent)";
+    delete gaugeEl.dataset.warning;
+    gaugeEl.title = presentation.title;
+    gaugeEl.setAttribute("aria-label", presentation.title);
+  }
+}
+
+export function clampNumber(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+export function getCurrentLocalTimestamp(): string {
+  return new Intl.DateTimeFormat("en-US", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    month: "2-digit",
+    day: "2-digit",
+    year: "numeric",
+    hour12: false,
+  }).format(new Date());
+}
+
+/**
+ * Extract the selected text within a bubble, replacing KaTeX-rendered math
+ * with its original LaTeX source wrapped in `$...$` (inline) or `$$...$$`
+ * (display).
+ */
+export function getSelectedTextWithinBubble(
+  doc: Document,
+  container: HTMLElement,
+): string {
+  const win = doc.defaultView;
+  const selection = win?.getSelection?.();
+  if (!selection || selection.isCollapsed || selection.rangeCount === 0) {
+    return "";
+  }
+
+  const anchorNode = selection.anchorNode;
+  const focusNode = selection.focusNode;
+  if (
+    !anchorNode ||
+    !focusNode ||
+    !container.contains(anchorNode) ||
+    !container.contains(focusNode)
+  ) {
+    return "";
+  }
+
+  try {
+    const range = selection.getRangeAt(0);
+    const fragment = range.cloneContents();
+    const temp = doc.createElement("div");
+    temp.appendChild(fragment);
+
+    const katexEls = Array.from(temp.querySelectorAll(".katex")) as Element[];
+    for (const el of katexEls) {
+      const ann = el.querySelector('annotation[encoding="application/x-tex"]');
+      if (ann) {
+        const latex = (ann.textContent || "").trim();
+        const mathEl = ann.closest("math");
+        const isDisplay = mathEl?.getAttribute("display") === "block";
+        el.replaceWith(
+          doc.createTextNode(isDisplay ? `$$${latex}$$` : `$${latex}$`),
+        );
+        continue;
+      }
+      const mathml = el.querySelector(".katex-mathml");
+      if (mathml) mathml.remove();
+    }
+
+    const strayMathml = Array.from(
+      temp.querySelectorAll(".katex-mathml"),
+    ) as Element[];
+    for (const el of strayMathml) el.remove();
+
+    return sanitizeText(temp.textContent || "").trim();
+  } catch (err) {
+    appLogger.warn("LLM: Selected text extraction failed:", err);
+    return "";
+  }
+}

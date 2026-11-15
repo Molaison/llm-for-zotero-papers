@@ -1,0 +1,10005 @@
+import { clearStandaloneSelection } from "./conversationSelection";
+import { setStandaloneSidePanelSlideDurationForTest } from "./standaloneSidePanel";
+import {
+  clearStandaloneSurfaceChoices,
+  getSelectedModelEntryForSurface,
+} from "./surfaceChoices";
+import { callLLM, callLLMStream } from "../../utils/llmClient";
+import { appLogger } from "../../core/logging";
+import { resolveRetrievalQueryPlan } from "../../services/retrieval/retrievalQueryPlan";
+import { getRecentRetrievalTimings } from "../../services/retrieval/retrievalTiming";
+import type { ZoteroGateway } from "../../agent/services/zoteroGateway";
+import { createAgentModelAdapter } from "../../agent/model/factory";
+import { resolveAgentRuntimeRequest } from "../../agent/context/resolvedAgentRequest";
+import { latestTaskPaperDecision } from "../../agent/context/taskPaperLedger";
+import { createProviderRequestScope } from "../../utils/providerTransport";
+import { waitForElementGeometrySettled } from "./workflowLayout";
+import { getChatScrollSnapshot } from "./chatScrollSnapshots";
+import { exerciseNativeQuestionReview } from "./nativePlanReviewReplay";
+import { exercisePlanHistoryReplay } from "./planHistoryReplay";
+import { deliverPendingPlanDocumentMessage } from "../../agent/documents/publication";
+import {
+  exerciseStreamingReplay,
+  startTaskProgressReplay,
+} from "./streamingReplay";
+import {
+  flushTaskProgressPanels,
+  listMountedTaskProgressPanelsForTests,
+} from "./taskProgress/panel";
+import {
+  clearAllTaskProgress,
+  getTaskProgress,
+  taskQuestionChecklist,
+} from "./taskProgress/store";
+import { resetTaskProgressDrawerHeight } from "./taskProgress/view";
+import { createCodexStreamingScrollReplay } from "./codexStreamingScrollReplay";
+import {
+  readTaskProgressComposerContexts,
+  reopenTaskProgressConversation,
+  seedTaskProgressConversation,
+  setTaskProgressComposerContexts,
+  startCodexTaskProgressReplay,
+  startTaskProgressAction,
+} from "./taskProgressReplay";
+import {
+  createChatTurnPromptProbes,
+  exerciseChatRenderingLifecycle,
+  exerciseCompletedChatTurnRefresh,
+} from "./chatRenderingReplay";
+import {
+  memoryProbeInspect,
+  exerciseChatModeStreamingTurn,
+} from "./chatMemoryReplay";
+import { exerciseAgentDeliveryReplay } from "./agentDeliveryReplay";
+import {
+  exerciseLongJobBatchStop,
+  exerciseLongJobNoteResume,
+  exerciseLongJobReplay,
+} from "./longJobReplay";
+import { exerciseAgentStopRules } from "./stopRulesReplay";
+import {
+  callScopedMcpToolForConversation,
+  exercisePaperDecisionsTurn,
+} from "./paperDecisionsReplay";
+import { mountPanelShell } from "./panelMount";
+import { getAgentRuntime } from "../../agent";
+import { normalizeExecutionOutput } from "../../agent/tools/execution/results";
+import {
+  renderPendingActionCard,
+  renderAgentTrace,
+  disposeAgentTrace,
+} from "./agentTrace/render";
+import { disposeSetupHandlers, setupHandlers } from "./setupHandlers";
+import {
+  activeConversationModeByLibrary,
+  activeContextPanels,
+  activeContextPanelRawItems,
+  activeContextPanelStateSync,
+  activeGlobalConversationByLibrary,
+  activePaperConversationByPaper,
+  chatHistory,
+  selectedRuntimeModeCache,
+  loadedConversationKeys,
+  readOnlyBorrowedConversationKeys,
+  webChatIsolatedConversationKeys,
+  paperContextModeOverrides,
+  paperContentSourceOverrides,
+  selectedPaperContextCache,
+  selectedCollectionContextCache,
+  selectedTagContextCache,
+  attachedConversationCache,
+  initializedConversationComposeContextKeys,
+  isRequestPending,
+  selectedTextCache,
+} from "./state";
+import type { ResolvedContextSource, SendQuestionOptions } from "./types";
+import type {
+  WorkflowTestApi,
+  WorkflowTestConversationHistoryTexts,
+  WorkflowTestAssistantRenderResult,
+  WorkflowTestAttachmentFixture,
+  WorkflowTestDiagnostics,
+  WorkflowTestDraftRefreshDiagnostics,
+  WorkflowTestDuplicatePanelSetupDiagnostics,
+  WorkflowTestFixture,
+  WorkflowTestFooterLayout,
+  WorkflowTestHighlightAwareRetrievalDiagnostics,
+  WorkflowTestNoteFixture,
+  WorkflowTestPanel,
+  WorkflowTestReaderPopupRoutingDiagnostics,
+  WorkflowTestReaderPopupStandaloneRoutingDiagnostics,
+  WorkflowTestReaderSelectionTrackingDiagnostics,
+  WorkflowTestRuntimeGeometry,
+  WorkflowTestRuntimeBadge,
+  WorkflowTestRuntimeSystemToggle,
+  WorkflowTestStandaloneComposerResizeDiagnostics,
+  WorkflowTestStandaloneDiagnostics,
+  WorkflowTestChatWindowEntry,
+  WorkflowTestStandaloneNoteFixture,
+  WorkflowTestTargetedQuoteRefreshResult,
+  WorkflowTestChatTurnLifecycleState,
+  WorkflowTestLiveChatTurn,
+  WorkflowTestLiveWebChatTurn,
+  WorkflowTestWebChatPdfChipState,
+  WorkflowTestWebChatPdfToggleDiagnostics,
+  WorkflowTestWebChatPdfTurn,
+  WorkflowTestPendingDeletionState,
+  WorkflowTestPendingSendDeleteResult,
+  WorkflowTestPermissionSurfaceDiagnostics,
+  WorkflowTestConfirmationDialogDiagnostics,
+  WorkflowTestHistoryRow,
+  WorkflowTestHistorySearchOpen,
+  WorkflowTestHistorySearchResult,
+  WorkflowTestRapidHistoryClicks,
+  WorkflowTestSeededHistoryConversation,
+  WorkflowTestSeededTurn,
+  WorkflowTestConversationPersistenceSnapshot,
+  WorkflowTestEphemeralConversationRowCounts,
+  WorkflowTestSidePanel,
+  WorkflowTestStandaloneSidePanelControl,
+  WorkflowTestStandaloneSidePanelSlideFrame,
+  WorkflowTestStandaloneSidePanelDiagnostics,
+  WorkflowTestStandalonePinnedPapers,
+  WorkflowTestComposerMetrics,
+  WorkflowTestSegmentedTabMetrics,
+  WorkflowTestHistoryChipColors,
+  WorkflowTestCrossPaperHistoryIsolationResult,
+  WorkflowTestStaleAgentTraceIsolationResult,
+} from "./workflowTestTypes";
+import { setFooterPermissionCatalogLoadersForTests } from "./footerPermissionControl";
+import { buildClaudePermissionOption } from "../../shared/permissionOptions";
+import {
+  buildCodexPermissionOptionCatalog,
+  type CodexPermissionCapabilities,
+} from "../../codexAppServer/permissionProfiles";
+import { readCodexPermissionStatePref } from "../../codexAppServer/prefs";
+import { forcePendingTurnFinalizeFailuresForTests } from "./pendingDeletionWiring";
+import { forceWebChatSessionAnchorFailuresForTests } from "./webchatSessionConversation";
+import {
+  forceInPlacePaperSwitchFailuresForTests,
+  getForcedInPlacePaperSwitchFailuresForTests,
+} from "./inPlacePaperSwitch";
+import {
+  pendingDeletionStore,
+  PENDING_DELETIONS_TABLE,
+} from "../../core/conversations/pendingDeletionStore";
+import type { Message } from "./types";
+import {
+  buildAssistantDisplayMarkdownForRender,
+  buildAgentEngineDepsForTests,
+  ensureConversationLoaded,
+  getConversationKey,
+  getSelectedReasoningForItem,
+  hasAgentRunTraceForTests,
+  refreshActiveConversationPanels,
+  refreshChat,
+  retryLatestAssistantResponse,
+  setAgentRunTraceLoaderForTests,
+  updateContextUsageSnapshotFromProvider,
+} from "./chat";
+import { getAdvancedModelParamsForEntry } from "./prefHelpers";
+import { loadUsageEventsForConversation } from "../../utils/usageStore";
+import {
+  addSelectedTextContext,
+  appendSelectedTextContextForItem,
+  applySelectedTextPreview,
+  getSelectedTextContextEntries,
+  resolveContextSourceItemAsync,
+  setSelectedTextContextEntries,
+  setSelectedTextExpandedIndex,
+} from "./contextResolution";
+import {
+  createGlobalPortalItem,
+  createPaperPortalItem,
+  resolveConversationBaseItem,
+  resolveInitialPanelItemState,
+} from "./portalScope";
+import {
+  allocateEphemeralGlobalConversationKey,
+  allocateEphemeralPaperConversationKey,
+  discardEphemeralConversation,
+  setEphemeralBackgroundContextProvider,
+} from "./ephemeralConversations";
+import { startSideSurfaceChoicesFromStandalone } from "./surfaceChoices";
+import { syncNoteEditingSelectedText } from "./noteEditing/selectionController";
+import {
+  decorateAssistantCitationLinks,
+  renderQuoteCitationPlaceholders,
+} from "./assistantCitationLinks";
+import { renderRenderedMarkdownInto } from "./renderedMarkdown";
+import { setPluginUpdateDepsForTest } from "../pluginUpdateAdapters";
+import { openStandalonePlanDocumentWindow } from "./standalonePlanDocumentWindow";
+import { renderPlanDocumentContent } from "./planDocumentPresentation";
+import {
+  isStandaloneWindowActive,
+  notifyStandaloneItemChanged as notifyStandaloneItemChangedRuntime,
+  openStandaloneChat,
+  openTornChatWindow,
+} from "./standaloneWindow";
+import {
+  closeAllTornChatWindows,
+  getTornChatWindows,
+  type TornChatIdentity,
+} from "./tornChatWindows";
+import {
+  getWorkflowTestSendSettledSequence,
+  getWorkflowTestSendInterceptor,
+  setWorkflowTestHistoryOpenFailure,
+  getWorkflowTestFinalRequestInterceptor,
+  setWorkflowTestFinalRequestInterceptor,
+  setWorkflowTestSendInterceptor,
+  type WorkflowTestFinalRequestSnapshot,
+} from "./workflowTestHooks";
+import { dispatchZoteroItemsAsContext } from "./zoteroItemContextMenu";
+import {
+  appendMessage,
+  getPaperConversation,
+  loadConversation,
+} from "../../utils/chatStore";
+import {
+  appendCodexMessage,
+  loadCodexConversation,
+} from "../../codexAppServer/store";
+import { setCodexAppServerModelCatalogLoaderForTests } from "../../codexAppServer/modelCatalog";
+import {
+  resetCodexDirectCatalogForTests,
+  setCodexDirectCatalogDependenciesForTests,
+} from "../../codexAuth/modelCatalog";
+import type { WorkflowTestCodexModelCatalogResponse } from "./workflowTestTypes";
+import {
+  appendClaudeMessage,
+  loadClaudeConversation,
+} from "../../claudeCode/store";
+import { notifyPastChatAttached } from "../../services/pastConversations/attachSink";
+import {
+  ensureMarkedReaderSelectionTrackingListener,
+  READER_TEXT_SELECTION_POPUP_EVENT,
+  type ReaderSelectionTrackingReader,
+} from "./readerSelectionTracking";
+import { config } from "./constants";
+import {
+  getModelProviderGroups,
+  setModelProviderGroups,
+  getModelEntryById,
+} from "../../utils/modelProviders";
+import type { RuntimeConversationSystem } from "./runtimeSystemControls";
+import { collectReaderSelectionDocuments } from "../../services/pdf/readerSelection";
+import { getReaderContextPanelForTab } from "./readerPopupPanelRouting";
+import { closeReaderSelectionPromptOverlay } from "./selectionPrompt/readerSelectionPromptOverlay";
+import type {
+  AttachedConversationRef,
+  ConversationSystem,
+} from "../../shared/types";
+import { clearPaperRestoreTargetsForWorkflowTests } from "../../shared/paperConversationRestore";
+import { relayGetStateSnapshot } from "../../webchat/relayServer";
+import { conversationRepository } from "../../core/conversations/repository";
+import {
+  bindEmbeddedPanelHost,
+  bindTestPanelHost,
+  capturePanelOperationLease,
+  markSidePanelBody,
+  resolveSelectionSurfaceForBody,
+} from "./panelHostOwnership";
+import {
+  getConversationWriteGeneration,
+  bumpConversationWriteGeneration,
+  getConversationWriteLockTailForTests,
+  withConversationWriteLock,
+} from "../../shared/conversationWriteFence";
+import { loadPlanDocumentOutbox } from "../../agent/documents/store";
+import {
+  activeClaudeConversationModeByLibrary,
+  activeClaudeGlobalConversationByLibrary,
+  activeClaudePaperConversationByPaper,
+} from "../../claudeCode/state";
+import {
+  activeCodexConversationModeByLibrary,
+  activeCodexGlobalConversationByLibrary,
+  activeCodexPaperConversationByPaper,
+} from "../../codexAppServer/state";
+
+let resolveDelayedCodexPermissionCatalog: (() => void) | null = null;
+let resolveDelayedCodexModelCatalog: (() => void) | null = null;
+let codexModelCatalogRequests: string[] = [];
+let codexDirectCatalogRequests: string[] = [];
+
+function configureCodexDirectCatalog(input: {
+  cachedClientVersion?: string;
+  liveAuthPath?: string;
+}): void {
+  assertWorkflowTestEnabled();
+  resetCodexDirectCatalogForTests();
+  codexDirectCatalogRequests = [];
+  if (input.liveAuthPath) {
+    setCodexDirectCatalogDependenciesForTests({ authPath: input.liveAuthPath });
+    return;
+  }
+  setCodexDirectCatalogDependenciesForTests({
+    authPath: "/workflow/codex/auth.json",
+    readText: async (path) =>
+      path.endsWith("models_cache.json")
+        ? JSON.stringify({ client_version: input.cachedClientVersion })
+        : JSON.stringify({
+            tokens: {
+              access_token: "workflow-token",
+              account_id: "workflow-account",
+            },
+          }),
+    fetchFn: (async (url: string | URL | Request) => {
+      codexDirectCatalogRequests.push(String(url));
+      const version =
+        new URL(String(url)).searchParams.get("client_version") || "";
+      const [major, minor] = version.split(".").map(Number);
+      const models = [
+        {
+          slug: "gpt-6-astra",
+          display_name: "GPT-6-Astra",
+          visibility: "list",
+          priority: 1,
+        },
+      ];
+      if (major > 0 || minor >= 153) {
+        models.push({
+          slug: "gpt-6.1-sol",
+          display_name: "GPT-6.1-Sol",
+          visibility: "list",
+          priority: 2,
+        });
+      }
+      return new Response(JSON.stringify({ models }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch,
+  });
+}
+
+function configureCodexModelCatalogs(
+  responses: WorkflowTestCodexModelCatalogResponse[],
+): void {
+  assertWorkflowTestEnabled();
+  codexModelCatalogRequests = [];
+  setCodexAppServerModelCatalogLoaderForTests(async ({ codexPath }) => {
+    const response =
+      responses[
+        Math.min(codexModelCatalogRequests.length, responses.length - 1)
+      ];
+    codexModelCatalogRequests.push(codexPath || "");
+    if (response?.delayed) {
+      await new Promise<void>((resolve) => {
+        resolveDelayedCodexModelCatalog = resolve;
+      });
+    }
+    if (response?.error) throw new Error(response.error);
+    return { models: response?.models || [] };
+  });
+}
+
+function configurePermissionCatalogs(input?: {
+  delayFirstCodex?: boolean;
+}): void {
+  assertWorkflowTestEnabled();
+  let codexRequestCount = 0;
+  const claudeOptions = [
+    "plan",
+    "dontAsk",
+    "default",
+    "acceptEdits",
+    "auto",
+    "bypassPermissions",
+  ].map((id) =>
+    buildClaudePermissionOption({
+      id: id as Parameters<typeof buildClaudePermissionOption>[0]["id"],
+    }),
+  );
+  const currentCodexProfiles = [
+    { id: ":read-only", description: "Read files only.", allowed: true },
+    { id: ":workspace", description: "Write in the workspace.", allowed: true },
+    {
+      id: ":danger-full-access",
+      description: "Use the full local environment.",
+      allowed: true,
+    },
+    {
+      id: ":team_custom_profile",
+      description: "A custom managed team profile.",
+      allowed: true,
+    },
+  ];
+  const staleCodexProfiles = [
+    {
+      id: ":stale-profile",
+      description: "A deliberately stale workflow response.",
+      allowed: true,
+    },
+  ];
+  const buildCatalog = (profiles: typeof currentCodexProfiles) => {
+    const capabilities: CodexPermissionCapabilities = {
+      protocol: "profiles",
+      profiles,
+      allowedApprovalPolicies: null,
+      allowedApprovalsReviewers: null,
+      guardianApprovalEnabled: true,
+      supportsThreadSettingsUpdate: true,
+    };
+    return buildCodexPermissionOptionCatalog({
+      capabilities,
+      preference: readCodexPermissionStatePref(),
+    });
+  };
+  resolveDelayedCodexPermissionCatalog = null;
+  setFooterPermissionCatalogLoadersForTests({
+    loadClaudeOptions: async () => claudeOptions,
+    loadCodexCatalog: () => {
+      codexRequestCount += 1;
+      if (input?.delayFirstCodex && codexRequestCount === 1) {
+        return new Promise((resolve) => {
+          resolveDelayedCodexPermissionCatalog = () => {
+            resolve(buildCatalog(staleCodexProfiles));
+            resolveDelayedCodexPermissionCatalog = null;
+          };
+        });
+      }
+      return Promise.resolve(buildCatalog(currentCodexProfiles));
+    },
+  });
+}
+
+async function resolveDelayedCodexCatalog(): Promise<void> {
+  assertWorkflowTestEnabled();
+  resolveDelayedCodexPermissionCatalog?.();
+  await Zotero.Promise.delay(100);
+}
+
+function readPermissionSurface(
+  root: ParentNode | null | undefined,
+): WorkflowTestPermissionSurfaceDiagnostics {
+  const main = root?.querySelector("#llm-main") as HTMLElement | null;
+  const control = root?.querySelector(
+    "#llm-permission-control",
+  ) as HTMLElement | null;
+  const button = root?.querySelector(
+    "#llm-permission-toggle",
+  ) as HTMLButtonElement | null;
+  const menu = root?.querySelector(
+    "#llm-permission-menu",
+  ) as HTMLDivElement | null;
+  const rows = Array.from(
+    root?.querySelectorAll("#llm-permission-menu .llm-permission-option") || [],
+  ) as HTMLButtonElement[];
+  return {
+    provider:
+      (main?.dataset.conversationSystem as ConversationSystem | undefined) ??
+      null,
+    visible: Boolean(control && control.style.display !== "none"),
+    compactLabel: button?.textContent?.trim() || "",
+    accessibleName: button?.getAttribute("aria-label") || "",
+    disabled: button?.disabled ?? true,
+    expanded: button?.getAttribute("aria-expanded") === "true",
+    menuVisible: Boolean(menu && menu.style.display !== "none"),
+    rows: rows.map((row) => ({
+      id: row.dataset.permissionId || "",
+      label: row.textContent?.trim() || "",
+      level: "",
+      risk: "",
+      disabled: row.disabled,
+      accessibleName: row.getAttribute("aria-label") || "",
+    })),
+  };
+}
+
+function getConfirmationDocument(root: ParentNode): Document {
+  if ((root as Document).documentElement) return root as Document;
+  const doc = (root as Element).ownerDocument;
+  if (!doc) throw new Error("Permission surface has no owner document");
+  return doc;
+}
+
+function readConfirmationDialog(
+  root: ParentNode,
+): WorkflowTestConfirmationDialogDiagnostics {
+  const doc = getConfirmationDocument(root);
+  const overlay = doc.querySelector(
+    ".llm-standalone-confirm-overlay",
+  ) as HTMLElement | null;
+  return {
+    visible: Boolean(overlay),
+    title:
+      overlay?.querySelector(".llm-standalone-confirm-title")?.textContent ||
+      "",
+    message:
+      overlay?.querySelector(".llm-standalone-confirm-message")?.textContent ||
+      "",
+    confirmLabel:
+      overlay?.querySelector(".llm-standalone-confirm-primary")?.textContent ||
+      "",
+    cancelLabel:
+      overlay?.querySelector(".llm-standalone-confirm-cancel")?.textContent ||
+      "",
+    destructive: Boolean(
+      overlay?.querySelector(".llm-standalone-confirm-destructive"),
+    ),
+  };
+}
+
+async function respondToConfirmationDialog(
+  root: ParentNode,
+  confirmed: boolean,
+): Promise<WorkflowTestPermissionSurfaceDiagnostics> {
+  const doc = getConfirmationDocument(root);
+  const button = doc.querySelector(
+    confirmed
+      ? ".llm-standalone-confirm-primary"
+      : ".llm-standalone-confirm-cancel",
+  ) as HTMLButtonElement | null;
+  if (!button)
+    throw new Error("Permission confirmation dialog was not rendered");
+  button.click();
+  await Zotero.Promise.delay(100);
+  return readPermissionSurface(root);
+}
+
+async function clickPermissionToggle(
+  root: ParentNode,
+): Promise<WorkflowTestPermissionSurfaceDiagnostics> {
+  const button = root.querySelector(
+    "#llm-permission-toggle",
+  ) as HTMLButtonElement | null;
+  if (!button) throw new Error("Permission toggle was not rendered");
+  button.click();
+  await Zotero.Promise.delay(50);
+  return readPermissionSurface(root);
+}
+
+async function clickPermissionOption(
+  root: ParentNode,
+  permissionId: string,
+): Promise<WorkflowTestPermissionSurfaceDiagnostics> {
+  const deadline = Date.now() + 3000;
+  let row: HTMLButtonElement | undefined;
+  while (!row && Date.now() < deadline) {
+    row = (
+      Array.from(
+        root.querySelectorAll("#llm-permission-menu .llm-permission-option"),
+      ) as HTMLButtonElement[]
+    ).find((candidate) => candidate.dataset.permissionId === permissionId);
+    if (!row) await Zotero.Promise.delay(25);
+  }
+  if (!row)
+    throw new Error(`Permission option ${permissionId} was not rendered`);
+  row.click();
+  await Zotero.Promise.delay(100);
+  return readPermissionSurface(root);
+}
+
+function getPanelPermissionSurface(
+  panelId: string,
+): WorkflowTestPermissionSurfaceDiagnostics {
+  assertWorkflowTestEnabled();
+  return readPermissionSurface(getPanel(panelId).body);
+}
+
+async function clickPanelPermissionToggle(
+  panelId: string,
+): Promise<WorkflowTestPermissionSurfaceDiagnostics> {
+  assertWorkflowTestEnabled();
+  return clickPermissionToggle(getPanel(panelId).body);
+}
+
+async function clickPanelPermissionOption(
+  panelId: string,
+  permissionId: string,
+): Promise<WorkflowTestPermissionSurfaceDiagnostics> {
+  assertWorkflowTestEnabled();
+  return clickPermissionOption(getPanel(panelId).body, permissionId);
+}
+
+function getPanelConfirmationDialog(
+  panelId: string,
+): WorkflowTestConfirmationDialogDiagnostics {
+  assertWorkflowTestEnabled();
+  return readConfirmationDialog(getPanel(panelId).body);
+}
+
+async function respondToPanelConfirmationDialog(
+  panelId: string,
+  confirmed: boolean,
+): Promise<WorkflowTestPermissionSurfaceDiagnostics> {
+  assertWorkflowTestEnabled();
+  return respondToConfirmationDialog(getPanel(panelId).body, confirmed);
+}
+
+function getStandalonePermissionSurface(): WorkflowTestPermissionSurfaceDiagnostics {
+  assertWorkflowTestEnabled();
+  return readPermissionSurface(getStandaloneWindowForTest()?.document);
+}
+
+async function clickStandalonePermissionToggle(): Promise<WorkflowTestPermissionSurfaceDiagnostics> {
+  assertWorkflowTestEnabled();
+  const doc = await waitForStandaloneReady();
+  return clickPermissionToggle(doc);
+}
+
+async function clickStandalonePermissionOption(
+  permissionId: string,
+): Promise<WorkflowTestPermissionSurfaceDiagnostics> {
+  assertWorkflowTestEnabled();
+  const doc = await waitForStandaloneReady();
+  return clickPermissionOption(doc, permissionId);
+}
+import {
+  removeLastUsedUpstreamConversationMode,
+  removeLastUsedUpstreamGlobalConversationKey,
+} from "./prefHelpers";
+
+async function appendWorkflowStoredMessage(
+  system: ConversationSystem,
+  conversationKey: number,
+  message: Parameters<typeof appendMessage>[1],
+): Promise<void> {
+  if (system === "codex") {
+    await appendCodexMessage(conversationKey, message);
+    return;
+  }
+  if (system === "claude_code") {
+    await appendClaudeMessage(conversationKey, message);
+    return;
+  }
+  await appendMessage(conversationKey, message);
+}
+
+function readRuntimeBadge(
+  root: ParentNode | null | undefined,
+): WorkflowTestRuntimeBadge | undefined {
+  const button = root?.querySelector(
+    "#llm-runtime-mode-toggle",
+  ) as HTMLButtonElement | null;
+  if (!button) return undefined;
+  const menu = root?.querySelector("#llm-runtime-menu") as HTMLElement | null;
+  const menuOpen = Boolean(menu && menu.style.display !== "none");
+  return {
+    visible: button.style.display !== "none",
+    label: (
+      button.querySelector(".llm-agent-toggle-label")?.textContent || ""
+    ).trim(),
+    clickable: !button.disabled,
+    menuOpen,
+    menuItems: menuOpen
+      ? (
+          Array.from(
+            menu?.querySelectorAll("[data-runtime-system]") || [],
+          ) as HTMLElement[]
+        ).map((option) => ({
+          system: option.dataset.runtimeSystem || "",
+          label: (option.textContent || "").trim(),
+          selected: option.classList.contains("llm-permission-option-selected"),
+        }))
+      : [],
+  };
+}
+
+function dispatchRuntimeMenuClick(element: HTMLElement): void {
+  const eventCtor = element.ownerDocument.defaultView?.MouseEvent;
+  if (eventCtor) {
+    element.dispatchEvent(
+      new eventCtor("click", { bubbles: true, cancelable: true }),
+    );
+  } else {
+    element.click();
+  }
+}
+
+/** Opens the badge menu under `root` if it is closed, and reads it. */
+async function openRuntimeMenuIn(
+  root: ParentNode,
+  owner: string,
+): Promise<WorkflowTestRuntimeBadge> {
+  const button = root.querySelector(
+    "#llm-runtime-mode-toggle",
+  ) as HTMLButtonElement | null;
+  if (!button) throw new Error(`${owner} runtime badge was not rendered`);
+  if (button.style.display === "none") {
+    throw new Error(`${owner} runtime badge is hidden`);
+  }
+  if (button.disabled) {
+    throw new Error(`${owner} runtime badge is not clickable`);
+  }
+  if (readRuntimeBadge(root)?.menuOpen !== true) {
+    dispatchRuntimeMenuClick(button);
+    await Zotero.Promise.delay(100);
+  }
+  const badge = readRuntimeBadge(root);
+  if (!badge?.menuOpen) {
+    throw new Error(`${owner} runtime menu did not open`);
+  }
+  return badge;
+}
+
+/** Opens the badge menu under `root` if needed and clicks one option. */
+async function clickRuntimeMenuOptionIn(
+  root: ParentNode,
+  owner: string,
+  system: ConversationSystem,
+): Promise<void> {
+  await openRuntimeMenuIn(root, owner);
+  const option = root.querySelector(
+    `#llm-runtime-menu [data-runtime-system='${system}']`,
+  ) as HTMLElement | null;
+  if (!option) {
+    throw new Error(
+      `${owner} runtime menu has no ${system} option: ${JSON.stringify(readRuntimeBadge(root))}`,
+    );
+  }
+  dispatchRuntimeMenuClick(option);
+}
+
+function readRuntimeSystemToggles(
+  root: ParentNode | null | undefined,
+  groupSelector: string,
+): WorkflowTestRuntimeSystemToggle[] {
+  const group = root?.querySelector(groupSelector) as HTMLElement | null;
+  if (!group) return [];
+  const groupVisible = group.style.display !== "none";
+  return (
+    Array.from(
+      group.querySelectorAll(
+        ".llm-runtime-system-toggle[data-conversation-system]",
+      ),
+    ) as HTMLButtonElement[]
+  )
+    .map((button) => {
+      const system = button.dataset.conversationSystem;
+      if (system !== "codex" && system !== "claude_code") return null;
+      return {
+        system,
+        visible: groupVisible && button.style.display !== "none",
+        active: button.dataset.active === "true",
+        disabled: button.disabled,
+        ariaPressed: button.getAttribute("aria-pressed") === "true",
+      };
+    })
+    .filter(
+      (state): state is WorkflowTestRuntimeSystemToggle => state !== null,
+    );
+}
+
+type GeometryRect = Pick<
+  DOMRect,
+  "left" | "right" | "top" | "bottom" | "width" | "height"
+>;
+
+function rectsIntersect(
+  first: GeometryRect | null,
+  second: GeometryRect | null,
+): boolean {
+  if (
+    !first ||
+    !second ||
+    first.width <= 0 ||
+    first.height <= 0 ||
+    second.width <= 0 ||
+    second.height <= 0
+  ) {
+    return false;
+  }
+  return (
+    first.left < second.right &&
+    first.right > second.left &&
+    first.top < second.bottom &&
+    first.bottom > second.top
+  );
+}
+
+function rectWithinContainer(
+  rect: GeometryRect,
+  container: GeometryRect,
+): boolean {
+  const tolerance = 0.5;
+  return (
+    rect.left >= container.left - tolerance &&
+    rect.right <= container.right + tolerance &&
+    rect.top >= container.top - tolerance &&
+    rect.bottom <= container.bottom + tolerance
+  );
+}
+
+function getVisibleRuntimeControlsRect(group: HTMLElement): GeometryRect {
+  const buttonRects = getVisibleRuntimeButtonRects(group);
+  if (!buttonRects.length) return group.getBoundingClientRect();
+  const left = Math.min(...buttonRects.map((rect) => rect.left));
+  const right = Math.max(...buttonRects.map((rect) => rect.right));
+  const top = Math.min(...buttonRects.map((rect) => rect.top));
+  const bottom = Math.max(...buttonRects.map((rect) => rect.bottom));
+  return {
+    left,
+    right,
+    top,
+    bottom,
+    width: right - left,
+    height: bottom - top,
+  };
+}
+
+function getVisibleRuntimeButtonRects(group: HTMLElement): DOMRect[] {
+  return (
+    Array.from(
+      group.querySelectorAll(
+        ".llm-runtime-system-toggle[data-conversation-system]",
+      ),
+    ) as HTMLElement[]
+  )
+    .map((button) => button.getBoundingClientRect())
+    .filter((rect) => rect.width > 0 && rect.height > 0);
+}
+
+type PanelRecord = {
+  id: string;
+  body: HTMLElement;
+  item: Zotero.Item;
+  contextSnapshot: ResolvedContextSource | null;
+};
+
+const panels = new Map<string, PanelRecord>();
+let panelCounter = 0;
+let lastSend: SendQuestionOptions | null = null;
+let lastFinalRequest: WorkflowTestFinalRequestSnapshot | null = null;
+
+function assertWorkflowTestEnabled(): void {
+  if (__env__ !== "test" && __env__ !== "development") {
+    throw new Error("Workflow test harness is not available in production");
+  }
+}
+
+function getWorkflowDocument(): Document {
+  const directDoc = (globalThis as { document?: Document }).document;
+  if (directDoc) return directDoc;
+  const mainDoc = Zotero.getMainWindow?.()?.document;
+  if (mainDoc) return mainDoc;
+  throw new Error("No document available for workflow test panel rendering");
+}
+
+function appendHost(doc: Document): HTMLElement {
+  const host = doc.createElement("div");
+  host.className = "llm-workflow-test-host";
+  host.setAttribute("data-llm-workflow-test", "true");
+  host.style.position = "fixed";
+  host.style.left = "-10000px";
+  host.style.top = "0";
+  host.style.width = "720px";
+  host.style.height = "960px";
+  const parent = doc.body || doc.documentElement;
+  parent.appendChild(host);
+  return host;
+}
+
+function getTempPath(filename: string): string {
+  const tempDir = Zotero.getTempDirectory?.()?.path?.trim();
+  if (!tempDir) throw new Error("Zotero temp directory is unavailable");
+  const pathUtils = (
+    globalThis as { PathUtils?: { join?: (...parts: string[]) => string } }
+  ).PathUtils;
+  return pathUtils?.join
+    ? pathUtils.join(tempDir, filename)
+    : `${tempDir.replace(/[\\/]+$/u, "")}/${filename}`;
+}
+
+function sanitizeTempFilename(filename: string): string {
+  const sanitized = filename.replace(/[^A-Za-z0-9._-]+/gu, "_");
+  return sanitized || "attachment.dat";
+}
+
+function escapePdfText(value: string): string {
+  return value
+    .replace(/\\/gu, "\\\\")
+    .replace(/\(/gu, "\\(")
+    .replace(/\)/gu, "\\)");
+}
+
+function wrapPdfPageText(value: string): string[] {
+  const words = value
+    .replace(/[^\x20-\x7E\n]+/gu, " ")
+    .split(/\s+/u)
+    .filter(Boolean);
+  const lines: string[] = [];
+  let current = "";
+  for (const word of words) {
+    const candidate = current ? `${current} ${word}` : word;
+    if (candidate.length <= 82) {
+      current = candidate;
+      continue;
+    }
+    if (current) lines.push(current);
+    current = word;
+  }
+  if (current) lines.push(current);
+  return lines;
+}
+
+function buildPdfBytes(pageTexts: string[]): Uint8Array {
+  const pages = pageTexts.length ? pageTexts : ["Workflow PDF fixture"];
+  const fontObjectId = 3 + pages.length * 2;
+  const pageObjectIds = pages.map((_, index) => 3 + index * 2);
+  const objects: string[] = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    `<< /Type /Pages /Kids [${pageObjectIds
+      .map((id) => `${id} 0 R`)
+      .join(" ")}] /Count ${pages.length} >>`,
+  ];
+  for (const [index, pageText] of pages.entries()) {
+    const pageObjectId = pageObjectIds[index];
+    const contentObjectId = pageObjectId + 1;
+    const lines = wrapPdfPageText(pageText).slice(0, 58);
+    const stream = [
+      "BT",
+      "/F1 10 Tf",
+      "40 760 Td",
+      "12 TL",
+      ...lines.flatMap((line) => [`(${escapePdfText(line)}) Tj`, "T*"]),
+      "ET",
+    ].join("\n");
+    objects.push(
+      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 ${fontObjectId} 0 R >> >> /Contents ${contentObjectId} 0 R >>`,
+      `<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`,
+    );
+  }
+  objects.push("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
+
+  let pdf = "%PDF-1.4\n";
+  const offsets = [0];
+  for (const [index, object] of objects.entries()) {
+    offsets.push(pdf.length);
+    pdf += `${index + 1} 0 obj\n${object}\nendobj\n`;
+  }
+  const xrefOffset = pdf.length;
+  pdf += `xref\n0 ${objects.length + 1}\n`;
+  pdf += "0000000000 65535 f \n";
+  for (const offset of offsets.slice(1)) {
+    pdf += `${String(offset).padStart(10, "0")} 00000 n \n`;
+  }
+  pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\n`;
+  pdf += `startxref\n${xrefOffset}\n%%EOF\n`;
+  return new TextEncoder().encode(pdf);
+}
+
+function minimalPdfBytes(title: string): Uint8Array {
+  return buildPdfBytes([title]);
+}
+
+// Two fixtures written in the same millisecond must not share a file: one
+// test's cleanup would otherwise remove another test's fixture.
+let tempFileSequence = 0;
+
+async function writeTempFile(
+  filename: string,
+  data: Uint8Array,
+): Promise<string> {
+  tempFileSequence += 1;
+  const path = getTempPath(
+    `llm-for-zotero-workflow-${Date.now()}-${tempFileSequence}-${sanitizeTempFilename(filename)}`,
+  );
+  const ioUtils = (
+    globalThis as unknown as {
+      IOUtils?: {
+        write?: (path: string, data: Uint8Array) => Promise<unknown>;
+      };
+    }
+  ).IOUtils;
+  if (!ioUtils?.write) throw new Error("IOUtils.write is unavailable");
+  await ioUtils.write(path, data);
+  return path;
+}
+
+async function writeTempPdf(title: string, pages?: string[]): Promise<string> {
+  return writeTempFile("paper.pdf", buildPdfBytes(pages || [title]));
+}
+
+async function removePathIfPossible(path: string): Promise<void> {
+  if (!path) return;
+  try {
+    await (
+      globalThis as { IOUtils?: { remove?: (path: string) => Promise<void> } }
+    ).IOUtils?.remove?.(path);
+  } catch (_error) {
+    void _error;
+  }
+}
+
+async function trashItemIfPossible(itemId: number): Promise<void> {
+  const item = Zotero.Items.get(itemId);
+  if (!item) return;
+  try {
+    item.deleted = true;
+    await item.saveTx();
+  } catch (_error) {
+    void _error;
+  }
+}
+
+const WORKFLOW_CONVERSATION_PERSISTENCE_TABLES = {
+  upstream: {
+    catalogs: [
+      "llm_for_zotero_global_conversations",
+      "llm_for_zotero_paper_conversations",
+    ],
+    messages: "llm_for_zotero_chat_messages",
+  },
+  claude_code: {
+    catalogs: ["llm_for_zotero_claude_conversations"],
+    messages: "llm_for_zotero_claude_messages",
+  },
+  codex: {
+    catalogs: ["llm_for_zotero_codex_conversations"],
+    messages: "llm_for_zotero_codex_messages",
+  },
+} as const;
+
+async function countWorkflowRows(
+  tableName: string,
+  whereSql: string,
+  params: unknown[],
+): Promise<number> {
+  const rows = (await Zotero.DB.queryAsync(
+    `SELECT COUNT(*) AS n FROM ${tableName} WHERE ${whereSql}`,
+    params,
+  )) as Array<{ n?: unknown }>;
+  return Math.max(0, Math.floor(Number(rows?.[0]?.n || 0)));
+}
+
+async function setWorkflowProviderSession(
+  system: ConversationSystem,
+  conversationKey: number,
+  providerSessionId: string,
+): Promise<void> {
+  assertWorkflowTestEnabled();
+  if (system !== "codex" && system !== "claude_code") {
+    throw new Error(`Provider sessions are not supported for ${system}`);
+  }
+  const table =
+    system === "codex"
+      ? "llm_for_zotero_codex_conversations"
+      : "llm_for_zotero_claude_conversations";
+  const normalizedSessionID = String(providerSessionId || "").trim();
+  if (!normalizedSessionID) throw new Error("Provider session ID is required");
+  await Zotero.DB.queryAsync(
+    `UPDATE ${table}
+     SET provider_session_id = ?
+     WHERE conversation_key = ?`,
+    [normalizedSessionID, conversationKey],
+  );
+}
+
+async function getWorkflowConversationPersistenceSnapshot(
+  system: ConversationSystem,
+  conversationKey: number,
+): Promise<WorkflowTestConversationPersistenceSnapshot> {
+  assertWorkflowTestEnabled();
+  const tables = WORKFLOW_CONVERSATION_PERSISTENCE_TABLES[system];
+  const catalogRows = (
+    await Promise.all(
+      tables.catalogs.map((table) =>
+        countWorkflowRows(table, "conversation_key = ?", [conversationKey]),
+      ),
+    )
+  ).reduce((total, count) => total + count, 0);
+  const messageRows = await countWorkflowRows(
+    tables.messages,
+    "conversation_key = ?",
+    [conversationKey],
+  );
+  const searchIndexRows = await countWorkflowRows(
+    "llm_for_zotero_conversation_search_index",
+    "system = ? AND legacy_conversation_key = ?",
+    [system, conversationKey],
+  );
+  const registryRows = await countWorkflowRows(
+    "llm_for_zotero_conversation_registry",
+    "system = ? AND legacy_conversation_key = ?",
+    [system, conversationKey],
+  );
+  const forkSourceRows = await countWorkflowRows(
+    "llm_for_zotero_conversation_fork_links",
+    "source_system = ? AND source_conversation_key = ?",
+    [system, conversationKey],
+  );
+  const forkTargetRows = await countWorkflowRows(
+    "llm_for_zotero_conversation_fork_links",
+    "target_system = ? AND target_conversation_key = ?",
+    [system, conversationKey],
+  );
+  const cleanupJobRows = await countWorkflowRows(
+    "llm_for_zotero_conversation_cleanup_jobs",
+    "system = ? AND conversation_key = ?",
+    [system, conversationKey],
+  );
+  const pendingDeletionRows = await countWorkflowRows(
+    PENDING_DELETIONS_TABLE,
+    "kind = 'conversation' AND conversation_key = ?",
+    [conversationKey],
+  );
+  return {
+    system,
+    conversationKey,
+    catalogRows,
+    messageRows,
+    searchIndexRows,
+    registryRows,
+    forkSourceRows,
+    forkTargetRows,
+    cleanupJobRows,
+    pendingDeletionRows,
+  };
+}
+
+async function waitForLastSend(): Promise<SendQuestionOptions> {
+  const startedAt = Date.now();
+  while (!lastSend) {
+    if (Date.now() - startedAt > 5000) {
+      throw new Error("Timed out waiting for workflow send capture");
+    }
+    await Zotero.Promise.delay(25);
+  }
+  return lastSend;
+}
+
+function getPanel(panelId: string): PanelRecord {
+  const panel = panels.get(panelId);
+  if (!panel) throw new Error(`Unknown workflow test panel: ${panelId}`);
+  return panel;
+}
+
+async function createPaperWithPdfFixture(input: {
+  title: string;
+  pdfTitle?: string;
+  pages?: string[];
+}): Promise<WorkflowTestFixture> {
+  assertWorkflowTestEnabled();
+  const libraryID = Zotero.Libraries.userLibraryID;
+  const parentItem = new Zotero.Item("journalArticle");
+  parentItem.libraryID = libraryID;
+  parentItem.setField("title", input.title);
+  const savedParentItemId = await parentItem.saveTx();
+  const parentItemId = Math.floor(Number(savedParentItemId));
+  if (!Number.isFinite(parentItemId) || parentItemId <= 0) {
+    throw new Error("Failed to save workflow test parent item");
+  }
+  const tempPdfPath = await writeTempPdf(
+    input.pdfTitle ?? input.title,
+    input.pages,
+  );
+  const attachment = await Zotero.Attachments.importFromFile({
+    file: tempPdfPath,
+    parentItemID: parentItemId,
+    title: input.pdfTitle,
+    contentType: "application/pdf",
+  });
+  const pdfAttachmentId = Math.floor(Number(attachment.id));
+  if (!Number.isFinite(pdfAttachmentId) || pdfAttachmentId <= 0) {
+    throw new Error("Failed to import workflow test PDF attachment");
+  }
+  return {
+    parentItemId,
+    pdfAttachmentId,
+    tempPdfPath,
+  };
+}
+
+async function createStandaloneAttachmentFixture(input: {
+  title: string;
+  filename: string;
+  contentType: string;
+  text?: string;
+}): Promise<WorkflowTestAttachmentFixture> {
+  assertWorkflowTestEnabled();
+  const filename = sanitizeTempFilename(input.filename);
+  const lowerFilename = filename.toLowerCase();
+  const lowerContentType = input.contentType.toLowerCase();
+  const bytes =
+    lowerContentType === "application/pdf" || lowerFilename.endsWith(".pdf")
+      ? minimalPdfBytes(input.title)
+      : new TextEncoder().encode(input.text || input.title || filename);
+  const tempPath = await writeTempFile(filename, bytes);
+  const attachment = await Zotero.Attachments.importFromFile({
+    file: tempPath,
+    title: input.title,
+    contentType: input.contentType,
+  });
+  const attachmentItemId = Math.floor(Number(attachment.id));
+  if (!Number.isFinite(attachmentItemId) || attachmentItemId <= 0) {
+    throw new Error("Failed to import workflow test standalone attachment");
+  }
+  return {
+    attachmentItemId,
+    tempPath,
+    title: input.title,
+    filename,
+    contentType: input.contentType,
+  };
+}
+
+async function createItemNoteFixture(input: {
+  title: string;
+  pdfTitle: string;
+  noteHtml: string;
+}): Promise<WorkflowTestNoteFixture> {
+  assertWorkflowTestEnabled();
+  const fixture = await createPaperWithPdfFixture({
+    title: input.title,
+    pdfTitle: input.pdfTitle,
+  });
+  const note = new Zotero.Item("note");
+  note.libraryID = Zotero.Libraries.userLibraryID;
+  note.parentID = fixture.parentItemId;
+  note.setNote(input.noteHtml);
+  // A selected note opens in Zotero's own note editor, which rewrites its
+  // HTML in its own format; whether Zotero selects a new item depends on
+  // what earlier tests left selected.
+  const savedNoteItemId = await note.saveTx({ skipSelect: true });
+  const noteItemId = Math.floor(Number(savedNoteItemId));
+  if (!Number.isFinite(noteItemId) || noteItemId <= 0) {
+    throw new Error("Failed to save workflow test note");
+  }
+  return {
+    ...fixture,
+    noteItemId,
+    noteText: input.noteHtml,
+  };
+}
+
+async function createStandaloneNoteFixture(input: {
+  noteHtml: string;
+}): Promise<WorkflowTestStandaloneNoteFixture> {
+  assertWorkflowTestEnabled();
+  const note = new Zotero.Item("note");
+  note.libraryID = Zotero.Libraries.userLibraryID;
+  note.setNote(input.noteHtml);
+  const savedNoteItemId = await note.saveTx();
+  const noteItemId = Math.floor(Number(savedNoteItemId));
+  if (!Number.isFinite(noteItemId) || noteItemId <= 0) {
+    throw new Error("Failed to save workflow test standalone note");
+  }
+  return {
+    noteItemId,
+    noteText: input.noteHtml,
+  };
+}
+
+async function renderPanelForItem(itemId: number): Promise<WorkflowTestPanel> {
+  return renderPanelForItemInternal(itemId);
+}
+
+/**
+ * Mounts a temporary side chat the way the window's side panel does: a full
+ * panel on a fresh ephemeral key, marked as a side body before it is built,
+ * on a paper portal item (Paper chat) or a global portal item (Library chat).
+ */
+async function renderSidePanelForItem(input: {
+  itemId: number;
+  mode: "paper" | "global";
+  /** Background text the side chat's model reads (the main chat). */
+  backgroundContext?: string;
+}): Promise<WorkflowTestSidePanel> {
+  assertWorkflowTestEnabled();
+  const item = Zotero.Items.get(input.itemId);
+  if (!item) throw new Error(`Unable to find Zotero item ${input.itemId}`);
+  const basePaper = resolveConversationBaseItem(item) || item;
+  const conversationKey =
+    input.mode === "global"
+      ? allocateEphemeralGlobalConversationKey()
+      : allocateEphemeralPaperConversationKey();
+  const sideItem =
+    input.mode === "global"
+      ? createGlobalPortalItem(item.libraryID, conversationKey)
+      : createPaperPortalItem(basePaper, conversationKey, 1);
+  if (input.backgroundContext !== undefined) {
+    const text = input.backgroundContext;
+    setEphemeralBackgroundContextProvider(conversationKey, () => text);
+  }
+  startSideSurfaceChoicesFromStandalone();
+  const doc = getWorkflowDocument();
+  const body = appendHost(doc);
+  const panelId = `workflow-side-panel-${++panelCounter}`;
+  body.dataset.workflowPanelId = panelId;
+  markSidePanelBody(body);
+  mountPanelShell({
+    body,
+    renderItem: sideItem,
+    getMountedItem: () => sideItem,
+    rawItem: item,
+    setupItem: sideItem,
+    beforeRegister: () => markSidePanelBody(body, sideItem),
+  });
+  await ensureConversationLoaded(sideItem, { body });
+  refreshChat(body, sideItem);
+  await Zotero.Promise.delay(50);
+  const contextSnapshot = await resolveContextSourceItemAsync(sideItem);
+  activeContextPanelStateSync.get(body)?.();
+  panels.set(panelId, { id: panelId, body, item: sideItem, contextSnapshot });
+  const root = body.querySelector("#llm-main") as HTMLElement | null;
+  return {
+    panelId,
+    itemId: input.itemId,
+    contextSnapshot,
+    conversationKey,
+    surface: resolveSelectionSurfaceForBody(body),
+    mountedConversationKey: Math.floor(Number(root?.dataset.itemId || 0)),
+    conversationSystem: root?.dataset.conversationSystem || "",
+  };
+}
+
+/** Drops a side chat's in-memory state (what closing the side chat does). */
+function discardSidePanelConversation(conversationKey: number): void {
+  assertWorkflowTestEnabled();
+  discardEphemeralConversation(conversationKey);
+}
+
+/**
+ * Rows any store holds for one conversation key, across the catalog,
+ * registry, ledger, message, search, fork, deletion, agent, document,
+ * attachment, and usage tables. A side chat's key must have none.
+ */
+async function getEphemeralConversationRowCounts(
+  conversationKey: number,
+  runIds: string[] = [],
+): Promise<WorkflowTestEphemeralConversationRowCounts> {
+  assertWorkflowTestEnabled();
+  const key = Math.floor(Number(conversationKey));
+  const count = async (
+    table: string,
+    whereSql: string,
+    params: unknown[],
+  ): Promise<number> => {
+    try {
+      return await countWorkflowRows(table, whereSql, params);
+    } catch (error) {
+      // A store that never initialized has no table, so it holds no rows.
+      if (/no such table/i.test(String(error))) return 0;
+      throw error;
+    }
+  };
+  const byKey = (table: string) => count(table, "conversation_key = ?", [key]);
+  return {
+    globalCatalog: await byKey("llm_for_zotero_global_conversations"),
+    paperCatalog: await byKey("llm_for_zotero_paper_conversations"),
+    messages: await byKey("llm_for_zotero_chat_messages"),
+    registry: await count(
+      "llm_for_zotero_conversation_registry",
+      "legacy_conversation_key = ?",
+      [key],
+    ),
+    searchIndex: await count(
+      "llm_for_zotero_conversation_search_index",
+      "legacy_conversation_key = ?",
+      [key],
+    ),
+    ledger: await byKey("llm_for_zotero_conversation_key_ledger"),
+    forkLinks: await count(
+      "llm_for_zotero_conversation_fork_links",
+      "source_conversation_key = ? OR target_conversation_key = ?",
+      [key, key],
+    ),
+    pendingDeletions: await byKey(PENDING_DELETIONS_TABLE),
+    agentRuns: await byKey("llm_for_zotero_agent_runs"),
+    // Events of a run row for the key, or of a run the caller names (an
+    // agent answer's run ID), in case events were written without a run row.
+    agentRunEvents: await count(
+      "llm_for_zotero_agent_run_events",
+      `run_id IN (SELECT run_id FROM llm_for_zotero_agent_runs WHERE conversation_key = ?)${
+        runIds.length
+          ? ` OR run_id IN (${runIds.map(() => "?").join(", ")})`
+          : ""
+      }`,
+      [key, ...runIds],
+    ),
+    agentTranscript: await byKey("llm_for_zotero_agent_transcript"),
+    agentToolResultHandles: await byKey(
+      "llm_for_zotero_agent_tool_result_handles",
+    ),
+    agentMemory: await byKey("llm_for_zotero_agent_memory"),
+    agentEvidence: await byKey("llm_for_zotero_agent_evidence"),
+    agentCoverage: await count(
+      "llm_for_zotero_agent_coverage",
+      "origin_conversation_key = ?",
+      [key],
+    ),
+    planDocuments: await byKey("llm_for_zotero_plan_documents"),
+    planDocumentOwners: await byKey("llm_for_zotero_plan_document_owners"),
+    attachmentRefs: await count(
+      "llm_for_zotero_attachment_refs",
+      "owner_type = 'conversation' AND owner_id = ?",
+      [key],
+    ),
+    usageEvents: await byKey("llm_for_zotero_usage_events"),
+  };
+}
+
+async function exerciseBackgroundAgentPublication(input: {
+  panelId: string;
+  paperBItemId: number;
+  invalidateConversation?: boolean;
+}) {
+  assertWorkflowTestEnabled();
+  const panel = getPanel(input.panelId);
+  const paperA = activeContextPanels.get(panel.body)?.() || panel.item;
+  const conversationKey = getConversationKey(paperA);
+  const generation = getConversationWriteGeneration(conversationKey);
+  const deps = buildAgentEngineDepsForTests(
+    paperA,
+    "upstream",
+    generation,
+    panel.body,
+    capturePanelOperationLease(panel.body),
+  );
+  const timestamp = Date.now();
+  await deps.persistConversationMessage(conversationKey, {
+    role: "user",
+    text: "Publish a background document.",
+    timestamp,
+  });
+  const tool = getAgentRuntime().getToolDefinition("submit_document")!;
+  const prepared = normalizeExecutionOutput(
+    await tool.execute(
+      {
+        title: "Background publication fixture",
+        markdown:
+          "# Background publication fixture\n\nThis exact document must survive switching papers.",
+        citations: [],
+        quotes: [],
+        assets: [],
+        groundingReviewed: "passed",
+        groundingIssues: [],
+      },
+      {
+        request: {
+          conversationKey,
+          mode: "agent",
+          libraryID: paperA.libraryID,
+          userText: "Publish a background document.",
+        },
+        runId: `background-publication-${paperA.key}-${timestamp}`,
+        item: paperA,
+        modelName: "workflow",
+        currentAnswerText: "",
+      } as never,
+    ),
+  ).content as { documentId: string; visibleMarkdown: string };
+  const paperB = Zotero.Items.get(input.paperBItemId);
+  disposeSetupHandlers(panel.body);
+  bindTestPanelHost(panel.body, paperB);
+  mountPanelShell({
+    body: panel.body,
+    renderItem: paperB,
+    getMountedItem: () => paperB,
+    rawItem: paperB,
+    setupItem: paperB,
+  });
+  await ensureConversationLoaded(paperB);
+  panel.item = paperB;
+  refreshChat(panel.body, paperB);
+  const paperBKey = getConversationKey(paperB);
+  if (input.invalidateConversation)
+    bumpConversationWriteGeneration(conversationKey);
+  await deps.persistConversationMessage(conversationKey, {
+    role: "assistant",
+    text: prepared.visibleMarkdown,
+    timestamp: timestamp + 1,
+    documentId: prepared.documentId,
+  });
+  const rows = (await Zotero.DB.queryAsync(
+    "SELECT conversation_key AS conversationKey, text FROM llm_for_zotero_chat_messages WHERE document_id = ?",
+    [prepared.documentId],
+  )) as Array<{ conversationKey: number; text: string }>;
+  const outbox = await loadPlanDocumentOutbox(prepared.documentId);
+  return {
+    sourceConversationKey: conversationKey,
+    otherConversationKey: paperBKey,
+    persistedConversationKeys: rows.map((row) => Number(row.conversationKey)),
+    exactMarkdown: rows.every((row) =>
+      row.text.endsWith(prepared.visibleMarkdown),
+    ),
+    outboxStatus: outbox?.status,
+    otherPanelContainsDocument: Boolean(
+      panel.body
+        .querySelector("#llm-chat-box")
+        ?.textContent?.includes("This exact document must survive"),
+    ),
+  };
+}
+
+async function renderStartupPanelForItem(
+  itemId: number,
+): Promise<WorkflowTestPanel> {
+  disposeWorkflowPanels();
+  clearWorkflowConversationRuntimeState();
+  return renderPanelForItemInternal(itemId, { resolveRememberedState: true });
+}
+
+function clearWorkflowConversationRuntimeState(): void {
+  chatHistory.clear();
+  // Task progress records derive from the history cleared here; a record an
+  // earlier case left "running" would otherwise hold one of the store's six
+  // slots into every later case.
+  clearAllTaskProgress();
+  selectedRuntimeModeCache.clear();
+  loadedConversationKeys.clear();
+  activeConversationModeByLibrary.clear();
+  activeGlobalConversationByLibrary.clear();
+  activePaperConversationByPaper.clear();
+  activeClaudeConversationModeByLibrary.clear();
+  activeClaudeGlobalConversationByLibrary.clear();
+  activeClaudePaperConversationByPaper.clear();
+  activeCodexConversationModeByLibrary.clear();
+  activeCodexGlobalConversationByLibrary.clear();
+  activeCodexPaperConversationByPaper.clear();
+  clearStandaloneSelection();
+  clearStandaloneSurfaceChoices();
+  selectedPaperContextCache.clear();
+  selectedCollectionContextCache.clear();
+  selectedTagContextCache.clear();
+  attachedConversationCache.clear();
+  initializedConversationComposeContextKeys.clear();
+  paperContextModeOverrides.clear();
+  paperContentSourceOverrides.clear();
+}
+
+async function renderPanelForItemInternal(
+  itemId: number,
+  options?: { resolveRememberedState?: boolean },
+): Promise<WorkflowTestPanel> {
+  assertWorkflowTestEnabled();
+  const item = Zotero.Items.get(itemId);
+  if (!item) throw new Error(`Unable to find Zotero item ${itemId}`);
+  const doc = getWorkflowDocument();
+  const body = appendHost(doc);
+  const panelId = `workflow-panel-${++panelCounter}`;
+  body.dataset.workflowPanelId = panelId;
+  const initialPanelItem = options?.resolveRememberedState
+    ? resolveInitialPanelItemState(item).item
+    : item;
+  mountPanelShell({
+    body,
+    renderItem: initialPanelItem,
+    getMountedItem: () => initialPanelItem,
+    rawItem: item,
+    setupItem: item,
+  });
+  const mountedItem = activeContextPanels.get(body)?.() || item;
+  await ensureConversationLoaded(mountedItem).catch(() => undefined);
+  refreshChat(body, mountedItem);
+  await Zotero.Promise.delay(50);
+  const contextSnapshot = await resolveContextSourceItemAsync(mountedItem);
+  activeContextPanelStateSync.get(body)?.();
+  const panel = { id: panelId, body, item: mountedItem, contextSnapshot };
+  panels.set(panelId, panel);
+  return { panelId, itemId, contextSnapshot };
+}
+
+async function exerciseStaleAgentTracePanelIsolation(input: {
+  panelId: string;
+  paperBItemId: number;
+  paperAMarker: string;
+  paperBMarker: string;
+  paperBAppendMarker: string;
+  runId: string;
+}): Promise<WorkflowTestStaleAgentTraceIsolationResult> {
+  assertWorkflowTestEnabled();
+  const panel = getPanel(input.panelId);
+  const body = panel.body;
+  const paperAItem = activeContextPanels.get(body)?.() || panel.item;
+  const paperAConversationKey = getConversationKey(paperAItem);
+  const paperBItem = Zotero.Items.get(input.paperBItemId);
+  if (!paperAConversationKey || !paperBItem) {
+    throw new Error("Workflow trace isolation requires two mounted papers");
+  }
+
+  const runId = input.runId.trim();
+  if (!runId) throw new Error("Workflow trace isolation requires a run ID");
+  let traceLoadStarted = false;
+  let traceResolved = false;
+  let resolveTrace: (value: { run: null; events: [] }) => void = () => {};
+  const traceResult = new Promise<{ run: null; events: [] }>((resolve) => {
+    resolveTrace = resolve;
+  });
+  setAgentRunTraceLoaderForTests(async (requestedRunId) => {
+    if (requestedRunId !== runId) {
+      throw new Error(`Unexpected workflow trace request: ${requestedRunId}`);
+    }
+    traceLoadStarted = true;
+    return traceResult;
+  });
+
+  try {
+    const paperATimestamp = Date.now() - 10;
+    const paperAUserMessage: Message = {
+      role: "user",
+      text: `${input.paperAMarker} request`,
+      timestamp: paperATimestamp,
+    };
+    const paperAAssistantMessage: Message = {
+      role: "assistant",
+      text: input.paperAMarker,
+      timestamp: paperATimestamp + 1,
+      runMode: "agent",
+      agentRunId: runId,
+    };
+    await appendWorkflowStoredMessage(
+      "upstream",
+      paperAConversationKey,
+      paperAUserMessage,
+    );
+    await appendWorkflowStoredMessage(
+      "upstream",
+      paperAConversationKey,
+      paperAAssistantMessage,
+    );
+    chatHistory.set(paperAConversationKey, [
+      ...(chatHistory.get(paperAConversationKey) || []),
+      paperAUserMessage,
+      paperAAssistantMessage,
+    ]);
+    loadedConversationKeys.add(paperAConversationKey);
+    refreshChat(body, paperAItem);
+
+    const traceStartDeadline = Date.now() + 5000;
+    while (!traceLoadStarted && Date.now() < traceStartDeadline) {
+      await Zotero.Promise.delay(25);
+    }
+    if (!traceLoadStarted) {
+      throw new Error("Timed out waiting for the paper A trace request");
+    }
+
+    disposeSetupHandlers(body);
+    bindTestPanelHost(body, paperBItem);
+    mountPanelShell({
+      body,
+      renderItem: paperBItem,
+      getMountedItem: () => paperBItem,
+      rawItem: paperBItem,
+      setupItem: paperBItem,
+    });
+    await ensureConversationLoaded(paperBItem);
+    const paperBConversationKey = getConversationKey(paperBItem);
+    if (!paperBConversationKey) {
+      throw new Error("Workflow paper B has no conversation key");
+    }
+    const paperBMessage: Message = {
+      role: "user",
+      text: input.paperBMarker,
+      timestamp: Date.now(),
+    };
+    await appendWorkflowStoredMessage(
+      "upstream",
+      paperBConversationKey,
+      paperBMessage,
+    );
+    chatHistory.set(paperBConversationKey, [
+      ...(chatHistory.get(paperBConversationKey) || []),
+      paperBMessage,
+    ]);
+    loadedConversationKeys.add(paperBConversationKey);
+    panel.item = paperBItem;
+    panel.contextSnapshot = await resolveContextSourceItemAsync(paperBItem);
+    refreshChat(body, paperBItem);
+    activeContextPanelStateSync.get(body)?.();
+    await Zotero.Promise.delay(100);
+    const beforeTraceResolution = await getDiagnostics(input.panelId);
+
+    resolveTrace({ run: null, events: [] });
+    traceResolved = true;
+    const traceCacheDeadline = Date.now() + 5000;
+    while (
+      !hasAgentRunTraceForTests(runId) &&
+      Date.now() < traceCacheDeadline
+    ) {
+      await Zotero.Promise.delay(25);
+    }
+    const traceCached = hasAgentRunTraceForTests(runId);
+    if (!traceCached) {
+      throw new Error("Timed out waiting for the paper A trace cache");
+    }
+    await Zotero.Promise.delay(100);
+    const afterTraceResolution = await getDiagnostics(input.panelId);
+
+    const paperABefore = await getWorkflowConversationPersistenceSnapshot(
+      "upstream",
+      paperAConversationKey,
+    );
+    const paperBBefore = await getWorkflowConversationPersistenceSnapshot(
+      "upstream",
+      paperBConversationKey,
+    );
+    const afterPaperBAppend = await seedPanelStoredUserMessage(
+      input.panelId,
+      input.paperBAppendMarker,
+    );
+    const paperAAfter = await getWorkflowConversationPersistenceSnapshot(
+      "upstream",
+      paperAConversationKey,
+    );
+    const paperBAfter = await getWorkflowConversationPersistenceSnapshot(
+      "upstream",
+      paperBConversationKey,
+    );
+
+    return {
+      paperAConversationKey,
+      paperBConversationKey,
+      beforeTraceResolution,
+      afterTraceResolution,
+      afterPaperBAppend,
+      traceCached,
+      paperAMessageRowsBeforePaperBAppend: paperABefore.messageRows,
+      paperAMessageRowsAfterPaperBAppend: paperAAfter.messageRows,
+      paperBMessageRowsBeforePaperBAppend: paperBBefore.messageRows,
+      paperBMessageRowsAfterPaperBAppend: paperBAfter.messageRows,
+    };
+  } finally {
+    if (!traceResolved) {
+      resolveTrace({ run: null, events: [] });
+      await Zotero.Promise.delay(0);
+    }
+    setAgentRunTraceLoaderForTests();
+  }
+}
+
+async function exerciseCrossPaperHistoryReturnIsolation(input: {
+  panelAId: string;
+  panelBId: string;
+  paperAItemId: number;
+  paperAAttachmentItemId: number;
+  paperBItemId: number;
+  paperAMarker: string;
+  paperBMarker: string;
+  promptMarker: string;
+  selectedText: string;
+  activation?: "pointer" | "keyboard" | "history-row";
+  delaySelection?: boolean;
+}): Promise<WorkflowTestCrossPaperHistoryIsolationResult> {
+  assertWorkflowTestEnabled();
+  const panelA = getPanel(input.panelAId);
+  const panelB = getPanel(input.panelBId);
+  await seedPanelStoredUserMessage(input.panelAId, input.paperAMarker);
+  await seedPanelStoredUserMessage(input.panelBId, input.paperBMarker);
+
+  const paperAItem = activeContextPanels.get(panelA.body)?.() || panelA.item;
+  const paperBItem = activeContextPanels.get(panelB.body)?.() || panelB.item;
+  const paperAConversationKey = getConversationKey(paperAItem);
+  const paperBConversationKey = getConversationKey(paperBItem);
+  const paperBRowsBefore = await getWorkflowConversationPersistenceSnapshot(
+    "upstream",
+    paperBConversationKey,
+  );
+
+  const reader = await openWorkflowPdfReader(input.paperAAttachmentItemId, 0);
+  let popupHost: HTMLElement | null = null;
+  let selectionDoc: Document | null = null;
+  let restoreSelectItems: (() => void) | null = null;
+  let foreignContentObserver: MutationObserver | null = null;
+  try {
+    const mainDocument = Zotero.getMainWindow?.()?.document || null;
+    const readerPanel = mainDocument
+      ? getReaderContextPanelForTab(mainDocument, reader.tabID)
+      : null;
+    const rawReaderItem = Zotero.Items.get(input.paperAAttachmentItemId);
+    if (!readerPanel || !rawReaderItem) {
+      throw new Error("Workflow paper A reader context is unavailable");
+    }
+    readerPanel.appendChild(panelA.body);
+    bindEmbeddedPanelHost(panelA.body, rawReaderItem, "reader");
+
+    const chatBox = panelA.body.querySelector(
+      "#llm-chat-box",
+    ) as HTMLElement | null;
+    if (!chatBox) throw new Error("Workflow paper A chat surface is missing");
+    let foreignMutationObserved = false;
+    const MutationObserverCtor =
+      panelA.body.ownerDocument.defaultView?.MutationObserver;
+    foreignContentObserver = MutationObserverCtor
+      ? new MutationObserverCtor((records) => {
+          for (const record of records) {
+            for (const node of Array.from(record.addedNodes)) {
+              if ((node?.textContent || "").includes(input.paperBMarker)) {
+                foreignMutationObserved = true;
+              }
+            }
+          }
+          if ((chatBox.textContent || "").includes(input.paperBMarker)) {
+            foreignMutationObserved = true;
+          }
+        })
+      : null;
+    foreignContentObserver?.observe(chatBox, {
+      childList: true,
+      subtree: true,
+    });
+
+    const pane = Zotero.getActiveZoteroPane?.() as
+      | {
+          getSelectedItems?: () => Zotero.Item[];
+          selectItems?: (
+            ids: number[],
+            options?: { selectInLibrary?: boolean },
+          ) => Promise<unknown> | unknown;
+        }
+      | undefined;
+    let releaseDelayedSelection: (() => void) | null = null;
+    let delayedSelectionStarted = false;
+    if (input.delaySelection && typeof pane?.selectItems === "function") {
+      const originalSelectItems = pane.selectItems;
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      releaseDelayedSelection = release;
+      pane.selectItems = async (ids, options) => {
+        delayedSelectionStarted = true;
+        await gate;
+        return await originalSelectItems.call(pane, ids, options);
+      };
+      restoreSelectItems = () => {
+        pane.selectItems = originalSelectItems;
+      };
+    }
+
+    await openPanelHistoryMenu(input.panelAId);
+    const targetConversationKey =
+      input.activation === "history-row"
+        ? paperAConversationKey
+        : paperBConversationKey;
+    const resultSelector =
+      input.activation === "history-row"
+        ? `.llm-history-item[data-conversation-key="${targetConversationKey}"]`
+        : `.llm-standalone-search-item[data-conversation-key="${targetConversationKey}"]`;
+    if (input.activation !== "history-row") {
+      dispatchWorkflowClick(
+        panelA.body,
+        ".llm-history-menu-search-trigger",
+        "History search trigger",
+      );
+      const searchInput = panelA.body.querySelector(
+        ".llm-standalone-search-input",
+      ) as HTMLInputElement | null;
+      if (!searchInput) {
+        throw new Error("History search input was not rendered");
+      }
+      searchInput.value = input.paperBMarker;
+      const InputEventCtor =
+        panelA.body.ownerDocument.defaultView?.Event || Event;
+      searchInput.dispatchEvent(new InputEventCtor("input", { bubbles: true }));
+    }
+
+    const searchDeadline = Date.now() + 8000;
+    let resultRow = panelA.body.querySelector(
+      resultSelector,
+    ) as HTMLElement | null;
+    while (!resultRow && Date.now() < searchDeadline) {
+      await Zotero.Promise.delay(50);
+      resultRow = panelA.body.querySelector(
+        resultSelector,
+      ) as HTMLElement | null;
+    }
+    if (!resultRow) {
+      throw new Error("Paper B was not rendered in conversation history");
+    }
+    if (input.activation === "keyboard") {
+      const KeyboardEventCtor =
+        panelA.body.ownerDocument.defaultView?.KeyboardEvent || KeyboardEvent;
+      resultRow.dispatchEvent(
+        new KeyboardEventCtor("keydown", {
+          bubbles: true,
+          cancelable: true,
+          key: "Enter",
+        }),
+      );
+    } else {
+      resultRow.click();
+    }
+
+    if (input.delaySelection) {
+      const delayedDeadline = Date.now() + 3000;
+      while (!delayedSelectionStarted && Date.now() < delayedDeadline) {
+        await Zotero.Promise.delay(20);
+      }
+      const tabs = (
+        Zotero as unknown as {
+          Tabs?: { select?: (tabID: string) => Promise<unknown> | unknown };
+        }
+      ).Tabs;
+      if (reader.tabID && typeof tabs?.select === "function") {
+        await tabs.select(reader.tabID);
+      }
+      releaseDelayedSelection?.();
+    }
+
+    const shouldNavigateToPaperB = input.activation !== "history-row";
+    const selectedDeadline = Date.now() + 8000;
+    let selectedLibraryItemID = Number(pane?.getSelectedItems?.()[0]?.id || 0);
+    while (
+      shouldNavigateToPaperB &&
+      selectedLibraryItemID !== input.paperBItemId &&
+      Date.now() < selectedDeadline
+    ) {
+      await Zotero.Promise.delay(50);
+      selectedLibraryItemID = Number(pane?.getSelectedItems?.()[0]?.id || 0);
+    }
+    if (
+      shouldNavigateToPaperB &&
+      selectedLibraryItemID !== input.paperBItemId
+    ) {
+      throw new Error("History navigation did not select paper B in Zotero");
+    }
+
+    const tabs = (
+      Zotero as unknown as {
+        Tabs?: { select?: (tabID: string) => Promise<unknown> | unknown };
+      }
+    ).Tabs;
+    if (reader.tabID && typeof tabs?.select === "function") {
+      await tabs.select(reader.tabID);
+    }
+    await Zotero.Promise.delay(150);
+    foreignContentObserver?.disconnect();
+
+    const diagnostics = await getDiagnostics(input.panelAId);
+    const request = await ask(input.panelAId, input.promptMarker);
+    const popupAction = await dispatchWorkflowReaderAddTextPopup({
+      reader,
+      pageIndex: 0,
+      selectedText: input.selectedText,
+    });
+    popupHost = popupAction.popupHost;
+    selectionDoc = popupAction.selectionDoc;
+    await waitForSelectedContext({
+      conversationKey: paperAConversationKey,
+      selectedText: input.selectedText,
+      pageIndex: 0,
+    });
+
+    const paperBRowsAfter = await getWorkflowConversationPersistenceSnapshot(
+      "upstream",
+      paperBConversationKey,
+    );
+    return {
+      paperAConversationKey,
+      paperBConversationKey,
+      selectedLibraryItemID,
+      foreignMutationObserved,
+      panelAConversationKey: Number(diagnostics.panelConversationKey || 0),
+      panelABasePaperItemID: Number(
+        (panelA.body.querySelector("#llm-main") as HTMLElement | null)?.dataset
+          .basePaperItemId || 0,
+      ),
+      panelARawContextItemID: Number(
+        (panelA.body.querySelector("#llm-main") as HTMLElement | null)?.dataset
+          .rawContextItemId || 0,
+      ),
+      panelAMessageText: diagnostics.messageText || "",
+      requestConversationKey: getConversationKey(request.item),
+      requestItemID: Number(request.item.id || 0),
+      addTextStoredForA: getSelectedTextContextEntries(
+        paperAConversationKey,
+      ).some((context) => context.text === input.selectedText),
+      addTextStoredForB: getSelectedTextContextEntries(
+        paperBConversationKey,
+      ).some((context) => context.text === input.selectedText),
+      paperBMessageRowsBefore: paperBRowsBefore.messageRows,
+      paperBMessageRowsAfter: paperBRowsAfter.messageRows,
+    };
+  } finally {
+    foreignContentObserver?.disconnect();
+    restoreSelectItems?.();
+    selectionDoc?.defaultView?.getSelection?.()?.removeAllRanges();
+    popupHost?.remove();
+    await closeWorkflowReader(reader);
+  }
+}
+
+function dispatchWorkflowClick(
+  body: HTMLElement,
+  selector: string,
+  label: string,
+): void {
+  const button = body.querySelector(selector) as HTMLButtonElement | null;
+  if (!button) throw new Error(`${label} was not rendered`);
+  const eventCtor = body.ownerDocument.defaultView?.MouseEvent;
+  if (eventCtor) {
+    button.dispatchEvent(
+      new eventCtor("click", { bubbles: true, cancelable: true }),
+    );
+    return;
+  }
+  button.click();
+}
+
+async function waitForPanelConversationChange(params: {
+  panelId: string;
+  previousConversationKey?: number;
+  previousConversationKind?: string;
+  allowReusedDraft?: boolean;
+  previousStatusText?: string;
+  completed?: () => boolean;
+}): Promise<WorkflowTestDiagnostics> {
+  const startedAt = Date.now();
+  // Generous deadline: the switch path does several DB round-trips, and a
+  // loaded machine has pushed the old 5s budget over the edge (observed as a
+  // flaky deletion-lifecycle failure). Polling exits the moment the key
+  // changes, so a large ceiling costs nothing on the happy path.
+  while (Date.now() - startedAt < 15000) {
+    const diagnostics = await getDiagnostics(params.panelId);
+    const keyChanged =
+      params.previousConversationKey === undefined ||
+      diagnostics.conversationKey !== params.previousConversationKey;
+    const kindChanged =
+      params.previousConversationKind === undefined ||
+      diagnostics.conversationKind !== params.previousConversationKind;
+    if (keyChanged && kindChanged && (!params.completed || params.completed()))
+      return diagnostics;
+    if (
+      params.allowReusedDraft &&
+      (!params.completed || params.completed()) &&
+      (params.completed ||
+        diagnostics.statusText !== params.previousStatusText) &&
+      /^(Reused existing new|Started new)/.test(diagnostics.statusText || "")
+    ) {
+      return diagnostics;
+    }
+    await Zotero.Promise.delay(25);
+  }
+  throw new Error(`Timed out waiting for panel ${params.panelId} to switch`);
+}
+
+async function startNewPanelConversation(
+  panelId: string,
+  options?: { allowReusedDraft?: boolean },
+): Promise<WorkflowTestDiagnostics> {
+  assertWorkflowTestEnabled();
+  const panel = getPanel(panelId);
+  const before = await getDiagnostics(panelId);
+  // Identity changes before asynchronous hydration clears the old composer.
+  // Observe a fresh completion announcement, including repeated "Started new"
+  // labels, rather than treating the new key as a completed UI transition.
+  const status = panel.body.querySelector("#llm-status");
+  const Observer = panel.body.ownerDocument.defaultView?.MutationObserver;
+  if (!status || !Observer)
+    throw new Error("New-chat completion observer is unavailable");
+  let completed = false;
+  const observer = new Observer(() => {
+    if (/^(Reused existing new|Started new)/.test(status.textContent || ""))
+      completed = true;
+  });
+  observer.observe(status, {
+    childList: true,
+    characterData: true,
+    subtree: true,
+  });
+  try {
+    dispatchWorkflowClick(panel.body, "#llm-history-new", "New chat button");
+    return await waitForPanelConversationChange({
+      panelId,
+      previousConversationKey: before.conversationKey,
+      allowReusedDraft: options?.allowReusedDraft,
+      previousStatusText: before.statusText,
+      completed: () => completed,
+    });
+  } finally {
+    observer.disconnect();
+  }
+}
+
+async function togglePanelConversationMode(
+  panelId: string,
+): Promise<WorkflowTestDiagnostics> {
+  assertWorkflowTestEnabled();
+  const panel = getPanel(panelId);
+  const before = await getDiagnostics(panelId);
+  dispatchWorkflowClick(
+    panel.body,
+    before.conversationKind === "global"
+      ? "#llm-paper-chat-tab"
+      : "#llm-library-chat-tab",
+    "Chat mode tab",
+  );
+  return waitForPanelConversationChange({
+    panelId,
+    previousConversationKind: before.conversationKind,
+  });
+}
+
+async function exerciseDuplicatePanelSetup(
+  panelId: string,
+): Promise<WorkflowTestDuplicatePanelSetupDiagnostics> {
+  assertWorkflowTestEnabled();
+  const panel = getPanel(panelId);
+  const panelRootBefore = panel.body.querySelector(
+    "#llm-main",
+  ) as HTMLElement | null;
+  if (!panelRootBefore) {
+    throw new Error(`Panel ${panelId} has no mounted root`);
+  }
+  const mountedItem = activeContextPanels.get(panel.body)?.() || panel.item;
+  const initializationGenerationBefore =
+    panelRootBefore.dataset.handlersInitialized || "";
+  const panelStateSyncBefore = activeContextPanelStateSync.has(panel.body);
+  const turnNavigatorCountBefore = panel.body.querySelectorAll(
+    ".llm-turn-navigator",
+  ).length;
+
+  setupHandlers(panel.body, mountedItem);
+
+  const panelRootAfter = panel.body.querySelector(
+    "#llm-main",
+  ) as HTMLElement | null;
+  return {
+    samePanelRoot: panelRootAfter === panelRootBefore,
+    initializationGenerationBefore,
+    initializationGenerationAfter:
+      panelRootAfter?.dataset.handlersInitialized || "",
+    panelStateSyncBefore,
+    panelStateSyncAfter: activeContextPanelStateSync.has(panel.body),
+    turnNavigatorCountBefore,
+    turnNavigatorCountAfter: panel.body.querySelectorAll(".llm-turn-navigator")
+      .length,
+  };
+}
+
+async function exercisePanelDraftStateRefresh(
+  panelId: string,
+  text: string,
+): Promise<WorkflowTestDraftRefreshDiagnostics> {
+  assertWorkflowTestEnabled();
+  const panel = getPanel(panelId);
+  const panelRoot = panel.body.querySelector("#llm-main") as HTMLElement | null;
+  const input = panel.body.querySelector(
+    "#llm-input",
+  ) as HTMLTextAreaElement | null;
+  if (!panelRoot || !input) {
+    throw new Error(`Panel ${panelId} has no mounted composer`);
+  }
+  const syncPanelState = activeContextPanelStateSync.get(panel.body);
+  if (!syncPanelState) {
+    throw new Error(`Panel ${panelId} has no state-sync callback`);
+  }
+
+  input.value = text;
+  const eventCtor = panel.body.ownerDocument.defaultView?.Event ?? Event;
+  input.dispatchEvent(new eventCtor("input", { bubbles: true }));
+  const inputBeforeRefresh = input.value;
+  syncPanelState();
+
+  return {
+    webChatMode: panelRoot.dataset.webchatMode === "true",
+    inputBeforeRefresh,
+    inputAfterRefresh: input.value,
+  };
+}
+
+/**
+ * Pick a model entry from the panel's model menu the way a user does: open
+ * the menu, click the entry's option, then wait until the panel has finished
+ * entering or leaving WebChat for that entry (the WebChat session anchoring
+ * and the return to the remembered paper conversation are both async).
+ */
+async function selectPanelModelEntry(
+  panelId: string,
+  entryId: string,
+  options?: { expectWebChat?: boolean },
+): Promise<WorkflowTestDiagnostics> {
+  assertWorkflowTestEnabled();
+  const panel = getPanel(panelId);
+  const toggle = panel.body.querySelector(
+    "#llm-model-toggle",
+  ) as HTMLButtonElement | null;
+  if (!toggle) throw new Error(`Panel ${panelId} has no model toggle`);
+  if (toggle.disabled) {
+    throw new Error(`Panel ${panelId} model toggle is disabled`);
+  }
+  toggle.click();
+  const option = panel.body.querySelector(
+    `#llm-model-menu .llm-model-option[data-entry-id="${entryId}"]`,
+  ) as HTMLButtonElement | null;
+  if (!option) {
+    throw new Error(`Panel ${panelId} model menu has no entry ${entryId}`);
+  }
+  // A WebChat entry normally settles inside WebChat, but a test can say it
+  // expects the fail-closed outcome (entry rejected, panel back on the API
+  // conversation) instead of that inference.
+  const expectWebChat =
+    typeof options?.expectWebChat === "boolean"
+      ? options.expectWebChat
+      : getModelEntryById(entryId)?.authMode === "webchat";
+  const expectedPaper = resolveConversationBaseItem(
+    activeContextPanels.get(panel.body)?.() || panel.item,
+  );
+  option.click();
+  const deadline = Date.now() + 15000;
+  let diagnostics = await getDiagnostics(panelId);
+  while (Date.now() < deadline) {
+    const key = diagnostics.conversationKey || 0;
+    if (expectWebChat) {
+      if (
+        diagnostics.webChatMode === true &&
+        webChatIsolatedConversationKeys.has(key)
+      ) {
+        // Another panel can isolate the ordinary paper key before this
+        // panel's async switch attaches its dedicated hidden session.
+        const session = await getPaperConversation(key);
+        diagnostics = await getDiagnostics(panelId);
+        if (
+          session?.webchatSession === true &&
+          session.paperItemID === expectedPaper?.id &&
+          session.libraryID === expectedPaper?.libraryID &&
+          diagnostics.webChatMode === true &&
+          diagnostics.conversationSystem === "upstream" &&
+          diagnostics.conversationKey === key &&
+          diagnostics.panelConversationKey === key &&
+          webChatIsolatedConversationKeys.has(key) &&
+          loadedConversationKeys.has(key)
+        ) {
+          return diagnostics;
+        }
+      }
+    } else if (
+      diagnostics.webChatMode === false &&
+      !webChatIsolatedConversationKeys.has(key) &&
+      loadedConversationKeys.has(key)
+    ) {
+      return diagnostics;
+    }
+    await Zotero.Promise.delay(25);
+    diagnostics = await getDiagnostics(panelId);
+  }
+  throw new Error(
+    `Timed out waiting for panel model entry ${entryId} to settle: ${JSON.stringify(
+      {
+        webChatMode: diagnostics.webChatMode,
+        conversationKey: diagnostics.conversationKey,
+      },
+    )}`,
+  );
+}
+
+async function seedPanelStoredUserMessage(
+  panelId: string,
+  text: string,
+  contexts: Pick<
+    Message,
+    | "paperContexts"
+    | "pdfPaperContexts"
+    | "fullTextPaperContexts"
+    | "selectedCollectionContexts"
+    | "selectedTagContexts"
+    | "attachedConversations"
+  > = {},
+): Promise<WorkflowTestDiagnostics> {
+  assertWorkflowTestEnabled();
+  const panel = getPanel(panelId);
+  let item = activeContextPanels.get(panel.body)?.() || panel.item;
+  // The visible history switch is asynchronous.  Re-run the same provisioning
+  // gate that a real send uses before seeding so a panel that just moved away
+  // from a retired historical key cannot append through its stale WeakMap
+  // binding.  Re-read the active item afterward because provisioning may have
+  // allocated a fresh permanent key for the scope.
+  await ensureConversationLoaded(item);
+  item = activeContextPanels.get(panel.body)?.() || item;
+  const conversationKey = getConversationKey(item);
+  if (!conversationKey) {
+    throw new Error("Workflow panel has no active conversation key");
+  }
+  const message = {
+    ...contexts,
+    role: "user" as const,
+    text,
+    timestamp: Date.now(),
+  };
+  const conversationSystem =
+    (panel.body.querySelector("#llm-main") as HTMLElement | null)?.dataset
+      .conversationSystem || "upstream";
+  try {
+    await appendWorkflowStoredMessage(
+      conversationSystem === "codex" || conversationSystem === "claude_code"
+        ? conversationSystem
+        : "upstream",
+      conversationKey,
+      message,
+    );
+  } catch (error) {
+    throw new Error(
+      `Workflow seed failed (${text}) for key ${conversationKey}: ${String(
+        (error as Error)?.message || error,
+      )}`,
+    );
+  }
+  const existing = chatHistory.get(conversationKey) || [];
+  chatHistory.set(conversationKey, [...existing, message]);
+  loadedConversationKeys.add(conversationKey);
+  panel.item = item;
+  refreshChat(panel.body, item);
+  await Zotero.Promise.delay(100);
+  return getDiagnostics(panelId);
+}
+
+async function selectNoteEditorText(
+  panelId: string,
+  text: string,
+): Promise<void> {
+  assertWorkflowTestEnabled();
+  const panel = getPanel(panelId);
+  const synced = syncNoteEditingSelectedText({
+    noteItem: activeContextPanels.get(panel.body)?.() || panel.item,
+    text,
+  });
+  if (!synced) throw new Error("Workflow panel item is not a note");
+  applySelectedTextPreview(panel.body, synced.conversationKey);
+}
+
+async function clickPanelSystemToggle(
+  panelId: string,
+  system: RuntimeConversationSystem,
+): Promise<WorkflowTestDiagnostics> {
+  assertWorkflowTestEnabled();
+  const panel = getPanel(panelId);
+  const button = panel.body.querySelector(
+    `.llm-panel-runtime-system-toggle[data-conversation-system='${system}']`,
+  ) as HTMLButtonElement | null;
+  if (!button) {
+    throw new Error(`Panel ${system} system toggle was not rendered`);
+  }
+  const before = await getDiagnostics(panelId);
+  const expectedSystem =
+    before.conversationSystem === system ? "upstream" : system;
+  button.click();
+  const deadline = Date.now() + 15000;
+  let diagnostics = await getDiagnostics(panelId);
+  while (Date.now() < deadline) {
+    if (
+      diagnostics.conversationSystem === expectedSystem &&
+      diagnostics.runtimeSystemToggles
+        .filter((toggle) => toggle.visible)
+        .every((toggle) => !toggle.disabled)
+    )
+      return diagnostics;
+    await Zotero.Promise.delay(25);
+    diagnostics = await getDiagnostics(panelId);
+  }
+  throw new Error(
+    `Timed out waiting for panel runtime ${expectedSystem} to finish switching: ${JSON.stringify(diagnostics)}`,
+  );
+}
+
+async function clickPanelSystemTogglesRapidly(
+  panelId: string,
+  systems: RuntimeConversationSystem[],
+): Promise<WorkflowTestDiagnostics> {
+  assertWorkflowTestEnabled();
+  const panel = getPanel(panelId);
+  const eventCtor = panel.body.ownerDocument.defaultView?.MouseEvent;
+  for (const system of systems) {
+    const button = panel.body.querySelector(
+      `.llm-panel-runtime-system-toggle[data-conversation-system='${system}']`,
+    ) as HTMLButtonElement | null;
+    if (!button) {
+      throw new Error(`Panel ${system} system toggle was not rendered`);
+    }
+    if (eventCtor) {
+      button.dispatchEvent(
+        new eventCtor("click", { bubbles: true, cancelable: true }),
+      );
+    } else {
+      button.click();
+    }
+  }
+  await Zotero.Promise.delay(500);
+  return getDiagnostics(panelId);
+}
+
+async function openPanelRuntimeMenu(
+  panelId: string,
+): Promise<WorkflowTestRuntimeBadge> {
+  assertWorkflowTestEnabled();
+  return openRuntimeMenuIn(getPanel(panelId).body, "Panel");
+}
+
+async function pickPanelRuntime(
+  panelId: string,
+  system: ConversationSystem,
+): Promise<WorkflowTestDiagnostics> {
+  assertWorkflowTestEnabled();
+  const panel = getPanel(panelId);
+  await clickRuntimeMenuOptionIn(panel.body, "Panel", system);
+  const deadline = Date.now() + 15000;
+  let diagnostics = await getDiagnostics(panelId);
+  while (Date.now() < deadline) {
+    if (
+      diagnostics.conversationSystem === system &&
+      diagnostics.runtimeSystemToggles
+        .filter((toggle) => toggle.visible)
+        .every((toggle) => !toggle.disabled)
+    ) {
+      return diagnostics;
+    }
+    await Zotero.Promise.delay(25);
+    diagnostics = await getDiagnostics(panelId);
+  }
+  throw new Error(
+    `Timed out waiting for panel runtime ${system} after a badge pick: ${JSON.stringify(diagnostics)}`,
+  );
+}
+
+async function measurePanelRuntimeGeometry(
+  panelId: string,
+  input: { width: number; fontScale: number },
+): Promise<WorkflowTestRuntimeGeometry> {
+  assertWorkflowTestEnabled();
+  const panel = getPanel(panelId);
+  const panelRoot = panel.body.querySelector("#llm-main") as HTMLElement | null;
+  const header = panel.body.querySelector(
+    ".llm-header-top",
+  ) as HTMLElement | null;
+  const runtimeControls = panel.body.querySelector(
+    ".llm-panel-runtime-system-controls",
+  ) as HTMLElement | null;
+  const modeRow = panel.body.querySelector(
+    ".llm-header-toggle-row",
+  ) as HTMLElement | null;
+  const modeTabs = panel.body.querySelector(
+    ".llm-header-mode-tabs",
+  ) as HTMLElement | null;
+  const historyToggle = panel.body.querySelector(
+    "#llm-history-toggle",
+  ) as HTMLElement | null;
+  const headerActions = panel.body.querySelector(
+    ".llm-header-actions",
+  ) as HTMLElement | null;
+  const clearButton = panel.body.querySelector(
+    ".llm-clear-btn",
+  ) as HTMLButtonElement | null;
+  if (
+    !panelRoot ||
+    !header ||
+    !runtimeControls ||
+    !modeRow ||
+    !modeTabs ||
+    !historyToggle ||
+    !headerActions ||
+    !clearButton
+  ) {
+    throw new Error("Panel runtime geometry targets were not rendered");
+  }
+
+  const previousWidth = panel.body.style.width;
+  const previousScale = panelRoot.style.getPropertyValue("--llm-font-scale");
+  panel.body.style.width = `${input.width}px`;
+  panelRoot.style.setProperty("--llm-font-scale", String(input.fontScale));
+  await Zotero.Promise.delay(50);
+  try {
+    const containerRect = header.getBoundingClientRect();
+    const runtimeRect = getVisibleRuntimeControlsRect(runtimeControls);
+    const runtimeButtonWidths = getVisibleRuntimeButtonRects(
+      runtimeControls,
+    ).map((rect) => rect.width);
+    const modeTabsRect = modeTabs.getBoundingClientRect();
+    const modeRowRect = modeRow.getBoundingClientRect();
+    const actionsRect = headerActions.getBoundingClientRect();
+    const clearButtonRect = clearButton.getBoundingClientRect();
+    const clearButtonStyle =
+      clearButton.ownerDocument.defaultView?.getComputedStyle(clearButton);
+    return {
+      containerWidth: containerRect.width,
+      fontScale: input.fontScale,
+      runtimeWidth: runtimeRect.width,
+      runtimeButtonWidths,
+      // Row 2 leads with new chat and history, then the runtime systems.
+      runtimeIntersectsLeadingContent: rectsIntersect(
+        runtimeRect,
+        historyToggle.getBoundingClientRect(),
+      ),
+      runtimeIntersectsTrailingContent: rectsIntersect(
+        runtimeRect,
+        actionsRect,
+      ),
+      runtimeTrailingOverlapPx: Math.max(
+        0,
+        runtimeRect.right - actionsRect.left,
+      ),
+      runtimeWithinContainer: rectWithinContainer(runtimeRect, containerRect),
+      trailingContentWithinContainer: rectWithinContainer(
+        actionsRect,
+        containerRect,
+      ),
+      deleteButtonIconOnly:
+        clearButtonRect.width <= 28.5 &&
+        Number.parseFloat(clearButtonStyle?.fontSize || "") === 0,
+      centeredContentOffset: Math.abs(
+        modeTabsRect.left +
+          modeTabsRect.width / 2 -
+          (modeRowRect.left + modeRowRect.width / 2),
+      ),
+    };
+  } finally {
+    panel.body.style.width = previousWidth;
+    if (previousScale) {
+      panelRoot.style.setProperty("--llm-font-scale", previousScale);
+    } else {
+      panelRoot.style.removeProperty("--llm-font-scale");
+    }
+  }
+}
+
+async function measurePanelFooterLayout(
+  panelId: string,
+  input: { width: number; statusText: string },
+): Promise<WorkflowTestFooterLayout> {
+  assertWorkflowTestEnabled();
+  const panel = getPanel(panelId);
+  const status = panel.body.querySelector("#llm-status") as HTMLElement | null;
+  const controls = panel.body.querySelector(
+    ".llm-footer-controls",
+  ) as HTMLElement | null;
+  const permissionButton = panel.body.querySelector(
+    "#llm-permission-toggle",
+  ) as HTMLElement | null;
+  if (!status || !controls || !permissionButton) {
+    throw new Error("Panel footer layout targets were not rendered");
+  }
+
+  const getFirstTextRect = (element: HTMLElement): DOMRect => {
+    const range = element.ownerDocument.createRange();
+    range.selectNodeContents(element);
+    const rects = range.getClientRects();
+    const rect = rects
+      ? Array.from(rects).find(
+          (candidate) => candidate.width > 0 && candidate.height > 0,
+        )
+      : undefined;
+    range.detach();
+    if (!rect) {
+      throw new Error("Panel footer text did not produce a rendered rectangle");
+    }
+    return rect;
+  };
+
+  const statusBar = status.parentElement as HTMLElement;
+  const inputSection = panel.body.querySelector(
+    "#llm-main > .llm-input-section",
+  ) as HTMLElement | null;
+  const previousWidth = panel.body.style.width;
+  const previousStatusText = status.textContent;
+  panel.body.style.width = `${input.width}px`;
+  status.textContent = input.statusText;
+  await Zotero.Promise.delay(50);
+  try {
+    const statusRect = status.getBoundingClientRect();
+    const controlsRect = controls.getBoundingClientRect();
+    const statusTextRect = getFirstTextRect(status);
+    const permissionTextRect = getFirstTextRect(permissionButton);
+    const statusStyle =
+      status.ownerDocument.defaultView?.getComputedStyle(status);
+    const statusLineHeight = Number.parseFloat(statusStyle?.lineHeight || "0");
+    const textGlyphsAligned =
+      Math.abs(permissionTextRect.top - statusTextRect.top) <= 0.5 &&
+      Math.abs(permissionTextRect.bottom - statusTextRect.bottom) <= 0.5;
+    return {
+      statusHeight: statusRect.height,
+      statusLineHeight,
+      statusTop: statusRect.top,
+      controlsTop: controlsRect.top,
+      statusTextTop: statusTextRect.top,
+      permissionTextTop: permissionTextRect.top,
+      statusTextBottom: statusTextRect.bottom,
+      permissionTextBottom: permissionTextRect.bottom,
+      statusWrapped: statusRect.height > statusLineHeight + 0.5,
+      controlsPinnedToFirstLine:
+        textGlyphsAligned &&
+        permissionTextRect.top < statusRect.top + statusLineHeight,
+      textGlyphsAligned,
+      statusBarHeight: statusBar.getBoundingClientRect().height,
+      spaceAboveStatus: inputSection
+        ? statusRect.top - inputSection.getBoundingClientRect().bottom
+        : Number.NaN,
+    };
+  } finally {
+    panel.body.style.width = previousWidth;
+    status.textContent = previousStatusText;
+  }
+}
+
+async function ask(
+  panelId: string,
+  text: string,
+  settleTimeoutMs = 5000,
+): Promise<SendQuestionOptions> {
+  assertWorkflowTestEnabled();
+  lastSend = null;
+  const panel = getPanel(panelId);
+  const input = panel.body.querySelector(
+    "#llm-input",
+  ) as HTMLTextAreaElement | null;
+  if (!input) throw new Error("Workflow test input box was not rendered");
+  const sendSettledSequenceBefore = getWorkflowTestSendSettledSequence();
+  input.value = text;
+  const eventCtor = panel.body.ownerDocument.defaultView?.Event ?? Event;
+  input.dispatchEvent(new eventCtor("input", { bubbles: true }));
+  const sendBtn = panel.body.querySelector(
+    "#llm-send",
+  ) as HTMLButtonElement | null;
+  if (!sendBtn) throw new Error("Workflow test send button was not rendered");
+  sendBtn.click();
+  const send = await waitForLastSend();
+  const startedAt = Date.now();
+  while (
+    getWorkflowTestSendSettledSequence() <= sendSettledSequenceBefore &&
+    Date.now() - startedAt <= settleTimeoutMs
+  ) {
+    await Zotero.Promise.delay(10);
+  }
+  if (getWorkflowTestSendSettledSequence() <= sendSettledSequenceBefore) {
+    throw new Error(
+      `Timed out after ${settleTimeoutMs}ms waiting for workflow send controller to settle`,
+    );
+  }
+  return send;
+}
+
+function readWebChatPdfChipState(
+  panel: PanelRecord,
+): WorkflowTestWebChatPdfChipState {
+  const chip = panel.body.querySelector(
+    "#llm-paper-context-preview .llm-paper-context-chip[data-content-source='pdf']",
+  ) as HTMLElement | null;
+  if (!chip) {
+    throw new Error(`Panel ${panel.id} has no WebChat PDF chip`);
+  }
+  return {
+    fullText: chip.dataset.fullText === "true",
+    inactive: chip.classList.contains(
+      "llm-paper-context-chip-webchat-inactive",
+    ),
+    contentSource: chip.dataset.contentSource || "",
+    paperItemId: Math.floor(Number(chip.dataset.paperItemId) || 0),
+    contextItemId: Math.floor(Number(chip.dataset.paperContextItemId) || 0),
+    modeOverride:
+      paperContextModeOverrides.get(
+        `${panel.item.id}:${chip.dataset.paperItemId}:${chip.dataset.paperContextItemId}`,
+      ) || "",
+  };
+}
+
+/*
+ * The PDF chip is re-rendered as a fresh element rather than mutated in place,
+ * so reading it a fixed number of milliseconds after an action is a race: on an
+ * idle machine the new node is always there in time, and on a loaded CI runner
+ * it sometimes is not, which silently yields the previous chip's state. Wait for
+ * the state itself instead of for the clock.
+ */
+async function waitForChipState(
+  panel: PanelRecord,
+  predicate: (state: WorkflowTestWebChatPdfChipState) => boolean,
+  label: string,
+  timeoutMs = 2000,
+): Promise<WorkflowTestWebChatPdfChipState> {
+  const startedAt = Date.now();
+  let state = readWebChatPdfChipState(panel);
+  while (!predicate(state)) {
+    if (Date.now() - startedAt > timeoutMs) {
+      throw new Error(
+        `Timed out after ${timeoutMs}ms waiting for ${label}; last chip state was ${JSON.stringify(state)}`,
+      );
+    }
+    await Zotero.Promise.delay(10);
+    state = readWebChatPdfChipState(panel);
+  }
+  return state;
+}
+
+/*
+ * A second panel mounted on the same item mirrors the first, and the test's
+ * whole point is that the two never disagree. The mirror syncs after the panel
+ * that was acted on, so read it once it has converged rather than immediately.
+ * If it never converges that is a real defect, and this reports it as an
+ * explicit timeout naming both states instead of quietly returning stale data.
+ */
+async function readMirrorChipStateInSyncWith(
+  mirrorPanel: PanelRecord | null,
+  primary: WorkflowTestWebChatPdfChipState,
+  label: string,
+): Promise<WorkflowTestWebChatPdfChipState | null> {
+  if (!mirrorPanel) return null;
+  return waitForChipState(
+    mirrorPanel,
+    (state) => state.fullText === primary.fullText,
+    `the mirror panel's PDF chip to match the acted-on panel ${label} (expected fullText=${primary.fullText})`,
+  );
+}
+
+async function toggleWebChatPdfChip(
+  panel: PanelRecord,
+): Promise<{ defaultPrevented: boolean; statusText: string }> {
+  const chip = panel.body.querySelector(
+    "#llm-paper-context-preview .llm-paper-context-chip[data-content-source='pdf']",
+  ) as HTMLElement | null;
+  if (!chip) {
+    throw new Error(`Panel ${panel.id} has no WebChat PDF chip`);
+  }
+  const MouseEventCtor =
+    panel.body.ownerDocument.defaultView?.MouseEvent ?? MouseEvent;
+  const event = new MouseEventCtor("contextmenu", {
+    bubbles: true,
+    cancelable: true,
+    button: 2,
+  });
+  // The toggle always flips the chip between full-text and retrieval, so the
+  // flip is an exact condition to wait on rather than a stability guess.
+  const fullTextBefore = readWebChatPdfChipState(panel).fullText;
+  chip.dispatchEvent(event);
+  await waitForChipState(
+    panel,
+    (state) => state.fullText !== fullTextBefore,
+    "the WebChat PDF chip to flip after the toggle",
+  );
+  return {
+    defaultPrevented: event.defaultPrevented,
+    statusText:
+      (
+        panel.body.querySelector("#llm-status") as HTMLElement | null
+      )?.textContent?.trim() || "",
+  };
+}
+
+async function captureWebChatPdfTurn(
+  panel: PanelRecord,
+  question: string,
+  outcome: "success" | "failed",
+): Promise<WorkflowTestWebChatPdfTurn> {
+  let modeBeforeOutcome = "";
+  let modeAfterOutcome = "";
+  // A successful send that carried the PDF spends it, greying the chip out.
+  // Anything else -- a prompt-only send, or a send that failed and so delivered
+  // nothing -- must leave the chip exactly as it was. That makes the final
+  // state an exact value to wait for rather than something to sample and hope.
+  const fullTextBeforeTurn = readWebChatPdfChipState(panel).fullText;
+  setWorkflowTestSendInterceptor((opts) => {
+    lastSend = opts;
+    modeBeforeOutcome = readWebChatPdfChipState(panel).modeOverride;
+    const mountedItem = activeContextPanels.get(panel.body)?.() || panel.item;
+    const conversationKey = getConversationKey(mountedItem);
+    const history = chatHistory.get(conversationKey) || [];
+    chatHistory.set(conversationKey, [
+      ...history,
+      {
+        role: "user",
+        text: opts.question,
+        timestamp: Date.now(),
+        paperContexts: opts.paperContexts,
+        pdfPaperContexts: opts.pdfPaperContexts,
+        fullTextPaperContexts: opts.fullTextPaperContexts,
+      },
+    ]);
+    opts.onWebChatSendOutcome?.(outcome);
+    modeAfterOutcome = readWebChatPdfChipState(panel).modeOverride;
+  });
+  const send = await ask(panel.id, question);
+  const expectedFullText =
+    send.webchatSendPdf === true && outcome === "success"
+      ? false
+      : fullTextBeforeTurn;
+  const chipAfterTurn = await waitForChipState(
+    panel,
+    (state) => state.fullText === expectedFullText,
+    `the WebChat PDF chip to settle at fullText=${expectedFullText} after the ${outcome} turn`,
+  );
+  return {
+    question: send.question,
+    outcome,
+    webchatSendPdf: send.webchatSendPdf === true,
+    pdfContextItemIds: (send.webchatPdfPaperContexts || []).map(
+      (context) => context.contextItemId,
+    ),
+    modeBeforeOutcome,
+    modeAfterOutcome,
+    chipAfterTurn,
+  };
+}
+
+async function exerciseWebChatPdfToggleWorkflow(
+  panelId: string,
+  mirrorPanelId?: string,
+): Promise<WorkflowTestWebChatPdfToggleDiagnostics> {
+  assertWorkflowTestEnabled();
+  const panel = getPanel(panelId);
+  const mirrorPanel = mirrorPanelId ? getPanel(mirrorPanelId) : null;
+  const panelRoot = panel.body.querySelector("#llm-main") as HTMLElement | null;
+  if (panelRoot?.dataset.webchatMode !== "true") {
+    throw new Error(`Panel ${panelId} is not in WebChat mode`);
+  }
+
+  const initialChip = readWebChatPdfChipState(panel);
+  const mirrorInitialChip = await readMirrorChipStateInSyncWith(
+    mirrorPanel,
+    initialChip,
+    "initially",
+  );
+  try {
+    const initialPdfTurn = await captureWebChatPdfTurn(
+      panel,
+      "workflow pdf initial turn",
+      "success",
+    );
+    const mirrorAfterInitialPdfTurn = await readMirrorChipStateInSyncWith(
+      mirrorPanel,
+      initialPdfTurn.chipAfterTurn,
+      "after the initial PDF turn",
+    );
+    const automaticPromptOnlyTurn = await captureWebChatPdfTurn(
+      panel,
+      "workflow automatic prompt-only turn",
+      "success",
+    );
+    const mirrorAfterAutomaticPromptOnlyTurn =
+      await readMirrorChipStateInSyncWith(
+        mirrorPanel,
+        automaticPromptOnlyTurn.chipAfterTurn,
+        "after the automatic prompt-only turn",
+      );
+    const toggleOn = await toggleWebChatPdfChip(panel);
+    const chipAfterToggleOn = readWebChatPdfChipState(panel);
+    const mirrorAfterToggleOn = await readMirrorChipStateInSyncWith(
+      mirrorPanel,
+      chipAfterToggleOn,
+      "after toggling the PDF back on",
+    );
+    const failedPdfTurn = await captureWebChatPdfTurn(
+      panel,
+      "workflow failed pdf turn",
+      "failed",
+    );
+    const mirrorAfterFailedPdfTurn = await readMirrorChipStateInSyncWith(
+      mirrorPanel,
+      failedPdfTurn.chipAfterTurn,
+      "after the failed PDF turn",
+    );
+    const toggleOff = await toggleWebChatPdfChip(panel);
+    const chipAfterToggleOff = readWebChatPdfChipState(panel);
+    const mirrorAfterToggleOff = await readMirrorChipStateInSyncWith(
+      mirrorPanel,
+      chipAfterToggleOff,
+      "after toggling the PDF off",
+    );
+    const explicitPromptOnlyTurn = await captureWebChatPdfTurn(
+      panel,
+      "workflow explicit prompt-only turn",
+      "success",
+    );
+    const mirrorAfterExplicitPromptOnlyTurn =
+      await readMirrorChipStateInSyncWith(
+        mirrorPanel,
+        explicitPromptOnlyTurn.chipAfterTurn,
+        "after the explicit prompt-only turn",
+      );
+
+    return {
+      webChatMode: true,
+      initialChip,
+      initialPdfTurn,
+      automaticPromptOnlyTurn,
+      chipAfterToggleOn,
+      toggleOnDefaultPrevented: toggleOn.defaultPrevented,
+      toggleOnStatusText: toggleOn.statusText,
+      failedPdfTurn,
+      chipAfterToggleOff,
+      toggleOffDefaultPrevented: toggleOff.defaultPrevented,
+      toggleOffStatusText: toggleOff.statusText,
+      explicitPromptOnlyTurn,
+      mirrorPanel:
+        mirrorPanel &&
+        mirrorInitialChip &&
+        mirrorAfterInitialPdfTurn &&
+        mirrorAfterAutomaticPromptOnlyTurn &&
+        mirrorAfterToggleOn &&
+        mirrorAfterFailedPdfTurn &&
+        mirrorAfterToggleOff &&
+        mirrorAfterExplicitPromptOnlyTurn
+          ? {
+              initialChip: mirrorInitialChip,
+              afterInitialPdfTurn: mirrorAfterInitialPdfTurn,
+              afterAutomaticPromptOnlyTurn: mirrorAfterAutomaticPromptOnlyTurn,
+              afterToggleOn: mirrorAfterToggleOn,
+              afterFailedPdfTurn: mirrorAfterFailedPdfTurn,
+              afterToggleOff: mirrorAfterToggleOff,
+              afterExplicitPromptOnlyTurn: mirrorAfterExplicitPromptOnlyTurn,
+            }
+          : null,
+    };
+  } finally {
+    setWorkflowTestSendInterceptor((opts) => {
+      lastSend = opts;
+    });
+  }
+}
+
+async function toggleWebChatPdfChipForWorkflow(
+  panelId: string,
+): Promise<WorkflowTestWebChatPdfChipState> {
+  assertWorkflowTestEnabled();
+  const panel = getPanel(panelId);
+  // toggleWebChatPdfChip now returns only once the flip has actually landed, so
+  // there is nothing left to sleep for.
+  await toggleWebChatPdfChip(panel);
+  return readWebChatPdfChipState(panel);
+}
+
+async function sendLiveWebChatTurn(
+  panelId: string,
+  question: string,
+  timeoutMs = 330_000,
+): Promise<WorkflowTestLiveWebChatTurn> {
+  assertWorkflowTestEnabled();
+  const panel = getPanel(panelId);
+  const panelRoot = panel.body.querySelector("#llm-main") as HTMLElement | null;
+  if (panelRoot?.dataset.webchatMode !== "true") {
+    throw new Error(`Panel ${panelId} is not in WebChat mode`);
+  }
+
+  let outcome: WorkflowTestLiveWebChatTurn["outcome"] = null;
+  setWorkflowTestSendInterceptor((opts) => {
+    lastSend = opts;
+    const reportOutcome = opts.onWebChatSendOutcome;
+    opts.onWebChatSendOutcome = (nextOutcome) => {
+      outcome = nextOutcome;
+      reportOutcome?.(nextOutcome);
+    };
+    return true;
+  });
+  try {
+    const send = await ask(panelId, question, timeoutMs);
+    await Zotero.Promise.delay(100);
+    const relayState = relayGetStateSnapshot();
+    const terminal = [...relayState.responses]
+      .reverse()
+      .find((entry) => entry.seq === relayState.query.seq);
+    return {
+      question: send.question,
+      outcome,
+      webchatSendPdf: send.webchatSendPdf === true,
+      pdfContextItemIds: (send.webchatPdfPaperContexts || []).map(
+        (context) => context.contextItemId,
+      ),
+      chipAfterTurn: readWebChatPdfChipState(panel),
+      statusText:
+        (
+          panel.body.querySelector("#llm-status") as HTMLElement | null
+        )?.textContent?.trim() || "",
+      relayStatus: relayState.status,
+      runState: terminal?.run_state || relayState.run_state,
+      completionReason:
+        terminal?.completion_reason || relayState.completion_reason,
+      responseText: terminal?.text || "",
+      diagnostic:
+        (terminal?.diagnostic as Record<string, unknown> | null | undefined) ||
+        (relayState.last_diagnostic as Record<string, unknown> | null) ||
+        null,
+    };
+  } finally {
+    setWorkflowTestSendInterceptor((opts) => {
+      lastSend = opts;
+    });
+  }
+}
+
+/**
+ * Sends one ordinary chat turn through the panel's own input and send button
+ * against whatever provider the panel is configured with, then reports what the
+ * user sees once the turn ends. Unlike `ask`, this lets the panel's send run
+ * into the real `sendQuestion`, so the turn-end refresh is the shipped one.
+ *
+ * Earlier turns are sampled repeatedly while the new turn streams, and the last
+ * streaming sample is the baseline: starting a turn rebuilds the whole chat box
+ * to show the new prompt, so only the window between that rebuild and the turn's
+ * end can tell a targeted turn-end refresh from another full one.
+ */
+async function sendLiveChatTurn(
+  panelId: string,
+  text: string,
+  timeoutMs = 180_000,
+): Promise<WorkflowTestLiveChatTurn> {
+  assertWorkflowTestEnabled();
+  const panel = getPanel(panelId);
+  const readChatBox = () =>
+    panel.body.querySelector<HTMLElement>("#llm-chat-box");
+  if (!readChatBox()) throw new Error(`Panel ${panelId} has no chat box`);
+  const readStatusText = () =>
+    (
+      panel.body.querySelector("#llm-status") as HTMLElement | null
+    )?.textContent?.trim() || "";
+  const readHistory = (): Message[] => {
+    const mountedItem = activeContextPanels.get(panel.body)?.() || panel.item;
+    return chatHistory.get(getConversationKey(mountedItem)) || [];
+  };
+  const newestAssistant = (history: Message[]): Message | undefined =>
+    [...history].reverse().find((message) => message.role === "assistant");
+  const pairedPromptOf = (
+    history: Message[],
+    answer: Message,
+  ): Message | undefined => {
+    const answerIndex = history.lastIndexOf(answer);
+    if (answerIndex <= 0) return undefined;
+    return [...history.slice(0, answerIndex)]
+      .reverse()
+      .find((message) => message.role === "user");
+  };
+  const countAssistants = (history: Message[]) =>
+    history.filter((message) => message.role === "assistant").length;
+  const assistantsBefore = countAssistants(readHistory());
+  const probes = createChatTurnPromptProbes(panel.body);
+  const previousInterceptor = getWorkflowTestSendInterceptor();
+  lastSend = null;
+  try {
+    // Returning true lets the panel's send continue into sendQuestion instead
+    // of stopping at the capture the other workflow tests rely on.
+    setWorkflowTestSendInterceptor((opts) => {
+      lastSend = opts;
+      return true;
+    });
+    const input = panel.body.querySelector(
+      "#llm-input",
+    ) as HTMLTextAreaElement | null;
+    if (!input) throw new Error("Workflow test input box was not rendered");
+    input.value = text;
+    const eventCtor = panel.body.ownerDocument.defaultView?.Event ?? Event;
+    input.dispatchEvent(new eventCtor("input", { bubbles: true }));
+    const sendBtn = panel.body.querySelector(
+      "#llm-send",
+    ) as HTMLButtonElement | null;
+    if (!sendBtn) throw new Error("Workflow test send button was not rendered");
+    sendBtn.click();
+    await waitForLastSend();
+
+    const startedAt = Date.now();
+    let answer: Message | null = null;
+    // Wrappers other than the streaming turn's own prompt and answer, as they
+    // stood the last time the turn was observed streaming.
+    let earlierWrappersWhileStreaming: HTMLElement[] | null = null;
+    while (!answer) {
+      const history = readHistory();
+      const newest = newestAssistant(history);
+      if (newest && countAssistants(history) > assistantsBefore) {
+        if (!newest.streaming) {
+          answer = newest;
+          break;
+        }
+        const answerWrapper = probes.wrapperOf(newest);
+        if (answerWrapper) {
+          const prompt = pairedPromptOf(history, newest);
+          const turnWrappers = [
+            answerWrapper,
+            prompt ? probes.wrapperOf(prompt) : null,
+          ].filter(Boolean) as HTMLElement[];
+          earlierWrappersWhileStreaming = (
+            Array.from(
+              readChatBox()?.querySelectorAll(".llm-message-wrapper") || [],
+            ) as HTMLElement[]
+          ).filter((wrapper) => !turnWrappers.includes(wrapper));
+        }
+      }
+      if (Date.now() - startedAt > timeoutMs) {
+        throw new Error(
+          `Timed out after ${timeoutMs}ms waiting for the live chat turn on panel ${panelId} to finish; last status text was "${readStatusText()}"`,
+        );
+      }
+      await Zotero.Promise.delay(50);
+    }
+    if (!earlierWrappersWhileStreaming) {
+      throw new Error(
+        `Live chat turn on panel ${panelId} was never observed streaming, so the turn-end refresh cannot be judged`,
+      );
+    }
+    // The turn-end refresh is queued behind the streaming renders, so let the
+    // DOM catch up with the finished message before reading it.
+    await Zotero.Promise.delay(250);
+
+    const history = readHistory();
+    const prompt = pairedPromptOf(history, answer);
+    const answerWrapper = probes.wrapperOf(answer);
+    if (!answerWrapper) {
+      throw new Error(
+        `Live chat turn on panel ${panelId} finished without a rendered answer wrapper`,
+      );
+    }
+    const chatBox = readChatBox();
+    const promptProbe = prompt ? probes.probePromptMenu(prompt) : null;
+    return {
+      answerText: answer.text || "",
+      earlierWrappersPreserved: earlierWrappersWhileStreaming.every(
+        (wrapper) => wrapper.isConnected && wrapper.parentElement === chatBox,
+      ),
+      assistantFinalized:
+        !answerWrapper.querySelector(".llm-bubble.streaming") &&
+        !answerWrapper.querySelector(".llm-typing") &&
+        !answer.streaming,
+      copyActionPresent: Boolean(
+        answerWrapper.querySelector(".llm-message-action-copy"),
+      ),
+      promptDeletable: promptProbe?.enabled === true,
+      promptEditable: Boolean(prompt && probes.isPromptEditable(prompt)),
+    };
+  } finally {
+    probes.hidePromptMenu();
+    setWorkflowTestSendInterceptor(previousInterceptor);
+  }
+}
+
+/**
+ * Types `text` into the panel's composer and clicks Send, letting the send
+ * continue into the real `sendQuestion`. Resolves as soon as the send flow
+ * hands the request over; the caller drives the provider and waits for
+ * `sendSettledSequence` to pass `sendSettledSequenceBefore`.
+ */
+async function startPanelChatSend(
+  panelId: string,
+  text: string,
+  overrides: Pick<
+    SendQuestionOptions,
+    "forcedSkillIds" | "selectedTagContexts" | "attachedConversations"
+  > = {},
+): Promise<{ conversationKey: number; sendSettledSequenceBefore: number }> {
+  assertWorkflowTestEnabled();
+  const panel = getPanel(panelId);
+  const input = panel.body.querySelector(
+    "#llm-input",
+  ) as HTMLTextAreaElement | null;
+  const sendBtn = panel.body.querySelector(
+    "#llm-send",
+  ) as HTMLButtonElement | null;
+  if (!input || !sendBtn) {
+    throw new Error("Workflow panel composer was not rendered");
+  }
+  const sendSettledSequenceBefore = getWorkflowTestSendSettledSequence();
+  const previousInterceptor = getWorkflowTestSendInterceptor();
+  lastSend = null;
+  try {
+    setWorkflowTestSendInterceptor((opts) => {
+      Object.assign(opts, overrides);
+      lastSend = opts;
+      return true;
+    });
+    input.value = text;
+    const eventCtor = panel.body.ownerDocument.defaultView?.Event ?? Event;
+    input.dispatchEvent(new eventCtor("input", { bubbles: true }));
+    sendBtn.click();
+    await waitForLastSend();
+  } finally {
+    setWorkflowTestSendInterceptor(previousInterceptor);
+  }
+  const mountedItem = activeContextPanels.get(panel.body)?.() || panel.item;
+  return {
+    conversationKey: getConversationKey(mountedItem),
+    sendSettledSequenceBefore,
+  };
+}
+
+/**
+ * Runs the real retry for the panel's latest turn with `entryId` (or the
+ * selected model entry), passing the same arguments the retry model menu
+ * passes for an upstream entry.
+ */
+async function retryLatestPanelResponse(
+  panelId: string,
+  entryId?: string,
+): Promise<unknown> {
+  assertWorkflowTestEnabled();
+  const panel = getPanel(panelId);
+  const item = activeContextPanels.get(panel.body)?.() || panel.item;
+  const entry = entryId
+    ? getModelEntryById(entryId)
+    : getSelectedModelEntryForSurface(
+        resolveSelectionSurfaceForBody(panel.body),
+      );
+  if (!entry) throw new Error("Workflow retry needs a model entry");
+  // The retry menu passes these arguments for upstream api_key entries only;
+  // Codex-auth entries take a different reasoning source.
+  const system =
+    (panel.body.querySelector("#llm-main") as HTMLElement | null)?.dataset
+      .conversationSystem || "upstream";
+  if (system !== "upstream" || entry.authMode === "codex_auth") {
+    throw new Error(
+      "Workflow retry helper supports upstream non-Codex-auth entries only",
+    );
+  }
+  return retryLatestAssistantResponse(
+    panel.body,
+    item,
+    entry.model,
+    entry.apiBase,
+    entry.apiKey,
+    entry.authMode,
+    entry.providerProtocol,
+    entry.entryId,
+    entry.providerLabel,
+    getSelectedReasoningForItem(
+      item.id,
+      entry.model,
+      entry.apiBase,
+      entry.providerProtocol,
+      entry.advanced?.profileOverride,
+      resolveSelectionSurfaceForBody(panel.body),
+    ),
+    getAdvancedModelParamsForEntry(entry.entryId),
+  );
+}
+
+async function readChatTurnLifecycle(
+  conversationKey: number,
+): Promise<WorkflowTestChatTurnLifecycleState> {
+  assertWorkflowTestEnabled();
+  const table = WORKFLOW_CONVERSATION_PERSISTENCE_TABLES.upstream.messages;
+  const columns = (
+    ((await Zotero.DB.queryAsync(`PRAGMA table_info(${table})`)) as
+      | Array<{ name?: unknown }>
+      | undefined) || []
+  )
+    .map((column) => String(column.name || ""))
+    .filter(Boolean);
+  const rows =
+    ((await Zotero.DB.queryAsync(
+      `SELECT ${columns.join(", ")} FROM ${table}
+       WHERE conversation_key = ?
+       ORDER BY id ASC`,
+      [conversationKey],
+    )) as Array<Record<string, unknown>> | undefined) || [];
+  return {
+    memory: JSON.parse(
+      JSON.stringify(chatHistory.get(conversationKey) || []),
+    ) as Array<Record<string, unknown>>,
+    storedRows: rows.map((row) =>
+      Object.fromEntries(columns.map((column) => [column, row[column]])),
+    ),
+    usageRows: await loadUsageEventsForConversation(conversationKey),
+    requestPending: isRequestPending(conversationKey),
+    sendSettledSequence: getWorkflowTestSendSettledSequence(),
+  };
+}
+
+async function renderAssistantForPanel(
+  panelId: string,
+  input: {
+    text: string;
+    quoteCitations?: Message["quoteCitations"];
+  },
+): Promise<WorkflowTestAssistantRenderResult> {
+  assertWorkflowTestEnabled();
+  const panel = getPanel(panelId);
+  const doc = panel.body.ownerDocument;
+  const bubble = doc.createElement("div") as HTMLDivElement;
+  bubble.className = "llm-message-content";
+  panel.body.appendChild(bubble);
+
+  const assistantMessage: Message = {
+    role: "assistant",
+    text: input.text,
+    timestamp: Date.now(),
+    quoteCitations: input.quoteCitations,
+  };
+  const paperContext = panel.contextSnapshot?.paperContext;
+  const pairedUserMessage: Message = {
+    role: "user",
+    text: "中文问题：请解释这篇论文。",
+    timestamp: assistantMessage.timestamp - 1,
+    paperContexts: paperContext ? [paperContext] : undefined,
+    fullTextPaperContexts: paperContext ? [paperContext] : undefined,
+    citationPaperContexts: paperContext ? [paperContext] : undefined,
+  };
+
+  renderRenderedMarkdownInto(
+    bubble,
+    buildAssistantDisplayMarkdownForRender(assistantMessage),
+    doc,
+  );
+  renderQuoteCitationPlaceholders({
+    body: panel.body,
+    panelItem: panel.item,
+    bubble,
+    assistantMessage,
+    pairedUserMessage,
+  });
+  decorateAssistantCitationLinks({
+    body: panel.body,
+    panelItem: panel.item,
+    bubble,
+    assistantMessage,
+    pairedUserMessage,
+  });
+
+  const quoteCards = Array.from(
+    bubble.querySelectorAll(".llm-quote-card"),
+  ) as HTMLElement[];
+  const quoteCardBodiesBeforeExpansion = Array.from(
+    bubble.querySelectorAll(".llm-quote-card-body"),
+  ).map((node) => ((node as Element).textContent || "").trim());
+  for (const quoteCard of quoteCards) {
+    if (quoteCard.dataset.quoteInteractive === "true") quoteCard.click();
+  }
+  return {
+    renderedText: bubble.textContent || "",
+    quoteCardBodiesBeforeExpansion,
+    quoteCardBodies: Array.from(
+      bubble.querySelectorAll(".llm-quote-card-body"),
+    ).map((node) => ((node as Element).textContent || "").trim()),
+    quoteCardPreviewTexts: Array.from(
+      bubble.querySelectorAll(".llm-quote-card-preview"),
+    ).map((node) => ((node as Element).textContent || "").trim()),
+    quoteCardStatuses: quoteCards.map((node) => node.dataset.quoteStatus || ""),
+    quoteCardCitationTexts: Array.from(
+      bubble.querySelectorAll(".llm-quote-card-citation"),
+    ).map((node) => ((node as Element).textContent || "").trim()),
+    quoteCardVerticalMargins: quoteCards.map((node) => {
+      const style = doc.defaultView?.getComputedStyle(node);
+      return {
+        top: Number.parseFloat(style?.marginTop || "0") || 0,
+        bottom: Number.parseFloat(style?.marginBottom || "0") || 0,
+      };
+    }),
+  };
+}
+
+async function exerciseTargetedQuoteRefresh(
+  panelId: string,
+): Promise<WorkflowTestTargetedQuoteRefreshResult> {
+  assertWorkflowTestEnabled();
+  const panel = getPanel(panelId);
+  const item = activeContextPanels.get(panel.body)?.() || panel.item;
+  const conversationKey = getConversationKey(item);
+  if (!conversationKey) {
+    throw new Error("Workflow panel has no active conversation key");
+  }
+  const paperContext = panel.contextSnapshot?.paperContext;
+  const baseTimestamp = Date.now() - 100_000;
+  const messages: Message[] = [];
+  const assistantMessages: Message[] = [];
+  for (let turn = 0; turn < 8; turn += 1) {
+    const userMessage: Message = {
+      role: "user",
+      text: `Explain the evidence for figure ${turn + 1}.`,
+      timestamp: baseTimestamp + turn * 2,
+      paperContexts: paperContext ? [paperContext] : undefined,
+    };
+    const quoteCitations = Array.from({ length: 8 }, (_value, quoteIndex) => {
+      const id = `Q_perf_${turn}_${quoteIndex}`;
+      return {
+        id,
+        quoteText: `Source quotation ${quoteIndex + 1} for response ${turn + 1} contains enough text to exercise a long quote-card conversation.`,
+        citationLabel: "(Workflow, 2026)",
+        itemId: paperContext?.itemId,
+        contextItemId: paperContext?.contextItemId,
+      };
+    });
+    // Turn 6 cites its first source quote a second time at the end, the way
+    // a review re-quotes a key passage: two cards share one citation id.
+    const repeatedCitation = turn === 5 ? quoteCitations[0] : null;
+    const assistantMessage: Message = {
+      role: "assistant",
+      text: [
+        ...quoteCitations.map(
+          (citation, quoteIndex) =>
+            `Evidence ${quoteIndex + 1}:\n\n[[quote:${citation.id}]]`,
+        ),
+        ...(repeatedCitation
+          ? [`Again, the key passage:\n\n[[quote:${repeatedCitation.id}]]`]
+          : []),
+      ].join("\n\n"),
+      timestamp: baseTimestamp + turn * 2 + 1,
+      modelName: "workflow-performance",
+      quoteCitations,
+    };
+    messages.push(userMessage, assistantMessage);
+    assistantMessages.push(assistantMessage);
+  }
+
+  chatHistory.set(conversationKey, messages);
+  loadedConversationKeys.add(conversationKey);
+  refreshChat(panel.body, item);
+
+  const chatBox = panel.body.querySelector(
+    "#llm-chat-box",
+  ) as HTMLElement | null;
+  if (!chatBox) throw new Error("Workflow panel chat box was not rendered");
+  const wrappersBefore = new Map(
+    (
+      Array.from(
+        chatBox.querySelectorAll(
+          ".llm-message-wrapper[data-message-timestamp]",
+        ),
+      ) as HTMLElement[]
+    ).map((wrapper) => [wrapper.dataset.messageTimestamp || "", wrapper]),
+  );
+
+  const target = assistantMessages[Math.floor(assistantMessages.length / 2)];
+  target.quoteDisplayOverride = {
+    markdown: Array.from(
+      { length: 8 },
+      (_value, quoteIndex) =>
+        `> **Rejected interpretation ${quoteIndex + 1}** remains visible for manual review.\n>\n> Not a source quote`,
+    ).join("\n\n"),
+    quoteCitations: [],
+  };
+  refreshChat(panel.body, item, {
+    rerenderAssistantMessages: new Set([target]),
+  });
+
+  const wrappersAfter = Array.from(
+    chatBox.querySelectorAll(".llm-message-wrapper[data-message-timestamp]"),
+  ) as HTMLElement[];
+  let unchangedWrapperCount = 0;
+  let replacedWrapperCount = 0;
+  for (const wrapper of wrappersAfter) {
+    const before = wrappersBefore.get(wrapper.dataset.messageTimestamp || "");
+    if (before === wrapper) unchangedWrapperCount += 1;
+    else replacedWrapperCount += 1;
+  }
+  const targetTimestamp = `${Math.floor(Number(target.timestamp) || 0)}`;
+  const targetWrapper = wrappersAfter.find(
+    (wrapper) => wrapper.dataset.messageTimestamp === targetTimestamp,
+  );
+  const scrollStability = await probeTargetedRerenderScrollStability({
+    panel,
+    item,
+    chatBox,
+    wrappers: wrappersAfter,
+    expandedMessage: assistantMessages[5],
+    earlierMessage: assistantMessages[2],
+  });
+  return {
+    scrollStability,
+    messageCount: messages.length,
+    assistantMessageCount: assistantMessages.length,
+    quoteCardCount: chatBox.querySelectorAll(".llm-quote-card").length,
+    unchangedWrapperCount,
+    replacedWrapperCount,
+    targetWasReplaced:
+      Boolean(targetWrapper) &&
+      wrappersBefore.get(targetTimestamp) !== targetWrapper,
+    targetNotSourceCardCount:
+      targetWrapper?.querySelectorAll(
+        '.llm-quote-card[data-quote-status="not-source"]',
+      ).length || 0,
+    targetStrongBodyCount:
+      targetWrapper?.querySelectorAll(".llm-quote-card-body strong").length ||
+      0,
+  };
+}
+
+function wrapperForMessage(
+  wrappers: HTMLElement[],
+  message: Message,
+): HTMLElement {
+  const timestamp = `${Math.floor(Number(message.timestamp) || 0)}`;
+  const wrapper = wrappers.find(
+    (candidate) => candidate.dataset.messageTimestamp === timestamp,
+  );
+  if (!wrapper) {
+    throw new Error(`Workflow chat has no wrapper for message ${timestamp}`);
+  }
+  return wrapper;
+}
+
+async function probeTargetedRerenderScrollStability(params: {
+  panel: PanelRecord;
+  item: Zotero.Item;
+  chatBox: HTMLElement;
+  wrappers: HTMLElement[];
+  expandedMessage: Message;
+  earlierMessage: Message;
+}): Promise<WorkflowTestTargetedQuoteRefreshResult["scrollStability"]> {
+  const { chatBox } = params;
+  const win = params.panel.body.ownerDocument.defaultView;
+  if (!win) throw new Error("Workflow panel has no window");
+  const nextFrame = () =>
+    new Promise<void>((resolve) => win.requestAnimationFrame(() => resolve()));
+
+  const expandedWrapper = wrapperForMessage(
+    params.wrappers,
+    params.expandedMessage,
+  );
+  const earlierWrapper = wrapperForMessage(
+    params.wrappers,
+    params.earlierMessage,
+  );
+  const conversationKey = getConversationKey(params.item);
+  const timeline: Array<Record<string, unknown>> = [];
+  const record = (label: string) => {
+    const snapshot = getChatScrollSnapshot(conversationKey);
+    timeline.push({
+      label,
+      scrollTop: chatBox.scrollTop,
+      scrollHeight: chatBox.scrollHeight,
+      wrapperTop:
+        expandedWrapper.getBoundingClientRect().top -
+        chatBox.getBoundingClientRect().top,
+      snapshot: snapshot
+        ? `${snapshot.mode}@${snapshot.scrollTop}${snapshot.anchor ? `/${snapshot.anchor.kind}:${snapshot.anchor.quoteCitationId || snapshot.anchor.messageAnchorKey}` : ""}`
+        : null,
+    });
+  };
+  record("start");
+  // The reader is on the last card of the later message: the repeated quote,
+  // whose citation id also belongs to an earlier card in the same message.
+  const interactiveCards = Array.from(
+    expandedWrapper.querySelectorAll(
+      '.llm-quote-card[data-quote-interactive="true"]',
+    ),
+  ) as HTMLElement[];
+  const card = interactiveCards[interactiveCards.length - 1];
+  if (!card) throw new Error("Expanded message rendered no interactive card");
+  // The card straddles the top edge, as a card the reader has just scrolled
+  // past does; the anchor search prefers exactly that card.
+  chatBox.scrollTop +=
+    card.getBoundingClientRect().top - chatBox.getBoundingClientRect().top + 12;
+  record("after-scroll-write");
+  const cardTopAfterScrollWrite = card.getBoundingClientRect().top;
+  await nextFrame();
+  record("after-frame-1");
+  await nextFrame();
+  record("after-frame-2");
+  // Nothing has been clicked yet: the view must still be where the reader
+  // put it once the panel's deferred scroll work has run.
+  const settleDrift =
+    card.getBoundingClientRect().top - cardTopAfterScrollWrite;
+
+  card.click();
+  record("after-click");
+  await nextFrame();
+  record("after-click-frame");
+  const citationId = card.dataset.quoteCitationId || "";
+  const sameCitationCards = expandedWrapper.querySelectorAll(
+    `.llm-quote-card[data-quote-citation-id="${citationId}"]`,
+  ).length;
+  const expandedBeforeRerender = card.dataset.expanded === "true";
+  const scrollTopBefore = chatBox.scrollTop;
+  const cardTopBefore = card.getBoundingClientRect().top;
+  const earlierHeightBefore = earlierWrapper.getBoundingClientRect().height;
+
+  // An earlier message changes height above the viewport while the expanded
+  // message is re-rendered with identical content under new citation identity.
+  params.earlierMessage.quoteDisplayOverride = {
+    markdown: Array.from(
+      { length: 8 },
+      (_value, quoteIndex) =>
+        `> **Rejected interpretation ${quoteIndex + 1}** remains visible for manual review.\n>\n> It stays in the transcript so the reader can see what the model claimed.\n>\n> It also stays long enough to move everything below it.\n>\n> Not a source quote`,
+    ).join("\n\n"),
+    quoteCitations: [],
+  };
+  params.expandedMessage.quoteCitations =
+    params.expandedMessage.quoteCitations?.map((citation) => ({
+      ...citation,
+    }));
+  refreshChat(params.panel.body, params.item, {
+    rerenderAssistantMessages: new Set([
+      params.earlierMessage,
+      params.expandedMessage,
+    ]),
+  });
+  await nextFrame();
+
+  record("after-rerender-frame");
+  const snapshotBefore = getChatScrollSnapshot(conversationKey);
+  const expandedWrapperAfter = wrapperForMessage(
+    Array.from(
+      chatBox.querySelectorAll(".llm-message-wrapper[data-message-timestamp]"),
+    ) as HTMLElement[],
+    params.expandedMessage,
+  );
+  const cardsAfter = Array.from(
+    expandedWrapperAfter.querySelectorAll(
+      `.llm-quote-card[data-quote-citation-id="${citationId}"]`,
+    ),
+  ) as HTMLElement[];
+  const cardAfter = cardsAfter[cardsAfter.length - 1] || null;
+  const diagnostics: Record<string, unknown> = {
+    timeline,
+    sameCitationCards,
+    snapshotBefore: snapshotBefore
+      ? {
+          mode: snapshotBefore.mode,
+          scrollTop: snapshotBefore.scrollTop,
+          anchor: snapshotBefore.anchor,
+        }
+      : null,
+    expandedWrapperReplaced: expandedWrapperAfter !== expandedWrapper,
+    expandedWrapperStillConnected: expandedWrapper.isConnected,
+    cardAfterIsSameNode: cardAfter === card,
+    cardTopBefore,
+    cardTopAfter: cardAfter?.getBoundingClientRect().top ?? null,
+    chatBoxTop: chatBox.getBoundingClientRect().top,
+    scrollTopBefore,
+    scrollTopAfter: chatBox.scrollTop,
+    scrollHeightAfter: chatBox.scrollHeight,
+    clientHeight: chatBox.clientHeight,
+  };
+  return {
+    diagnostics,
+    chatBoxScrollable: chatBox.scrollHeight > chatBox.clientHeight + 1,
+    earlierWrapperHeightDelta:
+      earlierWrapper.getBoundingClientRect().height - earlierHeightBefore,
+    expandedBeforeRerender,
+    expandedAfterRerender: cardAfter?.dataset.expanded === "true",
+    expandedBodyTextAfterRerender: (
+      cardAfter?.querySelector(".llm-quote-card-body")?.textContent || ""
+    ).trim(),
+    sameCitationCards,
+    settleDrift,
+    cardTopDelta: cardAfter
+      ? cardAfter.getBoundingClientRect().top - cardTopBefore
+      : Number.NaN,
+    scrollTopDelta: chatBox.scrollTop - scrollTopBefore,
+  };
+}
+
+function parsePositiveInt(value: unknown): number | undefined {
+  const parsed = Number(value || 0);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : undefined;
+}
+
+function getStandaloneWindowReferenceForTest(): Window | null {
+  return (
+    (addon as unknown as { data?: { standaloneWindow?: Window } }).data
+      ?.standaloneWindow || null
+  );
+}
+
+function getStandaloneWindowForTest(): Window | null {
+  const win = getStandaloneWindowReferenceForTest();
+  return win && !win.closed ? win : null;
+}
+
+async function selectZoteroItemForWorkflow(itemId: number): Promise<void> {
+  const panes: unknown[] = [];
+  try {
+    panes.push(Zotero.getActiveZoteroPane?.());
+  } catch (_error) {
+    void _error;
+  }
+  try {
+    panes.push(Zotero.getMainWindow?.()?.ZoteroPane);
+  } catch (_error) {
+    void _error;
+  }
+  for (const pane of panes) {
+    const typed = pane as
+      | {
+          selectItems?: (
+            ids: number[],
+            options?: { selectInLibrary?: boolean },
+          ) => Promise<unknown> | unknown;
+          selectItem?: (
+            id: number,
+            selectInLibrary?: boolean,
+          ) => Promise<unknown> | unknown;
+        }
+      | null
+      | undefined;
+    if (typeof typed?.selectItems === "function") {
+      await typed.selectItems([itemId], { selectInLibrary: true });
+      return;
+    }
+    if (typeof typed?.selectItem === "function") {
+      await typed.selectItem(itemId, true);
+      return;
+    }
+  }
+}
+
+async function waitForStandaloneReady(): Promise<Document> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < 7000) {
+    const win = getStandaloneWindowForTest();
+    const doc = win?.document;
+    const root = doc?.getElementById("llmforzotero-standalone-chat-root");
+    const paperTab = doc?.querySelector(
+      ".llm-standalone-tab-row .llm-standalone-tab[data-tab='paper']",
+    );
+    const panelRoot = doc?.querySelector(".llm-standalone-content #llm-main");
+    if (doc && root && paperTab && panelRoot) {
+      return doc;
+    }
+    await Zotero.Promise.delay(25);
+  }
+  throw new Error("Timed out waiting for standalone workflow window");
+}
+
+function readStandaloneDiagnostics(): WorkflowTestStandaloneDiagnostics {
+  const win = getStandaloneWindowForTest();
+  const doc = win?.document || null;
+  const activeTab = doc?.querySelector(
+    ".llm-standalone-tab-row .llm-standalone-tab.active",
+  ) as HTMLElement | null;
+  const paperTab = doc?.querySelector(
+    ".llm-standalone-tab-row .llm-standalone-tab[data-tab='paper']",
+  ) as HTMLElement | null;
+  const openTab = doc?.querySelector(
+    ".llm-standalone-tab-row .llm-standalone-tab[data-tab='open']",
+  ) as HTMLElement | null;
+  const contentArea = doc?.querySelector(
+    ".llm-standalone-content",
+  ) as HTMLElement | null;
+  const panelRoot = contentArea?.querySelector(
+    "#llm-main",
+  ) as HTMLElement | null;
+  const statusEl = contentArea?.querySelector(
+    "#llm-status",
+  ) as HTMLElement | null;
+  const titleEl = doc?.querySelector(
+    ".llm-standalone-content-title-text",
+  ) as HTMLElement | null;
+  const sidebar = doc?.querySelector(
+    ".llm-standalone-sidebar",
+  ) as HTMLElement | null;
+  const sidebarHeader = doc?.querySelector(
+    ".llm-standalone-sidebar-header",
+  ) as HTMLElement | null;
+  const sidebarPanel = doc?.querySelector(
+    ".llm-standalone-sidebar-panel",
+  ) as HTMLElement | null;
+  const windowButtons = doc?.querySelector(
+    ".llm-standalone-sidebar-header .llm-window-buttons",
+  ) as HTMLElement | null;
+  const collapseToggle = doc?.querySelector(
+    ".llm-standalone-nav-toggle",
+  ) as HTMLElement | null;
+  const tabRow = doc?.querySelector(
+    ".llm-standalone-tab-row",
+  ) as HTMLElement | null;
+  const newChatAction = doc?.querySelector(
+    '[data-sidebar-action="new-chat"]',
+  ) as HTMLElement | null;
+  const newChatLabel = newChatAction?.querySelector(
+    ".llm-standalone-nav-label",
+  ) as HTMLElement | null;
+  const contentTitleRow = doc?.querySelector(
+    ".llm-standalone-content-title",
+  ) as HTMLElement | null;
+  const chatBox = contentArea?.querySelector(
+    "#llm-chat-box",
+  ) as HTMLElement | null;
+  const mountedItem = contentArea
+    ? activeContextPanels.get(contentArea)?.() || null
+    : null;
+  const rawItem = contentArea
+    ? activeContextPanelRawItems.get(contentArea) || null
+    : null;
+  const activeTabName =
+    activeTab?.dataset.tab === "paper"
+      ? "paper"
+      : activeTab?.dataset.tab === "open"
+        ? "open"
+        : null;
+  const centerY = (element: HTMLElement | null): number | null => {
+    if (!element) return null;
+    const rect = element.getBoundingClientRect();
+    return rect.top + rect.height / 2;
+  };
+  const textCenterY = (element: HTMLElement | null): number | null => {
+    if (!element) return null;
+    const range = element.ownerDocument.createRange();
+    range.selectNodeContents(element);
+    const rect = range.getBoundingClientRect();
+    return rect.height > 0 ? rect.top + rect.height / 2 : centerY(element);
+  };
+  const toolbarCenters = [centerY(sidebarHeader), centerY(tabRow)];
+  const titleCenters = [centerY(newChatAction), centerY(contentTitleRow)];
+  // The header carries no text of its own any more, so the collapse toggle is
+  // what has to share a centreline with the tabs beside it.
+  const toolbarControlCenters = [centerY(collapseToggle), centerY(activeTab)];
+  const titleTextCenters = [textCenterY(newChatLabel), textCenterY(titleEl)];
+  const centerDelta = (centers: Array<number | null>): number | undefined => {
+    if (centers.some((value) => value === null)) return undefined;
+    return Math.abs((centers[0] as number) - (centers[1] as number));
+  };
+  const toolbarCenterDeltaPx = centerDelta(toolbarCenters);
+  const titleCenterDeltaPx = centerDelta(titleCenters);
+  const toolbarControlCenterDeltaPx = centerDelta(toolbarControlCenters);
+  const titleTextCenterDeltaPx = centerDelta(titleTextCenters);
+  return {
+    activeTab: activeTabName,
+    sidebarState:
+      sidebar?.dataset.sidebarState === "collapsed"
+        ? "collapsed"
+        : sidebar?.dataset.sidebarState === "expanded"
+          ? "expanded"
+          : undefined,
+    customTitlebar: Boolean(
+      doc?.documentElement?.hasAttribute("customtitlebar"),
+    ),
+    collapseToggleHost: collapseToggle
+      ? collapseToggle.closest(".llm-standalone-tab-row")
+        ? "tab-row"
+        : "sidebar-header"
+      : undefined,
+    sidebarWidthPx: sidebar ? sidebar.getBoundingClientRect().width : undefined,
+    sidebarFlyout:
+      sidebar?.dataset.sidebarFlyout === "open" ? "open" : "closed",
+    sidebarPanelWidthPx: sidebarPanel
+      ? sidebarPanel.getBoundingClientRect().width
+      : undefined,
+    sidebarPanelOpacity: sidebarPanel
+      ? Number(win?.getComputedStyle(sidebarPanel)?.opacity ?? Number.NaN)
+      : undefined,
+    sidebarContent: sidebarPanel
+      ? {
+          labels: Array.from(
+            sidebarPanel.querySelectorAll(".llm-standalone-nav-label"),
+          ).map((node) => {
+            const label = node as HTMLElement;
+            return {
+              text: label.textContent || "",
+              width: label.getBoundingClientRect().width,
+              opacity: Number(win?.getComputedStyle(label)?.opacity),
+            };
+          }),
+          historyHeight:
+            sidebarPanel
+              .querySelector(".llm-standalone-history-region")
+              ?.getBoundingClientRect().height || 0,
+          historyText:
+            sidebarPanel.querySelector(".llm-standalone-sidebar-list")
+              ?.textContent || "",
+          actionWidths: Array.from(
+            sidebarPanel.querySelectorAll("[data-sidebar-action]"),
+          ).map(
+            (action) => (action as HTMLElement).getBoundingClientRect().width,
+          ),
+        }
+      : undefined,
+    windowButtonsWidthPx: windowButtons
+      ? windowButtons.getBoundingClientRect().width
+      : undefined,
+    sidebarActionOrder: Array.from(
+      sidebar?.querySelectorAll("[data-sidebar-action]") || [],
+    ).map((node) => (node as HTMLElement).dataset.sidebarAction || ""),
+    sidebarPrimaryActionOrder: Array.from(
+      sidebar?.querySelectorAll(
+        ".llm-standalone-primary-nav [data-sidebar-action]",
+      ) || [],
+    ).map((node) => (node as HTMLElement).dataset.sidebarAction || ""),
+    titleActionLabels: Array.from(
+      doc?.querySelectorAll(".llm-standalone-content-title-actions button") ||
+        [],
+    ).map((node) =>
+      ((node as HTMLElement).getAttribute("aria-label") || "").trim(),
+    ),
+    alignment:
+      toolbarCenterDeltaPx === undefined ||
+      titleCenterDeltaPx === undefined ||
+      toolbarControlCenterDeltaPx === undefined ||
+      titleTextCenterDeltaPx === undefined
+        ? undefined
+        : {
+            toolbarCenterDeltaPx,
+            titleCenterDeltaPx,
+            toolbarControlCenterDeltaPx,
+            titleTextCenterDeltaPx,
+          },
+    conversationKey: mountedItem ? getConversationKey(mountedItem) : undefined,
+    activeItemId: parsePositiveInt(mountedItem?.id),
+    rawContextItemId:
+      parsePositiveInt(rawItem?.id) ||
+      parsePositiveInt(panelRoot?.dataset.rawContextItemId),
+    basePaperItemId: parsePositiveInt(panelRoot?.dataset.basePaperItemId),
+    contextItemId: parsePositiveInt(panelRoot?.dataset.contextItemId),
+    conversationKind: panelRoot?.dataset.conversationKind || undefined,
+    runtimeMode: panelRoot?.dataset.runtimeMode || undefined,
+    conversationSystem: panelRoot?.dataset.conversationSystem || undefined,
+    titleText: titleEl?.textContent?.trim() || undefined,
+    chipText: Array.from(
+      contentArea?.querySelectorAll(
+        "#llm-paper-context-preview .llm-paper-context-chip > .llm-paper-context-chip-header .llm-paper-context-chip-text",
+      ) || [],
+    ).map((node) => ((node as Element).textContent || "").trim()),
+    composerPaperContextKeys: Array.from(
+      contentArea?.querySelectorAll(
+        "#llm-paper-context-preview .llm-paper-context-chip",
+      ) || [],
+    ).map((node) => {
+      const chip = node as HTMLElement;
+      return `${chip.dataset.paperItemId}:${chip.dataset.paperContextItemId}`;
+    }),
+    selectedContextLabels: Array.from(
+      contentArea?.querySelectorAll(".llm-selected-context-meta") || [],
+    ).map((node) => ((node as Element).textContent || "").trim()),
+    composerCollectionLabels: Array.from(
+      contentArea?.querySelectorAll(
+        "#llm-paper-context-preview .llm-collection-chip-title",
+      ) || [],
+    ).map((node) => ((node as Element).textContent || "").trim()),
+    composerTagLabels: Array.from(
+      contentArea?.querySelectorAll(
+        "#llm-paper-context-preview .llm-tag-chip-title",
+      ) || [],
+    ).map((node) => ((node as Element).textContent || "").trim()),
+    messageText: chatBox?.textContent?.trim() || undefined,
+    paperTabText: paperTab?.textContent?.trim() || undefined,
+    openTabText: openTab?.textContent?.trim() || undefined,
+    statusText: statusEl?.textContent?.trim() || undefined,
+    runtimeSystemToggles: readRuntimeSystemToggles(
+      doc,
+      ".llm-standalone-runtime-system-controls",
+    ),
+    runtimeBadge: readRuntimeBadge(contentArea),
+    lastSend,
+    lastFinalRequest,
+  };
+}
+
+async function getStandaloneDiagnostics(): Promise<WorkflowTestStandaloneDiagnostics> {
+  if (getStandaloneWindowForTest()) {
+    await waitForStandaloneReady().catch(() => undefined);
+  }
+  return readStandaloneDiagnostics();
+}
+
+async function ensureStandaloneWorkflowPanelReady(): Promise<{
+  contentArea: HTMLElement;
+  item: Zotero.Item;
+}> {
+  const doc = await waitForStandaloneReady();
+  const contentArea = doc.querySelector(
+    ".llm-standalone-content",
+  ) as HTMLElement | null;
+  let item = contentArea
+    ? activeContextPanels.get(contentArea)?.() || null
+    : null;
+  if (!contentArea || !item) {
+    throw new Error("Standalone workflow chat panel is not mounted");
+  }
+
+  // Standalone mounting provisions and hydrates the conversation in a detached
+  // async task. Await the same gate a real send uses instead of assuming that a
+  // fixed paint delay is long enough under database or migration load.
+  await ensureConversationLoaded(item);
+  item = activeContextPanels.get(contentArea)?.() || item;
+  refreshChat(contentArea, item);
+  return { contentArea, item };
+}
+
+async function openStandaloneForItem(
+  itemId: number,
+): Promise<WorkflowTestStandaloneDiagnostics> {
+  assertWorkflowTestEnabled();
+  const item = Zotero.Items.get(itemId);
+  if (!item) throw new Error(`Unable to find Zotero item ${itemId}`);
+  await closeStandalone();
+  await selectZoteroItemForWorkflow(itemId).catch(() => undefined);
+  openStandaloneChat({ initialItem: item });
+  await ensureStandaloneWorkflowPanelReady();
+  return readStandaloneDiagnostics();
+}
+
+async function openStandaloneForLibraryAfterRestart(): Promise<WorkflowTestStandaloneDiagnostics> {
+  assertWorkflowTestEnabled();
+  await closeStandalone();
+  disposeWorkflowPanels();
+  clearWorkflowConversationRuntimeState();
+  openStandaloneChat();
+  await waitForStandaloneReady();
+  await Zotero.Promise.delay(250);
+  return readStandaloneDiagnostics();
+}
+
+async function clickStandaloneTab(
+  tab: "paper" | "open",
+): Promise<WorkflowTestStandaloneDiagnostics> {
+  assertWorkflowTestEnabled();
+  const doc = await waitForStandaloneReady();
+  const button = doc.querySelector(
+    `.llm-standalone-tab-row .llm-standalone-tab[data-tab='${tab}']`,
+  ) as HTMLButtonElement | null;
+  if (!button) throw new Error(`Standalone ${tab} tab was not rendered`);
+  button.click();
+  await ensureStandaloneWorkflowPanelReady();
+  return readStandaloneDiagnostics();
+}
+
+/**
+ * The rail animates its width over 280ms. Reading geometry before that settles
+ * reports a mid-transition width, so wait until two consecutive measurements
+ * agree before any caller inspects the layout.
+ */
+async function waitForStandaloneSidebarWidthSettled(
+  doc: Document,
+): Promise<void> {
+  const sidebar = doc.querySelector(
+    ".llm-standalone-sidebar",
+  ) as HTMLElement | null;
+  if (!sidebar) return;
+  await waitForElementGeometrySettled({
+    element: sidebar,
+    sample: () => String(sidebar.getBoundingClientRect().width),
+    delay: () => Zotero.Promise.delay(25),
+  });
+}
+
+/**
+ * Reveals the collapsed sidebar the way a pointer does. The panel slides in
+ * over 280ms, so wait for it to settle before any caller measures it.
+ */
+async function hoverStandaloneSidebarToggle(): Promise<WorkflowTestStandaloneDiagnostics> {
+  assertWorkflowTestEnabled();
+  const doc = await waitForStandaloneReady();
+  const toggle = doc.querySelector(
+    ".llm-standalone-nav-toggle",
+  ) as HTMLElement | null;
+  if (!toggle) throw new Error("Standalone sidebar toggle was not rendered");
+  const view = doc.defaultView;
+  const event = new (
+    view as unknown as { MouseEvent: typeof MouseEvent }
+  ).MouseEvent("mouseenter", { bubbles: false, cancelable: false });
+  toggle.dispatchEvent(event);
+  await Zotero.Promise.delay(25);
+  await waitForStandaloneSidebarPanelSettled(doc);
+  return readStandaloneDiagnostics();
+}
+
+/** Waits until the flyout's slide-in transition stops moving the panel. */
+async function waitForStandaloneSidebarPanelSettled(
+  doc: Document,
+): Promise<void> {
+  const panel = doc.querySelector(
+    ".llm-standalone-sidebar-panel",
+  ) as HTMLElement | null;
+  if (!panel) return;
+  await waitForElementGeometrySettled({
+    element: panel,
+    sample: () => {
+      const rect = panel.getBoundingClientRect();
+      const opacity = doc.defaultView?.getComputedStyle(panel)?.opacity || "";
+      return `${rect.left}:${rect.width}:${opacity}`;
+    },
+    delay: () => Zotero.Promise.delay(25),
+  });
+}
+
+async function toggleStandaloneSidebar(): Promise<WorkflowTestStandaloneDiagnostics> {
+  assertWorkflowTestEnabled();
+  const doc = await waitForStandaloneReady();
+  const button = doc.querySelector(
+    ".llm-standalone-nav-toggle",
+  ) as HTMLButtonElement | null;
+  if (!button) throw new Error("Standalone sidebar toggle was not rendered");
+  button.click();
+  await Zotero.Promise.delay(25);
+  await waitForStandaloneSidebarWidthSettled(doc);
+  return readStandaloneDiagnostics();
+}
+
+async function clickStandaloneSystemToggle(
+  system: RuntimeConversationSystem,
+): Promise<WorkflowTestStandaloneDiagnostics> {
+  assertWorkflowTestEnabled();
+  const doc = await waitForStandaloneReady();
+  const currentSystem = (readStandaloneDiagnostics().conversationSystem ||
+    "upstream") as ConversationSystem;
+  const expectedSystem: ConversationSystem =
+    currentSystem === system ? "upstream" : system;
+  const button = doc.querySelector(
+    `.llm-standalone-runtime-system-toggle[data-conversation-system='${system}']`,
+  ) as HTMLButtonElement | null;
+  if (!button) {
+    throw new Error(`Standalone ${system} system toggle was not rendered`);
+  }
+  button.click();
+  return waitForStandaloneConversationSystem(expectedSystem);
+}
+
+async function waitForStandaloneConversationSystem(
+  expectedSystem: ConversationSystem,
+  timeoutMs = 5000,
+): Promise<WorkflowTestStandaloneDiagnostics> {
+  const startedAt = Date.now();
+  let diagnostics = readStandaloneDiagnostics();
+  while (
+    diagnostics.conversationSystem !== expectedSystem &&
+    Date.now() - startedAt < timeoutMs
+  ) {
+    await Zotero.Promise.delay(25);
+    diagnostics = readStandaloneDiagnostics();
+  }
+  if (diagnostics.conversationSystem !== expectedSystem) {
+    throw new Error(
+      `Timed out waiting for standalone runtime ${expectedSystem}: ${JSON.stringify(diagnostics)}`,
+    );
+  }
+  return diagnostics;
+}
+
+async function openStandaloneRuntimeMenu(): Promise<WorkflowTestRuntimeBadge> {
+  assertWorkflowTestEnabled();
+  const doc = await waitForStandaloneReady();
+  const content = doc.querySelector(".llm-standalone-content");
+  if (!content) throw new Error("Standalone content area was not rendered");
+  return openRuntimeMenuIn(content, "Standalone");
+}
+
+async function pickStandaloneRuntime(
+  system: ConversationSystem,
+): Promise<WorkflowTestStandaloneDiagnostics> {
+  assertWorkflowTestEnabled();
+  const doc = await waitForStandaloneReady();
+  const content = doc.querySelector(".llm-standalone-content");
+  if (!content) throw new Error("Standalone content area was not rendered");
+  await clickRuntimeMenuOptionIn(content, "Standalone", system);
+  return waitForStandaloneConversationSystem(system);
+}
+
+async function clickStandaloneSystemTogglesRapidly(
+  systems: RuntimeConversationSystem[],
+): Promise<WorkflowTestStandaloneDiagnostics> {
+  assertWorkflowTestEnabled();
+  const doc = await waitForStandaloneReady();
+  let expectedSystem = (readStandaloneDiagnostics().conversationSystem ||
+    "upstream") as ConversationSystem;
+  for (const system of systems) {
+    const button = doc.querySelector(
+      `.llm-standalone-runtime-system-toggle[data-conversation-system='${system}']`,
+    ) as HTMLButtonElement | null;
+    if (!button) {
+      throw new Error(`Standalone ${system} system toggle was not rendered`);
+    }
+    button.click();
+    expectedSystem = expectedSystem === system ? "upstream" : system;
+  }
+  return waitForStandaloneConversationSystem(expectedSystem);
+}
+
+async function measureStandaloneRuntimeGeometry(input: {
+  width: number;
+  fontScale: number;
+}): Promise<WorkflowTestRuntimeGeometry> {
+  assertWorkflowTestEnabled();
+  const doc = await waitForStandaloneReady();
+  const root = doc.getElementById(
+    "llmforzotero-standalone-chat-root",
+  ) as HTMLElement | null;
+  const tabRow = doc.querySelector(
+    ".llm-standalone-tab-row",
+  ) as HTMLElement | null;
+  const runtimeControls = doc.querySelector(
+    ".llm-standalone-runtime-system-controls",
+  ) as HTMLElement | null;
+  const tabGroup = doc.querySelector(
+    ".llm-standalone-tab-row .llm-standalone-tab-group",
+  ) as HTMLElement | null;
+  if (!root || !tabRow || !runtimeControls || !tabGroup) {
+    throw new Error("Standalone runtime geometry targets were not rendered");
+  }
+
+  const previousWidth = tabRow.style.width;
+  const previousBoxSizing = tabRow.style.boxSizing;
+  const previousScale = root.style.getPropertyValue("--llm-font-scale");
+  tabRow.style.width = `${input.width}px`;
+  tabRow.style.boxSizing = "border-box";
+  root.style.setProperty("--llm-font-scale", String(input.fontScale));
+  await Zotero.Promise.delay(50);
+  try {
+    const containerRect = tabRow.getBoundingClientRect();
+    const runtimeRect = getVisibleRuntimeControlsRect(runtimeControls);
+    const runtimeButtonWidths = getVisibleRuntimeButtonRects(
+      runtimeControls,
+    ).map((rect) => rect.width);
+    const tabsRect = tabGroup.getBoundingClientRect();
+    const containerCenter = containerRect.left + containerRect.width / 2;
+    const tabsCenter = tabsRect.left + tabsRect.width / 2;
+    return {
+      containerWidth: containerRect.width,
+      fontScale: input.fontScale,
+      runtimeWidth: runtimeRect.width,
+      runtimeButtonWidths,
+      runtimeIntersectsLeadingContent: rectsIntersect(runtimeRect, tabsRect),
+      runtimeIntersectsTrailingContent: false,
+      runtimeTrailingOverlapPx: 0,
+      runtimeWithinContainer: rectWithinContainer(runtimeRect, containerRect),
+      trailingContentWithinContainer: true,
+      deleteButtonIconOnly: false,
+      centeredContentOffset: Math.abs(tabsCenter - containerCenter),
+    };
+  } finally {
+    tabRow.style.width = previousWidth;
+    tabRow.style.boxSizing = previousBoxSizing;
+    if (previousScale) {
+      root.style.setProperty("--llm-font-scale", previousScale);
+    } else {
+      root.style.removeProperty("--llm-font-scale");
+    }
+  }
+}
+
+async function exerciseStandaloneComposerManualResize(): Promise<WorkflowTestStandaloneComposerResizeDiagnostics> {
+  assertWorkflowTestEnabled();
+  const doc = await waitForStandaloneReady();
+  const win = getStandaloneWindowForTest();
+  const input = doc.querySelector(
+    ".llm-standalone-content #llm-input",
+  ) as HTMLTextAreaElement | null;
+  const handle = doc.querySelector(
+    '.llm-standalone-resize-handle[data-resize-target="input"]',
+  ) as HTMLElement | null;
+  if (!win || !input || !handle) {
+    throw new Error("Standalone composer resize controls were not rendered");
+  }
+
+  const computed = win.getComputedStyle(input);
+  const oneLineHeight = computed
+    ? Number.parseFloat(computed.lineHeight) +
+      Number.parseFloat(computed.paddingTop) +
+      Number.parseFloat(computed.paddingBottom) +
+      Number.parseFloat(computed.borderTopWidth) +
+      Number.parseFloat(computed.borderBottomWidth)
+    : 0;
+  const resizeHandleTargets = Array.from(
+    doc.querySelectorAll(
+      ".llm-standalone-content .llm-standalone-resize-handle",
+    ),
+    (element) => (element as HTMLElement).dataset.resizeTarget || "",
+  );
+  const modeLabel = input
+    .closest(".llm-input-section")
+    ?.querySelector(".llm-agent-toggle-label") as HTMLElement | null;
+  const textLeft =
+    input.getBoundingClientRect().left +
+    (computed ? Number.parseFloat(computed.paddingLeft) : 0);
+  const modeLabelRect = modeLabel?.getBoundingClientRect();
+  // Null when the mode label is not shown in this chat mode.
+  const textOffsetFromModeLabel =
+    modeLabelRect && modeLabelRect.width > 0
+      ? textLeft - modeLabelRect.left
+      : null;
+  const nativeResize = computed?.resize || "";
+  const heightBeforeDrag = input.getBoundingClientRect().height;
+  const startScreenY = 500;
+  handle.dispatchEvent(
+    new win.MouseEvent("mousedown", {
+      bubbles: true,
+      button: 0,
+      screenY: startScreenY,
+    }),
+  );
+  win.dispatchEvent(
+    new win.MouseEvent("mousemove", {
+      bubbles: true,
+      screenY: startScreenY + 60,
+    }),
+  );
+  win.dispatchEvent(new win.MouseEvent("mouseup", { bubbles: true }));
+  const heightAfterDrag = Number.parseFloat(input.style.height || "0") || 0;
+
+  input.value = "Manual standalone composer height survives typed input.";
+  input.dispatchEvent(new win.Event("input", { bubbles: true }));
+  const heightAfterInput = Number.parseFloat(input.style.height || "0") || 0;
+
+  return {
+    oneLineHeight,
+    resizeHandleTargets,
+    textOffsetFromModeLabel,
+    nativeResize,
+    heightBeforeDrag,
+    heightAfterDrag,
+    heightAfterInput,
+    manualHeightMarked: input.dataset.llmManualHeight === "true",
+  };
+}
+
+async function askStandalone(text: string): Promise<SendQuestionOptions> {
+  assertWorkflowTestEnabled();
+  lastSend = null;
+  const doc = await waitForStandaloneReady();
+  const input = doc.querySelector(
+    ".llm-standalone-content #llm-input",
+  ) as HTMLTextAreaElement | null;
+  if (!input) throw new Error("Standalone workflow input box was not rendered");
+  input.value = text;
+  const eventCtor = doc.defaultView?.Event ?? Event;
+  input.dispatchEvent(new eventCtor("input", { bubbles: true }));
+  const sendBtn = doc.querySelector(
+    ".llm-standalone-content #llm-send",
+  ) as HTMLButtonElement | null;
+  if (!sendBtn)
+    throw new Error("Standalone workflow send button was not rendered");
+  const startedAt = Date.now();
+  while (sendBtn.disabled && Date.now() - startedAt < 5000) {
+    await Zotero.Promise.delay(25);
+  }
+  sendBtn.click();
+  return waitForLastSend();
+}
+
+async function startNewStandaloneConversation(): Promise<WorkflowTestStandaloneDiagnostics> {
+  assertWorkflowTestEnabled();
+  const { contentArea } = await ensureStandaloneWorkflowPanelReady();
+  const before = readStandaloneDiagnostics();
+  // New chat keeps a chat that has no messages yet, so an empty one is
+  // already the new conversation a caller asks for.
+  if (
+    before.conversationKey &&
+    !contentArea.querySelector("#llm-chat-box .llm-message-wrapper")
+  )
+    return before;
+  dispatchWorkflowClick(contentArea, "#llm-history-new", "New chat button");
+  const deadline = Date.now() + 15000;
+  while (Date.now() < deadline) {
+    const current = readStandaloneDiagnostics();
+    if (
+      current.conversationKey &&
+      current.conversationKey !== before.conversationKey
+    )
+      return current;
+    await Zotero.Promise.delay(50);
+  }
+  throw new Error("New standalone conversation did not become ready");
+}
+
+async function seedStandaloneUserMessage(
+  text: string,
+): Promise<WorkflowTestStandaloneDiagnostics> {
+  assertWorkflowTestEnabled();
+  const { contentArea, item } = await ensureStandaloneWorkflowPanelReady();
+  const conversationKey = getConversationKey(item);
+  if (!conversationKey) {
+    throw new Error("Standalone workflow panel has no active conversation key");
+  }
+  const message = {
+    role: "user" as const,
+    text,
+    timestamp: Date.now(),
+  };
+  const conversationSystem =
+    (contentArea.querySelector("#llm-main") as HTMLElement | null)?.dataset
+      .conversationSystem || "upstream";
+  try {
+    await appendWorkflowStoredMessage(
+      conversationSystem === "codex" || conversationSystem === "claude_code"
+        ? conversationSystem
+        : "upstream",
+      conversationKey,
+      message,
+    );
+  } catch (error) {
+    throw new Error(
+      `Standalone workflow seed failed (${text}) for key ${conversationKey}: ${String(
+        (error as Error)?.message || error,
+      )}`,
+    );
+  }
+  chatHistory.set(conversationKey, [message]);
+  loadedConversationKeys.add(conversationKey);
+  refreshChat(contentArea, item);
+  await Zotero.Promise.delay(150);
+  return readStandaloneDiagnostics();
+}
+
+async function withPendingStandaloneSend(
+  text: string,
+  inspect: () => Promise<void>,
+): Promise<void> {
+  assertWorkflowTestEnabled();
+  const { contentArea, item } = await ensureStandaloneWorkflowPanelReady();
+  const conversationKey = getConversationKey(item);
+  let reachedProvider = false;
+  const previousSendInterceptor = getWorkflowTestSendInterceptor();
+  const previousFinalRequestInterceptor =
+    getWorkflowTestFinalRequestInterceptor();
+  let release = () => {};
+  const providerGate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  setWorkflowTestSendInterceptor((opts) => {
+    opts.apiBase = "http://127.0.0.1:9/v1";
+    opts.apiKey = "workflow-test-key";
+    opts.authMode = "api_key";
+    lastSend = opts;
+    return true;
+  });
+  setWorkflowTestFinalRequestInterceptor(async (snapshot) => {
+    lastFinalRequest = snapshot;
+    reachedProvider = true;
+    await providerGate;
+    return true;
+  });
+  try {
+    const input = contentArea.querySelector<HTMLTextAreaElement>("#llm-input")!;
+    input.value = text;
+    const EventCtor = contentArea.ownerDocument.defaultView!.Event;
+    input.dispatchEvent(new EventCtor("input", { bubbles: true }));
+    contentArea.querySelector<HTMLButtonElement>("#llm-send")!.click();
+    const deadline = Date.now() + 10_000;
+    while (!reachedProvider && Date.now() < deadline)
+      await Zotero.Promise.delay(25);
+    if (!reachedProvider || !isRequestPending(conversationKey)) {
+      throw new Error(
+        "Standalone send did not reach the pending provider boundary",
+      );
+    }
+    await inspect();
+  } finally {
+    release();
+    const deadline = Date.now() + 10_000;
+    while (isRequestPending(conversationKey) && Date.now() < deadline) {
+      await Zotero.Promise.delay(25);
+    }
+    setWorkflowTestSendInterceptor(previousSendInterceptor);
+    setWorkflowTestFinalRequestInterceptor(previousFinalRequestInterceptor);
+  }
+  if (isRequestPending(conversationKey))
+    throw new Error("Standalone send did not finish");
+}
+
+async function getConversationHistoryTexts(
+  conversationKey: number,
+): Promise<WorkflowTestConversationHistoryTexts> {
+  assertWorkflowTestEnabled();
+  const toEntries = (
+    messages: ReadonlyArray<{ role: string; text?: string | null }>,
+  ) =>
+    messages.map((message) => ({
+      role: message.role,
+      text: message.text || "",
+    }));
+  return {
+    memory: toEntries(chatHistory.get(conversationKey) || []),
+    stored: toEntries(await loadConversation(conversationKey, 200)),
+  };
+}
+
+async function seedStoredConversationTurns(
+  conversationKey: number,
+  turns: Array<{ role: "user" | "assistant"; text: string; timestamp: number }>,
+): Promise<void> {
+  assertWorkflowTestEnabled();
+  for (const turn of turns) {
+    await appendWorkflowStoredMessage("upstream", conversationKey, turn);
+  }
+  // A conversation the panel already loaded is served from memory.
+  if (loadedConversationKeys.has(conversationKey)) {
+    chatHistory.set(conversationKey, [
+      ...(chatHistory.get(conversationKey) || []),
+      ...turns,
+    ]);
+  }
+}
+
+async function seedStandaloneConversation(
+  turns: Array<{ role: "user" | "assistant"; text: string } & Partial<Message>>,
+): Promise<WorkflowTestStandaloneDiagnostics> {
+  assertWorkflowTestEnabled();
+  const doc = await waitForStandaloneReady();
+  const contentArea = doc.querySelector(
+    ".llm-standalone-content",
+  ) as HTMLElement | null;
+  const item = contentArea
+    ? activeContextPanels.get(contentArea)?.() || null
+    : null;
+  if (!contentArea || !item) {
+    throw new Error("Standalone workflow chat panel is not mounted");
+  }
+  const conversationKey = getConversationKey(item);
+  const baseTimestamp = Date.now() - turns.length;
+  const messages: Message[] = turns.map((turn, index) => ({
+    ...turn,
+    timestamp: turn.timestamp ?? baseTimestamp + index,
+  }));
+  const conversationSystem =
+    (contentArea.querySelector("#llm-main") as HTMLElement | null)?.dataset
+      .conversationSystem || "upstream";
+  const storedSystem =
+    conversationSystem === "codex" || conversationSystem === "claude_code"
+      ? conversationSystem
+      : "upstream";
+  for (const message of messages) {
+    // Persist only the plain turn shape; volatile streaming/trace fields are
+    // session-only presentation state and stay in chatHistory.
+    await appendWorkflowStoredMessage(storedSystem, conversationKey, {
+      role: message.role,
+      text: message.text,
+      timestamp: message.timestamp,
+    });
+  }
+  chatHistory.set(conversationKey, messages);
+  loadedConversationKeys.add(conversationKey);
+  refreshChat(contentArea, item);
+  await Zotero.Promise.delay(200);
+  return readStandaloneDiagnostics();
+}
+
+async function resizeStandaloneWindow(
+  width: number,
+  height: number,
+): Promise<{ innerWidth: number; innerHeight: number }> {
+  assertWorkflowTestEnabled();
+  await waitForStandaloneReady();
+  const win = getStandaloneWindowForTest();
+  if (!win) throw new Error("Standalone window is not open");
+  win.resizeBy(width - win.innerWidth, height - win.innerHeight);
+  await Zotero.Promise.delay(400);
+  return { innerWidth: win.innerWidth, innerHeight: win.innerHeight };
+}
+
+async function captureStandaloneScreenshot(filePath: string): Promise<string> {
+  assertWorkflowTestEnabled();
+  await waitForStandaloneReady();
+  const win = getStandaloneWindowForTest();
+  if (!win) throw new Error("Standalone window is not open");
+  const doc = win.document;
+  const width = Math.ceil(win.innerWidth);
+  const height = Math.ceil(win.innerHeight);
+  const scale = Number(win.devicePixelRatio) || 1;
+  const canvas = doc.createElementNS(
+    "http://www.w3.org/1999/xhtml",
+    "canvas",
+  ) as HTMLCanvasElement;
+  canvas.width = Math.ceil(width * scale);
+  canvas.height = Math.ceil(height * scale);
+  const ctx = canvas.getContext("2d") as
+    | (CanvasRenderingContext2D & {
+        drawWindow?: (
+          win: Window,
+          x: number,
+          y: number,
+          w: number,
+          h: number,
+          bg: string,
+        ) => void;
+      })
+    | null;
+  if (!ctx || typeof ctx.drawWindow !== "function") {
+    throw new Error("drawWindow is unavailable in this build");
+  }
+  ctx.scale(scale, scale);
+  ctx.drawWindow(win, 0, 0, width, height, "#1e1e1e");
+  const dataUrl = canvas.toDataURL("image/png");
+  const base64 = dataUrl.split(",")[1] || "";
+  const binary = win.atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index++) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  const ioUtils = (
+    globalThis as unknown as {
+      IOUtils?: {
+        write?: (path: string, data: Uint8Array) => Promise<unknown>;
+      };
+    }
+  ).IOUtils;
+  if (!ioUtils?.write) throw new Error("IOUtils.write is unavailable");
+  await ioUtils.write(filePath, bytes);
+  return filePath;
+}
+
+async function notifyStandaloneItemChanged(
+  itemId: number | null,
+): Promise<WorkflowTestStandaloneDiagnostics> {
+  assertWorkflowTestEnabled();
+  const item = itemId ? Zotero.Items.get(itemId) || null : null;
+  if (itemId && !item) throw new Error(`Unable to find Zotero item ${itemId}`);
+  if (itemId) {
+    await selectZoteroItemForWorkflow(itemId).catch(() => undefined);
+  }
+  notifyStandaloneItemChangedRuntime(item);
+  await Zotero.Promise.delay(250);
+  return readStandaloneDiagnostics();
+}
+
+async function notifyStandaloneItemChanges(
+  itemIds: number[],
+): Promise<WorkflowTestStandaloneDiagnostics> {
+  assertWorkflowTestEnabled();
+  const items = itemIds.map((itemId) => Zotero.Items.get(itemId) || null);
+  const missingIndex = items.findIndex((item) => !item);
+  if (missingIndex >= 0) {
+    throw new Error(`Unable to find Zotero item ${itemIds[missingIndex]}`);
+  }
+  for (const item of items) {
+    notifyStandaloneItemChangedRuntime(item);
+  }
+  await Zotero.Promise.delay(500);
+  return readStandaloneDiagnostics();
+}
+
+async function addItemsAsStandaloneContext(
+  itemIds: number[],
+): Promise<WorkflowTestStandaloneDiagnostics> {
+  assertWorkflowTestEnabled();
+  const items = itemIds.map((itemId) => Zotero.Items.get(itemId) || null);
+  const missingIndex = items.findIndex((item) => !item);
+  if (missingIndex >= 0) {
+    throw new Error(`Unable to find Zotero item ${itemIds[missingIndex]}`);
+  }
+  await dispatchZoteroItemsAsContext(items as Zotero.Item[], {
+    openStandaloneChat,
+  });
+  await waitForStandaloneReady();
+  await Zotero.Promise.delay(300);
+  return readStandaloneDiagnostics();
+}
+
+async function closeStandalone(): Promise<void> {
+  assertWorkflowTestEnabled();
+  const win = getStandaloneWindowReferenceForTest();
+  if (win && !win.closed) {
+    win.close();
+  }
+  const startedAt = Date.now();
+  while (
+    getStandaloneWindowReferenceForTest() &&
+    Date.now() - startedAt < 3000
+  ) {
+    await Zotero.Promise.delay(25);
+  }
+}
+
+/** Starts opening (or focuses) the standalone window without waiting. */
+function beginOpenStandaloneForTest(itemId: number): void {
+  assertWorkflowTestEnabled();
+  const item = Zotero.Items.get(itemId) || null;
+  openStandaloneChat({ initialItem: item });
+}
+
+function isStandaloneWindowActiveForTest(): boolean {
+  assertWorkflowTestEnabled();
+  return isStandaloneWindowActive();
+}
+
+// ---------------------------------------------------------------------------
+// Torn-off chat windows
+// ---------------------------------------------------------------------------
+
+/**
+ * Opens a torn-off window on the chat and waits until its panel shows the
+ * conversation, as openStandaloneForItem does for the standalone window.
+ */
+async function openTornChatWindowForTest(
+  identity: TornChatIdentity,
+  placement?: { screenX: number; screenY: number },
+): Promise<{ surface: string }> {
+  assertWorkflowTestEnabled();
+  const win = openTornChatWindow(identity, placement);
+  if (!win) throw new Error("The torn-off chat window did not open");
+  const startedAt = Date.now();
+  let contentArea: HTMLElement | null = null;
+  let item: Zotero.Item | null = null;
+  while (Date.now() - startedAt < 7000) {
+    contentArea =
+      (win.document?.querySelector(
+        ".llm-standalone-content",
+      ) as HTMLElement | null) || null;
+    const panelRoot = contentArea?.querySelector(
+      "#llm-main",
+    ) as HTMLElement | null;
+    item = contentArea
+      ? activeContextPanels.get(contentArea)?.() || null
+      : null;
+    if (panelRoot?.dataset.handlersInitialized && item) break;
+    await Zotero.Promise.delay(25);
+  }
+  if (!contentArea || !item) {
+    throw new Error("Timed out waiting for the torn-off chat window");
+  }
+  await ensureConversationLoaded(item);
+  item = activeContextPanels.get(contentArea)?.() || item;
+  refreshChat(contentArea, item);
+  return { surface: contentArea.dataset.selectionSurface || "" };
+}
+
+function getTornChatWindowsForTest(): Window[] {
+  assertWorkflowTestEnabled();
+  return getTornChatWindows();
+}
+
+async function closeTornChatWindowsForTest(): Promise<void> {
+  assertWorkflowTestEnabled();
+  closeAllTornChatWindows();
+  const startedAt = Date.now();
+  while (getTornChatWindows().length && Date.now() - startedAt < 3000) {
+    await Zotero.Promise.delay(25);
+  }
+}
+
+/** Every open chat window document (standalone or torn-off). */
+function listChatWindowsForTest(): WorkflowTestChatWindowEntry[] {
+  assertWorkflowTestEnabled();
+  const entries: WorkflowTestChatWindowEntry[] = [];
+  const enumerator = (Services as any).wm.getEnumerator(null);
+  while (enumerator.hasMoreElements()) {
+    const win = enumerator.getNext() as Window;
+    if (win.closed) continue;
+    const doc = win.document;
+    if (!doc?.getElementById("llmforzotero-standalone-chat-root")) continue;
+    entries.push({
+      name: win.name || "",
+      torn:
+        doc.documentElement?.getAttribute("windowtype") === "llmforzotero:chat",
+    });
+  }
+  return entries;
+}
+
+// ---------------------------------------------------------------------------
+// Standalone side panel (History / Side chat column)
+// ---------------------------------------------------------------------------
+
+/** Box metrics of a segmented tab group and of its tabs. */
+function segmentedMetrics(
+  win: Window | null,
+  group: HTMLElement | null,
+): WorkflowTestSegmentedTabMetrics | null {
+  if (!win || !group || !group.getClientRects().length) return null;
+  const groupStyle = win.getComputedStyle(group);
+  const tabs = Array.from(
+    group.querySelectorAll(".llm-standalone-tab"),
+  ) as HTMLElement[];
+  return {
+    groupPadding: groupStyle?.padding || "",
+    groupGap: groupStyle?.columnGap || "",
+    groupRadius: groupStyle?.borderRadius || "",
+    groupHeightPx: group.getBoundingClientRect().height,
+    tabs: tabs.map((tab) => {
+      const style = win.getComputedStyle(tab);
+      return {
+        paddingLeft: style?.paddingLeft || "",
+        paddingRight: style?.paddingRight || "",
+        paddingTop: style?.paddingTop || "",
+        minWidth: style?.minWidth || "",
+        heightPx: tab.getBoundingClientRect().height,
+        widthPx: tab.getBoundingClientRect().width,
+        fontSize: style?.fontSize || "",
+        radius: style?.borderRadius || "",
+        active: tab.classList.contains("active"),
+        fontWeight: style?.fontWeight || "",
+        background: style?.backgroundColor || "",
+        color: style?.color || "",
+      };
+    }),
+  };
+}
+
+/** The first visible history chip of each label type, with its colours. */
+function readHistoryChipColors(
+  win: Window | null,
+  root: ParentNode | null,
+): WorkflowTestHistoryChipColors[] {
+  if (!win || !root) return [];
+  const seen = new Set<string>();
+  const out: WorkflowTestHistoryChipColors[] = [];
+  for (const chip of Array.from(
+    root.querySelectorAll(".llm-standalone-search-label[data-label-type]"),
+  ) as HTMLElement[]) {
+    const type = chip.dataset.labelType || "";
+    if (seen.has(type) || !chip.getClientRects().length) continue;
+    seen.add(type);
+    const item = chip.closest(".llm-standalone-search-item");
+    const meta = item?.querySelector(
+      ".llm-standalone-search-meta, .llm-standalone-search-preview",
+    ) as HTMLElement | null;
+    const title = item?.querySelector(
+      ".llm-standalone-search-title",
+    ) as HTMLElement | null;
+    const style = win.getComputedStyle(chip);
+    out.push({
+      type,
+      color: style?.color || "",
+      background: style?.backgroundColor || "",
+      metaColor: (meta && win.getComputedStyle(meta)?.color) || "",
+      titleColor: (title && win.getComputedStyle(title)?.color) || "",
+    });
+  }
+  return out.sort((a, b) => a.type.localeCompare(b.type));
+}
+
+async function readStandaloneSearchPopupChipColors(): Promise<
+  WorkflowTestHistoryChipColors[]
+> {
+  assertWorkflowTestEnabled();
+  const doc = await waitForStandaloneReady();
+  const win = doc.defaultView!;
+  const opener = doc
+    .querySelector(".llm-standalone-sidebar .llm-standalone-nav-icon-search")
+    ?.closest(
+      "button, [role='button'], .llm-standalone-nav-row",
+    ) as HTMLElement | null;
+  if (!opener) throw new Error("The Search history nav row was not rendered");
+  opener.click();
+  const overlaySelector = ".llm-standalone-search-overlay";
+  const deadline = Date.now() + 5000;
+  let chips: WorkflowTestHistoryChipColors[] = [];
+  while (Date.now() < deadline) {
+    const overlay = Array.from(doc.querySelectorAll(overlaySelector)).find(
+      (element) => (element as HTMLElement).style.display !== "none",
+    ) as HTMLElement | undefined;
+    chips = readHistoryChipColors(win, overlay || null);
+    if (chips.length) break;
+    await Zotero.Promise.delay(50);
+  }
+  const input = doc.querySelector(
+    `${overlaySelector} .llm-standalone-search-input`,
+  ) as HTMLElement | null;
+  input?.dispatchEvent(
+    new win.KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+  );
+  await Zotero.Promise.delay(150);
+  return chips;
+}
+
+function readComposerMetrics(
+  win: Window | null,
+  body: HTMLElement | null,
+): WorkflowTestComposerMetrics | null {
+  if (!win || !body) return null;
+  const section = body.querySelector(
+    ".llm-input-section",
+  ) as HTMLElement | null;
+  if (!section || !section.getClientRects().length) return null;
+  const shown = (element: Element | null): element is HTMLElement =>
+    Boolean(
+      element &&
+      (element as HTMLElement).getClientRects().length &&
+      win.getComputedStyle(element as HTMLElement)?.display !== "none" &&
+      win.getComputedStyle(element as HTMLElement)?.visibility !== "hidden",
+    );
+  const height = (element: Element | null) =>
+    shown(element) ? element.getBoundingClientRect().height : 0;
+  const input = section.querySelector("#llm-input") as HTMLElement | null;
+  const actions = section.querySelector(".llm-actions");
+  const toolButtons = (
+    Array.from(actions?.querySelectorAll("button") || []) as HTMLElement[]
+  ).filter(shown);
+  const status = body.querySelector("#llm-status") as HTMLElement | null;
+  const modelButton = section.querySelector(
+    "#llm-model-toggle",
+  ) as HTMLElement | null;
+  let placeholderFontStyle = "";
+  try {
+    placeholderFontStyle =
+      (input && win.getComputedStyle(input, "::placeholder")?.fontStyle) || "";
+  } catch {
+    placeholderFontStyle = "";
+  }
+  return {
+    boxHeightPx: section.getBoundingClientRect().height,
+    contextRowHeightPx: height(section.querySelector(".llm-context-previews")),
+    inputHeightPx: height(input),
+    toolRowHeightPx: height(actions),
+    placeholderFontStyle,
+    contextChips: (
+      Array.from(
+        section.querySelectorAll(
+          ".llm-context-previews .llm-paper-context-chip-label",
+        ),
+      ) as HTMLElement[]
+    )
+      .filter(shown)
+      .map((chip) => (chip.textContent || "").trim()),
+    toolButtons: toolButtons.map((button) => (button.textContent || "").trim()),
+    toolButtonHeightsPx: toolButtons.map(
+      (button) => button.getBoundingClientRect().height,
+    ),
+    statusText: (status?.textContent || "").trim(),
+    statusClass: status?.className || "",
+    statusColor: (status && win.getComputedStyle(status)?.color) || "",
+    modelNameShown: shown(modelButton)
+      ? !modelButton.classList.contains("llm-model-btn-collapsed") &&
+        Boolean((modelButton.textContent || "").trim())
+      : null,
+  };
+}
+
+function readStandaloneSidePanelDiagnostics(): WorkflowTestStandaloneSidePanelDiagnostics {
+  const win = getStandaloneWindowForTest();
+  const doc = win?.document || null;
+  const query = <T extends Element = HTMLElement>(
+    root: ParentNode | null | undefined,
+    selector: string,
+  ) => (root?.querySelector(selector) as T | null) || null;
+  const queryAll = (root: ParentNode | null | undefined, selector: string) =>
+    Array.from(root?.querySelectorAll(selector) || []) as HTMLElement[];
+  const textOf = (element: Element | null | undefined) =>
+    (element?.textContent || "").trim();
+  const toggle = query<HTMLButtonElement>(
+    doc,
+    ".llm-standalone-side-panel-toggle",
+  );
+  const column = query(doc, ".llm-standalone-side-panel");
+  const contentWrapper = query(doc, ".llm-standalone-content-wrapper");
+  const contentArea = query(doc, ".llm-standalone-content");
+  const visible = (element: HTMLElement | null) =>
+    Boolean(element && !element.hidden && element.getClientRects().length);
+  const keysIn = (root: Element | null) =>
+    queryAll(root, ".llm-standalone-search-item[data-conversation-key]").map(
+      (row) => Number(row.dataset.conversationKey),
+    );
+  const countIn = (root: Element | null, selector: string) =>
+    queryAll(root, selector).length;
+  const assistantMessageTexts = (body: Element | null) =>
+    queryAll(body, "#llm-chat-box .llm-message-wrapper").map((wrapper) =>
+      textOf(wrapper.querySelector(".llm-bubble") || wrapper),
+    );
+
+  // The shown tab's content; other tabs stay mounted but hidden.
+  const readOnlyRoot = query(
+    column,
+    ".llm-standalone-side-panel-readonly:not([hidden])",
+  );
+  const readOnlyBody = query(readOnlyRoot, ".llm-standalone-side-body");
+  const readOnlyInput = query<HTMLTextAreaElement>(readOnlyBody, "#llm-input");
+  const sideRoot = query(
+    column,
+    ".llm-standalone-side-panel-chat:not([hidden])",
+  );
+  const sideBody = query(sideRoot, ".llm-standalone-side-body");
+  const sidePanelRoot = query(sideBody, "#llm-main");
+  const sideInput = query<HTMLTextAreaElement>(sideBody, "#llm-input");
+  const confirm = query(sideBody, ".llm-side-chat-close-confirm");
+  const mainInput = query<HTMLTextAreaElement>(contentArea, "#llm-input");
+  const mainItem = contentArea
+    ? activeContextPanels.get(contentArea)?.() || null
+    : null;
+  const mainKey = mainItem ? getConversationKey(mainItem) : 0;
+  const mainSelected = selectedTextCache.get(mainKey) || [];
+  return {
+    open: Boolean(column && !column.hidden),
+    toggleExpanded: toggle?.getAttribute("aria-expanded") ?? null,
+    toggleLabel: toggle?.getAttribute("aria-label") || "",
+    toggleControls: toggle?.getAttribute("aria-controls") ?? null,
+    view: column?.dataset.sideView || "",
+    activeTab:
+      query(
+        column,
+        ".llm-standalone-side-panel-tab.active:not([data-side-tab-kind='newtab'])",
+      )?.dataset.sideTabId || null,
+    stripTabCount: queryAll(column, ".llm-standalone-side-panel-tab").length,
+    newTabTab: (() => {
+      const tab = query(
+        column,
+        ".llm-standalone-side-panel-tab[data-side-tab-kind='newtab']",
+      );
+      const close = query(tab, ".llm-standalone-side-panel-tab-close");
+      return {
+        present: visible(tab),
+        active: Boolean(tab?.classList.contains("active")),
+        title: textOf(query(tab, ".llm-standalone-side-panel-tab-title")),
+        closeVisible: visible(close),
+        /** Its index among all strip tabs, the real ones first. */
+        index: queryAll(column, ".llm-standalone-side-panel-tab").indexOf(
+          tab as HTMLElement,
+        ),
+      };
+    })(),
+    tabs: queryAll(
+      column,
+      ".llm-standalone-side-panel-tab:not([data-side-tab-kind='newtab'])",
+    ).map((tab) => {
+      const close = query(tab, ".llm-standalone-side-panel-tab-close");
+      return {
+        id: tab.dataset.sideTabId || "",
+        kind: tab.dataset.sideTabKind || "",
+        title: textOf(query(tab, ".llm-standalone-side-panel-tab-title")),
+        active: tab.classList.contains("active"),
+        closeVisible: Boolean(
+          close &&
+          win &&
+          visible(close) &&
+          win.getComputedStyle(close)?.visibility !== "hidden",
+        ),
+      };
+    }),
+    newTabButton: (() => {
+      const button = query(
+        column,
+        ".llm-standalone-side-panel-bar > .llm-standalone-side-panel-icon-new-tab",
+      );
+      return {
+        visible: visible(button),
+        pressed: button?.getAttribute("aria-pressed") === "true",
+      };
+    })(),
+    panelConfirm: (() => {
+      const card = query(column, ".llm-side-panel-close-confirm");
+      return {
+        visible: visible(card),
+        text: textOf(query(card, ".llm-agent-hitl-description")),
+      };
+    })(),
+    titleText: textOf(
+      queryAll(column, ".llm-standalone-content-title-text").find(visible),
+    ),
+    design: (() => {
+      const metrics = (element: HTMLElement | null | undefined) => {
+        if (!element || !win || !visible(element)) return null;
+        const style = win.getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return {
+          fontSize: style?.fontSize || "",
+          fontWeight: style?.fontWeight || "",
+          topPx: rect.top,
+          heightPx: rect.height,
+        };
+      };
+      const firstVisible = (root: ParentNode | null, selector: string) =>
+        queryAll(root, selector).find(visible) || null;
+      const mainScale = (element: HTMLElement | null) =>
+        element && win
+          ? (
+              win
+                .getComputedStyle(element)
+                ?.getPropertyValue("--llm-font-scale") || ""
+            ).trim()
+          : "";
+      return {
+        mainTitle: metrics(
+          firstVisible(contentWrapper, ".llm-standalone-content-title-text"),
+        ),
+        sideTitle: metrics(
+          firstVisible(column, ".llm-standalone-content-title-text"),
+        ),
+        tabRowHeightPx:
+          query(doc, ".llm-standalone-tab-row")?.getBoundingClientRect()
+            .height || 0,
+        barHeightPx:
+          query(
+            column,
+            ".llm-standalone-side-panel-bar",
+          )?.getBoundingClientRect().height || 0,
+        navRow: metrics(
+          firstVisible(doc, ".llm-standalone-sidebar .llm-standalone-nav-row"),
+        ),
+        launchRow: metrics(firstVisible(column, "[data-side-launch]")),
+        startTitle: metrics(firstVisible(column, ".llm-start-page-title")),
+        newTabPage: (() => {
+          const root = firstVisible(
+            column,
+            ".llm-standalone-side-panel-newtab",
+          );
+          const title = query(root, ".llm-start-page-title");
+          const subtitle = query(root, ".llm-start-page-subtitle");
+          const nav = query(root, ".llm-standalone-side-panel-newtab-nav");
+          if (!win || !root || !title || !nav) return null;
+          const box = root.getBoundingClientRect();
+          const top = title.getBoundingClientRect().top;
+          const navRect = nav.getBoundingClientRect();
+          return {
+            title: textOf(title),
+            subtitle: textOf(subtitle),
+            subtitleFontStyle:
+              (subtitle && win.getComputedStyle(subtitle)?.fontStyle) || "",
+            /** Content centre minus the page's centre. */
+            centreDxPx:
+              navRect.left + navRect.width / 2 - (box.left + box.width / 2),
+            centreDyPx: (top + navRect.bottom) / 2 - (box.top + box.height / 2),
+            rowLefts: queryAll(nav, "[data-side-launch]").map(
+              (row) => row.getBoundingClientRect().left,
+            ),
+            titleTopPx: top,
+            subtitleTopPx: subtitle?.getBoundingClientRect().top ?? null,
+            mainTitleTopPx:
+              firstVisible(
+                contentWrapper,
+                ".llm-start-page-title",
+              )?.getBoundingClientRect().top ?? null,
+            mainSubtitleTopPx:
+              firstVisible(
+                contentWrapper,
+                ".llm-start-page-subtitle",
+              )?.getBoundingClientRect().top ?? null,
+          };
+        })(),
+        dayLabel: metrics(
+          firstVisible(
+            doc,
+            ".llm-standalone-sidebar .llm-standalone-day-label",
+          ),
+        ),
+        sectionLabel: null,
+        mainFontScale: mainScale(query(contentArea, "#llm-main")),
+        sideFontScales: queryAll(column, "#llm-main").map(mainScale),
+        mainTabs: segmentedMetrics(
+          win,
+          query(doc, ".llm-standalone-tab-row .llm-standalone-tab-group"),
+        ),
+        browserTabs: (() => {
+          const strip = query(column, ".llm-standalone-side-panel-tabs");
+          const bar = query(column, ".llm-standalone-side-panel-bar");
+          const toggle = query(doc, ".llm-standalone-side-panel-toggle");
+          const viewHost = query(column, ".llm-standalone-side-panel-view");
+          if (!win || !strip || !bar || !toggle || !viewHost || !column)
+            return null;
+          if (!visible(strip)) return null;
+          const flare = (tab: HTMLElement, pseudo: string) => {
+            const style = win.getComputedStyle(tab, pseudo);
+            return {
+              widthPx: Number.parseFloat(style?.width || "") || 0,
+              image: style?.backgroundImage || "",
+            };
+          };
+          const middle = (element: Element | null | undefined) => {
+            if (!element || !(element as HTMLElement).getClientRects().length)
+              return null;
+            const rect = element.getBoundingClientRect();
+            return rect.top + rect.height / 2;
+          };
+          return {
+            toggleTopPx: toggle.getBoundingClientRect().top,
+            toggleBottomPx: toggle.getBoundingClientRect().bottom,
+            navToggleBottomPx: (() => {
+              const navToggle = query(doc, ".llm-standalone-nav-toggle");
+              return navToggle && visible(navToggle)
+                ? navToggle.getBoundingClientRect().bottom
+                : null;
+            })(),
+            mainSwitchTopPx:
+              query(
+                doc,
+                ".llm-standalone-tab-row .llm-standalone-tab-group",
+              )?.getBoundingClientRect().top ?? 0,
+            centres: {
+              tabRow: middle(query(doc, ".llm-standalone-tab-row")) ?? 0,
+              toggle: middle(toggle) ?? 0,
+              mainSwitch:
+                middle(
+                  query(
+                    doc,
+                    ".llm-standalone-tab-row .llm-standalone-tab-group",
+                  ),
+                ) ?? 0,
+              strip: middle(bar) ?? 0,
+              newTabButton:
+                middle(
+                  query(
+                    bar,
+                    ":scope > .llm-standalone-side-panel-icon-new-tab",
+                  ),
+                ) ?? 0,
+              closeButton:
+                middle(query(bar, ".llm-standalone-side-panel-close")) ?? 0,
+              tabs: queryAll(strip, ".llm-standalone-side-panel-tab").map(
+                (tab) => ({
+                  icon:
+                    middle(query(tab, ".llm-standalone-side-panel-tab-icon")) ??
+                    0,
+                  title:
+                    middle(
+                      query(tab, ".llm-standalone-side-panel-tab-title"),
+                    ) ?? 0,
+                  close: middle(
+                    query(tab, ".llm-standalone-side-panel-tab-close"),
+                  ),
+                }),
+              ),
+            },
+            panelLeftPx: column.getBoundingClientRect().left,
+            stripTopPx: bar.getBoundingClientRect().top,
+            stripBottomPx: bar.getBoundingClientRect().bottom,
+            tabRowTopPx:
+              query(doc, ".llm-standalone-tab-row")?.getBoundingClientRect()
+                .top || 0,
+            tabRowBottomPx:
+              query(doc, ".llm-standalone-tab-row")?.getBoundingClientRect()
+                .bottom || 0,
+            stripBackground: win.getComputedStyle(bar)?.backgroundColor || "",
+            contentTopPx: viewHost.getBoundingClientRect().top,
+            tabs: queryAll(strip, ".llm-standalone-side-panel-tab").map(
+              (tab) => {
+                const rect = tab.getBoundingClientRect();
+                const style = win.getComputedStyle(tab);
+                return {
+                  leftPx: rect.left,
+                  rightPx: rect.right,
+                  topPx: rect.top,
+                  bottomPx: rect.bottom,
+                  active: tab.classList.contains("active"),
+                  background: style?.backgroundColor || "",
+                  color: style?.color || "",
+                  radius: `${style?.borderTopLeftRadius} ${style?.borderTopRightRadius} ${style?.borderBottomRightRadius} ${style?.borderBottomLeftRadius}`,
+                  flareBefore: flare(tab, "::before"),
+                  flareAfter: flare(tab, "::after"),
+                };
+              },
+            ),
+          };
+        })(),
+        sideChips: readHistoryChipColors(win, column),
+        searchField: (() => {
+          const field = firstVisible(
+            column,
+            ".llm-standalone-side-panel-search-row .llm-standalone-search-header",
+          );
+          if (!field || !win) return null;
+          const style = win.getComputedStyle(field);
+          const rect = field.getBoundingClientRect();
+          return {
+            topPx: rect.top,
+            heightPx: rect.height,
+            hasLens: Boolean(
+              field.querySelector(".llm-standalone-nav-icon-search"),
+            ),
+            background: style?.backgroundColor || "",
+            placeholder:
+              query<HTMLInputElement>(field, "input")?.placeholder || "",
+          };
+        })(),
+      };
+    })(),
+    panelWidthPx: column?.getBoundingClientRect().width || 0,
+    splitter: (() => {
+      const splitter = query(doc, ".llm-standalone-side-panel-resizer");
+      return {
+        visible: visible(splitter),
+        widthPx: splitter?.getBoundingClientRect().width || 0,
+        lineColor:
+          (splitter &&
+            win?.getComputedStyle(splitter, "::before")?.backgroundColor) ||
+          "",
+        cursor: (splitter && win?.getComputedStyle(splitter)?.cursor) || "",
+      };
+    })(),
+    panelBackground:
+      (column && win?.getComputedStyle(column)?.backgroundColor) || "",
+    mainBackground:
+      (contentWrapper &&
+        win?.getComputedStyle(contentWrapper)?.backgroundColor) ||
+      "",
+    mainContentWidthPx: contentWrapper?.getBoundingClientRect().width || 0,
+    window: {
+      outerWidth: win?.outerWidth || 0,
+      screenX: win?.screenX || 0,
+      screenY: win?.screenY || 0,
+      availLeft: Number((win?.screen as any)?.availLeft) || 0,
+      availWidth: win?.screen?.availWidth || 0,
+    },
+    sidebarState:
+      (query(doc, ".llm-standalone-sidebar") as HTMLElement | null)?.dataset
+        .sidebarState || "",
+    launchRows: queryAll(column, ".llm-standalone-side-panel-launch-row").map(
+      (row) => row.dataset.sideLaunch || "",
+    ),
+    historyKeys: visible(query(column, ".llm-standalone-side-panel-history"))
+      ? keysIn(query(column, ".llm-standalone-side-panel-history"))
+      : [],
+    sideChats: queryAll(column, ".llm-standalone-side-panel-chat").map(
+      (root) => {
+        const body = query(root, ".llm-standalone-side-body");
+        return {
+          tabId: root.dataset.sideTabId || "",
+          conversationKey: Number(
+            query(body, "#llm-main")?.dataset.itemId || 0,
+          ),
+          messageTexts: assistantMessageTexts(body),
+          shown: !root.hidden,
+        };
+      },
+    ),
+    readOnly:
+      readOnlyRoot && readOnlyBody && !readOnlyRoot.hidden
+        ? {
+            title: textOf(
+              query(readOnlyRoot, ".llm-standalone-content-title-text"),
+            ),
+            pill: textOf(
+              query(readOnlyRoot, ".llm-standalone-side-panel-pill"),
+            ),
+            conversationKey: Number(
+              query(readOnlyBody, "#llm-main")?.dataset.itemId || 0,
+            ),
+            messageTexts: assistantMessageTexts(readOnlyBody),
+            inputDisabled: Boolean(readOnlyInput?.disabled),
+            placeholder: readOnlyInput?.placeholder || "",
+            actionButtons: queryAll(
+              readOnlyBody,
+              "[data-side-read-only-action]",
+            ).map((button) => button.dataset.sideReadOnlyAction || ""),
+            statusText: textOf(query(readOnlyBody, "#llm-status")),
+            editableBubbles: countIn(readOnlyBody, ".llm-bubble-editable"),
+            retryButtons: countIn(readOnlyBody, ".llm-message-action-retry"),
+            deleteButtons: countIn(readOnlyBody, ".llm-message-action-delete"),
+            forkButtons: countIn(readOnlyBody, ".llm-message-action-fork"),
+            quoteButtons: countIn(
+              readOnlyBody,
+              ".llm-message-action-quote-main",
+            ),
+            copyButtons: countIn(readOnlyBody, ".llm-message-action-copy"),
+            composer: readComposerMetrics(win, readOnlyBody),
+          }
+        : null,
+    sideChat:
+      sideRoot && sideBody
+        ? {
+            conversationKey: Number(sidePanelRoot?.dataset.itemId || 0),
+            conversationKind: sidePanelRoot?.dataset.conversationKind || "",
+            messageTexts: assistantMessageTexts(sideBody),
+            pill: textOf(query(sideRoot, ".llm-standalone-side-panel-pill")),
+            placeholder: sideInput?.placeholder || "",
+            statusText: textOf(query(sideBody, "#llm-status")),
+            inputHeightPx: sideInput?.getBoundingClientRect().height || 0,
+            sendMainButtons: countIn(sideBody, ".llm-message-action-send-main"),
+            retryButtons: countIn(sideBody, ".llm-message-action-retry"),
+            editableBubbles: countIn(sideBody, ".llm-bubble-editable"),
+            forkButtons: countIn(sideBody, ".llm-message-action-fork"),
+            deleteButtons: countIn(sideBody, ".llm-message-action-delete"),
+            contextNotes: queryAll(sideBody, ".llm-side-chat-context-note").map(
+              (note) => textOf(note),
+            ),
+            selectedContextTexts: (
+              selectedTextCache.get(
+                Number(sidePanelRoot?.dataset.itemId || 0),
+              ) || []
+            ).map((entry) => entry.text),
+            confirmVisible: Boolean(confirm),
+            confirmText: textOf(query(confirm, ".llm-agent-hitl-description")),
+            clearDisabled: Boolean(
+              query<HTMLButtonElement>(
+                sideRoot,
+                ".llm-standalone-side-panel-icon-clear",
+              )?.disabled,
+            ),
+            composer: readComposerMetrics(win, sideBody),
+          }
+        : null,
+    main: {
+      conversationKey: mainKey,
+      inputHeightPx: mainInput?.getBoundingClientRect().height || 0,
+      statusText: textOf(query(contentArea, "#llm-status")),
+      selectedContextSources: mainSelected.map((entry) => String(entry.source)),
+      selectedContextTexts: mainSelected.map((entry) => entry.text),
+      askSideButtons: countIn(contentArea, ".llm-message-action-ask-side"),
+      composer: readComposerMetrics(win, contentArea),
+    },
+  };
+}
+
+async function getStandaloneSidePanelDiagnostics(): Promise<WorkflowTestStandaloneSidePanelDiagnostics> {
+  assertWorkflowTestEnabled();
+  await waitForStandaloneReady();
+  return readStandaloneSidePanelDiagnostics();
+}
+
+const STANDALONE_SIDE_PANEL_CONTROL_SELECTORS: Record<
+  WorkflowTestStandaloneSidePanelControl,
+  string
+> = {
+  toggle: ".llm-standalone-side-panel-toggle",
+  close: ".llm-standalone-side-panel-bar .llm-standalone-side-panel-close",
+  "new-tab":
+    ".llm-standalone-side-panel-bar > .llm-standalone-side-panel-icon-new-tab",
+  "newtab-tab": ".llm-standalone-side-panel-tab[data-side-tab-kind='newtab']",
+  "newtab-tab-close":
+    ".llm-standalone-side-panel-tab[data-side-tab-kind='newtab'] .llm-standalone-side-panel-tab-close",
+  "new-sidechat":
+    ".llm-standalone-side-panel-newtab:not([hidden]) [data-side-launch='sidechat']",
+  "new-history":
+    ".llm-standalone-side-panel-newtab:not([hidden]) [data-side-launch='history']",
+  clear:
+    ".llm-standalone-side-panel-chat:not([hidden]) .llm-standalone-side-panel-icon-clear",
+  "confirm-keep":
+    ".llm-standalone-side-panel-chat:not([hidden]) .llm-side-chat-close-confirm [data-confirm-action='keep']",
+  "confirm-send-last":
+    ".llm-standalone-side-panel-chat:not([hidden]) .llm-side-chat-close-confirm [data-confirm-action='send-last']",
+  "confirm-discard":
+    ".llm-standalone-side-panel-chat:not([hidden]) .llm-side-chat-close-confirm [data-confirm-action='discard']",
+  "panel-confirm-keep":
+    ".llm-side-panel-close-confirm [data-confirm-action='panel-keep']",
+  "panel-confirm-discard":
+    ".llm-side-panel-close-confirm [data-confirm-action='panel-discard']",
+  "readonly-add-paper":
+    ".llm-standalone-side-panel-readonly:not([hidden]) [data-side-read-only-action='add-paper']",
+  "readonly-open-main":
+    ".llm-standalone-side-panel-readonly:not([hidden]) [data-side-read-only-action='open-main']",
+};
+
+async function clickStandaloneSidePanelControl(
+  control: WorkflowTestStandaloneSidePanelControl,
+): Promise<WorkflowTestStandaloneSidePanelDiagnostics> {
+  assertWorkflowTestEnabled();
+  const doc = await waitForStandaloneReady();
+  const selector = STANDALONE_SIDE_PANEL_CONTROL_SELECTORS[control];
+  const target = doc.querySelector(selector) as HTMLElement | null;
+  if (!target)
+    throw new Error(`Side panel control ${control} was not rendered`);
+  target.click();
+  await Zotero.Promise.delay(250);
+  return readStandaloneSidePanelDiagnostics();
+}
+
+/** Slows (or restores, with null) the side panel's open/close slide. */
+function setStandaloneSidePanelSlideDuration(durationMs: number | null): void {
+  assertWorkflowTestEnabled();
+  setStandaloneSidePanelSlideDurationForTest(durationMs);
+}
+
+/**
+ * Clicks a side panel control and samples every animation frame for
+ * `sampleMs`: the window's width and position, the main column's and the
+ * panel's widths, and whether the panel still shows its tabs.
+ */
+async function recordStandaloneSidePanelSlide(
+  control: WorkflowTestStandaloneSidePanelControl,
+  sampleMs = 700,
+): Promise<WorkflowTestStandaloneSidePanelSlideFrame[]> {
+  assertWorkflowTestEnabled();
+  const doc = await waitForStandaloneReady();
+  const win = doc.defaultView!;
+  const target = doc.querySelector(
+    STANDALONE_SIDE_PANEL_CONTROL_SELECTORS[control],
+  ) as HTMLElement | null;
+  if (!target)
+    throw new Error(`Side panel control ${control} was not rendered`);
+  const main = doc.querySelector(
+    ".llm-standalone-content-wrapper",
+  ) as HTMLElement | null;
+  const column = doc.querySelector(
+    ".llm-standalone-side-panel",
+  ) as HTMLElement | null;
+  const frames: WorkflowTestStandaloneSidePanelSlideFrame[] = [];
+  const startedAt = win.performance.now();
+  const sample = () => {
+    const shown = Boolean(
+      column && !column.hidden && column.getClientRects().length,
+    );
+    frames.push({
+      timeMs: win.performance.now() - startedAt,
+      outerWidth: win.outerWidth,
+      innerWidth: win.innerWidth,
+      screenX: win.screenX,
+      screenY: win.screenY,
+      mainWidthPx: main?.getBoundingClientRect().width || 0,
+      mainLeftPx: main?.getBoundingClientRect().left || 0,
+      columnsScrollLeft:
+        (doc.querySelector(".llm-standalone-lower") as HTMLElement | null)
+          ?.scrollLeft || 0,
+      panelWidthPx: shown ? column!.getBoundingClientRect().width : 0,
+      panelLeftPx: shown ? column!.getBoundingClientRect().left : 0,
+      panelShown: shown,
+      panelTabCount: shown
+        ? column!.querySelectorAll(".llm-standalone-side-panel-tab").length
+        : 0,
+    });
+  };
+  sample();
+  target.click();
+  await new Promise<void>((resolve) => {
+    const step = () => {
+      sample();
+      if (win.performance.now() - startedAt >= sampleMs) resolve();
+      else win.requestAnimationFrame(step);
+    };
+    win.requestAnimationFrame(step);
+  });
+  return frames;
+}
+
+async function dragStandaloneSidePanelSplitter(
+  deltaX: number,
+): Promise<WorkflowTestStandaloneSidePanelDiagnostics> {
+  assertWorkflowTestEnabled();
+  const doc = await waitForStandaloneReady();
+  const win = doc.defaultView!;
+  const splitter = doc.querySelector(
+    ".llm-standalone-side-panel-resizer",
+  ) as HTMLElement | null;
+  if (!splitter) throw new Error("The side panel divider was not rendered");
+  const startX = 600;
+  splitter.dispatchEvent(
+    new win.MouseEvent("mousedown", {
+      bubbles: true,
+      button: 0,
+      screenX: startX,
+    }),
+  );
+  win.dispatchEvent(
+    new win.MouseEvent("mousemove", {
+      bubbles: true,
+      screenX: startX + deltaX,
+    }),
+  );
+  win.dispatchEvent(
+    new win.MouseEvent("mouseup", { bubbles: true, screenX: startX + deltaX }),
+  );
+  await Zotero.Promise.delay(100);
+  return readStandaloneSidePanelDiagnostics();
+}
+
+async function clickStandaloneSidePanelTab(
+  index: number,
+  part: "tab" | "close" = "tab",
+): Promise<WorkflowTestStandaloneSidePanelDiagnostics> {
+  assertWorkflowTestEnabled();
+  const doc = await waitForStandaloneReady();
+  const tab = doc.querySelectorAll(
+    ".llm-standalone-side-panel-tab:not([data-side-tab-kind='newtab'])",
+  )[index] as HTMLElement | undefined;
+  if (!tab) {
+    throw new Error(
+      `Side panel tab ${index} was not rendered: ${JSON.stringify(readStandaloneSidePanelDiagnostics().tabs)}`,
+    );
+  }
+  const target =
+    part === "close"
+      ? (tab.querySelector(
+          ".llm-standalone-side-panel-tab-close",
+        ) as HTMLElement | null)
+      : tab;
+  if (!target) throw new Error(`Side panel tab ${index} has no ${part}`);
+  target.click();
+  await Zotero.Promise.delay(300);
+  return readStandaloneSidePanelDiagnostics();
+}
+
+async function clickStandaloneSidePanelHistoryRow(
+  conversationKey: number,
+): Promise<WorkflowTestStandaloneSidePanelDiagnostics> {
+  assertWorkflowTestEnabled();
+  const doc = await waitForStandaloneReady();
+  const list = "History tab";
+  const selector = `.llm-standalone-side-panel-history:not([hidden]) .llm-standalone-search-item[data-conversation-key='${Math.floor(conversationKey)}']`;
+  const deadline = Date.now() + 5000;
+  let row = doc.querySelector(selector) as HTMLElement | null;
+  while (!row && Date.now() < deadline) {
+    await Zotero.Promise.delay(50);
+    row = doc.querySelector(selector) as HTMLElement | null;
+  }
+  if (!row) {
+    throw new Error(
+      `Side panel ${list} row ${conversationKey} was not rendered: ${JSON.stringify(readStandaloneSidePanelDiagnostics())}`,
+    );
+  }
+  row.click();
+  await Zotero.Promise.delay(400);
+  return readStandaloneSidePanelDiagnostics();
+}
+
+function resolveStandaloneChatScopeBody(
+  doc: Document,
+  scope: "main" | "readonly" | "sidechat",
+): HTMLElement | null {
+  if (scope === "main") {
+    return doc.querySelector(".llm-standalone-content") as HTMLElement | null;
+  }
+  // The shown tab of that kind.
+  return doc.querySelector(
+    scope === "readonly"
+      ? ".llm-standalone-side-panel-readonly:not([hidden]) .llm-standalone-side-body"
+      : ".llm-standalone-side-panel-chat:not([hidden]) .llm-standalone-side-body",
+  ) as HTMLElement | null;
+}
+
+/** Forgets a non-active conversation's in-memory history (stored rows stay). */
+async function evictStandaloneConversationFromMemory(
+  conversationKey: number,
+): Promise<void> {
+  assertWorkflowTestEnabled();
+  chatHistory.delete(conversationKey);
+  loadedConversationKeys.delete(conversationKey);
+  readOnlyBorrowedConversationKeys.delete(conversationKey);
+}
+
+/**
+ * While a past chat is open read-only in the side panel, runs the real
+ * conversation load for the same key (as the main chat would) and reports
+ * whether the read-only display copy was replaced by a real load.
+ */
+async function probeStandaloneReadOnlyBorrowedLoad(
+  paperItemId: number,
+): Promise<{
+  conversationKey: number;
+  borrowedBefore: boolean;
+  loadedBefore: boolean;
+  borrowedAfter: boolean;
+  loadedAfter: boolean;
+}> {
+  assertWorkflowTestEnabled();
+  const doc = await waitForStandaloneReady();
+  const body = resolveStandaloneChatScopeBody(doc, "readonly");
+  const keyText = (body?.querySelector("#llm-main") as HTMLElement | null)
+    ?.dataset.itemId;
+  const conversationKey = Number(keyText || 0);
+  const paper = Zotero.Items.get(paperItemId) as Zotero.Item | null;
+  if (!body || !conversationKey || !paper) {
+    throw new Error("No read-only view is open");
+  }
+  // The same portal item the window builds for this key's main-chat load.
+  const item = createPaperPortalItem(paper, conversationKey, 1);
+  const borrowedBefore = readOnlyBorrowedConversationKeys.has(conversationKey);
+  const loadedBefore = loadedConversationKeys.has(conversationKey);
+  await ensureConversationLoaded(item);
+  return {
+    conversationKey,
+    borrowedBefore,
+    loadedBefore,
+    borrowedAfter: readOnlyBorrowedConversationKeys.has(conversationKey),
+    loadedAfter: loadedConversationKeys.has(conversationKey),
+  };
+}
+
+async function clickStandaloneChatMessageAction(
+  scope: "main" | "readonly" | "sidechat",
+  actionClass: string,
+): Promise<WorkflowTestStandaloneSidePanelDiagnostics> {
+  assertWorkflowTestEnabled();
+  const doc = await waitForStandaloneReady();
+  const body = resolveStandaloneChatScopeBody(doc, scope);
+  const buttons = Array.from(
+    body?.querySelectorAll(`.${actionClass}`) || [],
+  ) as HTMLElement[];
+  const button = buttons[buttons.length - 1];
+  if (!button) {
+    throw new Error(`No ${actionClass} button in the ${scope} chat`);
+  }
+  button.click();
+  await Zotero.Promise.delay(300);
+  return readStandaloneSidePanelDiagnostics();
+}
+
+async function sendStandaloneSideChat(text: string): Promise<void> {
+  assertWorkflowTestEnabled();
+  const doc = await waitForStandaloneReady();
+  const body = resolveStandaloneChatScopeBody(doc, "sidechat");
+  const input = body?.querySelector("#llm-input") as HTMLTextAreaElement | null;
+  const send = body?.querySelector("#llm-send") as HTMLButtonElement | null;
+  if (!body || !input || !send) {
+    throw new Error("The side chat composer was not rendered");
+  }
+  input.value = text;
+  const EventCtor = doc.defaultView?.Event ?? Event;
+  input.dispatchEvent(new EventCtor("input", { bubbles: true }));
+  const startedAt = Date.now();
+  while (send.disabled && Date.now() - startedAt < 5000) {
+    await Zotero.Promise.delay(25);
+  }
+  send.click();
+}
+
+async function openStandaloneSlashSideChatItem(): Promise<{
+  visible: boolean;
+  disabled: boolean;
+  hint: string;
+}> {
+  assertWorkflowTestEnabled();
+  const { contentArea } = await ensureStandaloneWorkflowPanelReady();
+  dispatchWorkflowClick(contentArea, "#llm-upload-file", "Slash menu button");
+  await Zotero.Promise.delay(150);
+  const option = contentArea.querySelector(
+    "#llm-slash-side-chat-option",
+  ) as HTMLButtonElement | null;
+  if (!option) throw new Error("The Add side chat item was not rendered");
+  return {
+    visible:
+      option.style.display !== "none" && option.getClientRects().length > 0,
+    disabled: option.disabled,
+    hint: (
+      option.querySelector(".llm-action-picker-hint")?.textContent || ""
+    ).trim(),
+  };
+}
+
+async function clickStandaloneSlashSideChatItem(): Promise<WorkflowTestStandaloneSidePanelDiagnostics> {
+  assertWorkflowTestEnabled();
+  const { contentArea } = await ensureStandaloneWorkflowPanelReady();
+  dispatchWorkflowClick(
+    contentArea,
+    "#llm-slash-side-chat-option",
+    "Add side chat item",
+  );
+  await Zotero.Promise.delay(250);
+  return readStandaloneSidePanelDiagnostics();
+}
+
+/**
+ * Types "/" in the panel's composer, clicks "Add past conversation", reads
+ * the rows of the picker, and clicks the row titled `input.title` when given.
+ */
+async function pickPastConversationInPanel(
+  panelId: string,
+  input: { title?: string; rowIndex?: number } = {},
+): Promise<{
+  slashItemVisible: boolean;
+  rowTitles: string[];
+  rowLabels: string[];
+  /** The meta line under each row: scope label and time. */
+  rowMetas: string[];
+  /** Each row's small runtime label ("Codex", "Claude", or "" for Agent). */
+  rowRuntimeLabels: string[];
+  picked: boolean;
+}> {
+  assertWorkflowTestEnabled();
+  const panel = getPanel(panelId);
+  const body = panel.body as HTMLElement;
+  const composer = body.querySelector(
+    "#llm-input",
+  ) as HTMLTextAreaElement | null;
+  if (!composer) throw new Error("Workflow panel composer was not rendered");
+  composer.value = "/";
+  const EventCtor = body.ownerDocument.defaultView?.Event ?? Event;
+  composer.dispatchEvent(new EventCtor("input", { bubbles: true }));
+  await Zotero.Promise.delay(150);
+  const option = body.querySelector(
+    "#llm-slash-past-conversation-option",
+  ) as HTMLElement | null;
+  if (!option) throw new Error("The Add past conversation item is missing");
+  const slashItemVisible =
+    option.style.display !== "none" && option.getClientRects().length > 0;
+  dispatchWorkflowClick(
+    body,
+    "#llm-slash-past-conversation-option",
+    "Add past conversation item",
+  );
+  const openPicker = () =>
+    Array.from(body.querySelectorAll(".llm-standalone-search-overlay")).find(
+      (overlay) => (overlay as HTMLElement).style.display !== "none",
+    ) as HTMLElement | undefined;
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < 5000) {
+    const overlay = openPicker();
+    if (
+      overlay?.querySelector(
+        ".llm-standalone-search-item, .llm-standalone-search-empty",
+      )
+    ) {
+      break;
+    }
+    await Zotero.Promise.delay(25);
+  }
+  const overlay = openPicker();
+  const rows = Array.from(
+    overlay?.querySelectorAll(".llm-standalone-search-item") || [],
+  ) as HTMLElement[];
+  const textOf = (row: Element, selector: string) =>
+    (row.querySelector(selector)?.textContent || "").trim();
+  const rowTitles = rows.map((row) =>
+    textOf(row, ".llm-standalone-search-title"),
+  );
+  const rowLabels = rows.map((row) =>
+    textOf(row, ".llm-standalone-search-label"),
+  );
+  const rowMetas = rows.map((row) =>
+    textOf(row, ".llm-standalone-search-meta"),
+  );
+  const rowRuntimeLabels = rows.map((row) =>
+    textOf(row, ".llm-history-runtime-label"),
+  );
+  let picked = false;
+  if (input.title || input.rowIndex !== undefined) {
+    const index =
+      input.rowIndex !== undefined
+        ? input.rowIndex
+        : rowTitles.findIndex((title) => title.includes(input.title as string));
+    if (index >= 0 && index < rows.length) {
+      rows[index]!.click();
+      picked = true;
+      await Zotero.Promise.delay(250);
+    }
+  }
+  return {
+    slashItemVisible,
+    rowTitles,
+    rowLabels,
+    rowMetas,
+    rowRuntimeLabels,
+    picked,
+  };
+}
+
+/**
+ * Adds a past chat to the panel's latest user message the way past_chat_attach
+ * does: through the attach handler chat.ts registers, with via "agent". Then
+ * reads the refs back from the in-memory message and from the stored row.
+ */
+async function attachPastChatAsAgentInPanel(
+  panelId: string,
+  input: {
+    conversationKey: number;
+    title: string;
+    system?: ConversationSystem;
+  },
+): Promise<{
+  outcome: Awaited<ReturnType<typeof notifyPastChatAttached>>;
+  memoryRefs: AttachedConversationRef[];
+  storedRefs: AttachedConversationRef[];
+  diagnostics: WorkflowTestDiagnostics;
+}> {
+  assertWorkflowTestEnabled();
+  const panel = getPanel(panelId);
+  const item = activeContextPanels.get(panel.body)?.() || panel.item;
+  const conversationKey = getConversationKey(item);
+  if (!conversationKey) {
+    throw new Error("Workflow panel has no active conversation key");
+  }
+  const datasetSystem = (
+    panel.body.querySelector("#llm-main") as HTMLElement | null
+  )?.dataset.conversationSystem;
+  const conversationSystem: ConversationSystem =
+    datasetSystem === "codex" || datasetSystem === "claude_code"
+      ? datasetSystem
+      : "upstream";
+  const latestUser = [...(chatHistory.get(conversationKey) || [])]
+    .reverse()
+    .find((message) => message.role === "user");
+  if (!latestUser) throw new Error("Workflow panel has no user message");
+  const outcome = await notifyPastChatAttached({
+    conversationKey,
+    conversationSystem,
+    userMessageTimestamp: latestUser.timestamp,
+    ref: {
+      system: input.system || "upstream",
+      conversationKey: input.conversationKey,
+      title: input.title,
+      libraryID: item.libraryID,
+      via: "agent",
+    },
+  });
+  await Zotero.Promise.delay(100);
+  const stored =
+    conversationSystem === "codex"
+      ? await loadCodexConversation(conversationKey, 200)
+      : conversationSystem === "claude_code"
+        ? await loadClaudeConversation(conversationKey, 200)
+        : await loadConversation(conversationKey, 200);
+  const storedUser = [...stored]
+    .reverse()
+    .find((message) => message.role === "user");
+  return {
+    outcome,
+    memoryRefs: [...(latestUser.attachedConversations || [])],
+    storedRefs: [...(storedUser?.attachedConversations || [])],
+    diagnostics: await getDiagnostics(panelId),
+  };
+}
+
+async function getDiagnostics(
+  panelId?: string,
+): Promise<WorkflowTestDiagnostics> {
+  const panel = panelId ? panels.get(panelId) : undefined;
+  const body = panel?.body;
+  const panelRoot = body?.querySelector("#llm-main") as HTMLElement | null;
+  const mountedItem = body
+    ? activeContextPanels.get(body)?.() || panel?.item
+    : panel?.item;
+  const historyNewBtn = body?.querySelector(
+    "#llm-history-new",
+  ) as HTMLElement | null;
+  const historyToggleBtn = body?.querySelector(
+    "#llm-history-toggle",
+  ) as HTMLElement | null;
+  const chatBox = body?.querySelector("#llm-chat-box") as HTMLElement | null;
+  const statusBar = body?.querySelector(
+    ".llm-status-bar",
+  ) as HTMLElement | null;
+  const permissionControl = body?.querySelector(
+    "#llm-permission-control",
+  ) as HTMLElement | null;
+  const permissionButton = body?.querySelector(
+    "#llm-permission-toggle",
+  ) as HTMLElement | null;
+  const statusLine = body?.querySelector("#llm-status") as HTMLElement | null;
+  const contextGauge = body?.querySelector(
+    "#llm-context-gauge",
+  ) as HTMLElement | null;
+  const panelWin = body?.ownerDocument.defaultView;
+  const statusBarStyle =
+    panelWin && statusBar ? panelWin.getComputedStyle(statusBar) : null;
+  const permissionControlStyle =
+    panelWin && permissionControl
+      ? panelWin.getComputedStyle(permissionControl)
+      : null;
+  const permissionButtonStyle =
+    panelWin && permissionButton
+      ? panelWin.getComputedStyle(permissionButton)
+      : null;
+  const statusLineStyle =
+    panelWin && statusLine ? panelWin.getComputedStyle(statusLine) : null;
+  const panelRootStyle =
+    panelWin && panelRoot ? panelWin.getComputedStyle(panelRoot) : null;
+  const contextGaugeStyle =
+    panelWin && contextGauge ? panelWin.getComputedStyle(contextGauge) : null;
+  const contextGaugeInnerStyle =
+    panelWin && contextGauge
+      ? panelWin.getComputedStyle(contextGauge, "::after")
+      : null;
+  return {
+    panelId,
+    activeItemId: parsePositiveInt(mountedItem?.id),
+    conversationKey: mountedItem ? getConversationKey(mountedItem) : undefined,
+    panelConversationKey: parsePositiveInt(panelRoot?.dataset.itemId),
+    conversationKind: panelRoot?.dataset.conversationKind || undefined,
+    runtimeMode: panelRoot?.dataset.runtimeMode || undefined,
+    conversationSystem: panelRoot?.dataset.conversationSystem || undefined,
+    noteId: parsePositiveInt(panelRoot?.dataset.noteId),
+    noteKind: panelRoot?.dataset.noteKind || undefined,
+    noteParentItemId: parsePositiveInt(panelRoot?.dataset.noteParentItemId),
+    contextSnapshot: panel?.contextSnapshot,
+    chipText: Array.from(
+      body?.querySelectorAll(
+        "#llm-paper-context-preview .llm-paper-context-chip > .llm-paper-context-chip-header .llm-paper-context-chip-text",
+      ) || [],
+    ).map((node) => ((node as Element).textContent || "").trim()),
+    composerPaperContextKeys: Array.from(
+      body?.querySelectorAll(
+        "#llm-paper-context-preview .llm-paper-context-chip",
+      ) || [],
+    ).map((node) => {
+      const chip = node as HTMLElement;
+      return `${chip.dataset.paperItemId}:${chip.dataset.paperContextItemId}`;
+    }),
+    selectedContextLabels: Array.from(
+      body?.querySelectorAll(".llm-selected-context-meta") || [],
+    ).map((node) => ((node as Element).textContent || "").trim()),
+    composerCollectionLabels: Array.from(
+      body?.querySelectorAll(
+        "#llm-paper-context-preview .llm-collection-chip-title",
+      ) || [],
+    ).map((node) => ((node as Element).textContent || "").trim()),
+    composerTagLabels: Array.from(
+      body?.querySelectorAll(
+        "#llm-paper-context-preview .llm-tag-chip-title",
+      ) || [],
+    ).map((node) => ((node as Element).textContent || "").trim()),
+    composerAttachedConversationLabels: Array.from(
+      body?.querySelectorAll(
+        "#llm-paper-context-preview .llm-conversation-chip-title",
+      ) || [],
+    ).map((node) => ((node as Element).textContent || "").trim()),
+    sentContextBadgeLabels: Array.from(
+      body?.querySelectorAll("#llm-chat-box .llm-user-context-badges button") ||
+        [],
+    ).map((node) => ((node as Element).textContent || "").trim()),
+    sentContextItemLabels: Array.from(
+      body?.querySelectorAll("#llm-chat-box .llm-user-papers-item-title") || [],
+    ).map((node) => ((node as Element).textContent || "").trim()),
+    historyNewVisible: historyNewBtn
+      ? historyNewBtn.style.display !== "none"
+      : false,
+    historyToggleVisible: historyToggleBtn
+      ? historyToggleBtn.style.display !== "none"
+      : false,
+    runtimeSystemToggles: readRuntimeSystemToggles(
+      body,
+      ".llm-panel-runtime-system-controls",
+    ),
+    runtimeBadge: readRuntimeBadge(body),
+    webChatMode: panelRoot?.dataset.webchatMode === "true",
+    modelButtonDisabled: (
+      body?.querySelector("#llm-model-toggle") as HTMLButtonElement | null
+    )?.disabled,
+    inputValue: (
+      body?.querySelector("#llm-input") as HTMLTextAreaElement | null
+    )?.value,
+    statusText:
+      (body?.querySelector("#llm-status") as HTMLElement | null)?.textContent ||
+      undefined,
+    startPageActive: panelRoot?.dataset.startPageActive === "true",
+    statusBarVisible: Boolean(
+      statusBarStyle &&
+      statusBarStyle.display !== "none" &&
+      statusBarStyle.visibility !== "hidden",
+    ),
+    permissionControlVisible: Boolean(
+      permissionControlStyle &&
+      permissionControlStyle.display !== "none" &&
+      permissionControlStyle.visibility !== "hidden",
+    ),
+    permissionModeText: permissionButton?.textContent?.trim() || undefined,
+    permissionModeFontSize: permissionButtonStyle?.fontSize,
+    statusFontSize: statusLineStyle?.fontSize,
+    contextGaugeWidth: contextGaugeStyle
+      ? Number.parseFloat(contextGaugeStyle.width)
+      : undefined,
+    contextGaugeHeight: contextGaugeStyle
+      ? Number.parseFloat(contextGaugeStyle.height)
+      : undefined,
+    contextGaugeInnerWidth: contextGaugeInnerStyle
+      ? Number.parseFloat(contextGaugeInnerStyle.width)
+      : undefined,
+    contextGaugeInnerBackground: contextGaugeInnerStyle?.backgroundColor,
+    panelBackground: panelRootStyle?.backgroundColor,
+    tokenUsageText:
+      (
+        body?.querySelector("#llm-token-usage") as HTMLElement | null
+      )?.textContent?.trim() || undefined,
+    messageText: chatBox?.textContent?.trim() || undefined,
+    lastSend,
+    lastFinalRequest,
+  };
+}
+
+function countWorkflowReaderSelectionListeners(
+  readerAPI: ReaderSelectionTrackingReader<unknown>,
+): number {
+  return (readerAPI._registeredListeners || []).filter(
+    (listener) =>
+      listener.pluginID === config.addonID &&
+      listener.type === READER_TEXT_SELECTION_POPUP_EVENT,
+  ).length;
+}
+
+async function exerciseReaderSelectionTrackingRecovery(): Promise<WorkflowTestReaderSelectionTrackingDiagnostics> {
+  assertWorkflowTestEnabled();
+  const readerAPI = Zotero.Reader as ReaderSelectionTrackingReader<unknown>;
+  if (!Array.isArray(readerAPI._registeredListeners)) {
+    throw new Error("Zotero reader listener registry is unavailable");
+  }
+
+  const before = countWorkflowReaderSelectionListeners(readerAPI);
+  readerAPI._registeredListeners = readerAPI._registeredListeners.filter(
+    (listener) =>
+      listener.pluginID !== config.addonID ||
+      listener.type !== READER_TEXT_SELECTION_POPUP_EVENT,
+  );
+  const afterDrop = countWorkflowReaderSelectionListeners(readerAPI);
+  const startedAt = Date.now();
+  while (
+    countWorkflowReaderSelectionListeners(readerAPI) === 0 &&
+    Date.now() - startedAt < 2000
+  ) {
+    await Zotero.Promise.delay(25);
+  }
+  const afterHealthCheck = countWorkflowReaderSelectionListeners(readerAPI);
+  const markerPresent = Boolean(readerAPI.__llmSelectionTracking);
+  const markerLive = Boolean(
+    readerAPI.__llmSelectionTracking &&
+    (readerAPI._registeredListeners || []).some(
+      (listener) =>
+        listener.handler === readerAPI.__llmSelectionTracking?.handler,
+    ),
+  );
+  const elapsedMs = Date.now() - startedAt;
+
+  if (!afterHealthCheck) {
+    ensureMarkedReaderSelectionTrackingListener(readerAPI);
+  }
+  return {
+    before,
+    afterDrop,
+    afterHealthCheck,
+    markerPresent,
+    markerLive,
+    elapsedMs,
+  };
+}
+
+function findReaderForAttachment(
+  readerApi: { _readers?: _ZoteroTypes.ReaderInstance[] },
+  attachmentItemId: number,
+): _ZoteroTypes.ReaderInstance | null {
+  return (
+    (readerApi._readers || []).find(
+      (reader) =>
+        Number(reader?._item?.id || reader?.itemID || 0) === attachmentItemId,
+    ) || null
+  );
+}
+
+async function openWorkflowPdfReader(
+  attachmentItemId: number,
+  pageIndex: number,
+): Promise<_ZoteroTypes.ReaderInstance> {
+  const readerApi = Zotero.Reader as unknown as {
+    _readers?: _ZoteroTypes.ReaderInstance[];
+    open?: (
+      itemId: number,
+      location?: _ZoteroTypes.Reader.Location,
+    ) => Promise<void | _ZoteroTypes.ReaderInstance>;
+  };
+  if (typeof readerApi.open !== "function") {
+    throw new Error("Zotero.Reader.open is unavailable");
+  }
+  const opened = await readerApi.open(attachmentItemId, { pageIndex });
+  const startedAt = Date.now();
+  let reader =
+    opened &&
+    Number(opened?._item?.id || opened?.itemID || 0) === attachmentItemId
+      ? opened
+      : findReaderForAttachment(readerApi, attachmentItemId);
+  while (!reader && Date.now() - startedAt < 10_000) {
+    await Zotero.Promise.delay(25);
+    reader = findReaderForAttachment(readerApi, attachmentItemId);
+  }
+  if (!reader) {
+    throw new Error(
+      `Timed out opening workflow PDF reader ${attachmentItemId}`,
+    );
+  }
+  await reader._initPromise;
+  if (typeof reader.navigate === "function") {
+    await reader.navigate({ pageIndex });
+  }
+  return reader;
+}
+
+function findSelectionRangeOnPage(params: {
+  reader: _ZoteroTypes.ReaderInstance;
+  pageIndex: number;
+  selectedText: string;
+}): { doc: Document; range: Range } | null {
+  const pageNumber = params.pageIndex + 1;
+  for (const doc of collectReaderSelectionDocuments(params.reader)) {
+    const pages = Array.from(
+      doc.querySelectorAll(
+        `.page[data-page-number="${pageNumber}"], .page[data-page-index="${params.pageIndex}"], [data-page-number="${pageNumber}"], [data-page-index="${params.pageIndex}"]`,
+      ),
+    ) as Element[];
+    for (const page of pages) {
+      if (!page.textContent?.includes(params.selectedText)) continue;
+      const walker = doc.createTreeWalker(page, 4);
+      let node = walker.nextNode();
+      while (node) {
+        const value = node.nodeValue || "";
+        const start = value.indexOf(params.selectedText);
+        if (start >= 0) {
+          const range = doc.createRange();
+          range.setStart(node, start);
+          range.setEnd(node, start + params.selectedText.length);
+          return { doc, range };
+        }
+        node = walker.nextNode();
+      }
+    }
+  }
+  return null;
+}
+
+async function selectWorkflowPdfText(params: {
+  reader: _ZoteroTypes.ReaderInstance;
+  pageIndex: number;
+  selectedText: string;
+}): Promise<{ doc: Document; range: Range }> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < 10_000) {
+    const match = findSelectionRangeOnPage(params);
+    if (match) {
+      const selection = match.doc.defaultView?.getSelection?.();
+      selection?.removeAllRanges();
+      selection?.addRange(match.range);
+      if (selection?.toString().includes(params.selectedText)) return match;
+    }
+    await Zotero.Promise.delay(50);
+  }
+  const documents = collectReaderSelectionDocuments(params.reader).map(
+    (doc) => ({
+      url: doc.URL,
+      textLength: doc.body?.textContent?.length || 0,
+      containsSelection: Boolean(
+        doc.body?.textContent?.includes(params.selectedText),
+      ),
+      pageNumbers: (
+        Array.from(doc.querySelectorAll("[data-page-number]")) as Element[]
+      )
+        .slice(0, 10)
+        .map((node) => node.getAttribute("data-page-number")),
+      pageIndexes: (
+        Array.from(doc.querySelectorAll("[data-page-index]")) as Element[]
+      )
+        .slice(0, 10)
+        .map((node) => node.getAttribute("data-page-index")),
+    }),
+  );
+  throw new Error(
+    `Timed out selecting workflow PDF text on page ${params.pageIndex + 1}: ${JSON.stringify(
+      documents,
+    )}`,
+  );
+}
+
+async function waitForSelectedContext(params: {
+  conversationKey: number;
+  selectedText: string;
+  pageIndex: number;
+}): Promise<ReturnType<typeof getSelectedTextContextEntries>[number]> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < 5000) {
+    const match = getSelectedTextContextEntries(params.conversationKey).find(
+      (context) =>
+        context.text === params.selectedText &&
+        context.pageIndex === params.pageIndex,
+    );
+    if (match) return match;
+    await Zotero.Promise.delay(25);
+  }
+  throw new Error(
+    "Timed out waiting for Add Text to preserve the page locator",
+  );
+}
+
+async function waitForFinalRequest(
+  body: HTMLElement,
+): Promise<WorkflowTestFinalRequestSnapshot> {
+  const startedAt = Date.now();
+  while (!lastFinalRequest) {
+    if (Date.now() - startedAt > 15_000) {
+      const status = body.querySelector("#llm-status")?.textContent?.trim();
+      throw new Error(
+        `Timed out waiting for final workflow model request; status=${status || "<empty>"}`,
+      );
+    }
+    await Zotero.Promise.delay(25);
+  }
+  return lastFinalRequest;
+}
+
+async function closeWorkflowReader(
+  reader: _ZoteroTypes.ReaderInstance,
+): Promise<void> {
+  try {
+    const tabs = (
+      Zotero as unknown as {
+        Tabs?: { close?: (tabId: string) => Promise<unknown> | unknown };
+      }
+    ).Tabs;
+    if (reader.tabID && typeof tabs?.close === "function") {
+      await tabs.close(reader.tabID);
+    }
+  } catch (_error) {
+    void _error;
+  }
+}
+
+/**
+ * The reader UI document (resource://zotero/reader/reader.html). Zotero
+ * renders the text selection popup there and passes it as the
+ * renderTextSelectionPopup event's `doc`; the PDF text itself lives in a
+ * nested view iframe (viewer.html).
+ */
+function getWorkflowReaderUiDocument(
+  reader: _ZoteroTypes.ReaderInstance,
+): Document {
+  const candidate = reader as unknown as {
+    _iframeWindow?: Window | null;
+    _iframe?: HTMLIFrameElement | null;
+  };
+  const doc =
+    candidate._iframeWindow?.document || candidate._iframe?.contentDocument;
+  if (!doc) throw new Error("Workflow reader UI document is unavailable");
+  return doc;
+}
+
+async function dispatchWorkflowReaderAddTextPopup(input: {
+  reader: _ZoteroTypes.ReaderInstance;
+  pageIndex: number;
+  selectedText: string;
+}): Promise<{
+  addTextButtonLabel: string;
+  popupHost: HTMLElement;
+  /** The view document that holds the PDF text selection. */
+  selectionDoc: Document;
+  /** The reader UI document that hosts the popup, as in production. */
+  popupDoc: Document;
+}> {
+  const selected = await selectWorkflowPdfText(input);
+  const popupDoc = getWorkflowReaderUiDocument(input.reader);
+  const popupHost = popupDoc.createElement("div");
+  popupHost.dataset.workflowAddTextPopup = "true";
+  (popupDoc.body || popupDoc.documentElement).appendChild(popupHost);
+
+  const readerApi = Zotero.Reader as unknown as ReaderSelectionTrackingReader<
+    _ZoteroTypes.Reader.EventHandler<"renderTextSelectionPopup">
+  >;
+  const handler = readerApi.__llmSelectionTracking?.handler;
+  if (!handler) {
+    popupHost.remove();
+    throw new Error("Add Text reader selection handler is unavailable");
+  }
+  await handler({
+    reader: input.reader,
+    doc: popupDoc,
+    params: {
+      annotation: {
+        text: input.selectedText,
+        position: { pageIndex: input.pageIndex },
+      } as any,
+    },
+    append: (node: Node | string) => popupHost.append(node),
+    type: READER_TEXT_SELECTION_POPUP_EVENT,
+  });
+  const addTextButton = (
+    Array.from(popupHost.querySelectorAll("button")) as HTMLButtonElement[]
+  ).find((button) => button.textContent?.trim() === "Add Text");
+  if (!addTextButton) {
+    popupHost.remove();
+    throw new Error("Add Text button was not rendered in the reader popup");
+  }
+  const popupWindow = popupDoc.defaultView;
+  if (!popupWindow?.MouseEvent) {
+    popupHost.remove();
+    throw new Error("Workflow reader window does not expose MouseEvent");
+  }
+  addTextButton.dispatchEvent(
+    new popupWindow.MouseEvent(
+      "pointerdown",
+      cloneEventInitIntoWindow(
+        { bubbles: true, cancelable: true, button: 0 },
+        popupWindow,
+      ),
+    ),
+  );
+  return {
+    addTextButtonLabel: addTextButton.textContent?.trim() || "",
+    popupHost,
+    selectionDoc: selected.doc,
+    popupDoc,
+  };
+}
+
+async function exerciseReaderPopupActiveTabRouting(input: {
+  firstPanelId: string;
+  firstAttachmentItemId: number;
+  secondPanelId: string;
+  secondAttachmentItemId: number;
+  pageIndex: number;
+  selectedText: string;
+}): Promise<WorkflowTestReaderPopupRoutingDiagnostics> {
+  assertWorkflowTestEnabled();
+  const firstPanel = getPanel(input.firstPanelId);
+  const secondPanel = getPanel(input.secondPanelId);
+  const firstReader = await openWorkflowPdfReader(
+    input.firstAttachmentItemId,
+    0,
+  );
+  let secondReader: _ZoteroTypes.ReaderInstance | null = null;
+  let popupHost: HTMLElement | null = null;
+  let selectionDoc: Document | null = null;
+  try {
+    secondReader = await openWorkflowPdfReader(
+      input.secondAttachmentItemId,
+      input.pageIndex,
+    );
+    const mainDocument = Zotero.getMainWindow?.()?.document || null;
+    const firstReaderPanel = mainDocument
+      ? getReaderContextPanelForTab(mainDocument, firstReader.tabID)
+      : null;
+    const secondReaderPanel = mainDocument
+      ? getReaderContextPanelForTab(mainDocument, secondReader.tabID)
+      : null;
+    if (!firstReaderPanel || !secondReaderPanel) {
+      throw new Error("Workflow reader tabs do not expose distinct panels");
+    }
+    firstReaderPanel.appendChild(firstPanel.body);
+    secondReaderPanel.appendChild(secondPanel.body);
+
+    const popupAction = await dispatchWorkflowReaderAddTextPopup({
+      reader: secondReader,
+      pageIndex: input.pageIndex,
+      selectedText: input.selectedText,
+    });
+    selectionDoc = popupAction.selectionDoc;
+    popupHost = popupAction.popupHost;
+
+    const secondItem =
+      activeContextPanels.get(secondPanel.body)?.() || secondPanel.item;
+    await waitForSelectedContext({
+      conversationKey: getConversationKey(secondItem),
+      selectedText: input.selectedText,
+      pageIndex: input.pageIndex,
+    });
+    const firstItem =
+      activeContextPanels.get(firstPanel.body)?.() || firstPanel.item;
+    return {
+      firstReaderTabId: `${firstReader.tabID || ""}`,
+      secondReaderTabId: `${secondReader.tabID || ""}`,
+      addTextButtonLabel: popupAction.addTextButtonLabel,
+      firstConversationHasText: getSelectedTextContextEntries(
+        getConversationKey(firstItem),
+      ).some((context) => context.text === input.selectedText),
+      secondConversationHasText: getSelectedTextContextEntries(
+        getConversationKey(secondItem),
+      ).some((context) => context.text === input.selectedText),
+    };
+  } finally {
+    selectionDoc?.defaultView?.getSelection?.()?.removeAllRanges();
+    popupHost?.remove();
+    if (secondReader) await closeWorkflowReader(secondReader);
+    await closeWorkflowReader(firstReader);
+  }
+}
+
+/**
+ * Reader Add Text while the standalone window is open: the selection goes to
+ * the panel in the reader tab's own context pane, never to the window.
+ */
+async function exerciseReaderPopupStandaloneRouting(input: {
+  panelId: string;
+  attachmentItemId: number;
+  pageIndex: number;
+  selectedText: string;
+}): Promise<WorkflowTestReaderPopupStandaloneRoutingDiagnostics> {
+  assertWorkflowTestEnabled();
+  const readerPanel = getPanel(input.panelId);
+  const standaloneDoc = await waitForStandaloneReady();
+  const standaloneBody = standaloneDoc.querySelector(
+    ".llm-standalone-content",
+  ) as HTMLElement | null;
+  const standaloneItem = standaloneBody
+    ? activeContextPanels.get(standaloneBody)?.() || null
+    : null;
+  if (!standaloneBody || !standaloneItem) {
+    throw new Error("Standalone workflow chat panel is not mounted");
+  }
+  const standaloneConversationKey = getConversationKey(standaloneItem);
+  const reader = await openWorkflowPdfReader(
+    input.attachmentItemId,
+    input.pageIndex,
+  );
+  let popupHost: HTMLElement | null = null;
+  let selectionDoc: Document | null = null;
+  try {
+    const mainDocument = Zotero.getMainWindow?.()?.document || null;
+    const readerContextPanel = mainDocument
+      ? getReaderContextPanelForTab(mainDocument, reader.tabID)
+      : null;
+    if (!readerContextPanel) {
+      throw new Error("Workflow reader tab does not expose a context panel");
+    }
+    // First in the reader's pane, so routing picks it over any native panel
+    // in the pane that may show another conversation.
+    readerContextPanel.insertBefore(
+      readerPanel.body,
+      readerContextPanel.firstChild,
+    );
+    const readerItem =
+      activeContextPanels.get(readerPanel.body)?.() || readerPanel.item;
+    const readerConversationKey = getConversationKey(readerItem);
+
+    const popupAction = await dispatchWorkflowReaderAddTextPopup({
+      reader,
+      pageIndex: input.pageIndex,
+      selectedText: input.selectedText,
+    });
+    popupHost = popupAction.popupHost;
+    selectionDoc = popupAction.selectionDoc;
+    try {
+      await waitForSelectedContext({
+        conversationKey: readerConversationKey,
+        selectedText: input.selectedText,
+        pageIndex: input.pageIndex,
+      });
+    } catch (err) {
+      const roots = Array.from(
+        readerContextPanel.querySelectorAll("#llm-main"),
+      ) as HTMLElement[];
+      throw new Error(
+        `${(err as Error).message}: ${JSON.stringify({
+          readerConversationKey,
+          standaloneConversationKey,
+          readerPanelRoots: roots.map((root) => ({
+            workflowPanel: root.parentElement === readerPanel.body,
+            conversationKey: Number(root.dataset.itemId || 0),
+            conversationKind: root.dataset.conversationKind || "",
+            hasText: getSelectedTextContextEntries(
+              Number(root.dataset.itemId || 0),
+            ).some((context) => context.text === input.selectedText),
+          })),
+          standaloneHasText: getSelectedTextContextEntries(
+            standaloneConversationKey,
+          ).some((context) => context.text === input.selectedText),
+        })}`,
+      );
+    }
+    await Zotero.Promise.delay(25);
+
+    const previewHasText = (body: Element) =>
+      Array.from(body.querySelectorAll(".llm-selected-context-text")).some(
+        (node) => node?.textContent?.trim() === input.selectedText,
+      );
+    const conversationHasText = (conversationKey: number) =>
+      getSelectedTextContextEntries(conversationKey).some(
+        (context) => context.text === input.selectedText,
+      );
+    return {
+      readerTabId: `${reader.tabID || ""}`,
+      addTextButtonLabel: popupAction.addTextButtonLabel,
+      readerConversationKey,
+      readerConversationHasText: conversationHasText(readerConversationKey),
+      readerPreviewHasText: previewHasText(readerPanel.body),
+      standaloneConversationKey,
+      standaloneConversationHasText: conversationHasText(
+        standaloneConversationKey,
+      ),
+      standalonePreviewHasText: previewHasText(standaloneBody),
+    };
+  } finally {
+    selectionDoc?.defaultView?.getSelection?.()?.removeAllRanges();
+    popupHost?.remove();
+    await closeWorkflowReader(reader);
+  }
+}
+
+/**
+ * The reader's documents (reader.html and the PDF view's viewer.html, both
+ * resource://zotero/reader/) are content windows: their event constructors
+ * read nothing from an init object made here (key "", bubbles and
+ * cancelable false). Clone the init into the window first.
+ */
+function cloneEventInitIntoWindow<T extends object>(init: T, win: Window): T {
+  const scope = globalThis as unknown as {
+    cloneInto?: (value: T, target: Window) => T;
+    Components?: {
+      utils?: { cloneInto?: (value: T, target: Window) => T };
+    };
+  };
+  const cloneInto = scope.cloneInto || scope.Components?.utils?.cloneInto;
+  return cloneInto ? cloneInto(init, win) : init;
+}
+
+type WorkflowReaderKeyState = {
+  tool: string;
+  selectedAnnotationCount: number;
+};
+
+/** The reader state that its keyboard shortcuts change. */
+function readWorkflowReaderKeyState(
+  reader: _ZoteroTypes.ReaderInstance,
+): WorkflowReaderKeyState {
+  const state = (
+    reader as unknown as {
+      _internalReader?: {
+        _state?: {
+          tool?: { type?: string; color?: string } | null;
+          selectedAnnotationIDs?: unknown[];
+        };
+      };
+    }
+  )._internalReader?._state;
+  return {
+    tool: `${state?.tool?.type || ""}:${state?.tool?.color || ""}`,
+    selectedAnnotationCount: state?.selectedAnnotationIDs?.length ?? -1,
+  };
+}
+
+const READER_PROMPT_OVERLAY_SELECTOR =
+  '[data-llm-reader-selection-prompt="true"]';
+const READER_PROMPT_EDITOR_SELECTOR = `${READER_PROMPT_OVERLAY_SELECTOR} [data-llm-reader-selection-prompt-editor="true"]`;
+
+/** Puts the workflow panel first in the reader tab's pane, so routing picks it. */
+function mountWorkflowPanelInReaderPane(
+  panel: PanelRecord,
+  reader: _ZoteroTypes.ReaderInstance,
+): void {
+  const mainDocument = Zotero.getMainWindow?.()?.document || null;
+  const readerPanel = mainDocument
+    ? getReaderContextPanelForTab(mainDocument, reader.tabID)
+    : null;
+  if (!readerPanel) {
+    throw new Error("Workflow reader tab does not expose a context panel");
+  }
+  readerPanel.insertBefore(panel.body, readerPanel.firstChild);
+}
+
+async function waitForReaderPromptEditor(
+  popupDoc: Document,
+): Promise<HTMLElement | null> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < 2000) {
+    const editor = popupDoc.querySelector(
+      READER_PROMPT_EDITOR_SELECTOR,
+    ) as HTMLElement | null;
+    if (editor) return editor;
+    await Zotero.Promise.delay(25);
+  }
+  return null;
+}
+
+/** What the open reader box shows: the quoted selection and its labels. */
+function readReaderPromptBox(popupDoc: Document): {
+  quoteText: string;
+  quoteLabel: string;
+  buttonLabel: string;
+} {
+  const overlay = popupDoc.querySelector(READER_PROMPT_OVERLAY_SELECTOR);
+  return {
+    quoteText:
+      overlay?.querySelector('[data-llm-reader-selection-prompt-quote="true"]')
+        ?.textContent || "",
+    quoteLabel:
+      overlay?.querySelector(
+        '[data-llm-reader-selection-prompt-quote-label="true"]',
+      )?.textContent || "",
+    buttonLabel: overlay?.querySelector("button")?.textContent?.trim() || "",
+  };
+}
+
+/** A keydown built in the reader window's scope (see cloneEventInitIntoWindow). */
+function makeReaderPromptKey(
+  popupDoc: Document,
+  init: KeyboardEventInit,
+): KeyboardEvent {
+  const readerWindow = popupDoc.defaultView;
+  if (!readerWindow?.KeyboardEvent) {
+    throw new Error("Workflow reader window does not expose KeyboardEvent");
+  }
+  return new readerWindow.KeyboardEvent(
+    "keydown",
+    cloneEventInitIntoWindow(
+      { bubbles: true, cancelable: true, ...init },
+      readerWindow,
+    ),
+  );
+}
+
+/** Types `text` into the reader box and presses Enter. */
+function submitReaderPrompt(
+  popupDoc: Document,
+  editor: HTMLElement,
+  text: string,
+): void {
+  editor.textContent = text;
+  editor.dispatchEvent(
+    makeReaderPromptKey(popupDoc, { key: "Enter", code: "Enter" }),
+  );
+}
+
+/** Waits `ms` and reports whether a send reached the interceptor meanwhile. */
+async function sentWithin(ms: number): Promise<boolean> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < ms) {
+    if (lastSend) return true;
+    await Zotero.Promise.delay(25);
+  }
+  return lastSend !== null;
+}
+
+/** Records sends without a network call (the provider boundary stand-in). */
+function installRecordingSendInterceptor(): void {
+  lastSend = null;
+  setWorkflowTestSendInterceptor((opts) => {
+    lastSend = opts;
+    // A send that never dispatches is a failed send; the send flow would
+    // then restore the prompt into the composer.
+    opts.onProviderDispatch?.();
+  });
+}
+
+/**
+ * Lets the next send run through the real sendQuestion, so the user turn is
+ * rendered, and stops it at the provider boundary (no network). Returns the
+ * restore step for the final-request interceptor.
+ */
+function installRenderingSendInterceptor(): () => void {
+  const previousFinalRequestInterceptor =
+    getWorkflowTestFinalRequestInterceptor();
+  lastSend = null;
+  lastFinalRequest = null;
+  setWorkflowTestSendInterceptor((opts) => {
+    opts.apiBase = "http://127.0.0.1:9/v1";
+    opts.apiKey = "workflow-test-key";
+    opts.authMode = "api_key";
+    lastSend = opts;
+    return true;
+  });
+  setWorkflowTestFinalRequestInterceptor((snapshot) => {
+    lastFinalRequest = snapshot;
+    return true;
+  });
+  return () =>
+    setWorkflowTestFinalRequestInterceptor(previousFinalRequestInterceptor);
+}
+
+/**
+ * Waits for the newest user turn that shows `selectedText` as a chip, then
+ * reads its visible body text and the questions in its expanded chip bars.
+ */
+async function readSentUserBubble(
+  body: Element,
+  selectedText: string,
+  timeoutMs = 5000,
+): Promise<{
+  sentBubbleBodyText: string;
+  sentBubbleChipQuestions: string[];
+  sentBubbleBarCount: number;
+}> {
+  const win = body.ownerDocument?.defaultView;
+  const isShown = (element: Element | null): element is HTMLElement => {
+    if (!element) return false;
+    const html = element as HTMLElement;
+    if (html.hidden) return false;
+    return win?.getComputedStyle(html)?.display !== "none";
+  };
+  const findWrapper = (): HTMLElement | null => {
+    const wrappers = Array.from(
+      body.querySelectorAll("#llm-chat-box .llm-message-wrapper.user"),
+    ) as HTMLElement[];
+    for (const wrapper of wrappers.reverse()) {
+      // A chip without a question shows a bar; one with a question shows
+      // only its card.
+      const chipTexts = Array.from(
+        wrapper.querySelectorAll(
+          ".llm-user-selected-text-content, .llm-user-selected-text-expanded .llm-selected-context-text",
+        ),
+      );
+      if (
+        chipTexts.some((node) =>
+          (node?.textContent || "").includes(selectedText),
+        )
+      ) {
+        return wrapper;
+      }
+    }
+    return null;
+  };
+  const startedAt = Date.now();
+  let wrapper = findWrapper();
+  while (!wrapper && Date.now() - startedAt <= timeoutMs) {
+    await Zotero.Promise.delay(25);
+    wrapper = findWrapper();
+  }
+  if (!wrapper) {
+    throw new Error("The sent user turn with the chip was not rendered");
+  }
+  const bubble = wrapper.querySelector(".llm-bubble.user");
+  // Bars that belong to a chip whose card carries a question; one card per
+  // such chip means none.
+  const questionChipIndices = new Set(
+    (
+      Array.from(
+        wrapper.querySelectorAll(".llm-user-selected-text-expanded"),
+      ) as HTMLElement[]
+    )
+      .filter((card) => card.querySelector(".llm-selected-context-question"))
+      .map((card) => card.dataset.contextIndex),
+  );
+  const sentBubbleBarCount = (
+    Array.from(
+      wrapper.querySelectorAll(".llm-user-selected-text"),
+    ) as HTMLElement[]
+  ).filter((bar) => questionChipIndices.has(bar.dataset.contextIndex)).length;
+  return {
+    sentBubbleBarCount,
+    sentBubbleBodyText: isShown(bubble)
+      ? (bubble.textContent || "").trim()
+      : "",
+    sentBubbleChipQuestions: (
+      Array.from(
+        wrapper.querySelectorAll(".llm-user-selected-text-expanded"),
+      ) as HTMLElement[]
+    )
+      .filter((expanded) => isShown(expanded))
+      .flatMap((expanded) =>
+        Array.from(
+          expanded.querySelectorAll(".llm-selected-context-question"),
+        ).map((node) => (node?.textContent || "").trim()),
+      ),
+  };
+}
+
+/**
+ * Reader Add Text opens the inline box with the selection quoted above the
+ * editor. Enter attaches the typed text to the new chip as its question and
+ * sends nothing; the composer draft stays. A later send with an empty
+ * composer carries the chip question. Keys typed in the box must not drive
+ * the reader's own shortcuts.
+ */
+async function exerciseReaderPopupInlinePrompt(
+  input: Parameters<WorkflowTestApi["exerciseReaderPopupInlinePrompt"]>[0],
+): ReturnType<WorkflowTestApi["exerciseReaderPopupInlinePrompt"]> {
+  assertWorkflowTestEnabled();
+  const panel = getPanel(input.panelId);
+  const reader = await openWorkflowPdfReader(
+    input.attachmentItemId,
+    input.pageIndex,
+  );
+  const previousInterceptor = getWorkflowTestSendInterceptor();
+  let popupHost: HTMLElement | null = null;
+  let selectionDoc: Document | null = null;
+  let popupDoc: Document | null = null;
+  try {
+    mountWorkflowPanelInReaderPane(panel, reader);
+    const composer = panel.body.querySelector(
+      "#llm-input",
+    ) as HTMLTextAreaElement | null;
+    if (!composer) throw new Error("Workflow test input box was not rendered");
+    composer.value = "keep this draft";
+    const EventCtor = panel.body.ownerDocument.defaultView?.Event ?? Event;
+    composer.dispatchEvent(new EventCtor("input", { bubbles: true }));
+
+    const popupAction = await dispatchWorkflowReaderAddTextPopup({
+      reader,
+      pageIndex: input.pageIndex,
+      selectedText: input.selectedText,
+    });
+    popupHost = popupAction.popupHost;
+    selectionDoc = popupAction.selectionDoc;
+    popupDoc = popupAction.popupDoc;
+    const mountedItem = activeContextPanels.get(panel.body)?.() || panel.item;
+    const conversationKey = getConversationKey(mountedItem);
+    await waitForSelectedContext({
+      conversationKey,
+      selectedText: input.selectedText,
+      pageIndex: input.pageIndex,
+    });
+    const chipsForText = () =>
+      getSelectedTextContextEntries(conversationKey).filter(
+        (context) => context.text === input.selectedText,
+      );
+    const chipAddedBeforeEnter = chipsForText().length === 1;
+
+    const promptBox = await waitForReaderPromptEditor(popupDoc);
+    if (!promptBox) {
+      return {
+        chipAddedBeforeEnter,
+        overlayMounted: false,
+        overlayDocumentUrl: "",
+        quoteText: "",
+        quoteLabel: "",
+        buttonLabel: "",
+        editorKeys: [],
+        readerKeyStateBefore: "",
+        readerKeyStateAfter: "",
+        sentOnEnter: false,
+        attachedQuestion: "",
+        chipCount: chipsForText().length,
+        previewQuestionText: null,
+        previewLabels: [],
+        overlayRemovedAfterEnter: false,
+        composerAfterEnter: composer.value,
+        statusAfterEnter: "",
+        sentQuestion: "",
+        sentDisplayQuestion: "",
+        sentSelectedTexts: [],
+        sentBubbleBodyText: "",
+        sentBubbleChipQuestions: [],
+        sentBubbleBarCount: 0,
+      };
+    }
+    const box = readReaderPromptBox(popupDoc);
+
+    // Keys that Zotero's reader binds unless the target is a text box.
+    const mod = Zotero.isMac ? { metaKey: true } : { ctrlKey: true };
+    const readerKeyStateBefore = JSON.stringify(
+      readWorkflowReaderKeyState(reader),
+    );
+    const editorKeys: Array<{ key: string; defaultPrevented: boolean }> = [];
+    for (const [label, init] of [
+      ["Mod+A", { key: "a", code: "KeyA", ...mod }],
+      ["Backspace", { key: "Backspace", code: "Backspace" }],
+      ["ArrowRight", { key: "ArrowRight", code: "ArrowRight" }],
+      ["h", { key: "h", code: "KeyH" }],
+    ] as Array<[string, KeyboardEventInit]>) {
+      const event = makeReaderPromptKey(popupDoc, init);
+      promptBox.dispatchEvent(event);
+      editorKeys.push({ key: label, defaultPrevented: event.defaultPrevented });
+    }
+    // Reader state updates that a shortcut triggers settle asynchronously.
+    await Zotero.Promise.delay(50);
+    const readerKeyStateAfter = JSON.stringify(
+      readWorkflowReaderKeyState(reader),
+    );
+    if (!popupDoc.querySelector(READER_PROMPT_OVERLAY_SELECTOR)) {
+      throw new Error("Editing keys closed the reader inline prompt");
+    }
+
+    installRecordingSendInterceptor();
+    submitReaderPrompt(popupDoc, promptBox, input.prompt);
+    const sentOnEnter = await sentWithin(1000);
+    const chips = chipsForText();
+    const readPreviewQuestion = (): string | null => {
+      const element = panel.body.querySelector(
+        "#llm-selected-context-list .llm-selected-context-question",
+      );
+      return element ? (element.textContent || "").trim() : null;
+    };
+    const previewStartedAt = Date.now();
+    while (!readPreviewQuestion() && Date.now() - previewStartedAt <= 2000) {
+      await Zotero.Promise.delay(25);
+    }
+    const afterEnter = {
+      attachedQuestion: chips[0]?.userQuery ?? "",
+      chipCount: chips.length,
+      previewQuestionText: readPreviewQuestion(),
+      previewLabels: Array.from(
+        panel.body.querySelectorAll(
+          "#llm-selected-context-list .llm-selected-context-label",
+        ),
+      ).map((node) => (node?.textContent || "").trim()),
+      overlayRemovedAfterEnter: !popupDoc.querySelector(
+        READER_PROMPT_OVERLAY_SELECTOR,
+      ),
+      composerAfterEnter: composer.value,
+      statusAfterEnter:
+        panel.body.querySelector("#llm-status")?.textContent?.trim() || "",
+    };
+
+    // The main Send with an empty composer carries the chip question; it
+    // runs into the real send so the user turn renders.
+    const restoreFinalRequest = installRenderingSendInterceptor();
+    let send: SendQuestionOptions;
+    let sentBubble: Awaited<ReturnType<typeof readSentUserBubble>>;
+    try {
+      send = await ask(input.panelId, "");
+      sentBubble = await readSentUserBubble(panel.body, input.selectedText);
+    } finally {
+      restoreFinalRequest();
+    }
+    return {
+      chipAddedBeforeEnter,
+      overlayMounted: true,
+      overlayDocumentUrl: popupDoc.URL,
+      ...box,
+      editorKeys,
+      readerKeyStateBefore,
+      readerKeyStateAfter,
+      sentOnEnter,
+      ...afterEnter,
+      sentQuestion: send.question ?? "",
+      sentDisplayQuestion: send.displayQuestion ?? "",
+      sentSelectedTexts: send.selectedTexts ?? [],
+      ...sentBubble,
+    };
+  } finally {
+    setWorkflowTestSendInterceptor(previousInterceptor);
+    if (popupDoc) closeReaderSelectionPromptOverlay(popupDoc);
+    selectionDoc?.defaultView?.getSelection?.()?.removeAllRanges();
+    popupHost?.remove();
+    await closeWorkflowReader(reader);
+  }
+}
+
+/**
+ * Add Text on a selection that already is a chip opens the box against that
+ * chip; Enter replaces its question and never adds a second chip.
+ */
+async function exerciseReaderPopupDuplicateAttach(
+  input: Parameters<WorkflowTestApi["exerciseReaderPopupDuplicateAttach"]>[0],
+): ReturnType<WorkflowTestApi["exerciseReaderPopupDuplicateAttach"]> {
+  assertWorkflowTestEnabled();
+  const panel = getPanel(input.panelId);
+  const reader = await openWorkflowPdfReader(
+    input.attachmentItemId,
+    input.pageIndex,
+  );
+  const previousInterceptor = getWorkflowTestSendInterceptor();
+  const popupHosts: HTMLElement[] = [];
+  let selectionDoc: Document | null = null;
+  let popupDoc: Document | null = null;
+  try {
+    mountWorkflowPanelInReaderPane(panel, reader);
+    const mountedItem = activeContextPanels.get(panel.body)?.() || panel.item;
+    const conversationKey = getConversationKey(mountedItem);
+    const chipsForText = () =>
+      getSelectedTextContextEntries(conversationKey).filter(
+        (context) => context.text === input.selectedText,
+      );
+    installRecordingSendInterceptor();
+
+    const addAndAttach = async (question: string) => {
+      const action = await dispatchWorkflowReaderAddTextPopup({
+        reader,
+        pageIndex: input.pageIndex,
+        selectedText: input.selectedText,
+      });
+      popupHosts.push(action.popupHost);
+      selectionDoc = action.selectionDoc;
+      popupDoc = action.popupDoc;
+      await waitForSelectedContext({
+        conversationKey,
+        selectedText: input.selectedText,
+        pageIndex: input.pageIndex,
+      });
+      const editor = await waitForReaderPromptEditor(action.popupDoc);
+      const statusBeforeEnter =
+        panel.body.querySelector("#llm-status")?.textContent?.trim() || "";
+      if (!editor) {
+        return {
+          mounted: false,
+          quoteText: "",
+          statusBeforeEnter,
+          overlayRemovedAfterEnter: false,
+        };
+      }
+      const quoteText = readReaderPromptBox(action.popupDoc).quoteText;
+      submitReaderPrompt(action.popupDoc, editor, question);
+      return {
+        mounted: true,
+        quoteText,
+        statusBeforeEnter,
+        overlayRemovedAfterEnter: !action.popupDoc.querySelector(
+          READER_PROMPT_OVERLAY_SELECTOR,
+        ),
+      };
+    };
+
+    const first = await addAndAttach(input.firstPrompt);
+    const firstQuestion = chipsForText()[0]?.userQuery ?? "";
+    const second = await addAndAttach(input.secondPrompt);
+    const sent = await sentWithin(1000);
+    const chips = chipsForText();
+    return {
+      firstMounted: first.mounted,
+      firstQuestion,
+      secondMounted: second.mounted,
+      secondQuoteText: second.quoteText,
+      statusBeforeSecondEnter: second.statusBeforeEnter,
+      secondOverlayRemovedAfterEnter: second.overlayRemovedAfterEnter,
+      chipCount: chips.length,
+      finalQuestion: chips[0]?.userQuery ?? "",
+      sent,
+    };
+  } finally {
+    setWorkflowTestSendInterceptor(previousInterceptor);
+    if (popupDoc) closeReaderSelectionPromptOverlay(popupDoc);
+    (selectionDoc as Document | null)?.defaultView
+      ?.getSelection?.()
+      ?.removeAllRanges();
+    for (const host of popupHosts) host.remove();
+    await closeWorkflowReader(reader);
+  }
+}
+
+/**
+ * Reader inline prompt dismissal: Escape closes the box and keeps the chip;
+ * a pointerdown on the PDF page (the nested view document) closes it too.
+ */
+async function exerciseReaderPopupPromptDismissal(
+  input: Parameters<WorkflowTestApi["exerciseReaderPopupPromptDismissal"]>[0],
+): ReturnType<WorkflowTestApi["exerciseReaderPopupPromptDismissal"]> {
+  assertWorkflowTestEnabled();
+  const panel = getPanel(input.panelId);
+  const reader = await openWorkflowPdfReader(
+    input.attachmentItemId,
+    input.pageIndex,
+  );
+  const previousInterceptor = getWorkflowTestSendInterceptor();
+  const popupHosts: HTMLElement[] = [];
+  let selectionDoc: Document | null = null;
+  let popupDoc: Document | null = null;
+  const overlaySelector = '[data-llm-reader-selection-prompt="true"]';
+  const waitForOverlay = async (doc: Document, open: boolean) => {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < 2000) {
+      if (Boolean(doc.querySelector(overlaySelector)) === open) return true;
+      await Zotero.Promise.delay(25);
+    }
+    return false;
+  };
+  try {
+    const mainDocument = Zotero.getMainWindow?.()?.document || null;
+    const readerPanel = mainDocument
+      ? getReaderContextPanelForTab(mainDocument, reader.tabID)
+      : null;
+    if (!readerPanel) {
+      throw new Error("Workflow reader tab does not expose a context panel");
+    }
+    readerPanel.insertBefore(panel.body, readerPanel.firstChild);
+    const mountedItem = activeContextPanels.get(panel.body)?.() || panel.item;
+    const conversationKey = getConversationKey(mountedItem);
+    const chipCount = (text: string) =>
+      getSelectedTextContextEntries(conversationKey).filter(
+        (context) => context.text === text,
+      ).length;
+    lastSend = null;
+    setWorkflowTestSendInterceptor((opts) => {
+      lastSend = opts;
+      opts.onProviderDispatch?.();
+    });
+
+    const addText = async (selectedText: string) => {
+      const action = await dispatchWorkflowReaderAddTextPopup({
+        reader,
+        pageIndex: input.pageIndex,
+        selectedText,
+      });
+      popupHosts.push(action.popupHost);
+      selectionDoc = action.selectionDoc;
+      popupDoc = action.popupDoc;
+      await waitForSelectedContext({
+        conversationKey,
+        selectedText,
+        pageIndex: input.pageIndex,
+      });
+      return {
+        popupDoc: action.popupDoc,
+        selectionDoc: action.selectionDoc,
+        mounted: await waitForOverlay(action.popupDoc, true),
+      };
+    };
+
+    // Escape in the editor.
+    const first = await addText(input.firstSelectedText);
+    const editor = first.popupDoc.querySelector(
+      `${overlaySelector} [data-llm-reader-selection-prompt-editor="true"]`,
+    ) as HTMLElement | null;
+    const readerWindow = first.popupDoc.defaultView;
+    if (!editor || !readerWindow?.KeyboardEvent) {
+      throw new Error("Reader inline prompt editor was not rendered");
+    }
+    editor.dispatchEvent(
+      new readerWindow.KeyboardEvent(
+        "keydown",
+        cloneEventInitIntoWindow(
+          { key: "Escape", code: "Escape", bubbles: true, cancelable: true },
+          readerWindow,
+        ),
+      ),
+    );
+    const escapeClosed = await waitForOverlay(first.popupDoc, false);
+    const firstChipsAfterEscape = chipCount(input.firstSelectedText);
+
+    // A pointerdown on the PDF page, inside the nested view document.
+    const second = await addText(input.secondSelectedText);
+    const viewWindow = second.selectionDoc.defaultView;
+    const pageTarget =
+      second.selectionDoc.body || second.selectionDoc.documentElement;
+    if (!viewWindow?.MouseEvent || !pageTarget) {
+      throw new Error("Workflow PDF view window is unavailable");
+    }
+    pageTarget.dispatchEvent(
+      new viewWindow.MouseEvent(
+        "pointerdown",
+        cloneEventInitIntoWindow(
+          { bubbles: true, cancelable: true, button: 0 },
+          viewWindow,
+        ),
+      ),
+    );
+    const pageClickClosed = await waitForOverlay(second.popupDoc, false);
+    const secondChipsAfterPageClick = chipCount(input.secondSelectedText);
+    await Zotero.Promise.delay(100);
+    return {
+      firstMounted: first.mounted,
+      escapeClosed,
+      firstChipsAfterEscape,
+      secondMounted: second.mounted,
+      overlayAndPageInDifferentDocuments:
+        second.popupDoc !== second.selectionDoc,
+      pageClickClosed,
+      secondChipsAfterPageClick,
+      chipsWithQuestion: getSelectedTextContextEntries(conversationKey).filter(
+        (context) => Boolean(context.userQuery),
+      ).length,
+      sent: lastSend !== null,
+    };
+  } finally {
+    setWorkflowTestSendInterceptor(previousInterceptor);
+    if (popupDoc) closeReaderSelectionPromptOverlay(popupDoc);
+    (selectionDoc as Document | null)?.defaultView
+      ?.getSelection?.()
+      ?.removeAllRanges();
+    for (const host of popupHosts) host.remove();
+    await closeWorkflowReader(reader);
+  }
+}
+
+async function exerciseHighlightAwareContextRetrieval(input: {
+  panelId: string;
+  attachmentItemId: number;
+  pageIndex: number;
+  selectedText: string;
+  question: string;
+  trigger: "popup" | "action-bar";
+}): Promise<WorkflowTestHighlightAwareRetrievalDiagnostics> {
+  assertWorkflowTestEnabled();
+  const panel = getPanel(input.panelId);
+  const reader = await openWorkflowPdfReader(
+    input.attachmentItemId,
+    input.pageIndex,
+  );
+  let popupHost: HTMLElement | null = null;
+  let selectionDoc: Document | null = null;
+  try {
+    const mainDocument = Zotero.getMainWindow?.()?.document || null;
+    const readerPanel = mainDocument
+      ? getReaderContextPanelForTab(mainDocument, reader.tabID)
+      : null;
+    if (!readerPanel) {
+      throw new Error("Workflow reader tab does not expose a context panel");
+    }
+    readerPanel.appendChild(panel.body);
+    const selected = await selectWorkflowPdfText({
+      reader,
+      pageIndex: input.pageIndex,
+      selectedText: input.selectedText,
+    });
+    selectionDoc = selected.doc;
+    let clickedAt = 0;
+    let addTextButtonLabel = "";
+    if (input.trigger === "popup") {
+      popupHost = selected.doc.createElement("div");
+      popupHost.dataset.workflowAddTextPopup = "true";
+      (selected.doc.body || selected.doc.documentElement).appendChild(
+        popupHost,
+      );
+
+      const readerApi =
+        Zotero.Reader as unknown as ReaderSelectionTrackingReader<
+          _ZoteroTypes.Reader.EventHandler<"renderTextSelectionPopup">
+        >;
+      const handler = readerApi.__llmSelectionTracking?.handler;
+      if (!handler) {
+        throw new Error("Add Text reader selection handler is unavailable");
+      }
+      await handler({
+        reader,
+        doc: selected.doc,
+        params: {
+          annotation: { text: input.selectedText } as any,
+        },
+        append: (node: Node | string) => popupHost?.append(node),
+        type: READER_TEXT_SELECTION_POPUP_EVENT,
+      });
+      const addTextButton = (
+        Array.from(popupHost.querySelectorAll("button")) as HTMLButtonElement[]
+      ).find((button) => button.textContent?.trim() === "Add Text");
+      if (!addTextButton) {
+        throw new Error("Add Text button was not rendered in the reader popup");
+      }
+      addTextButtonLabel = addTextButton.textContent?.trim() || "";
+      const PointerEventCtor = selected.doc.defaultView?.MouseEvent;
+      if (!PointerEventCtor) {
+        throw new Error("Workflow reader window does not expose MouseEvent");
+      }
+      clickedAt = Date.now();
+      addTextButton.dispatchEvent(
+        new PointerEventCtor("pointerdown", {
+          bubbles: true,
+          cancelable: true,
+          button: 0,
+        }),
+      );
+    } else {
+      const addTextButton = panel.body.querySelector(
+        "#llm-select-text",
+      ) as HTMLButtonElement | null;
+      if (!addTextButton) {
+        throw new Error("Include selected text action was not rendered");
+      }
+      addTextButtonLabel = addTextButton.getAttribute("aria-label") || "";
+      const MouseEventCtor =
+        addTextButton.ownerDocument.defaultView?.MouseEvent;
+      if (!MouseEventCtor) {
+        throw new Error("Workflow panel window does not expose MouseEvent");
+      }
+      clickedAt = Date.now();
+      addTextButton.dispatchEvent(
+        new MouseEventCtor("pointerdown", {
+          bubbles: true,
+          cancelable: true,
+          button: 0,
+        }),
+      );
+      addTextButton.dispatchEvent(
+        new MouseEventCtor("click", {
+          bubbles: true,
+          cancelable: true,
+          button: 0,
+        }),
+      );
+    }
+    const immediatePreviewText =
+      panel.body
+        .querySelector("#llm-selected-context-list .llm-selected-context-text")
+        ?.textContent?.trim() || "";
+
+    const mountedItem = activeContextPanels.get(panel.body)?.() || panel.item;
+    const selectedContext = await waitForSelectedContext({
+      conversationKey: getConversationKey(mountedItem),
+      selectedText: input.selectedText,
+      pageIndex: input.pageIndex,
+    });
+    const clickToSelectedContextMs = Date.now() - clickedAt;
+
+    lastSend = null;
+    lastFinalRequest = null;
+    setWorkflowTestSendInterceptor((opts) => {
+      opts.apiBase = "http://127.0.0.1:9/v1";
+      opts.apiKey = "workflow-test-key";
+      opts.authMode = "api_key";
+      lastSend = opts;
+      return true;
+    });
+    setWorkflowTestFinalRequestInterceptor((snapshot) => {
+      lastFinalRequest = snapshot;
+      return true;
+    });
+    const capturedSend = await ask(input.panelId, input.question);
+    const finalRequest = await waitForFinalRequest(panel.body);
+    const resolvedAnchor = capturedSend.resolvedSelectedTextAnchors?.find(
+      (anchor) => anchor.contextItemId === input.attachmentItemId,
+    );
+    if (!resolvedAnchor) {
+      throw new Error("Final send did not include a resolved highlight anchor");
+    }
+    return {
+      trigger: input.trigger,
+      readerItemId: Number(reader._item?.id || reader.itemID || 0),
+      addTextButtonLabel,
+      immediatePreviewText,
+      clickToSelectedContextMs,
+      selectedContext,
+      resolvedAnchor,
+      lastSend: capturedSend,
+      lastFinalRequest: finalRequest,
+    };
+  } finally {
+    setWorkflowTestSendInterceptor((opts) => {
+      lastSend = opts;
+    });
+    setWorkflowTestFinalRequestInterceptor((snapshot) => {
+      lastFinalRequest = snapshot;
+    });
+    selectionDoc?.defaultView?.getSelection?.()?.removeAllRanges();
+    popupHost?.remove();
+    await closeWorkflowReader(reader);
+  }
+}
+
+async function exerciseContextChipCardVisibility(input: {
+  panelId?: string;
+  standalone: boolean;
+  selectedText: string;
+}): ReturnType<WorkflowTestApi["exerciseContextChipCardVisibility"]> {
+  assertWorkflowTestEnabled();
+  const body = input.standalone
+    ? ((await waitForStandaloneReady()).querySelector(
+        ".llm-standalone-content",
+      ) as HTMLElement | null)
+    : getPanel(input.panelId || "").body;
+  if (!body) throw new Error("Workflow chip panel body is unavailable");
+  const doc = body.ownerDocument;
+  const item = activeContextPanels.get(body)?.();
+  if (!item) throw new Error("Workflow chip panel is not mounted");
+  const conversationKey = getConversationKey(item);
+  // The sidebar host sits off screen, where hit testing finds nothing.
+  const previousLeft = body.style.left;
+  const previousZIndex = body.style.zIndex;
+  if (!input.standalone) {
+    body.style.left = "0";
+    body.style.zIndex = "2147483647";
+  }
+  const added = appendSelectedTextContextForItem(
+    conversationKey,
+    input.selectedText,
+    "pdf",
+  );
+  if (!added) throw new Error("Workflow chip was not added");
+  try {
+    setSelectedTextExpandedIndex(conversationKey, 0);
+    applySelectedTextPreview(body, conversationKey);
+    // The card fades in over about 140 ms.
+    await Zotero.Promise.delay(250);
+    const card = body.querySelector(
+      "#llm-selected-context-list .llm-selected-context.expanded .llm-selected-context-expanded",
+    ) as HTMLElement | null;
+    const row = body.querySelector(
+      "#llm-context-previews",
+    ) as HTMLElement | null;
+    const section = body.querySelector(
+      ".llm-input-section",
+    ) as HTMLElement | null;
+    if (!card || !row || !section) {
+      throw new Error("Workflow chip card, row, or input section is missing");
+    }
+    const cardRect = card.getBoundingClientRect();
+    const rowRect = row.getBoundingClientRect();
+    const sectionRect = section.getBoundingClientRect();
+    const centerX = cardRect.left + cardRect.width / 2;
+    const centerY = cardRect.top + cardRect.height / 2;
+    const hit = doc.elementFromPoint(centerX, centerY);
+    return {
+      cardWidth: cardRect.width,
+      cardHeight: cardRect.height,
+      cardTop: cardRect.top,
+      cardBottom: cardRect.bottom,
+      rowTop: rowRect.top,
+      leftInset: cardRect.left - sectionRect.left,
+      rightInset: sectionRect.right - cardRect.right,
+      hitIsCard: Boolean(hit && (hit === card || card.contains(hit))),
+      hitDescription: hit
+        ? `${hit.localName}.${String(hit.className || "")}`
+        : "none",
+    };
+  } finally {
+    if (!input.standalone) {
+      body.style.left = previousLeft;
+      body.style.zIndex = previousZIndex;
+    }
+    setSelectedTextExpandedIndex(conversationKey, null);
+    setSelectedTextContextEntries(conversationKey, []);
+    applySelectedTextPreview(body, conversationKey);
+  }
+}
+
+async function exerciseAssistantSelectionInlinePrompt(input: {
+  panelId: string;
+  assistantText: string;
+  selectedText: string;
+  prompt: string;
+}): ReturnType<WorkflowTestApi["exerciseAssistantSelectionInlinePrompt"]> {
+  assertWorkflowTestEnabled();
+  const panel = getPanel(input.panelId);
+  const doc = panel.body.ownerDocument;
+  const win = doc.defaultView;
+  if (!win) throw new Error("Workflow panel window is unavailable");
+  const chatBox = panel.body.querySelector(
+    "#llm-chat-box",
+  ) as HTMLDivElement | null;
+  if (!chatBox) throw new Error("Workflow panel chat box was not rendered");
+  const composer = panel.body.querySelector(
+    "#llm-input",
+  ) as HTMLTextAreaElement | null;
+  if (!composer) throw new Error("Workflow test input box was not rendered");
+  const offset = input.assistantText.indexOf(input.selectedText);
+  if (offset < 0) {
+    throw new Error("selectedText must occur inside assistantText");
+  }
+  const previousInterceptor = getWorkflowTestSendInterceptor();
+  let restoreFinalRequest: (() => void) | null = null;
+  // Same shape as the assistant bubbles the chat renders, so the popup
+  // controller's `.llm-bubble.assistant` lookup accepts the selection.
+  const bubble = doc.createElement("div") as HTMLDivElement;
+  bubble.className = "llm-bubble assistant";
+  const paragraph = doc.createElement("p");
+  paragraph.textContent = input.assistantText;
+  bubble.appendChild(paragraph);
+  chatBox.appendChild(bubble);
+  try {
+    const EventCtor = win.Event ?? Event;
+    composer.value = "keep this draft";
+    composer.dispatchEvent(new EventCtor("input", { bubbles: true }));
+
+    const textNode = paragraph.firstChild;
+    if (!textNode) throw new Error("Assistant bubble text was not rendered");
+    const range = doc.createRange();
+    range.setStart(textNode, offset);
+    range.setEnd(textNode, offset + input.selectedText.length);
+    const selection = win.getSelection();
+    if (!selection) throw new Error("Workflow panel selection is unavailable");
+    selection.removeAllRanges();
+    selection.addRange(range);
+    const MouseEventCtor = win.MouseEvent;
+    paragraph.dispatchEvent(
+      new MouseEventCtor("mouseup", {
+        bubbles: true,
+        cancelable: true,
+        button: 0,
+      }),
+    );
+    await Zotero.Promise.delay(30);
+
+    const popup = panel.body.querySelector(
+      ".llm-assistant-selection-popup",
+    ) as HTMLElement | null;
+    if (!popup) throw new Error("Assistant selection popup was not rendered");
+    const popupVisible = popup.classList.contains("is-visible");
+
+    const quoteButton = popup.querySelector(
+      ".llm-assistant-selection-action",
+    ) as HTMLButtonElement | null;
+    if (!quoteButton) throw new Error("Quote button was not rendered");
+    quoteButton.dispatchEvent(
+      new MouseEventCtor("pointerdown", {
+        bubbles: true,
+        cancelable: true,
+        button: 0,
+      }),
+    );
+    await Zotero.Promise.delay(30);
+    const promptExpandedAfterQuote = popup.classList.contains("is-expanded");
+    const mountedItem = activeContextPanels.get(panel.body)?.() || panel.item;
+    const conversationKey = getConversationKey(mountedItem);
+    const chipsWithText = () =>
+      getSelectedTextContextEntries(conversationKey).filter(
+        (context) => context.text === input.selectedText,
+      );
+    const chipAddedBeforeAttach = chipsWithText().length > 0;
+    const boxSelectedTextLabel =
+      popup
+        .querySelector(
+          ".llm-assistant-selection-prompt .llm-selected-context-label",
+        )
+        ?.textContent?.trim() || "";
+    const boxSelectedText =
+      popup
+        .querySelector(".llm-assistant-selection-quote")
+        ?.textContent?.trim() || "";
+    const hintText =
+      popup
+        .querySelector(".llm-assistant-selection-prompt-hint")
+        ?.textContent?.trim() || "";
+
+    const promptInput = popup.querySelector(
+      ".llm-assistant-selection-prompt-input",
+    ) as HTMLTextAreaElement | null;
+    if (!promptInput) throw new Error("Inline prompt input was not rendered");
+    // Record-only: Enter in the box must not reach the send flow at all.
+    lastSend = null;
+    setWorkflowTestSendInterceptor((opts) => {
+      lastSend = opts;
+      opts.onProviderDispatch?.();
+    });
+    promptInput.value = input.prompt;
+    promptInput.dispatchEvent(
+      new win.KeyboardEvent("keydown", {
+        key: "Enter",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    await Zotero.Promise.delay(1000);
+    const sentWithinOneSecond = lastSend !== null;
+    const readPreviewQuestion = () =>
+      panel.body
+        .querySelector(
+          "#llm-selected-context-list .llm-selected-context-question",
+        )
+        ?.textContent?.trim() || "";
+    const previewStartedAt = Date.now();
+    while (!readPreviewQuestion() && Date.now() - previewStartedAt <= 2000) {
+      await Zotero.Promise.delay(25);
+    }
+    const previewQuestionText = readPreviewQuestion();
+    const previewLabels = Array.from(
+      panel.body.querySelectorAll(
+        "#llm-selected-context-list .llm-selected-context-label",
+      ),
+    ).map((node) => (node?.textContent || "").trim());
+    const attachedQuestion = chipsWithText()[0]?.userQuery || "";
+    const chipCount = chipsWithText().length;
+    const popupHiddenAfterAttach =
+      !popup.classList.contains("is-visible") &&
+      !popup.classList.contains("is-expanded");
+    const composerAfterAttach = composer.value;
+    const statusAfterAttach =
+      panel.body.querySelector("#llm-status")?.textContent?.trim() || "";
+    const composerFocusedAfterAttach = doc.activeElement === composer;
+
+    // The main Send with an empty composer sends the chip's question; it
+    // runs into the real send so the user turn renders.
+    restoreFinalRequest = installRenderingSendInterceptor();
+    const sendSettledSequenceBefore = getWorkflowTestSendSettledSequence();
+    composer.value = "";
+    composer.dispatchEvent(new EventCtor("input", { bubbles: true }));
+    const sendBtn = panel.body.querySelector(
+      "#llm-send",
+    ) as HTMLButtonElement | null;
+    if (!sendBtn) throw new Error("Workflow test send button was not rendered");
+    sendBtn.click();
+    const send = await waitForLastSend();
+    const startedAt = Date.now();
+    while (
+      getWorkflowTestSendSettledSequence() <= sendSettledSequenceBefore &&
+      Date.now() - startedAt <= 5000
+    ) {
+      await Zotero.Promise.delay(10);
+    }
+    const sentBubble = await readSentUserBubble(panel.body, input.selectedText);
+    return {
+      popupVisible,
+      promptExpandedAfterQuote,
+      chipAddedBeforeAttach,
+      boxSelectedTextLabel,
+      boxSelectedText,
+      hintText,
+      sentWithinOneSecond,
+      attachedQuestion,
+      chipCount,
+      previewQuestionText,
+      previewLabels,
+      popupHiddenAfterAttach,
+      composerAfterAttach,
+      statusAfterAttach,
+      composerFocusedAfterAttach,
+      sentQuestion: send.question,
+      sentDisplayQuestion: send.displayQuestion ?? "",
+      sentSelectedTexts: send.selectedTexts ?? [],
+      ...sentBubble,
+    };
+  } finally {
+    restoreFinalRequest?.();
+    setWorkflowTestSendInterceptor(previousInterceptor);
+    win.getSelection()?.removeAllRanges();
+    bubble.remove();
+  }
+}
+
+/**
+ * Escape and an empty Enter close the assistant inline prompt without
+ * sending and keep the chip without a question; quoting the same text again
+ * reopens the box for that chip, and Enter there sets its question.
+ */
+async function exerciseAssistantSelectionPromptDismissal(input: {
+  panelId: string;
+  assistantText: string;
+  firstSelectedText: string;
+  secondSelectedText: string;
+  duplicatePrompt: string;
+}): ReturnType<WorkflowTestApi["exerciseAssistantSelectionPromptDismissal"]> {
+  assertWorkflowTestEnabled();
+  const panel = getPanel(input.panelId);
+  const doc = panel.body.ownerDocument;
+  const win = doc.defaultView;
+  if (!win) throw new Error("Workflow panel window is unavailable");
+  const chatBox = panel.body.querySelector(
+    "#llm-chat-box",
+  ) as HTMLDivElement | null;
+  if (!chatBox) throw new Error("Workflow panel chat box was not rendered");
+  const previousInterceptor = getWorkflowTestSendInterceptor();
+  const bubble = doc.createElement("div") as HTMLDivElement;
+  bubble.className = "llm-bubble assistant";
+  const paragraph = doc.createElement("p");
+  paragraph.textContent = input.assistantText;
+  bubble.appendChild(paragraph);
+  chatBox.appendChild(bubble);
+  const mountedItem = activeContextPanels.get(panel.body)?.() || panel.item;
+  const conversationKey = getConversationKey(mountedItem);
+  const chipsWithText = (text: string) =>
+    getSelectedTextContextEntries(conversationKey).filter(
+      (context) => context.text === text,
+    );
+  const chipCount = (text: string) => chipsWithText(text).length;
+  const chipQuestion = (text: string) =>
+    chipsWithText(text)[0]?.userQuery || "";
+  const readStatus = () =>
+    panel.body.querySelector("#llm-status")?.textContent?.trim() || "";
+  const getPopup = () => {
+    const popup = panel.body.querySelector(
+      ".llm-assistant-selection-popup",
+    ) as HTMLElement | null;
+    if (!popup) throw new Error("Assistant selection popup was not rendered");
+    return popup;
+  };
+  const selectAndQuote = async (selectedText: string) => {
+    const offset = input.assistantText.indexOf(selectedText);
+    const textNode = paragraph.firstChild;
+    if (offset < 0 || !textNode) {
+      throw new Error("selected text must occur inside assistantText");
+    }
+    const range = doc.createRange();
+    range.setStart(textNode, offset);
+    range.setEnd(textNode, offset + selectedText.length);
+    const selection = win.getSelection();
+    if (!selection) throw new Error("Workflow panel selection is unavailable");
+    selection.removeAllRanges();
+    selection.addRange(range);
+    paragraph.dispatchEvent(
+      new win.MouseEvent("mouseup", {
+        bubbles: true,
+        cancelable: true,
+        button: 0,
+      }),
+    );
+    await Zotero.Promise.delay(30);
+    const popup = getPopup();
+    const quoteButton = popup.querySelector(
+      ".llm-assistant-selection-action",
+    ) as HTMLButtonElement | null;
+    if (!quoteButton) throw new Error("Quote button was not rendered");
+    quoteButton.dispatchEvent(
+      new win.MouseEvent("pointerdown", {
+        bubbles: true,
+        cancelable: true,
+        button: 0,
+      }),
+    );
+    await Zotero.Promise.delay(30);
+    return popup.classList.contains("is-expanded");
+  };
+  const pressInPrompt = async (key: string, value = "") => {
+    const promptInput = getPopup().querySelector(
+      ".llm-assistant-selection-prompt-input",
+    ) as HTMLTextAreaElement | null;
+    if (!promptInput) throw new Error("Inline prompt input was not rendered");
+    promptInput.value = value;
+    promptInput.dispatchEvent(
+      new win.KeyboardEvent("keydown", {
+        key,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    await Zotero.Promise.delay(30);
+    const popup = getPopup();
+    return !(
+      popup.classList.contains("is-expanded") ||
+      popup.classList.contains("is-visible")
+    );
+  };
+  try {
+    lastSend = null;
+    setWorkflowTestSendInterceptor((opts) => {
+      lastSend = opts;
+      opts.onProviderDispatch?.();
+    });
+    const firstExpanded = await selectAndQuote(input.firstSelectedText);
+    const escapeClosed = await pressInPrompt("Escape");
+    const firstChipsAfterEscape = chipCount(input.firstSelectedText);
+    const firstQuestionAfterEscape = chipQuestion(input.firstSelectedText);
+    // The same text again: the box opens against the existing chip.
+    const duplicateExpanded = await selectAndQuote(input.firstSelectedText);
+    const duplicateStatus = readStatus();
+    const firstChipsAfterDuplicate = chipCount(input.firstSelectedText);
+    const duplicateAttachClosed = await pressInPrompt(
+      "Enter",
+      input.duplicatePrompt,
+    );
+    const firstChipsAfterDuplicateAttach = chipCount(input.firstSelectedText);
+    const firstQuestionAfterDuplicateAttach = chipQuestion(
+      input.firstSelectedText,
+    );
+    const secondExpanded = await selectAndQuote(input.secondSelectedText);
+    const emptyEnterClosed = await pressInPrompt("Enter");
+    const secondChipsAfterEmptyEnter = chipCount(input.secondSelectedText);
+    const secondQuestionAfterEmptyEnter = chipQuestion(
+      input.secondSelectedText,
+    );
+    await Zotero.Promise.delay(100);
+    return {
+      firstExpanded,
+      escapeClosed,
+      firstChipsAfterEscape,
+      firstQuestionAfterEscape,
+      duplicateExpanded,
+      duplicateStatus,
+      firstChipsAfterDuplicate,
+      duplicateAttachClosed,
+      firstChipsAfterDuplicateAttach,
+      firstQuestionAfterDuplicateAttach,
+      secondExpanded,
+      emptyEnterClosed,
+      secondChipsAfterEmptyEnter,
+      secondQuestionAfterEmptyEnter,
+      sent: lastSend !== null,
+    };
+  } finally {
+    setWorkflowTestSendInterceptor(previousInterceptor);
+    win.getSelection()?.removeAllRanges();
+    bubble.remove();
+  }
+}
+
+async function reset(): Promise<void> {
+  assertWorkflowTestEnabled();
+  setCodexDirectCatalogDependenciesForTests();
+  resetCodexDirectCatalogForTests();
+  codexDirectCatalogRequests = [];
+  resolveDelayedCodexModelCatalog?.();
+  resolveDelayedCodexModelCatalog = null;
+  setCodexAppServerModelCatalogLoaderForTests();
+  codexModelCatalogRequests = [];
+  resolveDelayedCodexPermissionCatalog?.();
+  resolveDelayedCodexPermissionCatalog = null;
+  for (const held of heldConversationWriteLocks.values()) held.release();
+  heldConversationWriteLocks.clear();
+  setFooterPermissionCatalogLoadersForTests();
+  setAgentRunTraceLoaderForTests();
+  await closeTornChatWindowsForTest();
+  await closeStandalone();
+  lastSend = null;
+  lastFinalRequest = null;
+  disposeWorkflowPanels();
+  clearWorkflowConversationRuntimeState();
+  await clearPaperRestoreTargetsForWorkflowTests();
+  const userLibraryID = Math.floor(
+    Number(Zotero.Libraries?.userLibraryID || 0),
+  );
+  if (userLibraryID > 0) {
+    removeLastUsedUpstreamConversationMode(userLibraryID);
+    removeLastUsedUpstreamGlobalConversationKey(userLibraryID);
+  }
+  // Workflow cases use fresh Zotero items but the isolated runner can retain
+  // the same numeric item IDs across process launches.  Clear persisted
+  // paper-selection maps at the test boundary so a stale preference from an
+  // earlier run cannot steer a new fixture into an unrelated conversation.
+  for (const prefKey of [
+    "lastUsedPaperConversationMap",
+    "claudeCodePaperConversationMap",
+    "codexAppServerPaperConversationMap",
+  ]) {
+    Zotero.Prefs.clear?.(`${config.prefsPrefix}.${prefKey}`, true);
+  }
+  setWorkflowTestSendInterceptor((opts) => {
+    lastSend = opts;
+  });
+  setWorkflowTestFinalRequestInterceptor((snapshot) => {
+    lastFinalRequest = snapshot;
+  });
+  forcePendingTurnFinalizeFailuresForTests(0);
+  forceWebChatSessionAnchorFailuresForTests(0);
+  forceInPlacePaperSwitchFailuresForTests(0);
+  // The dragged drawer height lives for the session; a case starts without it.
+  resetTaskProgressDrawerHeight();
+}
+
+function disposeWorkflowPanels(): void {
+  for (const panel of panels.values()) {
+    disposeSetupHandlers(panel.body);
+    activeContextPanels.delete(panel.body);
+    activeContextPanelRawItems.delete(panel.body);
+    panel.body.remove();
+  }
+  panels.clear();
+}
+
+function isHistoryMenuPopulated(body: HTMLElement | Element): boolean {
+  const menu = body.querySelector("#llm-history-menu") as HTMLElement | null;
+  if (!menu || menu.style.display === "none") return false;
+  return Boolean(
+    menu.querySelector(".llm-history-item[data-conversation-key]") ||
+    menu.querySelector(".llm-history-menu-empty"),
+  );
+}
+
+async function openPanelHistoryMenu(panelId: string): Promise<HTMLElement> {
+  const panel = getPanel(panelId);
+  const menu = panel.body.querySelector(
+    "#llm-history-menu",
+  ) as HTMLElement | null;
+  if (!(menu && menu.style.display !== "none")) {
+    dispatchWorkflowClick(panel.body, "#llm-history-toggle", "History toggle");
+  }
+  // The menu renders after several async DB loads; a fixed 200ms delay was
+  // flaky under load. Wait for rows (or the explicit empty marker) instead.
+  const deadline = Date.now() + 8000;
+  while (!isHistoryMenuPopulated(panel.body) && Date.now() < deadline) {
+    await Zotero.Promise.delay(50);
+  }
+  return panel.body;
+}
+
+async function listPanelHistory(
+  panelId: string,
+  options?: { reopen?: boolean },
+): Promise<WorkflowTestHistoryRow[]> {
+  assertWorkflowTestEnabled();
+  if (options?.reopen) {
+    const panel = getPanel(panelId);
+    const menu = panel.body.querySelector(
+      "#llm-history-menu",
+    ) as HTMLElement | null;
+    if (menu && menu.style.display !== "none") {
+      dispatchWorkflowClick(
+        panel.body,
+        "#llm-history-toggle",
+        "History toggle",
+      );
+      const deadline = Date.now() + 5000;
+      while (menu.style.display !== "none" && Date.now() < deadline) {
+        await Zotero.Promise.delay(50);
+      }
+    }
+  }
+  const body = await openPanelHistoryMenu(panelId);
+  const rows = Array.from(
+    body.querySelectorAll(".llm-history-item[data-conversation-key]"),
+  ) as HTMLElement[];
+  const seen = new Map<number, WorkflowTestHistoryRow>();
+  for (const row of rows) {
+    const conversationKey = Number(row.dataset.conversationKey || 0);
+    if (!conversationKey) continue;
+    seen.set(conversationKey, readWorkflowHistoryRow(row, conversationKey));
+  }
+  return Array.from(seen.values());
+}
+
+/** One history row as the reader sees it: title, runtime name, draft. */
+function readWorkflowHistoryRow(
+  row: HTMLElement,
+  conversationKey: number,
+): WorkflowTestHistoryRow {
+  const title =
+    row.querySelector(
+      ".llm-history-item-title, .llm-standalone-conv-title, .llm-standalone-search-title",
+    )?.textContent ||
+    row.textContent ||
+    "";
+  return {
+    conversationKey,
+    title: title.trim(),
+    system: row.dataset.conversationSystem || "",
+    runtimeLabel: (
+      row.querySelector(".llm-history-runtime-label")?.textContent || ""
+    ).trim(),
+    isDraft: row.dataset.historyDraft === "true",
+  };
+}
+
+async function waitForWorkflowElement(
+  root: ParentNode,
+  selector: string,
+  timeoutMs = 8000,
+): Promise<HTMLElement | null> {
+  const deadline = Date.now() + timeoutMs;
+  let element = root.querySelector(selector) as HTMLElement | null;
+  while (!element && Date.now() < deadline) {
+    await Zotero.Promise.delay(50);
+    element = root.querySelector(selector) as HTMLElement | null;
+  }
+  return element;
+}
+
+function dispatchWorkflowMouseClick(element: HTMLElement): void {
+  const eventCtor = element.ownerDocument.defaultView?.MouseEvent;
+  if (eventCtor) {
+    element.dispatchEvent(
+      new eventCtor("click", { bubbles: true, cancelable: true }),
+    );
+    return;
+  }
+  element.click();
+}
+
+/**
+ * Polls the panel until `done` holds or the time runs out; resolves with the
+ * last diagnostics either way, so a test can assert on a refused open.
+ */
+async function waitForPanelDiagnostics(
+  panelId: string,
+  done: (diagnostics: WorkflowTestDiagnostics) => boolean,
+  timeoutMs = 10000,
+): Promise<WorkflowTestDiagnostics> {
+  const deadline = Date.now() + timeoutMs;
+  let diagnostics = await getDiagnostics(panelId);
+  while (!done(diagnostics) && Date.now() < deadline) {
+    await Zotero.Promise.delay(50);
+    diagnostics = await getDiagnostics(panelId);
+  }
+  return diagnostics;
+}
+
+async function seedHistoryConversation(input: {
+  system: ConversationSystem;
+  kind: "global" | "paper";
+  paperItemId?: number;
+  userText: string;
+  assistantText?: string;
+}): Promise<WorkflowTestSeededHistoryConversation> {
+  assertWorkflowTestEnabled();
+  const paperItem = input.paperItemId
+    ? (Zotero.Items.get(input.paperItemId) as Zotero.Item | null)
+    : null;
+  if (input.kind === "paper" && !paperItem) {
+    throw new Error(`Unable to find paper item ${input.paperItemId}`);
+  }
+  const libraryID =
+    Number(paperItem?.libraryID || 0) || Zotero.Libraries.userLibraryID;
+  const entry = await conversationRepository.createCatalogEntry({
+    system: input.system,
+    kind: input.kind,
+    libraryID,
+    ...(input.kind === "paper" && paperItem
+      ? { paperItemID: paperItem.id }
+      : {}),
+  });
+  if (!entry?.conversationKey) {
+    throw new Error(`Could not create a ${input.system} ${input.kind} chat`);
+  }
+  const now = Date.now();
+  await appendWorkflowStoredMessage(input.system, entry.conversationKey, {
+    role: "user",
+    text: input.userText,
+    timestamp: now,
+  });
+  await appendWorkflowStoredMessage(input.system, entry.conversationKey, {
+    role: "assistant",
+    text: input.assistantText || "Seeded answer.",
+    timestamp: now + 1,
+  });
+  return {
+    system: input.system,
+    kind: input.kind,
+    conversationKey: entry.conversationKey,
+    libraryID,
+  };
+}
+
+async function deleteSeededHistoryConversation(
+  seeded: WorkflowTestSeededHistoryConversation,
+): Promise<void> {
+  assertWorkflowTestEnabled();
+  await conversationRepository
+    .deleteLocalConversationRows({
+      system: seeded.system,
+      conversationKey: seeded.conversationKey,
+      kind: seeded.kind,
+    })
+    .catch((error) => {
+      appLogger.warn("LLM: workflow seeded chat cleanup failed", error);
+    });
+}
+
+async function findPanelHistoryRow(
+  panelId: string,
+  conversationKey: number,
+): Promise<HTMLElement> {
+  const body = await openPanelHistoryMenu(panelId);
+  const row = await waitForWorkflowElement(
+    body,
+    `.llm-history-item[data-conversation-key="${conversationKey}"]`,
+  );
+  if (!row) {
+    const renderedKeys = Array.from(
+      body.querySelectorAll(".llm-history-item[data-conversation-key]"),
+    ).map((element) => (element as HTMLElement).dataset.conversationKey);
+    throw new Error(
+      `History row ${conversationKey} not rendered; renderedKeys=[${renderedKeys.join(",")}]`,
+    );
+  }
+  return row;
+}
+
+async function clickPanelHistoryRow(
+  panelId: string,
+  conversationKey: number,
+): Promise<WorkflowTestDiagnostics> {
+  assertWorkflowTestEnabled();
+  const row = await findPanelHistoryRow(panelId, conversationKey);
+  dispatchWorkflowMouseClick(row);
+  const diagnostics = await waitForPanelDiagnostics(
+    panelId,
+    (state) =>
+      state.conversationKey === conversationKey &&
+      !(state.runtimeSystemToggles || []).some(
+        (toggle) => toggle.visible && toggle.disabled,
+      ),
+  );
+  await Zotero.Promise.delay(150);
+  return (await getDiagnostics(panelId)) || diagnostics;
+}
+
+async function clickPanelHistoryRowWithForcedOpenFailure(
+  panelId: string,
+  conversationKey: number,
+  system: ConversationSystem,
+): Promise<{ diagnostics: WorkflowTestDiagnostics; interceptorHit: boolean }> {
+  assertWorkflowTestEnabled();
+  const row = await findPanelHistoryRow(panelId, conversationKey);
+  if (!row.isConnected) {
+    throw new Error(
+      `History row ${conversationKey} is not connected; the refusal path was not exercised`,
+    );
+  }
+  let interceptorHit = false;
+  setWorkflowTestHistoryOpenFailure((target) => {
+    if (target.conversationKey !== conversationKey || target.system !== system)
+      return false;
+    interceptorHit = true;
+    return true;
+  });
+  try {
+    dispatchWorkflowMouseClick(row);
+    const deadline = Date.now() + 2000;
+    let diagnostics = await getDiagnostics(panelId);
+    await Zotero.Promise.delay(150);
+    while (Date.now() < deadline) {
+      diagnostics = await getDiagnostics(panelId);
+      if (
+        !(diagnostics.runtimeSystemToggles || []).some(
+          (toggle) => toggle.visible && toggle.disabled,
+        )
+      )
+        break;
+      await Zotero.Promise.delay(50);
+    }
+    await Zotero.Promise.delay(150);
+    return { diagnostics: await getDiagnostics(panelId), interceptorHit };
+  } finally {
+    setWorkflowTestHistoryOpenFailure(null);
+  }
+}
+
+async function clickPanelHistoryRowsRapidly(
+  panelId: string,
+  conversationKeys: number[],
+): Promise<WorkflowTestRapidHistoryClicks> {
+  assertWorkflowTestEnabled();
+  const rows: HTMLElement[] = [];
+  for (const key of conversationKeys) {
+    rows.push(await findPanelHistoryRow(panelId, key));
+  }
+  const win = getPanel(panelId).body.ownerDocument.defaultView;
+  const errors: string[] = [];
+  const onError = (event: Event) => {
+    errors.push(String((event as ErrorEvent).message || event.type));
+  };
+  const onRejection = (event: Event) => {
+    errors.push(
+      String(
+        (event as PromiseRejectionEvent).reason?.message ||
+          (event as PromiseRejectionEvent).reason ||
+          event.type,
+      ),
+    );
+  };
+  win?.addEventListener("error", onError);
+  win?.addEventListener("unhandledrejection", onRejection);
+  try {
+    // One task: the second click lands before the first switch can end.
+    for (const row of rows) dispatchWorkflowMouseClick(row);
+    let previousKey = -1;
+    let stableSince = Date.now();
+    const deadline = Date.now() + 10000;
+    let diagnostics = await getDiagnostics(panelId);
+    while (Date.now() < deadline) {
+      const key = Number(diagnostics.conversationKey || 0);
+      const busy = (diagnostics.runtimeSystemToggles || []).some(
+        (toggle) => toggle.visible && toggle.disabled,
+      );
+      if (key !== previousKey || busy) {
+        previousKey = key;
+        stableSince = Date.now();
+      } else if (
+        conversationKeys.includes(key) &&
+        Date.now() - stableSince >= 600
+      ) {
+        break;
+      }
+      await Zotero.Promise.delay(50);
+      diagnostics = await getDiagnostics(panelId);
+    }
+    return { diagnostics, errors };
+  } finally {
+    win?.removeEventListener("error", onError);
+    win?.removeEventListener("unhandledrejection", onRejection);
+  }
+}
+
+/**
+ * Types `query` into an open Search history popup under `root` and, when
+ * `conversationKey` is set, clicks its row once the search has drawn it
+ * (a searched row carries a preview line).
+ */
+async function searchAndOpenHistoryPopup(
+  root: ParentNode,
+  query: string,
+  conversationKey: number,
+): Promise<WorkflowTestHistorySearchOpen> {
+  const overlay = Array.from(
+    root.querySelectorAll(".llm-standalone-search-overlay"),
+  ).find((element) => (element as HTMLElement).style.display !== "none") as
+    | HTMLElement
+    | undefined;
+  const input = overlay?.querySelector(
+    ".llm-standalone-search-input",
+  ) as HTMLInputElement | null;
+  if (!overlay || !input) {
+    throw new Error("The Search history popup did not open");
+  }
+  input.value = query;
+  const EventCtor = input.ownerDocument.defaultView?.Event || Event;
+  input.dispatchEvent(new EventCtor("input", { bubbles: true }));
+  const rowSelector = `.llm-standalone-search-item[data-conversation-key="${conversationKey}"]`;
+  const searchedRow = await waitForWorkflowElement(
+    overlay,
+    `${rowSelector} .llm-standalone-search-preview`,
+  );
+  const rows = Array.from(
+    overlay.querySelectorAll(".llm-standalone-search-item"),
+  ) as HTMLElement[];
+  const result: WorkflowTestHistorySearchOpen = {
+    resultKeys: rows.map((row) => Number(row.dataset.conversationKey || 0)),
+    resultSystems: rows.map((row) => row.dataset.conversationSystem || ""),
+    resultRuntimeLabels: rows.map((row) =>
+      (
+        row.querySelector(".llm-history-runtime-label")?.textContent || ""
+      ).trim(),
+    ),
+    opened: false,
+  };
+  const row = searchedRow?.closest(
+    ".llm-standalone-search-item",
+  ) as HTMLElement | null;
+  if (!row) {
+    // Close the popup so the next step starts from a closed popup.
+    input.dispatchEvent(
+      new (input.ownerDocument.defaultView?.KeyboardEvent || KeyboardEvent)(
+        "keydown",
+        { key: "Escape", bubbles: true },
+      ),
+    );
+    return result;
+  }
+  dispatchWorkflowMouseClick(row);
+  // The popup closes once the open has finished.
+  const deadline = Date.now() + 10000;
+  while (overlay.style.display !== "none" && Date.now() < deadline) {
+    await Zotero.Promise.delay(50);
+  }
+  result.opened = overlay.style.display === "none";
+  await Zotero.Promise.delay(200);
+  return result;
+}
+
+async function searchAndOpenPanelHistory(
+  panelId: string,
+  query: string,
+  conversationKey: number,
+): Promise<WorkflowTestHistorySearchOpen> {
+  assertWorkflowTestEnabled();
+  const body = await openPanelHistoryMenu(panelId);
+  dispatchWorkflowClick(
+    body as HTMLElement,
+    ".llm-history-menu-search-trigger",
+    "History search trigger",
+  );
+  return searchAndOpenHistoryPopup(body, query, conversationKey);
+}
+
+async function renamePanelHistoryConversation(
+  panelId: string,
+  conversationKey: number,
+  title: string,
+): Promise<Record<ConversationSystem, string | null>> {
+  assertWorkflowTestEnabled();
+  const row = await findPanelHistoryRow(panelId, conversationKey);
+  const renameButton = row.querySelector(
+    ".llm-history-item-rename",
+  ) as HTMLElement | null;
+  if (!renameButton) {
+    throw new Error(`History row ${conversationKey} has no rename button`);
+  }
+  dispatchWorkflowMouseClick(renameButton);
+  const doc = row.ownerDocument;
+  const input = (await waitForWorkflowElement(
+    doc,
+    ".llm-conversation-rename-input",
+  )) as HTMLInputElement | null;
+  if (!input) throw new Error("The rename dialog did not open");
+  input.value = title;
+  input.dispatchEvent(
+    new (doc.defaultView?.Event || Event)("input", { bubbles: true }),
+  );
+  (
+    doc.querySelector(
+      ".llm-conversation-rename-dialog .llm-modal-primary",
+    ) as HTMLButtonElement | null
+  )?.click();
+  const deadline = Date.now() + 5000;
+  while (
+    doc.querySelector(".llm-conversation-rename-dialog") &&
+    Date.now() < deadline
+  ) {
+    await Zotero.Promise.delay(50);
+  }
+  await Zotero.Promise.delay(300);
+  const titles = {} as Record<ConversationSystem, string | null>;
+  for (const system of ["upstream", "codex", "claude_code"] as const) {
+    const entry = await conversationRepository
+      .getCatalogEntry({ system, conversationKey })
+      .catch(() => null);
+    titles[system] = entry ? entry.title || "" : null;
+  }
+  return titles;
+}
+
+async function listStandaloneSidebarHistory(): Promise<
+  WorkflowTestHistoryRow[]
+> {
+  assertWorkflowTestEnabled();
+  const doc = await waitForStandaloneReady();
+  await waitForWorkflowElement(
+    doc,
+    ".llm-standalone-conv-item[data-conversation-key], .llm-standalone-sidebar-empty",
+  );
+  return (
+    Array.from(
+      doc.querySelectorAll(".llm-standalone-conv-item[data-conversation-key]"),
+    ) as HTMLElement[]
+  ).map((row) =>
+    readWorkflowHistoryRow(row, Number(row.dataset.conversationKey || 0)),
+  );
+}
+
+function readStandalonePinnedPapers(
+  doc: Document,
+): WorkflowTestStandalonePinnedPapers {
+  const button = doc.querySelector(
+    ".llm-standalone-icon-pin",
+  ) as HTMLButtonElement | null;
+  const region = doc.querySelector(
+    ".llm-standalone-pinned-region",
+  ) as HTMLElement | null;
+  const clear = doc.querySelector(
+    ".llm-standalone-pinned-clear",
+  ) as HTMLElement | null;
+  const leftEdge = (selector: string): number | null => {
+    const element = doc.querySelector(selector) as HTMLElement | null;
+    if (!element || !element.getClientRects().length) return null;
+    return Math.round(element.getBoundingClientRect().left);
+  };
+  return {
+    pinButton: {
+      visible: Boolean(button && !button.hidden),
+      pressed: button?.getAttribute("aria-pressed") === "true",
+      label: (button?.getAttribute("aria-label") || "").trim(),
+    },
+    regionVisible: Boolean(region && !region.hidden),
+    clearVisible: Boolean(clear && !clear.hidden),
+    edges: {
+      pinnedLabel: leftEdge(".llm-standalone-pinned-label"),
+      pinnedRow: leftEdge(".llm-standalone-pinned-paper"),
+      historyLabel: leftEdge(
+        ".llm-standalone-sidebar-list > .llm-standalone-conv-group",
+      ),
+      historyRow: leftEdge(
+        ".llm-standalone-sidebar-list > .llm-standalone-conv-item",
+      ),
+    },
+    rows: (
+      Array.from(
+        doc.querySelectorAll(".llm-standalone-pinned-paper"),
+      ) as HTMLElement[]
+    ).map((row) => {
+      const writing = row.querySelector(".llm-history-activity");
+      return {
+        paperItemId: Number(row.dataset.paperItemId || 0),
+        label: (
+          row.querySelector(".llm-standalone-conv-title")?.textContent || ""
+        ).trim(),
+        active: row.classList.contains("active"),
+        dot:
+          writing && !(writing as HTMLElement).hidden
+            ? "writing"
+            : row.querySelector(".llm-standalone-pinned-ready")
+              ? "ready"
+              : null,
+      };
+    }),
+  };
+}
+
+async function listStandalonePinnedPapers(): Promise<WorkflowTestStandalonePinnedPapers> {
+  assertWorkflowTestEnabled();
+  return readStandalonePinnedPapers(await waitForStandaloneReady());
+}
+
+async function clickStandalonePinButton(): Promise<WorkflowTestStandalonePinnedPapers> {
+  assertWorkflowTestEnabled();
+  const doc = await waitForStandaloneReady();
+  const button = doc.querySelector(
+    ".llm-standalone-icon-pin",
+  ) as HTMLButtonElement | null;
+  if (!button || button.hidden) {
+    throw new Error("The window's pin button is not shown");
+  }
+  dispatchWorkflowMouseClick(button);
+  await Zotero.Promise.delay(100);
+  return readStandalonePinnedPapers(doc);
+}
+
+async function clickStandalonePinnedClear(): Promise<WorkflowTestStandalonePinnedPapers> {
+  assertWorkflowTestEnabled();
+  const doc = await waitForStandaloneReady();
+  const button = doc.querySelector(
+    ".llm-standalone-pinned-clear",
+  ) as HTMLButtonElement | null;
+  if (!button || button.hidden) {
+    throw new Error('The "Pinned papers" Clear button is not shown');
+  }
+  dispatchWorkflowMouseClick(button);
+  await Zotero.Promise.delay(100);
+  return readStandalonePinnedPapers(doc);
+}
+
+async function clickStandalonePinnedPaper(
+  paperItemId: number,
+  action: "open" | "unpin" = "open",
+): Promise<WorkflowTestStandaloneDiagnostics> {
+  assertWorkflowTestEnabled();
+  const doc = await waitForStandaloneReady();
+  const row = await waitForWorkflowElement(
+    doc,
+    `.llm-standalone-pinned-paper[data-paper-item-id="${paperItemId}"]`,
+  );
+  if (!row) throw new Error(`Pinned paper ${paperItemId} not rendered`);
+  const target =
+    action === "unpin"
+      ? (row.querySelector('[data-action="unpin"]') as HTMLElement | null)
+      : row;
+  if (!target) throw new Error(`Pinned paper ${paperItemId} has no unpin`);
+  dispatchWorkflowMouseClick(target);
+  if (action === "open") {
+    await waitForStandaloneDiagnostics(
+      (state) => state.basePaperItemId === paperItemId,
+    );
+  }
+  await Zotero.Promise.delay(250);
+  return readStandaloneDiagnostics();
+}
+
+async function waitForStandaloneDiagnostics(
+  done: (diagnostics: WorkflowTestStandaloneDiagnostics) => boolean,
+  timeoutMs = 10000,
+): Promise<WorkflowTestStandaloneDiagnostics> {
+  const deadline = Date.now() + timeoutMs;
+  let diagnostics = readStandaloneDiagnostics();
+  while (!done(diagnostics) && Date.now() < deadline) {
+    await Zotero.Promise.delay(50);
+    diagnostics = readStandaloneDiagnostics();
+  }
+  return diagnostics;
+}
+
+async function clickStandaloneSidebarHistoryRow(
+  conversationKey: number,
+): Promise<WorkflowTestStandaloneDiagnostics> {
+  assertWorkflowTestEnabled();
+  const doc = await waitForStandaloneReady();
+  const row = await waitForWorkflowElement(
+    doc,
+    `.llm-standalone-conv-item[data-conversation-key="${conversationKey}"]`,
+  );
+  if (!row) {
+    throw new Error(`Window history row ${conversationKey} not rendered`);
+  }
+  dispatchWorkflowMouseClick(row);
+  await waitForStandaloneDiagnostics(
+    (state) => state.conversationKey === conversationKey,
+  );
+  await Zotero.Promise.delay(200);
+  return readStandaloneDiagnostics();
+}
+
+async function searchAndOpenStandaloneHistory(
+  query: string,
+  conversationKey: number,
+): Promise<WorkflowTestHistorySearchOpen> {
+  assertWorkflowTestEnabled();
+  const doc = await waitForStandaloneReady();
+  const opener = doc
+    .querySelector(".llm-standalone-sidebar .llm-standalone-nav-icon-search")
+    ?.closest(
+      "button, [role='button'], .llm-standalone-nav-row",
+    ) as HTMLElement | null;
+  if (!opener) throw new Error("The Search history nav row was not rendered");
+  opener.click();
+  await waitForWorkflowElement(doc, ".llm-standalone-search-overlay");
+  return searchAndOpenHistoryPopup(doc, query, conversationKey);
+}
+
+async function deletePanelHistoryConversation(
+  panelId: string,
+  conversationKey: number,
+): Promise<void> {
+  assertWorkflowTestEnabled();
+  const body = await openPanelHistoryMenu(panelId);
+  const rowSelector = `.llm-history-item[data-conversation-key="${conversationKey}"]`;
+  // The menu may still be re-rendering after recent conversation changes;
+  // poll for the specific row instead of failing on the first paint.
+  const deadline = Date.now() + 8000;
+  let row = body.querySelector(rowSelector) as HTMLElement | null;
+  while (!row && Date.now() < deadline) {
+    await Zotero.Promise.delay(50);
+    row = body.querySelector(rowSelector) as HTMLElement | null;
+  }
+  if (!row) {
+    const menu = body.querySelector("#llm-history-menu") as HTMLElement | null;
+    const renderedKeys = Array.from(
+      body.querySelectorAll(".llm-history-item[data-conversation-key]"),
+    ).map((el) => (el as HTMLElement).dataset.conversationKey);
+    throw new Error(
+      `History row ${conversationKey} not rendered; menuDisplay=${menu?.style.display}, renderedKeys=[${renderedKeys.join(",")}], menuTextSample=${(menu?.textContent || "").slice(0, 160)}`,
+    );
+  }
+  const deleteBtn = row.querySelector(
+    ".llm-history-item-delete",
+  ) as HTMLElement | null;
+  if (!deleteBtn) throw new Error(`Row ${conversationKey} is not deletable`);
+  const eventCtor = body.ownerDocument.defaultView?.MouseEvent || MouseEvent;
+  deleteBtn.dispatchEvent(
+    new eventCtor("click", { bubbles: true, cancelable: true }),
+  );
+  await Zotero.Promise.delay(300);
+}
+
+async function clickPanelDelete(panelId: string): Promise<void> {
+  assertWorkflowTestEnabled();
+  const panel = getPanel(panelId);
+  const itemBefore = activeContextPanels.get(panel.body)?.() || panel.item;
+  const conversationKeyBefore = getConversationKey(itemBefore);
+  dispatchWorkflowClick(
+    panel.body,
+    ".llm-clear-btn",
+    "Delete conversation button",
+  );
+
+  // The header trash action queues the same deletion used by history.
+  // Wait for this mounted surface to leave the doomed key and render the fresh
+  // empty conversation selected by the shared deletion subscriber.
+  const deadline = Date.now() + 8000;
+  while (Date.now() < deadline) {
+    const currentItem = activeContextPanels.get(panel.body)?.() || panel.item;
+    const currentKey = getConversationKey(currentItem);
+    if (
+      currentKey !== conversationKeyBefore &&
+      pendingDeletionStore.isConversationPendingDeletion(
+        conversationKeyBefore,
+      ) &&
+      panel.body.querySelectorAll(".llm-message-wrapper").length === 0
+    ) {
+      return;
+    }
+    await Zotero.Promise.delay(50);
+  }
+  const currentItem = activeContextPanels.get(panel.body)?.() || panel.item;
+  throw new Error(
+    `Delete did not render the empty replacement for conversation ${conversationKeyBefore}; current=${getConversationKey(currentItem)}, visibleMessages=${panel.body.querySelectorAll(".llm-message-wrapper").length}`,
+  );
+}
+
+async function exercisePanelDeleteDuringPendingSend(
+  panelId: string,
+  text: string,
+): Promise<WorkflowTestPendingSendDeleteResult> {
+  assertWorkflowTestEnabled();
+  const panel = getPanel(panelId);
+  const mountedItem = activeContextPanels.get(panel.body)?.() || panel.item;
+  const conversationKeyBefore = getConversationKey(mountedItem);
+  if (!conversationKeyBefore) {
+    throw new Error("Workflow panel has no active conversation key");
+  }
+
+  const input = panel.body.querySelector(
+    "#llm-input",
+  ) as HTMLTextAreaElement | null;
+  const sendBtn = panel.body.querySelector(
+    "#llm-send",
+  ) as HTMLButtonElement | null;
+  if (!input || !sendBtn) {
+    throw new Error("Workflow panel composer was not rendered");
+  }
+
+  lastSend = null;
+  lastFinalRequest = null;
+  const sendSettledSequenceBefore = getWorkflowTestSendSettledSequence();
+  let finalRequestReached = false;
+  let releaseFinalRequest: () => void = () => {};
+  const finalRequestGate = new Promise<void>((resolve) => {
+    releaseFinalRequest = resolve;
+  });
+  setWorkflowTestSendInterceptor((opts) => {
+    opts.apiBase = "http://127.0.0.1:9/v1";
+    opts.apiKey = "workflow-test-key";
+    opts.authMode = "api_key";
+    lastSend = opts;
+    return true;
+  });
+  setWorkflowTestFinalRequestInterceptor(async (snapshot) => {
+    lastFinalRequest = snapshot;
+    finalRequestReached = true;
+    await finalRequestGate;
+    return true;
+  });
+
+  try {
+    input.value = text;
+    const eventCtor = panel.body.ownerDocument.defaultView?.Event ?? Event;
+    input.dispatchEvent(new eventCtor("input", { bubbles: true }));
+    sendBtn.click();
+
+    const pendingDeadline = Date.now() + 10_000;
+    while (
+      (!finalRequestReached || !isRequestPending(conversationKeyBefore)) &&
+      Date.now() < pendingDeadline
+    ) {
+      await Zotero.Promise.delay(25);
+    }
+    const requestPendingBeforeClick = isRequestPending(conversationKeyBefore);
+    if (!finalRequestReached || !requestPendingBeforeClick) {
+      throw new Error(
+        `Workflow send did not reach a pending provider boundary: ${JSON.stringify(
+          {
+            finalRequestReached,
+            requestPendingBeforeClick,
+            diagnostics: await getDiagnostics(panelId),
+          },
+        )}`,
+      );
+    }
+
+    dispatchWorkflowClick(
+      panel.body,
+      ".llm-clear-btn",
+      "Delete conversation button",
+    );
+
+    const decisionDeadline = Date.now() + 3_000;
+    let diagnostics = await getDiagnostics(panelId);
+    let pendingDeletionQueued =
+      pendingDeletionStore.isConversationPendingDeletion(conversationKeyBefore);
+    while (
+      diagnostics.conversationKey === conversationKeyBefore &&
+      !pendingDeletionQueued &&
+      !String(diagnostics.statusText || "").includes(
+        "Cannot delete while generating",
+      ) &&
+      Date.now() < decisionDeadline
+    ) {
+      await Zotero.Promise.delay(25);
+      diagnostics = await getDiagnostics(panelId);
+      pendingDeletionQueued =
+        pendingDeletionStore.isConversationPendingDeletion(
+          conversationKeyBefore,
+        );
+    }
+
+    return {
+      conversationKeyBefore,
+      conversationKeyAfter: diagnostics.conversationKey,
+      requestPendingBeforeClick,
+      requestPendingAfterClick: isRequestPending(conversationKeyBefore),
+      pendingDeletionQueued,
+      statusText: diagnostics.statusText || "",
+    };
+  } finally {
+    releaseFinalRequest();
+    const settledDeadline = Date.now() + 10_000;
+    while (
+      getWorkflowTestSendSettledSequence() <= sendSettledSequenceBefore &&
+      Date.now() < settledDeadline
+    ) {
+      await Zotero.Promise.delay(25);
+    }
+    setWorkflowTestSendInterceptor((opts) => {
+      lastSend = opts;
+    });
+    setWorkflowTestFinalRequestInterceptor((snapshot) => {
+      lastFinalRequest = snapshot;
+    });
+  }
+}
+
+async function seedPanelStoredTurn(
+  panelId: string,
+  userText: string,
+  assistantText: string,
+  assistant: Partial<Message> = {},
+): Promise<WorkflowTestSeededTurn> {
+  assertWorkflowTestEnabled();
+  const panel = getPanel(panelId);
+  const item = activeContextPanels.get(panel.body)?.() || panel.item;
+  const conversationKey = getConversationKey(item);
+  if (!conversationKey) {
+    throw new Error("Workflow panel has no active conversation key");
+  }
+  const userTimestamp = Date.now();
+  const assistantTimestamp = userTimestamp + 1;
+  const userMessage = {
+    role: "user" as const,
+    text: userText,
+    timestamp: userTimestamp,
+  };
+  const assistantMessage = {
+    ...assistant,
+    role: "assistant" as const,
+    text: assistantText,
+    timestamp: assistantTimestamp,
+  };
+  const conversationSystem =
+    (panel.body.querySelector("#llm-main") as HTMLElement | null)?.dataset
+      .conversationSystem || "upstream";
+  const system =
+    conversationSystem === "codex" || conversationSystem === "claude_code"
+      ? conversationSystem
+      : "upstream";
+  await appendWorkflowStoredMessage(system, conversationKey, userMessage);
+  await appendWorkflowStoredMessage(system, conversationKey, assistantMessage);
+  const existing = chatHistory.get(conversationKey) || [];
+  chatHistory.set(conversationKey, [
+    ...existing,
+    userMessage,
+    assistantMessage,
+  ]);
+  loadedConversationKeys.add(conversationKey);
+  panel.item = item;
+  refreshChat(panel.body, item);
+  await Zotero.Promise.delay(100);
+  return { conversationKey, userTimestamp, assistantTimestamp };
+}
+
+async function deletePanelTurn(
+  panelId: string,
+  userTimestamp: number,
+  assistantTimestamp: number,
+): Promise<void> {
+  assertWorkflowTestEnabled();
+  const panel = getPanel(panelId);
+  const queueTurnDeletion = (
+    panel.body as HTMLElement & {
+      __llmQueueTurnDeletion?: (target: {
+        conversationKey: number;
+        userTimestamp: number;
+        assistantTimestamp: number;
+      }) => Promise<void>;
+    }
+  ).__llmQueueTurnDeletion;
+  if (!queueTurnDeletion) {
+    throw new Error("Turn deletion hook not installed on panel body");
+  }
+  const item = activeContextPanels.get(panel.body)?.() || panel.item;
+  const conversationKey = getConversationKey(item);
+  await queueTurnDeletion({
+    conversationKey,
+    userTimestamp,
+    assistantTimestamp,
+  });
+  await Zotero.Promise.delay(200);
+}
+
+async function clickPanelUndo(panelId: string): Promise<void> {
+  assertWorkflowTestEnabled();
+  const panel = getPanel(panelId);
+  dispatchWorkflowClick(panel.body, "#llm-history-undo-btn", "Undo button");
+  await Zotero.Promise.delay(300);
+}
+
+async function isPanelUndoToastVisible(panelId: string): Promise<boolean> {
+  const panel = getPanel(panelId);
+  const toast = panel.body.querySelector(
+    "#llm-history-undo",
+  ) as HTMLElement | null;
+  return Boolean(toast && toast.style.display !== "none");
+}
+
+async function getPanelVisibleMessageCount(panelId: string): Promise<number> {
+  const panel = getPanel(panelId);
+  return panel.body.querySelectorAll(".llm-message-wrapper").length;
+}
+
+async function remountPanel(panelId: string): Promise<WorkflowTestPanel> {
+  assertWorkflowTestEnabled();
+  const panel = getPanel(panelId);
+  // The mounted item may be a synthetic portal item (global conversations);
+  // remount from the original raw Zotero item backing the panel.
+  const rawItem = activeContextPanelRawItems.get(panel.body);
+  const itemId = Math.floor(Number(rawItem?.id || panel.item.id));
+  disposeSetupHandlers(panel.body);
+  activeContextPanels.delete(panel.body);
+  activeContextPanelRawItems.delete(panel.body);
+  panel.body.remove();
+  panels.delete(panelId);
+  return renderPanelForItemInternal(itemId);
+}
+
+async function getPendingDeletionState(): Promise<WorkflowTestPendingDeletionState> {
+  const keys = Array.from(
+    pendingDeletionStore.getPendingConversationKeys().values(),
+  );
+  const rows = (await Zotero.DB.queryAsync(
+    `SELECT COUNT(*) AS n FROM ${PENDING_DELETIONS_TABLE}`,
+  )) as Array<{ n: number }>;
+  return {
+    pendingCount: pendingDeletionStore.getLatestPending() ? 1 : 0,
+    pendingConversationKeys: keys,
+    persistedRowCount: Math.floor(Number(rows?.[0]?.n || 0)),
+  };
+}
+
+async function sweepPendingDeletionsAsRestart(): Promise<void> {
+  // These existing workflow cases intentionally model the post-expiry
+  // checkpoint (the six-second window is not slept through in the harness).
+  // Production startup uses the default and preserves an unexpired Undo row.
+  await pendingDeletionStore.sweepAllPersisted("workflow-test-restart", {
+    forceExpired: true,
+  });
+}
+
+async function searchPanelHistory(
+  panelId: string,
+  query: string,
+): Promise<WorkflowTestHistorySearchResult> {
+  assertWorkflowTestEnabled();
+  const panel = getPanel(panelId);
+  const search = (
+    panel.body as HTMLElement & {
+      __llmSearchPanelHistory?: (
+        query: string,
+      ) => Promise<WorkflowTestHistorySearchResult>;
+    }
+  ).__llmSearchPanelHistory;
+  if (!search) {
+    throw new Error("History search hook not installed on panel body");
+  }
+  return search(query);
+}
+
+const heldConversationWriteLocks = new Map<
+  number,
+  { release: () => void; tail: Promise<void> | undefined }
+>();
+
+/**
+ * Holds the conversation's write lock until `releaseConversationWriteLock`,
+ * so a test can stop a flow at its next store write.
+ */
+async function holdConversationWriteLock(
+  conversationKey: number,
+): Promise<void> {
+  assertWorkflowTestEnabled();
+  if (heldConversationWriteLocks.has(conversationKey)) {
+    throw new Error(`write lock ${conversationKey} is already held`);
+  }
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await new Promise<void>((held) => {
+    void withConversationWriteLock(conversationKey, () => {
+      held();
+      return released;
+    });
+  });
+  heldConversationWriteLocks.set(conversationKey, {
+    release,
+    tail: getConversationWriteLockTailForTests(conversationKey),
+  });
+}
+
+/** Whether another write now waits behind the held lock. */
+async function isConversationWriteLockQueued(
+  conversationKey: number,
+): Promise<boolean> {
+  assertWorkflowTestEnabled();
+  const held = heldConversationWriteLocks.get(conversationKey);
+  if (!held) throw new Error(`write lock ${conversationKey} is not held`);
+  return getConversationWriteLockTailForTests(conversationKey) !== held.tail;
+}
+
+/**
+ * Treats the writes queued so far as seen, so that
+ * isConversationWriteLockQueued reports only a write that queues later.
+ */
+async function markConversationWriteLockQueue(
+  conversationKey: number,
+): Promise<void> {
+  assertWorkflowTestEnabled();
+  const held = heldConversationWriteLocks.get(conversationKey);
+  if (!held) throw new Error(`write lock ${conversationKey} is not held`);
+  held.tail = getConversationWriteLockTailForTests(conversationKey);
+}
+
+async function releaseConversationWriteLock(
+  conversationKey: number,
+): Promise<void> {
+  assertWorkflowTestEnabled();
+  const held = heldConversationWriteLocks.get(conversationKey);
+  heldConversationWriteLocks.delete(conversationKey);
+  held?.release();
+}
+
+let heldFinalRequest: {
+  reached: boolean;
+  release: () => void;
+  previous: ReturnType<typeof getWorkflowTestFinalRequestInterceptor>;
+} | null = null;
+
+/**
+ * Holds the next chat request at its final preparation step, after the flow
+ * wrote its user row and before dispatch, until `releaseFinalRequest`. Later
+ * requests pass through to the interceptor that was installed before.
+ */
+async function holdNextFinalRequest(): Promise<void> {
+  assertWorkflowTestEnabled();
+  if (heldFinalRequest) throw new Error("a final request is already held");
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const hold = {
+    reached: false,
+    release,
+    previous: getWorkflowTestFinalRequestInterceptor(),
+  };
+  heldFinalRequest = hold;
+  setWorkflowTestFinalRequestInterceptor(async (snapshot) => {
+    if (!hold.reached) {
+      hold.reached = true;
+      await released;
+      return false;
+    }
+    return hold.previous ? await hold.previous(snapshot) : false;
+  });
+}
+
+/** Whether the held request has reached its final preparation step. */
+async function isFinalRequestHeld(): Promise<boolean> {
+  assertWorkflowTestEnabled();
+  return Boolean(heldFinalRequest?.reached);
+}
+
+async function releaseFinalRequest(): Promise<void> {
+  assertWorkflowTestEnabled();
+  const hold = heldFinalRequest;
+  heldFinalRequest = null;
+  if (!hold) return;
+  setWorkflowTestFinalRequestInterceptor(hold.previous);
+  hold.release();
+}
+
+async function failNextPendingTurnFinalizes(count: number): Promise<void> {
+  assertWorkflowTestEnabled();
+  forcePendingTurnFinalizeFailuresForTests(count);
+}
+
+async function forceWebChatSessionAnchorFailures(count: number): Promise<void> {
+  assertWorkflowTestEnabled();
+  forceWebChatSessionAnchorFailuresForTests(count);
+}
+
+async function failNextInPlacePaperSwitches(count: number): Promise<void> {
+  assertWorkflowTestEnabled();
+  forceInPlacePaperSwitchFailuresForTests(count);
+}
+
+async function getPendingInPlacePaperSwitchFailures(): Promise<number> {
+  assertWorkflowTestEnabled();
+  return getForcedInPlacePaperSwitchFailuresForTests();
+}
+
+// Adds a selected-text chip to the conversation a mounted Zotero pane shows,
+// or clears that conversation's chips when text is null.
+async function setMountedPanelSelectedText(
+  body: Element,
+  text: string | null,
+): Promise<number> {
+  assertWorkflowTestEnabled();
+  const root = body.querySelector("#llm-main") as HTMLElement | null;
+  const itemId = Number(root?.dataset.itemId || 0);
+  if (!(itemId > 0)) throw new Error("The panel shows no conversation");
+  if (text === null) {
+    setSelectedTextContextEntries(itemId, []);
+    applySelectedTextPreview(body, itemId);
+  } else if (
+    !addSelectedTextContext(body, itemId, text, {
+      source: "pdf",
+      focusInput: false,
+    })
+  ) {
+    throw new Error("The selected text was not added");
+  }
+  return itemId;
+}
+
+// Drive a real send through the full request pipeline with intercepting
+// hooks (no network), and return the captured final provider request.
+async function askCapturingFinalRequest(
+  panelId: string,
+  text: string,
+): Promise<WorkflowTestFinalRequestSnapshot> {
+  assertWorkflowTestEnabled();
+  const panel = getPanel(panelId);
+  lastFinalRequest = null;
+  setWorkflowTestSendInterceptor((opts) => {
+    opts.apiBase = "http://127.0.0.1:9/v1";
+    opts.apiKey = "workflow-test-key";
+    opts.authMode = "api_key";
+    lastSend = opts;
+    return true;
+  });
+  setWorkflowTestFinalRequestInterceptor((snapshot) => {
+    lastFinalRequest = snapshot;
+    return true;
+  });
+  try {
+    await ask(panelId, text);
+    return await waitForFinalRequest(panel.body);
+  } finally {
+    setWorkflowTestSendInterceptor((opts) => {
+      lastSend = opts;
+    });
+    setWorkflowTestFinalRequestInterceptor((snapshot) => {
+      lastFinalRequest = snapshot;
+    });
+  }
+}
+
+async function simulateProviderContextUsage(
+  panelId: string,
+  usage: {
+    contextTokens: number;
+    contextWindow?: number;
+    contextWindowIsAuthoritative?: boolean;
+  },
+): Promise<WorkflowTestDiagnostics> {
+  assertWorkflowTestEnabled();
+  const panel = getPanel(panelId);
+  const inputCap = lastFinalRequest?.inputCap;
+  if (!inputCap) {
+    throw new Error("No captured final request input cap is available");
+  }
+  const item = activeContextPanels.get(panel.body)?.() || panel.item;
+  updateContextUsageSnapshotFromProvider({
+    conversationKey: getConversationKey(item),
+    usage: {
+      promptTokens: usage.contextTokens,
+      completionTokens: 0,
+      totalTokens: usage.contextTokens,
+      ...usage,
+    },
+    fallbackContextWindow: inputCap.limitTokens,
+    fallbackInputLimitSource: inputCap.limitSource,
+  });
+  refreshChat(panel.body, item);
+  return getDiagnostics(panelId);
+}
+
+async function setWorkflowModelInputCap(
+  panelId: string,
+  entryId: string,
+  inputTokenCap: number,
+): Promise<WorkflowTestDiagnostics> {
+  assertWorkflowTestEnabled();
+  getPanel(panelId);
+  const groups = getModelProviderGroups();
+  const model = groups
+    .filter(
+      (group) =>
+        group.authMode !== "codex_auth" && group.authMode !== "webchat",
+    )
+    .flatMap((group) => group.models)
+    .find((entry) => entry.id === entryId);
+  if (!model) throw new Error(`Unknown workflow model entry ${entryId}`);
+  model.inputTokenCap = inputTokenCap;
+  setModelProviderGroups(groups);
+  await Zotero.Promise.delay(25);
+  return getDiagnostics(panelId);
+}
+
+async function cleanupFixture(
+  fixture:
+    | WorkflowTestFixture
+    | WorkflowTestAttachmentFixture
+    | WorkflowTestNoteFixture
+    | WorkflowTestStandaloneNoteFixture,
+): Promise<void> {
+  assertWorkflowTestEnabled();
+  if ("attachmentItemId" in fixture) {
+    await trashItemIfPossible(fixture.attachmentItemId);
+    await removePathIfPossible(fixture.tempPath);
+    return;
+  }
+  if ("noteItemId" in fixture) {
+    await trashItemIfPossible(fixture.noteItemId);
+  }
+  if ("pdfAttachmentId" in fixture) {
+    await trashItemIfPossible(fixture.pdfAttachmentId);
+  }
+  if ("parentItemId" in fixture) {
+    await trashItemIfPossible(fixture.parentItemId);
+  }
+  if ("tempPdfPath" in fixture) {
+    await removePathIfPossible(fixture.tempPdfPath);
+  }
+}
+
+/**
+ * The panel a Task progress replay runs in: a synthetic panel by id, or the
+ * visible native panel of the sidebar or the standalone window.
+ */
+async function resolveTaskProgressPanel(input: {
+  panelId?: string;
+  surface?: "embedded" | "standalone";
+}): Promise<{ body: HTMLElement; item: Zotero.Item }> {
+  assertWorkflowTestEnabled();
+  if (input.panelId) {
+    const panel = getPanel(input.panelId);
+    const item = activeContextPanels.get(panel.body)?.() || panel.item;
+    await ensureConversationLoaded(item);
+    return { body: panel.body, item };
+  }
+  const win =
+    input.surface === "standalone"
+      ? getStandaloneWindowForTest()
+      : Zotero.getMainWindow();
+  const doc = win?.document;
+  const host =
+    input.surface === "standalone"
+      ? doc?.querySelector(".llm-standalone-content")
+      : doc &&
+        (getReaderContextPanelForTab(
+          doc,
+          (win as Window & { Zotero_Tabs?: { selectedID?: string } })
+            ?.Zotero_Tabs?.selectedID,
+        ) ||
+          doc.getElementById("zotero-item-details"));
+  const root = host?.querySelector<HTMLElement>("#llm-main");
+  const body = root?.parentElement;
+  const item = body && activeContextPanels.get(body)?.();
+  if (!root?.isConnected || !body || !item) {
+    throw new Error("Task progress replay requires a mounted chat panel");
+  }
+  await ensureConversationLoaded(item);
+  return { body, item };
+}
+
+export function installWorkflowTestHarness(targetAddon: {
+  api: {
+    workflowTest?: WorkflowTestApi;
+    agent?: { getZoteroGateway(): ZoteroGateway };
+  };
+}): void {
+  if (__env__ !== "test" && __env__ !== "development") return;
+  targetAddon.api.workflowTest = {
+    planRetrievalQuery: resolveRetrievalQueryPlan,
+    async libraryRetrieveBench(input) {
+      const { LibraryRetrieveService } =
+        await import("../../agent/services/libraryRetrieveService");
+      const { PdfService } = await import("../../agent/services/pdfService");
+      const agentApi = targetAddon.api.agent;
+      if (!agentApi) throw new Error("Agent subsystem is not installed");
+      const service = new LibraryRetrieveService(
+        agentApi.getZoteroGateway(),
+        new PdfService(),
+      );
+      const startedAt = Date.now();
+      const result = await service.retrieve({
+        query: input.query,
+        depth: input.depth || "evidence",
+        intent: input.intent,
+        scope: input.collectionIds?.length
+          ? {
+              libraryID: Zotero.Libraries.userLibraryID,
+              collectionIds: input.collectionIds,
+            }
+          : { libraryID: Zotero.Libraries.userLibraryID },
+        // No model, apiBase or apiKey: the planner falls back to the literal
+        // query, so the numbers measure retrieval, not an LLM.
+      });
+      const elapsedMs = Date.now() - startedAt;
+      const [timing] = getRecentRetrievalTimings(1);
+      return {
+        elapsedMs,
+        timing: timing || null,
+        paperItemIds: result.paperMatches.map((match) => Number(match.itemId)),
+        snippetItemIds: result.snippets.map((snippet) =>
+          Number(snippet.itemId),
+        ),
+        snippetTexts: result.snippets.map((snippet) => snippet.snippet),
+        snippetCount: result.snippets.length,
+        warnings: result.warnings,
+        queryCoverage: result.resourcePool.queryCoverage,
+      };
+    },
+    getRecentRetrievalTimings: (limit) => getRecentRetrievalTimings(limit),
+    libraryTextIndexStatus: async () => {
+      const { libraryTextIndexScheduler } =
+        await import("../../services/libraryTextIndex");
+      return libraryTextIndexScheduler.getStatus(
+        Zotero.Libraries.userLibraryID,
+      );
+    },
+    setLibraryTextIndexUserIdle: async (idle) => {
+      const { setUserIdleForTests } =
+        await import("../../services/libraryTextIndex/userIdle");
+      const { libraryTextIndexScheduler } =
+        await import("../../services/libraryTextIndex");
+      setUserIdleForTests(idle);
+      libraryTextIndexScheduler.onUserIdleChange(idle !== false);
+    },
+    waitForLibraryTextIndexIdle: async (timeoutMs) => {
+      // The scaffold's tester is never "user idle"; force it so prefetch drains.
+      const { setUserIdleForTests } =
+        await import("../../services/libraryTextIndex/userIdle");
+      const { libraryTextIndexScheduler } =
+        await import("../../services/libraryTextIndex");
+      setUserIdleForTests(true);
+      libraryTextIndexScheduler.onUserIdleChange(true);
+      return libraryTextIndexScheduler.waitForIdle(timeoutMs);
+    },
+    libraryTextIndexCoverage: async (attachmentIds) => {
+      const { getLibraryTextIndexStore } =
+        await import("../../services/libraryTextIndex/store");
+      const store = await getLibraryTextIndexStore();
+      if (!store) throw new Error("library text index store unavailable");
+      const coverage = await store.getCoverage(attachmentIds);
+      return {
+        indexed: [...coverage.indexed],
+        missing: coverage.missing,
+        failed: coverage.failed,
+      };
+    },
+    forgetLibraryTextIndexDocuments: async (attachmentIds) => {
+      const { getLibraryTextIndexStore } =
+        await import("../../services/libraryTextIndex/store");
+      const store = await getLibraryTextIndexStore();
+      if (!store) throw new Error("library text index store unavailable");
+      await store.removeFromQueue(attachmentIds);
+      await store.deleteDocuments(attachmentIds);
+    },
+    reconcileLibraryTextIndex: async () => {
+      const { libraryTextIndexScheduler } =
+        await import("../../services/libraryTextIndex");
+      return libraryTextIndexScheduler.reconcile(
+        Zotero.Libraries.userLibraryID,
+      );
+    },
+    restartLibraryTextIndexFromPreStemmingShape: async (attachmentIds) => {
+      const { startLibraryTextIndex, stopLibraryTextIndex } =
+        await import("../../services/libraryTextIndex");
+      const { closeLibraryTextIndexDb, openLibraryTextIndexDb } =
+        await import("../../services/libraryTextIndex/db");
+      const { getLibraryTextIndexStore } =
+        await import("../../services/libraryTextIndex/store");
+      const { estimateDocumentBytes } =
+        await import("../../services/libraryTextIndex/indexer");
+      const { tokenizeRetrievalText } =
+        await import("../../services/retrieval/retrievalTokenizer");
+      const { TOKENIZER_VERSION_META_KEY } =
+        await import("../../services/libraryTextIndex/constants");
+      await stopLibraryTextIndex();
+      const store = await getLibraryTextIndexStore();
+      const db = await openLibraryTextIndexDb();
+      if (!store || !db) throw new Error("library text index unavailable");
+      // The tokenizer before stemming: surface tokens, as tokenizeRetrievalText
+      // emits them without `stem`.
+      const surfaceTerms = (texts: string[]) => {
+        const tf = texts.map((text) => {
+          const counts: Record<string, number> = Object.create(null);
+          for (const token of tokenizeRetrievalText(text))
+            counts[token] = (counts[token] || 0) + 1;
+          return counts;
+        });
+        return {
+          tf,
+          byteEstimate: estimateDocumentBytes({
+            chunks: texts.map((text, i) => ({ text, tf: tf[i] })),
+          }),
+        };
+      };
+      for (const attachmentId of attachmentIds)
+        await store.repostDocument(attachmentId, 1, surfaceTerms);
+      await db.queryAsync(`DROP TABLE IF EXISTS document_tokenizer`);
+      await db.queryAsync(`DELETE FROM index_meta WHERE key = ?`, [
+        TOKENIZER_VERSION_META_KEY,
+      ]);
+      await closeLibraryTextIndexDb();
+      await startLibraryTextIndex();
+    },
+    libraryTextIndexTokenizerState: async () => {
+      const { getLibraryTextIndexStore } =
+        await import("../../services/libraryTextIndex/store");
+      const {
+        LIBRARY_TEXT_INDEX_TOKENIZER_VERSION,
+        TOKENIZER_VERSION_META_KEY,
+      } = await import("../../services/libraryTextIndex/constants");
+      const store = await getLibraryTextIndexStore();
+      if (!store) throw new Error("library text index store unavailable");
+      return {
+        recordedVersion: await store.getIndexMeta(TOKENIZER_VERSION_META_KEY),
+        documentsNeedingRepost: (
+          await store.listDocumentsNeedingRepost(
+            LIBRARY_TEXT_INDEX_TOKENIZER_VERSION,
+            1_000_000,
+          )
+        ).length,
+      };
+    },
+    libraryTextIndexPostingTerms: async (attachmentId) => {
+      const { openLibraryTextIndexDb } =
+        await import("../../services/libraryTextIndex/db");
+      const db = await openLibraryTextIndexDb();
+      if (!db) throw new Error("library text index unavailable");
+      const rows = (await db.queryAsync(
+        `SELECT term FROM postings WHERE attachment_id = ? ORDER BY term`,
+        [attachmentId],
+      )) as Array<{ term: string }>;
+      return rows.map((row) => String(row.term));
+    },
+    searchLibraryTextIndexForTest: async (input) => {
+      const { libraryTextIndex } =
+        await import("../../services/libraryTextIndex");
+      const result = await libraryTextIndex.search({
+        scopeAttachmentIds: input.attachmentIds,
+        queries: input.queries,
+        maxPapers: Math.max(1, input.attachmentIds.length),
+        perPaperTopK: 3,
+      });
+      if (!result) throw new Error("library text index search unavailable");
+      return {
+        paperAttachmentIds: result.papers.map((paper) => paper.attachmentId),
+        matchedTerms: [
+          ...new Set(result.chunks.flatMap((chunk) => chunk.matchedTerms)),
+        ],
+        snippets: result.chunks.map((chunk) => chunk.text),
+      };
+    },
+    loadPaperContextForTest: async (attachmentId) => {
+      const { pdfTextCache } =
+        await import("../../services/paperContent/contextCache");
+      const { ensurePDFTextCached } =
+        await import("../../services/paperContent/pdfContext");
+      const item = Zotero.Items.get(attachmentId);
+      if (!item) throw new Error(`No attachment ${attachmentId}`);
+      // A fresh load, as when a question first reads this paper.
+      pdfTextCache.delete(attachmentId);
+      await ensurePDFTextCached(item);
+    },
+    async clearPaperTextCacheForBench() {
+      const { pdfTextCache, pdfTextLoadingTasks } =
+        await import("../../services/paperContent/contextCache");
+      const { invalidateRetrievalCandidates } =
+        await import("../../services/retrieval/cacheInvalidation");
+      pdfTextCache.clear();
+      pdfTextLoadingTasks.clear();
+      invalidateRetrievalCandidates();
+    },
+    async checkProviderConversationTransport(input) {
+      const params = {
+        ...input,
+        prompt: "Say OK",
+        requestScope: createProviderRequestScope(input.conversationKey),
+      };
+      const chat = await callLLM(params);
+      const stream = await callLLMStream(params, () => undefined);
+      const request = resolveAgentRuntimeRequest({
+        ...input,
+        mode: "agent",
+        userText: "Say OK",
+        libraryID: Zotero.Libraries.userLibraryID,
+        conversationKind: "global",
+      });
+      const adapter = createAgentModelAdapter(request);
+      const step = {
+        request,
+        messages: [{ role: "user" as const, content: "Say OK" }],
+        tools: [],
+      };
+      const agent = await adapter.runStep(step);
+      const continuation = await adapter.runStep({
+        ...step,
+        continuationMessages: step.messages,
+      });
+      if (agent.kind !== "final" || continuation.kind !== "final") {
+        throw new Error(
+          "Provider transport probe did not produce a final answer",
+        );
+      }
+      return {
+        chat: chat.text,
+        stream: stream.text,
+        agent: agent.text,
+        continuation: continuation.text,
+      };
+    },
+    mountAgentActivityTrace: (message) => {
+      assertWorkflowTestEnabled();
+      const doc = Zotero.getMainWindow().document;
+      const root = doc.createElement("div");
+      root.dataset.llmWorkflowTest = "true";
+      let trace: HTMLElement | null = null;
+      const render: ReturnType<
+        WorkflowTestApi["mountAgentActivityTrace"]
+      >["render"] = (events, options = {}) => {
+        if (options.streaming !== undefined)
+          message.streaming = options.streaming;
+        const next = renderAgentTrace({
+          doc,
+          message,
+          events,
+          onTraceMissing: events.length ? undefined : () => {},
+          previous: options.rebuild ? undefined : trace || undefined,
+        });
+        if (!next) throw new Error("Workflow activity trace was not rendered");
+        if (next !== trace) {
+          if (trace) disposeAgentTrace(trace);
+          root.replaceChildren(next);
+          trace = next;
+        }
+      };
+      render([]);
+      doc.documentElement.appendChild(root);
+      return {
+        root,
+        render,
+        dispose: () => {
+          if (trace) disposeAgentTrace(trace);
+          root.remove();
+        },
+      };
+    },
+    mountPublicationTrace: (documentId, text) => {
+      const doc = Zotero.getMainWindow().document;
+      const root = renderAgentTrace({
+        doc,
+        message: {
+          role: "assistant",
+          timestamp: 1,
+          text,
+          documentId,
+          streaming: false,
+        },
+        events: [
+          {
+            runId: "publication-card",
+            seq: 1,
+            createdAt: 1,
+            eventType: "final",
+            payload: { type: "final", text },
+          },
+        ],
+      })!;
+      doc.documentElement.appendChild(root);
+      return {
+        root,
+        deliver: (conversationKey) =>
+          deliverPendingPlanDocumentMessage({
+            conversationKey,
+            documentId,
+            visibleMarkdown: text,
+            messageTimestamp: 1,
+          }).then(() => {}),
+        dispose: () => {
+          disposeAgentTrace(root);
+          root.remove();
+        },
+      };
+    },
+    reset,
+    enableLiveAgentSending: () => {
+      assertWorkflowTestEnabled();
+      setWorkflowTestSendInterceptor((opts) => {
+        lastSend = opts;
+        return true;
+      });
+      setWorkflowTestFinalRequestInterceptor((snapshot) => {
+        lastFinalRequest = snapshot;
+      });
+    },
+    createPaperWithPdfFixture,
+    trashWorkflowItem: async (itemId: number) => {
+      assertWorkflowTestEnabled();
+      await trashItemIfPossible(itemId);
+    },
+    setWorkflowProviderSession,
+    getWorkflowConversationPersistenceSnapshot,
+    exerciseStaleAgentTracePanelIsolation,
+    exerciseCrossPaperHistoryReturnIsolation,
+    createStandaloneAttachmentFixture,
+    createItemNoteFixture,
+    createStandaloneNoteFixture,
+    renderPanelForItem,
+    renderSidePanelForItem,
+    discardSidePanelConversation,
+    getEphemeralConversationRowCounts,
+    refreshActiveConversationPanels,
+    exerciseBackgroundAgentPublication,
+    exerciseNativeQuestionReview: (panelId: string) => {
+      assertWorkflowTestEnabled();
+      const panel = getPanel(panelId);
+      return exerciseNativeQuestionReview(panel.body, panel.item);
+    },
+    exercisePlanHistoryReplay: (input) =>
+      exercisePlanHistoryReplay(getPanel(input.panelId), input),
+    exerciseStreamingReplay: (input) =>
+      exerciseStreamingReplay(getPanel(input.panelId), input),
+    createCodexStreamingScrollReplay: (panelId, options) => {
+      assertWorkflowTestEnabled();
+      const panel = getPanel(panelId);
+      return createCodexStreamingScrollReplay(
+        {
+          body: panel.body,
+          item: activeContextPanels.get(panel.body)?.() || panel.item,
+        },
+        options,
+      );
+    },
+    exerciseChatRenderingLifecycle: (panelId) =>
+      exerciseChatRenderingLifecycle(getPanel(panelId)),
+    exerciseCompletedChatTurnRefresh: (panelId) =>
+      exerciseCompletedChatTurnRefresh(getPanel(panelId)),
+    memoryProbeInspect: (input) => {
+      assertWorkflowTestEnabled();
+      return memoryProbeInspect(input);
+    },
+    exerciseChatModeStreamingTurn: async (input) => {
+      assertWorkflowTestEnabled();
+      if (input.panelId) {
+        const panel = getPanel(input.panelId);
+        await ensureConversationLoaded(panel.item);
+        return exerciseChatModeStreamingTurn(panel, input);
+      }
+      const win = Zotero.getMainWindow();
+      const host = getReaderContextPanelForTab(
+        win.document,
+        (win as any).Zotero_Tabs.selectedID,
+      );
+      const root = host?.querySelector<HTMLElement>("#llm-main");
+      const body = root?.parentElement;
+      const item = body && activeContextPanels.get(body)?.();
+      if (!root?.isConnected || !body || !item)
+        throw new Error("Memory replay requires a mounted reader chat panel");
+      return exerciseChatModeStreamingTurn({ body, item }, input);
+    },
+    exerciseNativeStreamingReplay: async (input) => {
+      assertWorkflowTestEnabled();
+      const win =
+        input.surface === "standalone"
+          ? getStandaloneWindowForTest()
+          : Zotero.getMainWindow();
+      const doc = win?.document;
+      const host =
+        input.surface === "standalone"
+          ? doc?.querySelector(".llm-standalone-content")
+          : doc &&
+            (getReaderContextPanelForTab(
+              doc,
+              (win as Window & { Zotero_Tabs?: { selectedID?: string } })
+                ?.Zotero_Tabs?.selectedID,
+            ) ||
+              doc.getElementById("zotero-item-details"));
+      const root = host?.querySelector<HTMLElement>("#llm-main");
+      const body = root?.parentElement;
+      const item = body && activeContextPanels.get(body)?.();
+      if (
+        !root?.isConnected ||
+        !root.getBoundingClientRect().height ||
+        !body ||
+        !item
+      ) {
+        throw new Error(
+          "Native streaming replay requires a visible mounted chat panel",
+        );
+      }
+      await ensureConversationLoaded(item);
+      return exerciseStreamingReplay({ body, item }, input);
+    },
+    startTaskProgressReplay: async (input) => {
+      const panel = await resolveTaskProgressPanel(input);
+      return startTaskProgressReplay(panel, input);
+    },
+    startTaskProgressAction: async (input) => {
+      const panel = await resolveTaskProgressPanel(input);
+      return startTaskProgressAction(panel, input);
+    },
+    startCodexTaskProgressReplay: async (input) => {
+      const panel = await resolveTaskProgressPanel(input);
+      return startCodexTaskProgressReplay(panel, input);
+    },
+    seedTaskProgressConversation: async (input) => {
+      const panel = await resolveTaskProgressPanel(input);
+      return seedTaskProgressConversation(panel, input.turns);
+    },
+    reopenTaskProgressConversation: async (input) => {
+      const panel = await resolveTaskProgressPanel(input);
+      await reopenTaskProgressConversation(panel);
+    },
+    setTaskProgressComposerContexts: async (input) => {
+      const panel = await resolveTaskProgressPanel(input);
+      await setTaskProgressComposerContexts(panel, input);
+    },
+    readTaskProgressComposerContexts: async (input) => {
+      const panel = await resolveTaskProgressPanel(input);
+      return readTaskProgressComposerContexts(panel);
+    },
+    flushTaskProgress: () => {
+      assertWorkflowTestEnabled();
+      flushTaskProgressPanels();
+    },
+    listTaskProgressPanels: () => {
+      assertWorkflowTestEnabled();
+      return listMountedTaskProgressPanelsForTests();
+    },
+    getTaskProgressSnapshot: (conversationKey) => {
+      assertWorkflowTestEnabled();
+      const record = getTaskProgress(conversationKey);
+      if (!record) return null;
+      return {
+        runState: record.runState,
+        turnIndex: record.turnIndex,
+        label: record.scope?.label || "",
+        scopeKeys:
+          record.scope?.listing?.entries.map((entry) => entry.key) || [],
+        listingLoaded: Boolean(record.scope?.listing),
+        planSeen: record.planSeen,
+        hydrated: record.hydrated,
+        checklist: record.checklist
+          ? {
+              source: record.checklist.source,
+              title: record.checklist.title,
+              steps: record.checklist.steps.map((step) => ({ ...step })),
+              outcome: record.checklist.outcome,
+              detail: record.checklist.detail,
+              end: record.checklist.end,
+            }
+          : null,
+        paperStates: Object.fromEntries(
+          Object.values(record.ledger.papers).map((entry) => [
+            entry.key,
+            entry.state,
+          ]),
+        ),
+        questions: record.questions.map((question) => ({
+          turn: question.turn,
+          runId: question.runId,
+          text: question.text,
+          title: question.title,
+          checklistSource: taskQuestionChecklist(record, question)?.source,
+        })),
+        paperRows: Object.fromEntries(
+          Object.values(record.ledger.papers).map((entry) => {
+            const decision = latestTaskPaperDecision(entry);
+            return [
+              entry.key,
+              {
+                state: entry.state,
+                title: entry.title,
+                reads: Object.values(entry.turns).flatMap((turn) =>
+                  turn.reads.map((read) => ({
+                    turnIndex: read.turnIndex,
+                    toolName: read.toolName,
+                    granularity: read.granularity,
+                    method: read.method,
+                    label: read.label,
+                    snippet: read.snippet,
+                    whyMatched: read.whyMatched,
+                  })),
+                ),
+                ...(decision ? { decision: { ...decision } } : {}),
+                decisions: Object.values(entry.turns).flatMap((turn) =>
+                  turn.decision ? [{ ...turn.decision }] : [],
+                ),
+              },
+            ];
+          }),
+        ),
+      };
+    },
+    exerciseAgentDeliveryReplay: (input) =>
+      exerciseAgentDeliveryReplay(
+        getPanel(input.panelId),
+        input.failFinalRefresh,
+      ),
+    exerciseLongJobReplay: (input) =>
+      exerciseLongJobReplay(getPanel(input.panelId), {
+        collection: input.collection,
+        papers: input.papers,
+        inputTokenCap: input.inputTokenCap,
+      }),
+    exerciseLongJobNoteResume: (input) =>
+      exerciseLongJobNoteResume(getPanel(input.panelId), {
+        collection: input.collection,
+        papers: input.papers,
+        inputTokenCap: input.inputTokenCap,
+        stopAfterNotes: input.stopAfterNotes,
+      }),
+    exercisePaperDecisionsTurn: async ({ panelId, ...input }) =>
+      exercisePaperDecisionsTurn(
+        await resolveTaskProgressPanel({ panelId }),
+        input,
+      ),
+    callScopedMcpToolForConversation: async ({ panelId, ...input }) =>
+      callScopedMcpToolForConversation(
+        await resolveTaskProgressPanel({ panelId }),
+        input,
+      ),
+    exerciseAgentStopRules: (input) =>
+      exerciseAgentStopRules(getPanel(input.panelId), {
+        scenario: input.scenario,
+        collection: input.collection,
+        papers: input.papers,
+      }),
+    exerciseLongJobBatchStop: (input) =>
+      exerciseLongJobBatchStop(getPanel(input.panelId), {
+        collection: input.collection,
+        papers: input.papers,
+        inputTokenCap: input.inputTokenCap,
+        stopAfterNotes: input.stopAfterNotes,
+      }),
+    renderStartupPanelForItem,
+    startNewPanelConversation,
+    togglePanelConversationMode,
+    exerciseDuplicatePanelSetup,
+    exercisePanelDraftStateRefresh,
+    selectPanelModelEntry,
+    exerciseWebChatPdfToggleWorkflow,
+    toggleWebChatPdfChip: toggleWebChatPdfChipForWorkflow,
+    sendLiveWebChatTurn,
+    sendLiveChatTurn,
+    startPanelChatSend,
+    retryLatestPanelResponse,
+    readChatTurnLifecycle,
+    seedPanelStoredUserMessage,
+    pickPastConversationInPanel,
+    attachPastChatAsAgentInPanel,
+    clickPanelSystemToggle,
+    clickPanelSystemTogglesRapidly,
+    openPanelRuntimeMenu,
+    pickPanelRuntime,
+    measurePanelRuntimeGeometry,
+    measurePanelFooterLayout,
+    selectNoteEditorText,
+    ask,
+    renderAssistantForPanel,
+    clickStandaloneReasoningOption: async (label) => {
+      assertWorkflowTestEnabled();
+      const doc = await waitForStandaloneReady();
+      doc.querySelector<HTMLButtonElement>("#llm-reasoning-toggle")?.click();
+      const options = Array.from(
+        doc.querySelectorAll<HTMLButtonElement>(
+          "#llm-reasoning-menu .llm-reasoning-option",
+        ),
+      ) as HTMLButtonElement[];
+      const matches = options.filter(
+        (option) =>
+          !option.disabled &&
+          option.textContent?.replace(/^\s*✓\s*/, "").trim() === label,
+      );
+      if (matches.length !== 1)
+        throw new Error(
+          `Expected one visible reasoning option for ${label}, found ${matches.length}`,
+        );
+      matches[0].click();
+    },
+    renderToolResultForPanel: (panelId, result, options) => {
+      assertWorkflowTestEnabled();
+      const panel = getPanel(panelId);
+      const trace = renderAgentTrace({
+        doc: panel.body.ownerDocument,
+        panelItem: panel.item,
+        message: {
+          role: "assistant",
+          text: "Saved.",
+          timestamp: Date.now(),
+          documentId: options?.documentId,
+        },
+        userMessage: {
+          role: "user",
+          text: options?.userText || "Create a note on this paper",
+          timestamp: Date.now() - 1,
+        },
+        events: [
+          ...[...(options?.priorResults || []), result].map((entry, index) => ({
+            runId: "workflow-tool-result",
+            seq: index + 1,
+            eventType: "tool_result" as const,
+            createdAt: Date.now(),
+            payload: {
+              type: "tool_result" as const,
+              ...entry,
+              actionReceipts: entry.actionReceipts || [],
+            },
+          })),
+        ],
+      });
+      if (trace) panel.body.appendChild(trace);
+      return trace;
+    },
+    renderPendingActionForPanel: (panelId, pending) => {
+      assertWorkflowTestEnabled();
+      const panel = getPanel(panelId);
+      return new Promise((resolve) => {
+        getAgentRuntime().registerPendingConfirmation(
+          pending.requestId,
+          resolve,
+        );
+        panel.body.appendChild(
+          renderPendingActionCard(panel.body.ownerDocument, pending),
+        );
+      });
+    },
+    renderDocumentForPanel: (panelId, document, openLargerView) => {
+      assertWorkflowTestEnabled();
+      const panel = getPanel(panelId);
+      const paperContext = panel.contextSnapshot?.paperContext;
+      const citationContext = {
+        panelItem: panel.item,
+        assistantMessage: {
+          role: "assistant" as const,
+          text: document.visibleMarkdown,
+          timestamp: document.createdAt,
+        },
+        pairedUserMessage: {
+          role: "user" as const,
+          text: "Document citation parity",
+          timestamp: document.createdAt - 1,
+          paperContexts: paperContext ? [paperContext] : undefined,
+        },
+      };
+      if (openLargerView)
+        return openStandalonePlanDocumentWindow(
+          panel.body.ownerDocument,
+          document,
+          citationContext,
+        );
+      const root = panel.body.ownerDocument.createElement("article");
+      root.className = "llm-plan-markdown llm-plan-document-content";
+      panel.body.appendChild(root);
+      renderPlanDocumentContent({
+        doc: root.ownerDocument,
+        root,
+        document,
+        citationContext,
+      });
+      return true;
+    },
+    exerciseTargetedQuoteRefresh,
+    openStandaloneForItem,
+    openStandaloneForLibraryAfterRestart,
+    clickStandaloneTab,
+    toggleStandaloneSidebar,
+    hoverStandaloneSidebarToggle,
+    openStandaloneRuntimeMenu,
+    pickStandaloneRuntime,
+    clickStandaloneSystemToggle,
+    clickStandaloneSystemTogglesRapidly,
+    measureStandaloneRuntimeGeometry,
+    exerciseStandaloneComposerManualResize,
+    askStandalone,
+    withPendingStandaloneSend,
+    startNewStandaloneConversation,
+    seedStandaloneUserMessage,
+    seedStandaloneConversation,
+    seedStoredConversationTurns,
+    resizeStandaloneWindow,
+    captureStandaloneScreenshot,
+    observeCitationNavigationFocus: async (button, options) => {
+      assertWorkflowTestEnabled();
+      const getMainWindow = Zotero.getMainWindow;
+      const mainWindow = getMainWindow();
+      const originalDebug = appLogger.debug;
+      const diagnostics: string[] = [];
+      const getFullText = Zotero.PDFWorker.getFullText;
+      if (options?.forceViewerFallbackForItemId) {
+        Zotero.PDFWorker.getFullText = async (...args: unknown[]) => {
+          const result = await getFullText.apply(Zotero.PDFWorker, args);
+          return args[0] === options.forceViewerFallbackForItemId
+            ? { ...result, pageChars: undefined }
+            : result;
+        };
+      }
+      appLogger.debug = (...args) => {
+        if (/citation|quote-locator/i.test(String(args[0])))
+          diagnostics.push(
+            args
+              .map((value) =>
+                typeof value === "string" ? value : JSON.stringify(value),
+              )
+              .join(" "),
+          );
+        return originalDebug(...args);
+      };
+      let focusRequests = 0;
+      const observedWindow = new Proxy(mainWindow, {
+        get(target, key) {
+          if (key === "focus")
+            return () => {
+              focusRequests++;
+              target.focus();
+            };
+          const value = Reflect.get(target, key, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+      Zotero.getMainWindow = () => observedWindow;
+      try {
+        if (options?.linkTargetItemId) {
+          const selected = () =>
+            Zotero.getActiveZoteroPane()
+              .getSelectedItems()
+              .some((item) => item.id === options.linkTargetItemId);
+          button.click();
+          // The click handler runs synchronously and marks the link busy; the
+          // selection becomes observable before navigation reveals the window.
+          const started = button.dataset.loading === "true";
+          const deadline = Date.now() + 5000;
+          while (
+            !(selected() && button.dataset.loading !== "true") &&
+            Date.now() < deadline
+          )
+            await Zotero.Promise.delay(25);
+          return {
+            started,
+            finished: selected() && button.dataset.loading === "false",
+            focusRequests,
+            diagnostics,
+          };
+        }
+        const win = button.ownerDocument.defaultView!;
+        button.dispatchEvent(
+          new win.KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+        );
+        const started = button.dataset.loading === "true";
+        // The native FindController can use 30s plus selection settling.
+        const deadline = Date.now() + 45000;
+        while (button.dataset.loading === "true" && Date.now() < deadline)
+          await Zotero.Promise.delay(25);
+        return {
+          started,
+          finished: button.dataset.loading === "false",
+          focusRequests,
+          diagnostics,
+        };
+      } finally {
+        Zotero.getMainWindow = getMainWindow;
+        appLogger.debug = originalDebug;
+        Zotero.PDFWorker.getFullText = getFullText;
+      }
+    },
+    notifyStandaloneItemChanged,
+    notifyStandaloneItemChanges,
+    addItemsAsStandaloneContext,
+    getLastFinalRequest: () => lastFinalRequest,
+    getConversationHistoryTexts,
+    getStandaloneDiagnostics,
+    closeStandalone,
+    beginOpenStandaloneForTest,
+    isStandaloneWindowActiveForTest,
+    openTornChatWindowForTest,
+    getTornChatWindowsForTest,
+    closeTornChatWindowsForTest,
+    listChatWindowsForTest,
+    setPluginUpdateDeps: setPluginUpdateDepsForTest,
+    getStandaloneSidePanelDiagnostics,
+    clickStandaloneSidePanelControl,
+    setStandaloneSidePanelSlideDuration,
+    recordStandaloneSidePanelSlide,
+    clickStandaloneSidePanelHistoryRow,
+    dragStandaloneSidePanelSplitter,
+    clickStandaloneSidePanelTab,
+    readStandaloneSearchPopupChipColors,
+    clickStandaloneChatMessageAction,
+    evictStandaloneConversationFromMemory,
+    probeStandaloneReadOnlyBorrowedLoad,
+    sendStandaloneSideChat,
+    openStandaloneSlashSideChatItem,
+    clickStandaloneSlashSideChatItem,
+    getLastSend: () => lastSend,
+    getDiagnostics,
+    configurePermissionCatalogs,
+    configureCodexDirectCatalog,
+    getCodexDirectCatalogRequests: () => [...codexDirectCatalogRequests],
+    configureCodexModelCatalogs,
+    getCodexModelCatalogRequests: () => [...codexModelCatalogRequests],
+    resolveDelayedCodexModelCatalog: async () => {
+      assertWorkflowTestEnabled();
+      resolveDelayedCodexModelCatalog?.();
+      resolveDelayedCodexModelCatalog = null;
+      await Zotero.Promise.delay(50);
+    },
+    resolveDelayedCodexPermissionCatalog: resolveDelayedCodexCatalog,
+    getPanelPermissionSurface,
+    clickPanelPermissionToggle,
+    clickPanelPermissionOption,
+    getPanelConfirmationDialog,
+    respondToPanelConfirmationDialog,
+    getStandalonePermissionSurface,
+    clickStandalonePermissionToggle,
+    clickStandalonePermissionOption,
+    exerciseReaderSelectionTrackingRecovery,
+    exerciseReaderPopupActiveTabRouting,
+    exerciseReaderPopupStandaloneRouting,
+    exerciseReaderPopupInlinePrompt,
+    exerciseReaderPopupDuplicateAttach,
+    exerciseReaderPopupPromptDismissal,
+    exerciseHighlightAwareContextRetrieval,
+    exerciseContextChipCardVisibility,
+    exerciseAssistantSelectionInlinePrompt,
+    exerciseAssistantSelectionPromptDismissal,
+    cleanupFixture,
+    listPanelHistory,
+    seedHistoryConversation,
+    deleteSeededHistoryConversation,
+    clickPanelHistoryRow,
+    clickPanelHistoryRowWithForcedOpenFailure,
+    clickPanelHistoryRowsRapidly,
+    searchAndOpenPanelHistory,
+    renamePanelHistoryConversation,
+    listStandaloneSidebarHistory,
+    clickStandaloneSidebarHistoryRow,
+    listStandalonePinnedPapers,
+    clickStandalonePinButton,
+    clickStandalonePinnedClear,
+    clickStandalonePinnedPaper,
+    searchAndOpenStandaloneHistory,
+    deletePanelHistoryConversation,
+    clickPanelDelete,
+    exercisePanelDeleteDuringPendingSend,
+    seedPanelStoredTurn,
+    deletePanelTurn,
+    clickPanelUndo,
+    isPanelUndoToastVisible,
+    getPanelVisibleMessageCount,
+    remountPanel,
+    getPendingDeletionState,
+    sweepPendingDeletionsAsRestart,
+    searchPanelHistory,
+    failNextPendingTurnFinalizes,
+    holdConversationWriteLock,
+    isConversationWriteLockQueued,
+    markConversationWriteLockQueue,
+    releaseConversationWriteLock,
+    holdNextFinalRequest,
+    isFinalRequestHeld,
+    releaseFinalRequest,
+    forceWebChatSessionAnchorFailures,
+    failNextInPlacePaperSwitches,
+    getPendingInPlacePaperSwitchFailures,
+    setMountedPanelSelectedText,
+    askCapturingFinalRequest,
+    simulateProviderContextUsage,
+    setWorkflowModelInputCap,
+  };
+}

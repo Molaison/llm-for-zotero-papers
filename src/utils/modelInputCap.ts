@@ -1,0 +1,716 @@
+/**
+ * Model-aware input-token capping helpers.
+ *
+ * Providers use different tokenizers and context semantics. We therefore
+ * use conservative estimates and per-model limits to reduce context-length
+ * failures before sending requests.
+ */
+
+import type { ChatFileAttachment } from "../shared/llm";
+
+import { DEFAULT_INPUT_TOKEN_CAP } from "./llmDefaults";
+import {
+  normalizeInputTokenCap,
+  normalizeOptionalInputTokenCap,
+} from "./normalization";
+import {
+  getModelCapabilities,
+  normalizeProfileOverride,
+  profileOverrideAppliesTo,
+  type CapabilitySource,
+  type ModelCapabilityIdentity,
+} from "../modelCapabilities";
+
+type TextPart = {
+  type: "text";
+  text: string;
+};
+
+type ImagePart = {
+  type: "image_url";
+  image_url: {
+    url: string;
+    detail?: "low" | "high" | "auto";
+  };
+};
+
+type FilePart = {
+  type: "file_ref";
+  file_ref: {
+    name?: string;
+    mimeType?: string;
+    storedPath?: string;
+    contentHash?: string;
+  };
+};
+
+export type InputCapMessageContent = string | (TextPart | ImagePart)[];
+
+export type InputCapMessage = {
+  role: "user" | "assistant" | "system";
+  content: InputCapMessageContent;
+  fileAttachments?: ChatFileAttachment[];
+};
+
+export type ContextEstimateMessageContent =
+  | string
+  | (TextPart | ImagePart | FilePart)[];
+
+export type ContextEstimateMessage = {
+  role: string;
+  content: ContextEstimateMessageContent;
+  name?: string;
+  tool_call_id?: string;
+  tool_calls?: Array<{
+    id?: unknown;
+    name?: unknown;
+    arguments?: unknown;
+  }>;
+};
+
+export const DEFAULT_MODEL_INPUT_TOKEN_LIMIT = DEFAULT_INPUT_TOKEN_CAP;
+export const TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4;
+
+const IMAGE_PART_ESTIMATED_TOKENS = 1_024;
+const FILE_PART_ESTIMATED_TOKENS = 512;
+const MESSAGE_OVERHEAD_ESTIMATED_TOKENS = 4;
+const TOOL_CALL_OVERHEAD_ESTIMATED_TOKENS = 8;
+const TOKEN_SAFETY_RATIO = 0.9;
+const MIN_CONTEXT_CHARS = 256;
+const MIN_PROMPT_CHARS = 64;
+const CONTEXT_PREFIX = "Document Context:\n";
+const CONTEXT_TRUNCATION_NOTICE =
+  "[Context truncated to fit model input limit]";
+const PROMPT_TRUNCATION_NOTICE = "[Prompt truncated to fit model input limit]";
+
+function stripTrailingNotice(text: string, notice: string): string {
+  if (!text) return "";
+  const suffix = `\n\n${notice}`;
+  if (text.endsWith(suffix)) {
+    return text.slice(0, text.length - suffix.length).trimEnd();
+  }
+  return text;
+}
+
+function truncateWithNotice(
+  text: string,
+  maxChars: number,
+  notice: string,
+): string {
+  if (maxChars <= 0) return notice;
+  const source = stripTrailingNotice(text, notice);
+  if (source.length <= maxChars) return source;
+  const suffix = `\n\n${notice}`;
+  if (maxChars <= suffix.length + 8) {
+    return source.slice(0, maxChars).trimEnd();
+  }
+  const bodyLimit = Math.max(0, maxChars - suffix.length);
+  return `${source.slice(0, bodyLimit).trimEnd()}${suffix}`;
+}
+
+function cloneMessageContent(
+  content: InputCapMessageContent,
+): InputCapMessageContent {
+  if (typeof content === "string") return content;
+  return content.map((part) => {
+    if (part.type === "text") {
+      return { type: "text" as const, text: part.text };
+    }
+    return {
+      type: "image_url" as const,
+      image_url: {
+        url: part.image_url.url,
+        detail: part.image_url.detail,
+      },
+    };
+  });
+}
+
+function cloneMessages(messages: InputCapMessage[]): InputCapMessage[] {
+  return messages.map((message) => ({
+    role: message.role,
+    content: cloneMessageContent(message.content),
+    ...(message.fileAttachments
+      ? {
+          fileAttachments: message.fileAttachments.map((file) => ({ ...file })),
+        }
+      : {}),
+  }));
+}
+
+function findLastUserIndex(messages: InputCapMessage[]): number {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === "user") return i;
+  }
+  return -1;
+}
+
+function findContextMessageIndex(messages: InputCapMessage[]): number {
+  for (let i = 0; i < messages.length; i++) {
+    const content = messages[i].content;
+    if (
+      messages[i].role === "system" &&
+      typeof content === "string" &&
+      content.startsWith(CONTEXT_PREFIX)
+    ) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+function estimateToolCallTokens(
+  toolCall: NonNullable<ContextEstimateMessage["tool_calls"]>[number],
+): number {
+  let total = TOOL_CALL_OVERHEAD_ESTIMATED_TOKENS;
+  if (typeof toolCall.id === "string") {
+    total += estimateTextTokens(toolCall.id);
+  }
+  if (typeof toolCall.name === "string") {
+    total += estimateTextTokens(toolCall.name);
+  }
+  if (typeof toolCall.arguments === "string") {
+    total += estimateTextTokens(toolCall.arguments);
+  } else if (toolCall.arguments !== undefined) {
+    try {
+      total += estimateTextTokens(JSON.stringify(toolCall.arguments));
+    } catch {
+      total += estimateTextTokens(String(toolCall.arguments));
+    }
+  }
+  return total;
+}
+
+export function estimateMessageContentTokens(
+  content: ContextEstimateMessageContent,
+): number {
+  if (typeof content === "string") {
+    return estimateTextTokens(content);
+  }
+  let total = 0;
+  for (const part of content) {
+    if (part.type === "text") {
+      total += estimateTextTokens(part.text);
+    } else if (part.type === "image_url") {
+      total += IMAGE_PART_ESTIMATED_TOKENS;
+    } else {
+      const name =
+        typeof part.file_ref.name === "string" ? part.file_ref.name : "";
+      const mimeType =
+        typeof part.file_ref.mimeType === "string"
+          ? part.file_ref.mimeType
+          : "";
+      total +=
+        FILE_PART_ESTIMATED_TOKENS +
+        estimateTextTokens([name, mimeType].filter(Boolean).join(" "));
+    }
+  }
+  return total;
+}
+
+function estimateContentTokens(content: InputCapMessageContent): number {
+  return estimateMessageContentTokens(content);
+}
+
+function trimContextMessage(
+  message: InputCapMessage,
+  overflowTokens: number,
+): boolean {
+  if (typeof message.content !== "string") return false;
+  if (!message.content.startsWith(CONTEXT_PREFIX)) return false;
+  const body = stripTrailingNotice(
+    message.content.slice(CONTEXT_PREFIX.length),
+    CONTEXT_TRUNCATION_NOTICE,
+  );
+  if (!body) return false;
+  const overflowChars = Math.max(
+    TOKEN_ESTIMATE_CHARS_PER_TOKEN,
+    overflowTokens * TOKEN_ESTIMATE_CHARS_PER_TOKEN,
+  );
+  const nextBodyChars = Math.max(
+    MIN_CONTEXT_CHARS,
+    body.length - overflowChars,
+  );
+  if (nextBodyChars >= body.length) return false;
+  const nextBody = truncateWithNotice(
+    body,
+    nextBodyChars,
+    CONTEXT_TRUNCATION_NOTICE,
+  );
+  message.content = `${CONTEXT_PREFIX}${nextBody}`;
+  return true;
+}
+
+function trimUserMessage(
+  message: InputCapMessage,
+  overflowTokens: number,
+): boolean {
+  const overflowChars = Math.max(
+    TOKEN_ESTIMATE_CHARS_PER_TOKEN,
+    overflowTokens * TOKEN_ESTIMATE_CHARS_PER_TOKEN,
+  );
+  if (typeof message.content === "string") {
+    const source = stripTrailingNotice(
+      message.content,
+      PROMPT_TRUNCATION_NOTICE,
+    );
+    if (!source) return false;
+    const nextChars = Math.max(MIN_PROMPT_CHARS, source.length - overflowChars);
+    if (nextChars >= source.length) return false;
+    message.content = truncateWithNotice(
+      source,
+      nextChars,
+      PROMPT_TRUNCATION_NOTICE,
+    );
+    return true;
+  }
+
+  const contentParts = message.content;
+  const firstTextIndex = contentParts.findIndex((part) => part.type === "text");
+  if (firstTextIndex >= 0) {
+    const part = contentParts[firstTextIndex] as TextPart;
+    const source = stripTrailingNotice(part.text, PROMPT_TRUNCATION_NOTICE);
+    const nextChars = Math.max(MIN_PROMPT_CHARS, source.length - overflowChars);
+    if (nextChars < source.length) {
+      part.text = truncateWithNotice(
+        source,
+        nextChars,
+        PROMPT_TRUNCATION_NOTICE,
+      );
+      return true;
+    }
+  }
+
+  for (let i = contentParts.length - 1; i >= 0; i--) {
+    if (contentParts[i].type === "image_url") {
+      contentParts.splice(i, 1);
+      if (!contentParts.length) {
+        contentParts.push({
+          type: "text",
+          text: PROMPT_TRUNCATION_NOTICE,
+        });
+      }
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function buildFallbackMessages(
+  messages: InputCapMessage[],
+  lastUserIndex: number,
+): InputCapMessage[] {
+  const fallback = messages.filter(
+    (message, index) => message.role === "system" || index === lastUserIndex,
+  );
+  if (fallback.length) return fallback;
+  return messages.length ? [messages[messages.length - 1]] : [];
+}
+
+const CJK_CHARS_PER_TOKEN = 2;
+
+function isCjkLikeCharCode(code: number): boolean {
+  return (
+    (code >= 0x1100 && code <= 0x11ff) || // Hangul Jamo
+    (code >= 0x3000 && code <= 0x30ff) || // CJK punctuation + kana
+    (code >= 0x3130 && code <= 0x318f) || // Hangul compatibility Jamo
+    (code >= 0x3400 && code <= 0x4dbf) || // CJK extension A
+    (code >= 0x4e00 && code <= 0x9fff) || // CJK unified ideographs
+    (code >= 0xac00 && code <= 0xd7af) || // Hangul syllables
+    (code >= 0xf900 && code <= 0xfaff) || // CJK compatibility ideographs
+    (code >= 0xff00 && code <= 0xffef) // full/half-width forms
+  );
+}
+
+/**
+ * Largest prefix of `text` whose estimateTextTokens result stays within
+ * `maxTokens`. Exact against the per-script estimator (CJK-like chars weigh
+ * 1/2 token, everything else 1/4), single O(n) pass. Char-count inverses of
+ * the estimator (tokens * 4) are wrong for CJK — use this instead.
+ */
+export function sliceTextToTokenBudget(
+  text: string,
+  maxTokens: number,
+): string {
+  if (!text) return "";
+  const budget = Math.max(0, maxTokens);
+  if (!budget) return "";
+  let weight = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    weight += isCjkLikeCharCode(text.charCodeAt(index)) ? 0.5 : 0.25;
+    if (weight > budget) return text.slice(0, index);
+  }
+  return text;
+}
+
+export function estimateTextTokens(text: string): number {
+  if (!text) return 0;
+  // CJK scripts tokenize at roughly 2 chars/token versus ~4 for ASCII; the
+  // flat /4 estimate undercounted CJK 2-4x, so budgets and compaction
+  // triggers fired far too late for Chinese/Japanese/Korean transcripts.
+  // Surrogate-pair CJK extensions and emoji fall into the /4 bucket, which
+  // stays an undercount but a rare one. Single O(n) pass, no allocation.
+  let cjkLikeChars = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    if (isCjkLikeCharCode(text.charCodeAt(index))) cjkLikeChars += 1;
+  }
+  return Math.ceil(
+    cjkLikeChars / CJK_CHARS_PER_TOKEN +
+      (text.length - cjkLikeChars) / TOKEN_ESTIMATE_CHARS_PER_TOKEN,
+  );
+}
+
+const BASE64_BLOB_MIN_CHARS = 4_096;
+const BASE64_PROBE_CHARS = 512;
+/** Base64 media is billed per image/page, not per character; ~40 chars/token is a conservative middle. */
+const BASE64_CHARS_PER_TOKEN = 40;
+
+function looksLikeBase64Blob(text: string): boolean {
+  if (text.length < BASE64_BLOB_MIN_CHARS) return false;
+  const probeStart = text.startsWith("data:")
+    ? text.indexOf(";base64,") + ";base64,".length
+    : 0;
+  if (probeStart < 0) return false;
+  return /^[A-Za-z0-9+/=]+$/.test(
+    text.slice(probeStart, probeStart + BASE64_PROBE_CHARS),
+  );
+}
+
+/**
+ * Estimate the prompt tokens of a wire payload (any provider shape) by
+ * walking it: text weighs like prompt text, base64 media weighs per blob
+ * rather than per character. Used to size the transmitted output cap.
+ */
+export function estimateWirePayloadTokens(value: unknown): number {
+  if (typeof value === "string") {
+    return looksLikeBase64Blob(value)
+      ? Math.ceil(value.length / BASE64_CHARS_PER_TOKEN)
+      : estimateTextTokens(value);
+  }
+  if (typeof value === "number" || typeof value === "boolean") return 1;
+  if (Array.isArray(value)) {
+    let total = 0;
+    for (const entry of value) total += estimateWirePayloadTokens(entry);
+    return total;
+  }
+  if (value && typeof value === "object") {
+    let total = 0;
+    for (const [key, entry] of Object.entries(value)) {
+      if (entry === undefined || entry === null) continue;
+      total += 1 + estimateWirePayloadTokens(entry);
+      void key;
+    }
+    return total;
+  }
+  return 0;
+}
+
+function estimateCapMessageTokens(message: InputCapMessage): number {
+  return (
+    MESSAGE_OVERHEAD_ESTIMATED_TOKENS + estimateContentTokens(message.content)
+  );
+}
+
+function sumTokens(values: number[]): number {
+  let total = 0;
+  for (const value of values) total += value;
+  return total;
+}
+
+/** Re-estimate one message in place and return the adjusted running total. */
+function replaceMessageTokens(
+  messageTokens: number[],
+  index: number,
+  message: InputCapMessage,
+  total: number,
+): number {
+  const next = estimateCapMessageTokens(message);
+  const adjusted = total - messageTokens[index] + next;
+  messageTokens[index] = next;
+  return adjusted;
+}
+
+export function estimateConversationTokens(
+  messages: InputCapMessage[],
+): number {
+  let total = 0;
+  for (const message of messages) {
+    total += estimateCapMessageTokens(message);
+  }
+  return total;
+}
+
+export function estimateContextMessagesTokens(
+  messages: ContextEstimateMessage[],
+): number {
+  let total = 0;
+  for (const message of messages) {
+    total += MESSAGE_OVERHEAD_ESTIMATED_TOKENS;
+    total += estimateTextTokens(message.role);
+    if (message.name) total += estimateTextTokens(message.name);
+    if (message.tool_call_id) total += estimateTextTokens(message.tool_call_id);
+    total += estimateMessageContentTokens(message.content);
+    if (Array.isArray(message.tool_calls)) {
+      for (const toolCall of message.tool_calls) {
+        total += estimateToolCallTokens(toolCall);
+      }
+    }
+  }
+  return total;
+}
+
+export function getModelInputTokenLimit(
+  modelName: string,
+  identity?: Omit<ModelCapabilityIdentity, "model">,
+): number {
+  return resolveModelInputTokenLimit(modelName, undefined, identity)
+    .limitTokens;
+}
+
+export type ModelInputTokenLimitSource =
+  | "advanced"
+  | CapabilitySource
+  | "default";
+
+export type ResolvedModelInputTokenLimit = {
+  limitTokens: number;
+  source: ModelInputTokenLimitSource;
+  detectedLimitTokens?: number;
+};
+
+/**
+ * Resolve the effective input budget without allowing discovered model
+ * metadata to constrain an explicit advanced setting.
+ */
+export function resolveModelInputTokenLimit(
+  modelName: string,
+  inputTokenCapOverride?: number,
+  identity?: Omit<ModelCapabilityIdentity, "model">,
+): ResolvedModelInputTokenLimit {
+  const capabilities = getModelCapabilities({
+    model: modelName,
+    ...identity,
+    profileOverride: undefined,
+  });
+  const detectedLimitTokens =
+    capabilities.limits.inputTokens || capabilities.limits.contextWindowTokens;
+  const explicitLimitTokens = normalizeOptionalInputTokenCap(
+    inputTokenCapOverride,
+  );
+  if (explicitLimitTokens !== undefined) {
+    return {
+      limitTokens: explicitLimitTokens,
+      source: "advanced",
+      ...(detectedLimitTokens ? { detectedLimitTokens } : {}),
+    };
+  }
+  const profileOverride = normalizeProfileOverride(identity?.profileOverride);
+  const profileLimitTokens =
+    profileOverride && profileOverrideAppliesTo(profileOverride, modelName)
+      ? profileOverride.limits?.inputTokens ||
+        profileOverride.limits?.contextWindowTokens
+      : undefined;
+  if (profileLimitTokens) {
+    return {
+      limitTokens: normalizeInputTokenCap(profileLimitTokens),
+      source: "user",
+      ...(detectedLimitTokens ? { detectedLimitTokens } : {}),
+    };
+  }
+  if (detectedLimitTokens) {
+    return {
+      limitTokens: normalizeInputTokenCap(detectedLimitTokens),
+      source: capabilities.provenance.limits || capabilities.source,
+      detectedLimitTokens,
+    };
+  }
+  return {
+    limitTokens: DEFAULT_MODEL_INPUT_TOKEN_LIMIT,
+    source: "default",
+  };
+}
+
+export function resolveContextWindowTokens(
+  modelName: string,
+  inputTokenCapOverride?: number,
+  identity?: Omit<ModelCapabilityIdentity, "model">,
+): number {
+  return resolveModelInputTokenLimit(modelName, inputTokenCapOverride, identity)
+    .limitTokens;
+}
+
+export type InputCapResult = {
+  messages: InputCapMessage[];
+  capped: boolean;
+  limitTokens: number;
+  limitSource: ModelInputTokenLimitSource;
+  softLimitTokens: number;
+  estimatedBeforeTokens: number;
+  estimatedAfterTokens: number;
+  effects: InputCapEffects;
+};
+
+export type InputCapEffects = {
+  documentContextTrimmed: boolean;
+  documentContextDropped: boolean;
+  promptTrimmed: boolean;
+  historyDropped: boolean;
+};
+
+export function applyModelInputTokenCap(
+  messages: InputCapMessage[],
+  modelName: string,
+  inputTokenCapOverride?: number,
+  identity?: Omit<ModelCapabilityIdentity, "model">,
+): InputCapResult {
+  const resolvedLimit = resolveModelInputTokenLimit(
+    modelName,
+    inputTokenCapOverride,
+    identity,
+  );
+  const limitTokens = resolvedLimit.limitTokens;
+  const softLimitTokens = Math.max(
+    1,
+    Math.floor(limitTokens * TOKEN_SAFETY_RATIO),
+  );
+  let working = cloneMessages(messages);
+  // Per-message estimates, kept parallel to `working`. The conversation
+  // estimate is a plain sum of these, so dropping or re-trimming one message
+  // only changes its own entry: the running total stays exactly equal to
+  // estimateConversationTokens(working) without re-walking every message.
+  let messageTokens = working.map(estimateCapMessageTokens);
+  const estimatedBeforeTokens = sumTokens(messageTokens);
+  let estimatedAfterTokens = estimatedBeforeTokens;
+  const effects: InputCapEffects = {
+    documentContextTrimmed: false,
+    documentContextDropped: false,
+    promptTrimmed: false,
+    historyDropped: false,
+  };
+
+  if (estimatedAfterTokens <= softLimitTokens) {
+    return {
+      messages: working,
+      capped: false,
+      limitTokens,
+      limitSource: resolvedLimit.source,
+      softLimitTokens,
+      estimatedBeforeTokens,
+      estimatedAfterTokens,
+      effects,
+    };
+  }
+
+  let lastUserIndex = findLastUserIndex(working);
+
+  for (
+    let i = 0;
+    i < working.length && estimatedAfterTokens > softLimitTokens;
+  ) {
+    if (i === lastUserIndex || working[i].role === "system") {
+      i++;
+      continue;
+    }
+    working.splice(i, 1);
+    estimatedAfterTokens -= messageTokens.splice(i, 1)[0];
+    effects.historyDropped = true;
+    if (lastUserIndex >= 0 && i < lastUserIndex) {
+      lastUserIndex -= 1;
+    }
+  }
+
+  let contextTrimGuard = 0;
+  while (estimatedAfterTokens > softLimitTokens && contextTrimGuard < 24) {
+    contextTrimGuard += 1;
+    const contextIndex = findContextMessageIndex(working);
+    if (contextIndex < 0) break;
+    const overflow = estimatedAfterTokens - softLimitTokens;
+    const changed = trimContextMessage(working[contextIndex], overflow);
+    if (!changed) {
+      working.splice(contextIndex, 1);
+      estimatedAfterTokens -= messageTokens.splice(contextIndex, 1)[0];
+      effects.documentContextDropped = true;
+      if (lastUserIndex >= 0 && contextIndex < lastUserIndex) {
+        lastUserIndex -= 1;
+      }
+    } else {
+      effects.documentContextTrimmed = true;
+      estimatedAfterTokens = replaceMessageTokens(
+        messageTokens,
+        contextIndex,
+        working[contextIndex],
+        estimatedAfterTokens,
+      );
+    }
+  }
+
+  let userTrimGuard = 0;
+  while (
+    estimatedAfterTokens > softLimitTokens &&
+    lastUserIndex >= 0 &&
+    userTrimGuard < 32
+  ) {
+    userTrimGuard += 1;
+    const overflow = estimatedAfterTokens - softLimitTokens;
+    const changed = trimUserMessage(working[lastUserIndex], overflow);
+    if (!changed) break;
+    effects.promptTrimmed = true;
+    estimatedAfterTokens = replaceMessageTokens(
+      messageTokens,
+      lastUserIndex,
+      working[lastUserIndex],
+      estimatedAfterTokens,
+    );
+  }
+
+  if (estimatedAfterTokens > softLimitTokens) {
+    const fallbackLength = buildFallbackMessages(working, lastUserIndex).length;
+    if (fallbackLength < working.length) {
+      effects.historyDropped = true;
+    }
+    working = buildFallbackMessages(working, lastUserIndex);
+    messageTokens = working.map(estimateCapMessageTokens);
+    estimatedAfterTokens = sumTokens(messageTokens);
+    const fallbackUserIndex = findLastUserIndex(working);
+    let fallbackGuard = 0;
+    while (
+      estimatedAfterTokens > softLimitTokens &&
+      fallbackUserIndex >= 0 &&
+      fallbackGuard < 32
+    ) {
+      fallbackGuard += 1;
+      const overflow = estimatedAfterTokens - softLimitTokens;
+      const changed = trimUserMessage(working[fallbackUserIndex], overflow);
+      if (!changed) break;
+      effects.promptTrimmed = true;
+      estimatedAfterTokens = replaceMessageTokens(
+        messageTokens,
+        fallbackUserIndex,
+        working[fallbackUserIndex],
+        estimatedAfterTokens,
+      );
+    }
+  }
+
+  return {
+    messages: working,
+    capped: true,
+    limitTokens,
+    limitSource: resolvedLimit.source,
+    softLimitTokens,
+    estimatedBeforeTokens,
+    estimatedAfterTokens,
+    effects,
+  };
+}
+
+/** Private steps of applyModelInputTokenCap, exposed only for parity tests. */
+export const modelInputCapInternalsForTests = {
+  cloneMessages,
+  findLastUserIndex,
+  findContextMessageIndex,
+  trimContextMessage,
+  trimUserMessage,
+  buildFallbackMessages,
+};

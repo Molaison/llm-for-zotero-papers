@@ -1,0 +1,128 @@
+export const MODEL_MENU_OPEN_CLASS = "llm-model-menu-open";
+export const REASONING_MENU_OPEN_CLASS = "llm-reasoning-menu-open";
+export const RETRY_MODEL_MENU_OPEN_CLASS = "llm-model-menu-open";
+export const SLASH_MENU_OPEN_CLASS = "llm-slash-menu-open";
+export const MENU_OPTION_SELECTED_CLASS = "llm-menu-option-selected";
+
+export function setFloatingMenuOpen(
+  menu: HTMLDivElement | null,
+  openClass: string,
+  isOpen: boolean,
+): void {
+  if (!menu) return;
+  if (isOpen) {
+    menu.style.display = "grid";
+    menu.classList.add(openClass);
+    return;
+  }
+  menu.classList.remove(openClass);
+  menu.style.display = "none";
+}
+
+export function isFloatingMenuOpen(menu: HTMLDivElement | null): boolean {
+  return Boolean(menu && menu.style.display !== "none");
+}
+
+export function positionFloatingMenu(
+  owner: Element,
+  menu: HTMLDivElement,
+  anchor: HTMLButtonElement,
+  options: {
+    horizontalAlignment?: "start" | "center";
+    verticalPlacement?: "adaptive" | "above";
+    /** Caps the menu height; it scrolls past this. */
+    maxHeightPx?: number;
+  } = {},
+): void {
+  const win = owner.ownerDocument?.defaultView;
+  if (!win) return;
+
+  const viewportMargin = 8;
+  const gap = 6;
+  const ownerRect = owner.getBoundingClientRect();
+  const hasOwnerBounds = ownerRect.width > 0 && ownerRect.height > 0;
+  const boundaryLeft = hasOwnerBounds
+    ? Math.max(viewportMargin, ownerRect.left + viewportMargin)
+    : viewportMargin;
+  const boundaryTop = hasOwnerBounds
+    ? Math.max(viewportMargin, ownerRect.top + viewportMargin)
+    : viewportMargin;
+  const boundaryRight = hasOwnerBounds
+    ? Math.min(
+        win.innerWidth - viewportMargin,
+        ownerRect.right - viewportMargin,
+      )
+    : win.innerWidth - viewportMargin;
+  const boundaryBottom = hasOwnerBounds
+    ? Math.min(
+        win.innerHeight - viewportMargin,
+        ownerRect.bottom - viewportMargin,
+      )
+    : win.innerHeight - viewportMargin;
+  const availableWidth = Math.max(120, boundaryRight - boundaryLeft);
+  const availableHeight = Math.max(120, boundaryBottom - boundaryTop);
+  const anchorRect = anchor.getBoundingClientRect();
+  // An "above" menu fits in the space over its anchor, so it never covers it.
+  const spaceAbove = anchorRect.top - gap - boundaryTop;
+  let maxHeight =
+    options.verticalPlacement === "above" && spaceAbove >= 120
+      ? Math.min(availableHeight, spaceAbove)
+      : availableHeight;
+  if (options.maxHeightPx) maxHeight = Math.min(maxHeight, options.maxHeightPx);
+
+  menu.style.position = "fixed";
+  menu.style.display = "grid";
+  menu.style.visibility = "hidden";
+  menu.style.maxWidth = `${availableWidth}px`;
+  menu.style.maxHeight = `${maxHeight}px`;
+  menu.style.boxSizing = "border-box";
+  menu.style.overflowY = "auto";
+  menu.style.overflowX = "hidden";
+
+  const menuRect = menu.getBoundingClientRect();
+
+  let left =
+    options.horizontalAlignment === "center"
+      ? anchorRect.left + (anchorRect.width - menuRect.width) / 2
+      : anchorRect.left;
+  const maxLeft = Math.max(boundaryLeft, boundaryRight - menuRect.width);
+  left = Math.min(Math.max(boundaryLeft, left), maxLeft);
+
+  const belowTop = anchorRect.bottom + gap;
+  const aboveTop = anchorRect.top - gap - menuRect.height;
+  let top = options.verticalPlacement === "above" ? aboveTop : belowTop;
+
+  if (options.verticalPlacement === "above" && aboveTop < boundaryTop) {
+    top =
+      belowTop + menuRect.height <= boundaryBottom
+        ? belowTop
+        : Math.max(boundaryTop, boundaryBottom - menuRect.height);
+  } else if (
+    options.verticalPlacement !== "above" &&
+    belowTop + menuRect.height > boundaryBottom
+  ) {
+    if (aboveTop >= boundaryTop) {
+      top = aboveTop;
+    } else {
+      top = Math.max(boundaryTop, boundaryBottom - menuRect.height);
+    }
+  }
+
+  menu.style.left = `${Math.round(left)}px`;
+  menu.style.top = `${Math.round(Math.max(boundaryTop, top))}px`;
+  menu.style.visibility = "visible";
+}
+
+/** The composer's model and effort menus open like the runtime menu. */
+export function positionComposerMenu(
+  owner: Element,
+  menu: HTMLDivElement,
+  anchor: HTMLButtonElement,
+): void {
+  positionFloatingMenu(owner, menu, anchor, {
+    horizontalAlignment: "center",
+    verticalPlacement: "above",
+    maxHeightPx: 480,
+  });
+  if (menu.scrollHeight <= menu.clientHeight) menu.style.overflowY = "hidden";
+}

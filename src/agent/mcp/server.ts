@@ -1,0 +1,3091 @@
+import { resolveAgentToolPresentationLabel } from "../toolPresentation";
+import { noteHtmlToModelText } from "../../services/notes/noteRendering";
+import { NOTE_EMBED_PLACEHOLDER_GUIDANCE } from "../../utils/noteEmbeds";
+import { createJournalId } from "../store/changeJournal";
+import { createAbortController } from "../../utils/apiHelpers";
+import { normalizeExcludedItemIds } from "../../services/context/normalizers";
+/**
+ * MCP (Model Context Protocol) server for the llm-for-zotero plugin.
+ *
+ * Registers a JSON-RPC 2.0 endpoint on Zotero's built-in HTTP server at
+ * "/llm-for-zotero/mcp". The endpoint is intended for local Codex app-server
+ * use and requires a bearer token.
+ */
+
+import { config } from "../../../package.json";
+import type {
+  AttachedConversationRef,
+  CollectionContextRef,
+  PaperContentSourceMode,
+  PaperContextRef,
+  QuoteCitation,
+  TagContextRef,
+} from "../../shared/types";
+import type { ReasoningConfig } from "../../shared/llm";
+import {
+  decodeReaderSelection,
+  encodeReaderSelection,
+  type ReaderSelection,
+} from "../../shared/readerSelection";
+import { readNoteSnapshot } from "../../services/notes/noteSnapshot";
+import { extractQuoteCitationsFromToolContent } from "../../services/quotes/quoteCitations";
+import type { AgentToolRegistry } from "../tools/registry";
+import type { AgentActionReceipt } from "../contracts/types";
+import type { ZoteroGateway } from "../services/zoteroGateway";
+import {
+  areConversationWritesFrozen,
+  getConversationWriteGeneration,
+  isConversationWriteGenerationCurrent,
+  withConversationWriteLock,
+} from "../../shared/conversationWriteFence";
+import type {
+  AgentRuntimeRequest,
+  AgentRuntimeRequestInput,
+  AgentToolArtifact,
+  AgentToolContext,
+  AgentToolDefinition,
+  ExhaustiveReadBackend,
+  PreparedToolExecution,
+  ToolSpec,
+} from "../types";
+import {
+  resolveAgentRuntimeRequest,
+  resolveZoteroTurnMetadataContext,
+} from "../context/resolvedAgentRequest";
+import {
+  getActiveTurnPaper,
+  type TurnPaperRole,
+  type TurnPaperScope,
+  type TurnPaperScopeWarning,
+} from "../context/turnPaperScope";
+import {
+  MCP_METHODS,
+  RPC_ERRORS,
+  makeError,
+  makeResult,
+  type JsonRpcRequest,
+  type McpServerInfo,
+  type McpToolCallParams,
+  type McpToolCallResult,
+  type McpToolDefinition,
+  type McpToolsListResult,
+} from "./protocol";
+import type { ZoteroMcpToolActivityEvent } from "./activityTypes";
+export type { ZoteroMcpToolActivityEvent } from "./activityTypes";
+import { extractVerifiedReadSources } from "../context/readEvidence";
+import type {
+  TrustedReadObservation,
+  VerifiedReadSource,
+} from "../context/readObservationTypes";
+import {
+  attestAndRecordRead,
+  recordTaskPaperDecisions,
+} from "../context/taskPaperLedgerRecorder";
+import {
+  outsidePaperRecordsFromToolResult,
+  prefetchOutsidePaperLookups,
+  rememberOutsidePapers,
+  type OutsidePaperRecord,
+} from "../context/outsidePaperRecords";
+import type { TaskPaperLedgerDelta } from "../context/taskPaperLedger";
+import {
+  isRawPdfRetrievalTool,
+  RETIRED_TOOL_HINTS,
+} from "../context/toolNames";
+import { resolveActiveLibraryID } from "../../utils/zoteroLibraryScope";
+import { resolveAgentToolCallWorkCategory } from "../workCategory";
+import { getNotesDirectoryConfig } from "../../utils/notesDirectoryConfig";
+import { OUTSIDE_SEARCH_NEED_SENTENCE } from "../tools/read/outsideSearchNeed";
+import { LITERATURE_SOURCE_SENTENCE } from "../tools/read/literatureSearch";
+import { SCOPELESS_MCP_RUN_PREFIX } from "../tools/read/outsideSearchLedger";
+import { toolGuidanceItems } from "../tools/guidance";
+import {
+  PAST_CHAT_ATTACH_TOOL_NAME,
+  PAST_CHAT_READ_TOOL_NAME,
+  PAST_CHAT_SEARCH_TOOL_NAME,
+  normalizeAttachedConversationScope,
+  pastConversationId,
+} from "../../services/pastConversations/pastConversationText";
+
+export const ZOTERO_MCP_SERVER_NAME = "llm_for_zotero";
+export const ZOTERO_MCP_ENDPOINT_PATH = "/llm-for-zotero/mcp";
+export const ZOTERO_MCP_AUTH_HEADER = "Authorization";
+export const ZOTERO_MCP_SCOPE_HEADER = "X-LLM-For-Zotero-Scope";
+export const ZOTERO_MCP_TOKEN_PREF_KEY = `${config.prefsPrefix}.codexZoteroMcpBearerToken`;
+
+const SERVER_VERSION = "1.0.0";
+const MCP_PROTOCOL_VERSION = "2025-06-18";
+const DEFAULT_ZOTERO_HTTP_PORT = 23119;
+const SCOPED_MCP_SCOPE_TTL_MS = 2 * 60 * 60 * 1000;
+export const ZOTERO_MCP_SAFE_READ_TOOL_NAMES = [
+  "load_skill",
+  "library_search",
+  "library_read",
+  "library_retrieve",
+  "paper_read",
+  "literature_search",
+  // Reads one outside paper's abstract and open-access text; it stays
+  // visible in direct-path PDF turns (not in the raw-PDF hidden set).
+  "literature_read",
+  // Always listed, so the tool list (and the client's prompt cache) stays the
+  // same; it opens only the chats in the scope's attachedConversationScope.
+  "past_chat_read",
+  // Lists chats of the scope's library by words; reads only.
+  "past_chat_search",
+  // Not a pure read: it adds a found chat to the user's message (a chip) and
+  // to the scope. That is plugin state with no external effect, so it is
+  // auto-approved here, and its MCP annotations say read-only like every
+  // non-external_effect tool. Refused without a scoped conversation.
+  "past_chat_attach",
+  // Not a pure read either: it records the agent's paper decisions in the
+  // scope's conversation (plugin state only, kept apart from reads), so it
+  // is auto-approved like past_chat_attach. Refused without a conversation.
+  "record_paper_decisions",
+  // Reads the scope's conversation's stored reads and decisions so far.
+  "review_coverage",
+  // The host's per-paper reader: reads papers with the chat's own model
+  // (Codex Responses or the Claude bridge); a read like paper_read.
+  "paper_digest",
+  // Formats citations and exports BibTeX through Zotero's own engines; it
+  // changes nothing.
+  "library_cite",
+  // Reads a non-PDF attachment's text. attachFile:true is refused over MCP
+  // (see MCP_REFUSED_TOOL_ARGUMENTS): its "after user review" has no review
+  // here.
+  "read_attachment",
+  // Opens a PDF in a reader tab at a page or an annotation. It changes what
+  // the user sees, not the library, so it is auto-approved like the other
+  // reads.
+  "reader_open",
+] as const;
+export const ZOTERO_MCP_PLAN_TOOL_NAMES = [
+  "request_user_input",
+  "task_update",
+  "submit_document",
+] as const;
+export const ZOTERO_MCP_WRITE_TOOL_NAMES = [
+  "library_update",
+  "note_write",
+  "library_import",
+  "library_delete",
+  "zotero_script",
+  "undo",
+  "annotate_pdf",
+  "file_io",
+  "run_command",
+  // list and syncStatus read; set changes a Zotero preference. The client's
+  // own approval covers the set, like every other write here.
+  "library_settings",
+  // Writes every listed note: there is no per-note checklist over MCP, so the
+  // client's approval covers the whole batch (see MCP_TOOL_DESCRIPTION_NOTES).
+  "note_write_batch",
+] as const;
+
+/**
+ * Registered tools deliberately NOT exposed over MCP, and why: the single
+ * owner of every plugin-only reason.
+ *
+ * This list exists so a missing tool reads as a decision rather than drift —
+ * the registry and these curated arrays are maintained by hand and have
+ * silently diverged before. test/mcpSurfaceDrift.test.ts derives the expected
+ * list from the registry and fails for a tool that is neither exposed, named
+ * here, nor `localAgentOnly`.
+ *
+ * Not listed here, by design: the tools the registry marks `localAgentOnly`.
+ * `registry.listTools()` never lists them to an external client, and the
+ * spec flag is their one owner. They are web_search and web_read (the MCP
+ * client has its own web tools) and workflow_script (it also needs the
+ * in-plugin `context.invokeRegisteredOperation`, which an MCP call lacks).
+ */
+export const ZOTERO_MCP_EXCLUDED_TOOL_NAMES: Record<string, string> = {
+  literature_review:
+    "Ranked discovery review uses the Original Agent's conversation-scoped candidate store and interactive review channel; external MCP clients receive scholarly search results directly.",
+  // Runs unattended for minutes and reports only at the end. The MCP
+  // transport has no progress channel and no way to drive the per-page
+  // review the in-plugin surface offers, so an external backend would see a
+  // single opaque call that either succeeds or times out. Revisit when the
+  // paged result contract ({done, nextOffset, remaining}) lands.
+  library_batch:
+    "library_batch runs unattended with no progress channel over MCP; use the in-plugin agent or the slash-command surface.",
+  // Both sources are in-plugin conversation state: the transcript and the
+  // turn-scoped tool-result handles. A standalone MCP client shares neither,
+  // and handle reads are gated on a metadata flag the MCP path never sets.
+  context_read:
+    "context_read reads the in-plugin conversation transcript and its stored tool-result handles; an external MCP client has neither, and handle reads are gated on an in-plugin metadata flag the MCP path does not set.",
+};
+/** The tools that read or attach past chats, pinned to the scope's library. */
+const PAST_CHAT_TOOL_NAMES = new Set<string>([
+  PAST_CHAT_READ_TOOL_NAME,
+  PAST_CHAT_SEARCH_TOOL_NAME,
+  PAST_CHAT_ATTACH_TOOL_NAME,
+]);
+/**
+ * The tools whose library is the scope's: past chats, and the per-paper
+ * reader, which must never read a paper outside the chat's library.
+ */
+const LIBRARY_PINNED_TOOL_NAMES = new Set<string>([
+  ...PAST_CHAT_TOOL_NAMES,
+  "paper_digest",
+]);
+const CURATED_READ_TOOL_NAMES = new Set<string>([
+  ...ZOTERO_MCP_SAFE_READ_TOOL_NAMES,
+  ...ZOTERO_MCP_PLAN_TOOL_NAMES,
+]);
+const CURATED_PLAN_TOOL_NAMES = new Set<string>(ZOTERO_MCP_PLAN_TOOL_NAMES);
+/**
+ * Tools whose turn guidance is the single owner of a rule an external agent
+ * also needs. The in-plugin agent receives it only on matching turns; an MCP
+ * catalog is static, so it carries the guidance on the tool description.
+ */
+const MCP_GUIDANCE_TOOL_NAMES = new Set<string>([
+  ...ZOTERO_MCP_PLAN_TOOL_NAMES,
+  "paper_read",
+  "library_retrieve",
+]);
+const CURATED_WRITE_TOOL_NAMES = new Set<string>(ZOTERO_MCP_WRITE_TOOL_NAMES);
+/**
+ * MCP-only descriptions for tools whose in-plugin description routes through
+ * a tool the MCP catalog excludes (see ZOTERO_MCP_EXCLUDED_TOOL_NAMES), or
+ * promises a review MCP has no channel for (MCP_REFUSED_TOOL_ARGUMENTS).
+ */
+const MCP_TOOL_DESCRIPTION_OVERRIDES: ReadonlyMap<string, string> = new Map([
+  [
+    "read_attachment",
+    "Read a non-PDF attachment's text by target.contextItemId (the Zotero attachment item ID). For PDFs use paper_read.",
+  ],
+  [
+    "literature_search",
+    "Search scholarly sources outside the library (OpenAlex, arXiv, Europe PMC); results come back to the client directly. The literature_review selection card is not available over MCP, so present discovery candidates yourself; discovery never imports silently. Outside papers a literature review cites are cited by paperId without importing, unless the user asks to import them (then library_import). An explicit import request uses library_import directly; metadata review uses workflow:'review', mode:'metadata'; literature_read reads a found paper. " +
+      OUTSIDE_SEARCH_NEED_SENTENCE +
+      "; mode:'metadata' needs none. " +
+      LITERATURE_SOURCE_SENTENCE +
+      " For web pages or current facts, use your client's own web search if it has one.",
+  ],
+]);
+/**
+ * Rules an MCP client needs on top of a tool's description. External agents
+ * (Claude Code, Codex, other MCP clients) never see the in-app note-editing
+ * prompt, so they learn note placeholders and new citations here.
+ */
+export const MCP_TOOL_DESCRIPTION_NOTES: ReadonlyMap<string, string> = new Map([
+  ["note_write", NOTE_EMBED_PLACEHOLDER_GUIDANCE],
+  [
+    "library_import",
+    "To import the outside papers a document cites, use kind:'document_citations' with its documentId, not their DOIs; DOIs imported with kind:'identifiers' leave the document citing them as outside papers.",
+  ],
+  [
+    "note_write_batch",
+    "Over MCP every listed note is written: there is no checklist to uncheck notes, so list only the notes you want. Sending the same notes again continues the same batch and writes nothing twice while Zotero stays open; to continue an interrupted batch, pass resumeBatchId alone.",
+  ],
+]);
+/**
+ * Arguments an MCP client may not use, by tool, with the message it gets.
+ * The tool's in-plugin contract assumes a review that MCP has no channel for.
+ * The argument is also removed from the tool's MCP schema.
+ */
+const MCP_REFUSED_TOOL_ARGUMENTS: ReadonlyMap<
+  string,
+  { argument: string; message: string }
+> = new Map([
+  [
+    "read_attachment",
+    {
+      argument: "attachFile",
+      message:
+        "read_attachment attachFile:true is not available over MCP: it sends the whole file to the model after the user reviews it, and an MCP call has no such review. Read the attachment's text with target.contextItemId instead, or use paper_read for a PDF.",
+    },
+  ],
+]);
+const READ_ONLY_TOOL_ANNOTATIONS = {
+  readOnlyHint: true,
+  openWorldHint: false,
+  destructiveHint: false,
+} as const;
+const WRITE_TOOL_ANNOTATIONS = {
+  readOnlyHint: false,
+  openWorldHint: false,
+  destructiveHint: false,
+} as const;
+const DESTRUCTIVE_WRITE_TOOL_NAMES = new Set<string>(["library_delete"]);
+const DESTRUCTIVE_WRITE_TOOL_ANNOTATIONS = {
+  ...WRITE_TOOL_ANNOTATIONS,
+  destructiveHint: true,
+} as const;
+const MCP_SCOPE_ARG_NAMES = new Set([
+  "libraryID",
+  "libraryId",
+  "activeItemId",
+  "activeItemID",
+  "activeContextItemId",
+  "activeContextItemID",
+]);
+const CODEX_MCP_READ_APPROVAL_MODE = "approve";
+// Plan tools only record the turn's own parts: Codex never asks for them.
+const CODEX_MCP_PLAN_APPROVAL_MODE = "auto";
+/**
+ * Codex's approval for Zotero MCP writes: "writes" asks before a tool that
+ * is not read-only, "auto" runs it. A Codex thread passes the mode its
+ * permission chip implies (`codexZoteroMcpWriteApprovalMode`); "auto" is the
+ * default for a config that names no chip.
+ */
+export type CodexZoteroMcpWriteApprovalMode = "writes" | "auto";
+const CODEX_MCP_DEFAULT_WRITE_APPROVAL_MODE: CodexZoteroMcpWriteApprovalMode =
+  "auto";
+const MCP_READ_DEDUPE_TTL_MS = 2 * 60 * 1000;
+const MCP_READ_DEDUPE_TOOL_NAMES = new Set([
+  "library_search",
+  "library_read",
+  "library_retrieve",
+  "paper_read",
+]);
+const RAW_PDF_HIDDEN_NATIVE_TOOL_NAMES = new Set([
+  "run_command",
+  "file_io",
+  "zotero_script",
+]);
+// paper_digest reads Zotero's text of each paper, which a raw-PDF turn
+// reads natively instead.
+const RAW_PDF_HIDDEN_RETRIEVAL_TOOL_NAMES = new Set([
+  "literature_search",
+  "paper_digest",
+]);
+/**
+ * The MCP tool-call timeout our server entry asks the client for, in
+ * seconds. A paper_digest call reads up to eight papers, each one or more
+ * reader calls of up to four minutes, behind a shared limit of four; a
+ * paper_read full call reads every batch of its papers. Both outlast the
+ * clients' 60-second default.
+ */
+export const ZOTERO_MCP_TOOL_TIMEOUT_SEC = 1_800;
+
+type ZoteroMcpScopeMetadata = {
+  publishHostEvent?: (event: import("../types").AgentEvent) => Promise<void>;
+  requestInteraction?: (
+    action: import("../types").AgentPendingAction,
+  ) => Promise<import("../types").AgentConfirmationResolution>;
+  clarificationHistory?: AgentRuntimeRequest["clarificationHistory"];
+  runtimeAuthority?: "claude" | "codex";
+  /** Host lifecycle signal; never supplied by MCP tool arguments. */
+  signal?: AbortSignal;
+  /** Durable provider run that owns direct document artifacts. */
+  runId?: string;
+  sourceMessageTimestamp?: number;
+  profileSignature?: string;
+  conversationKey?: number;
+  instanceID?: string;
+  conversationGeneration?: number;
+  libraryID?: number;
+  kind?: "global" | "paper";
+  paperItemID?: number;
+  activeItemId?: number;
+  activeContextItemId?: number;
+  activeNoteId?: number;
+  activeNoteKind?: "item" | "standalone";
+  activeNoteTitle?: string;
+  activeNoteParentItemId?: number;
+  libraryName?: string;
+  title?: string;
+  userText?: string;
+  model?: string;
+  codexPath?: string;
+  reasoning?: ReasoningConfig;
+  /** Host-created execution facts; never accepted from MCP tool arguments. */
+  executionContext?: AgentRuntimeRequest["executionContext"];
+  documentReadObservations?: AgentRuntimeRequest["documentReadObservations"];
+  documentArtifactObservations?: AgentRuntimeRequest["documentArtifactObservations"];
+  /** Host-recorded outside papers of the run; never from MCP tool arguments. */
+  outsidePaperRecords?: AgentRuntimeRequest["outsidePaperRecords"];
+  /** The outside papers the user chose to cite, once chosen. */
+  outsidePaperSelection?: AgentRuntimeRequest["outsidePaperSelection"];
+  /**
+   * The run's DOI lookups for citing outside papers. Kept by reference, so
+   * every call's request and every scope update share one cache.
+   */
+  outsidePaperLookupCache?: AgentRuntimeRequest["outsidePaperLookupCache"];
+  /**
+   * The past chats attached anywhere in the calling conversation: the only
+   * chats past_chat_read may open. Host-set by the Codex and Claude Code
+   * scope builders; a scope without it (a fork's provisional scope, a
+   * standalone client) makes the tool refuse.
+   */
+  attachedConversationScope?: AttachedConversationRef[];
+  exhaustiveReadBackend?: Extract<
+    ExhaustiveReadBackend,
+    "codex_responses" | "claude_bridge" | "unavailable"
+  >;
+  /**
+   * The reader model the user picked for this runtime (an entry ID or a model
+   * name, never a credential). Host-set by the Codex and Claude Code scope
+   * builders; absent means the main model reads.
+   */
+  readerSelection?: ReaderSelection;
+};
+
+export type ZoteroMcpPaperScopeInput =
+  | {
+      turnPaperScope: TurnPaperScope;
+      turnPaperScopeWarnings?: readonly TurnPaperScopeWarning[];
+      paperContext?: never;
+      selectedPaperContexts?: never;
+      pdfPaperContexts?: never;
+      fullTextPaperContexts?: never;
+      pinnedPaperContexts?: never;
+      selectedCollectionContexts?: never;
+      selectedTagContexts?: never;
+    }
+  | {
+      turnPaperScope?: never;
+      turnPaperScopeWarnings?: never;
+      paperContext?: PaperContextRef;
+      selectedPaperContexts?: PaperContextRef[];
+      pdfPaperContexts?: PaperContextRef[];
+      fullTextPaperContexts?: PaperContextRef[];
+      pinnedPaperContexts?: PaperContextRef[];
+      selectedCollectionContexts?: CollectionContextRef[];
+      selectedTagContexts?: TagContextRef[];
+    };
+
+export type ZoteroMcpActiveScope = ZoteroMcpScopeMetadata &
+  ZoteroMcpPaperScopeInput;
+
+type McpServerDeps = {
+  toolRegistry: AgentToolRegistry;
+  zoteroGateway: ZoteroGateway;
+};
+
+function getMcpScopePapers(
+  scope: ZoteroMcpActiveScope | null,
+  roles?: readonly TurnPaperRole[],
+): PaperContextRef[] {
+  if (scope?.turnPaperScope) {
+    return scope.turnPaperScope.papers
+      .filter(
+        (entry) => !roles || entry.roles.some((role) => roles.includes(role)),
+      )
+      .map((entry) => entry.paper);
+  }
+  if (!scope) return [];
+  const legacyByRole: Array<[TurnPaperRole, PaperContextRef[] | undefined]> = [
+    ["selected", normalizePaperContexts(scope.selectedPaperContexts)],
+    ["raw_pdf", normalizePaperContexts(scope.pdfPaperContexts)],
+    ["full_text", normalizePaperContexts(scope.fullTextPaperContexts)],
+    ["pinned", normalizePaperContexts(scope.pinnedPaperContexts)],
+  ];
+  return legacyByRole
+    .filter(([role]) => !roles || roles.includes(role))
+    .flatMap(([, papers]) => papers || []);
+}
+
+type EndpointOptions = {
+  method: string;
+  data: unknown;
+  headers?: Record<string, string>;
+};
+
+type McpHttpResponse = {
+  status: number;
+  contentType: string;
+  body: string;
+};
+
+const scopedZoteroMcpScopes = new Map<
+  string,
+  {
+    createdAt: number;
+    expiresAt: number;
+    scope: ZoteroMcpActiveScope;
+    controller: AbortController;
+  }
+>();
+const conversationScopeTokens = new Map<
+  string,
+  { token: string; instanceID?: string }
+>();
+let registeredMcpDeps: McpServerDeps | null = null;
+let scopelessRunId: string | null = null;
+
+/**
+ * A client that registers no scope is still one session, so its calls share a
+ * single run identity for the lifetime of this server instance. Minting one
+ * per call would make each call its own run, and work that spans two calls —
+ * finalizing a document, then saving it as a note — would never be owned by
+ * the run that has to authorize it. Host-driven runtimes carry their own
+ * per-turn run id on the registered scope and never reach this.
+ */
+function scopelessRunIdentity(): string {
+  scopelessRunId ||= createJournalId(SCOPELESS_MCP_RUN_PREFIX);
+  return scopelessRunId;
+}
+const mcpReadDedupeCache = new Map<
+  string,
+  {
+    expiresAt: number;
+    result: McpToolCallResult;
+    observations: readonly TrustedReadObservation[];
+    outsidePapers: readonly OutsidePaperRecord[];
+    quoteCitations: readonly QuoteCitation[];
+  }
+>();
+
+type ZoteroMcpToolActivityObserver = (
+  event: ZoteroMcpToolActivityEvent,
+) => void;
+
+const zoteroMcpToolActivityObservers = new Set<ZoteroMcpToolActivityObserver>();
+
+export function addZoteroMcpToolActivityObserver(
+  observer: ZoteroMcpToolActivityObserver,
+): () => void {
+  zoteroMcpToolActivityObservers.add(observer);
+  return () => {
+    zoteroMcpToolActivityObservers.delete(observer);
+  };
+}
+
+function emitZoteroMcpToolActivity(event: ZoteroMcpToolActivityEvent): void {
+  for (const observer of zoteroMcpToolActivityObservers) {
+    try {
+      observer(event);
+    } catch {
+      /* observer errors must not affect MCP tool execution */
+    }
+  }
+}
+
+function logZoteroMcp(message: string, details?: unknown): void {
+  try {
+    (
+      globalThis as typeof globalThis & {
+        ztoolkit?: { log?: (...args: unknown[]) => void };
+      }
+    ).ztoolkit?.log?.(message, details);
+  } catch {
+    /* diagnostics must not affect MCP execution */
+  }
+}
+
+function getZoteroPrefs(): {
+  get?: (key: string, global?: boolean) => unknown;
+  set?: (key: string, value: unknown, global?: boolean) => void;
+} | null {
+  return (
+    (
+      Zotero as unknown as
+        | {
+            Prefs?: {
+              get?: (key: string, global?: boolean) => unknown;
+              set?: (key: string, value: unknown, global?: boolean) => void;
+            };
+          }
+        | undefined
+    )?.Prefs || null
+  );
+}
+
+function generateToken(): string {
+  const bytes = new Uint8Array(32);
+  const cryptoApi = (globalThis as { crypto?: Crypto }).crypto;
+  if (cryptoApi?.getRandomValues) {
+    cryptoApi.getRandomValues(bytes);
+  } else {
+    for (let index = 0; index < bytes.length; index += 1) {
+      bytes[index] = Math.floor(Math.random() * 256);
+    }
+  }
+  return Array.from(bytes)
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+export function getOrCreateZoteroMcpBearerToken(): string {
+  const prefs = getZoteroPrefs();
+  const existing = prefs?.get?.(ZOTERO_MCP_TOKEN_PREF_KEY, true);
+  if (typeof existing === "string" && existing.trim().length >= 32) {
+    return existing.trim();
+  }
+  const token = generateToken();
+  prefs?.set?.(ZOTERO_MCP_TOKEN_PREF_KEY, token, true);
+  return token;
+}
+
+export function resetZoteroMcpBearerToken(): string {
+  const token = generateToken();
+  getZoteroPrefs()?.set?.(ZOTERO_MCP_TOKEN_PREF_KEY, token, true);
+  return token;
+}
+
+export function getZoteroHttpPort(): number {
+  const raw = (
+    Zotero as unknown as {
+      Prefs?: { get?: (key: string, global?: boolean) => unknown };
+    }
+  )?.Prefs?.get?.("httpServer.port");
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0
+    ? Math.floor(parsed)
+    : DEFAULT_ZOTERO_HTTP_PORT;
+}
+
+export function getZoteroMcpServerUrl(): string {
+  return `http://127.0.0.1:${getZoteroHttpPort()}${ZOTERO_MCP_ENDPOINT_PATH}`;
+}
+
+export function getZoteroMcpAllowedToolNames(): string[] {
+  return [
+    ...Array.from(CURATED_READ_TOOL_NAMES),
+    ...Array.from(CURATED_WRITE_TOOL_NAMES),
+  ];
+}
+
+/**
+ * Direct-path PDF turns read PDFs through the provider's native filesystem
+ * capability. Native filesystem tools and unscoped online retrieval stay
+ * hidden; local paper retrieval is enforced per exact current-turn identity.
+ */
+export function getZoteroMcpDirectPdfToolNames(): string[] {
+  return getZoteroMcpAllowedToolNames().filter(
+    (name) =>
+      !RAW_PDF_HIDDEN_NATIVE_TOOL_NAMES.has(name) &&
+      !RAW_PDF_HIDDEN_RETRIEVAL_TOOL_NAMES.has(name),
+  );
+}
+
+function getZoteroMcpToolApprovalOverrides(
+  toolNames: string[],
+  writeApprovalMode: CodexZoteroMcpWriteApprovalMode,
+): Record<string, { approval_mode: "approve" | "auto" | "writes" }> {
+  return Object.fromEntries(
+    toolNames.map((name) => [
+      name,
+      {
+        approval_mode: CURATED_PLAN_TOOL_NAMES.has(name)
+          ? CODEX_MCP_PLAN_APPROVAL_MODE
+          : CURATED_READ_TOOL_NAMES.has(name)
+            ? CODEX_MCP_READ_APPROVAL_MODE
+            : writeApprovalMode,
+      },
+    ]),
+  );
+}
+
+function normalizeServerNamePart(value: unknown): string {
+  const normalized = normalizeText(value, 128)
+    ?.replace(/[^a-zA-Z0-9_]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .toLowerCase();
+  return normalized || "";
+}
+
+export function getZoteroMcpServerName(profileSignature?: string): string {
+  const suffix = normalizeServerNamePart(profileSignature);
+  return suffix
+    ? `${ZOTERO_MCP_SERVER_NAME}_${suffix}`
+    : ZOTERO_MCP_SERVER_NAME;
+}
+
+export function qualifyZoteroMcpToolName(
+  serverName: string,
+  toolName: string,
+): string {
+  return `mcp__${serverName}__${toolName}`;
+}
+
+export function buildZoteroMcpConfigValue(
+  params: {
+    scopeToken?: string;
+    required?: boolean;
+    rawPdfMode?: boolean;
+    enabled?: boolean;
+    writeApprovalMode?: CodexZoteroMcpWriteApprovalMode;
+  } = {},
+): Record<string, unknown> {
+  const token = getOrCreateZoteroMcpBearerToken();
+  const writeApprovalMode =
+    params.writeApprovalMode || CODEX_MCP_DEFAULT_WRITE_APPROVAL_MODE;
+  const scopeToken = normalizeText(params.scopeToken, 256);
+  const enabled = params.enabled !== false;
+  const enabledToolNames = params.rawPdfMode
+    ? getZoteroMcpDirectPdfToolNames()
+    : getZoteroMcpAllowedToolNames();
+  return {
+    url: getZoteroMcpServerUrl(),
+    ...(!enabled ? { enabled: false } : {}),
+    ...(enabled && params.required ? { required: true } : {}),
+    default_tools_approval_mode: writeApprovalMode,
+    // Codex's per-server tool-call timeout (its default is 60 s).
+    tool_timeout_sec: ZOTERO_MCP_TOOL_TIMEOUT_SEC,
+    tools: getZoteroMcpToolApprovalOverrides(
+      enabledToolNames,
+      writeApprovalMode,
+    ),
+    http_headers: {
+      [ZOTERO_MCP_AUTH_HEADER]: `Bearer ${token}`,
+      ...(scopeToken ? { [ZOTERO_MCP_SCOPE_HEADER]: scopeToken } : {}),
+    },
+    enabled_tools: enabledToolNames,
+  };
+}
+
+function normalizePositiveInt(value: unknown): number | undefined {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return undefined;
+  return Math.floor(parsed);
+}
+
+function normalizeText(value: unknown, maxLength = 240): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const withoutControlChars = Array.from(value, (char) => {
+    const code = char.charCodeAt(0);
+    return code <= 0x1f || code === 0x7f ? " " : char;
+  }).join("");
+  const normalized = withoutControlChars.replace(/\s+/g, " ").trim();
+  return normalized ? normalized.slice(0, maxLength) : undefined;
+}
+
+function normalizePaperContentSourceMode(
+  value: unknown,
+): PaperContentSourceMode | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim().toLowerCase();
+  switch (normalized) {
+    case "text":
+    case "mineru":
+    case "pdf":
+    case "markdown":
+    case "html":
+    case "txt":
+    case "docx":
+      return normalized;
+    default:
+      return undefined;
+  }
+}
+
+function normalizePaperContext(
+  value: PaperContextRef | undefined,
+): PaperContextRef | undefined {
+  if (!value) return undefined;
+  const libraryID = normalizePositiveInt(value.libraryID);
+  const itemId = normalizePositiveInt(value.itemId);
+  const contextItemId = normalizePositiveInt(value.contextItemId);
+  if (!itemId || !contextItemId) return undefined;
+  return {
+    ...(libraryID ? { libraryID } : {}),
+    itemId,
+    contextItemId,
+    title: normalizeText(value.title) || `Paper ${itemId}`,
+    attachmentTitle: normalizeText(value.attachmentTitle),
+    citationKey: normalizeText(value.citationKey),
+    firstCreator: normalizeText(value.firstCreator),
+    year: normalizeText(value.year, 32),
+    contentSourceMode: normalizePaperContentSourceMode(value.contentSourceMode),
+    mineruCacheDir: normalizeText(value.mineruCacheDir, 1024),
+  };
+}
+
+function normalizePaperContexts(
+  values: PaperContextRef[] | undefined,
+): PaperContextRef[] | undefined {
+  if (!Array.isArray(values)) return undefined;
+  const out: PaperContextRef[] = [];
+  const seen = new Set<string>();
+  for (const value of values) {
+    const normalized = normalizePaperContext(value);
+    if (!normalized) continue;
+    const key = `${normalized.libraryID || 0}:${normalized.itemId}:${normalized.contextItemId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(normalized);
+  }
+  return out.length ? out : undefined;
+}
+
+function normalizeCollectionContexts(
+  values: CollectionContextRef[] | undefined,
+): CollectionContextRef[] | undefined {
+  if (!Array.isArray(values)) return undefined;
+  const out: CollectionContextRef[] = [];
+  const seen = new Set<string>();
+  for (const value of values) {
+    const collectionId = normalizePositiveInt(value?.collectionId);
+    const libraryID = normalizePositiveInt(value?.libraryID);
+    const name = normalizeText(value?.name);
+    if (!collectionId || !libraryID || !name) continue;
+    const key = `${libraryID}:${collectionId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const excludedItemIds = normalizeExcludedItemIds(value?.excludedItemIds);
+    out.push({
+      collectionId,
+      libraryID,
+      name,
+      ...(excludedItemIds ? { excludedItemIds } : {}),
+    });
+  }
+  return out.length ? out : undefined;
+}
+
+function normalizeTagContexts(
+  values: TagContextRef[] | undefined,
+): TagContextRef[] | undefined {
+  if (!Array.isArray(values)) return undefined;
+  const out: TagContextRef[] = [];
+  const seen = new Set<string>();
+  for (const value of values) {
+    const libraryID = normalizePositiveInt(value?.libraryID);
+    const scope =
+      value?.scope === "allTagged" || value?.scope === "untagged"
+        ? value.scope
+        : undefined;
+    const name =
+      normalizeText(value?.name) ||
+      (scope === "allTagged"
+        ? "All Tagged"
+        : scope === "untagged"
+          ? "Untagged"
+          : undefined);
+    if (!libraryID || !name) continue;
+    const normalizedName = normalizeText(
+      value?.normalizedName || value?.name,
+    )?.toLowerCase();
+    const includeAutomatic = value?.includeAutomatic === true;
+    const key = scope
+      ? `${libraryID}:scope:${scope}:${includeAutomatic ? "auto" : "manual"}`
+      : `${libraryID}:tag:${normalizedName || name.toLowerCase()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const excludedItemIds = normalizeExcludedItemIds(value?.excludedItemIds);
+    out.push({
+      name,
+      libraryID,
+      normalizedName: normalizedName || undefined,
+      scope,
+      includeAutomatic: includeAutomatic || undefined,
+      ...(excludedItemIds ? { excludedItemIds } : {}),
+    });
+  }
+  return out.length ? out : undefined;
+}
+
+function normalizeNoteKind(value: unknown): "item" | "standalone" | undefined {
+  return value === "item" || value === "standalone" ? value : undefined;
+}
+
+/** A scope names its full-read backend; anything else cannot read in full. */
+function normalizeScopeExhaustiveReadBackend(
+  value: ZoteroMcpActiveScope["exhaustiveReadBackend"],
+): "codex_responses" | "claude_bridge" | "unavailable" {
+  return value === "codex_responses" || value === "claude_bridge"
+    ? value
+    : "unavailable";
+}
+
+function normalizeReasoningConfig(
+  value: ReasoningConfig | undefined,
+): ReasoningConfig | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const providers = new Set<ReasoningConfig["provider"]>([
+    "openai",
+    "gemini",
+    "deepseek",
+    "kimi",
+    "mimo",
+    "qwen",
+    "grok",
+    "anthropic",
+  ]);
+  const levels = new Set<ReasoningConfig["level"]>([
+    "default",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+  ]);
+  if (!providers.has(value.provider) || !levels.has(value.level)) {
+    return undefined;
+  }
+  const effort = normalizeText(value.effort, 128);
+  return {
+    provider: value.provider,
+    level: value.level,
+    ...(effort ? { effort } : {}),
+  };
+}
+
+function normalizeActiveScope(
+  scope: ZoteroMcpActiveScope,
+): ZoteroMcpActiveScope {
+  const rawScope = scope as ZoteroMcpActiveScope & Record<string, unknown>;
+  const hasLegacyPaperScope = [
+    "paperContext",
+    "selectedPaperContexts",
+    "pdfPaperContexts",
+    "fullTextPaperContexts",
+    "pinnedPaperContexts",
+    "selectedCollectionContexts",
+    "selectedTagContexts",
+  ].some((field) => rawScope[field] !== undefined);
+  if (scope.turnPaperScope && hasLegacyPaperScope) {
+    throw new Error(
+      "conflicting_paper_scope: send turnPaperScope or legacy paper arrays, not both.",
+    );
+  }
+  const paperContext = normalizePaperContext(scope.paperContext);
+  const canonicalActivePaper = scope.turnPaperScope
+    ? getActiveTurnPaper(scope.turnPaperScope)
+    : undefined;
+  const conversationKey = normalizePositiveInt(scope.conversationKey);
+  const paperItemID =
+    normalizePositiveInt(scope.paperItemID) ||
+    canonicalActivePaper?.itemId ||
+    paperContext?.itemId;
+  const activeContextItemId =
+    normalizePositiveInt(scope.activeContextItemId) ||
+    canonicalActivePaper?.contextItemId ||
+    paperContext?.contextItemId;
+  const metadataLibraryID = normalizePositiveInt(scope.libraryID);
+  const canonicalLibraryID = normalizePositiveInt(
+    scope.turnPaperScope?.libraryID,
+  );
+  if (
+    metadataLibraryID &&
+    canonicalLibraryID &&
+    metadataLibraryID !== canonicalLibraryID
+  ) {
+    throw new Error(
+      "conflicting_paper_scope: turnPaperScope belongs to a different Zotero library.",
+    );
+  }
+  const attachedConversationScope = normalizeAttachedConversationScope(
+    scope.attachedConversationScope,
+  );
+  const metadata: ZoteroMcpScopeMetadata = {
+    runtimeAuthority:
+      scope.runtimeAuthority === "claude" || scope.runtimeAuthority === "codex"
+        ? scope.runtimeAuthority
+        : undefined,
+    runId: normalizeText(scope.runId, 256),
+    sourceMessageTimestamp: Number.isFinite(scope.sourceMessageTimestamp)
+      ? Math.floor(Number(scope.sourceMessageTimestamp))
+      : undefined,
+    profileSignature: normalizeText(scope.profileSignature, 128),
+    conversationKey,
+    instanceID: normalizeText(scope.instanceID, 128),
+    conversationGeneration: conversationKey
+      ? Number.isFinite(scope.conversationGeneration)
+        ? Math.max(0, Math.floor(Number(scope.conversationGeneration)))
+        : getConversationWriteGeneration(conversationKey)
+      : undefined,
+    libraryID: canonicalLibraryID || metadataLibraryID,
+    kind:
+      scope.turnPaperScope?.conversationKind ||
+      (scope.kind === "paper" ? "paper" : "global"),
+    paperItemID,
+    activeItemId:
+      normalizePositiveInt(scope.activeItemId) || paperItemID || undefined,
+    activeContextItemId,
+    activeNoteId: normalizePositiveInt(scope.activeNoteId),
+    activeNoteKind: normalizeNoteKind(scope.activeNoteKind),
+    activeNoteTitle: normalizeText(scope.activeNoteTitle),
+    activeNoteParentItemId: normalizePositiveInt(scope.activeNoteParentItemId),
+    libraryName: normalizeText(scope.libraryName),
+    title: normalizeText(scope.title),
+    userText: typeof scope.userText === "string" ? scope.userText : "",
+    model: normalizeText(scope.model, 256),
+    codexPath: normalizeText(scope.codexPath, 4096),
+    reasoning: normalizeReasoningConfig(scope.reasoning),
+    signal: scope.signal,
+    executionContext: scope.executionContext
+      ? { ...scope.executionContext, permissionOwner: "external_runtime" }
+      : undefined,
+    requestInteraction: scope.requestInteraction,
+    publishHostEvent: scope.publishHostEvent,
+    clarificationHistory: scope.clarificationHistory,
+    documentReadObservations: scope.documentReadObservations
+      ? cloneTrustedReadObservations(scope.documentReadObservations)
+      : undefined,
+    documentArtifactObservations: scope.documentArtifactObservations
+      ? cloneToolArtifacts(scope.documentArtifactObservations)
+      : undefined,
+    outsidePaperRecords: scope.outsidePaperRecords
+      ? [...scope.outsidePaperRecords]
+      : undefined,
+    outsidePaperSelection: scope.outsidePaperSelection
+      ? [...scope.outsidePaperSelection]
+      : undefined,
+    // The same object on every update; a scope that starts with records
+    // gets its cache now, before any call can build a request from it.
+    outsidePaperLookupCache:
+      scope.outsidePaperLookupCache ??
+      (scope.outsidePaperRecords?.length ? {} : undefined),
+    // Uncapped: every chat attached in the conversation stays readable.
+    attachedConversationScope: attachedConversationScope.length
+      ? attachedConversationScope
+      : undefined,
+    exhaustiveReadBackend: normalizeScopeExhaustiveReadBackend(
+      scope.exhaustiveReadBackend,
+    ),
+    readerSelection:
+      decodeReaderSelection(encodeReaderSelection(scope.readerSelection)) ||
+      undefined,
+  };
+  if (scope.turnPaperScope) {
+    return {
+      ...metadata,
+      turnPaperScope: scope.turnPaperScope,
+      turnPaperScopeWarnings: scope.turnPaperScopeWarnings,
+    };
+  }
+  return {
+    ...metadata,
+    paperContext,
+    selectedPaperContexts: normalizePaperContexts(scope.selectedPaperContexts),
+    pdfPaperContexts: (
+      normalizePaperContexts(scope.pdfPaperContexts) || []
+    ).map((paper) => ({ ...paper, contentSourceMode: "pdf" as const })),
+    fullTextPaperContexts: normalizePaperContexts(scope.fullTextPaperContexts),
+    pinnedPaperContexts: normalizePaperContexts(scope.pinnedPaperContexts),
+    selectedCollectionContexts: normalizeCollectionContexts(
+      scope.selectedCollectionContexts,
+    ),
+    selectedTagContexts: normalizeTagContexts(scope.selectedTagContexts),
+  };
+}
+
+function pruneExpiredScopedMcpScopes(): void {
+  const now = Date.now();
+  for (const [token, entry] of scopedZoteroMcpScopes) {
+    if (entry.expiresAt <= now) {
+      releaseScopedMcpScope(token);
+    }
+  }
+}
+
+export function registerScopedZoteroMcpScope(
+  scope: ZoteroMcpActiveScope,
+  options: { ttlMs?: number; token?: string } = {},
+): {
+  token: string;
+  clear: () => void;
+  getState: () => ZoteroMcpActiveScope | null;
+} {
+  pruneExpiredScopedMcpScopes();
+  const token = normalizeText(options.token, 256) || generateToken();
+  const ttlMs =
+    Number.isFinite(options.ttlMs) && Number(options.ttlMs) > 0
+      ? Math.floor(Number(options.ttlMs))
+      : SCOPED_MCP_SCOPE_TTL_MS;
+  releaseScopedMcpScope(token);
+  const controller = createAbortController();
+  const entry = {
+    createdAt: Date.now(),
+    expiresAt: Date.now() + ttlMs,
+    controller,
+    scope: normalizeActiveScope({ ...scope, signal: controller.signal }),
+  };
+  scopedZoteroMcpScopes.set(token, entry);
+  return {
+    token,
+    getState: () => {
+      pruneExpiredScopedMcpScopes();
+      return scopedZoteroMcpScopes.get(token) === entry ? entry.scope : null;
+    },
+    clear: () => {
+      if (scopedZoteroMcpScopes.get(token) === entry)
+        releaseScopedMcpScope(token);
+    },
+  };
+}
+
+function releaseScopedMcpScope(token: string): void {
+  scopedZoteroMcpScopes.get(token)?.controller.abort();
+  scopedZoteroMcpScopes.delete(token);
+  clearMcpReadDedupeCacheForScopeToken(token);
+}
+
+/** Refreshes the mutable per-turn authority carried by an already-issued
+ * scope token. The token remains stable while the provider reports its run ID
+ * and while verified read attestations accumulate between MCP calls. */
+export function updateScopedZoteroMcpScope(
+  token: string,
+  update: Partial<ZoteroMcpScopeMetadata>,
+): boolean {
+  const normalizedToken = normalizeText(token, 256);
+  if (!normalizedToken) return false;
+  pruneExpiredScopedMcpScopes();
+  const entry = scopedZoteroMcpScopes.get(normalizedToken);
+  if (!entry) return false;
+  entry.scope = normalizeActiveScope({
+    ...entry.scope,
+    ...update,
+  } as ZoteroMcpActiveScope);
+  return true;
+}
+
+/**
+ * Adds a chat past_chat_attach attached to the scope token's chat list, so
+ * the later calls of this turn may open it with past_chat_read. Only the
+ * attach path writes the list, and it adds to the current list instead of
+ * replacing it: a slower call that started before the attach cannot put an
+ * older list back. The next turn's scope comes from the stored messages,
+ * which hold the chat too.
+ */
+function extendScopedMcpAttachedConversationScope(
+  headers: Record<string, string> | undefined,
+  ref: AttachedConversationRef,
+): void {
+  const token = getHeader(headers, ZOTERO_MCP_SCOPE_HEADER).trim();
+  if (!token) return;
+  const entry = scopedZoteroMcpScopes.get(token);
+  if (!entry) return;
+  const current = entry.scope.attachedConversationScope || [];
+  const id = pastConversationId(ref);
+  if (current.some((existing) => pastConversationId(existing) === id)) return;
+  entry.scope.attachedConversationScope = [...current, ref];
+}
+
+/**
+ * Returns a scope token that stays stable for one conversation.
+ *
+ * Agent runtimes bind the scope header when they create their conversation and
+ * keep reusing it on resume, so a token that only lives for one turn is already
+ * stale by the next turn. A conversation-stable token lets every turn re-register
+ * its own scope under the same header value.
+ *
+ * Callers pass the identity rather than a pre-joined key so that the turn runner
+ * and the fork path cannot drift on the key format: two spellings of the same
+ * conversation would yield two tokens and bring the stale-header failure back.
+ *
+ * Entries hold only the token. The scope itself is registered per turn in
+ * `scopedZoteroMcpScopes` and released when the turn ends. They are not expired
+ * on a timer: a token whose conversation is still live in the agent runtime must
+ * keep resolving, because the runtime keeps sending the header it captured when
+ * the conversation was created. Endpoint restarts preserve the map; durable
+ * conversation deletion releases its exact entry.
+ */
+export function resolveConversationScopeToken(params: {
+  profileSignature?: string;
+  conversationKey: number;
+  instanceID?: string;
+}): string {
+  const conversationKey = Math.floor(Number(params.conversationKey));
+  if (!Number.isFinite(conversationKey) || conversationKey <= 0) {
+    return generateToken();
+  }
+  const instanceID = normalizeText(params.instanceID, 128);
+  const key = `${normalizeText(params.profileSignature, 256) || ""} ${conversationKey}${instanceID ? ` ${instanceID}` : ""}`;
+  const existing = conversationScopeTokens.get(key);
+  if (existing) return existing.token;
+  const token = generateToken();
+  conversationScopeTokens.set(key, {
+    token,
+    ...(instanceID ? { instanceID } : {}),
+  });
+  return token;
+}
+
+/**
+ * Releases the stable token after its conversation has been durably deleted.
+ * This is deliberately identity-specific: another Zotero profile can use the
+ * same numeric conversation key and must keep its own live runtime binding.
+ */
+export function releaseConversationScopeToken(params: {
+  profileSignature?: string;
+  conversationKey: number;
+  instanceID?: string;
+}): void {
+  const conversationKey = Math.floor(Number(params.conversationKey));
+  if (!Number.isFinite(conversationKey) || conversationKey <= 0) return;
+  const instanceID = normalizeText(params.instanceID, 128);
+  const key = `${normalizeText(params.profileSignature, 256) || ""} ${conversationKey}${instanceID ? ` ${instanceID}` : ""}`;
+  const entry = conversationScopeTokens.get(key);
+  if (!entry) {
+    // Older builds used a key-only token.  Once deletion supplies the old
+    // immutable instance, removing that legacy entry is safe and prevents a
+    // stale provider header from resolving into a later runtime.
+    if (instanceID) {
+      const legacyKey = `${normalizeText(params.profileSignature, 256) || ""} ${conversationKey}`;
+      const legacyEntry = conversationScopeTokens.get(legacyKey);
+      if (legacyEntry) {
+        conversationScopeTokens.delete(legacyKey);
+        releaseScopedMcpScope(legacyEntry.token);
+      }
+    }
+    return;
+  }
+  // A deletion carrying an immutable instance identity must never fall back
+  // to the legacy key-only lane: that key may already belong to a newer
+  // conversation. Legacy callers may still release legacy tokens by key.
+  if (instanceID && entry.instanceID !== instanceID) return;
+  conversationScopeTokens.delete(key);
+  releaseScopedMcpScope(entry.token);
+}
+
+function getHeader(
+  headers: Record<string, string> | undefined,
+  name: string,
+): string {
+  if (!headers) return "";
+  const lowerName = name.toLowerCase();
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() === lowerName) return String(value || "");
+  }
+  return "";
+}
+
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) {
+    return `[${value.map((entry) => stableStringify(entry)).join(",")}]`;
+  }
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`)
+    .join(",")}}`;
+}
+
+function pruneExpiredMcpReadDedupeCache(): void {
+  const now = Date.now();
+  for (const [key, entry] of mcpReadDedupeCache) {
+    if (entry.expiresAt <= now) mcpReadDedupeCache.delete(key);
+  }
+}
+
+function mcpReadDedupeScopePrefix(scopeToken: string): string {
+  return `token:${JSON.stringify(scopeToken)}:`;
+}
+
+function clearMcpReadDedupeCacheForScopeToken(scopeToken: string): void {
+  const prefix = mcpReadDedupeScopePrefix(scopeToken);
+  for (const key of mcpReadDedupeCache.keys()) {
+    if (key.startsWith(prefix)) mcpReadDedupeCache.delete(key);
+  }
+}
+
+function buildMcpReadDedupeKey(params: {
+  toolName: string;
+  toolArgs: unknown;
+  libraryID: number;
+  activeItemId?: number;
+  activeContextItemId?: number;
+  headers?: Record<string, string>;
+}): string | null {
+  if (!MCP_READ_DEDUPE_TOOL_NAMES.has(params.toolName)) return null;
+  const scopeToken = getHeader(params.headers, ZOTERO_MCP_SCOPE_HEADER).trim();
+  if (!scopeToken) return null;
+  pruneExpiredScopedMcpScopes();
+  if (!scopedZoteroMcpScopes.has(scopeToken)) return null;
+  return `${mcpReadDedupeScopePrefix(scopeToken)}${params.toolName}:${stableStringify(
+    {
+      libraryID: params.libraryID,
+      activeItemId: params.activeItemId,
+      activeContextItemId: params.activeContextItemId,
+      arguments: params.toolArgs || {},
+    },
+  )}`;
+}
+
+function cloneMcpResultWithDuplicateMarker(
+  result: McpToolCallResult,
+): McpToolCallResult {
+  const content = result.content.map((part, index) => {
+    if (index !== 0) return { ...part };
+    try {
+      const parsed = JSON.parse(part.text) as Record<string, unknown>;
+      return {
+        ...part,
+        text: JSON.stringify(
+          {
+            ...parsed,
+            duplicate: true,
+          },
+          null,
+          2,
+        ),
+      };
+    } catch {
+      return {
+        ...part,
+        text: `${part.text}\n\n{"duplicate":true}`,
+      };
+    }
+  });
+  return {
+    content,
+    ...(result.isError ? { isError: result.isError } : {}),
+  };
+}
+
+function cloneTrustedReadObservations(
+  observations: readonly TrustedReadObservation[],
+): TrustedReadObservation[] {
+  return observations.map((observation) => ({
+    ...observation,
+    capabilities: [...observation.capabilities],
+  }));
+}
+
+function cloneToolArtifacts(
+  artifacts: readonly AgentToolArtifact[],
+): AgentToolArtifact[] {
+  return artifacts.map((artifact) => ({
+    ...artifact,
+    paperContext: artifact.paperContext
+      ? { ...artifact.paperContext }
+      : undefined,
+  }));
+}
+
+function getCachedMcpReadResult(key: string | null): {
+  result: McpToolCallResult;
+  observations: readonly TrustedReadObservation[];
+  outsidePapers: readonly OutsidePaperRecord[];
+  quoteCitations: QuoteCitation[];
+} | null {
+  if (!key) return null;
+  pruneExpiredMcpReadDedupeCache();
+  const cached = mcpReadDedupeCache.get(key);
+  if (!cached) return null;
+  return {
+    result: cloneMcpResultWithDuplicateMarker(cached.result),
+    observations: cloneTrustedReadObservations(cached.observations),
+    outsidePapers: [...cached.outsidePapers],
+    quoteCitations: [...cached.quoteCitations],
+  };
+}
+
+function collectPaperIdentities(value: unknown): Array<{
+  itemId?: number;
+  contextItemId?: number;
+}> {
+  if (!value || typeof value !== "object") return [];
+  if (Array.isArray(value)) return value.flatMap(collectPaperIdentities);
+  const record = value as Record<string, unknown>;
+  const itemId = normalizePositiveInt(record.itemId ?? record.itemID);
+  const contextItemId = normalizePositiveInt(
+    record.contextItemId ?? record.contextItemID,
+  );
+  const current = itemId || contextItemId ? [{ itemId, contextItemId }] : [];
+  return [...current, ...Object.values(record).flatMap(collectPaperIdentities)];
+}
+
+function collectLibraryRetrieveItemIdentities(
+  value: unknown,
+): Array<{ itemId: number }> {
+  const record = normalizeRecord(value);
+  const scope = normalizeRecord(record.scope);
+  if (!Array.isArray(scope.itemIds)) return [];
+  return scope.itemIds
+    .map((itemId) => normalizePositiveInt(itemId))
+    .filter((itemId): itemId is number => Boolean(itemId))
+    .map((itemId) => ({ itemId }));
+}
+
+function collectLibraryReadItemIdentities(
+  value: unknown,
+): Array<{ itemId: number }> {
+  const record = normalizeRecord(value);
+  if (!Array.isArray(record.itemIds)) return [];
+  return record.itemIds
+    .map((itemId) => normalizePositiveInt(itemId))
+    .filter((itemId): itemId is number => Boolean(itemId))
+    .map((itemId) => ({ itemId }));
+}
+
+function getAttachmentParentItemId(itemId: number): number | null {
+  try {
+    const item = Zotero?.Items?.get?.(itemId);
+    if (!item || typeof item.isAttachment !== "function") return null;
+    if (!item.isAttachment()) return null;
+    return normalizePositiveInt(item.parentID) || null;
+  } catch {
+    return null;
+  }
+}
+
+function identityUsesAttachmentUnderRawParent(
+  identity: { itemId?: number; contextItemId?: number },
+  rawParentItemIds: ReadonlySet<number>,
+): boolean {
+  return [identity.itemId, identity.contextItemId].some((value) => {
+    const itemId = normalizePositiveInt(value);
+    if (!itemId) return false;
+    const parentItemId = getAttachmentParentItemId(itemId);
+    return Boolean(parentItemId && rawParentItemIds.has(parentItemId));
+  });
+}
+
+function shouldBlockRawPdfRetrieval(params: {
+  toolName: string;
+  rawArgs: unknown;
+  scope: ZoteroMcpActiveScope | null;
+}): boolean {
+  if (!isRawPdfRetrievalTool(params.toolName)) return false;
+  const rawPdfs = getMcpScopePapers(params.scope, ["raw_pdf"]);
+  if (!rawPdfs.length) return false;
+  const isLibraryAttachmentEnumeration =
+    params.toolName === "library_read" &&
+    Array.isArray(normalizeRecord(params.rawArgs).sections) &&
+    (normalizeRecord(params.rawArgs).sections as unknown[]).includes(
+      "attachments",
+    );
+  const identities: Array<{
+    itemId?: number;
+    contextItemId?: number;
+  }> = [
+    ...collectPaperIdentities(params.rawArgs),
+    ...(params.toolName === "library_retrieve"
+      ? collectLibraryRetrieveItemIdentities(params.rawArgs)
+      : []),
+    ...(params.toolName === "library_read"
+      ? collectLibraryReadItemIdentities(params.rawArgs)
+      : []),
+  ];
+  const rawParentItemIds = new Set(rawPdfs.map((paper) => paper.itemId));
+  const rawContextItemIds = new Set(
+    rawPdfs.map((paper) => paper.contextItemId),
+  );
+  if (params.toolName === "library_read" && !isLibraryAttachmentEnumeration) {
+    // Parent metadata and notes remain available, but an attachment ID can be
+    // silently canonicalized to its parent by library_read. Block raw and
+    // same-parent attachment aliases before that canonicalization occurs.
+    return identities.some((identity) => {
+      const suppliedValues = [identity.itemId, identity.contextItemId]
+        .map(normalizePositiveInt)
+        .filter((value): value is number => Boolean(value));
+      return (
+        suppliedValues.some((value) => rawContextItemIds.has(value)) ||
+        identityUsesAttachmentUnderRawParent(identity, rawParentItemIds)
+      );
+    });
+  }
+  if (!identities.length) {
+    // A global or implicit retrieval can traverse any paper in scope. Once a
+    // current turn contains a raw PDF, fail closed unless the tool names an
+    // exact non-PDF paper identity.
+    return true;
+  }
+  const explicitTextContexts = params.scope?.turnPaperScope
+    ? params.scope.turnPaperScope.papers
+        .filter((entry) => !entry.roles.includes("raw_pdf"))
+        .map((entry) => entry.paper)
+    : getMcpScopePapers(params.scope, [
+        "selected",
+        "full_text",
+        "pinned",
+      ]).filter((paper) => paper.contentSourceMode !== "pdf");
+  const explicitTextKeys = new Set(
+    explicitTextContexts.map(
+      (paper) => `${paper.itemId}:${paper.contextItemId}`,
+    ),
+  );
+  const explicitTextItemIds = new Set(
+    explicitTextContexts.map((paper) => paper.itemId),
+  );
+  return identities.some((identity) => {
+    const itemId = normalizePositiveInt(identity.itemId);
+    const contextItemId = normalizePositiveInt(identity.contextItemId);
+    if (!itemId && !contextItemId) return true;
+
+    const suppliedValues = [itemId, contextItemId].filter(
+      (value): value is number => Boolean(value),
+    );
+    if (suppliedValues.some((value) => rawContextItemIds.has(value))) {
+      return true;
+    }
+
+    if (
+      itemId &&
+      contextItemId &&
+      !isLibraryAttachmentEnumeration &&
+      explicitTextKeys.has(`${itemId}:${contextItemId}`)
+    ) {
+      return false;
+    }
+
+    if (
+      suppliedValues.some((value) => rawParentItemIds.has(value)) ||
+      identityUsesAttachmentUnderRawParent(identity, rawParentItemIds)
+    ) {
+      // A parent-only target includes the raw attachment, while an unselected
+      // sibling under the same parent is not independently authorized as
+      // Text/MinerU context.
+      return true;
+    }
+
+    if (itemId && !contextItemId && explicitTextItemIds.has(itemId)) {
+      return false;
+    }
+
+    // Content retrieval in a direct-PDF turn is allowed only for an exact
+    // current-turn Text/MinerU identity. Any other target could silently
+    // substitute unrelated or previously selected paper text.
+    return true;
+  });
+}
+
+function getRawPdfNativeFilesystemViolation(params: {
+  toolName: string;
+  scope: ZoteroMcpActiveScope | null;
+}): string | null {
+  if (!hasRawPdfScope(params.scope)) return null;
+  if (RAW_PDF_HIDDEN_NATIVE_TOOL_NAMES.has(params.toolName)) {
+    return `${params.toolName} is unavailable while this turn contains a direct-path PDF. Read only the exact current-turn local PDF path with Codex's native shell capability.`;
+  }
+  if (RAW_PDF_HIDDEN_RETRIEVAL_TOOL_NAMES.has(params.toolName)) {
+    return `${params.toolName} is unavailable for direct-path PDF identities. Read only the exact current-turn local PDF path with Codex's native shell capability.`;
+  }
+  return null;
+}
+
+/**
+ * The citations are kept beside the result, not read back from it: the text
+ * the model reads may leave them out (`modelContent`), and a repeat's
+ * activity must carry what the first call's did.
+ */
+function rememberMcpReadResult(
+  key: string | null,
+  result: McpToolCallResult,
+  observations: readonly TrustedReadObservation[],
+  outsidePapers: readonly OutsidePaperRecord[],
+  quoteCitations: readonly QuoteCitation[],
+): void {
+  if (!key || result.isError) return;
+  pruneExpiredMcpReadDedupeCache();
+  mcpReadDedupeCache.set(key, {
+    expiresAt: Date.now() + MCP_READ_DEDUPE_TTL_MS,
+    result,
+    observations: cloneTrustedReadObservations(observations),
+    outsidePapers: [...outsidePapers],
+    quoteCitations: [...quoteCitations],
+  });
+}
+
+function clearMcpReadDedupeCacheAfterToolResult(
+  tool: ToolSpec,
+  result: McpToolCallResult,
+): void {
+  if (tool.executionClass !== "external_effect" || result.isError) return;
+  mcpReadDedupeCache.clear();
+}
+
+function isAuthorized(headers: Record<string, string> | undefined): boolean {
+  const expected = getOrCreateZoteroMcpBearerToken();
+  const authorization = getHeader(headers, ZOTERO_MCP_AUTH_HEADER);
+  return authorization.trim() === `Bearer ${expected}`;
+}
+
+async function handleInitialize(): Promise<McpServerInfo> {
+  return {
+    protocolVersion: MCP_PROTOCOL_VERSION,
+    serverInfo: {
+      name: "llm-for-zotero",
+      version: SERVER_VERSION,
+    },
+    capabilities: {
+      tools: {},
+    },
+  };
+}
+
+function formatToolTitle(name: string): string {
+  return name
+    .split("_")
+    .map((part) => part.slice(0, 1).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function isMcpExposedTool(tool: ToolSpec): boolean {
+  if (tool.exposure === "internal") return false;
+  if (tool.executionClass !== "external_effect")
+    return CURATED_READ_TOOL_NAMES.has(tool.name);
+  if (tool.executionClass === "external_effect")
+    return CURATED_WRITE_TOOL_NAMES.has(tool.name);
+  return false;
+}
+
+function getMcpToolAnnotations(
+  toolName: string,
+  executionClass: ToolSpec["executionClass"],
+): McpToolDefinition["annotations"] {
+  if (executionClass !== "external_effect") return READ_ONLY_TOOL_ANNOTATIONS;
+  return DESTRUCTIVE_WRITE_TOOL_NAMES.has(toolName)
+    ? DESTRUCTIVE_WRITE_TOOL_ANNOTATIONS
+    : WRITE_TOOL_ANNOTATIONS;
+}
+
+function hasRawPdfScope(scope: ZoteroMcpActiveScope | null): boolean {
+  return getMcpScopePapers(scope, ["raw_pdf"]).length > 0;
+}
+
+function isMcpToolVisibleInScope(
+  tool: ToolSpec,
+  scope: ZoteroMcpActiveScope | null,
+): boolean {
+  if (!isMcpExposedTool(tool)) return false;
+  if (tool.name === "request_user_input")
+    return Boolean(scope?.requestInteraction);
+  // Of the control tools only submit_document serves an external turn:
+  // task_update tracks the in-plugin Agent's own parts.
+  if (CURATED_PLAN_TOOL_NAMES.has(tool.name))
+    return tool.name === "submit_document";
+  // The per-paper reader needs the chat's own runtime to read with; a
+  // client without one (no scope, or no native runtime) never sees it.
+  if (
+    tool.name === "paper_digest" &&
+    scope?.exhaustiveReadBackend !== "codex_responses" &&
+    scope?.exhaustiveReadBackend !== "claude_bridge"
+  )
+    return false;
+  if (!hasRawPdfScope(scope)) return true;
+  return getZoteroMcpDirectPdfToolNames().includes(tool.name);
+}
+
+function describeMcpHostAccess(toolName: string): string | undefined {
+  if (toolName === "file_io")
+    return "File access is available for all paths accessible to Zotero. The calling agent owns approval and path permissions; Zotero validates operations and verifies supported changes.";
+  if (toolName === "run_command")
+    return "Commands execute on the Zotero host. The calling agent owns approval and command permissions.";
+  return undefined;
+}
+
+function handleToolsList(
+  toolRegistry: AgentToolRegistry,
+  scope: ZoteroMcpActiveScope | null,
+): McpToolsListResult {
+  const tools: McpToolDefinition[] = toolRegistry
+    .listTools()
+    .filter((tool) => isMcpToolVisibleInScope(tool, scope))
+    .map(({ name, description, inputSchema, executionClass }) => {
+      const mutability =
+        executionClass === "external_effect" ? "write" : "read";
+      const schema = decorateMcpToolSchema(inputSchema, name);
+      return {
+        name,
+        title: formatToolTitle(name),
+        description: decorateMcpToolDescription(
+          name,
+          [
+            MCP_TOOL_DESCRIPTION_OVERRIDES.get(name) ?? description,
+            MCP_TOOL_DESCRIPTION_NOTES.get(name),
+            // Every item, unmatched: no tool in this set carries guidance
+            // tied to a skill (that goes on MCP-hidden tools).
+            ...(MCP_GUIDANCE_TOOL_NAMES.has(name)
+              ? toolGuidanceItems(toolRegistry.getTool(name)?.guidance).map(
+                  (guidance) => guidance.instruction,
+                )
+              : []),
+            describeMcpHostAccess(name),
+            // Codex code-mode discovery renders deeply nested input types as
+            // `unknown`. Keep the complete contract discoverable there too;
+            // otherwise the agent has to guess evidence and scope shapes.
+            CURATED_PLAN_TOOL_NAMES.has(name)
+              ? `Complete input JSON Schema (including nested fields): ${JSON.stringify(schema)}`
+              : undefined,
+          ]
+            .filter(Boolean)
+            .join("\n\n"),
+          mutability,
+        ),
+        inputSchema: schema,
+        annotations: getMcpToolAnnotations(name, executionClass),
+      };
+    });
+  return { tools };
+}
+
+function normalizeRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function hasJsonRpcId(request: JsonRpcRequest): boolean {
+  return Object.prototype.hasOwnProperty.call(request, "id");
+}
+
+function makeJsonRpcHttpResponse(body: unknown): McpHttpResponse {
+  return {
+    status: 200,
+    contentType: "application/json",
+    body: typeof body === "string" ? body : JSON.stringify(body),
+  };
+}
+
+function makeJsonRpcNotificationResponse(): McpHttpResponse {
+  return {
+    status: 202,
+    contentType: "text/plain",
+    body: "",
+  };
+}
+
+function extractMcpScopeArgs(rawArgs: unknown): {
+  toolArgs: Record<string, unknown>;
+  libraryID?: number;
+  activeItemId?: number;
+  activeContextItemId?: number;
+} {
+  const args = normalizeRecord(rawArgs);
+  const toolArgs = { ...args };
+  for (const key of MCP_SCOPE_ARG_NAMES) delete toolArgs[key];
+  return {
+    toolArgs,
+    libraryID: normalizePositiveInt(args.libraryID ?? args.libraryId),
+    activeItemId: normalizePositiveInt(args.activeItemId ?? args.activeItemID),
+    activeContextItemId: normalizePositiveInt(
+      args.activeContextItemId ?? args.activeContextItemID,
+    ),
+  };
+}
+
+type ResolvedMcpCallScope = {
+  scopeArgs: ReturnType<typeof extractMcpScopeArgs>;
+  scope: ZoteroMcpActiveScope | null;
+  libraryID: number;
+  libraryMismatch?: string;
+  activeItemId?: number;
+  activeContextItemId?: number;
+};
+
+function resolveLibraryRetrieveScopeID(
+  toolName: string,
+  toolArgs: Record<string, unknown>,
+): number | undefined {
+  if (toolName !== "library_retrieve") return undefined;
+  const retrievalScope = normalizeRecord(toolArgs.scope);
+  return normalizePositiveInt(
+    retrievalScope.libraryID ?? retrievalScope.libraryId,
+  );
+}
+
+function resolveMcpCallScope(params: {
+  toolName: string;
+  rawArgs: unknown;
+  headers?: Record<string, string>;
+}): ResolvedMcpCallScope {
+  const scopeArgs = extractMcpScopeArgs(params.rawArgs);
+  const scope = resolveScopedMcpScope(params.headers);
+  const retrievalLibraryID = resolveLibraryRetrieveScopeID(
+    params.toolName,
+    scopeArgs.toolArgs,
+  );
+  if (
+    scopeArgs.libraryID &&
+    retrievalLibraryID &&
+    scopeArgs.libraryID !== retrievalLibraryID
+  ) {
+    throw new Error(
+      `Conflicting Zotero library IDs: top-level libraryID=${scopeArgs.libraryID} but library_retrieve scope.libraryID=${retrievalLibraryID}.`,
+    );
+  }
+  // The past-chat tools and paper_digest are pinned to the scope's library:
+  // they ignore the library selected in Zotero, and a model-supplied
+  // libraryID that differs from the scope's is refused (libraryMismatch)
+  // instead of overriding it.
+  const pinnedToScopeLibrary = LIBRARY_PINNED_TOOL_NAMES.has(params.toolName);
+  const scopeLibraryID = normalizePositiveInt(scope?.libraryID) || 0;
+  const libraryMismatch =
+    pinnedToScopeLibrary &&
+    scopeArgs.libraryID &&
+    scopeArgs.libraryID !== scopeLibraryID
+      ? params.toolName === "paper_digest"
+        ? `paper_digest reads only papers of this conversation's library (libraryID ${scopeArgs.libraryID} is not the conversation's library).`
+        : `Only past chats from this library can be read (libraryID ${scopeArgs.libraryID} is not the conversation's library).`
+      : undefined;
+  return {
+    scopeArgs,
+    scope,
+    libraryMismatch,
+    libraryID: pinnedToScopeLibrary
+      ? scopeLibraryID
+      : scopeArgs.libraryID ||
+        retrievalLibraryID ||
+        scopeLibraryID ||
+        resolveActiveLibraryID() ||
+        0,
+    activeItemId:
+      scopeArgs.activeItemId ||
+      scope?.activeItemId ||
+      scope?.paperItemID ||
+      undefined,
+    activeContextItemId:
+      scopeArgs.activeContextItemId || scope?.activeContextItemId || undefined,
+  };
+}
+
+function decorateMcpToolDescription(
+  toolName: string,
+  description: string,
+  mutability: "read" | "write",
+): string {
+  const scopeGuidance =
+    "Zotero MCP scope: omit libraryID to use the exact turn-scoped chat library when a scope header is present, or the library currently selected in Zotero for a standalone MCP client. Omit activeItemId and activeContextItemId to use the current turn-scoped chat item when available. Use library_search with explicit entity and mode, for example library_search({ entity:'items', mode:'search', text:'...' }) or library_search({ entity:'collections', mode:'list', view:'tree' }), to discover Zotero items. Use library_retrieve for broad folder/library evidence search across a scoped resource pool: intent:'enumerate' for comprehensive quality-first local evidence search including which/all/how-many/list questions, intent:'summarize' for taxonomy/theme/commonality/comparison synthesis with body-evidence coverage in bounded selected pools, and intent:'verify' for exact presence/absence. Use library_read for structured item state, and paper_read for close reading one known paper: mode:'overview' for summaries/main message, mode:'outline' for the section list with ids and chunk ranges, then mode:'targeted' with sectionIds to read a named section, mode:'targeted' for textual evidence/sections/pages, mode:'figures' for precise extracted PDF figures from Zotero library PDFs, mode:'visual' for rendered PDF pages/layout, and mode:'capture' for the currently visible reader page. Use literature_search for scholarly sources outside the library: workflow:'answer' returns scholarly results for source-cited answers, and workflow:'review' with mode:'metadata' proposes metadata changes for the user to approve. No general web-search MCP tool is available. For counting questions, prefer library_search totalCount/returnedCount/limited metadata or library_retrieve intent:'enumerate' coverage instead of hand-counting listed results.";
+  const writeGuidance =
+    toolName === "zotero_script"
+      ? "The calling agent owns approval for zotero_script. Zotero applies its facade, integrity, and recovery checks. Write scripts must call env.snapshot(item) before mutating existing items, env.recordCreatedItem(item) after creating items, or env.addInverse(data) for supported custom changes so durable recovery can describe the operation."
+      : mutability === "write"
+        ? "The calling agent owns write approval through its native runtime permission profile or external client settings; Original Agent permission modes do not apply. Zotero validates and verifies operations before reporting success. For Zotero note requests, call note_write instead of returning note-ready text in chat."
+        : "";
+  return [
+    description,
+    scopeGuidance,
+    writeGuidance,
+    toolName === "undo"
+      ? "Standalone clients must supply explicit actionId/actionIds from write receipts; there is no shared external conversation history for relative undo."
+      : "",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function decorateMcpToolSchema(inputSchema: object, toolName: string): object {
+  if (
+    !inputSchema ||
+    typeof inputSchema !== "object" ||
+    Array.isArray(inputSchema)
+  ) {
+    return inputSchema;
+  }
+  const record = inputSchema as Record<string, unknown>;
+  const rawProperties = { ...normalizeRecord(record.properties) };
+  const refused = MCP_REFUSED_TOOL_ARGUMENTS.get(toolName);
+  if (refused) delete rawProperties[refused.argument];
+  return {
+    ...record,
+    properties: {
+      ...rawProperties,
+      libraryID: {
+        type: "number",
+        description:
+          "Optional Zotero library ID. Omit to use the exact turn-scoped chat library when available, otherwise the library currently selected in Zotero.",
+      },
+      activeItemId: {
+        type: "number",
+        description:
+          "Optional active Zotero parent item ID. Omit to use the active paper/item for the current Codex Zotero chat.",
+      },
+      activeContextItemId: {
+        type: "number",
+        description:
+          "Optional active Zotero attachment/context item ID. Omit to use the active paper attachment for the current Codex Zotero chat.",
+      },
+    },
+  };
+}
+
+function resolveScopePaperContext(
+  scope: ZoteroMcpActiveScope | null,
+): PaperContextRef | undefined {
+  if (!scope) return undefined;
+  if (scope.turnPaperScope) {
+    return (
+      getActiveTurnPaper(scope.turnPaperScope) ||
+      scope.turnPaperScope.papers[0]?.paper
+    );
+  }
+  const paperContext = normalizePaperContext(scope.paperContext);
+  if (paperContext) return paperContext;
+  const itemId = normalizePositiveInt(scope.paperItemID || scope.activeItemId);
+  const contextItemId = normalizePositiveInt(scope.activeContextItemId);
+  if (!itemId || !contextItemId) return undefined;
+  return {
+    itemId,
+    contextItemId,
+    title: normalizeText(scope.title) || `Paper ${itemId}`,
+  };
+}
+
+function resolveScopeActiveNoteContext(
+  scope: ZoteroMcpActiveScope | null,
+): AgentRuntimeRequest["activeNoteContext"] {
+  const noteId = normalizePositiveInt(scope?.activeNoteId);
+  if (!noteId) return undefined;
+  const noteItem =
+    (
+      Zotero as unknown as {
+        Items?: { get?: (id: number) => Zotero.Item | false | null };
+      }
+    ).Items?.get?.(noteId) || null;
+  const snapshot = readNoteSnapshot(noteItem);
+  if (snapshot) {
+    return {
+      noteId: snapshot.noteId,
+      title: snapshot.title,
+      noteKind: snapshot.noteKind,
+      parentItemId: snapshot.parentItemId,
+      noteText: noteHtmlToModelText(snapshot.html),
+      noteHtml: /<[^>]+\bstyle\s*=/i.test(snapshot.html)
+        ? snapshot.html.slice(0, 10_000)
+        : undefined,
+    };
+  }
+  return {
+    noteId,
+    title: normalizeText(scope?.activeNoteTitle) || `Note ${noteId}`,
+    noteKind: normalizeNoteKind(scope?.activeNoteKind) || "standalone",
+    parentItemId: normalizePositiveInt(scope?.activeNoteParentItemId),
+    noteText: "",
+  };
+}
+
+function resolveScopedMcpScope(
+  headers: Record<string, string> | undefined,
+): ZoteroMcpActiveScope | null {
+  const token = getHeader(headers, ZOTERO_MCP_SCOPE_HEADER).trim();
+  if (!token) return null;
+  pruneExpiredScopedMcpScopes();
+  const entry = scopedZoteroMcpScopes.get(token);
+  if (entry) {
+    // A valid token identifies one conversation, and every turn of that
+    // conversation re-registers its own scope under the token.
+    return entry.scope;
+  }
+  throw new Error(
+    "Zotero MCP scope token is invalid or expired. Start a new Codex turn from Zotero so tools bind to the current profile and library.",
+  );
+}
+
+function resolveCurrentScopedMcpCall(
+  headers: Record<string, string> | undefined,
+  scope: ZoteroMcpActiveScope | null,
+): ZoteroMcpActiveScope | null {
+  if (!scope) return null;
+  const token = getHeader(headers, ZOTERO_MCP_SCOPE_HEADER).trim();
+  if (!token) return null;
+  pruneExpiredScopedMcpScopes();
+  const current = scopedZoteroMcpScopes.get(token)?.scope;
+  if (
+    !current ||
+    current.signal?.aborted ||
+    // Re-registering a conversation-stable token creates a new turn owner,
+    // even when its conversation generation and execution metadata match.
+    current.signal !== scope.signal ||
+    current.conversationKey !== scope.conversationKey ||
+    current.conversationGeneration !== scope.conversationGeneration ||
+    current.instanceID !== scope.instanceID ||
+    stableStringify(current.executionContext || null) !==
+      stableStringify(scope.executionContext || null)
+  ) {
+    return null;
+  }
+  return current;
+}
+
+function isScopedMcpCallCurrent(
+  headers: Record<string, string> | undefined,
+  scope: ZoteroMcpActiveScope | null,
+): boolean {
+  return !scope || Boolean(resolveCurrentScopedMcpCall(headers, scope));
+}
+
+function formatMcpToolActivityRequestId(
+  id: string | number | null | undefined,
+): string {
+  if (typeof id === "string" && id.trim()) return `jsonrpc:${id.trim()}`;
+  if (typeof id === "number" && Number.isFinite(id)) return `jsonrpc:${id}`;
+  return `mcp:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function getMcpToolPresentationLabel(
+  deps: McpServerDeps,
+  toolName: string,
+): string | undefined {
+  return resolveAgentToolPresentationLabel(deps.toolRegistry.getTool(toolName));
+}
+
+function buildMcpToolActivityEvent(params: {
+  id: string | number | null | undefined;
+  phase: "started" | "completed";
+  toolName: string;
+  toolLabel?: string;
+  args?: unknown;
+  ok?: boolean;
+  error?: string;
+  quoteCitations?: QuoteCitation[];
+  artifacts?: AgentToolArtifact[];
+  actionReceipts?: AgentActionReceipt[];
+  workCategory?: import("../types").AgentWorkCategory;
+  verifiedReadSources?: VerifiedReadSource[];
+  readObservations?: readonly TrustedReadObservation[];
+  outsidePapers?: readonly OutsidePaperRecord[];
+  publishedDocumentId?: string;
+  paperLedgerDelta?: TaskPaperLedgerDelta;
+  mutability?: "read" | "write";
+  scope: ZoteroMcpActiveScope | null;
+  libraryID: number;
+}): ZoteroMcpToolActivityEvent {
+  return {
+    requestId: formatMcpToolActivityRequestId(params.id),
+    runId: params.scope?.runId,
+    conversationGeneration: params.scope?.conversationGeneration,
+    phase: params.phase,
+    toolName: params.toolName,
+    toolLabel: params.toolLabel,
+    serverName: ZOTERO_MCP_SERVER_NAME,
+    arguments: params.args,
+    ok: params.ok,
+    error: params.error,
+    artifacts: params.artifacts,
+    actionReceipts: params.actionReceipts,
+    workCategory: params.workCategory,
+    mutability: params.mutability,
+    quoteCitations: params.quoteCitations,
+    verifiedReadSources: params.verifiedReadSources,
+    readObservations: params.readObservations,
+    ...(params.outsidePapers?.length
+      ? { outsidePapers: params.outsidePapers }
+      : {}),
+    ...(params.publishedDocumentId
+      ? { publishedDocumentId: params.publishedDocumentId }
+      : {}),
+    ...(params.paperLedgerDelta
+      ? { paperLedgerDelta: params.paperLedgerDelta }
+      : {}),
+    profileSignature: params.scope?.profileSignature,
+    conversationKey: params.scope?.conversationKey,
+    libraryID: params.libraryID || undefined,
+    kind: params.scope?.kind,
+    timestamp: Date.now(),
+  };
+}
+
+function createToolContext(
+  rawArgs: unknown,
+  callScope: ResolvedMcpCallScope,
+  zoteroGateway?: ZoteroGateway,
+): AgentToolContext {
+  const { scope, libraryID, activeItemId, activeContextItemId } = callScope;
+  const runId = scope?.runId || scopelessRunIdentity();
+  const itemLookupId = activeItemId || activeContextItemId;
+  const item = itemLookupId
+    ? (
+        Zotero as unknown as {
+          Items?: { get?: (id: number) => Zotero.Item | false | null };
+        }
+      ).Items?.get?.(itemLookupId) || null
+    : null;
+  const paperContext = resolveScopePaperContext(scope);
+  const selectedPaperContexts = normalizePaperContexts(
+    scope?.selectedPaperContexts,
+  );
+  const pdfPaperContexts = (
+    normalizePaperContexts(scope?.pdfPaperContexts) || []
+  ).map((paper) => ({ ...paper, contentSourceMode: "pdf" as const }));
+  const fullTextPaperContexts = normalizePaperContexts(
+    scope?.fullTextPaperContexts,
+  );
+  const pinnedPaperContexts = normalizePaperContexts(
+    scope?.pinnedPaperContexts,
+  );
+  const hasExplicitPaperScope = Boolean(
+    selectedPaperContexts?.length ||
+    pdfPaperContexts.length ||
+    fullTextPaperContexts?.length ||
+    pinnedPaperContexts?.length,
+  );
+  const activeNoteContext = resolveScopeActiveNoteContext(scope);
+  const exhaustiveReadBackend = normalizeScopeExhaustiveReadBackend(
+    scope?.exhaustiveReadBackend,
+  );
+  const requestBase = {
+    conversationKey: scope?.conversationKey || 0,
+    conversationGeneration: scope?.conversationGeneration,
+    mode: "agent" as const,
+    userText: scope?.userText || "",
+    activeItemId,
+    libraryID,
+    conversationKind: scope?.kind,
+    model: scope?.model,
+    apiBase: scope?.codexPath,
+    authMode:
+      exhaustiveReadBackend === "codex_responses"
+        ? ("codex_app_server" as const)
+        : undefined,
+    providerProtocol:
+      exhaustiveReadBackend === "codex_responses"
+        ? ("codex_responses" as const)
+        : undefined,
+    reasoning: scope?.reasoning,
+    executionContext: scope?.executionContext,
+    clarificationHistory: scope?.clarificationHistory,
+    documentReadObservations: scope?.documentReadObservations,
+    documentArtifactObservations: scope?.documentArtifactObservations,
+    outsidePaperRecords: scope?.outsidePaperRecords,
+    outsidePaperSelection: scope?.outsidePaperSelection,
+    outsidePaperLookupCache: scope?.outsidePaperLookupCache,
+    // past_chat_read checks every chat against this list and the call's
+    // library (an explicit libraryID other than the scope's is refused). A
+    // copy: past_chat_attach extends the scope's own list only through
+    // extendScopedMcpAttachedConversationScope.
+    attachedConversationScope: scope?.attachedConversationScope?.length
+      ? [...scope.attachedConversationScope]
+      : undefined,
+    exhaustiveReadBackend,
+    ...(scope?.readerSelection
+      ? { readerSelection: scope.readerSelection }
+      : {}),
+    activeNoteContext,
+    metadata: {
+      sourceMessageTimestamp: scope?.sourceMessageTimestamp,
+    },
+  };
+  const request: AgentRuntimeRequest = scope?.turnPaperScope
+    ? {
+        ...requestBase,
+        turnPaperScope: scope.turnPaperScope,
+        zoteroMetadataContext: resolveZoteroTurnMetadataContext(
+          scope.turnPaperScope,
+        ),
+        turnPaperScopeWarnings: scope.turnPaperScopeWarnings,
+      }
+    : resolveAgentRuntimeRequest(
+        {
+          ...requestBase,
+          selectedPaperContexts:
+            selectedPaperContexts ||
+            (!hasExplicitPaperScope && paperContext
+              ? [paperContext]
+              : undefined),
+          pdfPaperContexts: pdfPaperContexts.length
+            ? pdfPaperContexts
+            : undefined,
+          fullTextPaperContexts:
+            fullTextPaperContexts ||
+            (!hasExplicitPaperScope && paperContext
+              ? [paperContext]
+              : undefined),
+          pinnedPaperContexts,
+          selectedCollectionContexts: scope?.selectedCollectionContexts,
+          selectedTagContexts: scope?.selectedTagContexts,
+        } satisfies AgentRuntimeRequestInput,
+        {
+          resolvePaperContext: zoteroGateway
+            ? (selector) => zoteroGateway.resolvePaperContextTarget(selector)
+            : undefined,
+        },
+      );
+  const activePaper = getActiveTurnPaper(request.turnPaperScope);
+  const notesDirectory = getNotesDirectoryConfig();
+  const standalone = !scope?.runtimeAuthority;
+  const taskReadFiles = standalone
+    ? []
+    : (request.localDocuments || []).map(
+        ({ resource }) => resource.absolutePath,
+      );
+  const taskReadDirectories = standalone
+    ? []
+    : request.turnPaperScope.papers.flatMap(({ paper }) =>
+        paper.mineruCacheDir ? [paper.mineruCacheDir] : [],
+      );
+  const configuredReadDirectories = [
+    ...(notesDirectory?.directoryPath ? [notesDirectory.directoryPath] : []),
+    ...taskReadDirectories,
+  ];
+  const configuredWriteDirectories = notesDirectory?.directoryPath
+    ? [notesDirectory.directoryPath]
+    : [];
+  request.executionContext ||= {
+    version: 1,
+    executionId: runId,
+    conversationKey: request.conversationKey,
+    conversationGeneration: request.conversationGeneration || 0,
+    chatLibraryID: request.libraryID || undefined,
+    permissionOwner: "external_runtime",
+    workspaceSnapshot: {
+      ...(activePaper
+        ? {
+            activePaper: {
+              libraryID: activePaper.libraryID,
+              itemId: activePaper.itemId,
+              contextItemId: activePaper.contextItemId,
+              title: activePaper.title,
+            },
+          }
+        : {}),
+      selectedPapers: request.turnPaperScope.papers
+        .filter((entry) => entry.roles.includes("selected"))
+        .map(({ paper }) => ({
+          libraryID: paper.libraryID,
+          itemId: paper.itemId,
+          contextItemId: paper.contextItemId,
+          title: paper.title,
+        })),
+      selectedCollections: request.turnPaperScope.collections.map(
+        (collection) => ({
+          libraryID: collection.libraryID,
+          collectionId: collection.collectionId,
+          name: collection.name,
+        }),
+      ),
+      ...(request.activeNoteContext
+        ? {
+            activeNote: {
+              noteId: request.activeNoteContext.noteId,
+              parentItemId: request.activeNoteContext.parentItemId,
+              title: request.activeNoteContext.title,
+            },
+          }
+        : {}),
+    },
+    configuredAccess: {
+      libraryIDs: request.libraryID ? [request.libraryID] : [],
+      outputDirectories: configuredWriteDirectories,
+      fileAccess: {
+        readFiles: taskReadFiles,
+        writeFiles: [],
+        readDirectories: configuredReadDirectories,
+        writeDirectories: configuredWriteDirectories,
+      },
+      hostCommandExecution: true,
+    },
+  };
+  const priorAccess = request.executionContext.configuredAccess;
+  request.executionContext = {
+    ...request.executionContext,
+    permissionOwner: "external_runtime",
+    configuredAccess: {
+      ...priorAccess,
+      // Authenticated MCP callers own file and command permission decisions.
+      unrestrictedFileAccess: true,
+      outputDirectories: [
+        ...new Set([
+          ...(!standalone ? priorAccess.outputDirectories || [] : []),
+          ...configuredWriteDirectories,
+        ]),
+      ],
+      fileAccess: {
+        readFiles: [
+          ...new Set([
+            ...(!standalone ? priorAccess.fileAccess?.readFiles || [] : []),
+            ...taskReadFiles,
+          ]),
+        ],
+        writeFiles: [
+          ...new Set(
+            !standalone ? priorAccess.fileAccess?.writeFiles || [] : [],
+          ),
+        ],
+        readDirectories: [
+          ...new Set([
+            ...(!standalone
+              ? priorAccess.fileAccess?.readDirectories || []
+              : []),
+            ...configuredReadDirectories,
+          ]),
+        ],
+        writeDirectories: [
+          ...new Set([
+            ...(!standalone
+              ? priorAccess.fileAccess?.writeDirectories ||
+                priorAccess.outputDirectories ||
+                []
+              : []),
+            ...configuredWriteDirectories,
+          ]),
+        ],
+      },
+      hostCommandExecution: true,
+    },
+  };
+  return {
+    request,
+    authorization: {
+      kind: "external_runtime",
+      standalone: !scope?.runtimeAuthority,
+    },
+    isToolVisible: (spec) => isMcpToolVisibleInScope(spec, scope),
+    conversationSystem:
+      scope?.runtimeAuthority === "claude"
+        ? "claude_code"
+        : scope?.runtimeAuthority === "codex"
+          ? "codex"
+          : undefined,
+    signal: scope?.signal,
+    runId,
+    item,
+    currentAnswerText: "",
+    modelName: scope?.model || "external-mcp",
+    modelProviderLabel:
+      exhaustiveReadBackend === "codex_responses" ? "Codex" : "External MCP",
+  };
+}
+
+/**
+ * The call's result as the client's model reads it. A tool that keeps fields
+ * from the model (`modelContent`: a digest's citation records) is sent its
+ * model content; the activity event carries the whole result.
+ */
+function formatToolResult(
+  execution: Extract<PreparedToolExecution, { kind: "result" }>["execution"],
+  tool: Pick<AgentToolDefinition<any, any>, "modelContent"> | undefined,
+): McpToolCallResult {
+  const { result } = execution;
+  const content =
+    result.ok && tool?.modelContent
+      ? tool.modelContent(result.content, execution.input)
+      : result.content;
+  return {
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify(
+          {
+            ok: result.ok,
+            result: content,
+            effect: result.effect,
+            ...(result.actionReceipts.length
+              ? { actionReceipts: result.actionReceipts }
+              : {}),
+            artifacts: result.artifacts,
+          },
+          null,
+          2,
+        ),
+      },
+    ],
+    ...(result.ok ? {} : { isError: true }),
+  };
+}
+
+function rememberDocumentReadObservations(
+  headers: Record<string, string> | undefined,
+  observations: readonly TrustedReadObservation[],
+  expectedScope: ZoteroMcpActiveScope | null,
+): void {
+  if (!observations.length) return;
+  const scope = resolveCurrentScopedMcpCall(headers, expectedScope);
+  if (!scope?.runtimeAuthority) return;
+  const merged = new Map(
+    (scope.documentReadObservations || []).map((entry) => [
+      entry.observationId,
+      entry,
+    ]),
+  );
+  for (const observation of observations) {
+    merged.set(observation.observationId, observation);
+  }
+  scope.documentReadObservations = cloneTrustedReadObservations([
+    ...merged.values(),
+  ]);
+}
+
+/**
+ * Adds a call's outside papers to the scope's record of the run, and starts
+ * the background DOI lookups of papers read past their metadata on the
+ * scope's lookup cache, which every call of the turn shares.
+ */
+function rememberScopeOutsidePapers(
+  headers: Record<string, string> | undefined,
+  records: readonly OutsidePaperRecord[],
+  expectedScope: ZoteroMcpActiveScope | null,
+): void {
+  if (!records.length) return;
+  const scope = resolveCurrentScopedMcpCall(headers, expectedScope);
+  if (!scope?.runtimeAuthority) return;
+  rememberOutsidePapers(scope, records);
+  prefetchOutsidePaperLookups(scope, records);
+}
+
+function rememberDocumentArtifacts(
+  headers: Record<string, string> | undefined,
+  artifacts: readonly AgentToolArtifact[],
+  expectedScope: ZoteroMcpActiveScope | null,
+): void {
+  if (!artifacts.length) return;
+  const scope = resolveCurrentScopedMcpCall(headers, expectedScope);
+  if (!scope?.runtimeAuthority) return;
+  const merged = new Map(
+    (scope.documentArtifactObservations || []).map((artifact) => [
+      artifact.storedPath,
+      artifact,
+    ]),
+  );
+  for (const artifact of artifacts) merged.set(artifact.storedPath, artifact);
+  scope.documentArtifactObservations = cloneToolArtifacts([...merged.values()]);
+}
+
+/**
+ * The observations an earlier paper_digest call of this scope already
+ * recorded for the papers whose digest this call repeats (`alreadyReturned`).
+ * A repeat reads nothing, so it records nothing new; this only lets its
+ * body carry the same evidence refs as the first call.
+ */
+function rememberedDigestObservations(
+  toolName: string,
+  content: unknown,
+  remembered: readonly TrustedReadObservation[] | undefined,
+  current: readonly TrustedReadObservation[],
+): TrustedReadObservation[] {
+  if (toolName !== "paper_digest" || !remembered?.length) return [];
+  const rows = (content as { papers?: unknown } | null)?.papers;
+  if (!Array.isArray(rows)) return [];
+  const items = globalThis.Zotero?.Items;
+  if (!items?.get) return [];
+  const seen = new Set(current.map((entry) => entry.observationId));
+  const out: TrustedReadObservation[] = [];
+  for (const row of rows) {
+    const value = row as { alreadyReturned?: unknown; itemId?: unknown };
+    if (value?.alreadyReturned !== true) continue;
+    const item = items.get(Number(value.itemId));
+    if (!item?.key || !item.libraryID) continue;
+    for (const entry of remembered) {
+      if (
+        entry.toolName === "paper_digest" &&
+        entry.libraryID === item.libraryID &&
+        entry.itemKey === item.key &&
+        !seen.has(entry.observationId)
+      ) {
+        seen.add(entry.observationId);
+        out.push(entry);
+      }
+    }
+  }
+  return out;
+}
+
+function appendDocumentEvidenceRefs(
+  result: McpToolCallResult,
+  observations: readonly TrustedReadObservation[],
+): McpToolCallResult {
+  if (!observations.length || !result.content.length) return result;
+  const content = result.content.map((part, index) => {
+    if (index !== 0 || part.type !== "text") return part;
+    try {
+      const parsed = JSON.parse(part.text) as Record<string, unknown>;
+      return {
+        ...part,
+        text: JSON.stringify(
+          {
+            ...parsed,
+            documentEvidenceRefs: observations.map((observation) => ({
+              evidenceRef: observation.observationId,
+              libraryID: observation.libraryID,
+              itemKey: observation.itemKey,
+              capabilities: observation.capabilities,
+              attachmentItemKey: observation.attachmentItemKey,
+              pageIndex: observation.pageIndex,
+              sourceFingerprint: observation.sourceFingerprint,
+            })),
+          },
+          null,
+          2,
+        ),
+      };
+    } catch {
+      return part;
+    }
+  });
+  return { ...result, content };
+}
+
+function extractArtifactsFromMcpToolCallResult(
+  result: McpToolCallResult,
+): AgentToolArtifact[] | undefined {
+  for (const part of result.content || []) {
+    if (part?.type !== "text" || typeof part.text !== "string") continue;
+    try {
+      const parsed = JSON.parse(part.text) as { artifacts?: unknown };
+      if (Array.isArray(parsed.artifacts)) {
+        return parsed.artifacts as AgentToolArtifact[];
+      }
+    } catch {
+      continue;
+    }
+  }
+  return undefined;
+}
+
+function extractToolCallErrorText(
+  result: McpToolCallResult,
+): string | undefined {
+  if (!result.isError) return undefined;
+  for (const part of result.content) {
+    const text = normalizeText(part.text, 1000);
+    if (!text) continue;
+    try {
+      const parsed = JSON.parse(text) as {
+        error?: unknown;
+        result?: { error?: unknown };
+      };
+      return (
+        normalizeText(parsed.result?.error, 1000) ||
+        normalizeText(parsed.error, 1000) ||
+        text
+      );
+    } catch {
+      return text;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * The document version a successful library_import call published: only
+ * kind:'document_citations' returns a documentId.
+ */
+function publishedDocumentIdOf(
+  toolName: string,
+  result: McpToolCallResult,
+  content: unknown,
+): string | undefined {
+  if (toolName !== "library_import" || result.isError) return undefined;
+  const documentId = (content as { documentId?: unknown } | null)?.documentId;
+  return typeof documentId === "string" && documentId ? documentId : undefined;
+}
+
+async function handleToolsCall(
+  params: McpToolCallParams,
+  deps: McpServerDeps,
+  headers?: Record<string, string>,
+  id?: string | number | null,
+): Promise<McpToolCallResult> {
+  const { name, arguments: rawArgs } = params;
+
+  const callScope = resolveMcpCallScope({
+    toolName: name,
+    rawArgs,
+    headers,
+  });
+  const { scopeArgs, scope } = callScope;
+  const tool = deps.toolRegistry.getTool(name);
+  const toolLabel = getMcpToolPresentationLabel(deps, name);
+  const workCategory = tool
+    ? resolveAgentToolCallWorkCategory(tool, scopeArgs.toolArgs)
+    : undefined;
+  emitZoteroMcpToolActivity(
+    buildMcpToolActivityEvent({
+      id,
+      phase: "started",
+      toolName: name,
+      toolLabel,
+      args: scopeArgs.toolArgs,
+      workCategory,
+      scope,
+      libraryID: callScope.libraryID,
+    }),
+  );
+
+  const completeActivity = (result: {
+    ok: boolean;
+    error?: string;
+    quoteCitations?: QuoteCitation[];
+    artifacts?: AgentToolArtifact[];
+    actionReceipts?: AgentActionReceipt[];
+    verifiedReadSources?: VerifiedReadSource[];
+    readObservations?: readonly TrustedReadObservation[];
+    outsidePapers?: readonly OutsidePaperRecord[];
+    publishedDocumentId?: string;
+    paperLedgerDelta?: TaskPaperLedgerDelta | null;
+  }) => {
+    emitZoteroMcpToolActivity(
+      buildMcpToolActivityEvent({
+        id,
+        phase: "completed",
+        toolName: name,
+        toolLabel,
+        args: scopeArgs.toolArgs,
+        ok: result.ok,
+        error: result.error,
+        artifacts: result.artifacts,
+        actionReceipts: result.actionReceipts,
+        workCategory,
+        verifiedReadSources: result.verifiedReadSources,
+        readObservations: result.readObservations,
+        outsidePapers: result.outsidePapers,
+        publishedDocumentId: result.publishedDocumentId,
+        paperLedgerDelta: result.paperLedgerDelta || undefined,
+        mutability:
+          tool?.spec.executionClass === "external_effect" ? "write" : "read",
+        quoteCitations: result.quoteCitations,
+        scope,
+        libraryID: callScope.libraryID,
+      }),
+    );
+  };
+
+  if (!tool || !isMcpExposedTool(tool.spec)) {
+    const replacement = Object.prototype.hasOwnProperty.call(
+      RETIRED_TOOL_HINTS,
+      name,
+    )
+      ? RETIRED_TOOL_HINTS[name]
+      : undefined;
+    const text = replacement
+      ? `Unknown tool: ${name}. This tool was renamed; call ${replacement} instead.`
+      : `Zotero MCP tool ${name} is not available through the Zotero MCP server.`;
+    completeActivity({ ok: false, error: text });
+    return {
+      content: [{ type: "text", text }],
+      isError: true,
+    };
+  }
+
+  const refusedArgument = MCP_REFUSED_TOOL_ARGUMENTS.get(name);
+  if (refusedArgument && scopeArgs.toolArgs[refusedArgument.argument]) {
+    completeActivity({ ok: false, error: refusedArgument.message });
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({ ok: false, error: refusedArgument.message }),
+        },
+      ],
+      isError: true,
+    };
+  }
+
+  const scopeConversationKey = scope?.conversationKey || 0;
+  const scopeGeneration = scopeConversationKey
+    ? Number.isFinite(scope?.conversationGeneration)
+      ? Number(scope?.conversationGeneration)
+      : getConversationWriteGeneration(scopeConversationKey)
+    : 0;
+  if (callScope.libraryMismatch) {
+    completeActivity({ ok: false, error: callScope.libraryMismatch });
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({ ok: false, error: callScope.libraryMismatch }),
+        },
+      ],
+      isError: true,
+    };
+  }
+  const nativeFilesystemViolation = getRawPdfNativeFilesystemViolation({
+    toolName: name,
+    scope,
+  });
+  if (nativeFilesystemViolation) {
+    completeActivity({ ok: false, error: nativeFilesystemViolation });
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            ok: false,
+            error: nativeFilesystemViolation,
+          }),
+        },
+      ],
+      isError: true,
+    };
+  }
+
+  if (
+    shouldBlockRawPdfRetrieval({
+      toolName: name,
+      rawArgs,
+      scope,
+    })
+  ) {
+    const error =
+      "This paper is in raw PDF mode. Read the exact current-turn local PDF path, or switch to Text/MinerU to use Zotero retrieval.";
+    completeActivity({ ok: false, error });
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({ ok: false, error }),
+        },
+      ],
+      isError: true,
+    };
+  }
+
+  try {
+    const readDedupeKey =
+      tool.spec.executionClass === "read"
+        ? buildMcpReadDedupeKey({
+            toolName: name,
+            toolArgs: scopeArgs.toolArgs,
+            libraryID: callScope.libraryID,
+            activeItemId: callScope.activeItemId,
+            activeContextItemId: callScope.activeContextItemId,
+            headers,
+          })
+        : null;
+    const cachedReadResult = getCachedMcpReadResult(readDedupeKey);
+    if (cachedReadResult) {
+      rememberDocumentReadObservations(
+        headers,
+        cachedReadResult.observations,
+        scope,
+      );
+      rememberScopeOutsidePapers(
+        headers,
+        cachedReadResult.outsidePapers,
+        scope,
+      );
+      rememberDocumentArtifacts(
+        headers,
+        extractArtifactsFromMcpToolCallResult(cachedReadResult.result) || [],
+        scope,
+      );
+      completeActivity({
+        ok: true,
+        quoteCitations: cachedReadResult.quoteCitations,
+        artifacts: extractArtifactsFromMcpToolCallResult(
+          cachedReadResult.result,
+        ),
+        verifiedReadSources: cachedReadResult.observations.map(
+          ({
+            libraryID,
+            itemKey,
+            attachmentItemKey,
+            pageIndex,
+            sourceFingerprint,
+          }) => ({
+            libraryID,
+            itemKey,
+            attachmentItemKey,
+            pageIndex,
+            sourceFingerprint,
+          }),
+        ),
+        readObservations: cachedReadResult.observations,
+        outsidePapers: cachedReadResult.outsidePapers,
+      });
+      return cachedReadResult.result;
+    }
+
+    const toolContext = createToolContext(
+      rawArgs,
+      callScope,
+      deps.zoteroGateway,
+    );
+    toolContext.extendAttachedConversationScope = (ref) => {
+      if (isScopedMcpCallCurrent(headers, scope))
+        extendScopedMcpAttachedConversationScope(headers, ref);
+    };
+    let prepared = await deps.toolRegistry.prepareExecution(
+      {
+        id: `mcp-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+        name,
+        arguments: scopeArgs.toolArgs,
+      },
+      toolContext,
+      {
+        callerKind: "mcp",
+        isExecutionAllowed: () => {
+          return (
+            (!scopeConversationKey ||
+              (!areConversationWritesFrozen(scopeConversationKey) &&
+                isConversationWriteGenerationCurrent(
+                  scopeConversationKey,
+                  scopeGeneration,
+                ))) &&
+            isScopedMcpCallCurrent(headers, scope)
+          );
+        },
+        executeWithLock: (task) => {
+          return scopeConversationKey
+            ? withConversationWriteLock(scopeConversationKey, task)
+            : task();
+        },
+      },
+    );
+
+    while (prepared.kind === "confirmation") {
+      if (!scope?.requestInteraction) {
+        const error =
+          "The native turn has no host interaction channel for this review. No action was applied.";
+        completeActivity({ ok: false, error });
+        return { content: [{ type: "text", text: error }], isError: true };
+      }
+      const resolution = await scope.requestInteraction(prepared.action);
+      prepared = resolution.approved
+        ? await prepared.execute(resolution)
+        : {
+            kind: "result" as const,
+            execution: await prepared.deny(resolution.data),
+          };
+    }
+    if (scope)
+      scope.clarificationHistory = toolContext.request.clarificationHistory;
+    let result = formatToolResult(prepared.execution, tool);
+    // One attestation site, one recorder: the read's trusted observations and
+    // its Task progress delta come from the same call. Without a
+    // conversation there is nothing to record the delta in. A call that is
+    // not a read may state paper decisions; the same recorder makes their
+    // delta, which rides on the activity as a read's does.
+    const { observations: readObservations, paperLedgerDelta } =
+      tool.spec.executionClass === "read" && !result.isError
+        ? await attestAndRecordRead({
+            toolName: name,
+            callId: prepared.execution.result.callId,
+            input: prepared.execution.input,
+            result: prepared.execution.result.content,
+            conversationKey: scopeConversationKey,
+            libraryID: callScope.libraryID,
+            runId: scope?.runId,
+          })
+        : {
+            observations: [],
+            paperLedgerDelta: result.isError
+              ? null
+              : recordTaskPaperDecisions({
+                  toolName: name,
+                  callId: prepared.execution.result.callId,
+                  decisions: prepared.execution.result.paperDecisions,
+                  conversationKey: scopeConversationKey,
+                  runId: scope?.runId,
+                }),
+          };
+    rememberDocumentReadObservations(headers, readObservations, scope);
+    // The outside papers a document of this run may cite: what
+    // literature_search and literature_read returned.
+    const outsidePapers = result.isError
+      ? []
+      : outsidePaperRecordsFromToolResult(
+          name,
+          prepared.execution.result.content,
+        );
+    rememberScopeOutsidePapers(headers, outsidePapers, scope);
+    rememberDocumentArtifacts(
+      headers,
+      prepared.execution.result.artifacts || [],
+      scope,
+    );
+    result = appendDocumentEvidenceRefs(result, [
+      ...readObservations,
+      ...rememberedDigestObservations(
+        name,
+        prepared.execution.result.content,
+        scope?.documentReadObservations,
+        readObservations,
+      ),
+    ]);
+    // From the whole result: the text the model reads may leave them out.
+    const quoteCitations = extractQuoteCitationsFromToolContent(
+      prepared.execution.result.content,
+    );
+    completeActivity({
+      ok: !result.isError,
+      error: extractToolCallErrorText(result),
+      quoteCitations,
+      artifacts: prepared.execution.result.artifacts,
+      actionReceipts: prepared.execution.result.actionReceipts,
+      verifiedReadSources: readObservations.map(
+        ({
+          libraryID,
+          itemKey,
+          attachmentItemKey,
+          pageIndex,
+          sourceFingerprint,
+        }) => ({
+          libraryID,
+          itemKey,
+          attachmentItemKey,
+          pageIndex,
+          sourceFingerprint,
+        }),
+      ),
+      readObservations,
+      outsidePapers,
+      publishedDocumentId: publishedDocumentIdOf(
+        name,
+        result,
+        prepared.execution.result.content,
+      ),
+      paperLedgerDelta,
+    });
+    clearMcpReadDedupeCacheAfterToolResult(tool.spec, result);
+    if (isScopedMcpCallCurrent(headers, scope))
+      rememberMcpReadResult(
+        readDedupeKey,
+        result,
+        readObservations,
+        outsidePapers,
+        quoteCitations,
+      );
+    return result;
+  } catch (error) {
+    completeActivity({
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
+  }
+}
+
+async function handleRequest(
+  body: string,
+  deps: McpServerDeps,
+  headers?: Record<string, string>,
+): Promise<McpHttpResponse> {
+  let request: JsonRpcRequest;
+
+  try {
+    const parsed = JSON.parse(body);
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      parsed.jsonrpc !== "2.0" ||
+      typeof parsed.method !== "string"
+    ) {
+      return makeJsonRpcHttpResponse(
+        makeError(
+          null,
+          RPC_ERRORS.INVALID_REQUEST.code,
+          RPC_ERRORS.INVALID_REQUEST.message,
+        ),
+      );
+    }
+    request = parsed as JsonRpcRequest;
+  } catch {
+    return makeJsonRpcHttpResponse(
+      makeError(
+        null,
+        RPC_ERRORS.PARSE_ERROR.code,
+        RPC_ERRORS.PARSE_ERROR.message,
+      ),
+    );
+  }
+
+  const { id, method, params } = request;
+  const isNotification = !hasJsonRpcId(request);
+
+  try {
+    if (method === MCP_METHODS.INITIALIZE) {
+      const result = await handleInitialize();
+      return makeJsonRpcHttpResponse(makeResult(id ?? null, result));
+    }
+
+    if (method === MCP_METHODS.INITIALIZED) {
+      return makeJsonRpcNotificationResponse();
+    }
+
+    // MCP base protocol: clients such as AnythingLLM use ping as a health check.
+    if (method === MCP_METHODS.PING) {
+      return makeJsonRpcHttpResponse(makeResult(id ?? null, {}));
+    }
+
+    if (method === MCP_METHODS.TOOLS_LIST) {
+      const result = handleToolsList(
+        deps.toolRegistry,
+        resolveScopedMcpScope(headers),
+      );
+      return makeJsonRpcHttpResponse(makeResult(id ?? null, result));
+    }
+
+    if (method === MCP_METHODS.TOOLS_CALL) {
+      if (
+        !params ||
+        typeof params !== "object" ||
+        typeof (params as McpToolCallParams).name !== "string"
+      ) {
+        return makeJsonRpcHttpResponse(
+          makeError(
+            id ?? null,
+            RPC_ERRORS.INVALID_PARAMS.code,
+            "tools/call requires { name, arguments }",
+          ),
+        );
+      }
+      const result = await handleToolsCall(
+        params as McpToolCallParams,
+        deps,
+        headers,
+        id ?? null,
+      );
+      return makeJsonRpcHttpResponse(makeResult(id ?? null, result));
+    }
+
+    if (isNotification) {
+      return makeJsonRpcNotificationResponse();
+    }
+
+    return makeJsonRpcHttpResponse(
+      makeError(
+        id ?? null,
+        RPC_ERRORS.METHOD_NOT_FOUND.code,
+        `Unknown method: ${method}`,
+      ),
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (isNotification) {
+      (
+        globalThis as typeof globalThis & {
+          ztoolkit?: { log?: (...args: unknown[]) => void };
+        }
+      ).ztoolkit?.log?.("Zotero MCP notification failed", method, error);
+      return makeJsonRpcNotificationResponse();
+    }
+    return makeJsonRpcHttpResponse(
+      makeError(
+        id ?? null,
+        RPC_ERRORS.INTERNAL_ERROR.code,
+        `Internal error: ${message}`,
+      ),
+    );
+  }
+}
+
+/**
+ * Registers the MCP endpoint on Zotero's built-in HTTP server.
+ * Call this after the agent subsystem is initialized.
+ */
+export function registerMcpServer(deps: McpServerDeps): void {
+  const capturedDeps = deps;
+  registeredMcpDeps = capturedDeps;
+  scopelessRunId = null;
+
+  class McpEndpoint {
+    supportedMethods = ["POST"];
+    supportedDataTypes = ["application/json"];
+
+    init = async (
+      options: EndpointOptions,
+    ): Promise<[number, string, string]> => {
+      if (!isAuthorized(options.headers)) {
+        return [
+          401,
+          "application/json",
+          JSON.stringify({ error: "unauthorized" }),
+        ];
+      }
+      const body =
+        typeof options.data === "string"
+          ? options.data
+          : JSON.stringify(options.data);
+
+      const response = await handleRequest(body, capturedDeps, options.headers);
+      return [response.status, response.contentType, response.body];
+    };
+  }
+
+  Zotero.Server.Endpoints[ZOTERO_MCP_ENDPOINT_PATH] = McpEndpoint;
+}
+
+export async function invokeRegisteredZoteroMcpEndpoint(
+  options: EndpointOptions,
+): Promise<[number, string, string] | null> {
+  const deps = registeredMcpDeps;
+  if (!deps) return null;
+  if (!isAuthorized(options.headers)) {
+    return [401, "application/json", JSON.stringify({ error: "unauthorized" })];
+  }
+  const body =
+    typeof options.data === "string"
+      ? options.data
+      : JSON.stringify(options.data);
+  const response = await handleRequest(body, deps, options.headers);
+  return [response.status, response.contentType, response.body];
+}
+
+/**
+ * Removes the MCP endpoint from Zotero's server (call on plugin shutdown).
+ */
+export function unregisterMcpServer(): void {
+  for (const token of scopedZoteroMcpScopes.keys())
+    releaseScopedMcpScope(token);
+  mcpReadDedupeCache.clear();
+  registeredMcpDeps = null;
+  scopelessRunId = null;
+  delete Zotero.Server.Endpoints[ZOTERO_MCP_ENDPOINT_PATH];
+}

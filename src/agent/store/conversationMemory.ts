@@ -1,0 +1,295 @@
+import { isEphemeralConversationKey } from "../../shared/conversationKeySpace";
+import { appLogger } from "../../core/logging";
+import { deleteIfPresent, type AgentPurgeDb } from "./inTransactionDelete";
+import {
+  installConversationKeyLedgerAgentTriggers,
+  isConversationKeyRetiredInMemory,
+} from "../../shared/conversationKeyLedger";
+import {
+  areConversationWritesFrozen,
+  getConversationWriteGeneration,
+  isConversationWriteGenerationCurrent,
+} from "../../shared/conversationWriteFence";
+
+/**
+ * Per-conversation agent turn memory.
+ *
+ * The runtime stores a compact summary of recent completed turns so future
+ * turns can reuse prior findings without re-running the same tools. The store
+ * keeps an in-memory cache and mirrors entries to SQLite when Zotero.DB is
+ * available, so memory survives UI reloads.
+ */
+
+export type AgentTurnMemory = Readonly<{
+  question: string;
+  toolsUsed: readonly string[];
+  answerExcerpt: string;
+}>;
+
+type ZoteroDb = {
+  queryAsync: (sql: string, params?: unknown[]) => Promise<unknown>;
+};
+
+const MEMORY_TABLE = "llm_for_zotero_agent_memory";
+const MAX_MEMORY_TURNS = 6;
+export const AGENT_MEMORY_QUESTION_EXCERPT_LENGTH = 200;
+const ANSWER_EXCERPT_LEN = 350;
+
+const store = new Map<number, AgentTurnMemory[]>();
+let initPromise: Promise<boolean> | null = null;
+
+function getDb(): ZoteroDb | null {
+  const zotero = (
+    globalThis as typeof globalThis & {
+      Zotero?: { DB?: ZoteroDb };
+    }
+  ).Zotero;
+  return zotero?.DB || null;
+}
+
+async function ensureConversationMemoryStore(): Promise<boolean> {
+  if (initPromise) {
+    return initPromise;
+  }
+  initPromise = (async () => {
+    const db = getDb();
+    if (!db) return false;
+    try {
+      await db.queryAsync(
+        `CREATE TABLE IF NOT EXISTS ${MEMORY_TABLE} (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          conversation_key INTEGER NOT NULL,
+          question_excerpt TEXT NOT NULL,
+          tools_used_json TEXT NOT NULL,
+          answer_excerpt TEXT NOT NULL,
+          created_at INTEGER NOT NULL
+        )`,
+      );
+      await installConversationKeyLedgerAgentTriggers();
+      return true;
+    } catch (error) {
+      appLogger.warn(
+        "LLM Agent: Failed to initialize conversation memory store",
+        error,
+      );
+      return false;
+    }
+  })();
+  return initPromise;
+}
+
+export async function initConversationMemoryStore(): Promise<boolean> {
+  return ensureConversationMemoryStore();
+}
+
+function normalizeConversationKey(conversationKey: number): number | null {
+  const key = Math.floor(conversationKey);
+  if (!Number.isFinite(key) || key <= 0) return null;
+  return key;
+}
+
+function clipTurnMemory(
+  question: string,
+  toolsUsed: string[],
+  finalAnswer: string,
+): AgentTurnMemory {
+  return {
+    question: question.trim().slice(0, AGENT_MEMORY_QUESTION_EXCERPT_LENGTH),
+    toolsUsed: [...new Set(toolsUsed)],
+    answerExcerpt: finalAnswer.trim().slice(0, ANSWER_EXCERPT_LEN),
+  };
+}
+
+export function formatAgentMemoryBlock(
+  turns: readonly AgentTurnMemory[],
+): string {
+  if (!turns.length) return "";
+  const lines: string[] = [
+    "Conversation continuity notes (not a substitute for preserved evidence):",
+  ];
+  for (const turn of turns) {
+    lines.push(
+      `- User asked: "${turn.question}${turn.question.length >= AGENT_MEMORY_QUESTION_EXCERPT_LENGTH ? "…" : ""}"`,
+    );
+    if (turn.toolsUsed.length) {
+      lines.push(`  Tools used: ${turn.toolsUsed.join(", ")}`);
+    }
+    lines.push(
+      `  Finding: ${turn.answerExcerpt}${turn.answerExcerpt.length >= ANSWER_EXCERPT_LEN ? "…" : ""}`,
+    );
+  }
+  return lines.join("\n");
+}
+
+async function loadConversationMemory(
+  conversationKey: number,
+): Promise<AgentTurnMemory[]> {
+  const dbReady = await ensureConversationMemoryStore();
+  const db = getDb();
+  if (!dbReady || !db) return [];
+  try {
+    const rows = (await db.queryAsync(
+      `SELECT question_excerpt AS questionExcerpt,
+              tools_used_json AS toolsUsedJson,
+              answer_excerpt AS answerExcerpt
+       FROM ${MEMORY_TABLE}
+       WHERE conversation_key = ?
+       ORDER BY id DESC
+       LIMIT ?`,
+      [conversationKey, MAX_MEMORY_TURNS],
+    )) as
+      | Array<{
+          questionExcerpt?: unknown;
+          toolsUsedJson?: unknown;
+          answerExcerpt?: unknown;
+        }>
+      | undefined;
+    if (!rows?.length) return [];
+    return rows
+      .reverse()
+      .map((row) => {
+        let toolsUsed: string[] = [];
+        try {
+          toolsUsed = JSON.parse(String(row.toolsUsedJson || "[]")) as string[];
+        } catch {
+          toolsUsed = [];
+        }
+        return {
+          question:
+            typeof row.questionExcerpt === "string" ? row.questionExcerpt : "",
+          toolsUsed: Array.isArray(toolsUsed)
+            ? toolsUsed.filter(
+                (entry): entry is string => typeof entry === "string",
+              )
+            : [],
+          answerExcerpt:
+            typeof row.answerExcerpt === "string" ? row.answerExcerpt : "",
+        };
+      })
+      .filter((entry) => entry.question || entry.answerExcerpt);
+  } catch (error) {
+    appLogger.warn("LLM Agent: Failed to load conversation memory", error);
+    return [];
+  }
+}
+
+export async function recordAgentTurn(
+  conversationKey: number,
+  question: string,
+  toolsUsed: string[],
+  finalAnswer: string,
+): Promise<void> {
+  const key = normalizeConversationKey(conversationKey);
+  if (!key) return;
+  if (isConversationKeyRetiredInMemory(key)) return;
+  // A temporary side chat's key (reserved band) is never persisted.
+  if (isEphemeralConversationKey(key)) return;
+  const entry = clipTurnMemory(question, toolsUsed, finalAnswer);
+  const expectedGeneration = getConversationWriteGeneration(key);
+
+  const dbReady = await ensureConversationMemoryStore();
+  const db = getDb();
+  if (
+    isConversationKeyRetiredInMemory(key) ||
+    areConversationWritesFrozen(key) ||
+    !isConversationWriteGenerationCurrent(key, expectedGeneration)
+  )
+    return;
+  // Read after preparation: another turn may have appended while we waited.
+  const existing = store.get(key) ?? [];
+  existing.push(entry);
+  store.set(key, existing.slice(-MAX_MEMORY_TURNS));
+  if (!dbReady || !db) return;
+  try {
+    await db.queryAsync(
+      `INSERT INTO ${MEMORY_TABLE}
+        (conversation_key, question_excerpt, tools_used_json, answer_excerpt, created_at)
+       VALUES (?, ?, ?, ?, ?)`,
+      [
+        key,
+        entry.question,
+        JSON.stringify(entry.toolsUsed),
+        entry.answerExcerpt,
+        Date.now(),
+      ],
+    );
+    await db.queryAsync(
+      `DELETE FROM ${MEMORY_TABLE}
+       WHERE conversation_key = ?
+         AND id NOT IN (
+           SELECT id
+           FROM ${MEMORY_TABLE}
+           WHERE conversation_key = ?
+           ORDER BY id DESC
+           LIMIT ?
+         )`,
+      [key, key, MAX_MEMORY_TURNS],
+    );
+  } catch (error) {
+    if (isConversationKeyRetiredInMemory(key)) store.delete(key);
+    appLogger.warn("LLM Agent: Failed to persist conversation memory", error);
+  }
+}
+
+/**
+ * Loads recent findings independently of the retained prompt history, so
+ * prompt compaction never deletes the continuity fallback.
+ */
+export async function loadAgentTurnMemory(
+  conversationKey: number,
+): Promise<readonly AgentTurnMemory[]> {
+  const key = normalizeConversationKey(conversationKey);
+  if (!key) return [];
+  let turns = store.get(key);
+  if (!turns?.length) {
+    const expectedGeneration = getConversationWriteGeneration(key);
+    turns = await loadConversationMemory(key);
+    if (
+      isConversationKeyRetiredInMemory(key) ||
+      areConversationWritesFrozen(key) ||
+      !isConversationWriteGenerationCurrent(key, expectedGeneration)
+    ) {
+      return [];
+    }
+    // A turn recorded during the SELECT is newer than its snapshot.
+    const current = store.get(key);
+    if (current?.length) return current;
+    if (turns.length) {
+      store.set(key, turns);
+    }
+  }
+  return turns || [];
+}
+
+export async function clearAgentMemory(conversationKey: number): Promise<void> {
+  const key = normalizeConversationKey(conversationKey);
+  if (!key) return;
+  store.delete(key);
+  const dbReady = await ensureConversationMemoryStore();
+  const db = getDb();
+  if (!dbReady || !db) return;
+  try {
+    await db.queryAsync(
+      `DELETE FROM ${MEMORY_TABLE}
+       WHERE conversation_key = ?`,
+      [key],
+    );
+  } catch (error) {
+    appLogger.warn("LLM Agent: Failed to clear conversation memory", error);
+  }
+}
+
+/**
+ * Delete a conversation's memory rows inside the conversation's deletion
+ * transaction (the agent row purge).  An absent table means no rows.
+ */
+export async function deleteAgentMemoryRowsInTransaction(
+  db: AgentPurgeDb,
+  conversationKey: number,
+): Promise<void> {
+  await deleteIfPresent(
+    db,
+    `DELETE FROM ${MEMORY_TABLE} WHERE conversation_key = ?`,
+    [conversationKey],
+  );
+}

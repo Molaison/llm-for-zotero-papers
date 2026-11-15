@@ -1,0 +1,1052 @@
+import {
+  buildReasoningPayload,
+  getAnthropicMessagesReasoningRecoverySelection,
+  normalizeProviderCompletion,
+  postWithReasoningFallback,
+  type ReasoningSelection,
+} from "../../utils/llmClient";
+import { normalizeTemperature } from "../../utils/normalization";
+import {
+  buildProviderAuthHeaders,
+  resolveProviderTransportEndpoint,
+} from "../../utils/providerTransport";
+import type {
+  AgentContentInputCapabilities,
+  AgentModelCapabilities,
+  AgentModelMessage,
+  AgentModelContentPart,
+  AgentModelStep,
+  AgentRuntimeRequest,
+  AgentToolCall,
+  ToolSpec,
+} from "../types";
+import type { AgentModelAdapter, AgentStepParams } from "./adapter";
+import { buildAgentModelCapabilities } from "./contentCapabilities";
+import { resolveAgentTransmittedOutputPolicy } from "./limits";
+import { estimateWirePayloadTokens } from "../../utils/modelInputCap";
+import {
+  buildAgentRecoveryInstruction,
+  resolveAgentRecoverableCompletion,
+  ModelStreamInterruptedError,
+} from "./completion";
+import type { ModelTurnCompletion } from "../../shared/llm";
+import {
+  resolveRequestContentInputs,
+  stringifyMessageContent,
+} from "./messageBuilder";
+import {
+  createFallbackToolCallId,
+  groupToolContinuationMessages,
+} from "./shared";
+import { resolveContentParts } from "./adapterUtils";
+import {
+  anthropicPromptTokens,
+  extractContextCacheUsage,
+} from "../../contextCache/manager";
+import type { AnthropicPromptCacheControl } from "../../contextCache/manager";
+import { createMalformedToolArgumentsDiagnostic } from "../toolArgumentDiagnostics";
+
+type AnthropicContentBlock = {
+  type: string;
+  [key: string]: unknown;
+};
+
+type AnthropicMessage = {
+  role: "user" | "assistant";
+  content: AnthropicContentBlock[];
+};
+
+type AnthropicSystemBlock = {
+  text: string;
+  cachePolicy?: "stable-prefix";
+};
+
+type AnthropicResponse = {
+  id?: unknown;
+  content?: unknown[];
+  stop_reason?: unknown;
+  usage?: AnthropicUsagePayload;
+};
+
+/**
+ * Anthropic reports the prompt once on `message_start` and a CUMULATIVE
+ * output count on every `message_delta`; the non-streaming response carries
+ * both at the top level.
+ */
+type AnthropicUsagePayload = {
+  input_tokens?: unknown;
+  output_tokens?: unknown;
+  cache_creation_input_tokens?: unknown;
+  cache_read_input_tokens?: unknown;
+};
+
+function anthropicTokenCount(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? value
+    : 0;
+}
+
+type AnthropicNormalizedResponse = {
+  text: string;
+  toolCalls: AgentToolCall[];
+  responseBlocks: AnthropicContentBlock[];
+  completion: ModelTurnCompletion;
+};
+
+type AnthropicStreamBlockState = {
+  block: AnthropicContentBlock;
+  partialJson?: string;
+};
+
+type AnthropicBuildOptions = {
+  contentInputs: AgentContentInputCapabilities;
+  modelName?: string;
+};
+
+function findLastStableSystemBlockIndex(
+  blocks: AnthropicSystemBlock[],
+): number {
+  for (let index = blocks.length - 1; index >= 0; index -= 1) {
+    if (blocks[index].cachePolicy === "stable-prefix") return index;
+  }
+  return -1;
+}
+
+function buildAnthropicTools(
+  tools: ToolSpec[],
+  cacheControl?: AnthropicPromptCacheControl,
+) {
+  return tools.map((tool, index) => ({
+    name: tool.name,
+    description: tool.description,
+    input_schema: tool.inputSchema,
+    ...(cacheControl && index === tools.length - 1
+      ? { cache_control: cacheControl }
+      : {}),
+  }));
+}
+
+function cloneAnthropicContentBlock(
+  block: AnthropicContentBlock,
+): AnthropicContentBlock {
+  return { ...block };
+}
+
+function normalizeAnthropicContentBlock(
+  value: unknown,
+): AnthropicContentBlock | null {
+  if (!value || typeof value !== "object") return null;
+  const type =
+    typeof (value as { type?: unknown }).type === "string"
+      ? (value as { type: string }).type.trim()
+      : "";
+  if (!type) return null;
+  return {
+    ...(value as Record<string, unknown>),
+    type,
+  };
+}
+
+function isToolUseBlock(block: AnthropicContentBlock): boolean {
+  return block.type.toLowerCase() === "tool_use";
+}
+
+function isEmptyTextBlock(block: AnthropicContentBlock): boolean {
+  return (
+    block.type.toLowerCase() === "text" &&
+    typeof block.text === "string" &&
+    !block.text.trim()
+  );
+}
+
+function getBlockStringField(
+  block: AnthropicContentBlock,
+  key: string,
+): string {
+  const value = block[key];
+  return typeof value === "string" && value.trim() ? value.trim() : "";
+}
+
+function buildAnthropicToolUseBlocks(
+  toolCalls: readonly AgentToolCall[],
+): AnthropicContentBlock[] {
+  return toolCalls.map((call) => ({
+    type: "tool_use" as const,
+    id: call.id,
+    name: call.name,
+    input: call.arguments ?? {},
+  }));
+}
+
+function buildAnthropicToolResultBlocks(
+  toolMessages: readonly Extract<AgentModelMessage, { role: "tool" }>[],
+): AnthropicContentBlock[] {
+  return toolMessages.map((message) => ({
+    type: "tool_result" as const,
+    tool_use_id: message.tool_call_id,
+    content: message.content,
+  }));
+}
+
+function collectConsecutiveToolMessages(
+  messages: AgentModelMessage[],
+  startIndex: number,
+): Extract<AgentModelMessage, { role: "tool" }>[] {
+  const toolMessages: Extract<AgentModelMessage, { role: "tool" }>[] = [];
+  for (let index = startIndex; index < messages.length; index += 1) {
+    const message = messages[index];
+    if (message.role !== "tool") break;
+    toolMessages.push(message);
+  }
+  return toolMessages;
+}
+
+function toolUseIdsFromMessage(
+  message: AnthropicMessage | undefined,
+): Set<string> {
+  const ids = new Set<string>();
+  if (!message || message.role !== "assistant") return ids;
+  for (const block of message.content) {
+    if (!isToolUseBlock(block)) continue;
+    const id = getBlockStringField(block, "id");
+    if (id) ids.add(id);
+  }
+  return ids;
+}
+
+function buildLooseToolResultSummaryMessage(
+  toolMessages: readonly Extract<AgentModelMessage, { role: "tool" }>[],
+): AnthropicMessage | null {
+  if (!toolMessages.length) return null;
+  return {
+    role: "user",
+    content: [
+      {
+        type: "text",
+        text: toolMessages
+          .map(
+            (message) =>
+              `Tool result (${message.name}, id=${message.tool_call_id}):\n${message.content}`,
+          )
+          .join("\n\n"),
+      },
+    ],
+  };
+}
+
+async function buildAnthropicParts(
+  message: AgentModelMessage,
+  options: AnthropicBuildOptions,
+): Promise<AnthropicContentBlock[]> {
+  if (message.role === "tool") {
+    return [{ type: "text", text: message.content }];
+  }
+  if (typeof message.content === "string") {
+    return [{ type: "text", text: message.content }];
+  }
+
+  const filteredContent: AgentModelContentPart[] = [];
+  let omittedImages = 0;
+  let omittedFiles = 0;
+  for (const part of message.content) {
+    if (part.type === "text") {
+      if (part.text.trim()) filteredContent.push(part);
+      continue;
+    }
+    if (part.type === "image_url") {
+      if (options.contentInputs.images) {
+        filteredContent.push(part);
+      } else {
+        omittedImages += 1;
+      }
+      continue;
+    }
+    if (
+      options.contentInputs.pdfDocuments ||
+      options.contentInputs.nativeFiles
+    ) {
+      filteredContent.push(part);
+    } else {
+      omittedFiles += 1;
+    }
+  }
+
+  const omitted: string[] = [];
+  const unsupported: string[] = [];
+  if (omittedImages) {
+    omitted.push(`${omittedImages} image${omittedImages === 1 ? "" : "s"}`);
+    unsupported.push("image input");
+  }
+  if (omittedFiles) {
+    omitted.push(`${omittedFiles} file${omittedFiles === 1 ? "" : "s"}`);
+    unsupported.push("PDF/document input");
+  }
+  if (omitted.length) {
+    const target = (options.modelName || "The selected model").trim();
+    filteredContent.push({
+      type: "text",
+      text: `[${omitted.join(" and ")} omitted because ${target} does not support ${unsupported.join(" or ")}.]`,
+    });
+  }
+
+  const resolved = await resolveContentParts({
+    ...message,
+    content: filteredContent,
+  });
+  return resolved.map((part): AnthropicContentBlock => {
+    switch (part.type) {
+      case "text":
+        return { type: "text", text: part.text };
+      case "image":
+        return {
+          type: "image",
+          source: {
+            type: "base64",
+            media_type: part.mimeType,
+            data: part.base64,
+          },
+        };
+      case "pdf":
+        return {
+          type: "document",
+          source: {
+            type: "base64",
+            media_type: "application/pdf",
+            data: part.base64,
+          },
+        };
+      case "file_placeholder":
+        return { type: "text", text: `[Prepared file: ${part.name}]` };
+    }
+  });
+}
+
+async function buildInitialAnthropicMessages(
+  messages: AgentModelMessage[],
+  options: AnthropicBuildOptions,
+): Promise<{
+  systemBlocks: AnthropicSystemBlock[];
+  messages: AnthropicMessage[];
+}> {
+  const systemBlocks: AnthropicSystemBlock[] = [];
+  const anthropicMessages: AnthropicMessage[] = [];
+  for (let index = 0; index < messages.length; index += 1) {
+    const message = messages[index];
+    if (message.role === "tool") {
+      const toolMessages = collectConsecutiveToolMessages(messages, index);
+      index += toolMessages.length - 1;
+      const previousToolUseIds = toolUseIdsFromMessage(
+        anthropicMessages[anthropicMessages.length - 1],
+      );
+      const matched = toolMessages.filter((toolMessage) =>
+        previousToolUseIds.has(toolMessage.tool_call_id),
+      );
+      const unmatched = toolMessages.filter(
+        (toolMessage) => !previousToolUseIds.has(toolMessage.tool_call_id),
+      );
+      if (matched.length) {
+        anthropicMessages.push({
+          role: "user",
+          content: buildAnthropicToolResultBlocks(matched),
+        });
+      }
+      const summary = buildLooseToolResultSummaryMessage(unmatched);
+      if (summary) anthropicMessages.push(summary);
+      continue;
+    }
+    if (message.role === "system") {
+      const text = stringifyMessageContent(message.content);
+      if (text) {
+        systemBlocks.push({
+          text,
+          cachePolicy: message.cachePolicy,
+        });
+      }
+      continue;
+    }
+    if (message.role === "assistant") {
+      const followingToolMessages = collectConsecutiveToolMessages(
+        messages,
+        index + 1,
+      );
+      const followingToolResultIds = new Set(
+        followingToolMessages.map((toolMessage) => toolMessage.tool_call_id),
+      );
+      const toolCalls =
+        Array.isArray(message.tool_calls) && followingToolResultIds.size
+          ? message.tool_calls.filter((call) =>
+              followingToolResultIds.has(call.id),
+            )
+          : [];
+      const content = [
+        ...(await buildAnthropicParts(message, options)),
+        ...buildAnthropicToolUseBlocks(toolCalls),
+      ].filter((block) => !isEmptyTextBlock(block));
+      if (!content.length) continue;
+      anthropicMessages.push({
+        role: "assistant",
+        content,
+      });
+      continue;
+    }
+    anthropicMessages.push({
+      role: "user",
+      content: await buildAnthropicParts(message, options),
+    });
+  }
+  return {
+    systemBlocks,
+    messages: anthropicMessages,
+  };
+}
+
+function buildAnthropicSystemPayload(
+  systemBlocks: AnthropicSystemBlock[] | undefined,
+  cacheControl: AnthropicPromptCacheControl | undefined,
+): string | AnthropicContentBlock[] | undefined {
+  const blocks = (systemBlocks || []).filter((block) => block.text.trim());
+  if (!blocks.length) return undefined;
+  if (!cacheControl) {
+    return blocks.map((block) => block.text).join("\n\n");
+  }
+  const stableIndex = findLastStableSystemBlockIndex(blocks);
+  const targetIndex = stableIndex >= 0 ? stableIndex : blocks.length - 1;
+  // Keep the first paper reusable when later papers or resource refs change.
+  // At most two system breakpoints leave room for tools and conversation caching.
+  const firstStableIndex = blocks.findIndex(
+    (block) => block.cachePolicy === "stable-prefix",
+  );
+  // With a single stable block (no paper blocks), the second breakpoint goes
+  // on the fixed prompt in front of it, so it stays reusable when the stable
+  // block changes with the active item.
+  const fixedPromptIndex =
+    firstStableIndex === targetIndex && targetIndex > 0 ? 0 : -1;
+  return blocks.map((block, index) => ({
+    type: "text",
+    text: block.text,
+    ...(index === targetIndex ||
+    index === firstStableIndex ||
+    index === fixedPromptIndex
+      ? { cache_control: cacheControl }
+      : {}),
+  }));
+}
+
+async function buildAnthropicContinuationMessages(
+  messages: AgentModelMessage[],
+  options: AnthropicBuildOptions,
+): Promise<AnthropicMessage[]> {
+  const { toolMessages, followupUserMessages } =
+    groupToolContinuationMessages(messages);
+  const anthropicMessages: AnthropicMessage[] = [];
+  if (toolMessages.length) {
+    anthropicMessages.push({
+      role: "user",
+      content: buildAnthropicToolResultBlocks(toolMessages),
+    });
+  }
+  for (const message of followupUserMessages) {
+    anthropicMessages.push({
+      role: "user",
+      content: await buildAnthropicParts(message, options),
+    });
+  }
+  return anthropicMessages;
+}
+
+function normalizeAnthropicResponseBlocks(
+  blocks: AnthropicContentBlock[],
+  completion: ModelTurnCompletion = { status: "complete" },
+): AnthropicNormalizedResponse {
+  const textParts: string[] = [];
+  const toolCalls: AgentToolCall[] = [];
+  const responseBlocks = blocks.map((block) =>
+    cloneAnthropicContentBlock(block),
+  );
+  for (let index = 0; index < responseBlocks.length; index += 1) {
+    const block = responseBlocks[index];
+    const typeValue = block.type.toLowerCase();
+    if (typeValue === "text" && typeof block.text === "string") {
+      textParts.push(block.text);
+      continue;
+    }
+    if (typeValue !== "tool_use") continue;
+    const name =
+      typeof block.name === "string" && block.name.trim()
+        ? block.name.trim()
+        : "";
+    if (!name) continue;
+    toolCalls.push({
+      id:
+        typeof block.id === "string" && block.id.trim()
+          ? block.id.trim()
+          : createFallbackToolCallId("anthropic-call", index),
+      name,
+      arguments:
+        block.input && typeof block.input === "object" ? block.input : {},
+    });
+  }
+  return {
+    text: textParts.join(""),
+    toolCalls,
+    responseBlocks,
+    completion,
+  };
+}
+
+function normalizeAnthropicResponse(
+  data: AnthropicResponse,
+): AnthropicNormalizedResponse {
+  const responseBlocks = (Array.isArray(data.content) ? data.content : [])
+    .map((block) => normalizeAnthropicContentBlock(block))
+    .filter((block): block is AnthropicContentBlock => Boolean(block));
+  return normalizeAnthropicResponseBlocks(
+    responseBlocks,
+    normalizeProviderCompletion(data.stop_reason),
+  );
+}
+
+async function parseAnthropicStepStream(
+  stream: ReadableStream<Uint8Array>,
+  onTextDelta?: (delta: string) => void | Promise<void>,
+  onReasoning?: (event: {
+    summary?: string;
+    details?: string;
+  }) => void | Promise<void>,
+  onUsage?: AgentStepParams["onUsage"],
+): Promise<AnthropicNormalizedResponse> {
+  const reader = stream.getReader() as ReadableStreamDefaultReader<Uint8Array>;
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let text = "";
+  let completion: ModelTurnCompletion = { status: "complete" };
+  let receivedTerminal = false;
+  // Whether the provider said why the message ended, and the content blocks
+  // started and not yet stopped. A stream that closes inside a block, with
+  // neither a stop reason nor message_stop, was cut off, not finished; one
+  // that closes between blocks is taken as finished, as some
+  // Anthropic-compatible providers end their streams that way.
+  let stopReasonSeen = false;
+  const openBlocks = new Set<number>();
+  const contentBlocks = new Map<number, AnthropicStreamBlockState>();
+
+  const handleFrame = async (payload: string) => {
+    if (!payload || payload === "[DONE]") return;
+    const parsed = JSON.parse(payload) as {
+      type?: unknown;
+      index?: unknown;
+      content_block?: {
+        type?: unknown;
+        id?: unknown;
+        name?: unknown;
+        input?: unknown;
+      };
+      delta?: {
+        type?: unknown;
+        text?: unknown;
+        partial_json?: unknown;
+        stop_reason?: unknown;
+      };
+      usage?: AnthropicUsagePayload;
+      message?: { stop_reason?: unknown; usage?: AnthropicUsagePayload };
+    };
+    const eventType =
+      typeof parsed.type === "string" ? parsed.type.toLowerCase() : "";
+    const index =
+      typeof parsed.index === "number" && Number.isFinite(parsed.index)
+        ? parsed.index
+        : -1;
+    const stopReason = parsed.delta?.stop_reason ?? parsed.message?.stop_reason;
+    if (typeof stopReason === "string") {
+      completion = normalizeProviderCompletion(stopReason);
+      stopReasonSeen = true;
+    }
+    if (onUsage && eventType === "message_start" && parsed.message?.usage) {
+      const inputTokens = anthropicPromptTokens(parsed.message.usage);
+      const outputTokens = anthropicTokenCount(
+        parsed.message.usage.output_tokens,
+      );
+      const totalTokens = inputTokens + outputTokens;
+      if (totalTokens > 0) {
+        await onUsage({
+          promptTokens: inputTokens,
+          completionTokens: outputTokens,
+          totalTokens,
+          ...extractContextCacheUsage(parsed.message.usage),
+          contextTokens: inputTokens,
+          contextWindowIsAuthoritative: inputTokens > 0,
+        });
+      }
+    }
+    if (onUsage && eventType === "message_delta" && parsed.usage) {
+      // Cumulative output so far; the prompt is not repeated here.
+      const outputTokens = anthropicTokenCount(parsed.usage.output_tokens);
+      if (outputTokens > 0) {
+        await onUsage({
+          promptTokens: 0,
+          completionTokens: outputTokens,
+          totalTokens: outputTokens,
+          ...extractContextCacheUsage(parsed.usage),
+        });
+      }
+    }
+    if (eventType === "message_stop") {
+      receivedTerminal = true;
+      return;
+    }
+    if (eventType === "error") {
+      // The provider ended the stream with an error event: an overloaded or
+      // internal error is a broken stream the runtime may retry; any other
+      // error is reported as it is.
+      const error = (
+        parsed as { error?: { type?: unknown; message?: unknown } }
+      ).error;
+      const errorType = typeof error?.type === "string" ? error.type : "";
+      const message =
+        typeof error?.message === "string" ? error.message : errorType;
+      if (errorType === "overloaded_error" || errorType === "api_error")
+        throw new ModelStreamInterruptedError(
+          `Anthropic stream error: ${message || errorType}`,
+          errorType === "overloaded_error" ? 529 : 500,
+        );
+      throw new Error(`Anthropic stream error: ${message || "unknown error"}`);
+    }
+    if (eventType === "content_block_stop" && index >= 0) {
+      openBlocks.delete(index);
+      return;
+    }
+    if (eventType === "content_block_start" && index >= 0) {
+      openBlocks.add(index);
+      const contentBlock = normalizeAnthropicContentBlock(parsed.content_block);
+      if (contentBlock) {
+        const state: AnthropicStreamBlockState = { block: contentBlock };
+        if (
+          contentBlock.type.toLowerCase() === "tool_use" &&
+          contentBlock.input &&
+          typeof contentBlock.input === "object" &&
+          Object.keys(contentBlock.input as Record<string, unknown>).length > 0
+        ) {
+          state.partialJson = JSON.stringify(contentBlock.input);
+        }
+        contentBlocks.set(index, state);
+      }
+      return;
+    }
+    if (eventType !== "content_block_delta") return;
+    const deltaType =
+      typeof parsed.delta?.type === "string"
+        ? parsed.delta.type.toLowerCase()
+        : "";
+    if (deltaType === "text_delta" && typeof parsed.delta?.text === "string") {
+      const existing = contentBlocks.get(index);
+      const nextText =
+        typeof existing?.block.text === "string" ? existing.block.text : "";
+      contentBlocks.set(index, {
+        block: {
+          ...(existing?.block || { type: "text" }),
+          type: existing?.block.type || "text",
+          text: `${nextText}${parsed.delta.text}`,
+        },
+        partialJson: existing?.partialJson,
+      });
+      text += parsed.delta.text;
+      if (onTextDelta) {
+        await onTextDelta(parsed.delta.text);
+      }
+      return;
+    }
+    if (
+      deltaType === "thinking_delta" &&
+      index >= 0 &&
+      typeof (parsed.delta as { thinking?: unknown }).thinking === "string"
+    ) {
+      const deltaThinking = (parsed.delta as { thinking: string }).thinking;
+      const existing = contentBlocks.get(index);
+      const nextThinking =
+        typeof existing?.block.thinking === "string"
+          ? existing.block.thinking
+          : "";
+      contentBlocks.set(index, {
+        block: {
+          ...(existing?.block || { type: "thinking" }),
+          type: existing?.block.type || "thinking",
+          thinking: `${nextThinking}${deltaThinking}`,
+        },
+        partialJson: existing?.partialJson,
+      });
+      if (deltaThinking && onReasoning) {
+        await onReasoning({ details: deltaThinking });
+      }
+      return;
+    }
+    if (
+      deltaType === "signature_delta" &&
+      index >= 0 &&
+      typeof (parsed.delta as { signature?: unknown }).signature === "string"
+    ) {
+      const deltaSignature = (parsed.delta as { signature: string }).signature;
+      const existing = contentBlocks.get(index);
+      const nextSignature =
+        typeof existing?.block.signature === "string"
+          ? existing.block.signature
+          : "";
+      contentBlocks.set(index, {
+        block: {
+          ...(existing?.block || { type: "thinking" }),
+          type: existing?.block.type || "thinking",
+          signature: `${nextSignature}${deltaSignature}`,
+        },
+        partialJson: existing?.partialJson,
+      });
+      return;
+    }
+    if (
+      deltaType === "input_json_delta" &&
+      index >= 0 &&
+      typeof parsed.delta?.partial_json === "string"
+    ) {
+      const existing = contentBlocks.get(index);
+      if (!existing) return;
+      existing.partialJson = `${existing.partialJson || ""}${parsed.delta.partial_json}`;
+    }
+  };
+
+  try {
+    while (!receivedTerminal) {
+      let chunk: ReadableStreamReadResult<Uint8Array>;
+      try {
+        chunk = await reader.read();
+      } catch (error) {
+        // The same classification as openaiCompatible.ts: the connection
+        // broke mid-stream. Nothing of the step is kept, so the runtime may
+        // send the same request again.
+        if (
+          /^(?:Error: )?Error in input stream$/.test(String(error)) ||
+          /NetworkError/.test(String(error))
+        )
+          throw new ModelStreamInterruptedError(String(error));
+        throw error;
+      }
+      const { value, done } = chunk;
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      while (!receivedTerminal) {
+        const separator = /\r?\n\r?\n/.exec(buffer);
+        if (!separator) break;
+        const frame = buffer.slice(0, separator.index);
+        buffer = buffer.slice(separator.index + separator[0].length);
+        const lines = frame.split(/\r?\n/);
+        const dataLines = lines
+          .map((line) => line.trim())
+          .filter((line) => line.startsWith("data:"))
+          .map((line) => line.slice(5).trim());
+        if (!dataLines.length) continue;
+        await handleFrame(dataLines.join("\n"));
+      }
+    }
+  } finally {
+    if (receivedTerminal) {
+      // The response is complete; transport cleanup must not delay its result.
+      void reader.cancel().catch(() => undefined);
+    }
+    reader.releaseLock();
+  }
+  if (!receivedTerminal && !stopReasonSeen && openBlocks.size)
+    throw new ModelStreamInterruptedError(
+      "Anthropic stream closed inside a content block",
+    );
+
+  const responseBlocks = Array.from(contentBlocks.entries())
+    .sort((left, right) => left[0] - right[0])
+    .map(([, state]) => {
+      const block = cloneAnthropicContentBlock(state.block);
+      if (block.type.toLowerCase() === "tool_use" && state.partialJson) {
+        try {
+          block.input = JSON.parse(state.partialJson);
+        } catch (_error) {
+          block.input = createMalformedToolArgumentsDiagnostic(
+            state.partialJson,
+          );
+        }
+      }
+      return block;
+    });
+  const normalized = normalizeAnthropicResponseBlocks(
+    responseBlocks,
+    completion,
+  );
+  return {
+    ...normalized,
+    text: normalized.text || text,
+  };
+}
+
+async function reportAnthropicResponseUsage(
+  data: AnthropicResponse,
+  onUsage: AgentStepParams["onUsage"],
+): Promise<void> {
+  if (!onUsage || !data?.usage) return;
+  const inputTokens = anthropicPromptTokens(data.usage);
+  const outputTokens = anthropicTokenCount(data.usage.output_tokens);
+  const totalTokens = inputTokens + outputTokens;
+  if (totalTokens <= 0) return;
+  await onUsage({
+    promptTokens: inputTokens,
+    completionTokens: outputTokens,
+    totalTokens,
+    ...extractContextCacheUsage(data.usage),
+    contextTokens: inputTokens,
+    contextWindowIsAuthoritative: inputTokens > 0,
+  });
+}
+
+function buildAssistantConversationMessage(step: {
+  text: string;
+  toolCalls: AgentToolCall[];
+  responseBlocks?: AnthropicContentBlock[];
+}): AnthropicMessage {
+  if (Array.isArray(step.responseBlocks) && step.responseBlocks.length) {
+    return {
+      role: "assistant",
+      content: step.responseBlocks.map((block) =>
+        cloneAnthropicContentBlock(block),
+      ),
+    };
+  }
+  return {
+    role: "assistant",
+    content: [
+      ...(step.text ? [{ type: "text" as const, text: step.text }] : []),
+      ...buildAnthropicToolUseBlocks(step.toolCalls),
+    ],
+  };
+}
+
+export class AnthropicMessagesAgentAdapter implements AgentModelAdapter {
+  private conversationMessages: AnthropicMessage[] | null = null;
+  private systemBlocks: AnthropicSystemBlock[] | undefined;
+
+  getCapabilities(request: AgentRuntimeRequest): AgentModelCapabilities {
+    return buildAgentModelCapabilities({
+      streaming: true,
+      toolCalls: true,
+      contentInputs: resolveRequestContentInputs(request),
+      fileInputs: false,
+      reasoning: true,
+    });
+  }
+
+  supportsTools(_request: AgentRuntimeRequest): boolean {
+    return true;
+  }
+
+  resetState(): void {
+    this.conversationMessages = null;
+    this.systemBlocks = undefined;
+  }
+
+  async runStep(params: AgentStepParams): Promise<AgentModelStep> {
+    const cached = this.conversationMessages;
+    try {
+      return await this.runStepOnce(params);
+    } catch (error) {
+      // A step that failed keeps nothing: the first step of a conversation
+      // leaves no cached messages behind, so a retry of it starts from the
+      // same input instead of adding its continuation twice.
+      if (!cached) this.resetState();
+      throw error;
+    }
+  }
+
+  private async runStepOnce(params: AgentStepParams): Promise<AgentModelStep> {
+    const request = params.request;
+    const buildOptions = {
+      contentInputs: resolveRequestContentInputs(request),
+      modelName: request.model,
+    };
+    const initial = await buildInitialAnthropicMessages(
+      params.messages,
+      buildOptions,
+    );
+    const cachedConversationMessages = this.conversationMessages;
+    if (!cachedConversationMessages) {
+      this.conversationMessages = initial.messages;
+      this.systemBlocks = initial.systemBlocks;
+    }
+    const continuationSource = cachedConversationMessages
+      ? params.continuationMessages || []
+      : [];
+    const continuation = await buildAnthropicContinuationMessages(
+      continuationSource,
+      buildOptions,
+    );
+    const conversationBase = cachedConversationMessages || initial.messages;
+    const messages = continuation.length
+      ? [...conversationBase, ...continuation]
+      : conversationBase;
+    const outputPolicy = resolveAgentTransmittedOutputPolicy(
+      request,
+      "anthropic_messages",
+      estimateWirePayloadTokens({
+        system: this.systemBlocks,
+        messages,
+        tools: params.tools,
+      }),
+    );
+    if (outputPolicy.mode !== "numeric") {
+      throw new Error("Anthropic Messages requires a numeric output policy.");
+    }
+    const maxTokens = outputPolicy.tokens;
+    const buildPayload = (
+      reasoningOverride: ReasoningSelection | undefined,
+    ) => {
+      const reasoningPayload = buildReasoningPayload(
+        reasoningOverride,
+        false,
+        request.model,
+        request.apiBase,
+        "anthropic_messages",
+        {
+          maxTokens,
+          anthropicModeOverride: reasoningOverride?.anthropicModeOverride,
+          profileOverride: request.advanced?.profileOverride,
+        },
+      );
+      const systemCacheControl =
+        request.contextCache?.enabled &&
+        request.contextCache.requestHints?.anthropicBlockCacheControl
+          ? request.contextCache.requestHints.anthropicBlockCacheControl
+          : undefined;
+      const toolCacheControl =
+        request.contextCache?.enabled &&
+        request.contextCache.requestHints?.anthropicToolCacheControl
+          ? request.contextCache.requestHints.anthropicToolCacheControl
+          : undefined;
+      const requestCacheControl =
+        request.contextCache?.enabled &&
+        request.contextCache.requestHints?.anthropicRequestCacheControl
+          ? request.contextCache.requestHints.anthropicRequestCacheControl
+          : undefined;
+      const system = buildAnthropicSystemPayload(
+        this.systemBlocks,
+        systemCacheControl,
+      );
+      const toolsPayload = buildAnthropicTools(params.tools, toolCacheControl);
+      return {
+        model: request.model,
+        max_tokens: maxTokens,
+        messages,
+        system,
+        tools: toolsPayload,
+        tool_choice: { type: params.toolChoice === "none" ? "none" : "auto" },
+        ...(requestCacheControl ? { cache_control: requestCacheControl } : {}),
+        stream: true,
+        ...reasoningPayload.extra,
+        ...(reasoningPayload.omitTemperature
+          ? {}
+          : {
+              temperature: normalizeTemperature(request.advanced?.temperature),
+            }),
+      };
+    };
+    const url = resolveProviderTransportEndpoint({
+      protocol: "anthropic_messages",
+      apiBase: request.apiBase || "",
+    });
+    const response = await postWithReasoningFallback({
+      url,
+      scope: { conversationKey: request.conversationKey },
+      auth: { mode: "api_key", token: request.apiKey || "" },
+      headers: buildProviderAuthHeaders({
+        protocol: "anthropic_messages",
+        apiKey: request.apiKey || "",
+      }),
+      modelName: request.model,
+      initialReasoning: request.reasoning,
+      buildPayload,
+      getRecoverySelection: getAnthropicMessagesReasoningRecoverySelection,
+      signal: params.signal,
+    });
+    if (!response.ok) {
+      throw new Error(
+        `${response.status} ${response.statusText} - ${await response.text()}`,
+      );
+    }
+    let normalized: AnthropicNormalizedResponse;
+    if (response.body) {
+      normalized = await parseAnthropicStepStream(
+        response.body,
+        params.onTextDelta,
+        params.onReasoning,
+        params.onUsage,
+      );
+    } else {
+      const data = (await response.json()) as AnthropicResponse;
+      normalized = normalizeAnthropicResponse(data);
+      await reportAnthropicResponseUsage(data, params.onUsage);
+    }
+    const recoveryReason = resolveAgentRecoverableCompletion(
+      normalized.completion,
+    );
+    if (recoveryReason) {
+      this.conversationMessages = normalized.text
+        ? [
+            ...messages,
+            {
+              role: "assistant",
+              content: [{ type: "text", text: normalized.text }],
+            },
+          ]
+        : messages;
+      return {
+        kind: "incomplete",
+        reason: recoveryReason,
+        providerReason: normalized.completion.providerReason,
+        text: normalized.text,
+        recoveryInstruction: buildAgentRecoveryInstruction(
+          recoveryReason,
+          "tool call",
+        ),
+        assistantMessage: {
+          role: "assistant",
+          content: normalized.text,
+        },
+      };
+    }
+    // A reply with no text and no tool call (empty, or thinking only) is
+    // not kept: Anthropic rejects an empty assistant turn, and such a turn
+    // carries nothing the next request needs.
+    const assistantMessage = buildAssistantConversationMessage(normalized);
+    const keepsAssistant =
+      Array.isArray(assistantMessage.content) &&
+      assistantMessage.content.some((block) => {
+        const type = String(block.type).toLowerCase();
+        return (
+          (type === "text" && Boolean(String(block.text || "").trim())) ||
+          type === "tool_use"
+        );
+      });
+    this.conversationMessages = keepsAssistant
+      ? [...messages, assistantMessage]
+      : messages;
+    if (normalized.toolCalls.length) {
+      return {
+        kind: "tool_calls",
+        calls: normalized.toolCalls,
+        assistantMessage: {
+          role: "assistant",
+          content: normalized.text,
+          tool_calls: normalized.toolCalls,
+        },
+      };
+    }
+    return {
+      kind: "final",
+      text: normalized.text,
+      assistantMessage: {
+        role: "assistant",
+        content: normalized.text,
+      },
+    };
+  }
+}

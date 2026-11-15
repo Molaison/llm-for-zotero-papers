@@ -1,0 +1,87 @@
+import type {
+  AgentModelCapabilities,
+  AgentModelStep,
+  AgentRuntimeRequest,
+} from "../types";
+import {
+  normalizeProviderProtocolForAuthMode,
+  type ProviderProtocol,
+} from "../../utils/providerProtocol";
+import { isGeminiBase } from "../../utils/apiHelpers";
+import type { AgentModelAdapter } from "./adapter";
+import { buildAgentModelCapabilities } from "./contentCapabilities";
+import { CodexResponsesAgentAdapter } from "./codexResponses";
+import { OpenAIResponsesAgentAdapter } from "./openaiResponses";
+import { OpenAIChatCompatAgentAdapter } from "./openaiCompatible";
+import { AnthropicMessagesAgentAdapter } from "./anthropicMessages";
+import { GeminiNativeAgentAdapter } from "./geminiNative";
+import { OllamaNativeAgentAdapter } from "./ollamaNative";
+
+class CodexAppServerNativeOnlyAgentAdapter implements AgentModelAdapter {
+  getCapabilities(_request: AgentRuntimeRequest): AgentModelCapabilities {
+    return buildAgentModelCapabilities({
+      streaming: false,
+      toolCalls: false,
+      contentInputs: null,
+      fileInputs: false,
+      reasoning: false,
+    });
+  }
+
+  supportsTools(_request: AgentRuntimeRequest): boolean {
+    return false;
+  }
+
+  async runStep(): Promise<AgentModelStep> {
+    throw new Error(
+      "Codex App Server is handled by the native persistent runtime, not the original agent pipeline.",
+    );
+  }
+}
+
+export function resolveRequestProviderProtocol(
+  request: Pick<
+    AgentRuntimeRequest,
+    "providerProtocol" | "authMode" | "apiBase"
+  >,
+): ProviderProtocol {
+  return normalizeProviderProtocolForAuthMode({
+    protocol: request.providerProtocol,
+    authMode: request.authMode,
+    apiBase: request.apiBase,
+  });
+}
+
+export function createAgentModelAdapter(
+  request: AgentRuntimeRequest,
+): AgentModelAdapter {
+  if (request.authMode === "codex_app_server") {
+    return new CodexAppServerNativeOnlyAgentAdapter();
+  }
+  const protocol = resolveRequestProviderProtocol(request);
+  if (
+    protocol === "openai_chat_compat" &&
+    isGeminiBase((request.apiBase || "").trim())
+  ) {
+    // Gemini's OpenAI-compatible chat endpoint drops thought signatures on
+    // returned tool calls, which breaks multi-step agent continuation.
+    return new GeminiNativeAgentAdapter();
+  }
+  if (protocol === "ollama_native") {
+    return new OllamaNativeAgentAdapter();
+  }
+  if (protocol === "codex_responses") {
+    return new CodexResponsesAgentAdapter();
+  }
+  if (protocol === "responses_api") {
+    // Honor the resolved protocol; file uploads remain independently gated.
+    return new OpenAIResponsesAgentAdapter();
+  }
+  if (protocol === "anthropic_messages") {
+    return new AnthropicMessagesAgentAdapter();
+  }
+  if (protocol === "gemini_native") {
+    return new GeminiNativeAgentAdapter();
+  }
+  return new OpenAIChatCompatAgentAdapter();
+}

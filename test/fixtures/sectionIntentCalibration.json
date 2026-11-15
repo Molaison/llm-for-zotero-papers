@@ -1,0 +1,248 @@
+{
+  "//": "Closest cosine similarity of each labelled calibration question to the section-intent examples of each group (SECTION_INTENT_EXAMPLES), from the live suite's plain_chat.section_intent_calibration case. Similarities only.",
+  "provider": "gemini",
+  "model": "gemini-embedding-001",
+  "dimensions": 3072,
+  "questions": [
+    {
+      "label": "methods",
+      "language": "en",
+      "closest": {
+        "methods": 0.9494,
+        "results": 0.7442,
+        "limitations": 0.7196,
+        "general": 0.7079
+      }
+    },
+    {
+      "label": "methods",
+      "language": "zh",
+      "closest": {
+        "methods": 0.8886,
+        "results": 0.7706,
+        "limitations": 0.7372,
+        "general": 0.7575
+      }
+    },
+    {
+      "label": "methods",
+      "language": "ja",
+      "closest": {
+        "methods": 0.8814,
+        "results": 0.7833,
+        "limitations": 0.7477,
+        "general": 0.7697
+      }
+    },
+    {
+      "label": "methods",
+      "language": "de",
+      "closest": {
+        "methods": 0.8962,
+        "results": 0.7553,
+        "limitations": 0.6787,
+        "general": 0.6648
+      }
+    },
+    {
+      "label": "methods",
+      "language": "es",
+      "closest": {
+        "methods": 0.8818,
+        "results": 0.7549,
+        "limitations": 0.6723,
+        "general": 0.664
+      }
+    },
+    {
+      "label": "results",
+      "language": "en",
+      "closest": {
+        "methods": 0.8129,
+        "results": 0.8296,
+        "limitations": 0.7027,
+        "general": 0.7153
+      }
+    },
+    {
+      "label": "results",
+      "language": "zh",
+      "closest": {
+        "methods": 0.755,
+        "results": 0.8272,
+        "limitations": 0.7082,
+        "general": 0.726
+      }
+    },
+    {
+      "label": "results",
+      "language": "ja",
+      "closest": {
+        "methods": 0.7896,
+        "results": 0.8358,
+        "limitations": 0.7252,
+        "general": 0.7466
+      }
+    },
+    {
+      "label": "results",
+      "language": "de",
+      "closest": {
+        "methods": 0.7956,
+        "results": 0.8242,
+        "limitations": 0.7027,
+        "general": 0.7268
+      }
+    },
+    {
+      "label": "results",
+      "language": "es",
+      "closest": {
+        "methods": 0.7893,
+        "results": 0.8192,
+        "limitations": 0.7007,
+        "general": 0.713
+      }
+    },
+    {
+      "label": "limitations",
+      "language": "en",
+      "closest": {
+        "methods": 0.7853,
+        "results": 0.774,
+        "limitations": 0.8395,
+        "general": 0.7186
+      }
+    },
+    {
+      "label": "limitations",
+      "language": "zh",
+      "closest": {
+        "methods": 0.7388,
+        "results": 0.7422,
+        "limitations": 0.8496,
+        "general": 0.6876
+      }
+    },
+    {
+      "label": "limitations",
+      "language": "ja",
+      "closest": {
+        "methods": 0.7521,
+        "results": 0.7421,
+        "limitations": 0.8659,
+        "general": 0.6873
+      }
+    },
+    {
+      "label": "limitations",
+      "language": "de",
+      "closest": {
+        "methods": 0.7627,
+        "results": 0.7437,
+        "limitations": 0.8268,
+        "general": 0.6607
+      }
+    },
+    {
+      "label": "limitations",
+      "language": "es",
+      "closest": {
+        "methods": 0.747,
+        "results": 0.7171,
+        "limitations": 0.8455,
+        "general": 0.6512
+      }
+    },
+    {
+      "label": "general",
+      "language": "en",
+      "closest": {
+        "methods": 0.8266,
+        "results": 0.8606,
+        "limitations": 0.8209,
+        "general": 0.9055
+      }
+    },
+    {
+      "label": "general",
+      "language": "zh",
+      "closest": {
+        "methods": 0.7798,
+        "results": 0.8041,
+        "limitations": 0.7639,
+        "general": 0.8695
+      }
+    },
+    {
+      "label": "general",
+      "language": "ja",
+      "closest": {
+        "methods": 0.7917,
+        "results": 0.8114,
+        "limitations": 0.7609,
+        "general": 0.8576
+      }
+    },
+    {
+      "label": "general",
+      "language": "de",
+      "closest": {
+        "methods": 0.6891,
+        "results": 0.7049,
+        "limitations": 0.6726,
+        "general": 0.7577
+      }
+    },
+    {
+      "label": "general",
+      "language": "es",
+      "closest": {
+        "methods": 0.692,
+        "results": 0.7038,
+        "limitations": 0.6708,
+        "general": 0.7636
+      }
+    },
+    {
+      "label": "unrelated",
+      "language": "en",
+      "closest": {
+        "methods": 0.5491,
+        "results": 0.5717,
+        "limitations": 0.5701,
+        "general": 0.5667
+      }
+    },
+    {
+      "label": "unrelated",
+      "language": "zh",
+      "closest": {
+        "methods": 0.5658,
+        "results": 0.5857,
+        "limitations": 0.5772,
+        "general": 0.6022
+      }
+    },
+    {
+      "label": "methods+results",
+      "language": "en",
+      "closest": {
+        "methods": 0.8262,
+        "results": 0.8007,
+        "limitations": 0.7451,
+        "general": 0.7036
+      }
+    },
+    {
+      "label": "methods+results",
+      "language": "zh",
+      "closest": {
+        "methods": 0.8637,
+        "results": 0.7975,
+        "limitations": 0.7462,
+        "general": 0.7855
+      }
+    }
+  ]
+}

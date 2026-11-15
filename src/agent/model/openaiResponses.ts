@@ -1,0 +1,267 @@
+import { providerSupportsFileUploads } from "../../utils/providerPresets";
+import {
+  buildReasoningPayload,
+  buildPromptCachePayloadHints,
+  postWithReasoningFallback,
+  resolveRequestAuthState,
+  uploadFilesForResponses,
+  readLocalFileBytes,
+  type ChatFileAttachment,
+} from "../../utils/llmClient";
+import { normalizeTemperature } from "../../utils/normalization";
+import { resolveProviderTransportEndpoint } from "../../utils/providerTransport";
+import type {
+  AgentModelCapabilities,
+  AgentModelContentPart,
+  AgentModelStep,
+  AgentRuntimeRequest,
+} from "../types";
+import type { AgentModelAdapter, AgentStepParams } from "./adapter";
+import { buildAgentModelCapabilities } from "./contentCapabilities";
+import { resolveAgentTransmittedOutputPolicy } from "./limits";
+import { estimateWirePayloadTokens } from "../../utils/modelInputCap";
+import {
+  buildAgentRecoveryInstruction,
+  resolveAgentRecoverableCompletion,
+} from "./completion";
+import {
+  buildResponsesContinuationInput,
+  buildResponsesInitialInput,
+  type ResponsesPayload,
+  normalizeResponsesStepFromPayload,
+  parseResponsesStepStream,
+  replayableResponsesOutputItems,
+  withoutTrailingReasoningItems,
+} from "./responsesShared";
+import { buildResponsesFunctionTools, encodeBytesBase64 } from "./shared";
+import {
+  createResponsesPdfPreparation,
+  isResponsesPdfAttachment,
+} from "../../utils/responsesPdfInputs";
+import { resolveRequestContentInputs } from "./messageBuilder";
+
+async function uploadFilePart(
+  part: Extract<AgentModelContentPart, { type: "file_ref" }>,
+  request: AgentRuntimeRequest,
+  signal?: AbortSignal,
+) {
+  if (!providerSupportsFileUploads(request.apiBase || "")) {
+    throw new Error(
+      "This provider does not support file uploads; use rendered document content.",
+    );
+  }
+  const fileIds = await uploadFilesForResponses({
+    apiBase: request.apiBase || "",
+    apiKey: request.apiKey || "",
+    attachments: [
+      {
+        name: part.file_ref.name,
+        mimeType: part.file_ref.mimeType,
+        storedPath: part.file_ref.storedPath,
+        contentHash: part.file_ref.contentHash,
+      } satisfies ChatFileAttachment,
+    ],
+    signal,
+  });
+  return fileIds.map((fileId) => ({
+    type: "input_file" as const,
+    file_id: fileId,
+  }));
+}
+
+export class OpenAIResponsesAgentAdapter implements AgentModelAdapter {
+  private conversationItems: unknown[] | null = null;
+
+  getCapabilities(request: AgentRuntimeRequest): AgentModelCapabilities {
+    const contentInputs = resolveRequestContentInputs(request);
+    return buildAgentModelCapabilities({
+      streaming: true,
+      toolCalls: true,
+      contentInputs,
+      fileInputs: contentInputs.nativeFiles || contentInputs.pdfDocuments,
+      reasoning: true,
+    });
+  }
+
+  supportsTools(_request: AgentRuntimeRequest): boolean {
+    return true;
+  }
+
+  resetState(): void {
+    this.conversationItems = null;
+  }
+
+  async runStep(params: AgentStepParams): Promise<AgentModelStep> {
+    const request = params.request;
+    const auth = await resolveRequestAuthState({
+      authMode: request.authMode || "api_key",
+      apiKey: request.apiKey || "",
+      signal: params.signal,
+    });
+    const pdf = createResponsesPdfPreparation({
+      model: request.model || "",
+      apiBase: request.apiBase,
+      protocol: "responses_api",
+      authMode: request.authMode || "api_key",
+      inputMode: request.advanced?.inputMode,
+      signal: params.signal,
+      readBytes: readLocalFileBytes,
+      encodeBase64: encodeBytesBase64,
+    });
+    const resolveFilePart = async (
+      part: Extract<AgentModelContentPart, { type: "file_ref" }>,
+      signal?: AbortSignal,
+    ) =>
+      isResponsesPdfAttachment(part.file_ref)
+        ? [await pdf.prepareFile(part.file_ref)]
+        : uploadFilePart(part, request, signal);
+    // Replayed wire already contains the bytes: do not reopen historical
+    // paths or encode a second, discarded initial input on tool continuation.
+    const initialMessages = this.conversationItems
+      ? params.messages.filter((message) => message.role === "system")
+      : params.messages;
+    const initialInput = await buildResponsesInitialInput(initialMessages, {
+      resolveFilePart,
+      inlinePdf: true,
+      signal: params.signal,
+    });
+    const instructions =
+      initialInput.instructions?.trim() ||
+      "You are the agent runtime inside a Zotero plugin.";
+    const followupInput = this.conversationItems
+      ? await buildResponsesContinuationInput(
+          params.continuationMessages || [],
+          {
+            resolveFilePart,
+            inlinePdf: true,
+            signal: params.signal,
+          },
+        )
+      : [];
+    const inputItems = this.conversationItems
+      ? [...this.conversationItems, ...followupInput]
+      : initialInput.input;
+    const hasInlinePdf = pdf.validateWireInput(inputItems);
+    const url = resolveProviderTransportEndpoint({
+      protocol: "responses_api",
+      apiBase: request.apiBase || "",
+      authMode: request.authMode,
+    });
+    const outputPolicy = resolveAgentTransmittedOutputPolicy(
+      request,
+      "responses_api",
+      estimateWirePayloadTokens({
+        instructions,
+        input: inputItems,
+        tools: params.tools,
+      }),
+    );
+    const response = await postWithReasoningFallback({
+      url,
+      scope: { conversationKey: request.conversationKey },
+      auth,
+      allowAutomaticRetry: hasInlinePdf ? false : undefined,
+      modelName: request.model,
+      initialReasoning: request.reasoning,
+      buildPayload: (reasoningOverride) => {
+        const reasoningPayload = buildReasoningPayload(
+          reasoningOverride,
+          true,
+          request.model,
+          request.apiBase,
+          "responses_api",
+          { profileOverride: request.advanced?.profileOverride },
+        );
+        return {
+          model: request.model,
+          instructions,
+          input: inputItems,
+          ...buildPromptCachePayloadHints(request.contextCache),
+          include: ["reasoning.encrypted_content"],
+          tools: buildResponsesFunctionTools(params.tools),
+          tool_choice: params.toolChoice === "none" ? "none" : "auto",
+          store: false,
+          stream: true,
+          ...(outputPolicy.mode === "numeric"
+            ? { max_output_tokens: outputPolicy.tokens }
+            : {}),
+          ...reasoningPayload.extra,
+          ...(reasoningPayload.omitTemperature
+            ? {}
+            : {
+                temperature: normalizeTemperature(
+                  request.advanced?.temperature,
+                ),
+              }),
+        };
+      },
+      signal: params.signal,
+    });
+    const normalized = response.body
+      ? await parseResponsesStepStream(
+          response.body,
+          params.onTextDelta,
+          params.onReasoning,
+          params.onUsage,
+        )
+      : normalizeResponsesStepFromPayload(
+          (await response.json()) as ResponsesPayload,
+        );
+    const recoveryReason = resolveAgentRecoverableCompletion(
+      normalized.completion,
+    );
+    if (recoveryReason) {
+      // A reasoning item must not end the replayed items: the recovery
+      // message would follow it, and the provider rejects that request.
+      this.conversationItems = [
+        ...inputItems,
+        ...withoutTrailingReasoningItems(
+          normalized.outputItems.filter((item) => {
+            if (!item || typeof item !== "object") return true;
+            const type = String(
+              (item as { type?: unknown }).type ?? "",
+            ).toLowerCase();
+            return type !== "function_call" && type !== "tool_call";
+          }),
+        ),
+      ];
+      return {
+        kind: "incomplete",
+        reason: recoveryReason,
+        providerReason: normalized.completion.providerReason,
+        text: normalized.text,
+        recoveryInstruction: buildAgentRecoveryInstruction(
+          recoveryReason,
+          "tool call",
+        ),
+        assistantMessage: {
+          role: "assistant",
+          content: normalized.text,
+        },
+      };
+    }
+    this.conversationItems = [
+      ...inputItems,
+      ...replayableResponsesOutputItems(normalized),
+    ];
+    if (normalized.toolCalls.length) {
+      return {
+        kind: "tool_calls",
+        calls: normalized.toolCalls,
+        assistantMessage: {
+          role: "assistant",
+          content: normalized.text,
+          tool_calls: normalized.toolCalls,
+        },
+      };
+    }
+    return {
+      kind: "final",
+      text: normalized.text,
+      assistantMessage: {
+        role: "assistant",
+        content: normalized.text,
+      },
+    };
+  }
+}

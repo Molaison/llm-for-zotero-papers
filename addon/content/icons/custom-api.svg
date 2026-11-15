@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none">
+  <style>
+    .brackets { stroke: #087bb5; }
+    .slash { stroke: #5365cb; }
+    @media (prefers-color-scheme: dark) {
+      .brackets { stroke: #69d6ff; }
+      .slash { stroke: #7797ff; }
+    }
+  </style>
+  <g stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+    <path class="brackets" d="m10 8-7 8 7 8m12-16 7 8-7 8" />
+    <path class="slash" d="m18 5-4 22" />
+  </g>
+</svg>

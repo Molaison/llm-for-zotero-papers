@@ -1,0 +1,53 @@
+[
+  {
+    "type": "text",
+    "text_level": 1,
+    "text": "Adaptive front tracking for lubrication-type free boundary flows",
+    "page_idx": 0
+  },
+  { "type": "text", "text_level": 2, "text": "Abstract", "page_idx": 0 },
+  {
+    "type": "text",
+    "text_level": 2,
+    "text": "1 Introduction and model statement",
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text_level": 2,
+    "text": "2 Numerical algorithm",
+    "page_idx": 1
+  },
+  {
+    "type": "text",
+    "text_level": 2,
+    "text": "2.1 Weak formulation",
+    "page_idx": 2
+  },
+  {
+    "type": "text",
+    "text_level": 2,
+    "text": "2.2 Kinematic condition",
+    "page_idx": 2
+  },
+  {
+    "type": "text",
+    "text_level": 2,
+    "text": "2.3 Algorithm summarized",
+    "page_idx": 3
+  },
+  {
+    "type": "text",
+    "text_level": 2,
+    "text": "3 Examples in 1D",
+    "page_idx": 3
+  },
+  {
+    "type": "text",
+    "text_level": 2,
+    "text": "4 Examples in 2D",
+    "page_idx": 4
+  },
+  { "type": "text", "text_level": 2, "text": "5 Conclusion", "page_idx": 5 },
+  { "type": "text", "text_level": 2, "text": "References", "page_idx": 5 }
+]

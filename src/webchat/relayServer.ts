@@ -1,0 +1,2531 @@
+/**
+ * [webchat] Embedded HTTP relay server for the ChatGPT web sync pipeline.
+ *
+ * Registers endpoints on Zotero's built-in HTTP server (port 23119)
+ * so no external relay process is needed.
+ *
+ * The Chrome extension polls these endpoints to pick up queries,
+ * post streaming partials, and submit final responses.
+ *
+ * Endpoints:
+ *   POST /llm-for-zotero/webchat/submit_query
+ *   GET  /llm-for-zotero/webchat/poll_query
+ *   GET  /llm-for-zotero/webchat/poll_response
+ *   POST /llm-for-zotero/webchat/update_partial
+ *   POST /llm-for-zotero/webchat/submit_response
+ *   GET  /llm-for-zotero/webchat/poll_command
+ *   POST /llm-for-zotero/webchat/new_chat
+ *   GET  /llm-for-zotero/webchat/chat_history
+ *   POST /llm-for-zotero/webchat/chat_history
+ *   POST /llm-for-zotero/webchat/update_chat_history
+ *   POST /llm-for-zotero/webchat/update_chat_url
+ *   POST /llm-for-zotero/webchat/load_chat
+ */
+
+import { appLogger } from "../core/logging";
+import {
+  getWebChatConversationId,
+  getWebChatTarget,
+  getWebChatTargetByUrl,
+  isWebChatUrlForTarget,
+} from "./types";
+
+const PREFIX = "/llm-for-zotero/webchat";
+const PRE_SUBMIT_RECLAIM_MS = 120_000;
+const PIPELINE_TIMEOUT_MS = 180_000;
+export const ATTACHMENT_DELIVERY_CONTRACT_VERSION = 1;
+
+/**
+ * Get the actual base URL of the embedded relay server.
+ * Zotero's HTTP server port can vary (23119, 23120, etc.) so we read it dynamically.
+ */
+export function getRelayBaseUrl(): string {
+  const port = Zotero.Prefs.get("httpServer.port") || 23119;
+  return `http://localhost:${port}${PREFIX}`;
+}
+
+// ---------------------------------------------------------------------------
+// In-memory state
+// ---------------------------------------------------------------------------
+
+interface PendingCommand {
+  type:
+    | "NEW_CHAT"
+    | "LOAD_CHAT"
+    | "DELETE_CHAT"
+    | "SCRAPE_HISTORY"
+    | "ENSURE_TAB";
+  chatUrl?: string;
+  chatId?: string;
+  target?: string;
+}
+
+export interface ScrapedChatMessage {
+  messageKey?: string;
+  role: string;
+  text: string;
+  thinking?: string;
+  attachments?: string[];
+}
+
+export interface ScrapedTranscriptSnapshot {
+  messages: ScrapedChatMessage[];
+  chatUrl: string | null;
+  chatId: string | null;
+  siteHostname: string | null;
+  capturedAt: number;
+  source: "network" | "dom" | null;
+}
+
+export type RelayQueryPhase =
+  | "pending"
+  | "claimed"
+  | "prompt_applied"
+  | "submit_started"
+  | "submitted"
+  | "streaming"
+  | "done"
+  | "error";
+
+export type RelayRunState =
+  | "submitted"
+  | "active"
+  | "settling"
+  | "done"
+  | "incomplete"
+  | "error";
+
+export type RelayCompletionReason =
+  | "settled"
+  | "forced_cancel"
+  | "timeout"
+  | "error";
+
+export type RelayTurnStatus =
+  | "navigating"
+  | "ready"
+  | "submitted"
+  | "user_turn_matched"
+  | "assistant_turn_matched"
+  | "assistant_settling"
+  | "done"
+  | "incomplete"
+  | "error";
+
+export interface RelayTurnDiagnostic {
+  reasonCode?: string | null;
+  phase?: RelayQueryPhase | RelayTurnStatus | string | null;
+  siteId?: string | null;
+  message?: string | null;
+  composerTextMatched?: boolean | null;
+  uploadDetected?: boolean | null;
+  sendControlState?: string | null;
+  clickAttempts?: number | null;
+  requestObserved?: boolean | null;
+  streamObserved?: boolean | null;
+  userTurnMatched?: boolean | null;
+  assistantTurnMatched?: boolean | null;
+  attachmentFilename?: string | null;
+  attachmentMethod?: string | null;
+  attachmentVerificationMs?: number | null;
+  attachmentPreviewVerified?: boolean | null;
+  attachmentRequested?: boolean | null;
+  attachmentFilenameConfirmed?: boolean | null;
+  attachmentReadyVerified?: boolean | null;
+  submittedAttachmentVerified?: boolean | null;
+  submittedAttachmentCount?: number | null;
+  submittedPdfCount?: number | null;
+  attachmentContractVerified?: boolean | null;
+  completionDetectionMs?: number | null;
+}
+
+export interface RelayState {
+  status: "idle" | "pending" | "running" | "done" | "error";
+  remote_chat_url: string | null;
+  remote_chat_id: string | null;
+  user_turn_key: string | null;
+  assistant_turn_key: string | null;
+  baseline_transcript_count: number;
+  baseline_transcript_hash: string | null;
+  turn_status: RelayTurnStatus | null;
+  query: {
+    prompt: string | null;
+    pdf_base64: string | null;
+    pdf_filename: string | null;
+    images: string[] | null;
+    chatgpt_mode: string | null;
+    /** Which registered webchat site to target. */
+    target: string | null;
+    /** Existing provider conversation that a follow-up must remain bound to. */
+    expected_chat_url: string | null;
+    expected_chat_id: string | null;
+    force_new_chat: boolean;
+    delivery_contract_version: number;
+    seq: number;
+    attempt: number;
+    phase: RelayQueryPhase;
+  };
+  active_seq: number;
+  active_attempt: number;
+  running_since: number;
+  last_activity_at: number;
+  partial_text: string | null;
+  partial_thinking: string | null;
+  answer_anchor_id: string | null;
+  answer_revision: number;
+  thinking_revision: number;
+  run_state: RelayRunState | null;
+  completion_reason: RelayCompletionReason | null;
+  last_diagnostic: RelayTurnDiagnostic | null;
+  responses: Array<{
+    seq: number;
+    attempt?: number;
+    text?: string;
+    error?: string;
+    timestamp: string;
+    thinking?: string;
+    answer_anchor_id?: string | null;
+    answer_revision?: number;
+    thinking_revision?: number;
+    run_state?: RelayRunState;
+    completion_reason?: RelayCompletionReason | null;
+    remote_chat_url?: string | null;
+    remote_chat_id?: string | null;
+    user_turn_key?: string | null;
+    assistant_turn_key?: string | null;
+    baseline_transcript_count?: number;
+    baseline_transcript_hash?: string | null;
+    turn_status?: RelayTurnStatus | null;
+    diagnostic?: RelayTurnDiagnostic | null;
+  }>;
+  activeSessionId: string | null;
+  pendingCommand: PendingCommand | null;
+  /** [webchat] Actual ChatGPT mode reported back by the extension. */
+  reported_mode: string | null;
+  /** [webchat] Set by cancel button — polled separately so it works during active pipeline. */
+  stopRequested: boolean;
+  stopRequestedSeq: number;
+  stopRequestedAttempt: number;
+  /** [webchat] Active registered target site, set when submitting queries. */
+  active_target: string | null;
+}
+
+// Use Zotero object as shared namespace — guaranteed same across all contexts
+// in the plugin (globalThis may differ between sandbox scopes in Gecko)
+interface ExtensionStatus {
+  chatTabAlive: boolean;
+  chatUrl: string | null;
+  siteId: string | null;
+  url: string | null;
+  contentScriptAlive: boolean;
+  contentScriptAliveExplicit: boolean;
+  mainWorldInjected: boolean;
+  composerFound: boolean;
+  composerFoundExplicit: boolean;
+  sendControlState: string | null;
+  uploadControlFound: boolean;
+  networkHookActive: boolean;
+  supportedDeliveryContracts: number[];
+  supportedTargets: string[];
+  answerCapture: "dom" | "network" | null;
+  lastRequestAt: number | null;
+  lastStreamAt: number | null;
+  lastDiagnostic: RelayTurnDiagnostic | null;
+  ts: number;
+}
+
+export type RelayHistorySyncStatus =
+  | "ok"
+  | "empty"
+  | "invalid_source"
+  | "timeout";
+
+export type RelayHistorySyncSource = "network" | "dom" | null;
+
+export type RelayHistorySiteSyncEntry = {
+  lastUpdatedAt: number;
+  status: RelayHistorySyncStatus;
+  source: RelayHistorySyncSource;
+};
+
+type HistorySiteSyncMap = Record<string, RelayHistorySiteSyncEntry>;
+
+const Z = Zotero as unknown as {
+  _webchatRelay?: {
+    state: RelayState;
+    mirroredHistory: Array<{ id: string; title: string; chatUrl: string }>;
+    historySiteSync: HistorySiteSyncMap;
+    scrapedTranscript: ScrapedTranscriptSnapshot | null;
+    lastExtensionContact: number;
+    extensionStatus: ExtensionStatus | null;
+  };
+};
+
+if (!Z._webchatRelay) {
+  Z._webchatRelay = {
+    state: {
+      status: "idle",
+      remote_chat_url: null,
+      remote_chat_id: null,
+      user_turn_key: null,
+      assistant_turn_key: null,
+      baseline_transcript_count: 0,
+      baseline_transcript_hash: null,
+      turn_status: null,
+      query: {
+        prompt: null,
+        pdf_base64: null,
+        pdf_filename: null,
+        images: null,
+        chatgpt_mode: null,
+        target: null,
+        expected_chat_url: null,
+        expected_chat_id: null,
+        force_new_chat: false,
+        delivery_contract_version: 0,
+        seq: 0,
+        attempt: 0,
+        phase: "pending",
+      },
+      active_seq: 0,
+      active_attempt: 0,
+      running_since: 0,
+      last_activity_at: 0,
+      partial_text: null,
+      partial_thinking: null,
+      answer_anchor_id: null,
+      answer_revision: 0,
+      thinking_revision: 0,
+      run_state: null,
+      completion_reason: null,
+      last_diagnostic: null,
+      responses: [],
+      activeSessionId: null,
+      pendingCommand: null,
+      reported_mode: null,
+      stopRequested: false,
+      stopRequestedSeq: 0,
+      stopRequestedAttempt: 0,
+      active_target: null,
+    },
+    mirroredHistory: [],
+    historySiteSync: {},
+    scrapedTranscript: null,
+    lastExtensionContact: 0,
+    extensionStatus: null,
+  };
+}
+
+// Access shared state via Zotero.Server.Endpoints — this object is guaranteed
+// to be the same in both the plugin's scope and the server's handler scope,
+// because we register endpoint classes directly on it.
+const STORAGE_KEY = "__webchatRelayStorage";
+
+function _store(): {
+  state: RelayState;
+  mirroredHistory: Array<{ id: string; title: string; chatUrl: string }>;
+  historySiteSync: HistorySiteSyncMap;
+  scrapedTranscript: ScrapedTranscriptSnapshot | null;
+  lastExtensionContact: number;
+  extensionStatus: ExtensionStatus | null;
+} {
+  const ep = Zotero.Server.Endpoints as any;
+  if (!ep[STORAGE_KEY]) {
+    ep[STORAGE_KEY] = Z._webchatRelay;
+  }
+  return ep[STORAGE_KEY];
+}
+
+function S(): RelayState {
+  return _store().state;
+}
+function getMirroredHistory(): Array<{
+  id: string;
+  title: string;
+  chatUrl: string;
+}> {
+  return _store().mirroredHistory;
+}
+function setMirroredHistory(
+  h: Array<{ id: string; title: string; chatUrl: string }>,
+) {
+  _store().mirroredHistory = h;
+}
+function getHistorySiteSync(): HistorySiteSyncMap {
+  return _store().historySiteSync;
+}
+function cloneScrapedTranscriptSnapshot(
+  snapshot: ScrapedTranscriptSnapshot | null,
+): ScrapedTranscriptSnapshot | null {
+  if (!snapshot) return null;
+  return {
+    messages: Array.isArray(snapshot.messages)
+      ? snapshot.messages.map((message) => ({
+          messageKey:
+            typeof message?.messageKey === "string"
+              ? message.messageKey
+              : undefined,
+          role: typeof message?.role === "string" ? message.role : "assistant",
+          text: typeof message?.text === "string" ? message.text : "",
+          thinking:
+            typeof message?.thinking === "string"
+              ? message.thinking
+              : undefined,
+          attachments: Array.isArray(message?.attachments)
+            ? message.attachments.filter(
+                (attachment): attachment is string =>
+                  typeof attachment === "string",
+              )
+            : undefined,
+        }))
+      : [],
+    chatUrl: typeof snapshot.chatUrl === "string" ? snapshot.chatUrl : null,
+    chatId: typeof snapshot.chatId === "string" ? snapshot.chatId : null,
+    siteHostname:
+      typeof snapshot.siteHostname === "string" ? snapshot.siteHostname : null,
+    capturedAt:
+      Number.isFinite(snapshot.capturedAt) && snapshot.capturedAt > 0
+        ? Math.floor(snapshot.capturedAt)
+        : 0,
+    source:
+      snapshot.source === "network" || snapshot.source === "dom"
+        ? snapshot.source
+        : null,
+  };
+}
+
+function getScrapedTranscript(): ScrapedTranscriptSnapshot | null {
+  return _store().scrapedTranscript;
+}
+
+function setScrapedTranscript(snapshot: ScrapedTranscriptSnapshot | null) {
+  _store().scrapedTranscript = cloneScrapedTranscriptSnapshot(snapshot);
+}
+
+function normalizeScrapedTranscriptSnapshot(
+  body: Record<string, unknown>,
+): ScrapedTranscriptSnapshot {
+  const messages = Array.isArray(body.messages)
+    ? (body.messages as Array<Record<string, unknown>>).map((message) => ({
+        messageKey:
+          typeof message?.messageKey === "string"
+            ? message.messageKey
+            : undefined,
+        role: typeof message?.role === "string" ? message.role : "assistant",
+        text: typeof message?.text === "string" ? message.text : "",
+        thinking:
+          typeof message?.thinking === "string" ? message.thinking : undefined,
+        attachments: Array.isArray(message?.attachments)
+          ? message.attachments.filter(
+              (attachment): attachment is string =>
+                typeof attachment === "string",
+            )
+          : undefined,
+      }))
+    : [];
+  const chatUrl = typeof body.chatUrl === "string" ? body.chatUrl : null;
+  const chatId = typeof body.chatId === "string" ? body.chatId : null;
+  let siteHostname =
+    typeof body.siteHostname === "string"
+      ? normalizeHistorySiteHostname(body.siteHostname)
+      : "";
+  if (!siteHostname && chatUrl) {
+    try {
+      siteHostname = normalizeHistorySiteHostname(new URL(chatUrl).hostname);
+    } catch {
+      siteHostname = "";
+    }
+  }
+  const capturedAtRaw = Number(body.capturedAt);
+  const capturedAt =
+    Number.isFinite(capturedAtRaw) && capturedAtRaw > 0
+      ? Math.floor(capturedAtRaw)
+      : Date.now();
+  const source =
+    body.source === "network" || body.source === "dom" ? body.source : null;
+
+  return {
+    messages,
+    chatUrl,
+    chatId,
+    siteHostname: siteHostname || null,
+    capturedAt,
+    source,
+  };
+}
+
+function normalizeHistorySiteHostname(
+  hostname: string | null | undefined,
+): string {
+  return String(hostname || "")
+    .trim()
+    .toLowerCase();
+}
+
+function normalizeHistorySyncStatus(
+  value: unknown,
+  fallback: RelayHistorySyncStatus,
+): RelayHistorySyncStatus {
+  return value === "ok" ||
+    value === "empty" ||
+    value === "invalid_source" ||
+    value === "timeout"
+    ? value
+    : fallback;
+}
+
+function normalizeHistorySyncSource(value: unknown): RelayHistorySyncSource {
+  return value === "network" || value === "dom" ? value : null;
+}
+
+function cloneHistorySiteSync(): HistorySiteSyncMap {
+  return Object.fromEntries(
+    Object.entries(getHistorySiteSync()).map(([hostname, value]) => [
+      hostname,
+      {
+        lastUpdatedAt: Number(value?.lastUpdatedAt) || 0,
+        status: normalizeHistorySyncStatus(value?.status, "empty"),
+        source: normalizeHistorySyncSource(value?.source),
+      },
+    ]),
+  );
+}
+
+function applyChatHistoryUpdate(body: Record<string, unknown>): void {
+  if (!Array.isArray(body.sessions)) return;
+
+  const incoming = (
+    body.sessions as Array<{ id: string; title: string; chatUrl: string }>
+  ).filter(
+    (session) =>
+      session &&
+      typeof session.id === "string" &&
+      typeof session.title === "string" &&
+      typeof session.chatUrl === "string",
+  );
+  const incomingSites = new Set<string>();
+
+  for (const session of incoming) {
+    try {
+      incomingSites.add(
+        normalizeHistorySiteHostname(new URL(session.chatUrl).hostname),
+      );
+    } catch {
+      // Ignore malformed URLs from the extension.
+    }
+  }
+
+  if (typeof body.siteHostname === "string" && body.siteHostname) {
+    incomingSites.add(normalizeHistorySiteHostname(body.siteHostname));
+  }
+
+  const source = normalizeHistorySyncSource(body.source);
+  const status = normalizeHistorySyncStatus(
+    body.status,
+    incoming.length > 0 ? "ok" : "empty",
+  );
+  const trustedExistingHistory = Array.from(incomingSites).every((hostname) => {
+    const existing = getHistorySiteSync()[hostname];
+    return existing?.status === "ok" || existing?.status === "empty";
+  });
+  // Never replace history with an empty array on timeout — a timeout means
+  // the scrape failed, not that the user has zero conversations.
+  const shouldReplaceHistory =
+    incomingSites.size > 0 &&
+    (incoming.length > 0 || status === "empty" || !trustedExistingHistory) &&
+    !(incoming.length === 0 && status === "timeout");
+
+  if (shouldReplaceHistory) {
+    const kept = getMirroredHistory().filter((session) => {
+      try {
+        return !incomingSites.has(
+          normalizeHistorySiteHostname(new URL(session.chatUrl).hostname),
+        );
+      } catch {
+        return true;
+      }
+    });
+    setMirroredHistory([...kept, ...incoming]);
+  } else if (incomingSites.size === 0) {
+    setMirroredHistory(incoming);
+  }
+
+  if (incomingSites.size === 0) return;
+
+  const lastUpdatedAtRaw = Number(body.scrapedAt);
+  const lastUpdatedAt =
+    Number.isFinite(lastUpdatedAtRaw) && lastUpdatedAtRaw > 0
+      ? Math.floor(lastUpdatedAtRaw)
+      : Date.now();
+  const siteSync = getHistorySiteSync();
+  for (const hostname of incomingSites) {
+    siteSync[hostname] = {
+      lastUpdatedAt,
+      status,
+      source,
+    };
+  }
+}
+
+function resetState() {
+  const prevSeq = S().query.seq; // preserve seq counter so background.js doesn't skip new queries
+  S().status = "idle";
+  S().remote_chat_url = null;
+  S().remote_chat_id = null;
+  S().user_turn_key = null;
+  S().assistant_turn_key = null;
+  S().baseline_transcript_count = 0;
+  S().baseline_transcript_hash = null;
+  S().turn_status = null;
+  S().query = {
+    prompt: null,
+    pdf_base64: null,
+    pdf_filename: null,
+    images: null,
+    chatgpt_mode: null,
+    target: null,
+    expected_chat_url: null,
+    expected_chat_id: null,
+    force_new_chat: false,
+    delivery_contract_version: 0,
+    seq: prevSeq,
+    attempt: 0,
+    phase: "pending",
+  };
+  S().active_seq = 0;
+  S().active_attempt = 0;
+  S().running_since = 0;
+  S().last_activity_at = 0;
+  S().partial_text = null;
+  S().partial_thinking = null;
+  S().answer_anchor_id = null;
+  S().answer_revision = 0;
+  S().thinking_revision = 0;
+  S().run_state = null;
+  S().completion_reason = null;
+  S().responses = [];
+  S().activeSessionId = null;
+  S().pendingCommand = null;
+  S().stopRequested = false;
+  S().stopRequestedSeq = 0;
+  S().stopRequestedAttempt = 0;
+  S().reported_mode = null;
+  setScrapedTranscript(null);
+}
+
+// ---------------------------------------------------------------------------
+// Helper types
+// ---------------------------------------------------------------------------
+
+type EndpointOptions = {
+  method: "GET" | "POST";
+  pathname: string;
+  query: Record<string, string>;
+  headers: Record<string, string>;
+  data: unknown;
+};
+
+type EndpointResponse =
+  | number
+  | [number, string | Record<string, string>, string?];
+
+function jsonReply(
+  data: Record<string, unknown>,
+  status = 200,
+): EndpointResponse {
+  return [status, "application/json", JSON.stringify(data)];
+}
+
+function parseBody(data: unknown): Record<string, unknown> {
+  if (typeof data === "string") return JSON.parse(data);
+  if (typeof data === "object" && data !== null)
+    return data as Record<string, unknown>;
+  return {};
+}
+
+function normalizeSupportedDeliveryContracts(value: unknown): number[] {
+  if (!Array.isArray(value)) return [];
+  return Array.from(
+    new Set(
+      value
+        .map((entry) => Number(entry))
+        .filter((entry) => Number.isInteger(entry) && entry > 0),
+    ),
+  ).sort((a, b) => a - b);
+}
+
+function normalizeSupportedTargets(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return Array.from(
+    new Set(
+      value
+        .filter((entry): entry is string => typeof entry === "string")
+        .map((entry) => entry.trim().toLowerCase())
+        .filter(Boolean),
+    ),
+  ).sort();
+}
+
+function normalizeAnswerCapture(value: unknown): "dom" | "network" | null {
+  return value === "dom" || value === "network" ? value : null;
+}
+
+function extensionStatusMatchesTarget(
+  status: ExtensionStatus,
+  targetId: string,
+): boolean {
+  if (status.siteId && status.siteId !== targetId) return false;
+  const reportedUrls = [status.url, status.chatUrl].filter(
+    (value): value is string => Boolean(value),
+  );
+  return reportedUrls.every((url) => isWebChatUrlForTarget(url, targetId));
+}
+
+function validateTargetCapabilityForDispatch(
+  status: ExtensionStatus,
+  targetId: string | null | undefined,
+): string | null {
+  if (!targetId) return null;
+  const target = getWebChatTarget(targetId);
+  if (!target) return `Unknown WebChat target "${targetId}".`;
+
+  if (!extensionStatusMatchesTarget(status, targetId)) {
+    return `The active extension tab is not ${target.label}. Open ${target.hostname} and try again.`;
+  }
+
+  if (targetId === "gemini") {
+    const reportedUrl = status.url || status.chatUrl;
+    if (!reportedUrl || !isWebChatUrlForTarget(reportedUrl, "gemini")) {
+      return "Sync for Zotero has not reported a canonical Gemini URL for the active tab. Open gemini.google.com and try again.";
+    }
+    if (!status.supportedTargets.includes("gemini")) {
+      return "The installed Sync for Zotero browser extension does not advertise Gemini support. Update the extension, reload Gemini, and try again.";
+    }
+    if (status.answerCapture !== "dom") {
+      return "The installed Sync for Zotero browser extension has not advertised Gemini DOM answer capture. Update the extension, reload Gemini, and try again.";
+    }
+    if (
+      !status.contentScriptAliveExplicit ||
+      !status.composerFoundExplicit ||
+      !status.contentScriptAlive ||
+      !status.composerFound
+    ) {
+      return "Sync for Zotero must explicitly report a ready Gemini content script and composer. Reload Gemini and try again.";
+    }
+    return null;
+  }
+
+  // Legacy ChatGPT and DeepSeek extensions did not advertise these additive
+  // capability fields. Their existing network bridge remains authoritative.
+  if (!status.composerFound) {
+    return `The ${target.label} extension cannot find the chat composer. Wait for the page to finish loading or reload the tab.`;
+  }
+  if (!status.mainWorldInjected || !status.networkHookActive) {
+    return `The ${target.label} page network bridge is inactive. Reload the chat tab and try again.`;
+  }
+  return null;
+}
+
+function validateDeliveryContractForDispatch(
+  requestedVersion: number,
+  targetId?: string | null,
+): string | null {
+  if (targetId && !getWebChatTarget(targetId)) {
+    return `Unknown WebChat target "${targetId}".`;
+  }
+  // Legacy clients may omit the delivery contract for existing sites. Gemini
+  // is never inferred from that legacy shape and still requires an explicit
+  // target/capture advertisement.
+  if (requestedVersion === 0 && targetId !== "gemini") return null;
+  if (requestedVersion !== ATTACHMENT_DELIVERY_CONTRACT_VERSION) {
+    return `Unsupported WebChat delivery contract version ${requestedVersion}.`;
+  }
+  const extensionStatus = relayGetExtensionStatus();
+  if (!extensionStatus) {
+    return "Sync for Zotero has not reported a fresh delivery-contract capability. Reload the chat tab and try again.";
+  }
+  if (
+    extensionStatus.chatTabAlive !== true ||
+    extensionStatus.contentScriptAlive !== true
+  ) {
+    return "Sync for Zotero cannot verify a live chat tab and content script. Reload the chat tab and try again.";
+  }
+  if (!extensionStatus.supportedDeliveryContracts.includes(requestedVersion)) {
+    return `The installed Sync for Zotero browser extension is too old: it does not support WebChat delivery contract ${requestedVersion}. Update the Sync for Zotero extension in your browser, then reload the chat tab and try again.`;
+  }
+  return validateTargetCapabilityForDispatch(extensionStatus, targetId);
+}
+
+function resolveExpectedChatBinding(
+  input: Record<string, unknown>,
+  targetId: string | null,
+  forceNewChat: boolean,
+): {
+  expectedChatUrl: string | null;
+  expectedChatId: string | null;
+  error?: string;
+} {
+  if (forceNewChat) {
+    return { expectedChatUrl: null, expectedChatId: null };
+  }
+
+  const hasExplicitUrl = Object.prototype.hasOwnProperty.call(
+    input,
+    "expected_chat_url",
+  );
+  const hasExplicitId = Object.prototype.hasOwnProperty.call(
+    input,
+    "expected_chat_id",
+  );
+  if (hasExplicitUrl || hasExplicitId) {
+    const rawExpectedChatUrl = input.expected_chat_url;
+    const rawExpectedChatId = input.expected_chat_id;
+    for (const [label, value] of [
+      ["URL", rawExpectedChatUrl],
+      ["ID", rawExpectedChatId],
+    ] as const) {
+      if (value === null || value === undefined) continue;
+      if (typeof value !== "string" || !value.trim()) {
+        return {
+          expectedChatUrl: null,
+          expectedChatId: null,
+          error: `WebChat conversation binding ${label} is malformed.`,
+        };
+      }
+    }
+    const expectedChatUrl =
+      typeof rawExpectedChatUrl === "string"
+        ? rawExpectedChatUrl.trim()
+        : undefined;
+    let expectedChatId =
+      typeof rawExpectedChatId === "string"
+        ? rawExpectedChatId.trim()
+        : undefined;
+    if (!expectedChatUrl && !expectedChatId) {
+      return { expectedChatUrl: null, expectedChatId: null };
+    }
+    if (!targetId) {
+      return {
+        expectedChatUrl: null,
+        expectedChatId: null,
+        error:
+          "WebChat conversation binding requires a registered target before dispatch.",
+      };
+    }
+    if (expectedChatUrl) {
+      const derivedChatId = getWebChatConversationId(expectedChatUrl, targetId);
+      if (!derivedChatId) {
+        return {
+          expectedChatUrl: null,
+          expectedChatId: null,
+          error:
+            "WebChat conversation binding URL is not a recognized conversation for the selected target.",
+        };
+      }
+      if (expectedChatId && expectedChatId !== derivedChatId) {
+        return {
+          expectedChatUrl: null,
+          expectedChatId: null,
+          error:
+            "WebChat conversation binding URL and ID do not identify the same conversation.",
+        };
+      }
+      expectedChatId = derivedChatId;
+    }
+    const validIdPattern =
+      targetId === "gemini" ? /^[a-f0-9]{16}$/ : /^[A-Za-z0-9_-]+$/;
+    if (expectedChatId && !validIdPattern.test(expectedChatId)) {
+      return {
+        expectedChatUrl: null,
+        expectedChatId: null,
+        error: "WebChat conversation binding ID is invalid.",
+      };
+    }
+    return {
+      expectedChatUrl: expectedChatUrl || null,
+      expectedChatId: expectedChatId || null,
+    };
+  }
+
+  const derivedChatId = getWebChatConversationId(S().remote_chat_url, targetId);
+  if (!targetId || !S().remote_chat_url || !derivedChatId) {
+    return { expectedChatUrl: null, expectedChatId: null };
+  }
+  if (S().remote_chat_id && S().remote_chat_id !== derivedChatId) {
+    return {
+      expectedChatUrl: null,
+      expectedChatId: null,
+      error:
+        "WebChat conversation binding state has conflicting URL and ID values.",
+    };
+  }
+  return {
+    expectedChatUrl: S().remote_chat_url,
+    expectedChatId: derivedChatId,
+  };
+}
+
+function isPreSubmitPhase(phase: RelayQueryPhase): boolean {
+  return phase === "claimed" || phase === "prompt_applied";
+}
+
+function copyQueryState(): RelayState["query"] {
+  return { ...S().query };
+}
+
+function phaseOrder(phase: RelayQueryPhase): number {
+  switch (phase) {
+    case "pending":
+      return 0;
+    case "claimed":
+      return 1;
+    case "prompt_applied":
+      return 2;
+    case "submit_started":
+      return 3;
+    case "submitted":
+      return 4;
+    case "streaming":
+      return 5;
+    case "done":
+      return 6;
+    case "error":
+      return 7;
+    default:
+      return 0;
+  }
+}
+
+function expireStaleClaimIfNeeded(): void {
+  if (
+    S().status !== "running" ||
+    S().active_seq <= 0 ||
+    !isPreSubmitPhase(S().query.phase) ||
+    S().running_since <= 0
+  ) {
+    return;
+  }
+
+  if (Date.now() - S().running_since <= PRE_SUBMIT_RECLAIM_MS) {
+    return;
+  }
+
+  S().status = "pending";
+  S().query.phase = "pending";
+  S().active_seq = 0;
+  S().active_attempt = 0;
+  S().running_since = 0;
+  S().last_activity_at = 0;
+  S().partial_text = null;
+  S().partial_thinking = null;
+  S().answer_anchor_id = null;
+  S().answer_revision = 0;
+  S().thinking_revision = 0;
+  S().run_state = null;
+  S().completion_reason = null;
+}
+
+function attemptMatches(body: Record<string, unknown>): boolean {
+  if (!("attempt" in body) || body.attempt == null) return true;
+  return Number(body.attempt) === S().active_attempt;
+}
+
+function normalizeRunState(
+  value: unknown,
+  fallback: RelayRunState | null = null,
+): RelayRunState | null {
+  return value === "submitted" ||
+    value === "active" ||
+    value === "settling" ||
+    value === "done" ||
+    value === "incomplete" ||
+    value === "error"
+    ? value
+    : fallback;
+}
+
+function normalizeCompletionReason(
+  value: unknown,
+  fallback: RelayCompletionReason | null = null,
+): RelayCompletionReason | null {
+  return value === "settled" ||
+    value === "forced_cancel" ||
+    value === "timeout" ||
+    value === "error"
+    ? value
+    : fallback;
+}
+
+function normalizeTurnStatus(
+  value: unknown,
+  fallback: RelayTurnStatus | null = null,
+): RelayTurnStatus | null {
+  return value === "navigating" ||
+    value === "ready" ||
+    value === "submitted" ||
+    value === "user_turn_matched" ||
+    value === "assistant_turn_matched" ||
+    value === "assistant_settling" ||
+    value === "done" ||
+    value === "incomplete" ||
+    value === "error"
+    ? value
+    : fallback;
+}
+
+function readNullableString(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function readNullableBoolean(value: unknown): boolean | null {
+  return typeof value === "boolean" ? value : null;
+}
+
+function readNullableNumber(value: unknown): number | null {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
+}
+
+function normalizeTurnDiagnostic(
+  body: Record<string, unknown>,
+  fallback: RelayTurnDiagnostic | null = null,
+): RelayTurnDiagnostic | null {
+  const raw =
+    body.diagnostic && typeof body.diagnostic === "object"
+      ? { ...(body.diagnostic as Record<string, unknown>), ...body }
+      : body;
+  const diagnostic: RelayTurnDiagnostic = {
+    reasonCode: readNullableString(raw.reasonCode),
+    phase: readNullableString(raw.phase),
+    siteId: readNullableString(raw.siteId),
+    message: readNullableString(raw.message),
+    composerTextMatched: readNullableBoolean(raw.composerTextMatched),
+    uploadDetected: readNullableBoolean(raw.uploadDetected),
+    sendControlState: readNullableString(raw.sendControlState),
+    clickAttempts:
+      raw.clickAttempts == null
+        ? null
+        : Math.max(0, Math.floor(Number(raw.clickAttempts) || 0)),
+    requestObserved: readNullableBoolean(raw.requestObserved),
+    streamObserved: readNullableBoolean(raw.streamObserved),
+    userTurnMatched: readNullableBoolean(raw.userTurnMatched),
+    assistantTurnMatched: readNullableBoolean(raw.assistantTurnMatched),
+    attachmentFilename: readNullableString(raw.attachmentFilename),
+    attachmentMethod: readNullableString(raw.attachmentMethod),
+    attachmentVerificationMs:
+      raw.attachmentVerificationMs == null
+        ? null
+        : Math.max(0, Math.floor(Number(raw.attachmentVerificationMs) || 0)),
+    attachmentPreviewVerified: readNullableBoolean(
+      raw.attachmentPreviewVerified,
+    ),
+    attachmentRequested: readNullableBoolean(raw.attachmentRequested),
+    attachmentFilenameConfirmed: readNullableBoolean(
+      raw.attachmentFilenameConfirmed,
+    ),
+    attachmentReadyVerified: readNullableBoolean(raw.attachmentReadyVerified),
+    submittedAttachmentVerified: readNullableBoolean(
+      raw.submittedAttachmentVerified,
+    ),
+    submittedAttachmentCount:
+      raw.submittedAttachmentCount == null
+        ? null
+        : Math.max(0, Math.floor(Number(raw.submittedAttachmentCount) || 0)),
+    submittedPdfCount:
+      raw.submittedPdfCount == null
+        ? null
+        : Math.max(0, Math.floor(Number(raw.submittedPdfCount) || 0)),
+    attachmentContractVerified: readNullableBoolean(
+      raw.attachmentContractVerified,
+    ),
+    completionDetectionMs:
+      raw.completionDetectionMs == null
+        ? null
+        : Math.max(0, Math.floor(Number(raw.completionDetectionMs) || 0)),
+  };
+  const hasValue = Object.values(diagnostic).some(
+    (value) => value !== null && value !== undefined,
+  );
+  return hasValue ? diagnostic : fallback;
+}
+
+function applyTurnDiagnostic(body: Record<string, unknown>): void {
+  const diagnostic = normalizeTurnDiagnostic(body, S().last_diagnostic);
+  if (diagnostic) {
+    S().last_diagnostic = diagnostic;
+  }
+}
+
+function validateTerminalDeliveryContract(
+  body: Record<string, unknown>,
+  diagnostic: RelayTurnDiagnostic | null,
+): string | null {
+  if (body.error) return null;
+  const requestedVersion = Math.max(
+    0,
+    Math.floor(Number(S().query.delivery_contract_version) || 0),
+  );
+  if (requestedVersion === 0) return null;
+  if (requestedVersion !== ATTACHMENT_DELIVERY_CONTRACT_VERSION) {
+    return `Unsupported WebChat delivery contract version ${requestedVersion}.`;
+  }
+  if (!diagnostic) {
+    return "WebChat returned no terminal delivery receipt.";
+  }
+  if (diagnostic.composerTextMatched !== true) {
+    return "WebChat did not verify the submitted prompt in the composer.";
+  }
+  if (diagnostic.userTurnMatched !== true) {
+    return "WebChat did not verify the submitted user turn.";
+  }
+  if (diagnostic.assistantTurnMatched !== true) {
+    return "WebChat did not bind the response to the submitted user turn.";
+  }
+
+  const pdfRequested = Boolean(S().query.pdf_base64);
+  if (diagnostic.attachmentRequested !== pdfRequested) {
+    return "WebChat attachment mode did not match the Zotero request.";
+  }
+  if (diagnostic.attachmentContractVerified !== true) {
+    return "WebChat did not verify the terminal attachment contract.";
+  }
+
+  if (!pdfRequested) {
+    if (diagnostic.submittedPdfCount !== 0) {
+      return "A prompt-only WebChat turn contained an unexpected PDF.";
+    }
+    return null;
+  }
+
+  const expectedFilename = String(S().query.pdf_filename || "").trim();
+  if (!expectedFilename) {
+    return "The Zotero PDF request did not include a filename.";
+  }
+  if (diagnostic.attachmentFilename !== expectedFilename) {
+    return "The WebChat receipt did not identify the requested Zotero PDF.";
+  }
+  // Presence tier: the upload must have been detected, confirmed in the
+  // composer, and carried by the submitted turn. Sites shorten, translate,
+  // and re-render file names, so the name-level fields
+  // (attachmentFilenameConfirmed, attachmentReadyVerified,
+  // submittedAttachmentVerified, submittedPdfCount) stay advisory — they
+  // are recorded in the diagnostic but insisting on them would reject
+  // deliveries that worked.
+  if (
+    diagnostic.uploadDetected !== true ||
+    diagnostic.attachmentPreviewVerified !== true ||
+    !Number.isFinite(diagnostic.submittedAttachmentCount) ||
+    Number(diagnostic.submittedAttachmentCount) < 1
+  ) {
+    return `WebChat could not prove delivery of "${expectedFilename}".`;
+  }
+  return null;
+}
+
+function deriveRemoteChatIdFromUrl(url: string | null): string | null {
+  return getWebChatConversationId(url);
+}
+
+function applyRemoteTurnMetadata(body: Record<string, unknown>): void {
+  if ("remote_chat_url" in body) {
+    S().remote_chat_url =
+      typeof body.remote_chat_url === "string" ? body.remote_chat_url : null;
+  }
+  if ("remote_chat_id" in body) {
+    S().remote_chat_id =
+      typeof body.remote_chat_id === "string" ? body.remote_chat_id : null;
+  }
+  if ("user_turn_key" in body) {
+    S().user_turn_key =
+      typeof body.user_turn_key === "string" ? body.user_turn_key : null;
+  }
+  if ("assistant_turn_key" in body) {
+    S().assistant_turn_key =
+      typeof body.assistant_turn_key === "string"
+        ? body.assistant_turn_key
+        : null;
+  }
+  if ("baseline_transcript_count" in body) {
+    const count = Number(body.baseline_transcript_count);
+    if (Number.isFinite(count) && count >= 0) {
+      S().baseline_transcript_count = Math.floor(count);
+    }
+  }
+  if ("baseline_transcript_hash" in body) {
+    S().baseline_transcript_hash =
+      typeof body.baseline_transcript_hash === "string"
+        ? body.baseline_transcript_hash
+        : null;
+  }
+  if ("turn_status" in body) {
+    S().turn_status = normalizeTurnStatus(body.turn_status, S().turn_status);
+  }
+}
+
+function resetPerTurnTracking(): void {
+  S().user_turn_key = null;
+  S().assistant_turn_key = null;
+  S().baseline_transcript_count = 0;
+  S().baseline_transcript_hash = null;
+  S().answer_anchor_id = null;
+  S().answer_revision = 0;
+  S().thinking_revision = 0;
+  S().run_state = null;
+  S().completion_reason = null;
+  S().last_diagnostic = null;
+  if (S().turn_status !== "navigating") {
+    S().turn_status =
+      S().remote_chat_url || S().remote_chat_id ? "ready" : null;
+  }
+}
+
+function isRunningExpired(): boolean {
+  if (S().status !== "running" || S().running_since <= 0) return false;
+  const activityAt = S().last_activity_at || S().running_since;
+  const elapsed = Date.now() - activityAt;
+  if (isPreSubmitPhase(S().query.phase)) {
+    return elapsed > PRE_SUBMIT_RECLAIM_MS;
+  }
+  return elapsed > PIPELINE_TIMEOUT_MS;
+}
+
+export function describeWebChatPipelineTimeout(
+  diagnostic: RelayTurnDiagnostic | null,
+): { reasonCode: string; message: string } {
+  const timeoutSeconds = Math.floor(PIPELINE_TIMEOUT_MS / 1000);
+  if (diagnostic?.attachmentContractVerified === true) {
+    if (diagnostic.attachmentRequested === true) {
+      return {
+        reasonCode: "provider_timeout_after_verified_pdf_delivery",
+        message:
+          `The web provider made no verified progress for ${timeoutSeconds} seconds. ` +
+          "PDF upload and submission were verified; no final answer was accepted.",
+      };
+    }
+    if (diagnostic.attachmentRequested === false) {
+      return {
+        reasonCode: "provider_timeout_after_verified_prompt_delivery",
+        message:
+          `The web provider made no verified progress for ${timeoutSeconds} seconds. ` +
+          "The prompt-only submission was verified with zero PDFs; no final answer was accepted.",
+      };
+    }
+  }
+  return {
+    reasonCode: "pipeline_timeout_unverified_delivery",
+    message:
+      `The WebChat pipeline made no verified progress for ${timeoutSeconds} seconds. ` +
+      "Delivery and the final response were not fully verified.",
+  };
+}
+
+function expireRunningPipelineIfNeeded(): boolean {
+  const activityAt = S().last_activity_at || S().running_since;
+  if (
+    S().status !== "running" ||
+    activityAt <= 0 ||
+    Date.now() - activityAt <= PIPELINE_TIMEOUT_MS
+  ) {
+    return false;
+  }
+
+  const timeout = describeWebChatPipelineTimeout(S().last_diagnostic);
+  const diagnostic: RelayTurnDiagnostic = {
+    ...(S().last_diagnostic || {}),
+    reasonCode: timeout.reasonCode,
+    phase: "error",
+    message: timeout.message,
+  };
+  S().status = "error";
+  S().query.phase = "error";
+  S().run_state = "error";
+  S().completion_reason = "timeout";
+  S().turn_status = "error";
+  S().last_diagnostic = diagnostic;
+  S().stopRequested = true;
+  S().stopRequestedSeq = S().active_seq;
+  S().stopRequestedAttempt = S().active_attempt;
+  S().responses.push({
+    seq: S().active_seq,
+    attempt: S().active_attempt || undefined,
+    error: timeout.message,
+    timestamp: new Date().toISOString(),
+    run_state: "error",
+    completion_reason: "timeout",
+    remote_chat_url: S().remote_chat_url,
+    remote_chat_id: S().remote_chat_id,
+    user_turn_key: S().user_turn_key,
+    assistant_turn_key: S().assistant_turn_key,
+    baseline_transcript_count: S().baseline_transcript_count,
+    baseline_transcript_hash: S().baseline_transcript_hash,
+    turn_status: "error",
+    diagnostic,
+  });
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Endpoint definitions
+// ---------------------------------------------------------------------------
+
+function createEndpoint(
+  methods: string[],
+  handler: (
+    opts: EndpointOptions,
+  ) => Promise<EndpointResponse> | EndpointResponse,
+) {
+  return class {
+    supportedMethods = methods;
+    supportedDataTypes = ["application/json"];
+    init = async (opts: EndpointOptions): Promise<EndpointResponse> => {
+      try {
+        return await handler(opts);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return jsonReply({ error: msg }, 500);
+      }
+    };
+  };
+}
+
+// POST /submit_query
+const SubmitQueryEndpoint = createEndpoint(["POST"], (opts) => {
+  const body = parseBody(opts.data);
+  expireStaleClaimIfNeeded();
+
+  if (S().status === "pending" || S().status === "running") {
+    if (S().status === "running" && isRunningExpired()) {
+      expireRunningPipelineIfNeeded();
+    } else {
+      return jsonReply({ error: "pipeline_busy", status: S().status });
+    }
+  }
+
+  const requestedDeliveryContractVersion = Math.max(
+    0,
+    Math.floor(Number(body.delivery_contract_version) || 0),
+  );
+  const requestedTarget =
+    typeof body.target === "string" ? body.target : S().active_target || null;
+  const compatibilityError = validateDeliveryContractForDispatch(
+    requestedDeliveryContractVersion,
+    requestedTarget,
+  );
+  if (compatibilityError) {
+    return jsonReply(
+      { error: compatibilityError, reason: "incompatible_extension" },
+      409,
+    );
+  }
+
+  const forceNewChat = body.force_new_chat === true;
+  const clearRemoteBinding =
+    forceNewChat ||
+    Boolean(
+      requestedTarget &&
+      S().remote_chat_url &&
+      !isWebChatUrlForTarget(S().remote_chat_url, requestedTarget),
+    );
+  const expectedBinding = resolveExpectedChatBinding(
+    body,
+    requestedTarget,
+    forceNewChat,
+  );
+  if (expectedBinding.error) {
+    return jsonReply(
+      { error: expectedBinding.error, reason: "invalid_conversation_binding" },
+      409,
+    );
+  }
+
+  // Clear stale state
+  S().responses = [];
+  S().active_seq = 0;
+  S().partial_text = null;
+  S().partial_thinking = null;
+  resetPerTurnTracking();
+
+  S().query.seq += 1;
+  S().query.prompt = (body.prompt as string) || "";
+  S().query.pdf_base64 = (body.pdf_base64 as string) || null;
+  S().query.pdf_filename = (body.pdf_filename as string) || null;
+  S().query.images = (body.images as string[]) || null;
+  S().query.chatgpt_mode = (body.chatgpt_mode as string) || null;
+  S().query.target = requestedTarget;
+  S().query.expected_chat_url = expectedBinding.expectedChatUrl;
+  S().query.expected_chat_id = expectedBinding.expectedChatId;
+  if (body.target) {
+    S().active_target = body.target as string;
+  }
+  S().query.force_new_chat = forceNewChat;
+  S().query.delivery_contract_version = requestedDeliveryContractVersion;
+  S().query.attempt = 0;
+  S().query.phase = "pending";
+  S().status = "pending";
+
+  // If this query requests a new chat, clear any pending NEW_CHAT command
+  // to prevent the extension from double-navigating (the query's force_new_chat
+  // flag will handle navigation in runPipeline).
+  if (body.force_new_chat && S().pendingCommand?.type === "NEW_CHAT") {
+    S().pendingCommand = null;
+  }
+  if (clearRemoteBinding) {
+    S().remote_chat_url = null;
+    S().remote_chat_id = null;
+    S().turn_status = forceNewChat ? "navigating" : null;
+  }
+
+  return jsonReply({ ok: true, seq: S().query.seq });
+});
+
+// GET /poll_query
+const PollQueryEndpoint = createEndpoint(["GET"], () => {
+  _store().lastExtensionContact = Date.now();
+  expireStaleClaimIfNeeded();
+  if (S().status === "pending") {
+    return jsonReply({ status: "pending", query: copyQueryState() });
+  }
+  return jsonReply({ status: S().status, query: null });
+});
+
+// POST /claim_query
+const ClaimQueryEndpoint = createEndpoint(["POST"], (opts) => {
+  const body = parseBody(opts.data);
+  const seq = Number(body.seq || 0);
+  expireStaleClaimIfNeeded();
+
+  if (S().status !== "pending" || seq !== S().query.seq) {
+    return jsonReply({ ok: false, reason: "not_pending", status: S().status });
+  }
+
+  S().status = "running";
+  S().active_seq = S().query.seq;
+  S().query.attempt += 1;
+  S().active_attempt = S().query.attempt;
+  S().query.phase = "claimed";
+  S().running_since = Date.now();
+  S().last_activity_at = S().running_since;
+  S().partial_text = null;
+  S().partial_thinking = null;
+  resetPerTurnTracking();
+
+  return jsonReply({
+    ok: true,
+    query: copyQueryState(),
+  });
+});
+
+// POST /ack_query_phase
+const AckQueryPhaseEndpoint = createEndpoint(["POST"], (opts) => {
+  const body = parseBody(opts.data);
+  const nextPhase = (body.phase as RelayQueryPhase | undefined) || "claimed";
+  expireStaleClaimIfNeeded();
+
+  if (body.seq !== S().active_seq) {
+    return jsonReply({ ok: false, reason: "seq_mismatch" });
+  }
+  if (!attemptMatches(body)) {
+    return jsonReply({ ok: false, reason: "attempt_mismatch" });
+  }
+  if (S().status !== "running") {
+    return jsonReply({ ok: false, reason: "attempt_not_running" });
+  }
+  if (phaseOrder(nextPhase) < phaseOrder(S().query.phase)) {
+    return jsonReply({ ok: false, reason: "phase_regression" });
+  }
+
+  S().query.phase = nextPhase;
+  applyTurnDiagnostic(body);
+  if (nextPhase === "claimed" || nextPhase === "prompt_applied") {
+    S().running_since = Date.now();
+  }
+  if (
+    nextPhase === "submit_started" ||
+    nextPhase === "submitted" ||
+    nextPhase === "streaming"
+  ) {
+    S().running_since = Date.now();
+  }
+  S().last_activity_at = Date.now();
+  if (nextPhase === "submitted" && !S().run_state) {
+    S().run_state = "submitted";
+  }
+  if (nextPhase === "submitted") {
+    S().turn_status = "submitted";
+  }
+
+  return jsonReply({ ok: true });
+});
+
+// POST /release_query
+const ReleaseQueryEndpoint = createEndpoint(["POST"], (opts) => {
+  const body = parseBody(opts.data);
+
+  if (body.seq !== S().active_seq) {
+    return jsonReply({ ok: false, reason: "seq_mismatch" });
+  }
+  if (!attemptMatches(body)) {
+    return jsonReply({ ok: false, reason: "attempt_mismatch" });
+  }
+  if (!isPreSubmitPhase(S().query.phase)) {
+    return jsonReply({ ok: false, reason: "already_submitted" });
+  }
+
+  S().status = "pending";
+  S().query.phase = "pending";
+  S().active_seq = 0;
+  S().active_attempt = 0;
+  S().running_since = 0;
+  S().last_activity_at = 0;
+  S().partial_text = null;
+  S().partial_thinking = null;
+  resetPerTurnTracking();
+
+  return jsonReply({ ok: true, query: copyQueryState() });
+});
+
+// GET /poll_response
+const PollResponseEndpoint = createEndpoint(["GET"], () => {
+  expireStaleClaimIfNeeded();
+  expireRunningPipelineIfNeeded();
+
+  return jsonReply({
+    status: S().status,
+    responses: S().responses,
+    partial_text: S().partial_text,
+    partial_thinking: S().partial_thinking,
+    answer_anchor_id: S().answer_anchor_id,
+    answer_revision: S().answer_revision,
+    thinking_revision: S().thinking_revision,
+    run_state: S().run_state,
+    completion_reason: S().completion_reason,
+    remote_chat_url: S().remote_chat_url,
+    remote_chat_id: S().remote_chat_id,
+    user_turn_key: S().user_turn_key,
+    assistant_turn_key: S().assistant_turn_key,
+    baseline_transcript_count: S().baseline_transcript_count,
+    baseline_transcript_hash: S().baseline_transcript_hash,
+    turn_status: S().turn_status,
+    diagnostic: S().last_diagnostic,
+    current_seq: S().query.seq,
+    current_attempt: S().active_attempt,
+  });
+});
+
+// POST /update_partial
+const UpdatePartialEndpoint = createEndpoint(["POST"], (opts) => {
+  const body = parseBody(opts.data);
+  expireStaleClaimIfNeeded();
+  if (body.seq !== S().active_seq) {
+    return jsonReply({ ok: false, reason: "seq_mismatch" });
+  }
+  if (!attemptMatches(body)) {
+    return jsonReply({ ok: false, reason: "attempt_mismatch" });
+  }
+  if (S().status !== "running") {
+    return jsonReply({ ok: false, reason: "attempt_not_running" });
+  }
+  const activityBefore = JSON.stringify([
+    S().partial_text,
+    S().partial_thinking,
+    S().answer_anchor_id,
+    S().answer_revision,
+    S().thinking_revision,
+    S().run_state,
+    S().completion_reason,
+    S().remote_chat_url,
+    S().remote_chat_id,
+    S().user_turn_key,
+    S().assistant_turn_key,
+    S().turn_status,
+  ]);
+  if ("answer_snapshot" in body) {
+    S().partial_text = body.answer_snapshot as string | null;
+  } else if ("text" in body) {
+    S().partial_text = body.text as string | null;
+  }
+  if ("thinking_snapshot" in body) {
+    S().partial_thinking = body.thinking_snapshot as string | null;
+  } else if ("thinking" in body) {
+    S().partial_thinking = body.thinking as string | null;
+  }
+  applyTurnDiagnostic(body);
+  applyRemoteTurnMetadata(body);
+  if ("answer_anchor_id" in body) {
+    S().answer_anchor_id =
+      typeof body.answer_anchor_id === "string" ? body.answer_anchor_id : null;
+  }
+  if ("answer_revision" in body) {
+    const revision = Number(body.answer_revision);
+    if (Number.isFinite(revision) && revision >= 0) {
+      S().answer_revision = revision;
+    }
+  }
+  if ("thinking_revision" in body) {
+    const revision = Number(body.thinking_revision);
+    if (Number.isFinite(revision) && revision >= 0) {
+      S().thinking_revision = revision;
+    }
+  }
+  if ("run_state" in body) {
+    S().run_state = normalizeRunState(body.run_state, S().run_state);
+  }
+  if ("completion_reason" in body) {
+    S().completion_reason = normalizeCompletionReason(
+      body.completion_reason,
+      S().completion_reason,
+    );
+  }
+  const partialText = S().partial_text;
+  const partialThinking = S().partial_thinking;
+  if (
+    (typeof partialText === "string" && partialText.length > 0) ||
+    (typeof partialThinking === "string" && partialThinking.length > 0)
+  ) {
+    S().query.phase = "streaming";
+    if (!S().run_state || S().run_state === "submitted") {
+      S().run_state = "active";
+    }
+  }
+  if (!S().turn_status) {
+    S().turn_status = "submitted";
+  }
+  const activityAfter = JSON.stringify([
+    S().partial_text,
+    S().partial_thinking,
+    S().answer_anchor_id,
+    S().answer_revision,
+    S().thinking_revision,
+    S().run_state,
+    S().completion_reason,
+    S().remote_chat_url,
+    S().remote_chat_id,
+    S().user_turn_key,
+    S().assistant_turn_key,
+    S().turn_status,
+  ]);
+  if (activityAfter !== activityBefore) {
+    S().last_activity_at = Date.now();
+  }
+  return jsonReply({ ok: true });
+});
+
+// POST /update_turn_state
+const UpdateTurnStateEndpoint = createEndpoint(["POST"], (opts) => {
+  const body = parseBody(opts.data);
+  expireStaleClaimIfNeeded();
+
+  const isAttemptBound =
+    ("seq" in body && body.seq != null) ||
+    ("attempt" in body && body.attempt != null);
+  if ("seq" in body && body.seq != null && body.seq !== S().active_seq) {
+    return jsonReply({ ok: false, reason: "seq_mismatch" });
+  }
+  if ("attempt" in body && body.attempt != null && !attemptMatches(body)) {
+    return jsonReply({ ok: false, reason: "attempt_mismatch" });
+  }
+  if (isAttemptBound && S().status !== "running") {
+    return jsonReply({ ok: false, reason: "attempt_not_running" });
+  }
+
+  const activityBefore = JSON.stringify([
+    S().remote_chat_url,
+    S().remote_chat_id,
+    S().user_turn_key,
+    S().assistant_turn_key,
+    S().baseline_transcript_count,
+    S().baseline_transcript_hash,
+    S().turn_status,
+  ]);
+  applyTurnDiagnostic(body);
+  applyRemoteTurnMetadata(body);
+
+  if ("turn_status" in body) {
+    const nextStatus = normalizeTurnStatus(body.turn_status, S().turn_status);
+    S().turn_status = nextStatus;
+    if (nextStatus === "ready" && S().status === "running" && !S().run_state) {
+      S().run_state = "submitted";
+    }
+  }
+  const activityAfter = JSON.stringify([
+    S().remote_chat_url,
+    S().remote_chat_id,
+    S().user_turn_key,
+    S().assistant_turn_key,
+    S().baseline_transcript_count,
+    S().baseline_transcript_hash,
+    S().turn_status,
+  ]);
+  if (isAttemptBound && activityAfter !== activityBefore) {
+    S().last_activity_at = Date.now();
+  }
+
+  return jsonReply({
+    ok: true,
+    remote_chat_url: S().remote_chat_url,
+    remote_chat_id: S().remote_chat_id,
+    user_turn_key: S().user_turn_key,
+    assistant_turn_key: S().assistant_turn_key,
+    baseline_transcript_count: S().baseline_transcript_count,
+    baseline_transcript_hash: S().baseline_transcript_hash,
+    turn_status: S().turn_status,
+  });
+});
+
+// POST /submit_response
+const SubmitResponseEndpoint = createEndpoint(["POST"], (opts) => {
+  const body = parseBody(opts.data);
+  expireStaleClaimIfNeeded();
+  if (body.seq !== S().active_seq) {
+    return jsonReply({ ok: false, reason: "seq_mismatch" });
+  }
+  if (!attemptMatches(body)) {
+    return jsonReply({ ok: false, reason: "attempt_mismatch" });
+  }
+  if (S().status !== "running") {
+    return jsonReply({ ok: false, reason: "attempt_not_running" });
+  }
+
+  const terminalDiagnostic = normalizeTurnDiagnostic(body, S().last_diagnostic);
+  const contractError = validateTerminalDeliveryContract(
+    body,
+    terminalDiagnostic,
+  );
+  if (contractError) {
+    return jsonReply(
+      { error: `WebChat delivery verification failed: ${contractError}` },
+      409,
+    );
+  }
+
+  const entry = {
+    seq: body.seq as number,
+    attempt:
+      ("attempt" in body ? Number(body.attempt) : S().active_attempt) ||
+      undefined,
+    text: body.response as string | undefined,
+    error: body.error as string | undefined,
+    timestamp: new Date().toISOString(),
+    thinking: body.thinking as string | undefined,
+    answer_anchor_id:
+      typeof body.answer_anchor_id === "string"
+        ? (body.answer_anchor_id as string)
+        : S().answer_anchor_id,
+    answer_revision: Number.isFinite(Number(body.answer_revision))
+      ? Number(body.answer_revision)
+      : S().answer_revision,
+    thinking_revision: Number.isFinite(Number(body.thinking_revision))
+      ? Number(body.thinking_revision)
+      : S().thinking_revision,
+    run_state:
+      normalizeRunState(body.run_state, body.error ? "error" : "done") ||
+      (body.error ? "error" : "done"),
+    completion_reason: normalizeCompletionReason(
+      body.completion_reason,
+      body.error ? "error" : "settled",
+    ),
+    remote_chat_url:
+      typeof body.remote_chat_url === "string"
+        ? (body.remote_chat_url as string)
+        : S().remote_chat_url,
+    remote_chat_id:
+      typeof body.remote_chat_id === "string"
+        ? (body.remote_chat_id as string)
+        : S().remote_chat_id,
+    user_turn_key:
+      typeof body.user_turn_key === "string"
+        ? (body.user_turn_key as string)
+        : S().user_turn_key,
+    assistant_turn_key:
+      typeof body.assistant_turn_key === "string"
+        ? (body.assistant_turn_key as string)
+        : S().assistant_turn_key,
+    baseline_transcript_count: Number.isFinite(
+      Number(body.baseline_transcript_count),
+    )
+      ? Number(body.baseline_transcript_count)
+      : S().baseline_transcript_count,
+    baseline_transcript_hash:
+      typeof body.baseline_transcript_hash === "string"
+        ? (body.baseline_transcript_hash as string)
+        : S().baseline_transcript_hash,
+    turn_status: normalizeTurnStatus(
+      body.turn_status,
+      body.error
+        ? "error"
+        : body.run_state === "incomplete"
+          ? "incomplete"
+          : "done",
+    ),
+    diagnostic: terminalDiagnostic || undefined,
+  };
+  S().responses.push(entry);
+  S().partial_text = null;
+  S().partial_thinking = null;
+  S().remote_chat_url = entry.remote_chat_url || null;
+  S().remote_chat_id = entry.remote_chat_id || null;
+  S().user_turn_key = entry.user_turn_key || null;
+  S().assistant_turn_key = entry.assistant_turn_key || null;
+  S().baseline_transcript_count = entry.baseline_transcript_count || 0;
+  S().baseline_transcript_hash = entry.baseline_transcript_hash || null;
+  S().turn_status = entry.turn_status || null;
+  S().answer_anchor_id = entry.answer_anchor_id || null;
+  S().answer_revision = entry.answer_revision || 0;
+  S().thinking_revision = entry.thinking_revision || 0;
+  S().run_state = entry.run_state;
+  S().completion_reason = entry.completion_reason || null;
+  S().last_diagnostic = entry.diagnostic || S().last_diagnostic || null;
+  S().status = entry.error ? "error" : "done";
+  S().query.phase = entry.error ? "error" : "done";
+
+  return jsonReply({ ok: true });
+});
+
+// GET /heartbeat — lightweight connectivity check for the extension
+const HeartbeatEndpoint = createEndpoint(["GET"], () => {
+  _store().lastExtensionContact = Date.now();
+  return jsonReply({
+    ok: true,
+    ts: Date.now(),
+    seq: S().query.seq,
+    active_target: S().active_target || null,
+  });
+});
+
+// GET /debug — minimal endpoint used by the browser extension for port discovery
+const DebugEndpoint = createEndpoint(["GET"], () => {
+  return jsonReply({
+    status: S().status,
+    extension_supported_delivery_contracts:
+      relayGetExtensionStatus()?.supportedDeliveryContracts || [],
+  });
+});
+
+// GET /poll_command
+const PollCommandEndpoint = createEndpoint(["GET"], () => {
+  const cmd = S().pendingCommand;
+  if (cmd) {
+    S().pendingCommand = null;
+    return jsonReply({
+      command: cmd,
+      active_target: S().active_target || null,
+    });
+  }
+  return jsonReply({ command: null, active_target: S().active_target || null });
+});
+
+// GET /poll_stop — lightweight endpoint polled during active pipeline
+const PollStopEndpoint = createEndpoint(["GET"], () => {
+  const requested = S().stopRequested;
+  const seq = S().stopRequestedSeq;
+  const attempt = S().stopRequestedAttempt;
+  if (requested) {
+    S().stopRequested = false;
+    S().stopRequestedSeq = 0;
+    S().stopRequestedAttempt = 0;
+  }
+  return jsonReply({ stop: requested, seq, attempt });
+});
+
+// POST /new_chat
+const NewChatEndpoint = createEndpoint(["POST"], () => {
+  resetState();
+  S().turn_status = "navigating";
+  S().pendingCommand = { type: "NEW_CHAT" };
+  return jsonReply({ ok: true });
+});
+
+// GET + POST /chat_history
+const ChatHistoryEndpoint = createEndpoint(["GET", "POST"], (opts) => {
+  if (opts.method === "POST") {
+    const body = parseBody(opts.data);
+    if (body.action === "submit_scraped") {
+      setScrapedTranscript(normalizeScrapedTranscriptSnapshot(body));
+      return jsonReply({ ok: true });
+    }
+    return jsonReply({ error: "Unknown action" }, 400);
+  }
+
+  // GET
+  if (opts.query?.action === "get_scraped") {
+    const snapshot = cloneScrapedTranscriptSnapshot(getScrapedTranscript());
+    return jsonReply({
+      messages: snapshot?.messages || [],
+      chatUrl: snapshot?.chatUrl || null,
+      chatId: snapshot?.chatId || null,
+      siteHostname: snapshot?.siteHostname || null,
+      capturedAt: snapshot?.capturedAt || 0,
+      source: snapshot?.source || null,
+    });
+  }
+
+  return jsonReply({
+    sessions: getMirroredHistory().map((s) => ({
+      id: s.id,
+      title: s.title,
+      chatUrl: s.chatUrl,
+    })),
+    site_sync: cloneHistorySiteSync(),
+  });
+});
+
+// POST /update_chat_history
+// Merges history per-site: incoming sessions replace only entries from the same
+// hostname(s), preserving entries from other sites.  This prevents ChatGPT
+// scrapes from wiping DeepSeek history (and vice-versa).
+const UpdateChatHistoryEndpoint = createEndpoint(["POST"], (opts) => {
+  const body = parseBody(opts.data);
+  applyChatHistoryUpdate(body);
+  return jsonReply({ success: true });
+});
+
+// POST /update_chat_url
+const UpdateChatUrlEndpoint = createEndpoint(["POST"], (opts) => {
+  const body = parseBody(opts.data);
+  const chatUrl =
+    typeof body.chat_url === "string"
+      ? body.chat_url
+      : typeof body.chatUrl === "string"
+        ? body.chatUrl
+        : null;
+  if (chatUrl) {
+    const reportedTarget = getWebChatTargetByUrl(chatUrl);
+    if (!reportedTarget) {
+      return jsonReply(
+        {
+          error: "The reported chat URL is not a recognized WebChat provider.",
+        },
+        400,
+      );
+    }
+    if (S().active_target && reportedTarget.id !== S().active_target) {
+      return jsonReply(
+        {
+          error:
+            "The reported chat URL does not match the active WebChat target.",
+        },
+        409,
+      );
+    }
+    S().remote_chat_url = chatUrl;
+    S().remote_chat_id = deriveRemoteChatIdFromUrl(chatUrl);
+    if (!S().turn_status) {
+      S().turn_status = "ready";
+    }
+  }
+  return jsonReply({
+    ok: true,
+    remote_chat_url: S().remote_chat_url,
+    remote_chat_id: S().remote_chat_id,
+  });
+});
+
+// POST /update_mode — extension reports ChatGPT's actual thinking mode
+const UpdateModeEndpoint = createEndpoint(["POST"], (opts) => {
+  const body = parseBody(opts.data);
+  const mode = body.mode as string | undefined;
+  if (mode) S().reported_mode = mode;
+  return jsonReply({ ok: true });
+});
+
+// POST /load_chat
+const LoadChatEndpoint = createEndpoint(["POST"], (opts) => {
+  const body = parseBody(opts.data);
+  const sessionId = body.sessionId as string;
+
+  // Look up in mirrored history
+  const session = getMirroredHistory().find((s) => s.id === sessionId);
+
+  resetState();
+
+  if (session?.chatUrl) {
+    S().remote_chat_url = session.chatUrl;
+    S().remote_chat_id = session.id;
+    S().turn_status = "navigating";
+    S().pendingCommand = {
+      type: "LOAD_CHAT",
+      chatUrl: session.chatUrl,
+      chatId: session.id,
+    };
+  }
+
+  return jsonReply({
+    ok: true,
+    session: session
+      ? {
+          id: session.id,
+          title: session.title,
+          chatUrl: session.chatUrl,
+          messages: [],
+        }
+      : { id: sessionId, title: "Unknown", chatUrl: null, messages: [] },
+  });
+});
+
+// POST /extension_status — extension reports its tab status
+const ExtensionStatusEndpoint = createEndpoint(["POST"], (opts) => {
+  const body = parseBody(opts.data);
+  _store().extensionStatus = {
+    chatTabAlive: !!body.chatTabAlive,
+    chatUrl: (body.chatUrl as string) || null,
+    siteId: readNullableString(body.siteId),
+    url: readNullableString(body.url) || readNullableString(body.chatUrl),
+    contentScriptAlive: body.contentScriptAlive !== false,
+    contentScriptAliveExplicit: body.contentScriptAlive === true,
+    mainWorldInjected: body.mainWorldInjected !== false,
+    composerFound: body.composerFound !== false,
+    composerFoundExplicit: body.composerFound === true,
+    sendControlState: readNullableString(body.sendControlState),
+    uploadControlFound: body.uploadControlFound === true,
+    networkHookActive: body.networkHookActive !== false,
+    supportedDeliveryContracts: normalizeSupportedDeliveryContracts(
+      body.supportedDeliveryContracts,
+    ),
+    supportedTargets: normalizeSupportedTargets(body.supportedTargets),
+    answerCapture: normalizeAnswerCapture(body.answerCapture),
+    lastRequestAt: readNullableNumber(body.lastRequestAt),
+    lastStreamAt: readNullableNumber(body.lastStreamAt),
+    lastDiagnostic:
+      normalizeTurnDiagnostic(
+        {
+          ...(body.lastDiagnostic && typeof body.lastDiagnostic === "object"
+            ? (body.lastDiagnostic as Record<string, unknown>)
+            : {}),
+          siteId: body.siteId,
+        },
+        null,
+      ) || null,
+    ts: Date.now(),
+  };
+  _store().lastExtensionContact = Date.now();
+  return jsonReply({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// Registration
+// ---------------------------------------------------------------------------
+
+const ENDPOINTS: Record<string, ReturnType<typeof createEndpoint>> = {
+  [`${PREFIX}/heartbeat`]: HeartbeatEndpoint,
+  [`${PREFIX}/extension_status`]: ExtensionStatusEndpoint,
+  [`${PREFIX}/debug`]: DebugEndpoint,
+
+  [`${PREFIX}/submit_query`]: SubmitQueryEndpoint,
+  [`${PREFIX}/poll_query`]: PollQueryEndpoint,
+  [`${PREFIX}/claim_query`]: ClaimQueryEndpoint,
+  [`${PREFIX}/ack_query_phase`]: AckQueryPhaseEndpoint,
+  [`${PREFIX}/release_query`]: ReleaseQueryEndpoint,
+  [`${PREFIX}/poll_response`]: PollResponseEndpoint,
+  [`${PREFIX}/update_turn_state`]: UpdateTurnStateEndpoint,
+  [`${PREFIX}/update_partial`]: UpdatePartialEndpoint,
+  [`${PREFIX}/submit_response`]: SubmitResponseEndpoint,
+  [`${PREFIX}/poll_command`]: PollCommandEndpoint,
+  [`${PREFIX}/poll_stop`]: PollStopEndpoint,
+  [`${PREFIX}/new_chat`]: NewChatEndpoint,
+  [`${PREFIX}/chat_history`]: ChatHistoryEndpoint,
+  [`${PREFIX}/update_chat_history`]: UpdateChatHistoryEndpoint,
+  [`${PREFIX}/update_chat_url`]: UpdateChatUrlEndpoint,
+  [`${PREFIX}/update_mode`]: UpdateModeEndpoint,
+  [`${PREFIX}/load_chat`]: LoadChatEndpoint,
+};
+
+// ---------------------------------------------------------------------------
+// Direct-access API (for plugin use — bypasses HTTP to avoid deadlock)
+// ---------------------------------------------------------------------------
+
+/** Submit a query directly to the relay state (no HTTP). */
+export function relaySubmitQuery(opts: {
+  prompt: string;
+  pdf_base64?: string | null;
+  pdf_filename?: string | null;
+  images?: string[] | null;
+  chatgpt_mode?: string | null;
+  target?: string | null;
+  expected_chat_url?: string | null;
+  expected_chat_id?: string | null;
+  force_new_chat?: boolean;
+  delivery_contract_version?: number;
+}): { ok: boolean; seq: number; error?: string } {
+  expireStaleClaimIfNeeded();
+  if (S().status === "pending" || S().status === "running") {
+    if (S().status === "running" && isRunningExpired()) {
+      expireRunningPipelineIfNeeded();
+    } else {
+      return { ok: false, seq: 0, error: "pipeline_busy" };
+    }
+  }
+
+  const requestedDeliveryContractVersion = Math.max(
+    0,
+    Math.floor(Number(opts.delivery_contract_version) || 0),
+  );
+  const compatibilityError = validateDeliveryContractForDispatch(
+    requestedDeliveryContractVersion,
+    opts.target,
+  );
+  if (compatibilityError) {
+    return { ok: false, seq: 0, error: compatibilityError };
+  }
+
+  const forceNewChat = opts.force_new_chat === true;
+  const clearRemoteBinding =
+    forceNewChat ||
+    Boolean(
+      opts.target &&
+      S().remote_chat_url &&
+      !isWebChatUrlForTarget(S().remote_chat_url, opts.target),
+    );
+  const expectedBinding = resolveExpectedChatBinding(
+    opts as Record<string, unknown>,
+    opts.target || null,
+    forceNewChat,
+  );
+  if (expectedBinding.error) {
+    return { ok: false, seq: 0, error: expectedBinding.error };
+  }
+
+  S().responses = [];
+  S().active_seq = 0;
+  S().partial_text = null;
+  S().partial_thinking = null;
+  resetPerTurnTracking();
+  S().query.seq += 1;
+  S().query.prompt = opts.prompt || "";
+  S().query.pdf_base64 = opts.pdf_base64 || null;
+  S().query.pdf_filename = opts.pdf_filename || null;
+  S().query.images = opts.images || null;
+  S().query.chatgpt_mode = opts.chatgpt_mode || null;
+  S().query.target = opts.target || null;
+  S().query.expected_chat_url = expectedBinding.expectedChatUrl;
+  S().query.expected_chat_id = expectedBinding.expectedChatId;
+  S().active_target = opts.target || null;
+  S().query.force_new_chat = forceNewChat;
+  S().query.delivery_contract_version = requestedDeliveryContractVersion;
+  S().query.attempt = 0;
+  S().query.phase = "pending";
+  S().status = "pending";
+
+  // If this query requests a new chat, clear any pending NEW_CHAT command
+  // to prevent the extension from double-navigating (the query's force_new_chat
+  // flag will handle navigation in runPipeline).
+  if (opts.force_new_chat && S().pendingCommand?.type === "NEW_CHAT") {
+    S().pendingCommand = null;
+  }
+  if (clearRemoteBinding) {
+    S().remote_chat_url = null;
+    S().remote_chat_id = null;
+    S().turn_status = forceNewChat ? "navigating" : null;
+  }
+
+  return { ok: true, seq: S().query.seq };
+}
+
+/** Peek at the pending query without consuming it. */
+export function relayPollQuery(): {
+  status: RelayState["status"];
+  query: RelayState["query"] | null;
+} {
+  expireStaleClaimIfNeeded();
+  if (S().status === "pending") {
+    return { status: "pending", query: copyQueryState() };
+  }
+  return { status: S().status, query: null };
+}
+
+/** Claim the current pending query for an extension attempt. */
+export function relayClaimQuery(seq: number): {
+  ok: boolean;
+  reason?: string;
+  query?: RelayState["query"];
+} {
+  expireStaleClaimIfNeeded();
+  if (S().status !== "pending" || seq !== S().query.seq) {
+    return { ok: false, reason: "not_pending" };
+  }
+
+  S().status = "running";
+  S().active_seq = S().query.seq;
+  S().query.attempt += 1;
+  S().active_attempt = S().query.attempt;
+  S().query.phase = "claimed";
+  S().running_since = Date.now();
+  S().last_activity_at = S().running_since;
+  S().partial_text = null;
+  S().partial_thinking = null;
+  resetPerTurnTracking();
+
+  return {
+    ok: true,
+    query: copyQueryState(),
+  };
+}
+
+/** Advance the claimed query to the reported delivery phase. */
+export function relayAckQueryPhase(
+  seq: number,
+  phase: RelayQueryPhase,
+  attempt?: number,
+): { ok: boolean; reason?: string } {
+  expireStaleClaimIfNeeded();
+  if (seq !== S().active_seq) {
+    return { ok: false, reason: "seq_mismatch" };
+  }
+  if (typeof attempt === "number" && attempt !== S().active_attempt) {
+    return { ok: false, reason: "attempt_mismatch" };
+  }
+  if (phaseOrder(phase) < phaseOrder(S().query.phase)) {
+    return { ok: false, reason: "phase_regression" };
+  }
+
+  S().query.phase = phase;
+  if (
+    phase === "claimed" ||
+    phase === "prompt_applied" ||
+    phase === "submit_started" ||
+    phase === "submitted" ||
+    phase === "streaming"
+  ) {
+    S().running_since = Date.now();
+  }
+  S().last_activity_at = Date.now();
+  if (phase === "submitted" && !S().run_state) {
+    S().run_state = "submitted";
+  }
+  if (phase === "submitted") {
+    S().turn_status = "submitted";
+  }
+  return { ok: true };
+}
+
+/** Release a claimed query back to pending before ChatGPT accepts it. */
+export function relayReleaseQuery(
+  seq: number,
+  attempt?: number,
+): { ok: boolean; reason?: string } {
+  if (seq !== S().active_seq) {
+    return { ok: false, reason: "seq_mismatch" };
+  }
+  if (typeof attempt === "number" && attempt !== S().active_attempt) {
+    return { ok: false, reason: "attempt_mismatch" };
+  }
+  if (!isPreSubmitPhase(S().query.phase)) {
+    return { ok: false, reason: "already_submitted" };
+  }
+
+  S().status = "pending";
+  S().query.phase = "pending";
+  S().active_seq = 0;
+  S().active_attempt = 0;
+  S().running_since = 0;
+  S().last_activity_at = 0;
+  S().partial_text = null;
+  S().partial_thinking = null;
+  resetPerTurnTracking();
+
+  return { ok: true };
+}
+
+/** Poll for response directly from relay state (no HTTP). */
+export function relayPollResponse(): {
+  status: string;
+  responses: RelayState["responses"];
+  partial_text: string | null;
+  partial_thinking: string | null;
+  answer_anchor_id: string | null;
+  answer_revision: number;
+  thinking_revision: number;
+  run_state: RelayRunState | null;
+  completion_reason: RelayCompletionReason | null;
+  remote_chat_url: string | null;
+  remote_chat_id: string | null;
+  user_turn_key: string | null;
+  assistant_turn_key: string | null;
+  baseline_transcript_count: number;
+  baseline_transcript_hash: string | null;
+  turn_status: RelayTurnStatus | null;
+  diagnostic: RelayTurnDiagnostic | null;
+  current_seq: number;
+  current_attempt: number;
+} {
+  expireStaleClaimIfNeeded();
+  expireRunningPipelineIfNeeded();
+
+  return {
+    status: S().status,
+    responses: S().responses,
+    partial_text: S().partial_text,
+    partial_thinking: S().partial_thinking,
+    answer_anchor_id: S().answer_anchor_id,
+    answer_revision: S().answer_revision,
+    thinking_revision: S().thinking_revision,
+    run_state: S().run_state,
+    completion_reason: S().completion_reason,
+    remote_chat_url: S().remote_chat_url,
+    remote_chat_id: S().remote_chat_id,
+    user_turn_key: S().user_turn_key,
+    assistant_turn_key: S().assistant_turn_key,
+    baseline_transcript_count: S().baseline_transcript_count,
+    baseline_transcript_hash: S().baseline_transcript_hash,
+    turn_status: S().turn_status,
+    diagnostic: S().last_diagnostic,
+    current_seq: S().query.seq,
+    current_attempt: S().active_attempt,
+  };
+}
+
+/** Send new chat command directly (no HTTP). */
+export function relayNewChat(target?: string): void {
+  const prevTarget = S().active_target;
+  resetState();
+  S().active_target = target || prevTarget;
+  S().turn_status = "navigating";
+  S().pendingCommand = { type: "NEW_CHAT" };
+}
+
+/** Set the active webchat target without sending a command. */
+export function relaySetActiveTarget(target: string): void {
+  S().active_target = target;
+}
+
+/** Set a pending command directly (no HTTP). */
+export function relaySetCommand(cmd: {
+  type: string;
+  chatUrl?: string;
+  chatId?: string;
+}): void {
+  S().pendingCommand = cmd as any;
+}
+
+/** Request the extension to stop ChatGPT generation (no HTTP). */
+export function relayRequestStop(): void {
+  S().stopRequested = true;
+  S().stopRequestedSeq = S().active_seq || S().query.seq;
+  S().stopRequestedAttempt = S().active_attempt;
+  // Write a cancel response so the plugin's pollForResponse exits immediately
+  const currentSeq = S().query.seq;
+  S().responses.push({
+    seq: currentSeq,
+    attempt: S().active_attempt || undefined,
+    text: S().partial_text || "",
+    thinking: S().partial_thinking || undefined,
+    error: undefined,
+    timestamp: new Date().toISOString(),
+    run_state: "incomplete",
+    completion_reason: "forced_cancel",
+    remote_chat_url: S().remote_chat_url,
+    remote_chat_id: S().remote_chat_id,
+    user_turn_key: S().user_turn_key,
+    assistant_turn_key: S().assistant_turn_key,
+    baseline_transcript_count: S().baseline_transcript_count,
+    baseline_transcript_hash: S().baseline_transcript_hash,
+    turn_status: "incomplete",
+  });
+  // Reset relay state so new queries aren't rejected as "pipeline_busy"
+  S().status = "idle";
+  S().query.phase = "pending";
+  S().run_state = "incomplete";
+  S().completion_reason = "forced_cancel";
+  S().turn_status = "incomplete";
+}
+
+/** Refresh the current provider conversation by re-navigating and re-scraping. */
+export function relayRefreshChat(): { ok: boolean; chatUrl: string | null } {
+  const chatUrl = S().remote_chat_url;
+  const chatId = S().remote_chat_id;
+  if (!chatUrl) return { ok: false, chatUrl: null };
+  setScrapedTranscript(null);
+  S().turn_status = "navigating";
+  S().pendingCommand = {
+    type: "LOAD_CHAT",
+    chatUrl,
+    chatId: chatId || undefined,
+  } as any;
+  return { ok: true, chatUrl };
+}
+
+/** Load a chat session directly (no HTTP). */
+export function relayLoadChat(sessionId: string): {
+  ok: boolean;
+  session: {
+    id: string;
+    title: string;
+    chatUrl: string | null;
+    messages: unknown[];
+  };
+} {
+  const session = getMirroredHistory().find((s) => s.id === sessionId);
+  resetState();
+  if (session?.chatUrl) {
+    S().remote_chat_url = session.chatUrl;
+    S().remote_chat_id = session.id;
+    S().turn_status = "navigating";
+    S().pendingCommand = {
+      type: "LOAD_CHAT",
+      chatUrl: session.chatUrl,
+      chatId: session.id,
+    };
+  }
+  return {
+    ok: true,
+    session: session
+      ? {
+          id: session.id,
+          title: session.title,
+          chatUrl: session.chatUrl,
+          messages: [],
+        }
+      : { id: sessionId, title: "Unknown", chatUrl: null, messages: [] },
+  };
+}
+
+/** Update remote ChatGPT/session metadata directly (no HTTP). */
+export function relayUpdateTurnState(opts: {
+  remote_chat_url?: string | null;
+  remote_chat_id?: string | null;
+  user_turn_key?: string | null;
+  assistant_turn_key?: string | null;
+  baseline_transcript_count?: number;
+  baseline_transcript_hash?: string | null;
+  turn_status?: RelayTurnStatus | null;
+}): void {
+  applyRemoteTurnMetadata(opts as Record<string, unknown>);
+}
+
+/** Get mirrored chat history directly (no HTTP). */
+export function relayGetChatHistory(): Array<{
+  id: string;
+  title: string;
+  chatUrl: string | null;
+}> {
+  return getMirroredHistory().map((s) => ({
+    id: s.id,
+    title: s.title,
+    chatUrl: s.chatUrl,
+  }));
+}
+
+/** Get mirrored chat history plus per-site freshness metadata (no HTTP). */
+export function relayGetHistorySnapshot(): {
+  sessions: Array<{ id: string; title: string; chatUrl: string | null }>;
+  siteSync: HistorySiteSyncMap;
+} {
+  return {
+    sessions: relayGetChatHistory(),
+    siteSync: cloneHistorySiteSync(),
+  };
+}
+
+/** Get the reported ChatGPT mode (set by extension via /update_mode). */
+export function relayGetReportedMode(): string | null {
+  return S().reported_mode;
+}
+
+/** Get the latest scraped transcript snapshot directly (no HTTP). */
+export function relayGetScrapedTranscriptSnapshot(): ScrapedTranscriptSnapshot | null {
+  return cloneScrapedTranscriptSnapshot(getScrapedTranscript());
+}
+
+/** Get scraped messages directly (no HTTP). */
+export function relayGetScrapedMessages(): ScrapedChatMessage[] | null {
+  return relayGetScrapedTranscriptSnapshot()?.messages || null;
+}
+
+/** Test-only visibility into the relay state. */
+export function relayGetStateSnapshot(): RelayState {
+  expireStaleClaimIfNeeded();
+  return JSON.parse(JSON.stringify(S())) as RelayState;
+}
+
+/** Check if the Chrome extension has contacted the relay recently. */
+export function relayGetExtensionLiveness(): {
+  lastContact: number;
+  aliveSinceMs: number;
+} {
+  const lc = _store().lastExtensionContact || 0;
+  return { lastContact: lc, aliveSinceMs: lc ? Date.now() - lc : Infinity };
+}
+
+/** Clear cached extension status — forces the preload screen to wait for a fresh heartbeat. */
+export function relayClearExtensionStatus(): void {
+  _store().extensionStatus = null;
+}
+
+/** Get the latest extension status report (chatTabAlive, etc.). Returns null if stale (>30s). */
+export function relayGetExtensionStatus(): ExtensionStatus | null {
+  const s = _store().extensionStatus;
+  if (!s || Date.now() - s.ts > 30_000) return null; // 30s staleness — heartbeat posts every 10s
+  return s;
+}
+
+/** Explain why the latest extension heartbeat cannot serve a target. */
+export function relayGetExtensionReadinessError(
+  targetId: string | null | undefined,
+  deliveryContractVersion = ATTACHMENT_DELIVERY_CONTRACT_VERSION,
+): string | null {
+  return validateDeliveryContractForDispatch(deliveryContractVersion, targetId);
+}
+
+/** Test helper for exercising strict submissions without a browser runtime. */
+export function relaySetExtensionCapabilitiesForTests(
+  supportedDeliveryContracts: number[],
+): void {
+  _store().extensionStatus = {
+    chatTabAlive: true,
+    chatUrl: "https://chatgpt.com/",
+    siteId: "chatgpt",
+    url: "https://chatgpt.com/",
+    contentScriptAlive: true,
+    contentScriptAliveExplicit: true,
+    mainWorldInjected: true,
+    composerFound: true,
+    composerFoundExplicit: true,
+    sendControlState: "enabled",
+    uploadControlFound: true,
+    networkHookActive: true,
+    supportedDeliveryContracts: normalizeSupportedDeliveryContracts(
+      supportedDeliveryContracts,
+    ),
+    supportedTargets: ["chatgpt", "deepseek"],
+    answerCapture: "network",
+    lastRequestAt: null,
+    lastStreamAt: null,
+    lastDiagnostic: null,
+    ts: Date.now(),
+  };
+  _store().lastExtensionContact = Date.now();
+}
+
+/** Test helper to reset relay state without issuing commands. */
+export function relayResetForTests(): void {
+  resetState();
+  S().active_target = null;
+  setMirroredHistory([]);
+  _store().historySiteSync = {};
+  setScrapedTranscript(null);
+  _store().lastExtensionContact = 0;
+  _store().extensionStatus = null;
+}
+
+/**
+ * Register all webchat relay endpoints on Zotero's built-in HTTP server.
+ * Call during plugin startup.
+ */
+export function registerWebChatRelay(): void {
+  for (const [path, EndpointClass] of Object.entries(ENDPOINTS)) {
+    Zotero.Server.Endpoints[path] = EndpointClass;
+  }
+  const port = Zotero.Prefs.get("httpServer.port") || 23119;
+  appLogger.info(
+    `[webchat] Relay registered: ${Object.keys(ENDPOINTS).length} endpoints on port ${port}`,
+  );
+}
+
+/**
+ * Remove all webchat relay endpoints from Zotero's server.
+ * Call during plugin shutdown.
+ */
+export function unregisterWebChatRelay(): void {
+  for (const path of Object.keys(ENDPOINTS)) {
+    delete Zotero.Server.Endpoints[path];
+  }
+}

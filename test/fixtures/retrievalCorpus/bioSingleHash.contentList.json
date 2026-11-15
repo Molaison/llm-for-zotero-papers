@@ -1,0 +1,14 @@
+[
+  {
+    "type": "text",
+    "text_level": 1,
+    "text": "Sleep pressure reshapes place field stability in the rodent hippocampus",
+    "page_idx": 0
+  },
+  { "type": "text", "text_level": 1, "text": "Abstract", "page_idx": 0 },
+  { "type": "text", "text_level": 1, "text": "Introduction", "page_idx": 1 },
+  { "type": "text", "text_level": 1, "text": "Methods", "page_idx": 1 },
+  { "type": "text", "text_level": 1, "text": "Results", "page_idx": 2 },
+  { "type": "text", "text_level": 1, "text": "Discussion", "page_idx": 3 },
+  { "type": "text", "text_level": 1, "text": "References", "page_idx": 4 }
+]

@@ -1,0 +1,5233 @@
+import { fnv1a32Raw } from "../../utils/fnv1a";
+import { appLogger } from "../../core/logging";
+import { collectReaderSelectionDocuments } from "./readerSelection";
+import { sanitizeText } from "../../utils/textSanitization";
+import { clearCitationPageCache } from "./citationNavigationCache";
+import { readPageCompleteZoteroFulltextCache } from "./zoteroFulltextPageCache";
+import {
+  readAttachmentFileState,
+  type AttachmentFileState,
+} from "../../utils/attachmentFileState";
+import {
+  findLargestUniqueQuoteTextAnchorMatch,
+  normalizeLocatorText,
+  splitQuoteAtPairedInlineMath,
+  splitQuoteAtEllipsisInOrder,
+  stripBoundaryEllipsis,
+  summarizeQuoteTextSupport,
+  type QuoteTextSearchQueryKind,
+} from "../quotes/quoteTextSearch";
+import {
+  assessAcademicQuoteAlignment,
+  buildQuoteTextIndex,
+  findQuoteSourceSpansAllowingLayoutArtifacts,
+  stripPdfTextItemBoundaries,
+  type QuoteTextIndex,
+} from "../quotes/quoteTextNormalization";
+
+type PdfReaderPageText = {
+  pageIndex: number;
+  pageLabel?: string;
+  text: string;
+};
+
+type PdfReaderTextCoverage = "full-pdfworker" | "full-viewer" | "partial-dom";
+
+type PdfReaderTextCache = {
+  pages: PdfReaderPageText[];
+  /** Pre-computed normalised text per page for O(1) reuse. */
+  normalised: Array<{
+    pageIndex: number;
+    pageLabel?: string;
+    normalizedText: string;
+    textIndex: QuoteTextIndex;
+  }>;
+  coverage: PdfReaderTextCoverage;
+  pageCount?: number;
+  sourceFingerprint?: string;
+};
+
+type PdfQuoteCertificate = {
+  contextItemId: number;
+  documentFingerprint: string;
+  pageIndex: number;
+  pageLabel?: string;
+  sourceMatchText: string;
+  sourceMatchKind: "exact" | "normalized-span";
+  /** What was established, independently of formatting normalization. */
+  verificationMode?: "complete-quote" | "inline-math-locator";
+  sourceMatchPageOccurrence: number;
+};
+
+type PdfQuoteVerification =
+  | { status: "matched"; certificate: PdfQuoteCertificate }
+  | { status: "literal-not-found"; documentFingerprint: string }
+  | { status: "defer"; reason: string };
+
+export type LivePdfPageText = PdfReaderPageText;
+
+export type LivePdfSelectionPageLocation = {
+  contextItemId?: number;
+  pageIndex: number;
+  pageLabel?: string;
+  pagesScanned: number;
+};
+
+export type LivePdfSelectionLocateStatus =
+  | "resolved"
+  | "ambiguous"
+  | "not-found"
+  | "selection-too-short"
+  | "unavailable";
+
+export type LivePdfSelectionLocateConfidence =
+  | "high"
+  | "medium"
+  | "low"
+  | "none";
+
+export type LivePdfSelectionLocateResult = {
+  status: LivePdfSelectionLocateStatus;
+  confidence: LivePdfSelectionLocateConfidence;
+  selectionText: string;
+  normalizedSelection: string;
+  queryLabel?: string;
+  expectedPageIndex: number | null;
+  computedPageIndex: number | null;
+  matchedPageIndexes: number[];
+  totalMatches: number;
+  pagesScanned: number;
+  sourceMatchText?: string;
+  sourceMatchKind?: QuoteTextSearchQueryKind;
+  sourceMatchPageOccurrence?: number;
+  /** Coverage of the single matched span. */
+  sourceMatchQuoteTokenCoverage?: number;
+  /**
+   * Coverage of the whole quote across every run this document accounts for,
+   * pooled over its pages.  A stitched quote scores low on the span figure
+   * above and high here; this is the one to judge "is this the paper?" by.
+   */
+  sourceMatchQuoteTokenSupportCoverage?: number;
+  /** Absolute count behind the coverage above. */
+  sourceMatchSupportedQuoteTokenCount?: number;
+  /** Longest single contiguous run this document shares with the quote. */
+  sourceMatchLongestRunTokenCount?: number;
+  excerpt?: string;
+  reason?: string;
+  debugSummary?: string[];
+};
+
+export type LivePdfQuoteCertificate = PdfQuoteCertificate;
+
+export type LivePdfQuoteVerification = PdfQuoteVerification;
+
+export type ExactQuoteJumpQueryAttempt = {
+  query: string;
+  matchedPageIndexes: number[];
+  totalMatches: number;
+};
+
+export type ExactQuoteJumpResult = {
+  /** Backward-compatible alias for `matchStatus === "found"`. */
+  matched: boolean;
+  matchStatus: "found" | "not-found" | "deferred";
+  navigationStatus: "paragraph-selected" | "page-only" | "none";
+  reason: string;
+  failureStage?:
+    | "find-controller-unavailable"
+    | "source-fingerprint-mismatch"
+    | "page-text-unavailable"
+    | "full-quote-not-on-page"
+    | "query-not-accepted"
+    | "full-match-not-found"
+    | "intended-match-not-selected"
+    | "deadline-exceeded"
+    | "cancelled";
+  expectedPageIndex: number | null;
+  matchedPageIndex?: number;
+  queryUsed?: string;
+  /**
+   * Which of the wordings handed to the jump (sanitized and trimmed) this
+   * match came from. Set only on a match.
+   */
+  wordingUsed?: string;
+  highlightCoverage?: number;
+  queries: ExactQuoteJumpQueryAttempt[];
+  debugSummary: string[];
+};
+
+type FindControllerSearchResult = {
+  matchedPageIndexes: number[];
+  totalMatches: number;
+  pagesCount: number;
+  pageMatchCounts: number[];
+  selectedPageIndex: number | null;
+  selectedMatchIndex: number | null;
+  acceptanceMs: number;
+  completion: "found" | "complete" | "deferred";
+  /** Whether PDF.js reported terminal results for the whole document. */
+  resultsComplete: boolean;
+  completionReason?: "inactivity" | "absolute-deadline" | "cancelled";
+  snapshotCount: number;
+};
+
+type LocatePageTextOptions = {
+  queryLabel?: string;
+  resolveSinglePageDuplicates?: boolean;
+};
+
+type PageMatch = {
+  pageIndex: number;
+  matchIndexes: number[];
+  excerpt?: string;
+};
+
+type PageTextIndexEntry = {
+  pageIndex: number;
+  pageLabel?: string;
+  text: string;
+  normalizedText: string;
+};
+
+const PAGE_CONTAINER_SELECTOR = [
+  ".page[data-page-number]",
+  ".page[data-page-index]",
+  "[data-page-number]",
+  "[data-page-index]",
+].join(", ");
+// FindController concatenates adjacent text-content items without a separator.
+// Keep an internal one-character boundary while aligning so a margin line
+// number in its own item cannot fuse with a semantic word (for example,
+// "the152"). The marker is removed only when reconstructing the literal query
+// that FindController will normalize and search.
+const PDF_TEXT_ITEM_BOUNDARY = "\u0003";
+
+function buildPageTextIndex(pages: LivePdfPageText[]): PageTextIndexEntry[] {
+  return pages.map((page) => ({
+    pageIndex: page.pageIndex,
+    pageLabel: page.pageLabel,
+    text: page.text,
+    normalizedText: normalizeLocatorText(page.text),
+  }));
+}
+
+function searchPageIndexEntries(
+  pageIndexEntries: PageTextIndexEntry[],
+  query: string,
+): {
+  matchedPageIndexes: number[];
+  totalMatches: number;
+  excerpt?: string;
+} {
+  const normalizedQuery = normalizeLocatorText(query);
+  if (!normalizedQuery) {
+    return {
+      matchedPageIndexes: [],
+      totalMatches: 0,
+    };
+  }
+
+  const matchedPageIndexes: number[] = [];
+  let totalMatches = 0;
+  let excerpt: string | undefined;
+  for (const page of pageIndexEntries) {
+    const matchIndexes = findAllMatchIndexes(
+      page.normalizedText,
+      normalizedQuery,
+    );
+    if (!matchIndexes.length) continue;
+    matchedPageIndexes.push(page.pageIndex);
+    totalMatches += matchIndexes.length;
+    if (!excerpt) {
+      excerpt = buildExcerpt(
+        page.normalizedText,
+        matchIndexes[0],
+        normalizedQuery.length,
+      );
+    }
+  }
+  return { matchedPageIndexes, totalMatches, excerpt };
+}
+
+function findAllMatchIndexes(haystack: string, needle: string): number[] {
+  if (!haystack || !needle) return [];
+  const out: number[] = [];
+  let cursor = 0;
+  while (cursor < haystack.length) {
+    const found = haystack.indexOf(needle, cursor);
+    if (found < 0) break;
+    out.push(found);
+    cursor = found + Math.max(1, Math.floor(needle.length / 2));
+  }
+  return out;
+}
+
+function buildExcerpt(
+  text: string,
+  index: number,
+  matchLength: number,
+): string {
+  if (!text) return "";
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (!normalized) return "";
+  const start = Math.max(0, index - 72);
+  const end = Math.min(normalized.length, index + matchLength + 72);
+  const prefix = start > 0 ? "..." : "";
+  const suffix = end < normalized.length ? "..." : "";
+  return `${prefix}${normalized.slice(start, end).trim()}${suffix}`;
+}
+
+function isElementNode(value: unknown): value is Element {
+  return Boolean(
+    value &&
+    typeof value === "object" &&
+    "nodeType" in value &&
+    (value as { nodeType?: unknown }).nodeType === 1,
+  );
+}
+
+function getElementFromNode(node: Node | null | undefined): Element | null {
+  if (!node) return null;
+  if (node.nodeType === 1) {
+    return node as Element;
+  }
+  return node.parentElement || null;
+}
+
+function parsePageIndexFromElement(
+  element: Element | null | undefined,
+): number | null {
+  let current = element || null;
+  while (current) {
+    const pageNumberAttr = current.getAttribute("data-page-number");
+    if (pageNumberAttr) {
+      const pageNumber = Number.parseInt(pageNumberAttr, 10);
+      if (Number.isFinite(pageNumber) && pageNumber >= 1) {
+        return pageNumber - 1;
+      }
+    }
+    const pageIndexAttr = current.getAttribute("data-page-index");
+    if (pageIndexAttr) {
+      const pageIndex = Number.parseInt(pageIndexAttr, 10);
+      if (Number.isFinite(pageIndex) && pageIndex >= 0) {
+        return pageIndex;
+      }
+    }
+    current = current.parentElement;
+  }
+  return null;
+}
+
+/**
+ * The printed label on a PDF.js page element or its ancestors. PDF.js sets
+ * data-page-label exactly when the page has one. The page's other attributes
+ * are no label: data-page-number is the page number, and the landmark's
+ * l10n args and aria-label hold `pageLabel ?? pageNumber`, so without a
+ * label they hold the page number too.
+ */
+function getPageLabelFromElement(
+  element: Element | null | undefined,
+): string | undefined {
+  let current = element || null;
+  while (current) {
+    const explicitPageLabel = current.getAttribute("data-page-label")?.trim();
+    if (explicitPageLabel) return explicitPageLabel;
+    current = current.parentElement;
+  }
+  return undefined;
+}
+
+function parseRomanPageLabel(value: string): number {
+  const values: Record<string, number> = {
+    i: 1,
+    v: 5,
+    x: 10,
+    l: 50,
+    c: 100,
+    d: 500,
+    m: 1000,
+  };
+  const clean = sanitizeText(value || "")
+    .trim()
+    .toLowerCase();
+  if (!/^[ivxlcdm]+$/.test(clean)) return 0;
+  let total = 0;
+  let previous = 0;
+  for (let index = clean.length - 1; index >= 0; index -= 1) {
+    const current = values[clean[index]] || 0;
+    if (!current) return 0;
+    if (current < previous) {
+      total -= current;
+    } else {
+      total += current;
+      previous = current;
+    }
+  }
+  return total;
+}
+
+function countRenderedPages(doc: Document): number {
+  return doc.querySelectorAll(PAGE_CONTAINER_SELECTOR).length;
+}
+
+function getPageElementByIndex(
+  doc: Document,
+  pageIndex: number,
+): Element | null {
+  const pageElements = Array.from(
+    doc.querySelectorAll(PAGE_CONTAINER_SELECTOR),
+  ).filter(isElementNode);
+  for (const pageElement of pageElements) {
+    if (parsePageIndexFromElement(pageElement) === pageIndex) {
+      return pageElement;
+    }
+  }
+  return null;
+}
+
+function getSelectionPageElement(doc: Document): Element | null {
+  const selection = doc.defaultView?.getSelection?.();
+  if (!selection || selection.rangeCount < 1 || selection.isCollapsed) {
+    return null;
+  }
+  const candidates: Array<Node | null> = [
+    selection.anchorNode,
+    selection.focusNode,
+    selection.getRangeAt(0).commonAncestorContainer,
+  ];
+  for (const node of candidates) {
+    const element = getElementFromNode(node);
+    const pageIndex = parsePageIndexFromElement(element);
+    if (pageIndex !== null) {
+      return element;
+    }
+  }
+  return null;
+}
+
+function buildDomResolvedResult(
+  selectionText: string,
+  expectedPageIndex: number | null,
+  pageIndex: number,
+  pageLabel?: string,
+  pagesScanned = 0,
+): LivePdfSelectionLocateResult {
+  return {
+    status: "resolved",
+    confidence: "high",
+    selectionText: sanitizeText(selectionText || "").trim(),
+    normalizedSelection: normalizeLocatorText(selectionText),
+    queryLabel: "Selection",
+    expectedPageIndex,
+    computedPageIndex: pageIndex,
+    matchedPageIndexes: [pageIndex],
+    totalMatches: 1,
+    pagesScanned,
+    reason: pageLabel
+      ? `Resolved directly from the live selection DOM on page ${pageLabel}.`
+      : "Resolved directly from the live selection DOM.",
+  };
+}
+
+function matchByPrefixSuffix(
+  normalizedPageText: string,
+  normalizedSelection: string,
+): number[] {
+  if (normalizedSelection.length < 48) return [];
+  const edgeLength = Math.max(
+    18,
+    Math.min(64, Math.floor(normalizedSelection.length / 3)),
+  );
+  const prefix = normalizedSelection.slice(0, edgeLength).trim();
+  const suffix = normalizedSelection.slice(-edgeLength).trim();
+  if (!prefix || !suffix) return [];
+  const out: number[] = [];
+  let cursor = 0;
+  while (cursor < normalizedPageText.length) {
+    const prefixIndex = normalizedPageText.indexOf(prefix, cursor);
+    if (prefixIndex < 0) break;
+    const suffixSearchStart = prefixIndex + prefix.length;
+    const suffixIndex = normalizedPageText.indexOf(suffix, suffixSearchStart);
+    if (suffixIndex < 0) break;
+    const spanLength = suffixIndex + suffix.length - prefixIndex;
+    if (spanLength <= normalizedSelection.length * 1.8 + 48) {
+      out.push(prefixIndex);
+    }
+    cursor = prefixIndex + Math.max(1, Math.floor(prefix.length / 2));
+  }
+  return out;
+}
+
+function collectPageMatches(
+  pages: LivePdfPageText[],
+  normalizedSelection: string,
+): { matches: PageMatch[]; confidence: LivePdfSelectionLocateConfidence } {
+  const exactMatches: PageMatch[] = [];
+  for (const page of pages) {
+    const normalizedPageText = normalizeLocatorText(page.text);
+    const matchIndexes = findAllMatchIndexes(
+      normalizedPageText,
+      normalizedSelection,
+    );
+    if (!matchIndexes.length) continue;
+    exactMatches.push({
+      pageIndex: page.pageIndex,
+      matchIndexes,
+      excerpt: buildExcerpt(
+        normalizedPageText,
+        matchIndexes[0],
+        normalizedSelection.length,
+      ),
+    });
+  }
+  if (exactMatches.length) {
+    return { matches: exactMatches, confidence: "high" };
+  }
+
+  const fallbackMatches: PageMatch[] = [];
+  for (const page of pages) {
+    const normalizedPageText = normalizeLocatorText(page.text);
+    const matchIndexes = matchByPrefixSuffix(
+      normalizedPageText,
+      normalizedSelection,
+    );
+    if (!matchIndexes.length) continue;
+    fallbackMatches.push({
+      pageIndex: page.pageIndex,
+      matchIndexes,
+      excerpt: buildExcerpt(
+        normalizedPageText,
+        matchIndexes[0],
+        normalizedSelection.length,
+      ),
+    });
+  }
+  return {
+    matches: fallbackMatches,
+    confidence: fallbackMatches.length ? "medium" : "none",
+  };
+}
+
+export function locateSelectionInPageTexts(
+  pages: LivePdfPageText[],
+  selectionText: string,
+  expectedPageIndex?: number | null,
+  options?: LocatePageTextOptions,
+): LivePdfSelectionLocateResult {
+  const queryLabel = options?.queryLabel || "Selection";
+  const queryLabelLower = queryLabel.toLowerCase();
+  const normalizedSelection = normalizeLocatorText(selectionText);
+  if (!normalizedSelection) {
+    return {
+      status: "unavailable",
+      confidence: "none",
+      selectionText: sanitizeText(selectionText || "").trim(),
+      normalizedSelection,
+      queryLabel,
+      expectedPageIndex: expectedPageIndex ?? null,
+      computedPageIndex: null,
+      matchedPageIndexes: [],
+      totalMatches: 0,
+      pagesScanned: pages.length,
+      reason: `${queryLabel} text was empty.`,
+    };
+  }
+  if (normalizedSelection.length < 12) {
+    return {
+      status: "selection-too-short",
+      confidence: "none",
+      selectionText: sanitizeText(selectionText || "").trim(),
+      normalizedSelection,
+      queryLabel,
+      expectedPageIndex: expectedPageIndex ?? null,
+      computedPageIndex: null,
+      matchedPageIndexes: [],
+      totalMatches: 0,
+      pagesScanned: pages.length,
+      reason: `${queryLabel} was too short for reliable page resolution.`,
+    };
+  }
+
+  const { matches, confidence } = collectPageMatches(
+    pages,
+    normalizedSelection,
+  );
+  const matchedPageIndexes = matches.map((match) => match.pageIndex);
+  const totalMatches = matches.reduce(
+    (sum, match) => sum + match.matchIndexes.length,
+    0,
+  );
+  if (!matches.length) {
+    return {
+      status: "not-found",
+      confidence: "none",
+      selectionText: sanitizeText(selectionText || "").trim(),
+      normalizedSelection,
+      queryLabel,
+      expectedPageIndex: expectedPageIndex ?? null,
+      computedPageIndex: null,
+      matchedPageIndexes,
+      totalMatches,
+      pagesScanned: pages.length,
+      reason: `The live PDF text search did not find the current ${queryLabelLower}.`,
+    };
+  }
+  if (
+    matches.length === 1 &&
+    totalMatches > 1 &&
+    options?.resolveSinglePageDuplicates
+  ) {
+    return {
+      status: "resolved",
+      confidence: confidence === "high" ? "low" : confidence,
+      selectionText: sanitizeText(selectionText || "").trim(),
+      normalizedSelection,
+      queryLabel,
+      expectedPageIndex: expectedPageIndex ?? null,
+      computedPageIndex: matches[0].pageIndex,
+      matchedPageIndexes,
+      totalMatches,
+      pagesScanned: pages.length,
+      excerpt: matches[0].excerpt,
+      reason: `The current ${queryLabelLower} matched multiple locations on the same page in the live PDF.`,
+    };
+  }
+  if (matches.length > 1 || totalMatches > 1) {
+    return {
+      status: "ambiguous",
+      confidence: confidence === "high" ? "low" : confidence,
+      selectionText: sanitizeText(selectionText || "").trim(),
+      normalizedSelection,
+      queryLabel,
+      expectedPageIndex: expectedPageIndex ?? null,
+      computedPageIndex: null,
+      matchedPageIndexes,
+      totalMatches,
+      pagesScanned: pages.length,
+      excerpt: matches[0].excerpt,
+      reason: `The current ${queryLabelLower} matched more than one location in the live PDF.`,
+    };
+  }
+
+  return {
+    status: "resolved",
+    confidence,
+    selectionText: sanitizeText(selectionText || "").trim(),
+    normalizedSelection,
+    queryLabel,
+    expectedPageIndex: expectedPageIndex ?? null,
+    computedPageIndex: matches[0].pageIndex,
+    matchedPageIndexes,
+    totalMatches,
+    pagesScanned: pages.length,
+    excerpt: matches[0].excerpt,
+  };
+}
+
+type IndexedLivePdfPageText = {
+  page: LivePdfPageText;
+  textIndex: QuoteTextIndex;
+};
+
+type EllipsisSegmentLocation = {
+  pageIndex: number;
+  pageIndexes: number[];
+  sourceMatchText: string;
+  occurrenceIndex: number;
+};
+
+/** Drop the quotation marks a displayed quote is wrapped in. */
+function stripOuterQuoteMarks(value: string): string {
+  const text = (value || "").trim();
+  const paired =
+    (text.startsWith('"') && text.endsWith('"')) ||
+    (text.startsWith("\u201c") && text.endsWith("\u201d"));
+  return paired ? text.slice(1, -1).trim() : text;
+}
+
+/**
+ * A displayed quote often ends with a full stop the source sentence does not
+ * have, and the span matcher fails closed on a terminal sentence boundary.
+ * Retrying without it recovers the ordinary case without loosening matching.
+ */
+function segmentMatchVariants(segment: string): string[] {
+  const trimmed = segment.trim();
+  const withoutTerminal = trimmed.replace(/[.,;:!?]+$/u, "").trim();
+  return withoutTerminal && withoutTerminal !== trimmed
+    ? [trimmed, withoutTerminal]
+    : [trimmed];
+}
+
+/**
+ * Locate a quote that declares its own pieces with an ellipsis.
+ *
+ * Each piece must appear exactly once in the document and the pieces must
+ * appear in the order the quote gives them, compared by position within the
+ * page as well as across pages — same-page stitching is the common case, so an
+ * order rule that only compared page numbers would be vacuous exactly when it
+ * matters.  Together those make a coincidental assembly out of unrelated parts
+ * of a paper unlikely.
+ *
+ * Being an assembly is not by itself proof that this is the right paper: the
+ * caller still measures how much of the quote the document accounts for.  The
+ * reader lands on the first piece, since that is where the quote starts.
+ */
+function locateEllipsisSegmentsInIndexedPageTexts(
+  indexedPages: IndexedLivePdfPageText[],
+  quoteText: string,
+): EllipsisSegmentLocation | null {
+  const segments = splitQuoteAtEllipsisInOrder(stripOuterQuoteMarks(quoteText));
+  if (segments.length < 2) return null;
+
+  const located: Array<{
+    pageIndex: number;
+    sourceStart: number;
+    text: string;
+    occurrenceIndex: number;
+  }> = [];
+  for (const segment of segments) {
+    const hits = segmentMatchVariants(segment)
+      .map((variant) =>
+        indexedPages.flatMap((entry) =>
+          findQuoteSourceSpansAllowingLayoutArtifacts(
+            entry.textIndex,
+            variant,
+          ).map((span) => ({
+            pageIndex: entry.page.pageIndex,
+            sourceStart: span.sourceStart,
+            text: span.text.trim(),
+            occurrenceIndex: span.occurrenceIndex,
+          })),
+        ),
+      )
+      .find((found) => found.length > 0);
+    // Ambiguous or missing pieces make the assembly unverifiable, so the
+    // caller falls through to the weaker single-run rescue rather than guess.
+    if (!hits || hits.length !== 1) return null;
+    located.push(hits[0]);
+  }
+
+  for (let index = 1; index < located.length; index += 1) {
+    const previous = located[index - 1];
+    const current = located[index];
+    if (current.pageIndex < previous.pageIndex) return null;
+    if (
+      current.pageIndex === previous.pageIndex &&
+      current.sourceStart < previous.sourceStart
+    ) {
+      return null;
+    }
+  }
+  const first = located[0];
+  return {
+    pageIndex: first.pageIndex,
+    pageIndexes: located.map((entry) => entry.pageIndex),
+    sourceMatchText: first.text,
+    occurrenceIndex: first.occurrenceIndex,
+  };
+}
+
+function locateQuoteInIndexedPageTexts(
+  indexedPages: IndexedLivePdfPageText[],
+  quoteText: string,
+  expectedPageIndex?: number | null,
+  options?: { exactOnly?: boolean },
+): LivePdfSelectionLocateResult {
+  const pages = indexedPages.map((entry) => entry.page);
+  const cleanQuote = sanitizeText(quoteText || "").trim();
+  const normalizedSelection = normalizeLocatorText(cleanQuote);
+  if (!normalizedSelection) {
+    return {
+      status: "unavailable",
+      confidence: "none",
+      selectionText: cleanQuote,
+      normalizedSelection,
+      queryLabel: "Quote",
+      expectedPageIndex: expectedPageIndex ?? null,
+      computedPageIndex: null,
+      matchedPageIndexes: [],
+      totalMatches: 0,
+      pagesScanned: pages.length,
+      reason: "Quote text was empty.",
+    };
+  }
+  const matches = indexedPages
+    .map((entry) => ({
+      page: entry.page,
+      spans: findQuoteSourceSpansAllowingLayoutArtifacts(
+        entry.textIndex,
+        cleanQuote,
+      ),
+    }))
+    .filter((entry) => entry.spans.length);
+  const matchedPageIndexes = matches.map((entry) => entry.page.pageIndex);
+  const totalMatches = matches.reduce(
+    (sum, entry) => sum + entry.spans.length,
+    0,
+  );
+  if (!matches.length) {
+    const pageByEntryId = new Map<string, LivePdfPageText>();
+    const searchEntries = pages.map((page, index) => {
+      const id = `page-${page.pageIndex}-${index}`;
+      pageByEntryId.set(id, page);
+      return {
+        id,
+        text: page.text,
+      };
+    });
+    // Pooled over every page, so a quote stitched across a page break is
+    // summarised for the document rather than for whichever page won.
+    const documentSupport = summarizeQuoteTextSupport(
+      searchEntries,
+      cleanQuote,
+      {
+        minQueryLength: 24,
+        rejectWeakQueries: true,
+      },
+    );
+    if (options?.exactOnly) {
+      return {
+        status: "not-found",
+        confidence: "none",
+        selectionText: cleanQuote,
+        normalizedSelection,
+        queryLabel: "Quote",
+        expectedPageIndex: expectedPageIndex ?? null,
+        computedPageIndex: null,
+        matchedPageIndexes: [],
+        totalMatches: 0,
+        pagesScanned: pages.length,
+        sourceMatchQuoteTokenSupportCoverage: documentSupport.coverage,
+        sourceMatchSupportedQuoteTokenCount:
+          documentSupport.supportedQuoteTokenCount,
+        sourceMatchLongestRunTokenCount: documentSupport.longestRunTokenCount,
+        reason: "The complete quote was not found in the live PDF text.",
+      };
+    }
+    // A quote written with an ellipsis declares its own pieces.  Locate them
+    // individually before falling back to "largest single run", which cannot
+    // resolve a quote whose longest piece happens to repeat in the document.
+    const segmentLocation = locateEllipsisSegmentsInIndexedPageTexts(
+      indexedPages,
+      cleanQuote,
+    );
+    if (segmentLocation) {
+      return {
+        status: "resolved",
+        confidence: "high",
+        selectionText: cleanQuote,
+        normalizedSelection,
+        queryLabel: "Quote",
+        expectedPageIndex: expectedPageIndex ?? null,
+        computedPageIndex: segmentLocation.pageIndex,
+        matchedPageIndexes: segmentLocation.pageIndexes,
+        totalMatches: segmentLocation.pageIndexes.length,
+        pagesScanned: pages.length,
+        sourceMatchText: segmentLocation.sourceMatchText,
+        sourceMatchKind: "ellipsis-segment",
+        sourceMatchPageOccurrence: segmentLocation.occurrenceIndex,
+        // Measured on the same filtered basis as every other branch.  Assuming
+        // completeness here would hand the caller's guard a number it never
+        // computed, which is the whole failure this rewrite exists to remove.
+        sourceMatchQuoteTokenCoverage: documentSupport.longestRunCoverage,
+        sourceMatchQuoteTokenSupportCoverage: documentSupport.coverage,
+        sourceMatchSupportedQuoteTokenCount:
+          documentSupport.supportedQuoteTokenCount,
+        sourceMatchLongestRunTokenCount: documentSupport.longestRunTokenCount,
+        reason:
+          "Every piece of the ellipsized quote matched exactly once, in order, in the live PDF text.",
+        debugSummary: [
+          `Matched ${segmentLocation.pageIndexes.length} quote segments across pages ${segmentLocation.pageIndexes.join(", ")}.`,
+        ],
+      };
+    }
+    const sourceMatch = findLargestUniqueQuoteTextAnchorMatch(
+      searchEntries,
+      cleanQuote,
+      {
+        minQueryLength: 24,
+        rejectWeakQueries: true,
+      },
+    );
+    const matchedPage = sourceMatch
+      ? pageByEntryId.get(sourceMatch.entryId)
+      : undefined;
+    // Pooled over every page, so a quote stitched across a page break is
+    // summarised for the document rather than for whichever page won.
+    if (sourceMatch && matchedPage) {
+      return {
+        status: "resolved",
+        confidence: sourceMatch.confidence,
+        selectionText: cleanQuote,
+        normalizedSelection,
+        queryLabel: "Quote",
+        expectedPageIndex: expectedPageIndex ?? null,
+        computedPageIndex: matchedPage.pageIndex,
+        matchedPageIndexes: [matchedPage.pageIndex],
+        totalMatches: sourceMatch.totalOccurrences,
+        pagesScanned: pages.length,
+        sourceMatchText: sourceMatch.query,
+        sourceMatchKind: sourceMatch.matchKind,
+        // The rescue only accepts a span that occurs once in the document, so
+        // its position on its own page is necessarily the first.
+        sourceMatchPageOccurrence: 0,
+        sourceMatchQuoteTokenCoverage: sourceMatch.quoteTokenCoverage,
+        sourceMatchQuoteTokenSupportCoverage: documentSupport.coverage,
+        sourceMatchSupportedQuoteTokenCount:
+          documentSupport.supportedQuoteTokenCount,
+        sourceMatchLongestRunTokenCount: documentSupport.longestRunTokenCount,
+        reason:
+          "The complete quote did not align, but its largest strong contiguous source span matched exactly once in the live PDF text.",
+        debugSummary: [
+          `Largest unique source span matched ${sourceMatch.matchedTokenCount}/${sourceMatch.quoteTokenCount} quote tokens.`,
+          `Document accounts for ${documentSupport.supportedQuoteTokenCount}/${documentSupport.quoteTokenCount} quote tokens.`,
+        ],
+      };
+    }
+    return {
+      status: "not-found",
+      confidence: "none",
+      selectionText: cleanQuote,
+      normalizedSelection,
+      queryLabel: "Quote",
+      expectedPageIndex: expectedPageIndex ?? null,
+      computedPageIndex: null,
+      matchedPageIndexes,
+      totalMatches,
+      pagesScanned: pages.length,
+      sourceMatchQuoteTokenSupportCoverage: documentSupport.coverage,
+      sourceMatchSupportedQuoteTokenCount:
+        documentSupport.supportedQuoteTokenCount,
+      sourceMatchLongestRunTokenCount: documentSupport.longestRunTokenCount,
+      reason: "The complete quote was not found in the live PDF text.",
+    };
+  }
+  const normalizedExpectedPageIndex =
+    Number.isFinite(expectedPageIndex) && Number(expectedPageIndex) >= 0
+      ? Math.floor(Number(expectedPageIndex))
+      : null;
+  const expectedPageMatch =
+    normalizedExpectedPageIndex === null
+      ? undefined
+      : matches.find(
+          (entry) => entry.page.pageIndex === normalizedExpectedPageIndex,
+        );
+  if (
+    totalMatches > 1 &&
+    expectedPageMatch &&
+    expectedPageMatch.spans.length === 1
+  ) {
+    return {
+      status: "resolved",
+      confidence: "high",
+      selectionText: cleanQuote,
+      normalizedSelection,
+      queryLabel: "Quote",
+      expectedPageIndex: normalizedExpectedPageIndex,
+      computedPageIndex: normalizedExpectedPageIndex,
+      matchedPageIndexes,
+      totalMatches,
+      pagesScanned: pages.length,
+      sourceMatchText: expectedPageMatch.spans[0].text.trim(),
+      sourceMatchKind: "exact",
+      sourceMatchPageOccurrence: expectedPageMatch.spans[0].occurrenceIndex,
+      sourceMatchQuoteTokenCoverage: 1,
+      reason:
+        "The complete quote matched the expected PDF page; identical complete matches elsewhere in the PDF do not make this navigation ambiguous.",
+    };
+  }
+  const firstSingleOccurrencePage = matches.find(
+    (entry) => entry.spans.length === 1,
+  );
+  if (matches.length > 1 && firstSingleOccurrencePage) {
+    return {
+      status: "resolved",
+      confidence: "medium",
+      selectionText: cleanQuote,
+      normalizedSelection,
+      queryLabel: "Quote",
+      expectedPageIndex: normalizedExpectedPageIndex,
+      computedPageIndex: firstSingleOccurrencePage.page.pageIndex,
+      matchedPageIndexes,
+      totalMatches,
+      pagesScanned: pages.length,
+      sourceMatchText: firstSingleOccurrencePage.spans[0].text.trim(),
+      sourceMatchKind: "exact",
+      sourceMatchPageOccurrence:
+        firstSingleOccurrencePage.spans[0].occurrenceIndex,
+      sourceMatchQuoteTokenCoverage: 1,
+      reason:
+        "The complete quote matched multiple PDF pages; navigation uses the first page containing one complete occurrence.",
+    };
+  }
+  if (matches.length > 1 || totalMatches > 1) {
+    return {
+      status: "ambiguous",
+      confidence: "low",
+      selectionText: cleanQuote,
+      normalizedSelection,
+      queryLabel: "Quote",
+      expectedPageIndex: expectedPageIndex ?? null,
+      computedPageIndex: null,
+      matchedPageIndexes,
+      totalMatches,
+      pagesScanned: pages.length,
+      reason:
+        matches.length > 1
+          ? "The complete quote matched more than one PDF page."
+          : "The complete quote matched more than one occurrence on the PDF page.",
+    };
+  }
+  return {
+    status: "resolved",
+    confidence: "high",
+    selectionText: cleanQuote,
+    normalizedSelection,
+    queryLabel: "Quote",
+    expectedPageIndex: expectedPageIndex ?? null,
+    computedPageIndex: matches[0].page.pageIndex,
+    matchedPageIndexes,
+    totalMatches,
+    pagesScanned: pages.length,
+    sourceMatchText: matches[0].spans[0].text.trim(),
+    sourceMatchKind: "exact",
+    sourceMatchPageOccurrence: matches[0].spans[0].occurrenceIndex,
+    sourceMatchQuoteTokenCoverage: 1,
+    reason: "The complete quote matched a single PDF page.",
+  };
+}
+
+export function locateQuoteInPageTexts(
+  pages: LivePdfPageText[],
+  quoteText: string,
+  expectedPageIndex?: number | null,
+): LivePdfSelectionLocateResult {
+  return locateQuoteInIndexedPageTexts(
+    pages.map((page) => ({
+      page,
+      textIndex: buildQuoteTextIndex(page.text),
+    })),
+    quoteText,
+    expectedPageIndex,
+  );
+}
+
+function unwrapGeckoJsObject(value: any): any {
+  try {
+    return value?.wrappedJSObject || value;
+  } catch {
+    return value;
+  }
+}
+
+function resolveGeckoMethodOwner(value: any, methodName: string): any | null {
+  const candidates = [unwrapGeckoJsObject(value), value];
+  const seen = new Set<any>();
+  for (const candidate of candidates) {
+    if (!candidate || seen.has(candidate)) continue;
+    seen.add(candidate);
+    try {
+      if (typeof candidate[methodName] === "function") return candidate;
+    } catch {
+      // Continue to the other side of the Gecko wrapper.
+    }
+  }
+  return null;
+}
+
+function getPdfViewerApplication(reader: any): any | null {
+  const candidates = [
+    reader?._internalReader?._lastView,
+    reader?._internalReader?._primaryView,
+    reader?._internalReader?._secondaryView,
+    reader,
+  ];
+  for (const candidate of candidates) {
+    // Firefox/Gecko Xray wrapper bypass — custom JS globals like
+    // PDFViewerApplication are hidden behind Xray wrappers and need
+    // wrappedJSObject to expose PDFDocumentProxy prototype methods such as
+    // getPage() to chrome (privileged) code. Prefer the unwrapped application:
+    // an Xray wrapper can expose app.pdfDocument while still hiding getPage(),
+    // which makes page-native quote extraction fail in the real Zotero reader.
+    try {
+      const wrapped =
+        candidate?._iframeWindow?.wrappedJSObject?.PDFViewerApplication ||
+        candidate?._iframe?.contentWindow?.wrappedJSObject
+          ?.PDFViewerApplication ||
+        candidate?._window?.wrappedJSObject?.PDFViewerApplication;
+      if (wrapped?.pdfDocument) return wrapped;
+    } catch {
+      // wrappedJSObject may throw in non-Firefox environments
+    }
+
+    // Standard property access for tests and reader builds without Xray
+    // wrappers.
+    const app =
+      candidate?._iframeWindow?.PDFViewerApplication ||
+      candidate?._iframe?.contentWindow?.PDFViewerApplication ||
+      candidate?._window?.PDFViewerApplication;
+    if (app?.pdfDocument) return app;
+  }
+
+  // Last resort: reach the iframe window via the DOM documents already
+  // accessible through collectReaderSelectionDocuments.
+  try {
+    const docs = collectReaderSelectionDocuments(reader);
+    for (const doc of docs) {
+      const win: any = doc?.defaultView;
+      if (!win) continue;
+      try {
+        const wrapped = win.wrappedJSObject?.PDFViewerApplication;
+        if (wrapped?.pdfDocument) return wrapped;
+      } catch {
+        // Ignore
+      }
+      const app = win.PDFViewerApplication;
+      if (app?.pdfDocument) return app;
+    }
+  } catch {
+    // Ignore
+  }
+
+  return null;
+}
+
+function getExpectedPageIndex(reader: any, app?: any | null): number | null {
+  const candidates = [
+    reader?._internalReader?._state?.primaryViewStats?.pageIndex,
+    reader?._internalReader?._state?.secondaryViewStats?.pageIndex,
+    Number.isFinite(app?.page) ? Number(app.page) - 1 : null,
+  ];
+  for (const candidate of candidates) {
+    if (candidate === null || candidate === undefined || candidate === "") {
+      continue;
+    }
+    const parsed = Number(candidate);
+    if (Number.isFinite(parsed) && parsed >= 0) {
+      return Math.floor(parsed);
+    }
+  }
+  return null;
+}
+
+function locateCurrentSelectionFromDom(
+  reader: any,
+  selectionText: string,
+): LivePdfSelectionLocateResult | null {
+  const normalizedSelection = normalizeLocatorText(selectionText);
+  if (!normalizedSelection) return null;
+
+  const app = getPdfViewerApplication(reader);
+  const expectedPageIndex = getExpectedPageIndex(reader, app);
+  const docs = collectReaderSelectionDocuments(reader);
+  for (const doc of docs) {
+    const selectedText = sanitizeText(
+      doc.defaultView?.getSelection?.()?.toString() || "",
+    ).trim();
+    if (!selectedText) continue;
+    if (normalizeLocatorText(selectedText) !== normalizedSelection) continue;
+    const selectionPageElement = getSelectionPageElement(doc);
+    const pageIndex = parsePageIndexFromElement(selectionPageElement);
+    if (pageIndex === null) continue;
+    return buildDomResolvedResult(
+      selectionText,
+      expectedPageIndex,
+      pageIndex,
+      getPageLabelForIndex(reader, pageIndex),
+      countRenderedPages(doc),
+    );
+  }
+  return null;
+}
+
+export function getCurrentSelectionPageLocationFromReader(
+  reader: any,
+  selectionText: string,
+): LivePdfSelectionPageLocation | null {
+  const normalizedSelection = normalizeLocatorText(selectionText);
+  if (!normalizedSelection) return null;
+
+  const docs = collectReaderSelectionDocuments(reader);
+  const contextItemId = (() => {
+    const raw = Number(reader?._item?.id || reader?.itemID || 0);
+    return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : undefined;
+  })();
+
+  for (const doc of docs) {
+    const selectedText = sanitizeText(
+      doc.defaultView?.getSelection?.()?.toString() || "",
+    ).trim();
+    if (!selectedText) continue;
+    if (normalizeLocatorText(selectedText) !== normalizedSelection) continue;
+    const selectionPageElement = getSelectionPageElement(doc);
+    const pageIndex = parsePageIndexFromElement(selectionPageElement);
+    if (pageIndex === null) continue;
+    return {
+      contextItemId,
+      pageIndex,
+      pageLabel: getPageLabelForIndex(reader, pageIndex),
+      pagesScanned: countRenderedPages(doc),
+    };
+  }
+
+  return null;
+}
+
+/**
+ * The viewer's printed page labels, one per page index, when the PDF has
+ * them. Zotero's PDF.js keeps them on `_pageLabels`; other builds expose
+ * `pageLabels`.
+ */
+function getViewerPageLabels(app: any): unknown[] | null {
+  const labels =
+    app?.pdfViewer?.pageLabels ||
+    app?.pdfViewer?._pageLabels ||
+    app?.pdfDocument?._pageLabels;
+  return Array.isArray(labels) && labels.length > 0 ? labels : null;
+}
+
+/**
+ * The printed label the reader reports for a page, from the viewer's label
+ * array or the page's DOM. Undefined when the reader reports none.
+ */
+export function getPageLabelForIndex(
+  reader: any,
+  pageIndex: number,
+): string | undefined {
+  if (!Number.isFinite(pageIndex) || pageIndex < 0) return undefined;
+  const normalizedPageIndex = Math.floor(pageIndex);
+
+  // PDF.js data-page-number is always the internal 1-based index. Prefer
+  // the viewer's label array so printed labels such as 431 or iv are
+  // preserved instead of being collapsed to the internal page number 4.
+  const labels = getViewerPageLabels(getPdfViewerApplication(reader));
+  if (labels && labels[normalizedPageIndex]) {
+    return String(labels[normalizedPageIndex]);
+  }
+
+  const docs = collectReaderSelectionDocuments(reader);
+  for (const doc of docs) {
+    const pageElement = getPageElementByIndex(doc, normalizedPageIndex);
+    const pageLabel = getPageLabelFromElement(pageElement);
+    if (pageLabel) return pageLabel;
+  }
+
+  // No label is guessed from the page index. The index drives navigation;
+  // a label is for display and links, and a PDF's printed labels need not
+  // follow its page order. A caller that shows a page falls back to
+  // `${pageIndex + 1}` itself.
+  return undefined;
+}
+
+/**
+ * Read a label as a page number, never through the PDF's printed labels:
+ * "4" is page index 3, and a roman "iv" is too. For labels that were page
+ * numbers guessed from the index, as every label stored before page text
+ * stopped recording labels was.
+ */
+export function resolvePageIndexForPageNumberLabel(
+  reader: any,
+  pageLabel: string,
+): number | null {
+  const clean = sanitizeText(pageLabel || "").trim();
+  if (!clean) return null;
+  const app = getPdfViewerApplication(reader);
+
+  if (/^\d+$/.test(clean)) {
+    const parsed = Number.parseInt(clean, 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed - 1 : null;
+  }
+
+  if (/^[ivxlcdm]+$/i.test(clean)) {
+    const roman = parseRomanPageLabel(clean);
+    const pagesCount = getPagesCount(app);
+    if (roman > 0 && (!pagesCount || roman <= pagesCount)) {
+      return roman - 1;
+    }
+  }
+
+  return null;
+}
+
+export async function resolveCurrentSelectionPageLocationFromReader(
+  reader: any,
+  selectionText: string,
+): Promise<LivePdfSelectionPageLocation | null> {
+  const directLocation = getCurrentSelectionPageLocationFromReader(
+    reader,
+    selectionText,
+  );
+  if (directLocation) return directLocation;
+
+  const resolved = await locateCurrentSelectionInLivePdfReader(
+    reader,
+    selectionText,
+  );
+  if (resolved.status !== "resolved" || resolved.computedPageIndex === null) {
+    return null;
+  }
+
+  const rawContextItemId = Number(reader?._item?.id || reader?.itemID || 0);
+  const contextItemId =
+    Number.isFinite(rawContextItemId) && rawContextItemId > 0
+      ? Math.floor(rawContextItemId)
+      : undefined;
+  const pageIndex = Math.floor(resolved.computedPageIndex);
+  return {
+    contextItemId,
+    pageIndex,
+    pageLabel: getPageLabelForIndex(reader, pageIndex),
+    pagesScanned: resolved.pagesScanned,
+  };
+}
+
+function extractPageTextFromElement(pageElement: Element): string {
+  const textLayer =
+    pageElement.querySelector(".textLayer") ||
+    pageElement.querySelector('[class*="textLayer"]');
+  if (textLayer) {
+    // Collect text from each direct child span separately and join with
+    // a space.  Some PDF.js builds produce text-layer spans whose
+    // textContent lacks trailing spaces, causing `textLayer.textContent`
+    // to concatenate words into a single run (e.g. "wordAwordB").
+    const children = textLayer.children;
+    if (children.length > 0) {
+      const parts: string[] = [];
+      for (let i = 0; i < children.length; i++) {
+        const t = (children[i].textContent || "").trimEnd();
+        if (t) parts.push(t);
+      }
+      if (parts.length) {
+        return sanitizeText(parts.join(" ").trim());
+      }
+    }
+    return sanitizeText((textLayer.textContent || "").trim());
+  }
+  return sanitizeText((pageElement.textContent || "").trim());
+}
+
+function extractRenderedPageTexts(reader: any): {
+  pages: LivePdfPageText[];
+  expectedPageIndex: number | null;
+} {
+  const app = getPdfViewerApplication(reader);
+  const pagesByIndex = new Map<number, LivePdfPageText>();
+  const docs = collectReaderSelectionDocuments(reader);
+  for (const doc of docs) {
+    const pageElements = Array.from(
+      doc.querySelectorAll(PAGE_CONTAINER_SELECTOR),
+    ).filter(isElementNode);
+    for (const pageElement of pageElements) {
+      const pageIndex = parsePageIndexFromElement(pageElement);
+      if (pageIndex === null || pagesByIndex.has(pageIndex)) continue;
+      const text = extractPageTextFromElement(pageElement);
+      if (!text) continue;
+      pagesByIndex.set(pageIndex, {
+        pageIndex,
+        pageLabel: getPageLabelForIndex(reader, pageIndex),
+        text,
+      });
+    }
+  }
+
+  return {
+    pages: Array.from(pagesByIndex.values()).sort(
+      (a, b) => a.pageIndex - b.pageIndex,
+    ),
+    expectedPageIndex: getExpectedPageIndex(reader, app),
+  };
+}
+
+// ── Page text cache ─────────────────────────────────────────────────
+// Pre-loads ALL page texts from the PDF document once and caches them
+// so that subsequent quote lookups are instant (pure in-memory substring
+// search with zero async I/O).
+
+export type PageTextCacheCoverage = PdfReaderTextCoverage;
+
+export type CachedPageTextIndex = PdfReaderTextCache;
+
+type ExtractedPageTextIndexSource = {
+  pages: LivePdfPageText[];
+  pageCount?: number;
+};
+
+export type HiddenQuoteLocationCacheEntry = {
+  contextItemId: number;
+  pageIndex: number;
+  sourceFingerprint?: string;
+  sourceMatchText?: string;
+  sourceMatchKind?: QuoteTextSearchQueryKind;
+  sourceMatchPageOccurrence?: number;
+  sourceMatchQuoteTokenCoverage?: number;
+  confidence: LivePdfSelectionLocateConfidence;
+  reason?: string;
+  matchedPageIndexes: number[];
+  pagesScanned: number;
+  debugSummary?: string[];
+};
+
+const MAX_PAGE_TEXT_CACHE_ENTRIES = 50;
+const PAGE_TEXT_CACHE_TTL_MS = 2 * 60 * 60 * 1000;
+const FIND_CONTROLLER_INACTIVITY_DEADLINE_MS = 10_000;
+const FIND_CONTROLLER_ABSOLUTE_DEADLINE_MS = 30_000;
+const FIND_CONTROLLER_SELECTION_DEADLINE_MS = 5_000;
+const FIND_CONTROLLER_ACCEPTANCE_TIMEOUT_MS = 1_500;
+const FIND_CONTROLLER_ACCEPTANCE_POLL_MS = 100;
+const FIND_CONTROLLER_ACTIVE_POLL_MS = 100;
+const FIND_CONTROLLER_ACCEPTED_POLL_MS = 500;
+const MAX_PAGE_TEXT_CACHE_ESTIMATED_BYTES = 32 * 1024 * 1024;
+const MAX_HIDDEN_QUOTE_LOCATION_CACHE_ENTRIES = 1000;
+const MAX_LIVE_PDF_QUOTE_VERIFICATION_CACHE_ENTRIES = 1000;
+const MAX_COOPERATIVE_PAGE_TEXT_CHARS = 50_000;
+
+type CachedPageTextRecord = {
+  index: CachedPageTextIndex;
+  /**
+   * The attachment file the text was read from, as it was when the read
+   * began; a record from an earlier version of the file is stale.
+   */
+  fileState?: PageTextFileState;
+  createdAt: number;
+  lastAccessedAt: number;
+  lastAccessedOrder: number;
+  estimatedBytes: number;
+};
+
+type HiddenQuoteLocationCacheRecord = {
+  entry: HiddenQuoteLocationCacheEntry;
+  createdAt: number;
+  lastAccessedAt: number;
+  lastAccessedOrder: number;
+};
+
+const pageTextCacheByKey = new Map<string, CachedPageTextRecord>();
+const pageTextCachePromisesByKey = new Map<
+  string,
+  { promise: Promise<CachedPageTextIndex | null>; promote?: () => void }
+>();
+const hiddenQuoteLocationCache = new Map<
+  string,
+  HiddenQuoteLocationCacheRecord
+>();
+const livePdfQuoteVerificationCache = new Map<
+  string,
+  Extract<LivePdfQuoteVerification, { status: "matched" | "literal-not-found" }>
+>();
+
+function cacheLivePdfQuoteVerification(
+  key: string,
+  value: Extract<
+    LivePdfQuoteVerification,
+    { status: "matched" | "literal-not-found" }
+  >,
+): void {
+  livePdfQuoteVerificationCache.delete(key);
+  livePdfQuoteVerificationCache.set(key, value);
+  while (
+    livePdfQuoteVerificationCache.size >
+    MAX_LIVE_PDF_QUOTE_VERIFICATION_CACHE_ENTRIES
+  ) {
+    const oldestKey = livePdfQuoteVerificationCache.keys().next().value;
+    if (typeof oldestKey !== "string") break;
+    livePdfQuoteVerificationCache.delete(oldestKey);
+  }
+}
+const MAX_LIVE_PDF_VERIFICATION_EXTRACTION_CACHE_ENTRIES = 3;
+type LivePdfVerificationExtraction = {
+  pages: LivePdfPageText[];
+  indexes: QuoteTextIndex[];
+};
+const livePdfVerificationExtractionCache = new Map<
+  string,
+  LivePdfVerificationExtraction
+>();
+
+function cacheLivePdfVerificationExtraction(
+  key: string,
+  value: LivePdfVerificationExtraction,
+): void {
+  livePdfVerificationExtractionCache.delete(key);
+  livePdfVerificationExtractionCache.set(key, value);
+  while (
+    livePdfVerificationExtractionCache.size >
+    MAX_LIVE_PDF_VERIFICATION_EXTRACTION_CACHE_ENTRIES
+  ) {
+    const oldestKey = livePdfVerificationExtractionCache.keys().next().value;
+    if (typeof oldestKey !== "string") break;
+    livePdfVerificationExtractionCache.delete(oldestKey);
+  }
+}
+const hiddenQuoteLocationTasks = new Map<
+  string,
+  Promise<HiddenQuoteLocationCacheEntry | null>
+>();
+let anonymousReaderKeys = new WeakMap<object, string>();
+let anonymousReaderKeySequence = 0;
+let pageTextCacheGeneration = 0;
+let cacheAccessSequence = 0;
+const findControllerNavigationGenerations = new WeakMap<object, number>();
+
+function getNavigationGenerationKey(reader: any): object | null {
+  const app = getPdfViewerApplication(reader);
+  const candidate = app?.findController || app || reader;
+  const type = typeof candidate;
+  return type === "object" || type === "function"
+    ? (candidate as object)
+    : null;
+}
+
+function beginFindControllerNavigationAttempt(reader: any): {
+  generation: number;
+  isCurrent: () => boolean;
+} {
+  const key = getNavigationGenerationKey(reader);
+  if (!key) return { generation: 0, isCurrent: () => true };
+  const generation = (findControllerNavigationGenerations.get(key) || 0) + 1;
+  findControllerNavigationGenerations.set(key, generation);
+  return {
+    generation,
+    isCurrent: () =>
+      findControllerNavigationGenerations.get(key) === generation,
+  };
+}
+
+function normalizePageTextCacheKey(value: unknown): string | null {
+  const key = sanitizeText(String(value || "")).trim();
+  return key ? key : null;
+}
+
+function uniqueCacheKeys(values: Array<string | null | undefined>): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const value of values) {
+    const key = normalizePageTextCacheKey(value);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(key);
+  }
+  return out;
+}
+
+function getAttachmentPageTextCacheKey(contextItemId: number): string | null {
+  const itemId = Math.floor(Number(contextItemId));
+  return Number.isFinite(itemId) && itemId > 0 ? `item-${itemId}` : null;
+}
+
+function getReaderItemPageTextCacheKey(reader: any): string | null {
+  const itemId = Number(reader?._item?.id || reader?.itemID || 0);
+  return Number.isFinite(itemId) && itemId > 0
+    ? getAttachmentPageTextCacheKey(itemId)
+    : null;
+}
+
+function getReaderFingerprintCacheKey(reader: any): string | null {
+  const app = getPdfViewerApplication(reader);
+  const fp = app?.pdfDocument?.fingerprints;
+  return Array.isArray(fp) && fp[0] ? `fingerprint-${String(fp[0])}` : null;
+}
+
+function getAnonymousReaderCacheKey(reader: any): string | null {
+  if (!reader) return null;
+  const type = typeof reader;
+  if (type !== "object" && type !== "function") return null;
+  const readerObject = reader as object;
+  let key = anonymousReaderKeys.get(readerObject);
+  if (!key) {
+    anonymousReaderKeySequence += 1;
+    key = `reader-${anonymousReaderKeySequence}`;
+    anonymousReaderKeys.set(readerObject, key);
+  }
+  return key;
+}
+
+function getReaderCacheKeys(reader: any): string[] {
+  return uniqueCacheKeys([
+    getReaderFingerprintCacheKey(reader),
+    getReaderItemPageTextCacheKey(reader),
+    getAnonymousReaderCacheKey(reader),
+  ]);
+}
+
+type PageTextFileState = Pick<AttachmentFileState, "size" | "mtime">;
+
+function pageTextFileState(
+  state: AttachmentFileState | null | undefined,
+): PageTextFileState | undefined {
+  return state ? { size: state.size, mtime: state.mtime } : undefined;
+}
+
+/**
+ * The cached page text for `keys`. Given the attachment file's current
+ * state, a record read from another version of the file is dropped.
+ */
+function getCachedPageTextIndex(
+  keys: string[],
+  fileState?: AttachmentFileState | null,
+): CachedPageTextIndex | null {
+  const currentTime = Date.now();
+  evictExpiredPageTextCacheRecords(currentTime);
+  for (const key of keys) {
+    const cached = pageTextCacheByKey.get(key);
+    if (
+      cached?.fileState &&
+      fileState &&
+      (cached.fileState.size !== fileState.size ||
+        cached.fileState.mtime !== fileState.mtime)
+    ) {
+      deletePageTextCacheRecord(cached);
+      continue;
+    }
+    if (cached) {
+      touchPageTextCacheRecord(cached, currentTime);
+      return cached.index;
+    }
+  }
+  return null;
+}
+
+function getCachedPageTextPromise(
+  keys: string[],
+  foreground = false,
+): Promise<CachedPageTextIndex | null> | null {
+  for (const key of keys) {
+    const task = pageTextCachePromisesByKey.get(key);
+    if (task) {
+      if (foreground) task.promote?.();
+      return task.promise;
+    }
+  }
+  return null;
+}
+
+function storeCachedPageTextIndex(
+  keys: string[],
+  index: CachedPageTextIndex,
+  fileState?: AttachmentFileState | null,
+): void {
+  const currentTime = Date.now();
+  evictExpiredPageTextCacheRecords(currentTime);
+  const estimatedBytes = estimateCachedPageTextBytes(index);
+  if (estimatedBytes > MAX_PAGE_TEXT_CACHE_ESTIMATED_BYTES) return;
+  const record: CachedPageTextRecord = {
+    index,
+    fileState: pageTextFileState(fileState),
+    createdAt: currentTime,
+    lastAccessedAt: currentTime,
+    lastAccessedOrder: nextCacheAccessOrder(),
+    estimatedBytes,
+  };
+  for (const key of keys) {
+    pageTextCacheByKey.set(key, record);
+  }
+  enforcePageTextCacheLimits(currentTime);
+}
+
+function nextCacheAccessOrder(): number {
+  cacheAccessSequence += 1;
+  return cacheAccessSequence;
+}
+
+function touchPageTextCacheRecord(
+  record: CachedPageTextRecord,
+  currentTime: number,
+): void {
+  record.lastAccessedAt = currentTime;
+  record.lastAccessedOrder = nextCacheAccessOrder();
+}
+
+function storeCachedPageTextPromise(
+  keys: string[],
+  task: Promise<CachedPageTextIndex | null>,
+  promote?: () => void,
+): void {
+  const record = { promise: task, promote };
+  for (const key of keys) {
+    // Completed immutable text can be reused by fingerprint. Pending work is
+    // bound to a native attachment/reader, which may close independently of
+    // another attachment containing the same PDF bytes.
+    if (key.startsWith("fingerprint-")) continue;
+    pageTextCachePromisesByKey.set(key, record);
+  }
+}
+
+function clearCachedPageTextPromise(
+  keys: string[],
+  task?: Promise<CachedPageTextIndex | null>,
+): void {
+  for (const key of keys) {
+    if (task && pageTextCachePromisesByKey.get(key)?.promise !== task) continue;
+    pageTextCachePromisesByKey.delete(key);
+  }
+}
+
+function estimateCachedPageTextBytes(index: CachedPageTextIndex): number {
+  let total = 0;
+  for (const page of index.pages) {
+    total += String(page.text || "").length * 2;
+  }
+  for (const page of index.normalised) {
+    total += String(page.normalizedText || "").length * 2;
+    // Conservative allowance for token strings, offsets, and object overhead.
+    total += page.textIndex.tokens.length * 48;
+  }
+  return total;
+}
+
+function getUniquePageTextCacheRecords(): CachedPageTextRecord[] {
+  const seen = new Set<CachedPageTextRecord>();
+  const records: CachedPageTextRecord[] = [];
+  for (const record of pageTextCacheByKey.values()) {
+    if (seen.has(record)) continue;
+    seen.add(record);
+    records.push(record);
+  }
+  return records;
+}
+
+function deletePageTextCacheRecord(record: CachedPageTextRecord): void {
+  for (const [key, cached] of pageTextCacheByKey) {
+    if (cached === record) {
+      pageTextCacheByKey.delete(key);
+    }
+  }
+}
+
+function evictExpiredPageTextCacheRecords(currentTime: number): void {
+  for (const record of getUniquePageTextCacheRecords()) {
+    if (currentTime - record.createdAt > PAGE_TEXT_CACHE_TTL_MS) {
+      deletePageTextCacheRecord(record);
+    }
+  }
+}
+
+function getPageTextCacheTotalBytes(records: CachedPageTextRecord[]): number {
+  return records.reduce((total, record) => total + record.estimatedBytes, 0);
+}
+
+function findLeastRecentlyUsedPageTextRecord(
+  records: CachedPageTextRecord[],
+): CachedPageTextRecord | null {
+  let oldest: CachedPageTextRecord | null = null;
+  for (const record of records) {
+    if (!oldest || record.lastAccessedOrder < oldest.lastAccessedOrder) {
+      oldest = record;
+    }
+  }
+  return oldest;
+}
+
+function enforcePageTextCacheLimits(currentTime: number): void {
+  evictExpiredPageTextCacheRecords(currentTime);
+  let records = getUniquePageTextCacheRecords();
+  let totalBytes = getPageTextCacheTotalBytes(records);
+  while (
+    records.length > MAX_PAGE_TEXT_CACHE_ENTRIES ||
+    totalBytes > MAX_PAGE_TEXT_CACHE_ESTIMATED_BYTES
+  ) {
+    const oldest = findLeastRecentlyUsedPageTextRecord(records);
+    if (!oldest) return;
+    deletePageTextCacheRecord(oldest);
+    records = getUniquePageTextCacheRecords();
+    totalBytes = getPageTextCacheTotalBytes(records);
+  }
+}
+
+function buildCachedPageTextIndex(
+  pages: LivePdfPageText[],
+  coverage: PageTextCacheCoverage,
+  pageCount?: number,
+  sourceFingerprint?: string,
+): CachedPageTextIndex {
+  const normalised = pages.map((p) => {
+    const textIndex = buildQuoteTextIndex(p.text);
+    return {
+      pageIndex: p.pageIndex,
+      pageLabel: p.pageLabel,
+      normalizedText: textIndex.canonicalText,
+      textIndex,
+    };
+  });
+  const normalizedPageCount =
+    Number.isFinite(pageCount) && Number(pageCount) > 0
+      ? Math.floor(Number(pageCount))
+      : undefined;
+  const resolvedSourceFingerprint =
+    sourceFingerprint ||
+    `page-text:${hashFindControllerQuery(
+      pages.map((page) => `${page.pageIndex}\u241e${page.text}`).join("\u241f"),
+    )}`;
+  return {
+    pages,
+    normalised,
+    coverage,
+    pageCount: normalizedPageCount,
+    sourceFingerprint: resolvedSourceFingerprint,
+  };
+}
+
+async function buildCachedPageTextIndexCooperatively(
+  pages: LivePdfPageText[],
+  coverage: PageTextCacheCoverage,
+  pageCount: number | undefined,
+  sourceFingerprint: string | undefined,
+  options: {
+    yieldToMain: () => Promise<void>;
+    shouldContinue?: () => boolean;
+  },
+): Promise<CachedPageTextIndex | null> {
+  const normalised: CachedPageTextIndex["normalised"] = [];
+  const pageFingerprintParts: string[] = [];
+  let sliceStartedAt = Date.now();
+  for (const page of pages) {
+    if (options.shouldContinue?.() === false) return null;
+    if (String(page.text || "").length > MAX_COOPERATIVE_PAGE_TEXT_CHARS) {
+      // A single pathological page cannot be normalized cooperatively by the
+      // current tokenizer. Defer provenance instead of blocking the Zotero UI.
+      return null;
+    }
+    const textIndex = buildQuoteTextIndex(page.text);
+    normalised.push({
+      pageIndex: page.pageIndex,
+      pageLabel: page.pageLabel,
+      normalizedText: textIndex.canonicalText,
+      textIndex,
+    });
+    pageFingerprintParts.push(
+      `${page.pageIndex}:${hashFindControllerQuery(page.text)}`,
+    );
+    if (Date.now() - sliceStartedAt >= 8) {
+      await options.yieldToMain();
+      sliceStartedAt = Date.now();
+    }
+  }
+  const normalizedPageCount =
+    Number.isFinite(pageCount) && Number(pageCount) > 0
+      ? Math.floor(Number(pageCount))
+      : undefined;
+  return {
+    pages,
+    normalised,
+    coverage,
+    pageCount: normalizedPageCount,
+    sourceFingerprint:
+      sourceFingerprint ||
+      `page-text:${hashFindControllerQuery(pageFingerprintParts.join("\u241f"))}`,
+  };
+}
+
+function isCompletePageTextCache(cached: CachedPageTextIndex | null): boolean {
+  return (
+    cached?.coverage === "full-pdfworker" || cached?.coverage === "full-viewer"
+  );
+}
+
+function canUseCachedPageTextAsNegativeEvidence(
+  cached: CachedPageTextIndex | null,
+): boolean {
+  return isCompletePageTextCache(cached);
+}
+
+export function getCachedPageTextForAttachment(
+  contextItemId: number,
+): CachedPageTextIndex | null {
+  const key = getAttachmentPageTextCacheKey(contextItemId);
+  return key ? getCachedPageTextIndex([key]) : null;
+}
+
+/**
+ * The share of pages that may be blank in a PDF still called complete,
+ * rounded up. A page with no text cannot be told apart from a scanned page,
+ * so only an occasional blank page between text pages is allowed.
+ */
+const MAX_BLANK_PAGE_FRACTION = 0.1;
+
+export function hasCompleteSearchablePageTextForAttachment(
+  contextItemId: number,
+): boolean {
+  const cached = getCachedPageTextForAttachment(contextItemId);
+  if (
+    !isCompletePageTextCache(cached) ||
+    !cached?.pageCount ||
+    cached.pages.length !== cached.pageCount ||
+    cached.normalised.length !== cached.pageCount ||
+    cached.normalised.some((page, index) => page.pageIndex !== index)
+  ) {
+    return false;
+  }
+  const hasText = cached.normalised.map((page) => Boolean(page.normalizedText));
+  // A blank first or last page may hide a scanned cover or appendix.
+  if (!hasText[0] || !hasText[hasText.length - 1]) return false;
+  const blankPages = hasText.filter((value) => !value).length;
+  return blankPages <= Math.ceil(hasText.length * MAX_BLANK_PAGE_FRACTION);
+}
+
+function buildHiddenQuoteLocationCacheKey(
+  contextItemId: number,
+  quoteText: string,
+): string | null {
+  const itemId = Math.floor(Number(contextItemId));
+  if (!Number.isFinite(itemId) || itemId <= 0) return null;
+  const normalizedQuote = normalizeLocatorText(
+    stripBoundaryEllipsis(quoteText),
+  );
+  if (!normalizedQuote) return null;
+  return `${itemId}\u241f${normalizedQuote.length}:${hashFindControllerQuery(
+    normalizedQuote,
+  )}`;
+}
+
+function isCacheRecordExpired(
+  currentTime: number,
+  record: { createdAt: number },
+): boolean {
+  return currentTime - record.createdAt > PAGE_TEXT_CACHE_TTL_MS;
+}
+
+function evictExpiredHiddenQuoteLocationRecords(currentTime: number): void {
+  for (const [key, record] of hiddenQuoteLocationCache) {
+    if (isCacheRecordExpired(currentTime, record)) {
+      hiddenQuoteLocationCache.delete(key);
+    }
+  }
+}
+
+function enforceHiddenQuoteLocationCacheLimit(currentTime: number): void {
+  evictExpiredHiddenQuoteLocationRecords(currentTime);
+  while (
+    hiddenQuoteLocationCache.size > MAX_HIDDEN_QUOTE_LOCATION_CACHE_ENTRIES
+  ) {
+    let oldestKey = "";
+    let oldestAccessOrder = Number.POSITIVE_INFINITY;
+    for (const [key, record] of hiddenQuoteLocationCache) {
+      if (record.lastAccessedOrder < oldestAccessOrder) {
+        oldestAccessOrder = record.lastAccessedOrder;
+        oldestKey = key;
+      }
+    }
+    if (!oldestKey) return;
+    hiddenQuoteLocationCache.delete(oldestKey);
+  }
+}
+
+function rememberHiddenQuoteLocationCacheEntry(
+  key: string,
+  entry: HiddenQuoteLocationCacheEntry,
+): void {
+  const currentTime = Date.now();
+  hiddenQuoteLocationCache.set(key, {
+    entry,
+    createdAt: currentTime,
+    lastAccessedAt: currentTime,
+    lastAccessedOrder: nextCacheAccessOrder(),
+  });
+  enforceHiddenQuoteLocationCacheLimit(currentTime);
+}
+
+function toHiddenQuoteLocationCacheEntry(
+  contextItemId: number,
+  result: LivePdfSelectionLocateResult,
+): HiddenQuoteLocationCacheEntry | null {
+  if (result.status !== "resolved" || result.computedPageIndex === null) {
+    return null;
+  }
+  const pageIndex = Math.floor(result.computedPageIndex);
+  if (!Number.isFinite(pageIndex) || pageIndex < 0) return null;
+  return {
+    contextItemId: Math.floor(contextItemId),
+    pageIndex,
+    sourceMatchText: result.sourceMatchText,
+    sourceMatchKind: result.sourceMatchKind,
+    sourceMatchPageOccurrence: result.sourceMatchPageOccurrence,
+    sourceMatchQuoteTokenCoverage: result.sourceMatchQuoteTokenCoverage,
+    confidence: result.confidence,
+    reason: result.reason,
+    matchedPageIndexes: result.matchedPageIndexes.slice(),
+    pagesScanned: result.pagesScanned,
+    debugSummary: result.debugSummary?.slice(),
+  };
+}
+
+function locateQuoteLocationInCachedPages(
+  contextItemId: number,
+  quoteText: string,
+  cached: CachedPageTextIndex,
+): HiddenQuoteLocationCacheEntry | null {
+  const located = locateQuoteInCachedPageTexts(cached, quoteText, null);
+  const entry = toHiddenQuoteLocationCacheEntry(contextItemId, located);
+  return entry
+    ? {
+        ...entry,
+        sourceFingerprint: cached.sourceFingerprint,
+      }
+    : null;
+}
+
+function locateQuoteInCachedPageTexts(
+  cached: CachedPageTextIndex,
+  quoteText: string,
+  expectedPageIndex?: number | null,
+  options?: { exactOnly?: boolean },
+): LivePdfSelectionLocateResult {
+  const cachedIndexByPage = new Map(
+    cached.normalised.map((entry) => [entry.pageIndex, entry.textIndex]),
+  );
+  return locateQuoteInIndexedPageTexts(
+    cached.pages.map((page) => ({
+      page,
+      textIndex:
+        cachedIndexByPage.get(page.pageIndex) ??
+        // Partial DOM caches can be refreshed independently. Preserve
+        // correctness if a stale caller supplies a page missing its index.
+        buildQuoteTextIndex(page.text),
+    })),
+    quoteText,
+    expectedPageIndex,
+    options,
+  );
+}
+
+// ── Text extraction strategies ──────────────────────────────────────
+// Three approaches to extract per-page text, tried in priority order.
+// The first one that returns data wins.
+
+/** The parts of a `PDFWorker.getFullText` result that place text on pages. */
+export type PdfWorkerFullTextResult = {
+  text?: unknown;
+  pageChars?: unknown;
+  totalPages?: unknown;
+  extractedPages?: unknown;
+};
+
+function positivePageCount(value: unknown): number | undefined {
+  const count = Number(value);
+  return Number.isInteger(count) && count > 0 ? count : undefined;
+}
+
+/**
+ * Split PDFWorker full text into pages.
+ *
+ * Zotero 7+ returns `{ text, extractedPages, totalPages }`: pages joined by
+ * form feeds, with the whole string trimmed, so blank pages at either end
+ * leave no break behind. Older builds returned `pageChars`. Blank pages are
+ * kept as empty strings so each page keeps its own index; `totalPages` is the
+ * PDF's real page count, so trimmed pages show as missing, not as absent.
+ */
+export function splitPdfWorkerFullTextIntoPages(
+  result: PdfWorkerFullTextResult | null | undefined,
+): ExtractedPageTextIndexSource | null {
+  const fullText = typeof result?.text === "string" ? result.text : "";
+  if (!fullText) return null;
+  const totalPages = positivePageCount(result?.totalPages);
+  const rawPageChars = result?.pageChars;
+  const pageChars = Array.isArray(rawPageChars)
+    ? rawPageChars.map((value) => Number(value))
+    : null;
+
+  const pages: LivePdfPageText[] = [];
+  let pageCount: number | undefined;
+  if (pageChars?.length) {
+    let offset = 0;
+    for (let i = 0; i < pageChars.length; i++) {
+      const charCount = pageChars[i];
+      if (
+        Number.isFinite(charCount) &&
+        charCount >= 0 &&
+        offset + charCount <= fullText.length
+      ) {
+        // PDFWorker text carries no printed labels.
+        pages.push({
+          pageIndex: i,
+          text: sanitizeText(fullText.slice(offset, offset + charCount).trim()),
+        });
+      }
+      offset += Number.isFinite(charCount) ? charCount : 0;
+    }
+    pageCount = pageChars.length;
+  } else {
+    const ffPages = fullText.split("\f");
+    // Without a break the text can only be placed when the PDF has one page.
+    if (ffPages.length < 2 && totalPages !== 1) return null;
+    // More parts than pages means a break inside a page: no part can be
+    // trusted to sit on the page its position names.
+    if (totalPages && ffPages.length > totalPages) return null;
+    // Zotero trims blank pages at either end, which shifts every index when
+    // a leading page is lost. Trust the split only when the part count equals
+    // the extracted page count (a limit such as pdfMaxPages keeps indices).
+    const extractedPages = positivePageCount(result?.extractedPages);
+    if (extractedPages !== undefined && ffPages.length !== extractedPages) {
+      return null;
+    }
+    for (let i = 0; i < ffPages.length; i++) {
+      pages.push({ pageIndex: i, text: sanitizeText(ffPages[i].trim()) });
+    }
+    pageCount = totalPages ?? ffPages.length;
+  }
+  return pages.some((page) => page.text) ? { pages, pageCount } : null;
+}
+
+/**
+ * Strategy 0 — Zotero PDFWorker (MOST RELIABLE)
+ *
+ * Uses Zotero.PDFWorker.getFullText(itemId), which needs no iframe access
+ * and is proven working in the codebase (pdfContext.ts).
+ */
+async function extractPageTextsFromPdfWorkerItemId(
+  itemId: number,
+): Promise<ExtractedPageTextIndexSource | null> {
+  try {
+    if (!Number.isFinite(itemId) || itemId <= 0) {
+      appLogger.debug(
+        "LLM quote-locator: PDFWorker — no valid itemID on reader",
+      );
+      return null;
+    }
+
+    const result = await Zotero.PDFWorker.getFullText(itemId);
+    if (!result || !result.text) {
+      appLogger.debug(
+        "LLM quote-locator: PDFWorker.getFullText returned no text",
+      );
+      return null;
+    }
+    const extracted = splitPdfWorkerFullTextIntoPages(result);
+    if (!extracted) {
+      appLogger.warn(
+        "LLM quote-locator: PDFWorker — text could not be split into pages",
+      );
+      return null;
+    }
+    appLogger.debug(
+      "LLM quote-locator: PDFWorker extracted",
+      extracted.pages.length,
+      "pages of",
+      extracted.pageCount,
+    );
+    return extracted;
+  } catch (e) {
+    appLogger.debug("LLM quote-locator: PDFWorker strategy failed:", e);
+    return null;
+  }
+}
+
+/**
+ * Strategy 0a — Zotero's own full-text cache, when it is page-complete.
+ * The file holds the text PDFWorker returned when Zotero indexed the PDF.
+ */
+async function extractPageTextsFromZoteroFulltextCache(
+  itemId: number,
+): Promise<ExtractedPageTextIndexSource | null> {
+  const cached = await readPageCompleteZoteroFulltextCache(itemId);
+  if (!cached) return null;
+  return splitPdfWorkerFullTextIntoPages({
+    text: cached.text,
+    totalPages: cached.totalPages,
+  });
+}
+
+async function extractPageTextsFromPdfWorker(
+  reader: any,
+): Promise<ExtractedPageTextIndexSource | null> {
+  const itemId = Number(reader?._item?.id || reader?.itemID || 0);
+  return extractPageTextsFromPdfWorkerItemId(itemId);
+}
+
+/**
+ * Strategy 1 — pdf.js viewer API
+ *
+ * Reaches into the viewer iframe to access pdfDocument.getPage(i)
+ * and getTextContent().  This gives precise per-page text with correct
+ * page labels and covers ALL pages in the document.
+ */
+async function extractPageTextsFromViewer(
+  reader: any,
+  options?: {
+    pageNative?: boolean;
+    yieldToMain?: () => Promise<void>;
+    shouldContinue?: () => boolean;
+  },
+): Promise<ExtractedPageTextIndexSource | null> {
+  try {
+    const app = getPdfViewerApplication(reader);
+    if (!app) {
+      appLogger.debug(
+        "LLM quote-locator: getPdfViewerApplication returned null",
+      );
+      return null;
+    }
+    if (!app.pdfDocument) {
+      appLogger.debug(
+        "LLM quote-locator: app found but pdfDocument is null/undefined",
+      );
+      return null;
+    }
+    const pdfDoc = resolveGeckoMethodOwner(app.pdfDocument, "getPage");
+    if (!pdfDoc) {
+      appLogger.warn(
+        "LLM quote-locator: pdfDocument.getPage is unavailable through the Gecko wrapper",
+      );
+      return null;
+    }
+    const numPages = Number(pdfDoc.numPages);
+    if (!Number.isFinite(numPages) || numPages < 1) {
+      appLogger.debug(
+        "LLM quote-locator: pdfDocument.numPages =",
+        pdfDoc.numPages,
+      );
+      return null;
+    }
+
+    appLogger.debug(
+      "LLM quote-locator: extracting text from",
+      numPages,
+      "pages via viewer API",
+    );
+    const pages: LivePdfPageText[] = [];
+    for (let i = 1; i <= numPages; i++) {
+      if (options?.shouldContinue?.() === false) return null;
+      if (options?.yieldToMain) await options.yieldToMain();
+      try {
+        const page = resolveGeckoMethodOwner(
+          await pdfDoc.getPage(i),
+          "getTextContent",
+        );
+        if (!page) {
+          appLogger.debug(
+            "LLM quote-locator: page",
+            i,
+            "does not expose getTextContent through the Gecko wrapper",
+          );
+          continue;
+        }
+        let rawTextContent: any;
+        if (options?.pageNative) {
+          try {
+            rawTextContent = await page.getTextContent({
+              disableNormalization: true,
+            });
+          } catch {
+            // Some Gecko cross-realm proxies reject an options object even
+            // though the same method succeeds without one.
+            rawTextContent = await page.getTextContent();
+          }
+        } else {
+          rawTextContent = await page.getTextContent();
+        }
+        const textContent = unwrapGeckoJsObject(rawTextContent);
+        const rawItems = textContent?.items;
+        const itemCount = Number(rawItems?.length || 0);
+        const items: any[] = [];
+        if (Number.isFinite(itemCount) && itemCount > 0) {
+          for (let itemIndex = 0; itemIndex < itemCount; itemIndex += 1) {
+            items.push(unwrapGeckoJsObject(rawItems[itemIndex]));
+          }
+        }
+        const text = options?.pageNative
+          ? buildPageNativeFindControllerPageText(items)
+          : items
+              .map((item: any) => item.str ?? "")
+              .join(" ")
+              .replace(/\s+/g, " ")
+              .trim();
+        if (text) {
+          // Page text carries no label. The page index is the identity of
+          // a page here; a printed label comes from getPageLabelForIndex at
+          // the place that shows it.
+          pages.push({
+            pageIndex: i - 1,
+            text: options?.pageNative ? text : sanitizeText(text),
+          });
+        }
+      } catch (e) {
+        appLogger.debug(
+          "LLM quote-locator: page",
+          i,
+          "text extraction failed:",
+          e,
+        );
+      }
+    }
+    if (pages.length) {
+      appLogger.debug(
+        "LLM quote-locator: viewer API extracted",
+        pages.length,
+        "pages",
+      );
+    }
+    return pages.length > 0 ? { pages, pageCount: numPages } : null;
+  } catch (e) {
+    appLogger.debug("LLM quote-locator: viewer API strategy failed:", e);
+    return null;
+  }
+}
+
+type InlineMathPdfLocatorResult =
+  | {
+      status: "matched";
+      page: LivePdfPageText;
+      sourceMatchText: string;
+      sourceMatchPageOccurrence: number;
+    }
+  | { status: "ambiguous" }
+  | { status: "not-found" };
+
+function resolveInlineMathQuoteInCompletePdfPages(
+  pages: LivePdfPageText[],
+  indexes: QuoteTextIndex[],
+  quoteText: string,
+): InlineMathPdfLocatorResult {
+  const split = splitQuoteAtPairedInlineMath(quoteText);
+  if (!split) return { status: "not-found" };
+
+  const proseSegments = split.proseSegments
+    .map((segment) => segment.trim())
+    .filter((segment) => buildQuoteTextIndex(segment).tokens.length > 0);
+  const hasSubstantiveSegment = proseSegments.some((segment) => {
+    const segmentIndex = buildQuoteTextIndex(segment);
+    return (
+      segmentIndex.tokens.length >= 4 &&
+      normalizeLocatorText(segment).length >= 24
+    );
+  });
+  if (!proseSegments.length || !hasSubstantiveSegment) {
+    return { status: "not-found" };
+  }
+
+  type QuoteSpan = ReturnType<
+    typeof findQuoteSourceSpansAllowingLayoutArtifacts
+  >[number];
+  type Candidate = {
+    pageOrdinal: number;
+    sourceStart: number;
+    sourceEnd: number;
+    sourceMatchText: string;
+  };
+  const candidates = new Map<string, Candidate>();
+  let proseCandidateCount = 0;
+
+  for (let pageOrdinal = 0; pageOrdinal < pages.length; pageOrdinal += 1) {
+    const spansBySegment = proseSegments.map((segment) =>
+      findQuoteSourceSpansAllowingLayoutArtifacts(
+        indexes[pageOrdinal],
+        segment,
+      ),
+    );
+    if (spansBySegment.some((spans) => !spans.length)) continue;
+
+    let sequences: QuoteSpan[][] = [[]];
+    for (const spans of spansBySegment) {
+      const nextSequences: QuoteSpan[][] = [];
+      for (const sequence of sequences) {
+        const previous = sequence[sequence.length - 1];
+        for (const span of spans) {
+          if (previous && span.sourceStart < previous.sourceEnd) continue;
+          nextSequences.push([...sequence, span]);
+          if (nextSequences.length > 256) {
+            return { status: "ambiguous" };
+          }
+        }
+      }
+      sequences = nextSequences;
+      if (!sequences.length) break;
+    }
+
+    for (const sequence of sequences) {
+      const first = sequence[0];
+      const last = sequence[sequence.length - 1];
+      if (!first || !last || last.sourceEnd <= first.sourceStart) continue;
+      const sourceMatchText = normalizePageNativeFindControllerLiteral(
+        pages[pageOrdinal].text.slice(first.sourceStart, last.sourceEnd),
+        quoteText,
+      ).trim();
+      if (!sourceMatchText) continue;
+      proseCandidateCount += 1;
+      if (
+        !assessAcademicQuoteAlignment(sourceMatchText, quoteText)
+          .allMeaningfulTokensSupported
+      ) {
+        continue;
+      }
+      const key = `${pageOrdinal}\u241f${first.sourceStart}\u241f${last.sourceEnd}`;
+      candidates.set(key, {
+        pageOrdinal,
+        sourceStart: first.sourceStart,
+        sourceEnd: last.sourceEnd,
+        sourceMatchText,
+      });
+    }
+  }
+
+  if (!candidates.size) {
+    return proseCandidateCount > 1
+      ? { status: "ambiguous" }
+      : { status: "not-found" };
+  }
+  if (candidates.size !== 1) return { status: "ambiguous" };
+
+  const candidate = Array.from(candidates.values())[0];
+  const literalLocations = pages.flatMap((page, pageOrdinal) =>
+    findQuoteSourceSpansAllowingLayoutArtifacts(
+      indexes[pageOrdinal],
+      candidate.sourceMatchText,
+    ).map((span) => ({ page, pageOrdinal, span })),
+  );
+  if (literalLocations.length !== 1) {
+    return literalLocations.length
+      ? { status: "ambiguous" }
+      : { status: "not-found" };
+  }
+  const literalLocation = literalLocations[0];
+  if (literalLocation.pageOrdinal !== candidate.pageOrdinal) {
+    return { status: "ambiguous" };
+  }
+  return {
+    status: "matched",
+    page: literalLocation.page,
+    sourceMatchText: candidate.sourceMatchText,
+    sourceMatchPageOccurrence: literalLocation.span.occurrenceIndex,
+  };
+}
+
+/**
+ * Verify a quote only against the loaded PDF.js document. The default path is
+ * deliberately stricter than navigation: partial anchors are never accepted,
+ * and a unique verdict requires searchable text for every page.
+ * A literal search miss is reported separately so extraction-sensitive text
+ * cannot be mistaken for a proven semantic absence.
+ * The opt-in inline-math mode aligns ordered prose and accepts its bounded PDF
+ * span only when the typed academic alignment accounts for every hard atom.
+ */
+export async function verifyCompleteQuoteInLivePdfJs(
+  reader: any,
+  contextItemId: number,
+  quoteText: string,
+  options?: {
+    yieldToMain?: () => Promise<void>;
+    shouldContinue?: () => boolean;
+    allowInlineMathLocator?: boolean;
+  },
+): Promise<LivePdfQuoteVerification> {
+  const itemId = Math.floor(Number(contextItemId));
+  const readerItemId = Math.floor(
+    Number(reader?._item?.id || reader?.itemID || 0),
+  );
+  if (!itemId || readerItemId !== itemId) {
+    return {
+      status: "defer",
+      reason: "The active PDF reader does not contain this attachment.",
+    };
+  }
+  const cleanQuote = stripBoundaryEllipsis(
+    sanitizeText(quoteText || "").trim(),
+  );
+  if (!cleanQuote) {
+    return { status: "defer", reason: "No quote text was provided." };
+  }
+  const app = getPdfViewerApplication(reader);
+  const documentFingerprint = getPdfDocumentFingerprint(app);
+  if (!app?.pdfDocument || !documentFingerprint) {
+    return {
+      status: "defer",
+      reason: "The loaded PDF.js document is not ready for verification.",
+    };
+  }
+  const verificationCacheKey = `${itemId}\u241f${documentFingerprint}\u241f${
+    options?.allowInlineMathLocator ? "inline-math-locator" : "complete"
+  }\u241f${hashFindControllerQuery(normalizeLocatorText(cleanQuote))}`;
+  const cachedVerification =
+    livePdfQuoteVerificationCache.get(verificationCacheKey);
+  if (cachedVerification) {
+    cacheLivePdfQuoteVerification(verificationCacheKey, cachedVerification);
+    return cachedVerification;
+  }
+  const extractionCacheKey = `${itemId}␟${documentFingerprint}`;
+  let extraction = livePdfVerificationExtractionCache.get(extractionCacheKey);
+  if (!extraction) {
+    const extracted = await extractPageTextsFromViewer(reader, {
+      pageNative: true,
+      yieldToMain: options?.yieldToMain,
+      shouldContinue: options?.shouldContinue,
+    });
+    const pageCount = Math.floor(Number(extracted?.pageCount || 0));
+    const indexes = (extracted?.pages ?? []).map((page) =>
+      buildQuoteTextIndex(page.text),
+    );
+    if (
+      !extracted?.pages.length ||
+      !pageCount ||
+      extracted.pages.length !== pageCount ||
+      indexes.some((index) => !index.tokens.length)
+    ) {
+      return {
+        status: "defer",
+        reason:
+          "PDF.js could not provide complete searchable text for every page.",
+      };
+    }
+    extraction = { pages: extracted.pages, indexes };
+    cacheLivePdfVerificationExtraction(extractionCacheKey, extraction);
+  }
+  const { pages, indexes } = extraction;
+
+  const locations = pages.flatMap((page, pageOrdinal) =>
+    findQuoteSourceSpansAllowingLayoutArtifacts(
+      indexes[pageOrdinal],
+      cleanQuote,
+    ).map((span) => ({ page, span })),
+  );
+  if (!locations.length) {
+    if (options?.allowInlineMathLocator) {
+      const inlineMathLocation = resolveInlineMathQuoteInCompletePdfPages(
+        pages,
+        indexes,
+        cleanQuote,
+      );
+      if (inlineMathLocation.status === "ambiguous") {
+        return {
+          status: "defer",
+          reason:
+            "The non-math prose around the verified inline math does not identify one PDF location.",
+        };
+      }
+      if (inlineMathLocation.status === "matched") {
+        const matched: Extract<
+          LivePdfQuoteVerification,
+          { status: "matched" }
+        > = {
+          status: "matched",
+          certificate: {
+            contextItemId: itemId,
+            documentFingerprint,
+            pageIndex: inlineMathLocation.page.pageIndex,
+            pageLabel: inlineMathLocation.page.pageLabel,
+            sourceMatchText: inlineMathLocation.sourceMatchText,
+            sourceMatchKind: "normalized-span",
+            verificationMode: "inline-math-locator",
+            sourceMatchPageOccurrence:
+              inlineMathLocation.sourceMatchPageOccurrence,
+          },
+        };
+        cacheLivePdfQuoteVerification(verificationCacheKey, matched);
+        return matched;
+      }
+    }
+    // A genuine quote that straddles a page break matches no single page.
+    // Probe the text around each boundary before condemning the quote; a
+    // boundary match cannot form a per-page navigation certificate, so it
+    // defers instead of matching.
+    const boundaryWindow = cleanQuote.length + 400;
+    for (let i = 0; i + 1 < pages.length; i += 1) {
+      if (options?.shouldContinue && !options.shouldContinue()) {
+        return {
+          status: "defer",
+          reason: "Verification was interrupted before completing.",
+        };
+      }
+      const joined = buildQuoteTextIndex(
+        `${pages[i].text.slice(-boundaryWindow)}\n${pages[i + 1].text.slice(
+          0,
+          boundaryWindow,
+        )}`,
+      );
+      if (
+        findQuoteSourceSpansAllowingLayoutArtifacts(joined, cleanQuote).length
+      ) {
+        return {
+          status: "defer",
+          reason:
+            "The quote spans a page boundary, which per-page verification cannot certify.",
+        };
+      }
+      if (options?.yieldToMain) await options.yieldToMain();
+    }
+    const literalNotFound: Extract<
+      LivePdfQuoteVerification,
+      { status: "literal-not-found" }
+    > = {
+      status: "literal-not-found",
+      documentFingerprint,
+    };
+    cacheLivePdfQuoteVerification(verificationCacheKey, literalNotFound);
+    return literalNotFound;
+  }
+  if (locations.length !== 1) {
+    return {
+      status: "defer",
+      reason: "The complete quote occurs more than once in the loaded PDF.",
+    };
+  }
+  const location = locations[0];
+  const sourceMatchText = normalizePageNativeFindControllerLiteral(
+    location.span.text,
+    cleanQuote,
+  ).trim();
+  if (!sourceMatchText) {
+    return {
+      status: "defer",
+      reason: "The verified PDF.js span could not form a native search query.",
+    };
+  }
+  const matched: Extract<LivePdfQuoteVerification, { status: "matched" }> = {
+    status: "matched",
+    certificate: {
+      contextItemId: itemId,
+      documentFingerprint,
+      pageIndex: location.page.pageIndex,
+      pageLabel: location.page.pageLabel,
+      sourceMatchText,
+      sourceMatchKind:
+        sourceMatchText === cleanQuote ? "exact" : "normalized-span",
+      verificationMode: "complete-quote",
+      sourceMatchPageOccurrence: location.span.occurrenceIndex,
+    },
+  };
+  cacheLivePdfQuoteVerification(verificationCacheKey, matched);
+  return matched;
+}
+
+async function refreshPageTextCacheFromLiveViewer(
+  reader: any,
+): Promise<CachedPageTextIndex | null> {
+  const generation = pageTextCacheGeneration;
+  const keys = getReaderCacheKeys(reader);
+  const document = getPdfViewerApplication(reader)?.pdfDocument;
+  const extracted = await extractPageTextsFromViewer(reader);
+  if (
+    generation !== pageTextCacheGeneration ||
+    document !== getPdfViewerApplication(reader)?.pdfDocument ||
+    !extracted?.pages.length
+  ) {
+    return null;
+  }
+  const fingerprint = getPdfDocumentFingerprint(
+    getPdfViewerApplication(reader),
+  );
+  const result = buildCachedPageTextIndex(
+    extracted.pages,
+    "full-viewer",
+    extracted.pageCount,
+    fingerprint ? `pdfjs:${fingerprint}` : undefined,
+  );
+  storeCachedPageTextIndex(keys, result);
+  return result;
+}
+
+/**
+ * Warm (or return) the page-text cache for the given reader.
+ *
+ * Safe to call multiple times — only the first call triggers extraction;
+ * subsequent calls return the same promise.  Tries three strategies:
+ *
+ *   0. Zotero PDFWorker  — most reliable, reads ALL pages via getFullText
+ *   1. pdf.js viewer API  — reads ALL pages from the loaded document
+ *   2. DOM text layers    — only currently rendered pages (~3-5)
+ */
+export async function warmPageTextCache(
+  reader: any,
+): Promise<CachedPageTextIndex | null> {
+  const keys = getReaderCacheKeys(reader);
+  const cached = getCachedPageTextIndex(keys);
+  if (cached) return cached;
+  const cachedTask = getCachedPageTextPromise(keys, true);
+  if (cachedTask) return cachedTask;
+
+  const generation = pageTextCacheGeneration;
+  let task: Promise<CachedPageTextIndex | null> | null = null;
+  task = (async () => {
+    try {
+      // Strategy 0: Zotero PDFWorker — ALL pages via getFullText + pageChars
+      let extracted = await extractPageTextsFromPdfWorker(reader);
+      let coverage: PageTextCacheCoverage = "full-pdfworker";
+
+      // Strategy 1: pdf.js viewer API — ALL pages from viewer iframe
+      if (!extracted) {
+        appLogger.debug(
+          "LLM quote-locator: PDFWorker unavailable, trying viewer API",
+        );
+        extracted = await extractPageTextsFromViewer(reader);
+        coverage = "full-viewer";
+      }
+
+      // Strategy 2: DOM text layer scraping — rendered pages only
+      if (!extracted) {
+        appLogger.debug(
+          "LLM quote-locator: viewer API unavailable, falling back to DOM text layers",
+        );
+        const rendered = extractRenderedPageTexts(reader);
+        if (rendered.pages.length) {
+          extracted = {
+            pages: rendered.pages,
+            pageCount:
+              getPagesCount(getPdfViewerApplication(reader)) || undefined,
+          };
+          coverage = "partial-dom";
+          appLogger.debug(
+            "LLM quote-locator: DOM extracted",
+            extracted.pages.length,
+            "rendered pages",
+          );
+        }
+      }
+
+      if (!extracted?.pages.length) {
+        appLogger.warn(
+          "LLM quote-locator: all extraction strategies failed — no pages",
+        );
+        return null;
+      }
+
+      const result = buildCachedPageTextIndex(
+        extracted.pages,
+        coverage,
+        extracted.pageCount,
+        (() => {
+          const fingerprint = getPdfDocumentFingerprint(
+            getPdfViewerApplication(reader),
+          );
+          return fingerprint ? `pdfjs:${fingerprint}` : undefined;
+        })(),
+      );
+      if (generation !== pageTextCacheGeneration) return null;
+      storeCachedPageTextIndex(keys, result);
+      return result;
+    } catch (e) {
+      appLogger.debug("LLM quote-locator: warmPageTextCache error:", e);
+      return null;
+    } finally {
+      if (task) clearCachedPageTextPromise(keys, task);
+    }
+  })();
+  storeCachedPageTextPromise(keys, task);
+  return task;
+}
+
+export async function warmPageTextCacheForAttachment(
+  contextItemId: number,
+  options?: {
+    yieldToMain?: () => Promise<void>;
+    shouldContinue?: () => boolean;
+    reader?: any;
+  },
+): Promise<CachedPageTextIndex | null> {
+  const key = getAttachmentPageTextCacheKey(contextItemId);
+  if (!key) return null;
+  const reader =
+    options?.reader && getReaderItemPageTextCacheKey(options.reader) === key
+      ? options.reader
+      : null;
+  const keys = reader ? getReaderCacheKeys(reader) : [key];
+  const itemId = Math.floor(Number(contextItemId));
+  // Taken before the stat below: a clear while it runs still voids this warm.
+  const generation = pageTextCacheGeneration;
+  // The file as it is now: text read from an earlier version of it is
+  // stale, and a fresh read is recorded against this version.
+  const fileState = await readAttachmentFileState(
+    (globalThis as { Zotero?: typeof Zotero }).Zotero?.Items?.get?.(itemId),
+  );
+  const cached = getCachedPageTextIndex(keys, fileState);
+  if (cached) return cached;
+  const cachedTask = getCachedPageTextPromise(keys, !options?.yieldToMain);
+  if (cachedTask) return cachedTask;
+
+  let foreground = false;
+  let promote: (() => void) | undefined;
+  const promotion = new Promise<void>((resolve) => {
+    promote = () => {
+      foreground = true;
+      resolve();
+    };
+  });
+  let task: Promise<CachedPageTextIndex | null> | null = null;
+  task = (async () => {
+    try {
+      // Zotero's page-complete full-text cache holds the same text a fresh
+      // PDFWorker extraction would return, without queueing a PDF parse.
+      let extracted =
+        (await extractPageTextsFromZoteroFulltextCache(itemId)) ??
+        (await extractPageTextsFromPdfWorkerItemId(itemId));
+      let coverage: PageTextCacheCoverage = "full-pdfworker";
+      let sourceFingerprint: string | undefined;
+      if (!extracted?.pages.length && reader) {
+        extracted = await extractPageTextsFromViewer(reader);
+        coverage = "full-viewer";
+        const fingerprint = getPdfDocumentFingerprint(
+          getPdfViewerApplication(reader),
+        );
+        sourceFingerprint = fingerprint ? `pdfjs:${fingerprint}` : undefined;
+      }
+      if (!extracted?.pages.length) return null;
+      const result = options?.yieldToMain
+        ? await buildCachedPageTextIndexCooperatively(
+            extracted.pages,
+            coverage,
+            extracted.pageCount,
+            sourceFingerprint,
+            {
+              yieldToMain: async () => {
+                // A source click preempts idle quote validation. If that click
+                // joins this task, release its idle-only wait instead of
+                // making navigation wait for itself to finish.
+                if (foreground) {
+                  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+                } else {
+                  await Promise.race([options.yieldToMain!(), promotion]);
+                }
+              },
+              shouldContinue: () =>
+                foreground || options.shouldContinue?.() !== false,
+            },
+          )
+        : buildCachedPageTextIndex(
+            extracted.pages,
+            coverage,
+            extracted.pageCount,
+            sourceFingerprint,
+          );
+      if (!result) return null;
+      if (generation !== pageTextCacheGeneration) return null;
+      storeCachedPageTextIndex(keys, result, fileState);
+      return result;
+    } catch (e) {
+      appLogger.debug(
+        "LLM quote-locator: warmPageTextCacheForAttachment error:",
+        e,
+      );
+      return null;
+    } finally {
+      if (task) clearCachedPageTextPromise(keys, task);
+    }
+  })();
+  storeCachedPageTextPromise(
+    keys,
+    task,
+    options?.yieldToMain ? promote : undefined,
+  );
+  return task;
+}
+
+/**
+ * Fill the page-text cache from PDFWorker text that is already in hand, such
+ * as the text a context extraction just read, so quote checks need no second
+ * extraction. The text is split and normalised exactly as a PDFWorker warm
+ * would; an attachment that is cached or being read already is left alone.
+ * `fileState` is the attachment file as it was when that text was read.
+ */
+export async function seedPageTextCacheFromFullText(
+  contextItemId: number,
+  fullText: PdfWorkerFullTextResult,
+  options?: {
+    fileState?: AttachmentFileState | null;
+    yieldToMain?: () => Promise<void>;
+    shouldContinue?: () => boolean;
+  },
+): Promise<CachedPageTextIndex | null> {
+  const key = getAttachmentPageTextCacheKey(contextItemId);
+  if (!key) return null;
+  const keys = [key];
+  const cached = getCachedPageTextIndex(keys);
+  if (cached) return cached;
+  const pendingTask = getCachedPageTextPromise(keys);
+  if (pendingTask) return pendingTask;
+  const extracted = splitPdfWorkerFullTextIntoPages(fullText);
+  if (!extracted) return null;
+
+  const generation = pageTextCacheGeneration;
+  let task: Promise<CachedPageTextIndex | null> | null = null;
+  task = (async () => {
+    try {
+      const result = await buildCachedPageTextIndexCooperatively(
+        extracted.pages,
+        "full-pdfworker",
+        extracted.pageCount,
+        undefined,
+        {
+          yieldToMain:
+            options?.yieldToMain ||
+            (() => new Promise<void>((resolve) => setTimeout(resolve, 0))),
+          shouldContinue: options?.shouldContinue,
+        },
+      );
+      if (!result || generation !== pageTextCacheGeneration) return null;
+      storeCachedPageTextIndex(keys, result, options?.fileState);
+      return result;
+    } catch (e) {
+      appLogger.debug("LLM quote-locator: page text seed failed:", e);
+      return null;
+    } finally {
+      if (task) clearCachedPageTextPromise(keys, task);
+    }
+  })();
+  storeCachedPageTextPromise(keys, task);
+  return task;
+}
+
+export function lookupCachedQuoteLocationForAttachment(
+  contextItemId: number,
+  quoteText: string,
+): HiddenQuoteLocationCacheEntry | null {
+  const key = buildHiddenQuoteLocationCacheKey(contextItemId, quoteText);
+  if (!key) return null;
+  const currentTime = Date.now();
+  const record = hiddenQuoteLocationCache.get(key);
+  if (!record) return null;
+  if (isCacheRecordExpired(currentTime, record)) {
+    hiddenQuoteLocationCache.delete(key);
+    return null;
+  }
+  const currentPageText = getCachedPageTextForAttachment(contextItemId);
+  if (
+    record.entry.sourceFingerprint &&
+    currentPageText?.sourceFingerprint &&
+    record.entry.sourceFingerprint !== currentPageText.sourceFingerprint
+  ) {
+    hiddenQuoteLocationCache.delete(key);
+    return null;
+  }
+  record.lastAccessedAt = currentTime;
+  record.lastAccessedOrder = nextCacheAccessOrder();
+  return record.entry;
+}
+
+export async function warmQuoteLocationCacheForAttachment(
+  contextItemId: number,
+  quoteText: string,
+): Promise<HiddenQuoteLocationCacheEntry | null> {
+  const key = buildHiddenQuoteLocationCacheKey(contextItemId, quoteText);
+  if (!key) return null;
+  const cached = lookupCachedQuoteLocationForAttachment(
+    contextItemId,
+    quoteText,
+  );
+  if (cached) return cached;
+  const existingTask = hiddenQuoteLocationTasks.get(key);
+  if (existingTask) return existingTask;
+
+  const itemId = Math.floor(Number(contextItemId));
+  const generation = pageTextCacheGeneration;
+  let task: Promise<HiddenQuoteLocationCacheEntry | null> | null = null;
+  task = (async () => {
+    try {
+      const pageTextCache = await warmPageTextCacheForAttachment(itemId);
+      if (!pageTextCache) return null;
+      if (generation !== pageTextCacheGeneration) return null;
+      const location = locateQuoteLocationInCachedPages(
+        itemId,
+        quoteText,
+        pageTextCache,
+      );
+      if (location && generation === pageTextCacheGeneration) {
+        rememberHiddenQuoteLocationCacheEntry(key, location);
+      }
+      return location;
+    } catch (e) {
+      appLogger.debug(
+        "LLM quote-locator: warmQuoteLocationCacheForAttachment error:",
+        e,
+      );
+      return null;
+    } finally {
+      if (task && hiddenQuoteLocationTasks.get(key) === task) {
+        hiddenQuoteLocationTasks.delete(key);
+      }
+    }
+  })();
+  hiddenQuoteLocationTasks.set(key, task);
+  return task;
+}
+
+/**
+ * Resolve a quote against an attachment's complete background text cache
+ * without invoking FindController or changing the visible reader state.
+ *
+ * Unlike `warmQuoteLocationCacheForAttachment()`, this preserves negative and
+ * ambiguous outcomes so render-time quote-card verification can distinguish a
+ * real search miss from unavailable PDF text.
+ */
+export async function verifyQuoteLocationForAttachment(
+  contextItemId: number,
+  quoteText: string,
+  options?: {
+    /**
+     * The page to prefer when the quote occurs on several pages; it only
+     * chooses among identical copies.
+     */
+    expectedPageIndex?: number | null;
+  },
+): Promise<LivePdfSelectionLocateResult> {
+  const cleanQuote = stripBoundaryEllipsis(
+    sanitizeText(quoteText || "").trim(),
+  );
+  const normalizedSelection = normalizeLocatorText(cleanQuote);
+  const unavailable = (reason: string): LivePdfSelectionLocateResult => ({
+    status: "unavailable",
+    confidence: "none",
+    selectionText: cleanQuote,
+    normalizedSelection,
+    queryLabel: "Quote",
+    expectedPageIndex: null,
+    computedPageIndex: null,
+    matchedPageIndexes: [],
+    totalMatches: 0,
+    pagesScanned: 0,
+    reason,
+  });
+  if (!cleanQuote || !normalizedSelection) {
+    return unavailable("No quote text was provided.");
+  }
+
+  const itemId = Math.floor(Number(contextItemId));
+  if (!Number.isFinite(itemId) || itemId <= 0) {
+    return unavailable("No searchable PDF attachment was available.");
+  }
+  const pageTextCache = await warmPageTextCacheForAttachment(itemId);
+  if (!pageTextCache) {
+    return unavailable(
+      "Could not read complete PDF page text for background quote verification.",
+    );
+  }
+  const result = locateQuoteInCachedPageTexts(
+    pageTextCache,
+    cleanQuote,
+    options?.expectedPageIndex ?? null,
+  );
+  // A reader warmed from its DOM text layers caches only the pages it had
+  // rendered, under this attachment's key too. A complete match there is
+  // still a match. A miss (or a tie) says nothing about the pages never
+  // rendered, and a partial span found there is unique only among the
+  // rendered pages, so neither may read as the PDF's verdict: callers would
+  // report "not found", or trust the span, and skip the viewer, which can
+  // read the whole PDF.
+  if (
+    !canUseCachedPageTextAsNegativeEvidence(pageTextCache) &&
+    result.status !== "selection-too-short" &&
+    !(result.status === "resolved" && result.sourceMatchKind === "exact")
+  ) {
+    return {
+      ...unavailable(
+        result.status === "resolved"
+          ? "Only the PDF's rendered pages were readable in the background; only part of the quote was found on them."
+          : "Only the PDF's rendered pages were readable in the background; the quote was not on them.",
+      ),
+      pagesScanned: result.pagesScanned,
+    };
+  }
+  return result;
+}
+
+/** Clear cache (e.g. when switching documents). */
+export function clearPageTextCache(): void {
+  pageTextCacheGeneration += 1;
+  pageTextCacheByKey.clear();
+  pageTextCachePromisesByKey.clear();
+  hiddenQuoteLocationCache.clear();
+  hiddenQuoteLocationTasks.clear();
+  livePdfQuoteVerificationCache.clear();
+  livePdfVerificationExtractionCache.clear();
+  clearCitationPageCache();
+  anonymousReaderKeys = new WeakMap<object, string>();
+  anonymousReaderKeySequence = 0;
+  cacheAccessSequence = 0;
+}
+
+function getPagesCount(app: any): number {
+  const candidates = [app?.pagesCount, app?.pdfDocument?.numPages];
+  for (const candidate of candidates) {
+    const parsed = Number(candidate);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return Math.floor(parsed);
+    }
+  }
+  return 0;
+}
+
+async function waitForFindControllerReady(
+  reader: any,
+  timeoutMs = 1200,
+): Promise<{ app: any; eventBus: any; findController: any } | null> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const app = getPdfViewerApplication(reader);
+    const eventBus = app?.eventBus;
+    const findController = app?.findController;
+    if (app?.pdfDocument && eventBus && findController) {
+      return { app, eventBus, findController };
+    }
+    await delay(40);
+  }
+  return null;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function settleBeforeDeadline<T>(
+  promise: Promise<T>,
+  deadlineAt: number,
+): Promise<{ completed: boolean; value?: T }> {
+  const remainingMs = deadlineAt - Date.now();
+  if (remainingMs <= 0) return { completed: false };
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise.then((value) => ({ completed: true, value })),
+      new Promise<{ completed: false }>((resolve) => {
+        timeoutId = setTimeout(
+          () => resolve({ completed: false }),
+          remainingMs,
+        );
+      }),
+    ]);
+  } finally {
+    if (timeoutId !== undefined) clearTimeout(timeoutId);
+  }
+}
+
+function parsePositiveInteger(value: unknown): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 0;
+}
+
+function getFindControllerMatchCount(findController: any): number {
+  const candidates = [
+    findController?.matchesCount?.total,
+    findController?._matchesCount?.total,
+    findController?._matchesCountTotal,
+  ];
+  for (const candidate of candidates) {
+    const parsed = parsePositiveInteger(candidate);
+    if (parsed > 0) return parsed;
+  }
+  return 0;
+}
+
+function getFindControllerQuery(findController: any): string | undefined {
+  const rawQuery =
+    findController?._rawQuery ??
+    findController?._state?.query ??
+    findController?.state?.query ??
+    findController?._query ??
+    findController?.query;
+  return rawQuery === undefined ? undefined : String(rawQuery);
+}
+
+type FindControllerSearchSnapshot = {
+  matchCount: number;
+  pageMatches: unknown;
+  pageMatchesLength: number;
+  query: string | undefined;
+  selectedPageIndex: number | null;
+  selectedMatchIndex: number | null;
+};
+
+/**
+ * One search sent to PDF.js, followed from the moment it is sent.
+ *
+ * PDF.js marks the results dirty as soon as a search arrives and clears the
+ * mark only once the search has run. It empties and refills the same result
+ * list, so a finished search can leave the counts, the page and the selected
+ * match exactly as the previous search left them (two quotes on one page with
+ * one match each; two searches that both find nothing). The mark, seen set
+ * and then clear with this query, is the evidence that the results are this
+ * search's.
+ */
+type FindControllerSearchRun = {
+  query: string;
+  dirtySeen: boolean;
+};
+
+/** Start following a search; call it right after sending the search. */
+function followFindControllerSearch(
+  findController: any,
+  query: string,
+): FindControllerSearchRun {
+  const run = { query, dirtySeen: false };
+  noteFindControllerSearchRun(findController, run);
+  return run;
+}
+
+/**
+ * The query of the last search PDF.js was sent. Its state holds it as soon as
+ * the search arrives; `_rawQuery` (which `getFindControllerQuery` reads
+ * first) follows only once the search runs.
+ */
+function getFindControllerRequestedQuery(
+  findController: any,
+): string | undefined {
+  const query = findController?.state?.query ?? findController?._state?.query;
+  return typeof query === "string" ? query : undefined;
+}
+
+function noteFindControllerSearchRun(
+  findController: any,
+  run: FindControllerSearchRun | undefined,
+): void {
+  if (
+    run &&
+    !run.dirtySeen &&
+    findController?._dirtyMatch === true &&
+    getFindControllerRequestedQuery(findController) === run.query
+  ) {
+    run.dirtySeen = true;
+  }
+}
+
+/** Whether PDF.js has run this search since it arrived. */
+function hasFindControllerSearchRun(
+  findController: any,
+  run: FindControllerSearchRun | undefined,
+): boolean {
+  noteFindControllerSearchRun(findController, run);
+  return (
+    run?.dirtySeen === true &&
+    findController?._dirtyMatch === false &&
+    getFindControllerRequestedQuery(findController) === run.query &&
+    getFindControllerQuery(findController) === run.query
+  );
+}
+
+type CloneIntoFn = (value: unknown, targetScope: unknown) => any;
+
+function getCloneInto(): CloneIntoFn | undefined {
+  const globalWithClone = globalThis as unknown as {
+    cloneInto?: CloneIntoFn;
+    Components?: { utils?: { cloneInto?: CloneIntoFn } };
+  };
+  return (
+    globalWithClone.cloneInto || globalWithClone.Components?.utils?.cloneInto
+  );
+}
+
+/** The reader page's window, where PDF.js runs. */
+function getPdfViewerWindow(app: any): unknown {
+  const findBar = app?.findBar;
+  for (const node of [
+    findBar?._findField ?? findBar?.findField,
+    app?.appConfig?.mainContainer,
+    app?.pdfViewer?.container,
+  ]) {
+    const view = node?.ownerDocument?.defaultView;
+    if (view) return view;
+  }
+  return null;
+}
+
+/** The plain settings of a PDF.js find state: text, flags and numbers. */
+function findStateSettings(state: unknown): Record<string, unknown> {
+  const settings: Record<string, unknown> = {};
+  if (!state || typeof state !== "object") return settings;
+  for (const key of Object.keys(state)) {
+    const value = (state as Record<string, unknown>)[key];
+    if (["string", "boolean", "number"].includes(typeof value)) {
+      settings[key] = value;
+    }
+  }
+  return settings;
+}
+
+/**
+ * A request PDF.js can read. PDF.js runs in the reader page, which cannot
+ * read the fields of an object made in the plugin's privileged code: such a
+ * "find" request reaches PDF.js with no type and no query, as an empty search
+ * that clears every result. The request is copied into the reader page;
+ * `source`, an object of the page, is set on the copy.
+ */
+function toPdfViewerRequest(
+  app: any,
+  request: Record<string, unknown>,
+  source?: unknown,
+): any {
+  const view = getPdfViewerWindow(app);
+  const cloneInto = getCloneInto();
+  if (!view || typeof cloneInto !== "function") {
+    // PDF.js may not be able to read this request (an empty search that
+    // clears every result); say so, so the failure is not silent.
+    logFindControllerDiagnostic(
+      "LLM paragraph-jump: sending PDF.js a request it may not be able to read",
+      {
+        hasViewerWindow: Boolean(view),
+        hasCloneInto: typeof cloneInto === "function",
+      },
+    );
+    return source === undefined ? request : { ...request, source };
+  }
+  const copy = cloneInto(request, view);
+  if (source !== undefined) (copy?.wrappedJSObject ?? copy).source = source;
+  return copy;
+}
+
+function getFindControllerPageMatchesValue(findController: any): unknown {
+  return findController?.pageMatches ?? findController?._pageMatches;
+}
+
+function getArrayLikeLength(value: unknown): number {
+  const rawLength =
+    value != null && typeof (value as any).length === "number"
+      ? Number((value as any).length)
+      : 0;
+  return Number.isFinite(rawLength) && rawLength > 0
+    ? Math.floor(rawLength)
+    : 0;
+}
+
+function normalizeZeroBasedPageIndex(value: unknown): number | null {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) return null;
+  return Math.floor(parsed);
+}
+
+function normalizeOneBasedPageNumber(value: unknown): number | null {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 1) return null;
+  return Math.floor(parsed) - 1;
+}
+
+function getFindControllerSelectedPageIndex(
+  findController: any,
+): number | null {
+  const selectedCandidates = [
+    findController?.selected,
+    findController?._selected,
+    findController?.offset,
+    findController?._offset,
+  ];
+  for (const selected of selectedCandidates) {
+    const pageIndex = normalizeZeroBasedPageIndex(
+      selected?.pageIdx ?? selected?.pageIndex,
+    );
+    if (pageIndex !== null) return pageIndex;
+
+    const pageNumber = normalizeOneBasedPageNumber(
+      selected?.pageNumber ?? selected?.page,
+    );
+    if (pageNumber !== null) return pageNumber;
+  }
+
+  return null;
+}
+
+function getFindControllerSelectedMatchIndex(
+  findController: any,
+): number | null {
+  const selectedCandidates = [
+    findController?.selected,
+    findController?._selected,
+    findController?.offset,
+    findController?._offset,
+  ];
+  for (const selected of selectedCandidates) {
+    const matchIndex = normalizeZeroBasedPageIndex(
+      selected?.matchIdx ?? selected?.matchIndex,
+    );
+    if (matchIndex !== null) return matchIndex;
+  }
+  return null;
+}
+
+function captureFindControllerSearchSnapshot(
+  findController: any,
+): FindControllerSearchSnapshot {
+  const pageMatches = getFindControllerPageMatchesValue(findController);
+  return {
+    matchCount: getFindControllerMatchCount(findController),
+    pageMatches,
+    pageMatchesLength: getArrayLikeLength(pageMatches),
+    query: getFindControllerQuery(findController),
+    selectedPageIndex: getFindControllerSelectedPageIndex(findController),
+    selectedMatchIndex: getFindControllerSelectedMatchIndex(findController),
+  };
+}
+
+function didFindControllerSearchStateChange(
+  findController: any,
+  snapshot: FindControllerSearchSnapshot,
+): boolean {
+  const pageMatches = getFindControllerPageMatchesValue(findController);
+  return (
+    pageMatches !== snapshot.pageMatches ||
+    getArrayLikeLength(pageMatches) !== snapshot.pageMatchesLength ||
+    getFindControllerMatchCount(findController) !== snapshot.matchCount ||
+    getFindControllerSelectedPageIndex(findController) !==
+      snapshot.selectedPageIndex ||
+    getFindControllerSelectedMatchIndex(findController) !==
+      snapshot.selectedMatchIndex
+  );
+}
+
+function hasFindControllerResultsForQuery(
+  findController: any,
+  snapshot: FindControllerSearchSnapshot,
+  expectedQuery: string,
+  run?: FindControllerSearchRun,
+): boolean {
+  // Updating the query happens before PDF.js replaces the previous results.
+  // Neither old hits nor an old empty result are evidence about the new query.
+  // A search PDF.js was seen to run is; an unchanged-looking result is not
+  // evidence against it (see `FindControllerSearchRun`).
+  return (
+    findController?._dirtyMatch !== true &&
+    (snapshot.query === expectedQuery ||
+      hasFindControllerSearchRun(findController, run) ||
+      didFindControllerSearchStateChange(findController, snapshot))
+  );
+}
+
+async function waitForFindControllerSearchAcceptance(
+  findController: any,
+  expectedQuery: string,
+  snapshot: FindControllerSearchSnapshot,
+  options?: {
+    eventBus?: any;
+    timeoutMs?: number;
+    hardDeadlineAt?: number;
+    isCancelled?: () => boolean;
+    run?: FindControllerSearchRun;
+  },
+): Promise<number | null> {
+  const startedAt = Date.now();
+  const timeoutAt = Math.min(
+    startedAt +
+      Math.max(
+        FIND_CONTROLLER_ACCEPTANCE_POLL_MS,
+        options?.timeoutMs ?? FIND_CONTROLLER_ACCEPTANCE_TIMEOUT_MS,
+      ),
+    options?.hardDeadlineAt ?? Number.MAX_SAFE_INTEGER,
+  );
+  const progressWaiter = createFindControllerProgressWaiter(options?.eventBus);
+  try {
+    while (true) {
+      noteFindControllerSearchRun(findController, options?.run);
+      const rawQuery = getFindControllerQuery(findController);
+      if (
+        rawQuery === expectedQuery ||
+        (rawQuery === undefined &&
+          didFindControllerSearchStateChange(findController, snapshot))
+      ) {
+        return Date.now() - startedAt;
+      }
+      if (options?.isCancelled?.() || Date.now() >= timeoutAt) return null;
+      await progressWaiter.wait(
+        Math.min(
+          FIND_CONTROLLER_ACCEPTANCE_POLL_MS,
+          Math.max(1, timeoutAt - Date.now()),
+        ),
+      );
+    }
+  } finally {
+    progressWaiter.dispose();
+  }
+}
+
+type FindControllerProgressWaiter = {
+  wait: (timeoutMs: number) => Promise<void>;
+  dispose: () => void;
+};
+
+function createFindControllerProgressWaiter(
+  eventBus: any,
+): FindControllerProgressWaiter {
+  let pendingResolve: (() => void) | null = null;
+  const eventNames = ["updatefindmatchescount", "updatefindcontrolstate"];
+  const on =
+    typeof eventBus?._on === "function"
+      ? eventBus._on.bind(eventBus)
+      : typeof eventBus?.on === "function"
+        ? eventBus.on.bind(eventBus)
+        : null;
+  const off =
+    typeof eventBus?._off === "function"
+      ? eventBus._off.bind(eventBus)
+      : typeof eventBus?.off === "function"
+        ? eventBus.off.bind(eventBus)
+        : null;
+  const notify = () => {
+    const resolve = pendingResolve;
+    pendingResolve = null;
+    resolve?.();
+  };
+  if (on) {
+    for (const eventName of eventNames) {
+      try {
+        on(eventName, notify);
+      } catch {
+        // Zotero PDF.js versions differ; adaptive polling remains available.
+      }
+    }
+  }
+  return {
+    wait: (timeoutMs: number) =>
+      new Promise<void>((resolve) => {
+        let settled = false;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          if (pendingResolve === finish) pendingResolve = null;
+          clearTimeout(timer);
+          resolve();
+        };
+        const timer = setTimeout(finish, Math.max(1, timeoutMs));
+        pendingResolve = finish;
+      }),
+    dispose: () => {
+      notify();
+      if (!off) return;
+      for (const eventName of eventNames) {
+        try {
+          off(eventName, notify);
+        } catch {
+          // Best-effort cleanup for older event-bus implementations.
+        }
+      }
+    },
+  };
+}
+
+function getFindControllerPageMatches(findController: any): unknown[] {
+  const rawMatches = getFindControllerPageMatchesValue(findController);
+  return rawMatches != null && typeof (rawMatches as any).length === "number"
+    ? (rawMatches as unknown[])
+    : [];
+}
+
+function getFindControllerPendingMatchCount(findController: any): number {
+  return typeof findController?._pendingFindMatches?.size === "number"
+    ? Math.max(0, Number(findController._pendingFindMatches.size))
+    : 0;
+}
+
+function getFindControllerPagesToSearch(findController: any): number | null {
+  return Number.isFinite(findController?._pagesToSearch)
+    ? Math.max(0, Number(findController._pagesToSearch))
+    : null;
+}
+
+function mergeFindControllerResultSnapshot(params: {
+  findController: any;
+  pagesCount: number;
+  expectedQuery: string;
+  previousSnapshot: FindControllerSearchSnapshot;
+  acceptanceMs: number;
+  completion: FindControllerSearchResult["completion"];
+  resultsComplete?: boolean;
+  completionReason?: FindControllerSearchResult["completionReason"];
+  snapshotCount: number;
+  allowUnobservableQuery?: boolean;
+  run?: FindControllerSearchRun;
+}): FindControllerSearchResult {
+  const pageMatches = getFindControllerPageMatches(params.findController);
+  const currentQuery = getFindControllerQuery(params.findController);
+  const queryConfirmed =
+    (currentQuery === params.expectedQuery ||
+      (currentQuery === undefined && params.allowUnobservableQuery === true)) &&
+    hasFindControllerResultsForQuery(
+      params.findController,
+      params.previousSnapshot,
+      params.expectedQuery,
+      params.run,
+    );
+  // PDF.js replaces pageMatches in place for the newest query. Never attribute
+  // a newer click's positive results to an older, superseded navigation.
+  const summary = queryConfirmed
+    ? summarizeFindControllerMatches(pageMatches)
+    : {
+        matchedPageIndexes: [],
+        totalMatches: 0,
+        pageMatchCounts: [],
+      };
+  const selectedPageIndex = getFindControllerSelectedPageIndex(
+    params.findController,
+  );
+  const selectedMatchIndex = getFindControllerSelectedMatchIndex(
+    params.findController,
+  );
+  const findControllerTotal = getFindControllerMatchCount(
+    params.findController,
+  );
+  const matchStateChanged =
+    findControllerTotal !== params.previousSnapshot.matchCount ||
+    selectedPageIndex !== params.previousSnapshot.selectedPageIndex;
+
+  if (findControllerTotal > summary.totalMatches && queryConfirmed) {
+    summary.totalMatches = findControllerTotal;
+    if (
+      selectedPageIndex !== null &&
+      (matchStateChanged ||
+        params.previousSnapshot.query === params.expectedQuery ||
+        hasFindControllerSearchRun(params.findController, params.run))
+    ) {
+      if (!summary.matchedPageIndexes.includes(selectedPageIndex)) {
+        summary.matchedPageIndexes.push(selectedPageIndex);
+      }
+      summary.pageMatchCounts[selectedPageIndex] = findControllerTotal;
+    }
+  }
+
+  return {
+    ...summary,
+    pagesCount: params.pagesCount,
+    selectedPageIndex:
+      queryConfirmed &&
+      selectedPageIndex !== null &&
+      summary.matchedPageIndexes.includes(selectedPageIndex)
+        ? selectedPageIndex
+        : null,
+    selectedMatchIndex: queryConfirmed ? selectedMatchIndex : null,
+    acceptanceMs: params.acceptanceMs,
+    completion: params.completion,
+    resultsComplete: params.resultsComplete === true,
+    completionReason: params.completionReason,
+    snapshotCount: params.snapshotCount,
+  };
+}
+
+async function waitForFindControllerPageMatches(params: {
+  findController: any;
+  eventBus?: any;
+  pagesCount: number;
+  expectedQuery: string;
+  previousSnapshot: FindControllerSearchSnapshot;
+  acceptanceMs: number;
+  hardDeadlineAt: number;
+  isCancelled?: () => boolean;
+  requireCompleteResults?: boolean;
+  run?: FindControllerSearchRun;
+}): Promise<FindControllerSearchResult> {
+  const startedAt = Date.now();
+  let lastProgressAt = startedAt;
+  let lastProgressSignature = "";
+  let queryConfirmed = false;
+  let confirmedFromRawQuery = false;
+  let snapshotCount = 0;
+  const progressWaiter = createFindControllerProgressWaiter(params.eventBus);
+
+  try {
+    while (true) {
+      snapshotCount += 1;
+      noteFindControllerSearchRun(params.findController, params.run);
+      const rawQuery = getFindControllerQuery(params.findController);
+      if (rawQuery === params.expectedQuery) {
+        queryConfirmed = true;
+        confirmedFromRawQuery = true;
+      } else if (
+        rawQuery === undefined &&
+        (didFindControllerSearchStateChange(
+          params.findController,
+          params.previousSnapshot,
+        ) ||
+          Date.now() - startedAt >= FIND_CONTROLLER_ACCEPTANCE_TIMEOUT_MS)
+      ) {
+        queryConfirmed = true;
+      }
+
+      const pageMatches = getFindControllerPageMatches(params.findController);
+      const summary = summarizeFindControllerMatches(pageMatches);
+      const findControllerTotal = getFindControllerMatchCount(
+        params.findController,
+      );
+      const pendingCount = getFindControllerPendingMatchCount(
+        params.findController,
+      );
+      const pagesToSearch = getFindControllerPagesToSearch(
+        params.findController,
+      );
+      const selectedPageIndex = getFindControllerSelectedPageIndex(
+        params.findController,
+      );
+      const selectedMatchIndex = getFindControllerSelectedMatchIndex(
+        params.findController,
+      );
+      const progressSignature = [
+        rawQuery ?? "<unknown>",
+        pageMatches.length,
+        summary.totalMatches,
+        findControllerTotal,
+        pendingCount,
+        pagesToSearch ?? "<unknown>",
+        selectedPageIndex ?? "<none>",
+        selectedMatchIndex ?? "<none>",
+      ].join("\u241f");
+      if (progressSignature !== lastProgressSignature) {
+        lastProgressSignature = progressSignature;
+        lastProgressAt = Date.now();
+      }
+
+      const snapshot = mergeFindControllerResultSnapshot({
+        findController: params.findController,
+        pagesCount: params.pagesCount,
+        expectedQuery: params.expectedQuery,
+        previousSnapshot: params.previousSnapshot,
+        acceptanceMs: params.acceptanceMs,
+        completion: "found",
+        resultsComplete: false,
+        snapshotCount,
+        allowUnobservableQuery: queryConfirmed,
+        run: params.run,
+      });
+      if (
+        queryConfirmed &&
+        snapshot.totalMatches > 0 &&
+        !params.requireCompleteResults
+      ) {
+        return snapshot;
+      }
+
+      if (params.isCancelled?.() === true) {
+        return {
+          ...snapshot,
+          completion: "deferred",
+          completionReason: "cancelled",
+          resultsComplete: false,
+        };
+      }
+
+      const canTrustEmptyCompletion =
+        confirmedFromRawQuery ||
+        pageMatches.length > 0 ||
+        Date.now() - startedAt >= 700;
+      if (
+        queryConfirmed &&
+        hasFindControllerResultsForQuery(
+          params.findController,
+          params.previousSnapshot,
+          params.expectedQuery,
+          params.run,
+        ) &&
+        (pageMatches.length >= params.pagesCount || pagesToSearch === 0) &&
+        pendingCount === 0 &&
+        canTrustEmptyCompletion
+      ) {
+        return {
+          ...snapshot,
+          completion: snapshot.totalMatches > 0 ? "found" : "complete",
+          resultsComplete: true,
+        };
+      }
+
+      const cancelled = params.isCancelled?.() === true;
+      const now = Date.now();
+      const absoluteDeadlineReached = now >= params.hardDeadlineAt;
+      const inactivityDeadlineReached =
+        now - lastProgressAt >= FIND_CONTROLLER_INACTIVITY_DEADLINE_MS;
+      if (cancelled || absoluteDeadlineReached || inactivityDeadlineReached) {
+        // This is deliberately the final state read. A match observed here is
+        // success even when it arrived at the deadline boundary.
+        const finalSnapshot = mergeFindControllerResultSnapshot({
+          findController: params.findController,
+          pagesCount: params.pagesCount,
+          expectedQuery: params.expectedQuery,
+          previousSnapshot: params.previousSnapshot,
+          acceptanceMs: params.acceptanceMs,
+          completion: "deferred",
+          resultsComplete: false,
+          completionReason: cancelled
+            ? "cancelled"
+            : absoluteDeadlineReached
+              ? "absolute-deadline"
+              : "inactivity",
+          snapshotCount: snapshotCount + 1,
+          allowUnobservableQuery: queryConfirmed,
+          run: params.run,
+        });
+        if (queryConfirmed && finalSnapshot.totalMatches > 0) {
+          return { ...finalSnapshot, completion: "found" };
+        }
+        return finalSnapshot;
+      }
+
+      await progressWaiter.wait(
+        Math.min(
+          queryConfirmed
+            ? FIND_CONTROLLER_ACCEPTED_POLL_MS
+            : FIND_CONTROLLER_ACTIVE_POLL_MS,
+          Math.max(1, params.hardDeadlineAt - now),
+          Math.max(
+            1,
+            FIND_CONTROLLER_INACTIVITY_DEADLINE_MS - (now - lastProgressAt),
+          ),
+        ),
+      );
+    }
+  } finally {
+    progressWaiter.dispose();
+  }
+}
+
+export const waitForFindControllerPageMatchesForTests =
+  waitForFindControllerPageMatches;
+
+function summarizeFindControllerMatches(pageMatches: unknown[]): {
+  matchedPageIndexes: number[];
+  totalMatches: number;
+  pageMatchCounts: number[];
+} {
+  const matchedPageIndexes: number[] = [];
+  const pageMatchCounts: number[] = [];
+  let totalMatches = 0;
+  for (let pageIndex = 0; pageIndex < pageMatches.length; pageIndex += 1) {
+    // Cross-realm compatible: use array-like length check instead of Array.isArray.
+    const rawEntry = pageMatches[pageIndex];
+    const matchCount =
+      rawEntry != null && typeof (rawEntry as any).length === "number"
+        ? Number((rawEntry as any).length)
+        : 0;
+    if (!matchCount) continue;
+    matchedPageIndexes.push(pageIndex);
+    pageMatchCounts[pageIndex] = matchCount;
+    totalMatches += matchCount;
+  }
+  return { matchedPageIndexes, totalMatches, pageMatchCounts };
+}
+
+async function searchFindControllerForQuery(
+  reader: any,
+  query: string,
+  options: {
+    hardDeadlineAt: number;
+    isCancelled?: () => boolean;
+    requireCompleteResults?: boolean;
+  },
+): Promise<FindControllerSearchResult | null> {
+  const app = getPdfViewerApplication(reader);
+  const findController = app?.findController;
+  const eventBus = app?.eventBus;
+  const pagesCount = getPagesCount(app);
+  if (!findController || pagesCount < 1) {
+    return null;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Strategy: literally automate Ctrl+F by setting the find bar's input value
+  // and dispatching a DOM input event.  This is exactly what happens when a
+  // user presses Ctrl+F, types a query, and the PDF viewer finds + scrolls.
+  // ---------------------------------------------------------------------------
+  const findBar = app?.findBar;
+  const findField: HTMLInputElement | null =
+    findBar?._findField ?? findBar?.findField ?? null;
+  const previousSearchSnapshot =
+    captureFindControllerSearchSnapshot(findController);
+  const dispatchStartedAt = Date.now();
+
+  let shouldRunCommandFallback = true;
+  let acceptanceMs: number | null = null;
+  // Followed from the moment the search is sent; a find bar that handles the
+  // input later is followed by the waits below.
+  let run: FindControllerSearchRun | undefined;
+
+  if (findField) {
+    try {
+      // Ensure the find bar is open (required for the search to activate).
+      if (typeof findBar?.open === "function") {
+        findBar.open();
+      }
+
+      // Set the query text — equivalent to the user typing in the search box.
+      findField.value = query;
+
+      // Dispatch an InputEvent in the *content window's* context so that
+      // Firefox's security boundaries don't swallow it.
+      const contentWin: any = findField.ownerDocument?.defaultView;
+      const EventCtor: typeof InputEvent =
+        contentWin?.InputEvent ?? contentWin?.Event ?? InputEvent;
+      findField.dispatchEvent(
+        new EventCtor("input", { bubbles: true } as EventInit),
+      );
+      run = followFindControllerSearch(findController, query);
+      const findFieldAcceptanceMs = await waitForFindControllerSearchAcceptance(
+        findController,
+        query,
+        previousSearchSnapshot,
+        {
+          eventBus,
+          hardDeadlineAt: options.hardDeadlineAt,
+          isCancelled: options.isCancelled,
+          run,
+        },
+      );
+      shouldRunCommandFallback = findFieldAcceptanceMs === null;
+      if (findFieldAcceptanceMs !== null) {
+        acceptanceMs = Date.now() - dispatchStartedAt;
+      }
+    } catch (err) {
+      appLogger.debug(
+        "LLM paragraph-jump: find-bar input approach failed, will try eventBus",
+        err,
+      );
+    }
+  }
+
+  // Fallback: direct eventBus / executeCommand dispatch (may not work in all
+  // Zotero builds, but costs nothing to try).
+  if (shouldRunCommandFallback) {
+    if (!eventBus && typeof findController.executeCommand !== "function") {
+      return null;
+    }
+    const findState = toPdfViewerRequest(
+      app,
+      {
+        type: "",
+        query,
+        phraseSearch: true,
+        caseSensitive: false,
+        entireWord: false,
+        highlightAll: true,
+        findPrevious: false,
+        matchDiacritics: false,
+      },
+      findBar ?? undefined,
+    );
+    try {
+      if (typeof findBar?.open === "function") findBar.open();
+    } catch {
+      /* ignore */
+    }
+    let dispatched = false;
+    try {
+      if (typeof findController.executeCommand === "function") {
+        findController.executeCommand("find", findState);
+        dispatched = true;
+      }
+    } catch {
+      dispatched = false;
+    }
+    if (!dispatched && eventBus) {
+      eventBus.dispatch("find", findState);
+    }
+    run = followFindControllerSearch(findController, query);
+    const commandAcceptanceMs = await waitForFindControllerSearchAcceptance(
+      findController,
+      query,
+      previousSearchSnapshot,
+      {
+        eventBus,
+        hardDeadlineAt: options.hardDeadlineAt,
+        isCancelled: options.isCancelled,
+        run,
+      },
+    );
+    if (commandAcceptanceMs !== null) {
+      acceptanceMs = Date.now() - dispatchStartedAt;
+    }
+  }
+
+  // Wait for PDF.js progress without monopolizing the main thread. Event-bus
+  // notifications wake the observer promptly; bounded adaptive polling covers
+  // Zotero builds that do not expose those events.
+  return waitForFindControllerPageMatches({
+    findController,
+    eventBus,
+    pagesCount,
+    expectedQuery: query,
+    previousSnapshot: previousSearchSnapshot,
+    acceptanceMs:
+      acceptanceMs ??
+      (getFindControllerQuery(findController) === query
+        ? Date.now() - dispatchStartedAt
+        : 0),
+    hardDeadlineAt: options.hardDeadlineAt,
+    isCancelled: options.isCancelled,
+    requireCompleteResults: options.requireCompleteResults,
+    run,
+  });
+}
+
+export type PageNativeFindControllerQuery = {
+  query: string;
+  occurrenceIndex: number;
+  totalOccurrences: number;
+};
+
+type PageNativeFindControllerSourceMatch = PageNativeFindControllerQuery & {
+  matchKind: QuoteTextSearchQueryKind;
+  quoteTokenCoverage: number;
+};
+
+export function buildPageNativeFindControllerPageText(
+  items: ArrayLike<{ str?: unknown; hasEOL?: unknown }>,
+): string {
+  const parts: string[] = [];
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index];
+    if (index > 0) parts.push(PDF_TEXT_ITEM_BOUNDARY);
+    parts.push(String(item?.str || ""));
+    if (item?.hasEOL) parts.push("\n");
+  }
+  return parts.join("");
+}
+
+function normalizePageNativeFindControllerLiteral(
+  sourceText: string,
+  _quoteText: string,
+): string {
+  return stripPdfTextItemBoundaries(sourceText)
+    .replace(/(\p{Ll})[-‐‑‒–—−]\s*\r?\n\s*(?=\p{Ll})/gu, "$1")
+    .replace(/(\p{Lu})[-‐‑‒–—−]\s*\r?\n\s*(?=\p{L})/gu, "$1")
+    .replace(/(\S)[-‐‑‒–—−]\s*\r?\n\s*/gu, "$1-")
+    .replace(
+      /([\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}])\r?\n/gu,
+      "$1",
+    )
+    .replace(/\r\n?|\n/g, " ");
+}
+
+export function normalizePageNativeFindControllerComparableText(
+  value: string,
+): string {
+  return normalizeLocatorText(
+    normalizePageNativeFindControllerLiteral(value, ""),
+  );
+}
+
+export function resolvePageNativeFindControllerQuery(
+  pageText: string,
+  quoteText: string,
+  requestedOccurrence?: number,
+  normalizationHintText?: string,
+): PageNativeFindControllerQuery | null {
+  const spans = findQuoteSourceSpansAllowingLayoutArtifacts(
+    buildQuoteTextIndex(pageText),
+    quoteText,
+  );
+  if (!spans.length) return null;
+  const normalizedOccurrence =
+    Number.isFinite(requestedOccurrence) && Number(requestedOccurrence) >= 0
+      ? Math.floor(Number(requestedOccurrence))
+      : undefined;
+  if (normalizedOccurrence === undefined && spans.length > 1) return null;
+  const selected =
+    spans[normalizedOccurrence === undefined ? 0 : normalizedOccurrence];
+  if (!selected?.text) return null;
+  const literalQuery = normalizePageNativeFindControllerLiteral(
+    selected.text,
+    normalizationHintText || quoteText,
+  );
+  if (!literalQuery) return null;
+  return {
+    query: literalQuery,
+    occurrenceIndex: selected.occurrenceIndex,
+    totalOccurrences: spans.length,
+  };
+}
+
+function resolveLargestUniquePageNativeSourceMatch(
+  pageText: string,
+  quoteText: string,
+  normalizationHintText?: string,
+): PageNativeFindControllerSourceMatch | null {
+  const sourceMatch = findLargestUniqueQuoteTextAnchorMatch(
+    [
+      {
+        id: "live-page",
+        text: pageText,
+      },
+    ],
+    quoteText,
+    {
+      minQueryLength: 24,
+      rejectWeakQueries: true,
+    },
+  );
+  if (!sourceMatch || sourceMatch.matchKind === "exact") return null;
+  const resolved = resolvePageNativeFindControllerQuery(
+    pageText,
+    sourceMatch.query,
+    undefined,
+    normalizationHintText || quoteText,
+  );
+  return resolved
+    ? {
+        ...resolved,
+        matchKind: sourceMatch.matchKind,
+        quoteTokenCoverage: sourceMatch.quoteTokenCoverage,
+      }
+    : null;
+}
+
+const PAGE_NATIVE_MATH_GAP_PATTERN = /[=<>+*/^_\\{}$()[\]≤≥≈≠∑∏√∞∫−]/u;
+const PAGE_NATIVE_LATIN_PROSE_TOKEN_PATTERN = /^[\p{Script=Latin}\p{M}'’-]+$/u;
+const PAGE_NATIVE_CJK_PROSE_TOKEN_PATTERN =
+  /^[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]+$/u;
+
+function pageNativeProseTokenClass(value: string): "latin" | "cjk" | null {
+  if (PAGE_NATIVE_LATIN_PROSE_TOKEN_PATTERN.test(value)) return "latin";
+  if (PAGE_NATIVE_CJK_PROSE_TOKEN_PATTERN.test(value)) return "cjk";
+  return null;
+}
+
+function resolvePageNativeFallbackAfterCompleteSearchFailure(
+  pageText: string,
+  quoteText: string,
+  requestedOccurrence?: number,
+  normalizationHintText?: string,
+): PageNativeFindControllerSourceMatch | null {
+  const pageIndex = buildQuoteTextIndex(pageText);
+  const spans = findQuoteSourceSpansAllowingLayoutArtifacts(
+    pageIndex,
+    quoteText,
+  );
+  const normalizedOccurrence =
+    Number.isFinite(requestedOccurrence) && Number(requestedOccurrence) >= 0
+      ? Math.floor(Number(requestedOccurrence))
+      : undefined;
+  if (normalizedOccurrence === undefined && spans.length !== 1) return null;
+  const selected =
+    spans[normalizedOccurrence === undefined ? 0 : normalizedOccurrence];
+  if (!selected?.text) return null;
+
+  const selectedIndex = buildQuoteTextIndex(selected.text);
+  const quoteTokenCount = buildQuoteTextIndex(quoteText).tokens.length;
+  if (selectedIndex.tokens.length < 4 || quoteTokenCount < 4) return null;
+
+  type ProseRun = {
+    tokenStart: number;
+    tokenEnd: number;
+    sourceStart: number;
+    sourceEnd: number;
+  };
+  const proseRuns: ProseRun[] = [];
+  let activeRun: (ProseRun & { tokenClass: "latin" | "cjk" }) | null = null;
+  for (let index = 0; index < selectedIndex.tokens.length; index += 1) {
+    const token = selectedIndex.tokens[index];
+    const sourceToken = selectedIndex.sourceText.slice(
+      token.sourceStart,
+      token.sourceEnd,
+    );
+    const tokenClass = pageNativeProseTokenClass(sourceToken);
+    const gap =
+      activeRun && index > 0
+        ? selectedIndex.sourceText.slice(
+            selectedIndex.tokens[index - 1].sourceEnd,
+            token.sourceStart,
+          )
+        : "";
+    const canExtend = Boolean(
+      activeRun &&
+      tokenClass === activeRun.tokenClass &&
+      !PAGE_NATIVE_MATH_GAP_PATTERN.test(gap),
+    );
+    if (!tokenClass) {
+      if (activeRun) proseRuns.push(activeRun);
+      activeRun = null;
+      continue;
+    }
+    if (canExtend && activeRun) {
+      activeRun.tokenEnd = index + 1;
+      activeRun.sourceEnd = token.sourceEnd;
+      continue;
+    }
+    if (activeRun) proseRuns.push(activeRun);
+    activeRun = {
+      tokenStart: index,
+      tokenEnd: index + 1,
+      sourceStart: token.sourceStart,
+      sourceEnd: token.sourceEnd,
+      tokenClass,
+    };
+  }
+  if (activeRun) proseRuns.push(activeRun);
+
+  const fullRun = proseRuns.find(
+    (run) =>
+      run.tokenStart === 0 && run.tokenEnd === selectedIndex.tokens.length,
+  );
+  if (fullRun && selectedIndex.tokens.length > 4) {
+    const prefixLast = selectedIndex.tokens[selectedIndex.tokens.length - 2];
+    const suffixFirst = selectedIndex.tokens[1];
+    proseRuns.push(
+      {
+        tokenStart: 0,
+        tokenEnd: selectedIndex.tokens.length - 1,
+        sourceStart: selectedIndex.tokens[0].sourceStart,
+        sourceEnd: prefixLast.sourceEnd,
+      },
+      {
+        tokenStart: 1,
+        tokenEnd: selectedIndex.tokens.length,
+        sourceStart: suffixFirst.sourceStart,
+        sourceEnd:
+          selectedIndex.tokens[selectedIndex.tokens.length - 1].sourceEnd,
+      },
+    );
+  }
+
+  const candidates = proseRuns
+    .filter(
+      (run) =>
+        run.tokenEnd - run.tokenStart >= 4 &&
+        !(fullRun === run && run.tokenEnd === selectedIndex.tokens.length),
+    )
+    .map((run) => {
+      const text = selectedIndex.sourceText
+        .slice(run.sourceStart, run.sourceEnd)
+        .trim();
+      const normalizedText = normalizeLocatorText(text);
+      return {
+        ...run,
+        text,
+        normalizedText,
+      };
+    })
+    .filter(
+      (candidate) =>
+        candidate.normalizedText.length >= 24 &&
+        findQuoteSourceSpansAllowingLayoutArtifacts(pageIndex, candidate.text)
+          .length === 1,
+    )
+    .sort(
+      (left, right) =>
+        right.tokenEnd - right.tokenStart - (left.tokenEnd - left.tokenStart) ||
+        right.normalizedText.length - left.normalizedText.length ||
+        left.tokenStart - right.tokenStart,
+    );
+  const candidate = candidates[0];
+  if (!candidate) return null;
+  const resolved = resolvePageNativeFindControllerQuery(
+    pageText,
+    candidate.text,
+    undefined,
+    normalizationHintText || quoteText,
+  );
+  if (!resolved) return null;
+  return {
+    ...resolved,
+    matchKind:
+      candidate.tokenStart === 0
+        ? "raw-prefix"
+        : candidate.tokenEnd === selectedIndex.tokens.length
+          ? "raw-suffix"
+          : "raw-middle",
+    quoteTokenCoverage: Math.min(
+      1,
+      (candidate.tokenEnd - candidate.tokenStart) / quoteTokenCount,
+    ),
+  };
+}
+
+type FindControllerUserState = {
+  query: string;
+  state: Record<string, unknown> | null;
+  findFieldValue: string;
+  findBarWasOpen: boolean | null;
+  selectedPageIndex: number | null;
+  selectedMatchIndex: number | null;
+  matchCount: number;
+};
+
+function getFindBarOpenState(findBar: any): boolean | null {
+  for (const candidate of [
+    findBar?.opened,
+    findBar?._opened,
+    findBar?.isOpen,
+  ]) {
+    if (typeof candidate === "boolean") return candidate;
+  }
+  const barElement =
+    findBar?._findbar ?? findBar?._bar ?? findBar?.bar ?? findBar?.element;
+  if (barElement?.classList?.contains) {
+    return !barElement.classList.contains("hidden");
+  }
+  return null;
+}
+
+function captureFindControllerUserState(app: any): FindControllerUserState {
+  const findController = app?.findController;
+  const findBar = app?.findBar;
+  const findField: HTMLInputElement | null =
+    findBar?._findField ?? findBar?.findField ?? null;
+  const rawState = findController?.state ?? findController?._state;
+  return {
+    // The search the reader was last sent: the user's, or one this plugin
+    // put back. The last search PDF.js ran can be an earlier wording of this
+    // navigation that the put-back search has not yet replaced.
+    query:
+      getFindControllerRequestedQuery(findController) ??
+      (getFindControllerQuery(findController) || ""),
+    state:
+      rawState && typeof rawState === "object"
+        ? { ...(rawState as Record<string, unknown>) }
+        : null,
+    findFieldValue: String(findField?.value || ""),
+    findBarWasOpen: getFindBarOpenState(findBar),
+    selectedPageIndex: getFindControllerSelectedPageIndex(findController),
+    selectedMatchIndex: getFindControllerSelectedMatchIndex(findController),
+    matchCount: getFindControllerMatchCount(findController),
+  };
+}
+
+function dispatchFindFieldInput(findField: HTMLInputElement): void {
+  const contentWin: any = findField.ownerDocument?.defaultView;
+  const EventCtor: typeof InputEvent =
+    contentWin?.InputEvent ?? contentWin?.Event ?? InputEvent;
+  findField.dispatchEvent(
+    new EventCtor("input", { bubbles: true } as EventInit),
+  );
+}
+
+async function restoreFindControllerUserState(
+  app: any,
+  previous: FindControllerUserState,
+): Promise<void> {
+  const findController = app?.findController;
+  const eventBus = app?.eventBus;
+  const findBar = app?.findBar;
+  const findField: HTMLInputElement | null =
+    findBar?._findField ?? findBar?.findField ?? null;
+  const query = previous.query || previous.findFieldValue;
+  try {
+    const restoreSnapshot = captureFindControllerSearchSnapshot(findController);
+    if (findField) {
+      findField.value = query;
+      dispatchFindFieldInput(findField);
+    } else if (eventBus && previous.state) {
+      eventBus.dispatch(
+        "find",
+        toPdfViewerRequest(
+          app,
+          { ...findStateSettings(previous.state), type: "", query },
+          findBar ?? undefined,
+        ),
+      );
+    } else if (query && typeof findController?.executeCommand === "function") {
+      findController.executeCommand(
+        "find",
+        toPdfViewerRequest(app, {
+          ...findStateSettings(previous.state),
+          query,
+        }),
+      );
+    }
+    const run = followFindControllerSearch(findController, query);
+    if (
+      query &&
+      previous.matchCount > 0 &&
+      previous.selectedPageIndex !== null &&
+      previous.selectedMatchIndex !== null
+    ) {
+      const restoreDeadlineAt = Date.now() + 800;
+      await waitForFindControllerSearchAcceptance(
+        findController,
+        query,
+        restoreSnapshot,
+        {
+          eventBus,
+          timeoutMs: 800,
+          hardDeadlineAt: restoreDeadlineAt,
+          run,
+        },
+      );
+      const restoredSearch = await waitForFindControllerPageMatches({
+        findController,
+        eventBus,
+        pagesCount: getPagesCount(app),
+        expectedQuery: query,
+        previousSnapshot: restoreSnapshot,
+        acceptanceMs: 0,
+        hardDeadlineAt: restoreDeadlineAt,
+        run,
+      });
+      const pageMatchCount =
+        restoredSearch.pageMatchCounts[previous.selectedPageIndex] || 0;
+      if (pageMatchCount > 0) {
+        await selectNativeFindControllerMatch({
+          app,
+          pageIndex: previous.selectedPageIndex,
+          occurrenceIndex: previous.selectedMatchIndex,
+          totalMatches: restoredSearch.totalMatches,
+          pageMatchCount,
+          deadlineAt: Date.now() + 800,
+        });
+      }
+    }
+    if (!query) {
+      eventBus?.dispatch?.(
+        "findbarclose",
+        toPdfViewerRequest(app, {}, findBar ?? undefined),
+      );
+    }
+    if (
+      previous.findBarWasOpen === false &&
+      typeof findBar?.close === "function"
+    ) {
+      findBar.close();
+    }
+  } catch (error) {
+    appLogger.debug("LLM paragraph-jump: could not restore prior find state", {
+      error,
+    });
+  }
+}
+
+function getPdfDocumentFingerprint(app: any): string | undefined {
+  const fingerprints = app?.pdfDocument?.fingerprints;
+  const value =
+    fingerprints != null && typeof fingerprints.length === "number"
+      ? fingerprints[0]
+      : undefined;
+  const normalized = String(value || "").trim();
+  return normalized || undefined;
+}
+
+async function extractFindControllerPageText(
+  app: any,
+  pageIndex: number,
+): Promise<string | null> {
+  if (!Number.isFinite(pageIndex) || pageIndex < 0) return null;
+
+  const documents: any[] = [];
+  const seenDocuments = new Set<any>();
+  for (const candidate of [
+    unwrapGeckoJsObject(app?.pdfDocument),
+    app?.pdfDocument,
+    unwrapGeckoJsObject(app?.findController?._pdfDocument),
+    app?.findController?._pdfDocument,
+  ]) {
+    if (!candidate || seenDocuments.has(candidate)) continue;
+    seenDocuments.add(candidate);
+    documents.push(candidate);
+  }
+
+  for (const pdfDocument of documents) {
+    if (typeof pdfDocument?.getPage !== "function") continue;
+    try {
+      const page = unwrapGeckoJsObject(
+        await pdfDocument.getPage(Math.floor(pageIndex) + 1),
+      );
+      if (typeof page?.getTextContent !== "function") continue;
+      let textContent: any;
+      try {
+        textContent = await page.getTextContent({
+          disableNormalization: true,
+        });
+      } catch (optionsError) {
+        // Some Gecko compartments reject a chrome-realm options object even
+        // though the same PDFDocumentProxy method works without arguments.
+        // The page still comes from the live PDF.js document; retrying keeps
+        // navigation available while the offset-preserving aligner handles
+        // any normalization differences.
+        logFindControllerDiagnostic(
+          "LLM paragraph-jump: retrying PDF.js text extraction without cross-realm options",
+          {
+            pageIndex,
+            error: optionsError,
+          },
+        );
+        textContent = await page.getTextContent();
+      }
+      const unwrappedTextContent = unwrapGeckoJsObject(textContent);
+      const items =
+        unwrappedTextContent?.items != null &&
+        typeof unwrappedTextContent.items.length === "number"
+          ? unwrappedTextContent.items
+          : [];
+      const unwrappedItems: Array<{ str?: unknown; hasEOL?: unknown }> = [];
+      for (let index = 0; index < items.length; index += 1) {
+        unwrappedItems.push(unwrapGeckoJsObject(items[index]));
+      }
+      const text = buildPageNativeFindControllerPageText(unwrappedItems);
+      if (text) return text;
+    } catch (error) {
+      logFindControllerDiagnostic(
+        "LLM paragraph-jump: PDF.js page text extraction failed",
+        {
+          pageIndex,
+          error,
+        },
+      );
+    }
+  }
+  return null;
+}
+
+function hashFindControllerQuery(query: string): string {
+  return fnv1a32Raw(query).toString(36);
+}
+
+function findControllerQueryDiagnostic(query: string): string {
+  return `Full query length=${query.length} hash=${hashFindControllerQuery(query)}`;
+}
+
+function logFindControllerDiagnostic(
+  message: string,
+  details: Record<string, unknown>,
+): void {
+  if (typeof ztoolkit !== "undefined") {
+    appLogger.debug(message, details);
+  }
+}
+
+async function waitForFindControllerSelectionChange(
+  findController: any,
+  previousPageIndex: number | null,
+  previousMatchIndex: number | null,
+  timeoutMs = 400,
+): Promise<void> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (
+      getFindControllerSelectedPageIndex(findController) !==
+        previousPageIndex ||
+      getFindControllerSelectedMatchIndex(findController) !== previousMatchIndex
+    ) {
+      return;
+    }
+    await delay(20);
+  }
+}
+
+/**
+ * Ask PDF.js for the next match of the current search, as the find bar's
+ * Next button does. The find bar builds the request in the reader page from
+ * its own field, which holds the current search; without one, the request is
+ * copied into the reader page (see `toPdfViewerRequest`).
+ */
+function sendFindAgain(app: any): void {
+  const findController = app?.findController;
+  const findBar = app?.findBar;
+  const findField = findBar?._findField ?? findBar?.findField;
+  if (
+    typeof findBar?.dispatchEvent === "function" &&
+    findField &&
+    String(findField.value ?? "") === getFindControllerQuery(findController)
+  ) {
+    findBar.dispatchEvent("again", false);
+    return;
+  }
+  const state = findController?.state ?? findController?._state ?? {};
+  app?.eventBus?.dispatch(
+    "find",
+    toPdfViewerRequest(
+      app,
+      { ...findStateSettings(state), type: "again", findPrevious: false },
+      findBar ?? undefined,
+    ),
+  );
+}
+
+async function selectNativeFindControllerMatch(params: {
+  app: any;
+  pageIndex: number;
+  occurrenceIndex: number;
+  totalMatches: number;
+  pageMatchCount: number;
+  deadlineAt: number;
+}): Promise<boolean> {
+  const findController = params.app?.findController;
+  const eventBus = params.app?.eventBus;
+  if (!findController || !eventBus) return false;
+
+  const isSelected = (): boolean => {
+    const selectedPageIndex =
+      getFindControllerSelectedPageIndex(findController);
+    const selectedMatchIndex =
+      getFindControllerSelectedMatchIndex(findController);
+    if (selectedPageIndex !== params.pageIndex) return false;
+    if (params.pageMatchCount <= 1) return true;
+    return selectedMatchIndex === params.occurrenceIndex;
+  };
+  if (isSelected()) return true;
+
+  for (
+    let attempt = 0;
+    attempt < Math.max(1, params.totalMatches) &&
+    Date.now() < params.deadlineAt;
+    attempt += 1
+  ) {
+    const previousPageIndex =
+      getFindControllerSelectedPageIndex(findController);
+    const previousMatchIndex =
+      getFindControllerSelectedMatchIndex(findController);
+    sendFindAgain(params.app);
+    await waitForFindControllerSelectionChange(
+      findController,
+      previousPageIndex,
+      previousMatchIndex,
+      Math.min(400, Math.max(20, params.deadlineAt - Date.now())),
+    );
+    if (isSelected()) return true;
+  }
+  return false;
+}
+
+export async function locateCurrentSelectionInLivePdfReader(
+  reader: any,
+  selectionText: string,
+): Promise<LivePdfSelectionLocateResult> {
+  const cleanSelection = sanitizeText(selectionText || "").trim();
+  if (!cleanSelection) {
+    return {
+      status: "unavailable",
+      confidence: "none",
+      selectionText: cleanSelection,
+      normalizedSelection: "",
+      queryLabel: "Selection",
+      expectedPageIndex: null,
+      computedPageIndex: null,
+      matchedPageIndexes: [],
+      totalMatches: 0,
+      pagesScanned: 0,
+      reason: "No live reader selection was available.",
+    };
+  }
+
+  try {
+    const domResolved = locateCurrentSelectionFromDom(reader, cleanSelection);
+    if (domResolved) {
+      return domResolved;
+    }
+
+    const { pages, expectedPageIndex } = extractRenderedPageTexts(reader);
+    if (!pages.length) {
+      return {
+        status: "unavailable",
+        confidence: "none",
+        selectionText: cleanSelection,
+        normalizedSelection: normalizeLocatorText(cleanSelection),
+        queryLabel: "Selection",
+        expectedPageIndex,
+        computedPageIndex: null,
+        matchedPageIndexes: [],
+        totalMatches: 0,
+        pagesScanned: 0,
+        reason:
+          "The active reader did not expose a live selection page or rendered page text.",
+      };
+    }
+
+    const result = locateSelectionInPageTexts(
+      pages,
+      cleanSelection,
+      expectedPageIndex,
+      {
+        queryLabel: "Selection",
+      },
+    );
+    if (result.status === "resolved" && result.reason) {
+      return {
+        ...result,
+        reason: `${result.reason} This was matched against the currently rendered live reader pages.`,
+      };
+    }
+    return result;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      status: "unavailable",
+      confidence: "none",
+      selectionText: cleanSelection,
+      normalizedSelection: normalizeLocatorText(cleanSelection),
+      queryLabel: "Selection",
+      expectedPageIndex: getExpectedPageIndex(
+        reader,
+        getPdfViewerApplication(reader),
+      ),
+      computedPageIndex: null,
+      matchedPageIndexes: [],
+      totalMatches: 0,
+      pagesScanned: 0,
+      reason: `Live reader locator failed: ${message}`,
+    };
+  }
+}
+
+export async function locateQuoteInLivePdfReader(
+  reader: any,
+  quoteText: string,
+  options?: {
+    exactOnly?: boolean;
+    /**
+     * The page to prefer when the quote occurs on several pages; it only
+     * chooses among identical copies. Default: the reader's current page.
+     */
+    expectedPageIndex?: number | null;
+  },
+): Promise<LivePdfSelectionLocateResult> {
+  const cleanQuote = stripBoundaryEllipsis(
+    sanitizeText(quoteText || "").trim(),
+  );
+  if (!cleanQuote) {
+    return {
+      status: "unavailable",
+      confidence: "none",
+      selectionText: cleanQuote,
+      normalizedSelection: "",
+      queryLabel: "Quote",
+      expectedPageIndex: null,
+      computedPageIndex: null,
+      matchedPageIndexes: [],
+      totalMatches: 0,
+      pagesScanned: 0,
+      reason: "No quote text was provided.",
+    };
+  }
+
+  try {
+    const cached = await warmPageTextCache(reader);
+    const expectedPageIndex =
+      options?.expectedPageIndex ??
+      getExpectedPageIndex(reader, getPdfViewerApplication(reader));
+    if (!cached?.pages.length) {
+      return {
+        status: "unavailable",
+        confidence: "none",
+        selectionText: cleanQuote,
+        normalizedSelection: normalizeLocatorText(cleanQuote),
+        queryLabel: "Quote",
+        expectedPageIndex,
+        computedPageIndex: null,
+        matchedPageIndexes: [],
+        totalMatches: 0,
+        pagesScanned: 0,
+        reason: "Could not read complete PDF page text from the active reader.",
+      };
+    }
+    const cachedResult = locateQuoteInCachedPageTexts(
+      cached,
+      cleanQuote,
+      expectedPageIndex,
+      { exactOnly: options?.exactOnly },
+    );
+    if (
+      cachedResult.status === "resolved" &&
+      cachedResult.sourceMatchKind === "exact" &&
+      canUseCachedPageTextAsNegativeEvidence(cached)
+    ) {
+      return cachedResult;
+    }
+
+    // Zotero's indexed PDFWorker text and a prematurely warmed DOM cache can
+    // differ from the text currently searched by PDF.js FindController.
+    // Before accepting a negative/ambiguous result or a partial-cache result,
+    // rebuild from the loaded PDF.js document and apply the same locator there.
+    // Only this live-viewer pass is conclusive enough to mark a quote
+    // unsearchable; a cache/readiness miss must remain retryable.
+    const liveViewerCache = await refreshPageTextCacheFromLiveViewer(reader);
+    if (liveViewerCache) {
+      return locateQuoteInCachedPageTexts(
+        liveViewerCache,
+        cleanQuote,
+        expectedPageIndex,
+        { exactOnly: options?.exactOnly },
+      );
+    }
+    if (cachedResult.status === "resolved") return cachedResult;
+    return {
+      ...cachedResult,
+      status: "unavailable",
+      confidence: "none",
+      computedPageIndex: null,
+      matchedPageIndexes: [],
+      totalMatches: 0,
+      reason:
+        "Could not verify the quote against the loaded PDF.js text. The cached result is not conclusive.",
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      status: "unavailable",
+      confidence: "none",
+      selectionText: cleanQuote,
+      normalizedSelection: normalizeLocatorText(cleanQuote),
+      queryLabel: "Quote",
+      expectedPageIndex: getExpectedPageIndex(
+        reader,
+        getPdfViewerApplication(reader),
+      ),
+      computedPageIndex: null,
+      matchedPageIndexes: [],
+      totalMatches: 0,
+      pagesScanned: 0,
+      reason: `Live quote locator failed: ${message}`,
+    };
+  }
+}
+
+async function runPageNativeFindControllerJump(
+  reader: any,
+  quoteText: string,
+  options?: {
+    citationId?: string;
+    expectedPageIndex?: number | null;
+    sourceFingerprint?: string;
+    sourceMatchPageOccurrence?: number;
+    hardDeadlineAt?: number;
+    isAttemptCurrent?: () => boolean;
+    queryRole?: "displayed-quote" | "source-locator";
+    normalizationHintText?: string;
+    requireUniqueMatch?: boolean;
+    highlightCoverage?: number;
+    allowDerivedPartialAfterSearchFailure?: boolean;
+    verifiedFullSpan?: boolean;
+  },
+): Promise<ExactQuoteJumpResult> {
+  const startedAt = Date.now();
+  let diagnosticQuery = sanitizeText(quoteText || "");
+  let normalizationResult = "not-attempted";
+  const findControllerDiagnosticState: {
+    acceptanceMs?: number;
+    matchCount?: number;
+  } = {};
+  const ready = await waitForFindControllerReady(reader);
+  const readyAt = Date.now();
+  const hardDeadlineAt = Number.isFinite(options?.hardDeadlineAt)
+    ? Number(options?.hardDeadlineAt)
+    : startedAt + FIND_CONTROLLER_ABSOLUTE_DEADLINE_MS;
+  const app = ready?.app ?? getPdfViewerApplication(reader);
+  const findController = ready?.findController ?? app?.findController;
+  const expectedPageIndex =
+    options &&
+    Object.prototype.hasOwnProperty.call(options, "expectedPageIndex")
+      ? Number.isFinite(options.expectedPageIndex) &&
+        Number(options.expectedPageIndex) >= 0
+        ? Math.floor(Number(options.expectedPageIndex))
+        : null
+      : getExpectedPageIndex(reader, app);
+  const failure = (
+    failureStage: NonNullable<ExactQuoteJumpResult["failureStage"]>,
+    reason: string,
+    debugSummary: string[] = [],
+    queries: ExactQuoteJumpQueryAttempt[] = [],
+  ): ExactQuoteJumpResult => {
+    logFindControllerDiagnostic(
+      "LLM citation FindController exact match failed",
+      {
+        citationId: options?.citationId,
+        queryLength: diagnosticQuery.length,
+        queryHash: hashFindControllerQuery(diagnosticQuery),
+        normalizationResult,
+        pageIndex: expectedPageIndex,
+        sourceOccurrence: options?.sourceMatchPageOccurrence,
+        queryRole: options?.queryRole || "displayed-quote",
+        acceptanceMs: findControllerDiagnosticState.acceptanceMs,
+        totalMatches: findControllerDiagnosticState.matchCount,
+        failureStage,
+        elapsedMs: Date.now() - startedAt,
+      },
+    );
+    return {
+      matched: false,
+      matchStatus:
+        failureStage === "full-match-not-found" ? "not-found" : "deferred",
+      navigationStatus: "none",
+      failureStage,
+      reason,
+      expectedPageIndex,
+      queries,
+      debugSummary,
+    };
+  };
+  const restorePreviousUserStateIfCurrent = async (
+    app: any,
+    previousUserState: ReturnType<typeof captureFindControllerUserState>,
+  ): Promise<void> => {
+    if (options?.isAttemptCurrent?.() === false) return;
+    await restoreFindControllerUserState(app, previousUserState);
+  };
+
+  if (options?.isAttemptCurrent?.() === false) {
+    return failure(
+      "cancelled",
+      "A newer citation navigation replaced this attempt.",
+    );
+  }
+
+  if (!app || !findController || !ready?.eventBus) {
+    return failure(
+      "find-controller-unavailable",
+      "PDF.js FindController is unavailable in the current reader.",
+    );
+  }
+  if (expectedPageIndex === null) {
+    return failure(
+      "page-text-unavailable",
+      "The exact quote has no verified PDF page target.",
+    );
+  }
+
+  const liveFingerprint = getPdfDocumentFingerprint(app);
+  const expectedFingerprint = String(options?.sourceFingerprint || "").trim();
+  const comparableExpectedFingerprint = expectedFingerprint.startsWith("pdfjs:")
+    ? expectedFingerprint.slice("pdfjs:".length)
+    : expectedFingerprint.startsWith("fingerprint-")
+      ? expectedFingerprint.slice("fingerprint-".length)
+      : "";
+  if (
+    comparableExpectedFingerprint &&
+    liveFingerprint &&
+    comparableExpectedFingerprint !== liveFingerprint
+  ) {
+    return failure(
+      "source-fingerprint-mismatch",
+      "The cited source fingerprint does not match the loaded PDF.",
+    );
+  }
+
+  const pageTextResult = await settleBeforeDeadline(
+    extractFindControllerPageText(app, expectedPageIndex),
+    hardDeadlineAt,
+  );
+  if (!pageTextResult.completed) {
+    return failure(
+      "deadline-exceeded",
+      "Exact quote navigation exceeded its PDF.js page-text deadline.",
+    );
+  }
+  const pageText = pageTextResult.value;
+  if (!pageText) {
+    return failure(
+      "page-text-unavailable",
+      "PDF.js could not provide searchable text for the cited page.",
+    );
+  }
+  const completeQuery = resolvePageNativeFindControllerQuery(
+    pageText,
+    quoteText,
+    options?.sourceMatchPageOccurrence,
+    options?.normalizationHintText,
+  );
+  const partialSourceMatch = completeQuery
+    ? null
+    : options?.verifiedFullSpan
+      ? null
+      : resolveLargestUniquePageNativeSourceMatch(
+          pageText,
+          quoteText,
+          options?.normalizationHintText,
+        );
+  const resolvedQuery = completeQuery || partialSourceMatch;
+  const usedPartialSourceMatch = Boolean(partialSourceMatch);
+  if (!resolvedQuery) {
+    normalizationResult = "no-unique-page-native-source-span";
+    return failure(
+      "full-quote-not-on-page",
+      "Neither the complete quote nor a strong unique partial source span could be aligned to the cited PDF page.",
+    );
+  }
+  diagnosticQuery = resolvedQuery.query;
+  normalizationResult = usedPartialSourceMatch
+    ? `page-native-${partialSourceMatch?.matchKind || "partial"}`
+    : "page-native-aligned";
+
+  const previousUserState = captureFindControllerUserState(app);
+  const diagnostic = findControllerQueryDiagnostic(resolvedQuery.query);
+  const searchResult = await searchFindControllerForQuery(
+    reader,
+    resolvedQuery.query,
+    {
+      hardDeadlineAt,
+      isCancelled: () => options?.isAttemptCurrent?.() === false,
+      requireCompleteResults:
+        usedPartialSourceMatch || options?.requireUniqueMatch === true,
+    },
+  );
+  const attempts: ExactQuoteJumpQueryAttempt[] = searchResult
+    ? [
+        {
+          query: resolvedQuery.query,
+          matchedPageIndexes: searchResult.matchedPageIndexes,
+          totalMatches: searchResult.totalMatches,
+        },
+      ]
+    : [];
+  findControllerDiagnosticState.acceptanceMs = searchResult?.acceptanceMs;
+  findControllerDiagnosticState.matchCount = searchResult?.totalMatches;
+  const debugSummary = [
+    diagnostic,
+    ...(searchResult
+      ? [
+          `FindController completion=${searchResult.completion} snapshots=${searchResult.snapshotCount}`,
+        ]
+      : []),
+  ];
+  const retryWithDerivedPartialSource =
+    async (): Promise<ExactQuoteJumpResult | null> => {
+      if (
+        !completeQuery ||
+        usedPartialSourceMatch ||
+        options?.verifiedFullSpan ||
+        options?.allowDerivedPartialAfterSearchFailure === false ||
+        Date.now() >= hardDeadlineAt ||
+        options?.isAttemptCurrent?.() === false
+      ) {
+        return null;
+      }
+      const fallback = resolvePageNativeFallbackAfterCompleteSearchFailure(
+        pageText,
+        quoteText,
+        options?.sourceMatchPageOccurrence,
+        options?.normalizationHintText,
+      );
+      if (!fallback || fallback.query === resolvedQuery.query) return null;
+      logFindControllerDiagnostic(
+        "LLM citation FindController retrying largest unique partial source span",
+        {
+          citationId: options?.citationId,
+          completeQueryLength: resolvedQuery.query.length,
+          completeQueryHash: hashFindControllerQuery(resolvedQuery.query),
+          partialQueryLength: fallback.query.length,
+          partialQueryHash: hashFindControllerQuery(fallback.query),
+          pageIndex: expectedPageIndex,
+          matchKind: fallback.matchKind,
+          quoteTokenCoverage: fallback.quoteTokenCoverage,
+        },
+      );
+      await restorePreviousUserStateIfCurrent(app, previousUserState);
+      const retried = await runPageNativeFindControllerJump(
+        reader,
+        fallback.query,
+        {
+          ...options,
+          sourceMatchPageOccurrence: fallback.occurrenceIndex,
+          hardDeadlineAt,
+          queryRole: "source-locator",
+          normalizationHintText: options?.normalizationHintText || quoteText,
+          requireUniqueMatch: true,
+          highlightCoverage: fallback.quoteTokenCoverage,
+          allowDerivedPartialAfterSearchFailure: false,
+        },
+      );
+      return {
+        ...retried,
+        queries: [...attempts, ...retried.queries],
+        debugSummary: [
+          ...debugSummary,
+          `Complete FindController query failed; retried a ${fallback.matchKind} source span covering ${Math.round(
+            fallback.quoteTokenCoverage * 100,
+          )}% of quote tokens.`,
+          ...retried.debugSummary,
+        ],
+      };
+    };
+  if (!searchResult) {
+    await restorePreviousUserStateIfCurrent(app, previousUserState);
+    return failure(
+      "query-not-accepted",
+      `FindController could not accept the ${
+        usedPartialSourceMatch ? "unique partial source" : "complete quote"
+      } query.`,
+      debugSummary,
+      attempts,
+    );
+  }
+
+  if (searchResult.totalMatches <= 0) {
+    if (searchResult.completion === "complete") {
+      const retried = await retryWithDerivedPartialSource();
+      if (retried) return retried;
+      await restorePreviousUserStateIfCurrent(app, previousUserState);
+      return failure(
+        "full-match-not-found",
+        `FindController completed the full-PDF search and found no ${
+          usedPartialSourceMatch ? "unique partial source" : "complete quote"
+        } match.`,
+        debugSummary,
+        attempts,
+      );
+    }
+    await restorePreviousUserStateIfCurrent(app, previousUserState);
+    const cancelled = searchResult.completionReason === "cancelled";
+    return failure(
+      cancelled ? "cancelled" : "deadline-exceeded",
+      cancelled
+        ? "A newer citation navigation replaced this attempt."
+        : "FindController did not complete the search before its progress-aware deadline.",
+      debugSummary,
+      attempts,
+    );
+  }
+
+  const matchedPageIndex = searchResult.matchedPageIndexes.includes(
+    expectedPageIndex,
+  )
+    ? expectedPageIndex
+    : (searchResult.selectedPageIndex ??
+      searchResult.matchedPageIndexes[0] ??
+      expectedPageIndex);
+  const highlightCoverage =
+    options?.highlightCoverage !== undefined
+      ? options.highlightCoverage
+      : partialSourceMatch?.quoteTokenCoverage !== undefined
+        ? partialSourceMatch.quoteTokenCoverage
+        : 1;
+  const foundPageOnly = (
+    reason: string,
+    failureStage?: ExactQuoteJumpResult["failureStage"],
+  ): ExactQuoteJumpResult => ({
+    matched: true,
+    matchStatus: "found",
+    navigationStatus: "page-only",
+    ...(failureStage ? { failureStage } : {}),
+    reason,
+    expectedPageIndex,
+    matchedPageIndex,
+    queryUsed: resolvedQuery.query,
+    highlightCoverage,
+    queries: attempts,
+    debugSummary,
+  });
+
+  if (getFindControllerQuery(findController) !== resolvedQuery.query) {
+    // A positive snapshot is monotonic. A later query change can prevent exact
+    // occurrence selection, but it cannot erase the match already reported by
+    // FindController or revoke quote provenance.
+    return foundPageOnly(
+      `FindController found the quote on page ${matchedPageIndex + 1}, but a newer search replaced the active highlight.`,
+      options?.isAttemptCurrent?.() === false ? "cancelled" : undefined,
+    );
+  }
+  if (options?.isAttemptCurrent?.() === false) {
+    return foundPageOnly(
+      `FindController found the quote on page ${matchedPageIndex + 1} before a newer navigation replaced this attempt.`,
+      "cancelled",
+    );
+  }
+  if (
+    (usedPartialSourceMatch || options?.requireUniqueMatch) &&
+    (!searchResult.resultsComplete || searchResult.totalMatches !== 1)
+  ) {
+    return foundPageOnly(
+      searchResult.resultsComplete
+        ? `FindController found the source locator ${searchResult.totalMatches} times; the quote remains source-backed but no unique paragraph was selected.`
+        : `FindController found the source locator before the full-PDF search completed; the quote remains source-backed but no unique paragraph was selected.`,
+      "intended-match-not-selected",
+    );
+  }
+
+  const pageMatchCount =
+    searchResult.pageMatchCounts[matchedPageIndex] ||
+    (searchResult.matchedPageIndexes.length <= 1
+      ? searchResult.totalMatches
+      : 0);
+  const intendedOccurrence =
+    pageMatchCount <= 1
+      ? 0
+      : (options?.sourceMatchPageOccurrence ?? resolvedQuery.occurrenceIndex);
+  const selected = await selectNativeFindControllerMatch({
+    app,
+    pageIndex: matchedPageIndex,
+    occurrenceIndex: intendedOccurrence,
+    totalMatches: searchResult.totalMatches,
+    pageMatchCount,
+    deadlineAt: Date.now() + FIND_CONTROLLER_SELECTION_DEADLINE_MS,
+  });
+  if (!selected) {
+    return foundPageOnly(
+      `FindController found the quote on page ${matchedPageIndex + 1}, but could not select its intended occurrence.`,
+      "intended-match-not-selected",
+    );
+  }
+
+  logFindControllerDiagnostic("LLM citation FindController exact match", {
+    citationId: options?.citationId,
+    queryLength: resolvedQuery.query.length,
+    queryHash: hashFindControllerQuery(resolvedQuery.query),
+    normalizationResult,
+    pageIndex: matchedPageIndex,
+    expectedPageIndex,
+    sourceOccurrence: resolvedQuery.occurrenceIndex,
+    queryRole: options?.queryRole || "displayed-quote",
+    totalMatches: searchResult.totalMatches,
+    acceptanceMs: searchResult.acceptanceMs,
+    searchSnapshots: searchResult.snapshotCount,
+    readyElapsedMs: Date.now() - readyAt,
+    elapsedMs: Date.now() - startedAt,
+  });
+  return {
+    matched: true,
+    matchStatus: "found",
+    navigationStatus: "paragraph-selected",
+    reason: `FindController highlighted the ${
+      usedPartialSourceMatch || options?.queryRole === "source-locator"
+        ? "largest unique source locator"
+        : "complete displayed quote"
+    } on page ${matchedPageIndex + 1}.`,
+    expectedPageIndex,
+    matchedPageIndex,
+    queryUsed: resolvedQuery.query,
+    highlightCoverage,
+    queries: attempts,
+    debugSummary,
+  };
+}
+
+/**
+ * After navigating to the correct page, trigger PDF.js's built-in find
+ * controller to scroll to the exact paragraph/text position of the quote
+ * and highlight it — equivalent to the user typing the quote into Ctrl+F.
+ *
+ * Returns structured success/failure information so callers can surface
+ * debug details when the paragraph jump fails.
+ */
+export async function scrollToExactQuoteInReader(
+  reader: any,
+  quoteText: string,
+  options?: {
+    citationId?: string;
+    expectedPageIndex?: number | null;
+    sourceFingerprint?: string;
+    sourceMatchPageOccurrence?: number;
+    fallbackQuoteTexts?: string[];
+    verifiedFullSpan?: boolean;
+  },
+): Promise<ExactQuoteJumpResult> {
+  const navigationStartedAt = Date.now();
+  const { fallbackQuoteTexts = [], ...navigationOptions } = options || {};
+  const quoteTexts = Array.from(
+    new Set(
+      [quoteText, ...fallbackQuoteTexts]
+        .map((value) => sanitizeText(value || "").trim())
+        .filter(Boolean),
+    ),
+  );
+  await waitForFindControllerReady(reader);
+  const attempt = beginFindControllerNavigationAttempt(reader);
+  const hardDeadlineAt =
+    navigationStartedAt + FIND_CONTROLLER_ABSOLUTE_DEADLINE_MS;
+  let lastResult: ExactQuoteJumpResult | null = null;
+  for (
+    let candidateIndex = 0;
+    candidateIndex < quoteTexts.length;
+    candidateIndex += 1
+  ) {
+    const candidate = quoteTexts[candidateIndex];
+    const result = await runPageNativeFindControllerJump(reader, candidate, {
+      ...navigationOptions,
+      hardDeadlineAt,
+      isAttemptCurrent: attempt.isCurrent,
+      queryRole: candidateIndex === 0 ? "displayed-quote" : "source-locator",
+      normalizationHintText: quoteTexts[0],
+    });
+    if (result.matched) return { ...result, wordingUsed: candidate };
+    lastResult = result;
+    if (
+      result.matchStatus === "deferred" ||
+      Date.now() >= hardDeadlineAt ||
+      !attempt.isCurrent()
+    ) {
+      break;
+    }
+  }
+  return (
+    lastResult || {
+      matched: false,
+      matchStatus: "deferred",
+      navigationStatus: "none",
+      failureStage: "page-text-unavailable",
+      reason: "No searchable quote text was provided.",
+      expectedPageIndex: null,
+      queries: [],
+      debugSummary: [],
+    }
+  );
+}
+
+export async function scrollToSelectedTextInReader(
+  reader: any,
+  selectedText: string,
+  options?: { expectedPageIndex?: number | null },
+): Promise<ExactQuoteJumpResult> {
+  const attempt = beginFindControllerNavigationAttempt(reader);
+  return runPageNativeFindControllerJump(reader, selectedText, {
+    ...options,
+    hardDeadlineAt: Date.now() + FIND_CONTROLLER_ABSOLUTE_DEADLINE_MS,
+    isAttemptCurrent: attempt.isCurrent,
+  });
+}

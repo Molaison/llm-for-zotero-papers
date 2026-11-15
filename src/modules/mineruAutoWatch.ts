@@ -1,0 +1,952 @@
+import { appLogger } from "../core/logging";
+import {
+  parsePdfWithMineru,
+  publishMineruParsedResult,
+} from "../services/mineru/mineruParser";
+import { config } from "../../package.json";
+import {
+  buildMineruFilenameMatcher,
+  getMineruMaxAutoPages,
+  isGlobalAutoParseEnabled,
+  type MineruFilenameMatcher,
+} from "../utils/mineruConfig";
+import {
+  MineruRateLimitError,
+  MineruCancelledError,
+  MineruPageLimitError,
+} from "../utils/mineruClient";
+import { invalidateCachedContextText } from "../services/paperContent/pdfContext";
+import {
+  setItemProcessing,
+  setItemCached,
+  setItemFailed,
+  clearItemStatus,
+  cancelMineruTask,
+  cancelMineruTaskAndWait,
+  getItemStatus,
+  runMineruTaskOnce,
+} from "./mineruProcessingStatus";
+import {
+  cleanupMineruArtifactsForRemovedAttachment,
+  getMineruAvailabilityForAttachment,
+  publishMineruCachePackageForAttachment,
+} from "../services/mineru/sync";
+import {
+  getMineruParseEligibility,
+  updateMineruPdfPageCount,
+} from "./mineruParseEligibility";
+
+type QueueEntry = {
+  attachmentId: number;
+  title: string;
+  parentItemId?: number;
+  readinessRetryCount?: number;
+};
+
+type QueueValidationResult =
+  | { item: Zotero.Item }
+  | { item: null; reason: string; retryable: boolean };
+
+class StaleAutoWatchAttachmentError extends Error {}
+
+type ProgressListener = (status: AutoWatchStatus) => void;
+
+export type AutoWatchStatus = {
+  isProcessing: boolean;
+  isPaused: boolean;
+  currentItem: string;
+  queueLength: number;
+  statusMessage: string;
+  lastCompleted?: string;
+  lastError?: string;
+};
+
+const DEBOUNCE_MS = 3000;
+const READINESS_RETRY_DELAYS_MS = [5000, 15000, 30000, 60000] as const;
+
+let notifierId: string | null = null;
+let processingQueue: QueueEntry[] = [];
+let isProcessing = false;
+let watchGeneration = 0;
+let isPaused = false;
+let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+let currentAbort: AbortController | null = null;
+let currentItemTitle = "";
+let currentStatusMessage = "";
+let currentAttachmentId: number | null = null;
+const staleAbortAttachmentIds = new Set<number>();
+const stoppedAbortAttachmentIds = new Set<number>();
+const progressListeners = new Set<ProgressListener>();
+const readinessRetryTimers = new Map<
+  number,
+  { timer: ReturnType<typeof setTimeout>; entry: QueueEntry }
+>();
+
+function getAbortControllerCtor(): (new () => AbortController) | null {
+  return (
+    (ztoolkit.getGlobal("AbortController") as
+      | (new () => AbortController)
+      | undefined) ||
+    (
+      globalThis as typeof globalThis & {
+        AbortController?: new () => AbortController;
+      }
+    ).AbortController ||
+    null
+  );
+}
+
+function notifyProgress(): void {
+  const status: AutoWatchStatus = {
+    isProcessing,
+    isPaused,
+    currentItem: currentItemTitle,
+    queueLength: processingQueue.length + readinessRetryTimers.size,
+    statusMessage: currentStatusMessage,
+  };
+  for (const listener of progressListeners) {
+    try {
+      listener(status);
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+export function onAutoWatchProgress(listener: ProgressListener): () => void {
+  progressListeners.add(listener);
+  return () => progressListeners.delete(listener);
+}
+
+function showNotification(title: string, message: string): void {
+  try {
+    const progressWindow = new (
+      Zotero as unknown as {
+        ProgressWindow: new () => {
+          changeHeadline: (text: string) => void;
+          addDescription: (text: string) => void;
+          show: () => void;
+          close: () => void;
+        };
+      }
+    ).ProgressWindow();
+    progressWindow.changeHeadline(title);
+    progressWindow.addDescription(message);
+    progressWindow.show();
+    setTimeout(() => progressWindow.close(), 3000);
+  } catch (err) {
+    appLogger.warn("MinerU auto-parse: failed to show notification", err);
+  }
+}
+
+function getPdfAttachments(item: Zotero.Item): Zotero.Item[] {
+  const out: Zotero.Item[] = [];
+  if (!item?.isRegularItem?.()) return out;
+  for (const attId of item.getAttachments()) {
+    const att = Zotero.Items.get(attId);
+    if (
+      att?.isAttachment?.() &&
+      att.attachmentContentType === "application/pdf"
+    ) {
+      out.push(att);
+    }
+  }
+  return out;
+}
+
+function isPdfAttachment(item: Zotero.Item): boolean {
+  return (
+    item?.isAttachment?.() && item.attachmentContentType === "application/pdf"
+  );
+}
+
+function normalizeNotifierId(id: string | number): number | null {
+  const itemId = typeof id === "string" ? parseInt(id, 10) : id;
+  return Number.isFinite(itemId) ? itemId : null;
+}
+
+function validateQueueItem(entry: QueueEntry): QueueValidationResult {
+  const item = Zotero.Items.get(entry.attachmentId);
+  if (!item) {
+    return {
+      item: null,
+      reason: "attachment no longer exists",
+      retryable: false,
+    };
+  }
+
+  if (!isPdfAttachment(item)) {
+    return { item: null, reason: "attachment is not a PDF", retryable: false };
+  }
+
+  const itemParentId = Number(item.parentID);
+  const normalizedItemParentId =
+    Number.isFinite(itemParentId) && itemParentId > 0
+      ? Math.floor(itemParentId)
+      : null;
+
+  if (entry.parentItemId && normalizedItemParentId !== entry.parentItemId) {
+    return {
+      item: null,
+      reason: "attachment parent changed",
+      retryable: false,
+    };
+  }
+
+  if (normalizedItemParentId) {
+    const parentItem = Zotero.Items.get(normalizedItemParentId);
+    if (!parentItem) {
+      return {
+        item: null,
+        reason: "parent item is not ready",
+        retryable: true,
+      };
+    }
+    const attachmentIds = parentItem?.getAttachments?.() || [];
+    if (!attachmentIds.includes(entry.attachmentId)) {
+      return {
+        item: null,
+        reason: "parent attachment list is not ready",
+        retryable: true,
+      };
+    }
+  }
+
+  return { item };
+}
+
+function getValidatedQueueItem(entry: QueueEntry): Zotero.Item | null {
+  return validateQueueItem(entry).item;
+}
+
+function clearReadinessRetryTimer(attachmentId: number): void {
+  const pending = readinessRetryTimers.get(attachmentId);
+  if (!pending) return;
+  clearTimeout(pending.timer);
+  readinessRetryTimers.delete(attachmentId);
+  notifyProgress();
+}
+
+function discardStaleEntry(entry: QueueEntry, reason: string): void {
+  clearReadinessRetryTimer(entry.attachmentId);
+  clearItemStatus(entry.attachmentId);
+  appLogger.debug(
+    `MinerU auto-parse: skipping stale PDF ${entry.attachmentId} (${reason})`,
+  );
+}
+
+function scheduleReadinessRetry(entry: QueueEntry, reason: string): boolean {
+  const retryCount = entry.readinessRetryCount || 0;
+  const delay = READINESS_RETRY_DELAYS_MS[retryCount];
+  if (delay == null) {
+    setItemFailed(entry.attachmentId, reason);
+    appLogger.debug(
+      `MinerU auto-parse: PDF ${entry.attachmentId} still not ready after ${retryCount} retry attempt(s): ${reason}`,
+    );
+    return false;
+  }
+
+  if (readinessRetryTimers.has(entry.attachmentId)) return true;
+
+  const retryEntry: QueueEntry = {
+    ...entry,
+    readinessRetryCount: retryCount + 1,
+  };
+  const timer = setTimeout(() => {
+    readinessRetryTimers.delete(entry.attachmentId);
+    enqueueForProcessing(
+      retryEntry.attachmentId,
+      retryEntry.title,
+      retryEntry.parentItemId,
+      retryEntry.readinessRetryCount,
+    );
+  }, delay);
+  readinessRetryTimers.set(entry.attachmentId, { timer, entry: retryEntry });
+  setItemProcessing(entry.attachmentId);
+  currentStatusMessage = `Waiting for Zotero file readiness: ${entry.title}`;
+  appLogger.debug(
+    `MinerU auto-parse: PDF ${entry.attachmentId} not ready (${reason}); retrying in ${Math.round(delay / 1000)}s`,
+  );
+  notifyProgress();
+  return true;
+}
+
+function getReadinessRetryStatusMessage(): string {
+  const pending = readinessRetryTimers.values().next().value;
+  return pending
+    ? `Waiting for Zotero file readiness: ${pending.entry.title}`
+    : "Waiting for Zotero file readiness.";
+}
+
+function removeDeletedAttachmentsFromQueue(ids: number[]): void {
+  const deletedIds = new Set(ids);
+  const previousLength = processingQueue.length;
+  processingQueue = processingQueue.filter(
+    (entry) => !deletedIds.has(entry.attachmentId),
+  );
+
+  for (const id of deletedIds) {
+    clearReadinessRetryTimer(id);
+    clearItemStatus(id);
+    if (cancelMineruTask(id)) {
+      appLogger.debug(`MinerU auto-parse: cancelled deleted PDF ${id}`);
+    }
+  }
+
+  if (previousLength !== processingQueue.length) {
+    appLogger.debug(
+      `MinerU auto-parse: removed ${
+        previousLength - processingQueue.length
+      } deleted PDF(s) from queue`,
+    );
+  }
+
+  if (currentAttachmentId !== null && deletedIds.has(currentAttachmentId)) {
+    staleAbortAttachmentIds.add(currentAttachmentId);
+    if (currentAbort) {
+      currentAbort.abort();
+      currentAbort = null;
+    }
+  }
+
+  if (
+    processingQueue.length === 0 &&
+    readinessRetryTimers.size === 0 &&
+    currentAttachmentId === null
+  ) {
+    currentStatusMessage = "";
+  }
+
+  notifyProgress();
+}
+
+async function cleanupRemovedAttachmentArtifacts(
+  itemIds: number[],
+): Promise<void> {
+  for (const itemId of itemIds) {
+    await cancelMineruTaskAndWait(itemId);
+    const result = await cleanupMineruArtifactsForRemovedAttachment(itemId);
+    if (result.failed > 0) {
+      appLogger.warn(
+        "MinerU auto-parse: failed to clean removed attachment artifacts",
+        result,
+      );
+    }
+  }
+}
+
+function getRemovedItemIdsForCleanup(
+  event: string,
+  itemIds: number[],
+): number[] {
+  if (event !== "remove") return itemIds;
+  return itemIds.filter((itemId) => {
+    const liveItem = Zotero.Items.get(itemId);
+    return (
+      !liveItem ||
+      Boolean((liveItem as unknown as { deleted?: boolean }).deleted)
+    );
+  });
+}
+
+async function processQueue(): Promise<void> {
+  if (isProcessing || isPaused || processingQueue.length === 0) return;
+
+  const generation = watchGeneration;
+  isProcessing = true;
+  isPaused = false;
+  currentStatusMessage = "Starting MinerU auto-parse...";
+  notifyProgress();
+
+  let processedCount = 0;
+  let errorCount = 0;
+
+  while (processingQueue.length > 0) {
+    if (generation !== watchGeneration) return;
+    if (isPaused) {
+      break;
+    }
+    const entry = processingQueue.shift()!;
+    currentItemTitle = entry.title;
+    currentStatusMessage = `Starting: ${entry.title}`;
+    notifyProgress();
+
+    const validation = validateQueueItem(entry);
+    if (!validation.item) {
+      if (validation.retryable) {
+        if (scheduleReadinessRetry(entry, validation.reason)) {
+          continue;
+        }
+        errorCount++;
+        continue;
+      }
+      discardStaleEntry(entry, validation.reason);
+      continue;
+    }
+    const entryItem = validation.item;
+
+    const AbortCtor = getAbortControllerCtor();
+    const abort = AbortCtor ? new AbortCtor() : null;
+    currentAbort = abort;
+    currentAttachmentId = entry.attachmentId;
+
+    try {
+      if (
+        (
+          await getMineruAvailabilityForAttachment(entryItem, {
+            validateSyncedPackage: false,
+          })
+        ).status !== "missing"
+      ) {
+        if (generation !== watchGeneration) return;
+        appLogger.debug(
+          `MinerU auto-parse: skipping available item ${entry.attachmentId}`,
+        );
+        continue;
+      }
+
+      if (generation !== watchGeneration) return;
+      const pdfItem = getValidatedQueueItem(entry);
+      if (!pdfItem) {
+        discardStaleEntry(entry, "attachment changed before parse");
+        continue;
+      }
+
+      const pdfPath = await (
+        pdfItem as unknown as {
+          getFilePathAsync?: () => Promise<string | false>;
+        }
+      ).getFilePathAsync?.();
+
+      if (generation !== watchGeneration) return;
+      if (!pdfPath) {
+        appLogger.debug(
+          `MinerU auto-parse: no file path for ${entry.attachmentId}`,
+        );
+        if (scheduleReadinessRetry(entry, "No file path")) {
+          continue;
+        }
+        errorCount++;
+        setItemFailed(entry.attachmentId, "No file path");
+        continue;
+      }
+
+      appLogger.debug(`MinerU auto-parse: processing ${entry.title}`);
+      let lastProgressStage = "";
+      const { value: result } = await runMineruTaskOnce(
+        entry.attachmentId,
+        async (report, sharedSignal) => {
+          if (generation !== watchGeneration) throw new MineruCancelledError();
+          setItemProcessing(entry.attachmentId);
+          const parsed = await parsePdfWithMineru(
+            pdfPath as string,
+            report,
+            sharedSignal,
+            {
+              attachmentId: entry.attachmentId,
+              maxPages: getMineruMaxAutoPages(),
+            },
+          );
+          if (sharedSignal?.aborted || generation !== watchGeneration) {
+            throw new MineruCancelledError();
+          }
+          if (!parsed?.mdContent) return parsed;
+
+          if (!getValidatedQueueItem(entry)) {
+            throw new StaleAutoWatchAttachmentError(
+              "attachment changed before cache write",
+            );
+          }
+
+          await publishMineruParsedResult(pdfItem, parsed, sharedSignal);
+          if (generation !== watchGeneration) throw new MineruCancelledError();
+          setItemCached(entry.attachmentId);
+          void publishMineruCachePackageForAttachment(entry.attachmentId).then(
+            (published) => {
+              if (published.status === "error") {
+                appLogger.warn(
+                  "LLM: MinerU sync package publish failed",
+                  published,
+                );
+              }
+            },
+          );
+          // Flush stale in-memory text cache and disk embedding cache so the
+          // next query picks up MinerU-quality chunks and re-generates embeddings.
+          invalidateCachedContextText(entry.attachmentId);
+          return parsed;
+        },
+        (stage) => {
+          if (generation !== watchGeneration) return;
+          lastProgressStage = stage;
+          currentStatusMessage = `${stage} — ${entry.title}`;
+          notifyProgress();
+        },
+        abort?.signal,
+      );
+
+      if (generation !== watchGeneration) return;
+      if (result?.mdContent) {
+        processedCount++;
+        currentStatusMessage = `Cached: ${entry.title}`;
+        notifyProgress();
+        appLogger.debug(`MinerU auto-parse: cached ${entry.title}`);
+      } else {
+        const reason = lastProgressStage || "No content returned";
+        if (scheduleReadinessRetry(entry, reason)) {
+          continue;
+        }
+        errorCount++;
+        setItemFailed(entry.attachmentId, reason);
+        appLogger.warn(
+          `MinerU auto-parse: no content for ${entry.title}: ${reason}`,
+        );
+      }
+    } catch (e) {
+      if (generation !== watchGeneration) return;
+      if (e instanceof StaleAutoWatchAttachmentError) {
+        discardStaleEntry(entry, e.message);
+        continue;
+      }
+      if (e instanceof MineruCancelledError) {
+        if (staleAbortAttachmentIds.has(entry.attachmentId)) {
+          staleAbortAttachmentIds.delete(entry.attachmentId);
+          discardStaleEntry(entry, "attachment deleted while parsing");
+          continue;
+        }
+        if (stoppedAbortAttachmentIds.has(entry.attachmentId)) {
+          stoppedAbortAttachmentIds.delete(entry.attachmentId);
+          clearItemStatus(entry.attachmentId);
+          appLogger.debug(`MinerU auto-parse: stopped ${entry.title}`);
+          break;
+        }
+        errorCount++;
+        appLogger.debug(`MinerU auto-parse: cancelled ${entry.title}`);
+        setItemFailed(entry.attachmentId, "Cancelled");
+        processingQueue.unshift(entry);
+        currentStatusMessage = `Paused: ${entry.title}`;
+        break;
+      }
+      if (e instanceof MineruRateLimitError) {
+        errorCount++;
+        appLogger.warn(
+          `MinerU auto-parse: rate limited - ${(e as Error).message}`,
+        );
+        setItemFailed(entry.attachmentId, "Rate limited");
+        processingQueue.unshift(entry);
+        isPaused = true;
+        showNotification(
+          "MinerU Auto-Parse Paused",
+          "Daily quota reached. Resume tomorrow.",
+        );
+        currentStatusMessage = "MinerU auto-parse paused: daily quota reached.";
+        break;
+      }
+      if (e instanceof MineruPageLimitError) {
+        updateMineruPdfPageCount(entry.attachmentId, e.pageCount);
+        clearItemStatus(entry.attachmentId);
+        appLogger.debug(
+          `MinerU auto-parse: skipped ${entry.title} - ${e.message}`,
+        );
+        currentStatusMessage = `Skipped: ${entry.title} (${e.pageCount} pages)`;
+        notifyProgress();
+        continue;
+      }
+      errorCount++;
+      const errorMsg = (e as Error).message || String(e);
+      setItemFailed(entry.attachmentId, errorMsg);
+      appLogger.warn(`MinerU auto-parse: error processing ${entry.title}:`, e);
+    } finally {
+      if (generation === watchGeneration) {
+        if (currentAttachmentId === entry.attachmentId) {
+          currentAttachmentId = null;
+          currentAbort = null;
+        }
+        staleAbortAttachmentIds.delete(entry.attachmentId);
+        stoppedAbortAttachmentIds.delete(entry.attachmentId);
+      }
+    }
+  }
+
+  if (generation !== watchGeneration) return;
+  currentAbort = null;
+  currentAttachmentId = null;
+  currentItemTitle = "";
+  isProcessing = false;
+  currentStatusMessage =
+    isPaused && processingQueue.length > 0
+      ? currentStatusMessage || "MinerU auto-parse paused."
+      : readinessRetryTimers.size > 0
+        ? getReadinessRetryStatusMessage()
+        : "";
+  notifyProgress();
+
+  // Resume may arrive before an aborted owner has settled. Its requeued item
+  // must not be stranded merely because resume saw isProcessing still true.
+  if (!isPaused && processingQueue.length > 0) void processQueue();
+
+  if (processedCount > 0) {
+    showNotification(
+      "MinerU Auto-Parse Complete",
+      `Successfully parsed ${processedCount} PDF${processedCount > 1 ? "s" : ""}.`,
+    );
+  } else if (errorCount > 0 && processingQueue.length === 0) {
+    showNotification(
+      "MinerU Auto-Parse",
+      `${errorCount} PDF${errorCount > 1 ? "s" : ""} could not be parsed.`,
+    );
+  }
+}
+
+function enqueueForProcessing(
+  attachmentId: number,
+  title: string,
+  parentItemId?: number,
+  readinessRetryCount = 0,
+): void {
+  clearReadinessRetryTimer(attachmentId);
+  if (currentAttachmentId === attachmentId) return;
+  if (processingQueue.some((e) => e.attachmentId === attachmentId)) return;
+  processingQueue.push({
+    attachmentId,
+    title,
+    parentItemId,
+    readinessRetryCount,
+  });
+  if (!isProcessing) {
+    currentStatusMessage = `Queued for MinerU auto-parse: ${title}`;
+  }
+  notifyProgress();
+
+  if (debounceTimer) clearTimeout(debounceTimer);
+  debounceTimer = setTimeout(() => {
+    debounceTimer = null;
+    void processQueue();
+  }, DEBOUNCE_MS);
+}
+
+function shouldConsiderModifiedPdf(attachmentId: number): boolean {
+  if (currentAttachmentId === attachmentId) return false;
+  if (processingQueue.some((entry) => entry.attachmentId === attachmentId)) {
+    return false;
+  }
+  if (readinessRetryTimers.has(attachmentId)) return true;
+  const status = getItemStatus(attachmentId)?.status;
+  return status === "failed";
+}
+
+async function enqueuePdfIfEligible(
+  pdf: Zotero.Item,
+  title: string,
+  parentItemId: number | undefined,
+  event: "add" | "modify",
+  filenameMatcher: MineruFilenameMatcher,
+  generation: number,
+): Promise<void> {
+  if (event === "modify" && !shouldConsiderModifiedPdf(pdf.id)) return;
+
+  const parentItem = parentItemId ? Zotero.Items.get(parentItemId) : null;
+  const eligibility = await getMineruParseEligibility(parentItem, pdf, {
+    filenameMatcher,
+  });
+  if (generation !== watchGeneration) return;
+  if (eligibility.excluded) {
+    appLogger.debug(
+      `MinerU auto-parse: PDF ${pdf.id} excluded by parse filter (${
+        eligibility.reasonLabel || "unknown reason"
+      })`,
+    );
+    return;
+  }
+
+  if (
+    (
+      await getMineruAvailabilityForAttachment(pdf, {
+        validateSyncedPackage: false,
+      })
+    ).status !== "missing"
+  ) {
+    appLogger.debug(`MinerU auto-parse: PDF ${pdf.id} already available`);
+    return;
+  }
+
+  if (generation !== watchGeneration) return;
+  appLogger.debug(`MinerU auto-parse: enqueuing ${title}`);
+  enqueueForProcessing(pdf.id, title, parentItemId);
+}
+
+async function handleItemNotification(
+  event: string,
+  type: string,
+  ids: Array<string | number>,
+): Promise<void> {
+  if (type !== "item") return;
+  const generation = watchGeneration;
+
+  const itemIds = ids
+    .map(normalizeNotifierId)
+    .filter((id): id is number => id !== null);
+
+  if (event === "delete" || event === "trash" || event === "remove") {
+    const removedItemIds = getRemovedItemIdsForCleanup(event, itemIds);
+    removeDeletedAttachmentsFromQueue(removedItemIds);
+    await cleanupRemovedAttachmentArtifacts(removedItemIds);
+    return;
+  }
+
+  if (event !== "add" && event !== "modify") return;
+
+  if (!isGlobalAutoParseEnabled()) return;
+
+  appLogger.debug(
+    `MinerU auto-parse: handling ${itemIds.length} ${event} item(s)`,
+  );
+
+  const filenameMatcher = buildMineruFilenameMatcher();
+
+  for (const itemId of itemIds) {
+    if (generation !== watchGeneration) return;
+    const item = Zotero.Items.get(itemId);
+    if (!item) continue;
+
+    appLogger.debug(
+      `MinerU auto-parse: checking item ${itemId} (type: ${item.itemType})`,
+    );
+
+    if (item.isRegularItem?.()) {
+      const pdfs = getPdfAttachments(item);
+      appLogger.debug(
+        `MinerU auto-parse: found ${pdfs.length} PDF attachment(s)`,
+      );
+      for (const pdf of pdfs) {
+        const title = item.getField?.("title") || `Item ${pdf.id}`;
+        await enqueuePdfIfEligible(
+          pdf,
+          title,
+          item.id,
+          event,
+          filenameMatcher,
+          generation,
+        );
+      }
+    } else if (isPdfAttachment(item)) {
+      const parentItem = item.parentID ? Zotero.Items.get(item.parentID) : null;
+      const title =
+        parentItem?.getField?.("title") ||
+        item.getField?.("title") ||
+        `PDF ${item.id}`;
+      await enqueuePdfIfEligible(
+        item,
+        title,
+        item.parentID || undefined,
+        event,
+        filenameMatcher,
+        generation,
+      );
+    }
+  }
+}
+
+export function startAutoWatch(): void {
+  if (notifierId) return;
+
+  stoppedAbortAttachmentIds.clear();
+
+  try {
+    const notifier = (
+      Zotero as unknown as {
+        Notifier?: {
+          registerObserver?: (
+            observer: {
+              notify: (
+                event: string,
+                type: string,
+                ids: unknown[],
+                extraData: Record<string, unknown>,
+              ) => void;
+            },
+            types: string[],
+            id?: string,
+          ) => string;
+          unregisterObserver?: (id: string) => void;
+        };
+      }
+    ).Notifier;
+
+    if (notifier?.registerObserver) {
+      notifierId = notifier.registerObserver(
+        {
+          notify(
+            event: string,
+            type: string,
+            ids: unknown[],
+            _extraData: Record<string, unknown>,
+          ) {
+            void handleItemNotification(
+              event,
+              type,
+              ids as Array<string | number>,
+            );
+          },
+        },
+        ["item"],
+        "mineruAutoWatch",
+      );
+      appLogger.info("MinerU auto-parse: started");
+    }
+  } catch (err) {
+    appLogger.warn("MinerU auto-parse: failed to start", err);
+  }
+}
+
+export function pauseAutoWatch(): void {
+  if (!isProcessing || isPaused) return;
+  isPaused = true;
+  if (currentAbort) {
+    currentAbort.abort();
+    currentAbort = null;
+  }
+  currentStatusMessage = currentItemTitle
+    ? `Pausing MinerU auto-parse: ${currentItemTitle}`
+    : "Pausing MinerU auto-parse.";
+  notifyProgress();
+  appLogger.info("MinerU auto-parse: paused");
+}
+
+export function resumeAutoWatch(): void {
+  if (!isPaused) return;
+  isPaused = false;
+  currentStatusMessage = "Resuming MinerU auto-parse...";
+  notifyProgress();
+  if (processingQueue.length > 0) {
+    void processQueue();
+  }
+  appLogger.info("MinerU auto-parse: resumed");
+}
+
+export function stopAutoWatch(): void {
+  watchGeneration++;
+  if (currentAttachmentId !== null) {
+    stoppedAbortAttachmentIds.add(currentAttachmentId);
+  }
+  if (currentAbort) {
+    currentAbort.abort();
+    currentAbort = null;
+  }
+
+  processingQueue = [];
+  for (const { timer } of readinessRetryTimers.values()) {
+    clearTimeout(timer);
+  }
+  readinessRetryTimers.clear();
+  isProcessing = false;
+  isPaused = false;
+  currentItemTitle = "";
+  currentStatusMessage = "";
+  currentAttachmentId = null;
+  staleAbortAttachmentIds.clear();
+
+  if (debounceTimer) {
+    clearTimeout(debounceTimer);
+    debounceTimer = null;
+  }
+
+  if (notifierId) {
+    try {
+      const notifier = (
+        Zotero as unknown as {
+          Notifier?: { unregisterObserver?: (id: string) => void };
+        }
+      ).Notifier;
+      notifier?.unregisterObserver?.(notifierId);
+    } catch {
+      /* ignore */
+    }
+    notifierId = null;
+  }
+
+  progressListeners.clear();
+  appLogger.info("MinerU auto-parse: stopped");
+}
+
+export function getAutoWatchStatus(): AutoWatchStatus {
+  return {
+    isProcessing,
+    isPaused,
+    currentItem: currentItemTitle,
+    queueLength: processingQueue.length + readinessRetryTimers.size,
+    statusMessage: currentStatusMessage,
+  };
+}
+
+export async function handleAutoWatchNotificationForTests(
+  event: string,
+  type: string,
+  ids: Array<string | number>,
+): Promise<void> {
+  await handleItemNotification(event, type, ids);
+}
+
+export async function processAutoWatchQueueForTests(): Promise<void> {
+  await processQueue();
+}
+
+export function getAutoWatchQueueSnapshotForTests(): QueueEntry[] {
+  return processingQueue.map((entry) => ({ ...entry }));
+}
+
+export function getAutoWatchReadinessRetryCountForTests(): number {
+  return readinessRetryTimers.size;
+}
+
+export function flushAutoWatchReadinessRetryForTests(
+  attachmentId: number,
+): boolean {
+  const pending = readinessRetryTimers.get(attachmentId);
+  if (!pending) return false;
+  clearTimeout(pending.timer);
+  readinessRetryTimers.delete(attachmentId);
+  enqueueForProcessing(
+    pending.entry.attachmentId,
+    pending.entry.title,
+    pending.entry.parentItemId,
+    pending.entry.readinessRetryCount,
+  );
+  return true;
+}
+
+export function isAutoWatchQueueEntryCurrentForTests(
+  entry: QueueEntry,
+): boolean {
+  return Boolean(getValidatedQueueItem(entry));
+}
+
+export function resetAutoWatchForTests(): void {
+  watchGeneration++;
+  if (currentAttachmentId !== null) {
+    stoppedAbortAttachmentIds.add(currentAttachmentId);
+  }
+  if (currentAbort) {
+    currentAbort.abort();
+    currentAbort = null;
+  }
+
+  processingQueue = [];
+  for (const { timer } of readinessRetryTimers.values()) {
+    clearTimeout(timer);
+  }
+  readinessRetryTimers.clear();
+  isProcessing = false;
+  isPaused = false;
+  currentItemTitle = "";
+  currentStatusMessage = "";
+  currentAttachmentId = null;
+  staleAbortAttachmentIds.clear();
+
+  if (debounceTimer) {
+    clearTimeout(debounceTimer);
+    debounceTimer = null;
+  }
+
+  progressListeners.clear();
+}

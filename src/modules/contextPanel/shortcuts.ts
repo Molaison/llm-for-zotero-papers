@@ -1,0 +1,784 @@
+import {
+  config,
+  BUILTIN_SHORTCUT_FILES,
+  MAX_EDITABLE_SHORTCUTS,
+  CUSTOM_SHORTCUT_ID_PREFIX,
+} from "./constants";
+import type { CustomShortcut } from "./types";
+import {
+  shortcutTextCache,
+  shortcutMoveModeState,
+  shortcutRenderItemState,
+  shortcutEscapeListenerAttached,
+} from "./state";
+import { resolveActiveNoteSession } from "./portalScope";
+import {
+  getShortcutOverrides,
+  setShortcutOverrides,
+  getShortcutLabelOverrides,
+  setShortcutLabelOverrides,
+  getDeletedShortcutIds,
+  setDeletedShortcutIds,
+  getCustomShortcuts,
+  setCustomShortcuts,
+  getShortcutOrder,
+  setShortcutOrder,
+  createCustomShortcutId,
+  migrateShortcutDefaultsIfNeeded,
+  normalizeShortcutOrderForVisibleIds,
+  resetShortcutsToDefault,
+} from "./prefHelpers";
+import { setStatus } from "./textUtils";
+import { showShortcutEditDialog } from "./shortcutEditDialog";
+import { showStandaloneConfirmationDialog } from "./standaloneConfirmationDialog";
+import { isChineseLocale, t } from "../../utils/i18n";
+
+const shortcutRenderGeneration = new WeakMap<Element, number>();
+
+export function closeShortcutMenu(menu: HTMLDivElement | null): void {
+  if (!menu) return;
+  menu.style.display = "none";
+  menu.dataset.menuKind = "";
+  menu.dataset.shortcutId = "";
+  menu.dataset.shortcutKind = "";
+}
+
+export function isShortcutMenuVisible(menu: HTMLDivElement | null): boolean {
+  return Boolean(menu && menu.style.display !== "none");
+}
+
+async function fetchShortcutFile(path: string): Promise<string | null> {
+  if (shortcutTextCache.has(path)) {
+    return shortcutTextCache.get(path)!;
+  }
+  const uri = `chrome://${config.addonRef}/content/shortcuts/${path}`;
+  const fetchFn = ztoolkit.getGlobal("fetch") as typeof fetch;
+  try {
+    const res = await fetchFn(uri);
+    if (!res.ok) return null;
+    const text = await res.text();
+    shortcutTextCache.set(path, text);
+    return text;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Load a built-in shortcut prompt in the plugin's UI language, falling back
+ * to the English file when no localized copy exists.
+ */
+export async function loadShortcutText(file: string): Promise<string> {
+  if (isChineseLocale()) {
+    const localized = await fetchShortcutFile(`zh-CN/${file}`);
+    if (localized !== null) return localized;
+  }
+  const text = await fetchShortcutFile(file);
+  if (text === null) {
+    throw new Error(`Failed to load ${file}`);
+  }
+  return text;
+}
+
+export async function renderShortcuts(
+  body: Element,
+  item?: Zotero.Item | null,
+  mode?: "paper" | "library",
+) {
+  const renderGeneration = (shortcutRenderGeneration.get(body) || 0) + 1;
+  shortcutRenderGeneration.set(body, renderGeneration);
+  const isCurrentRender = () =>
+    shortcutRenderGeneration.get(body) === renderGeneration;
+  shortcutRenderItemState.set(body, item);
+
+  // Library chat mode and note-editing mode: no shortcut buttons (actions
+  // available via / menu). Note-editing is detected from the item itself so
+  // we stay correct even if a caller forgets to pass mode="library".
+  if (mode === "library" || resolveActiveNoteSession(item)) {
+    const container = body.querySelector(
+      "#llm-shortcuts",
+    ) as HTMLDivElement | null;
+    if (container) container.innerHTML = "";
+    return;
+  }
+
+  const container = body.querySelector(
+    "#llm-shortcuts",
+  ) as HTMLDivElement | null;
+  const menu = body.querySelector(
+    "#llm-shortcut-menu",
+  ) as HTMLDivElement | null;
+  const menuEdit = body.querySelector(
+    "#llm-shortcut-menu-edit",
+  ) as HTMLButtonElement | null;
+  const menuDelete = body.querySelector(
+    "#llm-shortcut-menu-delete",
+  ) as HTMLButtonElement | null;
+  const menuAdd = body.querySelector(
+    "#llm-shortcut-menu-add",
+  ) as HTMLButtonElement | null;
+  const menuMove = body.querySelector(
+    "#llm-shortcut-menu-move",
+  ) as HTMLButtonElement | null;
+  const menuReset = body.querySelector(
+    "#llm-shortcut-menu-reset",
+  ) as HTMLButtonElement | null;
+  if (!container) return;
+
+  migrateShortcutDefaultsIfNeeded();
+
+  const moveMode = shortcutMoveModeState.get(body) === true;
+  const overrides = getShortcutOverrides();
+  const labelOverrides = getShortcutLabelOverrides();
+  const deletedIds = new Set(getDeletedShortcutIds());
+  const builtins = BUILTIN_SHORTCUT_FILES.filter(
+    (shortcut) => !deletedIds.has(shortcut.id),
+  );
+  const customShortcuts = getCustomShortcuts();
+
+  const availableCustomSlots = Math.max(
+    0,
+    MAX_EDITABLE_SHORTCUTS - builtins.length,
+  );
+  const visibleCustomShortcuts = customShortcuts.slice(0, availableCustomSlots);
+  const editableShortcutsRaw: Array<{
+    id: string;
+    kind: "builtin" | "custom";
+    prompt: string;
+    label: string;
+    defaultLabel: string;
+  }> = [];
+
+  for (const shortcut of builtins) {
+    let promptText = (overrides[shortcut.id] || "").trim();
+    if (!promptText) {
+      try {
+        promptText = (await loadShortcutText(shortcut.file)).trim();
+        if (!isCurrentRender()) return;
+      } catch {
+        if (!isCurrentRender()) return;
+        promptText = "";
+      }
+    }
+    const labelText = (labelOverrides[shortcut.id] || shortcut.label).trim();
+    editableShortcutsRaw.push({
+      id: shortcut.id,
+      kind: "builtin",
+      prompt: promptText,
+      label: labelText || shortcut.label,
+      defaultLabel: shortcut.label,
+    });
+  }
+
+  for (const shortcut of visibleCustomShortcuts) {
+    const label = shortcut.label.trim() || "Custom Shortcut";
+    editableShortcutsRaw.push({
+      id: shortcut.id,
+      kind: "custom",
+      prompt: shortcut.prompt.trim(),
+      label,
+      defaultLabel: label,
+    });
+  }
+  const currentVisibleIds = editableShortcutsRaw.map((shortcut) => shortcut.id);
+  const currentVisibleSet = new Set(currentVisibleIds);
+  const savedOrder = getShortcutOrder();
+  const normalizedOrder = normalizeShortcutOrderForVisibleIds(
+    savedOrder,
+    currentVisibleIds,
+  );
+  if (
+    normalizedOrder.length !== savedOrder.length ||
+    normalizedOrder.some((id, index) => id !== savedOrder[index])
+  ) {
+    setShortcutOrder(normalizedOrder);
+  }
+  if (!isCurrentRender()) return;
+  container.innerHTML = "";
+  const orderIndex = new Map(
+    normalizedOrder.map((shortcutId, index) => [shortcutId, index]),
+  );
+  const editableShortcuts = editableShortcutsRaw.sort(
+    (a, b) =>
+      (orderIndex.get(a.id) ?? Number.MAX_SAFE_INTEGER) -
+      (orderIndex.get(b.id) ?? Number.MAX_SAFE_INTEGER),
+  );
+  const orderedEditableIds = editableShortcuts.map((shortcut) => shortcut.id);
+  const canAddShortcut = editableShortcuts.length < MAX_EDITABLE_SHORTCUTS;
+  let draggingShortcutId = "";
+  let draggingButton: HTMLButtonElement | null = null;
+
+  const setMoveMode = async (next: boolean) => {
+    shortcutMoveModeState.set(body, next);
+    await renderShortcuts(body, item);
+  };
+
+  const removeShortcut = async (
+    shortcutId: string,
+    kind: "builtin" | "custom",
+  ) => {
+    if (kind === "custom") {
+      const nextCustomShortcuts = getCustomShortcuts().filter(
+        (shortcut) => shortcut.id !== shortcutId,
+      );
+      setCustomShortcuts(nextCustomShortcuts);
+    } else {
+      const nextDeletedIds = new Set(getDeletedShortcutIds());
+      nextDeletedIds.add(shortcutId);
+      setDeletedShortcutIds(Array.from(nextDeletedIds));
+
+      const nextOverrides = getShortcutOverrides();
+      delete nextOverrides[shortcutId];
+      setShortcutOverrides(nextOverrides);
+
+      const nextLabelOverrides = getShortcutLabelOverrides();
+      delete nextLabelOverrides[shortcutId];
+      setShortcutLabelOverrides(nextLabelOverrides);
+    }
+
+    const nextOrder = getShortcutOrder().filter((id) => id !== shortcutId);
+    setShortcutOrder(nextOrder);
+    await renderShortcuts(body, item);
+  };
+
+  const addShortcut = async () => {
+    const updated = await openShortcutEditDialog(
+      body.ownerDocument as Document,
+      "",
+      "",
+      "Add Shortcut",
+    );
+    if (!updated) return;
+
+    const prompt = updated.prompt.trim();
+    if (!prompt) {
+      const status = body.querySelector("#llm-status") as HTMLElement | null;
+      if (status) setStatus(status, "Shortcut prompt cannot be empty", "error");
+      return;
+    }
+
+    const currentDeleted = new Set(getDeletedShortcutIds());
+    const visibleBuiltinCount = BUILTIN_SHORTCUT_FILES.filter(
+      (shortcut) => !currentDeleted.has(shortcut.id),
+    ).length;
+    const currentCustomShortcuts = getCustomShortcuts();
+    if (
+      visibleBuiltinCount + currentCustomShortcuts.length >=
+      MAX_EDITABLE_SHORTCUTS
+    ) {
+      const status = body.querySelector("#llm-status") as HTMLElement | null;
+      if (status) {
+        setStatus(
+          status,
+          `Maximum ${MAX_EDITABLE_SHORTCUTS} editable shortcuts allowed`,
+          "error",
+        );
+      }
+      return;
+    }
+
+    const nextCustomShortcut: CustomShortcut = {
+      id: createCustomShortcutId(),
+      label: updated.label.trim() || "Custom Shortcut",
+      prompt,
+    };
+    const nextCustomShortcuts = [...currentCustomShortcuts, nextCustomShortcut];
+    setCustomShortcuts(nextCustomShortcuts);
+    const currentOrder = getShortcutOrder().filter((id) =>
+      currentVisibleSet.has(id),
+    );
+    setShortcutOrder([...currentOrder, nextCustomShortcut.id]);
+    await renderShortcuts(body, item);
+  };
+
+  const positionShortcutMenu = (x: number, y: number) => {
+    if (!menu) return;
+    const win = body.ownerDocument?.defaultView;
+    if (!win) return;
+
+    const viewportMargin = 8;
+    menu.style.position = "fixed";
+    menu.style.display = "grid";
+    menu.style.visibility = "hidden";
+    menu.style.maxHeight = `${Math.max(120, win.innerHeight - viewportMargin * 2)}px`;
+    menu.style.overflowY = "auto";
+
+    const menuRect = menu.getBoundingClientRect();
+    const maxLeft = win.innerWidth - menuRect.width - viewportMargin;
+    const maxTop = win.innerHeight - menuRect.height - viewportMargin;
+    const left = Math.min(
+      Math.max(viewportMargin, x),
+      Math.max(viewportMargin, maxLeft),
+    );
+    const top = Math.min(
+      Math.max(viewportMargin, y),
+      Math.max(viewportMargin, maxTop),
+    );
+
+    menu.style.left = `${Math.round(left)}px`;
+    menu.style.top = `${Math.round(top)}px`;
+    menu.style.visibility = "visible";
+  };
+
+  const openMenuForShortcut = (
+    event: MouseEvent,
+    shortcutId: string,
+    shortcutKind: "builtin" | "custom",
+  ) => {
+    if (
+      !menu ||
+      !menuEdit ||
+      !menuDelete ||
+      !menuAdd ||
+      !menuMove ||
+      !menuReset
+    ) {
+      return;
+    }
+    menu.dataset.menuKind = "shortcut";
+    menu.dataset.shortcutId = shortcutId;
+    menu.dataset.shortcutKind = shortcutKind;
+    menuEdit.style.display = "flex";
+    menuDelete.style.display = "flex";
+    menuAdd.style.display = "none";
+    menuMove.style.display = "none";
+    menuReset.style.display = "none";
+    menu.style.display = "grid";
+    positionShortcutMenu(event.clientX + 4, event.clientY + 4);
+  };
+
+  const openMenuForPanel = (event: MouseEvent) => {
+    if (
+      !menu ||
+      !menuEdit ||
+      !menuDelete ||
+      !menuAdd ||
+      !menuMove ||
+      !menuReset
+    ) {
+      return;
+    }
+    menu.dataset.menuKind = "panel";
+    menu.dataset.shortcutId = "";
+    menu.dataset.shortcutKind = "";
+    menuEdit.style.display = "none";
+    menuDelete.style.display = "none";
+    menuAdd.style.display = "flex";
+    menuMove.style.display = "flex";
+    menuReset.style.display = "flex";
+    menuAdd.disabled = !canAddShortcut;
+    menuMove.disabled = orderedEditableIds.length < 2;
+    menu.style.display = "grid";
+    positionShortcutMenu(event.clientX + 4, event.clientY + 4);
+  };
+
+  for (const shortcut of editableShortcuts) {
+    const btn = body.ownerDocument!.createElementNS(
+      "http://www.w3.org/1999/xhtml",
+      "button",
+    ) as HTMLButtonElement;
+    btn.className = "llm-shortcut-btn";
+    btn.type = "button";
+    btn.textContent = "";
+    btn.dataset.shortcutId = shortcut.id;
+    btn.dataset.shortcutKind = shortcut.kind;
+    btn.dataset.prompt = shortcut.prompt;
+    btn.dataset.label = shortcut.label;
+    btn.dataset.defaultLabel = shortcut.defaultLabel;
+    btn.disabled = !moveMode && (!item || !shortcut.prompt);
+    btn.draggable = moveMode;
+    if (moveMode) btn.classList.add("llm-shortcut-move-mode");
+
+    if (moveMode) {
+      const handle = body.ownerDocument!.createElementNS(
+        "http://www.w3.org/1999/xhtml",
+        "span",
+      ) as HTMLSpanElement;
+      handle.className = "llm-shortcut-drag-handle";
+      handle.textContent = "≡";
+      handle.title = "Drag to reorder";
+      handle.draggable = false;
+      handle.addEventListener("click", (e: Event) => {
+        e.preventDefault();
+        e.stopPropagation();
+      });
+      btn.appendChild(handle);
+    }
+
+    const label = body.ownerDocument!.createElementNS(
+      "http://www.w3.org/1999/xhtml",
+      "span",
+    ) as HTMLSpanElement;
+    label.className = "llm-shortcut-label";
+    label.textContent = shortcut.label;
+    btn.appendChild(label);
+
+    container.appendChild(btn);
+  }
+
+  const getShortcutButtonFromEventTarget = (
+    target: EventTarget | null,
+  ): HTMLButtonElement | null => {
+    const node = target as Node | null;
+    if (!node || typeof node !== "object") return null;
+    let element: Element | null = null;
+    if ((node as any).nodeType === 1) {
+      element = node as unknown as Element;
+    } else if ((node as any).nodeType === 3) {
+      element = (node as any).parentElement || null;
+    }
+    if (!element || typeof (element as any).closest !== "function") return null;
+    const btn = element.closest(
+      ".llm-shortcut-btn",
+    ) as HTMLButtonElement | null;
+    if (!btn || !container.contains(btn)) return null;
+    return btn;
+  };
+
+  container.onclick = (e: Event) => {
+    const mouseEvent = e as MouseEvent;
+    const btn = getShortcutButtonFromEventTarget(mouseEvent.target);
+    if (!btn) return;
+    mouseEvent.preventDefault();
+    mouseEvent.stopPropagation();
+    const shortcutId = btn.dataset.shortcutId || "";
+    if (!shortcutId || moveMode || !item) return;
+    const nextPrompt = (btn.dataset.prompt || "").trim();
+    if (!nextPrompt) return;
+    const inputBox = body.querySelector(
+      "#llm-input",
+    ) as HTMLTextAreaElement | null;
+    const sendBtn = body.querySelector("#llm-send") as HTMLButtonElement | null;
+    if (!inputBox || !sendBtn) return;
+    inputBox.value = nextPrompt;
+    sendBtn.click();
+  };
+
+  container.oncontextmenu = (e: Event) => {
+    const mouseEvent = e as MouseEvent;
+    const btn = getShortcutButtonFromEventTarget(mouseEvent.target);
+    mouseEvent.preventDefault();
+    mouseEvent.stopPropagation();
+    if (!btn) {
+      openMenuForPanel(mouseEvent);
+      return;
+    }
+    const shortcutId = btn.dataset.shortcutId || "";
+    const shortcutKind = btn.dataset.shortcutKind || "";
+    if (
+      shortcutId &&
+      (shortcutKind === "builtin" || shortcutKind === "custom")
+    ) {
+      openMenuForShortcut(mouseEvent, shortcutId, shortcutKind);
+    }
+  };
+
+  container.ondragstart = (e: Event) => {
+    const dragEvent = e as DragEvent;
+    if (!moveMode) return;
+    const btn = getShortcutButtonFromEventTarget(dragEvent.target);
+    if (!btn) return;
+    const shortcutId = btn.dataset.shortcutId || "";
+    if (!shortcutId) {
+      dragEvent.preventDefault();
+      return;
+    }
+    draggingShortcutId = shortcutId;
+    draggingButton = btn;
+    btn.classList.add("llm-shortcut-dragging");
+    if (dragEvent.dataTransfer) {
+      dragEvent.dataTransfer.effectAllowed = "move";
+      dragEvent.dataTransfer.setData("text/plain", shortcutId);
+      const rect = btn.getBoundingClientRect();
+      dragEvent.dataTransfer.setDragImage(
+        btn,
+        Math.floor(rect.width / 2),
+        Math.floor(rect.height / 2),
+      );
+    }
+  };
+
+  container.ondragenter = (e: Event) => {
+    const dragEvent = e as DragEvent;
+    if (!moveMode) return;
+    dragEvent.preventDefault();
+    const btn = getShortcutButtonFromEventTarget(dragEvent.target);
+    if (!btn) return;
+    const targetId = btn.dataset.shortcutId || "";
+    if (!draggingShortcutId || !targetId || draggingShortcutId === targetId) {
+      return;
+    }
+    btn.classList.add("llm-shortcut-drop-target");
+  };
+
+  container.ondragover = (e: Event) => {
+    const dragEvent = e as DragEvent;
+    if (!moveMode) return;
+    dragEvent.preventDefault();
+    if (dragEvent.dataTransfer) dragEvent.dataTransfer.dropEffect = "move";
+    const btn = getShortcutButtonFromEventTarget(dragEvent.target);
+    if (!btn) return;
+    const targetId = btn.dataset.shortcutId || "";
+    if (!draggingShortcutId || !targetId || draggingShortcutId === targetId) {
+      return;
+    }
+    btn.classList.add("llm-shortcut-drop-target");
+  };
+
+  container.ondragleave = (e: Event) => {
+    const dragEvent = e as DragEvent;
+    if (!moveMode) return;
+    const btn = getShortcutButtonFromEventTarget(dragEvent.target);
+    btn?.classList.remove("llm-shortcut-drop-target");
+  };
+
+  container.ondrop = async (e: Event) => {
+    const dragEvent = e as DragEvent;
+    if (!moveMode) return;
+    dragEvent.preventDefault();
+    const btn = getShortcutButtonFromEventTarget(dragEvent.target);
+    if (!btn) return;
+    btn.classList.remove("llm-shortcut-drop-target");
+    const targetId = btn.dataset.shortcutId || "";
+    if (!targetId || !draggingShortcutId || draggingShortcutId === targetId) {
+      return;
+    }
+    const sourceId =
+      draggingShortcutId ||
+      (dragEvent.dataTransfer
+        ? dragEvent.dataTransfer.getData("text/plain")
+        : "");
+    if (!sourceId) return;
+    const nextOrder = orderedEditableIds.slice();
+    const fromIndex = nextOrder.indexOf(sourceId);
+    const toIndex = nextOrder.indexOf(targetId);
+    if (fromIndex < 0 || toIndex < 0) return;
+    const [moved] = nextOrder.splice(fromIndex, 1);
+    nextOrder.splice(toIndex, 0, moved);
+    setShortcutOrder(nextOrder);
+    await renderShortcuts(body, item);
+  };
+
+  container.ondragend = () => {
+    draggingShortcutId = "";
+    if (draggingButton) {
+      draggingButton.classList.remove("llm-shortcut-dragging");
+      draggingButton = null;
+    }
+    const highlighted = container.querySelectorAll(".llm-shortcut-drop-target");
+    highlighted.forEach((el: Element) =>
+      (el as HTMLElement).classList.remove("llm-shortcut-drop-target"),
+    );
+  };
+
+  if (menu && menuEdit && menuDelete && menuAdd && menuMove && menuReset) {
+    menuEdit.onclick = async (e: Event) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (menu.dataset.menuKind !== "shortcut") return;
+      const shortcutId = menu.dataset.shortcutId || "";
+      const shortcutKind = menu.dataset.shortcutKind || "";
+      if (!shortcutId || !shortcutKind) return;
+      const target = container.querySelector(
+        `.llm-shortcut-btn[data-shortcut-id="${shortcutId}"]`,
+      ) as HTMLButtonElement | null;
+      const currentPrompt = target?.dataset.prompt || "";
+      const currentLabel = target?.dataset.label || "";
+      const updated = await openShortcutEditDialog(
+        body.ownerDocument as Document,
+        currentLabel,
+        currentPrompt,
+      );
+      if (!updated) {
+        menu.style.display = "none";
+        return;
+      }
+      const nextPrompt = updated.prompt.trim();
+      if (!nextPrompt) {
+        const status = body.querySelector("#llm-status") as HTMLElement | null;
+        if (status)
+          setStatus(status, "Shortcut prompt cannot be empty", "error");
+        menu.style.display = "none";
+        return;
+      }
+      const nextLabel = updated.label.trim();
+
+      if (shortcutKind === "custom") {
+        const nextCustomShortcuts = getCustomShortcuts().map((shortcut) =>
+          shortcut.id === shortcutId
+            ? {
+                ...shortcut,
+                label: nextLabel || shortcut.label || "Custom Shortcut",
+                prompt: nextPrompt,
+              }
+            : shortcut,
+        );
+        setCustomShortcuts(nextCustomShortcuts);
+      } else {
+        const nextOverrides = getShortcutOverrides();
+        nextOverrides[shortcutId] = nextPrompt;
+        setShortcutOverrides(nextOverrides);
+
+        const nextLabelOverrides = getShortcutLabelOverrides();
+        if (nextLabel) {
+          nextLabelOverrides[shortcutId] = nextLabel;
+        } else {
+          delete nextLabelOverrides[shortcutId];
+        }
+        setShortcutLabelOverrides(nextLabelOverrides);
+      }
+
+      menu.style.display = "none";
+      menu.dataset.menuKind = "";
+      menu.dataset.shortcutId = "";
+      menu.dataset.shortcutKind = "";
+      await renderShortcuts(body, item);
+    };
+
+    menuDelete.onclick = async (e: Event) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (menu.dataset.menuKind !== "shortcut") return;
+      const shortcutId = menu.dataset.shortcutId || "";
+      const shortcutKind = menu.dataset.shortcutKind || "";
+      if (
+        !shortcutId ||
+        (shortcutKind !== "builtin" && shortcutKind !== "custom")
+      ) {
+        return;
+      }
+      await removeShortcut(shortcutId, shortcutKind);
+      menu.style.display = "none";
+      menu.dataset.menuKind = "";
+      menu.dataset.shortcutId = "";
+      menu.dataset.shortcutKind = "";
+    };
+
+    menuAdd.onclick = async (e: Event) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (menu.dataset.menuKind !== "panel" || menuAdd.disabled) return;
+      menu.style.display = "none";
+      menu.dataset.menuKind = "";
+      menu.dataset.shortcutId = "";
+      menu.dataset.shortcutKind = "";
+      await addShortcut();
+    };
+
+    menuMove.onclick = async (e: Event) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (menu.dataset.menuKind !== "panel" || menuMove.disabled) return;
+      menu.style.display = "none";
+      menu.dataset.menuKind = "";
+      menu.dataset.shortcutId = "";
+      menu.dataset.shortcutKind = "";
+      const next = shortcutMoveModeState.get(body) !== true;
+      await setMoveMode(next);
+    };
+
+    menuReset.onclick = async (e: Event) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (menu.dataset.menuKind !== "panel") return;
+      const shouldReset = await openResetShortcutsDialog(
+        body.ownerDocument as Document,
+      );
+      if (!shouldReset) {
+        menu.style.display = "none";
+        menu.dataset.menuKind = "";
+        menu.dataset.shortcutId = "";
+        menu.dataset.shortcutKind = "";
+        return;
+      }
+      resetShortcutsToDefault();
+      shortcutTextCache.clear();
+      shortcutMoveModeState.set(body, false);
+      menu.style.display = "none";
+      menu.dataset.menuKind = "";
+      menu.dataset.shortcutId = "";
+      menu.dataset.shortcutKind = "";
+      await renderShortcuts(body, item);
+    };
+
+    const bodyEl = body as HTMLElement;
+    if (!bodyEl.dataset.llmShortcutBodyClickAttached) {
+      bodyEl.dataset.llmShortcutBodyClickAttached = "true";
+      body.addEventListener("click", (e: Event) => {
+        const target = e.target as Node | null;
+        const targetEl = target as Element | null;
+        const clickedShortcutButton = Boolean(
+          targetEl?.closest(".llm-shortcut-btn"),
+        );
+        closeShortcutMenu(menu);
+        if (
+          shortcutMoveModeState.get(body) === true &&
+          !clickedShortcutButton
+        ) {
+          shortcutMoveModeState.set(body, false);
+          const latestItem = shortcutRenderItemState.get(body);
+          void renderShortcuts(body, latestItem);
+        }
+        if (shortcutMoveModeState.get(body) === true && !target) {
+          shortcutMoveModeState.set(body, false);
+          const latestItem = shortcutRenderItemState.get(body);
+          void renderShortcuts(body, latestItem);
+        }
+      });
+    }
+
+    const ownerDoc = body.ownerDocument;
+    if (ownerDoc && !shortcutEscapeListenerAttached.has(ownerDoc)) {
+      shortcutEscapeListenerAttached.add(ownerDoc);
+      ownerDoc.addEventListener(
+        "keydown",
+        (e: Event) => {
+          const keyEvent = e as KeyboardEvent;
+          if (keyEvent.key !== "Escape") return;
+          if (isShortcutMenuVisible(menu)) {
+            keyEvent.preventDefault();
+            closeShortcutMenu(menu);
+            return;
+          }
+          if (shortcutMoveModeState.get(body) !== true) return;
+          keyEvent.preventDefault();
+          shortcutMoveModeState.set(body, false);
+          const latestItem = shortcutRenderItemState.get(body);
+          void renderShortcuts(body, latestItem);
+        },
+        true,
+      );
+    }
+  }
+}
+
+export async function openShortcutEditDialog(
+  doc: Document,
+  initialLabel: string,
+  initialPrompt: string,
+  dialogTitle = "Edit Shortcut",
+): Promise<{ label: string; prompt: string } | null> {
+  return await showShortcutEditDialog(doc, {
+    title: t(dialogTitle),
+    initialLabel: initialLabel || "",
+    initialPrompt: initialPrompt || "",
+    labelText: t("Label"),
+    promptText: t("Prompt"),
+    confirmLabel: t("Save"),
+    cancelLabel: t("Cancel"),
+  });
+}
+
+export async function openResetShortcutsDialog(
+  doc: Document,
+): Promise<boolean> {
+  return await showStandaloneConfirmationDialog(doc, {
+    title: t("Reset Shortcuts"),
+    message: t(
+      "Reset all shortcuts to their default labels, prompts, order, and visibility?",
+    ),
+    confirmLabel: t("Reset"),
+    cancelLabel: t("Cancel"),
+    destructive: true,
+  });
+}

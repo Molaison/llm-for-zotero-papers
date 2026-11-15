@@ -1,0 +1,125 @@
+import { config } from "../../../package.json";
+import { t } from "../../utils/i18n";
+import { ReasoningLevel as LLMReasoningLevel } from "../../utils/llmClient";
+import {
+  buildDefaultUpstreamGlobalConversationKey,
+  isConversationKeyForKind,
+  UPSTREAM_GLOBAL_CONVERSATION_KEY_BASE,
+  UPSTREAM_PAPER_CONVERSATION_KEY_BASE,
+} from "../../shared/conversationKeySpace";
+export { buildDefaultUpstreamGlobalConversationKey };
+export {
+  COLLECTION_RETRIEVAL_MAX_PAPERS,
+  MAX_FULL_TEXT_PAPER_CONTEXTS,
+  MAX_SELECTED_PAPER_CONTEXTS,
+} from "../../shared/contextLimits";
+
+// =============================================================================
+// Constants
+// =============================================================================
+
+export const PANE_ID = "llm-context-panel";
+export const PREFERENCES_PANE_ID = `${config.addonRef}-preferences`;
+export const PERSISTED_HISTORY_LIMIT = 200;
+export const AUTO_SCROLL_BOTTOM_THRESHOLD = 1;
+export const FONT_SCALE_DEFAULT_PERCENT = 120;
+export const FONT_SCALE_MIN_PERCENT = 80;
+export const FONT_SCALE_MAX_PERCENT = 180;
+export const FONT_SCALE_STEP_PERCENT = 10;
+export const MESSAGE_LINE_SPACING_DEFAULT_PERCENT = 150;
+export const MESSAGE_LINE_SPACING_MIN_PERCENT = 150;
+export const MESSAGE_LINE_SPACING_MAX_PERCENT = 250;
+export const MESSAGE_PARAGRAPH_SPACING_DEFAULT_PX = 12;
+export const MESSAGE_PARAGRAPH_SPACING_MIN_PX = 0;
+export const MESSAGE_PARAGRAPH_SPACING_MAX_PX = 32;
+export const MESSAGE_WORD_SPACING_DEFAULT_PX = 0;
+export const MESSAGE_WORD_SPACING_MIN_PX = 0;
+export const MESSAGE_WORD_SPACING_MAX_PX = 8;
+export const SELECTED_TEXT_MAX_LENGTH = 4000;
+/** A side-chat transcript attached to the main chat ("sidechat" source). */
+export const SIDECHAT_SELECTED_TEXT_MAX_LENGTH = 24000;
+/** The main chat given to a side chat's model as background. */
+export const MAIN_CHAT_BACKGROUND_CONTEXT_MAX_LENGTH = 24000;
+export const SELECTED_TEXT_PREVIEW_LENGTH = 240;
+export const MAX_SELECTED_TEXT_CONTEXTS = 5;
+// Total visible editable shortcuts: built-in plus user-created custom shortcuts.
+export const MAX_EDITABLE_SHORTCUTS = 20;
+export const MAX_SELECTED_IMAGES = 50;
+export const MAX_UPLOAD_PDF_SIZE_BYTES = 50 * 1024 * 1024;
+export const PAPER_CONVERSATION_KEY_BASE = UPSTREAM_PAPER_CONVERSATION_KEY_BASE;
+export const GLOBAL_CONVERSATION_KEY_BASE =
+  UPSTREAM_GLOBAL_CONVERSATION_KEY_BASE;
+export const GLOBAL_HISTORY_LIMIT = 50;
+
+export function isUpstreamGlobalConversationKey(
+  conversationKey: number,
+): boolean {
+  return isConversationKeyForKind("upstream", "global", conversationKey);
+}
+
+export function formatFigureCountLabel(count: number): string {
+  if (count <= 0) return "";
+  const noun = count === 1 ? t("Figure") : t("Figures");
+  return `${noun} (${count})`;
+}
+
+export function formatFileCountLabel(count: number): string {
+  if (count <= 0) return "";
+  return `${t("Files")} (${count})`;
+}
+
+export function formatPaperCountLabel(count: number): string {
+  if (count <= 0) return "";
+  return t("Papers");
+}
+
+export function getSelectTextExpandedLabel() {
+  return t("Add Text");
+}
+export const SELECT_TEXT_COMPACT_LABEL = "";
+export function getScreenshotExpandedLabel() {
+  return t("Screenshots");
+}
+export const SCREENSHOT_COMPACT_LABEL = "";
+export const UPLOAD_FILE_EXPANDED_LABEL = "";
+export const UPLOAD_FILE_COMPACT_LABEL = "";
+export const REASONING_COMPACT_LABEL = "";
+export const ACTION_LAYOUT_FULL_MODE_BUFFER_PX = 0;
+export const ACTION_LAYOUT_PARTIAL_MODE_BUFFER_PX = 0;
+export const ACTION_LAYOUT_CONTEXT_ICON_WIDTH_PX = 36;
+export const ACTION_LAYOUT_DROPDOWN_ICON_WIDTH_PX = 36;
+export const CUSTOM_SHORTCUT_ID_PREFIX = "custom-shortcut";
+
+export const BUILTIN_SHORTCUT_FILES = [
+  { id: "summarize", label: "Summarize", file: "summarize.txt" },
+  { id: "key-points", label: "Key Points", file: "key-points.txt" },
+  { id: "methodology", label: "Methodology", file: "methodology.txt" },
+  { id: "limitations", label: "Limitations", file: "limitations.txt" },
+  { id: "mermaid-diagram", label: "Diagram", file: "mermaid-diagram.txt" },
+] as const;
+
+export type ModelProfileKey =
+  | "primary"
+  | "secondary"
+  | "tertiary"
+  | "quaternary";
+
+export const MODEL_PROFILE_ORDER: ModelProfileKey[] = [
+  "primary",
+  "secondary",
+  "tertiary",
+  "quaternary",
+];
+export const ASSISTANT_NOTE_MAP_PREF_KEY = "assistantNoteMap";
+
+export function getModelProfileSuffix(): Record<ModelProfileKey, string> {
+  return {
+    primary: t("Primary"),
+    secondary: t("Secondary"),
+    tertiary: t("Tertiary"),
+    quaternary: t("Quaternary"),
+  };
+}
+
+export { config };
+export type { LLMReasoningLevel };

@@ -1,0 +1,267 @@
+import type { RuntimeModelEntry } from "../utils/modelProviders";
+import { DEFAULT_TEMPERATURE } from "../utils/llmDefaults";
+import {
+  buildCodexReasoningChoices,
+  buildCodexRuntimeModelCandidates,
+  formatCodexReasoningLabel,
+  reconcileCodexReasoningChoice,
+  type CodexReasoningChoice,
+} from "../codex/catalogSelection";
+import { CODEX_REASONING_OPTIONS } from "./constants";
+import { listCodexAppServerModels } from "./nativeClient";
+
+/** Escape hatch in the model picker: the user names a model by hand. */
+export const CODEX_CUSTOMIZED_MODEL_OPTION_KEY = "customized";
+
+const DEFAULT_MODEL_LIST_LIMIT = 100;
+const CODEX_APP_SERVER_GROUP_ID = "codex_app_server";
+const CODEX_APP_SERVER_PROVIDER_LABEL = "Codex";
+
+export type CodexAppServerModelCatalogEntry = {
+  id: string;
+  model: string;
+  displayName: string;
+  description: string;
+  hidden: boolean;
+  supportedReasoningEfforts: string[];
+  defaultReasoningEffort?: string;
+};
+
+export type CodexAppServerModelCatalog = {
+  models: CodexAppServerModelCatalogEntry[];
+};
+
+export type CodexAppServerReasoningChoice = CodexReasoningChoice;
+
+export type ListCodexAppServerModelsParams = {
+  codexPath?: string;
+  includeHidden?: boolean;
+  cursor?: string;
+  limit?: number;
+  processKey?: string;
+};
+
+export type ListCodexAppServerModelsFn = (
+  params: ListCodexAppServerModelsParams,
+) => Promise<unknown>;
+
+let catalogLoaderForTests:
+  | ((params: { codexPath?: string }) => Promise<CodexAppServerModelCatalog>)
+  | undefined;
+
+export function setCodexAppServerModelCatalogLoaderForTests(
+  loader?: typeof catalogLoaderForTests,
+): void {
+  catalogLoaderForTests = loader;
+}
+
+function normalizeString(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function normalizeReasoningEfforts(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const efforts: string[] = [];
+  for (const entry of value) {
+    if (typeof entry === "string") {
+      const effort = entry.trim();
+      if (effort) efforts.push(effort);
+      continue;
+    }
+    if (!entry || typeof entry !== "object") continue;
+    const effort = normalizeString(
+      (entry as Record<string, unknown>).reasoningEffort,
+    );
+    if (effort) efforts.push(effort);
+  }
+  return efforts;
+}
+
+function normalizeCatalogModel(
+  value: unknown,
+): CodexAppServerModelCatalogEntry | null {
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  const model = normalizeString(record.model);
+  if (!model) return null;
+  const displayName = normalizeString(record.displayName) || model;
+  const id = normalizeString(record.id) || model;
+  const defaultReasoningEffort = normalizeString(record.defaultReasoningEffort);
+  return {
+    id,
+    model,
+    displayName,
+    description: normalizeString(record.description),
+    hidden: record.hidden === true,
+    supportedReasoningEfforts: normalizeReasoningEfforts(
+      record.supportedReasoningEfforts,
+    ),
+    ...(defaultReasoningEffort ? { defaultReasoningEffort } : {}),
+  };
+}
+
+function normalizeCatalogPage(value: unknown): {
+  models: CodexAppServerModelCatalogEntry[];
+  nextCursor?: string;
+} {
+  if (!value || typeof value !== "object") {
+    return { models: [] };
+  }
+  const record = value as Record<string, unknown>;
+  const rawData = Array.isArray(record.data) ? record.data : [];
+  const models = rawData
+    .map((entry) => normalizeCatalogModel(entry))
+    .filter((entry): entry is CodexAppServerModelCatalogEntry =>
+      Boolean(entry),
+    );
+  const nextCursor = normalizeString(record.nextCursor);
+  return {
+    models,
+    ...(nextCursor ? { nextCursor } : {}),
+  };
+}
+
+export async function loadCodexAppServerModelCatalog(params: {
+  codexPath?: string;
+  includeHidden?: boolean;
+  limit?: number;
+  processKey?: string;
+  listModels?: ListCodexAppServerModelsFn;
+}): Promise<CodexAppServerModelCatalog> {
+  if (catalogLoaderForTests && !params.listModels) {
+    return catalogLoaderForTests(params);
+  }
+  const listModels = params.listModels || listCodexAppServerModels;
+  const includeHidden = params.includeHidden === true;
+  const limit = params.limit ?? DEFAULT_MODEL_LIST_LIMIT;
+  const models: CodexAppServerModelCatalogEntry[] = [];
+  const seenModels = new Set<string>();
+  const seenCursors = new Set<string>();
+  let cursor: string | undefined;
+
+  for (;;) {
+    const page = normalizeCatalogPage(
+      await listModels({
+        codexPath: params.codexPath,
+        includeHidden,
+        limit,
+        cursor,
+        processKey: params.processKey,
+      }),
+    );
+    for (const model of page.models) {
+      if (!includeHidden && model.hidden) continue;
+      const key = model.model.toLowerCase();
+      if (seenModels.has(key)) continue;
+      seenModels.add(key);
+      models.push(model);
+    }
+    if (!page.nextCursor || seenCursors.has(page.nextCursor)) break;
+    seenCursors.add(page.nextCursor);
+    cursor = page.nextCursor;
+  }
+
+  return { models };
+}
+
+export function formatCodexAppServerReasoningLabel(value: string): string {
+  return formatCodexReasoningLabel(value);
+}
+
+export function getCodexAppServerReasoningChoices(params: {
+  models: CodexAppServerModelCatalogEntry[];
+  selectedModel: string;
+}): CodexAppServerReasoningChoice[] {
+  const selectedModel = params.selectedModel.trim().toLowerCase();
+  const catalogModel = params.models.find(
+    (model) => model.model.toLowerCase() === selectedModel,
+  );
+  const efforts = catalogModel
+    ? catalogModel.supportedReasoningEfforts
+    : CODEX_REASONING_OPTIONS;
+  return buildCodexReasoningChoices({ efforts });
+}
+
+export function reconcileCodexAppServerReasoningMode(
+  mode: string,
+  choices: CodexAppServerReasoningChoice[],
+): string {
+  return reconcileCodexReasoningChoice(mode, choices);
+}
+
+export function resolveCodexAppServerReasoningSelection(params: {
+  mode: string;
+  choices: CodexAppServerReasoningChoice[];
+  catalogReady: boolean;
+}): {
+  mode: string;
+  choices: CodexAppServerReasoningChoice[];
+} {
+  if (params.catalogReady) {
+    return {
+      mode: reconcileCodexAppServerReasoningMode(params.mode, params.choices),
+      choices: params.choices,
+    };
+  }
+
+  const normalizedMode = params.mode.trim();
+  if (!normalizedMode || normalizedMode.toLowerCase() === "auto") {
+    return { mode: "auto", choices: params.choices };
+  }
+  const existingChoice = params.choices.find(
+    (choice) => choice.value.toLowerCase() === normalizedMode.toLowerCase(),
+  );
+  if (existingChoice) {
+    return { mode: existingChoice.value, choices: params.choices };
+  }
+  return {
+    mode: normalizedMode,
+    choices: [
+      ...params.choices,
+      {
+        value: normalizedMode,
+        label: formatCodexAppServerReasoningLabel(normalizedMode),
+      },
+    ],
+  };
+}
+
+function createRuntimeModelEntry(params: {
+  model: string;
+  displayModelLabel: string;
+  codexPath?: string;
+}): RuntimeModelEntry {
+  return {
+    entryId: `${CODEX_APP_SERVER_GROUP_ID}::${params.model}`,
+    groupId: CODEX_APP_SERVER_GROUP_ID,
+    model: params.model,
+    apiBase: params.codexPath || "",
+    apiKey: "",
+    authMode: "codex_app_server",
+    providerProtocol: "codex_responses",
+    providerLabel: CODEX_APP_SERVER_PROVIDER_LABEL,
+    providerOrder: -1,
+    displayModelLabel: params.displayModelLabel,
+    advanced: {
+      temperature: DEFAULT_TEMPERATURE,
+      outputTokenLimit: { mode: "auto" },
+    },
+  };
+}
+
+export function buildCodexRuntimeModelEntries(params: {
+  models: CodexAppServerModelCatalogEntry[];
+  selectedModel: string;
+  codexPath?: string;
+}): RuntimeModelEntry[] {
+  return buildCodexRuntimeModelCandidates({
+    catalogModels: params.models,
+    selectedModel: params.selectedModel,
+  }).map((candidate) =>
+    createRuntimeModelEntry({
+      model: candidate.model,
+      displayModelLabel: candidate.displayName,
+      codexPath: params.codexPath,
+    }),
+  );
+}

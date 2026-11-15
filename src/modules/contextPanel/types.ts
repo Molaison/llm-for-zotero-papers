@@ -1,0 +1,444 @@
+import type { ReasoningLevel as LLMReasoningLevel } from "../../utils/llmClient";
+import type { ContextAttachmentSupport } from "../../services/paperContent/contextAttachmentTypes";
+import type {
+  SelectedTextSource,
+  ChatAttachmentCategory,
+  ChatAttachment,
+  GeneratedChatImage,
+  PaperContentSourceMode,
+  AdvancedModelParams,
+  ActiveNoteSession,
+  ActiveNoteContext,
+  SelectedTextContext,
+  SelectedTextAnchorResolution,
+  ResolvedSelectedTextAnchor,
+  PaperContextRef,
+  LocalDocumentResource,
+  QuoteCitation,
+  NoteContextRef,
+  OtherContextRef,
+  CollectionContextRef,
+  TagContextRef,
+  AttachedConversationRef,
+  GlobalConversationSummary,
+  PaperConversationSummary,
+} from "../../shared/types";
+import type {
+  LibraryChatCoverageReceipt,
+  LibraryChatReadStrategyDiagnostics,
+} from "../../shared/libraryChatReadStrategy";
+export type {
+  SelectedTextSource,
+  ChatAttachmentCategory,
+  ChatAttachment,
+  GeneratedChatImage,
+  PaperContentSourceMode,
+  AdvancedModelParams,
+  ActiveNoteSession,
+  ActiveNoteContext,
+  SelectedTextContext,
+  SelectedTextAnchorResolution,
+  ResolvedSelectedTextAnchor,
+  PaperContextRef,
+  LocalDocumentResource,
+  QuoteCitation,
+  NoteContextRef,
+  OtherContextRef,
+  CollectionContextRef,
+  TagContextRef,
+  AttachedConversationRef,
+  GlobalConversationSummary,
+  PaperConversationSummary,
+} from "../../shared/types";
+
+export type QuoteDisplayOverride = {
+  markdown: string;
+  quoteCitations?: QuoteCitation[];
+};
+
+export interface Message {
+  /** Immutable database row identity when this message came from persistence. */
+  id?: number;
+  /** Internal lifecycle witness; never persisted as conversation content. */
+  conversationGeneration?: number;
+  role: "user" | "assistant";
+  text: string;
+  timestamp: number;
+  runMode?: "chat" | "agent";
+  agentRunId?: string;
+  /** Durable identity of the document artifact rendered for this message. */
+  documentId?: string;
+  /** @deprecated Session-only Plan document hint. */
+  planDocumentId?: string;
+  selectedText?: string;
+  selectedTextExpanded?: boolean;
+  selectedTextContexts?: SelectedTextContext[];
+  selectedTexts?: string[];
+  selectedTextSources?: SelectedTextSource[];
+  selectedTextPaperContexts?: (PaperContextRef | undefined)[];
+  selectedTextNoteContexts?: (NoteContextRef | undefined)[];
+  selectedTextExpandedIndex?: number;
+  /**
+   * Session-only: the sent chips the user left expanded, after a toggle.
+   * Unset means the default (chips with a question open).
+   */
+  selectedTextExpandedIndices?: number[];
+  screenshotImages?: string[];
+  paperContexts?: PaperContextRef[];
+  pdfPaperContexts?: PaperContextRef[];
+  fullTextPaperContexts?: PaperContextRef[];
+  citationPaperContexts?: PaperContextRef[];
+  quoteCitations?: QuoteCitation[];
+  /** Session-only presentation; persistence and model history use the raw message. */
+  quoteDisplayOverride?: QuoteDisplayOverride;
+  pinnedPaperContexts?: PaperContextRef[];
+  selectedCollectionContexts?: CollectionContextRef[];
+  selectedTagContexts?: TagContextRef[];
+  attachedConversations?: AttachedConversationRef[];
+  /** Skill IDs explicitly selected via slash command for this turn. */
+  forcedSkillIds?: string[];
+  collectionContextsExpanded?: boolean;
+  tagContextsExpanded?: boolean;
+  attachedConversationsExpanded?: boolean;
+  paperContextsExpanded?: boolean;
+  attachments?: ChatAttachment[];
+  modelAttachments?: ChatAttachment[];
+  generatedImages?: GeneratedChatImage[];
+  attachmentsExpanded?: boolean;
+  attachmentActiveIndex?: number;
+  screenshotExpanded?: boolean;
+  screenshotActiveIndex?: number;
+  modelName?: string;
+  modelEntryId?: string;
+  modelProviderLabel?: string;
+  streaming?: boolean;
+  pendingFinalText?: string;
+  waitingAnimationStartedAt?: number;
+  pendingAgentTraceEvents?: import("../../agent/types").AgentRunEventRecord[];
+  reasoningSummary?: string;
+  reasoningDetails?: string;
+  reasoningOpen?: boolean;
+  /**
+   * Set when a streamed reply was cut off before completion (e.g. a mid-stream
+   * connectivity drop). The partial text stays in `text`; this drives a neutral
+   * "interrupted" footer. Session-only — the preserved text persists via the
+   * normal `text` column, but this flag is not stored across restarts.
+   */
+  interrupted?: boolean;
+  /** Durable terminal state for provider-normalized direct-chat responses. */
+  completionStatus?: "complete" | "incomplete" | "blocked";
+  completionReason?:
+    | "output_limit"
+    | "context_limit"
+    | "provider_pause"
+    | "safety"
+    | "refusal"
+    | "malformed_tool_call"
+    | "other";
+  webchatRunState?: "done" | "incomplete" | "error";
+  webchatCompletionReason?:
+    | "settled"
+    | "forced_cancel"
+    | "timeout"
+    | "error"
+    | null;
+  webchatChatUrl?: string;
+  webchatChatId?: string;
+  compactMarker?: boolean;
+  runtimeMarkerText?: string;
+  modelSwitchMarkerText?: string;
+}
+
+export type ChatRuntimeMode = "chat" | "agent";
+export type PaperContextSendMode = "retrieval" | "full-next" | "full-sticky";
+
+export type ReasoningProviderKind =
+  | "openai"
+  | "gemini"
+  | "deepseek"
+  | "kimi"
+  | "mimo"
+  | "qwen"
+  | "grok"
+  | "minimax"
+  | "glm"
+  | "anthropic"
+  | "customized"
+  | "local"
+  | "unsupported";
+export type ReasoningLevelSelection = "none" | LLMReasoningLevel;
+export type ReasoningOption = {
+  level: LLMReasoningLevel;
+  enabled: boolean;
+  label?: string;
+};
+export type ActionDropdownSpec = {
+  slotId: string;
+  slotClassName: string;
+  buttonId: string;
+  buttonClassName: string;
+  buttonText: string;
+  menuId: string;
+  menuClassName: string;
+  disabled?: boolean;
+};
+export type CustomShortcut = {
+  id: string;
+  label: string;
+  prompt: string;
+};
+export type ResolvedContextSource = {
+  contextItem: Zotero.Item | null;
+  paperContext?: PaperContextRef | null;
+  support?: ContextAttachmentSupport | null;
+  statusText: string;
+  sourceKind?:
+    | "none"
+    | "note"
+    | "active-reader"
+    | "selected-child"
+    | "direct-attachment"
+    | "first-child"
+    | "best-attachment";
+  ownerItem?: Zotero.Item | null;
+  rawItem?: Zotero.Item | null;
+  ownerItemId?: number;
+  contextItemId?: number;
+  supportKind?: "pdf" | "text";
+  contentSourceMode?: PaperContentSourceMode;
+  requiresAsyncResolution?: boolean;
+  isAsyncFinal?: boolean;
+};
+
+export type ContextSourceLifecycleState = {
+  rawItem: Zotero.Item | null;
+  ownerItem: Zotero.Item | null;
+  contextItem: Zotero.Item | null;
+  rawItemId: number;
+  ownerItemId: number;
+  contextItemId: number;
+  sourceKind: NonNullable<ResolvedContextSource["sourceKind"]>;
+  supportKind?: "pdf" | "text";
+  contentSourceMode?: PaperContentSourceMode;
+  requiresAsyncResolution: boolean;
+  isAsyncFinal: boolean;
+};
+
+export type ContextAssemblyMode = "full" | "retrieval";
+export type ContextAssemblyStrategy =
+  | "paper-first-full"
+  | "paper-cache-full"
+  | "paper-manual-full"
+  | "paper-exhaustive-full"
+  | "paper-explicit-retrieval"
+  | "paper-followup-retrieval"
+  | "general-full"
+  | "general-retrieval";
+
+export type ContextBudgetPlan = {
+  modelLimitTokens: number;
+  limitTokens: number;
+  softLimitTokens: number;
+  baseInputTokens: number;
+  outputReserveTokens: number;
+  reasoningReserveTokens: number;
+  contextBudgetTokens: number;
+};
+
+export type MultiContextPlan = {
+  mode: ContextAssemblyMode;
+  strategy: ContextAssemblyStrategy;
+  contextText: string;
+  contextCache?: import("../../contextCache/manager").ContextCachePlan;
+  contextBudget: ContextBudgetPlan;
+  usedContextTokens: number;
+  selectedPaperCount: number;
+  selectedChunkCount: number;
+  citationPaperContexts?: PaperContextRef[];
+  quoteCitations?: QuoteCitation[];
+  assistantInstruction?: string;
+  readStrategy?: LibraryChatReadStrategyDiagnostics;
+  coverageReceipt?: LibraryChatCoverageReceipt;
+  fullReadReceipt?: import("../../shared/exhaustiveDocumentReader").FullReadCoverageReceipt;
+  modelImages?: string[];
+};
+
+export type ClaudeGlobalPortalItem = {
+  __llmClaudeGlobalPortalItem: true;
+  __llmClaudeConversationKind: "global";
+  id: number;
+  libraryID: number;
+  parentID?: number;
+  attachmentContentType?: string;
+  isAttachment: () => boolean;
+  getAttachments: () => number[];
+  getField: (field: string) => string;
+  isRegularItem: () => boolean;
+};
+
+export type ClaudePaperPortalItem = {
+  __llmClaudePaperPortalItem: true;
+  __llmClaudeConversationKind: "paper";
+  __llmClaudePaperPortalBaseItemID: number;
+  id: number;
+  libraryID: number;
+  parentID?: number;
+  attachmentContentType?: string;
+  isAttachment: () => boolean;
+  getAttachments: () => number[];
+  getField: (field: string) => string;
+  isRegularItem: () => boolean;
+};
+
+export type CodexGlobalPortalItem = {
+  __llmCodexGlobalPortalItem: true;
+  __llmCodexConversationKind: "global";
+  id: number;
+  libraryID: number;
+  parentID?: number;
+  attachmentContentType?: string;
+  isAttachment: () => boolean;
+  getAttachments: () => number[];
+  getField: (field: string) => string;
+  isRegularItem: () => boolean;
+};
+
+export type CodexPaperPortalItem = {
+  __llmCodexPaperPortalItem: true;
+  __llmCodexConversationKind: "paper";
+  __llmCodexPaperPortalBaseItemID: number;
+  id: number;
+  libraryID: number;
+  parentID?: number;
+  attachmentContentType?: string;
+  isAttachment: () => boolean;
+  getAttachments: () => number[];
+  getField: (field: string) => string;
+  isRegularItem: () => boolean;
+};
+
+// ── Send flow options ─────────────────────────────────────────────────────
+
+import type { ReasoningConfig as LLMReasoningConfig } from "../../utils/llmClient";
+
+export type SendQuestionOptions = {
+  body: Element;
+  item: Zotero.Item;
+  /** Existing conversation request ownership claimed by the compose flow. */
+  requestId?: number;
+  /** Internal notification that asynchronous preparation has handed off to the provider. */
+  onProviderDispatch?: () => void;
+  annotationReplyBatchId?: string;
+  onAnnotationReplyComplete?: (
+    rawAnswer: string,
+    complete: boolean,
+  ) => Promise<void>;
+  /** Resolved panel/source context selected by compose UI. */
+  contextSource?: ResolvedContextSource | null;
+  question: string;
+  images?: string[];
+  model?: string;
+  apiBase?: string;
+  apiKey?: string;
+  authMode?:
+    | "api_key"
+    | "codex_auth"
+    | "codex_app_server"
+    | "copilot_auth"
+    | "webchat";
+  providerProtocol?: import("../../utils/providerProtocol").ProviderProtocol;
+  modelEntryId?: string;
+  modelProviderLabel?: string;
+  reasoning?: LLMReasoningConfig;
+  advanced?: AdvancedModelParams;
+  displayQuestion?: string;
+  selectedTextContexts?: SelectedTextContext[];
+  resolvedSelectedTextAnchors?: ResolvedSelectedTextAnchor[];
+  selectedTexts?: string[];
+  selectedTextSources?: SelectedTextSource[];
+  selectedTextPaperContexts?: (PaperContextRef | undefined)[];
+  selectedTextNoteContexts?: (NoteContextRef | undefined)[];
+  activeNoteContext?: ActiveNoteContext;
+  conversationKey?: number;
+  conversationKind?: "global" | "paper";
+  paperContexts?: PaperContextRef[];
+  pdfPaperContexts?: PaperContextRef[];
+  fullTextPaperContexts?: PaperContextRef[];
+  selectedCollectionContexts?: CollectionContextRef[];
+  selectedTagContexts?: TagContextRef[];
+  attachedConversations?: AttachedConversationRef[];
+  /** Attachments shown in chat history. */
+  attachments?: ChatAttachment[];
+  /** Provider-resolved attachments sent to the model. Defaults to `attachments`. */
+  modelAttachments?: ChatAttachment[];
+  runtimeMode?: ChatRuntimeMode;
+  agentRunId?: string;
+  skipAgentDispatch?: boolean;
+  localDocuments?: readonly LocalDocumentResource[];
+  /** Skill IDs force-activated via slash menu selection. */
+  forcedSkillIds?: string[];
+  /** System messages injected by provider-side PDF upload (Qwen fileid://, Kimi extracted text). */
+  pdfUploadSystemMessages?: string[];
+  /** [webchat] When true, attach the paper PDF to the provider query. */
+  webchatSendPdf?: boolean;
+  /** [webchat] Exact PDF chips active for the current upload, in UI order. */
+  webchatPdfPaperContexts?: PaperContextRef[];
+  /** [webchat] Ephemeral delivery outcome for send-state bookkeeping. */
+  onWebChatSendOutcome?: (outcome: "success" | "failed" | "cancelled") => void;
+  /** [webchat] When true, send the prompt into a fresh provider conversation. */
+  webchatForceNewChat?: boolean;
+  /** [webchat] Explicit persisted remote conversation binding for a follow-up. */
+  webchatExpectedChatUrl?: string;
+  webchatExpectedChatId?: string;
+};
+
+export type EditRetryOptions = {
+  body: Element;
+  item: Zotero.Item;
+  /** Existing conversation request ownership claimed by the compose flow. */
+  requestId?: number;
+  /** Internal notification that asynchronous preparation has handed off to the provider. */
+  onProviderDispatch?: () => void;
+  /** Resolved panel/source context selected by compose UI. */
+  contextSource?: ResolvedContextSource | null;
+  displayQuestion: string;
+  selectedTextContexts?: SelectedTextContext[];
+  resolvedSelectedTextAnchors?: ResolvedSelectedTextAnchor[];
+  selectedTexts?: string[];
+  selectedTextSources?: SelectedTextSource[];
+  selectedTextPaperContexts?: (PaperContextRef | undefined)[];
+  selectedTextNoteContexts?: (NoteContextRef | undefined)[];
+  screenshotImages?: string[];
+  paperContexts?: PaperContextRef[];
+  pdfPaperContexts?: PaperContextRef[];
+  fullTextPaperContexts?: PaperContextRef[];
+  selectedCollectionContexts?: CollectionContextRef[];
+  selectedTagContexts?: TagContextRef[];
+  attachedConversations?: AttachedConversationRef[];
+  /** Attachments shown in chat history. */
+  attachments?: ChatAttachment[];
+  /** Provider-resolved attachments sent to the retry request. Defaults to `attachments`. */
+  modelAttachments?: ChatAttachment[];
+  localDocuments?: readonly LocalDocumentResource[];
+  pdfUploadSystemMessages?: string[];
+  targetRuntimeMode?: ChatRuntimeMode;
+  expected?: {
+    conversationKey: number;
+    userTimestamp: number;
+    assistantTimestamp: number;
+  };
+  model?: string;
+  apiBase?: string;
+  apiKey?: string;
+  authMode?:
+    | "api_key"
+    | "codex_auth"
+    | "codex_app_server"
+    | "copilot_auth"
+    | "webchat";
+  providerProtocol?: import("../../utils/providerProtocol").ProviderProtocol;
+  modelEntryId?: string;
+  modelProviderLabel?: string;
+  reasoning?: LLMReasoningConfig;
+  advanced?: AdvancedModelParams;
+};

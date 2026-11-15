@@ -1,0 +1,381 @@
+/**
+ * Shared domain types used by both the agent layer and the contextPanel layer.
+ * This file has zero imports — all types are pure data shapes.
+ */
+
+export type SelectedTextSource =
+  | "pdf"
+  | "model"
+  | "note"
+  | "note-edit"
+  /** A side chat's transcript attached to the main chat. */
+  | "sidechat";
+
+export type ChatAttachmentCategory =
+  | "image"
+  | "pdf"
+  | "markdown"
+  | "code"
+  | "text"
+  | "file";
+
+export type ChatAttachment = {
+  id: string;
+  name: string;
+  mimeType: string;
+  sizeBytes: number;
+  category: ChatAttachmentCategory;
+  imageDataUrl?: string;
+  textContent?: string;
+  storedPath?: string;
+  contentHash?: string;
+};
+
+/** Where an extracted paper figure came from, so its box can reopen the page. */
+export type GeneratedChatImageFigure = {
+  pageIndex?: number;
+  pageLabel?: string;
+  paper?: {
+    itemId: number;
+    contextItemId: number;
+    title?: string;
+  };
+};
+
+export type GeneratedChatImage = {
+  id: string;
+  label?: string;
+  path?: string;
+  src?: string;
+  revisedPrompt?: string;
+  figure?: GeneratedChatImageFigure;
+};
+
+export type PaperContentSourceMode =
+  | "text"
+  | "mineru"
+  | "pdf"
+  | "markdown"
+  | "html"
+  | "txt"
+  | "docx";
+
+export type ModelInputMode = "text_only" | "vision_allowed" | "pdf_allowed";
+
+/**
+ * User intent for the maximum output of one provider inference.
+ *
+ * Auto delegates the ceiling to the provider/runtime. Custom is deliberately
+ * distinct from model capability metadata and from whole-Agent run limits.
+ */
+export type OutputTokenLimitSetting =
+  | { mode: "auto" }
+  | { mode: "custom"; tokens: number };
+
+export type AdvancedModelParams = {
+  temperature: number;
+  outputTokenLimit: OutputTokenLimitSetting;
+  inputTokenCap?: number;
+  inputMode?: ModelInputMode;
+  /**
+   * User-authored capability overrides for this model. Typed loosely here to
+   * keep `shared/` free of a dependency on the capability layer; it is
+   * validated by `normalizeProfileOverride` wherever it is consumed.
+   */
+  profileOverride?: Record<string, unknown>;
+};
+
+export type PaperContextRef = {
+  /** Stable Zotero library identity when resolved from live Zotero state. */
+  libraryID?: number;
+  itemId: number;
+  contextItemId: number;
+  contentSourceMode?: PaperContentSourceMode;
+  citationKey?: string;
+  title: string;
+  attachmentTitle?: string;
+  firstCreator?: string;
+  year?: string;
+  /** Full path to durable MinerU text metadata plus PDF figure crop cache. */
+  mineruCacheDir?: string;
+};
+
+export type LocalDocumentResource = Readonly<{
+  kind: "local_pdf";
+  sourceKey: `zotero-pdf:${number}:${number}`;
+  itemId: number;
+  contextItemId: number;
+  title: string;
+  name: string;
+  mimeType: "application/pdf";
+  absolutePath: string;
+}>;
+
+export type QuoteCitation = {
+  id: string;
+  quoteText: string;
+  displayQuoteText?: string;
+  citationLabel: string;
+  sourceMatchText?: string;
+  sourceMatchKind?:
+    | "trusted"
+    | "exact"
+    | "ellipsis-segment"
+    | "raw-prefix"
+    | "raw-suffix"
+    | "raw-middle"
+    | "progressive"
+    | "selected-text"
+    | "normalized-span";
+  sourceMatchSource?: "context-text" | "pdf-page-text";
+  sourceSectionLabel?: string;
+  sourceChunkKind?: string;
+  contextItemId?: number;
+  itemId?: number;
+  /** Fingerprint of the extracted source used to ground the quote. */
+  sourceFingerprint?: string;
+  /** Zero-based occurrence of the full quote on the hinted PDF page. */
+  sourceMatchPageOccurrence?: number;
+  /** Best-effort zero-based PDF page hint for fast initial quote navigation. */
+  pageHintIndex?: number;
+  /** Best-effort printed page label from Zotero/PDF metadata. */
+  pageHintLabel?: string;
+  /** Whether the anchor follows the citing claim or the retrieved passage. */
+  anchorMatch?: "claim" | "passage";
+};
+
+/** A Zotero note (item note or standalone) selected as a reference context. */
+export type NoteContextRef = {
+  libraryID: number;
+  noteItemKey: string;
+  noteItemId?: number;
+  parentItemId?: number;
+  parentItemKey?: string;
+  noteKind: "item" | "standalone";
+  title: string;
+};
+
+/** Stable user-selected text state persisted with a conversation turn. */
+export type SelectedTextContext = {
+  text: string;
+  source: SelectedTextSource;
+  paperContext?: PaperContextRef;
+  noteContext?: NoteContextRef;
+  /** Zotero attachment or note item that owns the selected text. */
+  contextItemId?: number;
+  /** Zero-based PDF page index used for machine operations. */
+  pageIndex?: number;
+  /** User-facing PDF page label, which may be non-numeric. */
+  pageLabel?: string;
+  /**
+   * The user's question about this text, attached from the inline box.
+   * Trimmed, whitespace-collapsed, at most 2000 characters; absent when empty.
+   */
+  userQuery?: string;
+};
+
+export type SelectedTextAnchorResolution = "chunks" | "page" | "locator-only";
+
+/**
+ * Ephemeral model-facing context resolved from a stable selected-text context.
+ * Chunk indexes and expanded text are intentionally recomputed for every send.
+ */
+export type ResolvedSelectedTextAnchor = {
+  contextIndex: number;
+  contextItemId: number;
+  pageIndex?: number;
+  pageLabel?: string;
+  paperContext?: PaperContextRef;
+  resolution: SelectedTextAnchorResolution;
+  primaryChunkIndex?: number;
+  preferredChunkIndexes: number[];
+  contextText?: string;
+  sourceType?: string;
+  injectedChars: number;
+};
+
+/** A non-PDF, non-note file attachment (image/figure or other file) selected as reference context. */
+export type OtherContextRef = {
+  contextItemId: number;
+  parentItemId?: number;
+  title: string;
+  contentType: string;
+  refKind: "figure" | "other";
+};
+
+/** A Zotero collection selected as context scope. */
+export type CollectionContextRef = {
+  collectionId: number;
+  name: string;
+  libraryID: number;
+  /** Papers of this folder the user removed from the task (Task progress). */
+  excludedItemIds?: number[];
+};
+
+/** A Zotero tag or tag scope selected as context scope. */
+export type TagContextRef = {
+  name: string;
+  libraryID: number;
+  normalizedName?: string;
+  scope?: "allTagged" | "untagged";
+  includeAutomatic?: boolean;
+  /** Papers with this tag the user removed from the task (Task progress). */
+  excludedItemIds?: number[];
+};
+
+/**
+ * A past conversation attached to a user message as context.
+ * Reference only: no conversation text is copied into the message.
+ */
+export type AttachedConversationRef = {
+  system: ConversationSystem;
+  conversationKey: number;
+  /** Catalog conversationID, used to detect a reused conversationKey. */
+  conversationID?: string;
+  title: string;
+  libraryID: number;
+  kind?: "paper" | "global";
+  paperItemID?: number;
+  /**
+   * "agent" when the agent attached it with past_chat_attach; absent when
+   * the user attached it from the picker.
+   */
+  via?: "agent";
+};
+
+export type ActiveNoteSession = {
+  noteKind: "item" | "standalone";
+  noteId: number;
+  libraryID: number;
+  title: string;
+  parentItemId?: number;
+  conversationKind: "paper" | "global";
+};
+
+export type ActiveNoteContext = {
+  noteId: number;
+  title: string;
+  noteKind: "item" | "standalone";
+  parentItemId?: number;
+  noteText: string;
+  /** Raw HTML of the note, provided so the agent can see the original
+   *  structure and inline styles when editing styled/template notes. */
+  noteHtml?: string;
+};
+
+export type ConversationSystem = "upstream" | "claude_code" | "codex";
+
+export type GlobalConversationSummary = {
+  conversationID: string;
+  conversationKey: number;
+  libraryID: number;
+  createdAt: number;
+  title?: string;
+  lastActivityAt: number;
+  userTurnCount: number;
+  /** Ephemeral webchat session row: hidden from history, swept at startup. */
+  webchatSession?: boolean;
+};
+
+export type PaperConversationSummary = {
+  conversationID: string;
+  conversationKey: number;
+  libraryID: number;
+  paperItemID: number;
+  sessionVersion: number;
+  createdAt: number;
+  title?: string;
+  lastActivityAt: number;
+  userTurnCount: number;
+  /** Ephemeral webchat session row: hidden from history, swept at startup. */
+  webchatSession?: boolean;
+};
+
+export type ClaudeConversationKind = "global" | "paper";
+
+export type ClaudeConversationSummary = {
+  instanceID?: string;
+  conversationID: string;
+  conversationKey: number;
+  libraryID: number;
+  kind: ClaudeConversationKind;
+  paperItemID?: number;
+  createdAt: number;
+  updatedAt: number;
+  title?: string;
+  providerSessionId?: string;
+  scopedConversationKey?: string;
+  scopeType?: string;
+  scopeId?: string;
+  scopeLabel?: string;
+  cwd?: string;
+  model?: string;
+  effort?: string;
+  userTurnCount: number;
+};
+
+export type CodexConversationKind = "global" | "paper";
+
+export type CodexConversationSummary = {
+  instanceID?: string;
+  conversationID: string;
+  conversationKey: number;
+  libraryID: number;
+  kind: CodexConversationKind;
+  paperItemID?: number;
+  createdAt: number;
+  updatedAt: number;
+  title?: string;
+  providerSessionId?: string;
+  providerPermissionState?: string;
+  scopedConversationKey?: string;
+  scopeType?: string;
+  scopeId?: string;
+  scopeLabel?: string;
+  cwd?: string;
+  model?: string;
+  effort?: string;
+  userTurnCount: number;
+};
+
+/** Frozen, library-qualified identity and user-authored version for PDF replies. */
+export type AnnotationReplyTarget = {
+  identity: string;
+  version: string;
+  libraryID: number;
+  attachmentID: number;
+  attachmentKey: string;
+  annotationID: number;
+  annotationKey: string;
+  title: string;
+  comment: string;
+  quotedText: string;
+  position: {
+    pageIndex: number;
+    rects: number[][];
+    nextPageRects?: number[][];
+  };
+};
+export type AnnotationReplyPage = {
+  attachmentID: number;
+  pageIndex: number;
+  dataURL: string;
+  context: string;
+};
+export type AnnotationReplyBatch = {
+  id: string;
+  protocol: "zotero-annotation-replies/v1";
+  conversationKey: number;
+  createdAt: number;
+  status:
+    | "inflight"
+    | "uncertain"
+    | "answered"
+    | "invalid"
+    | "applied"
+    | "not-sent";
+  targets: AnnotationReplyTarget[];
+  pages: AnnotationReplyPage[];
+  rawAnswer?: string;
+  error?: string;
+};

@@ -1,0 +1,767 @@
+import { fnv1a32Raw } from "../utils/fnv1a";
+import { appLogger } from "../core/logging";
+import {
+  buildZoteroMcpConfigValue,
+  getZoteroMcpAllowedToolNames,
+  getZoteroMcpDirectPdfToolNames,
+  getZoteroMcpServerName,
+  getZoteroMcpServerUrl,
+  invokeRegisteredZoteroMcpEndpoint,
+  qualifyZoteroMcpToolName,
+  ZOTERO_MCP_SAFE_READ_TOOL_NAMES,
+  ZOTERO_MCP_SERVER_NAME,
+  ZOTERO_MCP_SCOPE_HEADER,
+  ZOTERO_MCP_TOOL_TIMEOUT_SEC,
+  type CodexZoteroMcpWriteApprovalMode,
+} from "../agent/mcp/server";
+import { MCP_METHODS } from "../agent/mcp/protocol";
+import {
+  extractCodexAppServerThreadId,
+  getOrCreateCodexAppServerProcess,
+  resolveCodexAppServerBinaryPath,
+  type CodexAppServerProcess,
+} from "../utils/codexAppServerProcess";
+import { resolveCodexPermissionExecution } from "./permissionProfiles";
+import { resolveCodexNativeRuntimeCwd } from "./runtimeCwd";
+
+const DEFAULT_CODEX_APP_SERVER_NATIVE_PROCESS_KEY = "codex_app_server_native";
+const MCP_PREFLIGHT_SUCCESS_TTL_MS = 5 * 60 * 1000;
+const MCP_PREFLIGHT_FAILURE_TTL_MS = 10 * 1000;
+let codexMcpProbeSequence = 0;
+export const REQUIRED_CODEX_ZOTERO_MCP_TOOL_NAMES = [
+  "library_search",
+  "library_read",
+  "paper_read",
+  "file_io",
+  "run_command",
+] as const;
+/**
+ * Direct-path PDF turns read the PDF with Codex's own shell, so the host
+ * access tools are hidden and only the library tools must be ready. The MCP
+ * catalog also hides control tools per scope, so readiness never requires
+ * the whole enabled list.
+ */
+export const REQUIRED_CODEX_RAW_PDF_MCP_TOOL_NAMES = [
+  "library_search",
+  "library_read",
+] as const;
+export const REQUIRED_CLAUDE_ZOTERO_MCP_TOOL_NAMES = [
+  "library_search",
+  "library_read",
+  "library_retrieve",
+  "paper_read",
+  "file_io",
+  "run_command",
+] as const;
+export const REQUIRED_CLAUDE_RAW_PDF_MCP_TOOL_NAMES = [
+  "library_search",
+] as const;
+
+export type CodexNativeMcpSetupStatus = {
+  enabled: boolean;
+  serverName: string;
+  serverUrl: string;
+  configured: boolean;
+  connected: boolean | null;
+  toolNames: string[];
+  config?: unknown;
+  mcpStatus?: unknown;
+  skills?: unknown;
+  plugins?: unknown;
+  errors: string[];
+};
+
+type SetupParams = {
+  codexPath?: string;
+  processKey?: string;
+  proc?: CodexAppServerProcess;
+  serverName?: string;
+  serverUrl?: string;
+  scopeToken?: string;
+  required?: boolean;
+  rawPdfMode?: boolean;
+  permissionExecution?: Awaited<
+    ReturnType<typeof resolveCodexPermissionExecution>
+  >;
+};
+
+type PreflightCacheEntry =
+  | {
+      expiresAt: number;
+      ok: true;
+      status: CodexNativeMcpSetupStatus;
+    }
+  | {
+      expiresAt: number;
+      ok: false;
+      error: string;
+    };
+
+const preflightCache = new Map<string, PreflightCacheEntry>();
+
+export function clearCodexZoteroMcpPreflightCache(): void {
+  preflightCache.clear();
+}
+
+async function resolveProcess(
+  params: SetupParams,
+): Promise<CodexAppServerProcess> {
+  if (params.proc) return params.proc;
+  const codexPath = resolveCodexAppServerBinaryPath(params.codexPath);
+  return getOrCreateCodexAppServerProcess(
+    params.processKey || DEFAULT_CODEX_APP_SERVER_NATIVE_PROCESS_KEY,
+    { codexPath },
+  );
+}
+
+async function sendOptional(
+  proc: CodexAppServerProcess,
+  method: string,
+  params?: unknown,
+): Promise<{ ok: true; value: unknown } | { ok: false; error: string }> {
+  try {
+    return { ok: true, value: await proc.sendRequest(method, params) };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+function normalizeString(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function collectToolNames(value: unknown, names = new Set<string>()): string[] {
+  if (Array.isArray(value)) {
+    for (const entry of value) collectToolNames(entry, names);
+    return Array.from(names);
+  }
+  if (!value || typeof value !== "object") return Array.from(names);
+  const record = value as Record<string, unknown>;
+  const type = normalizeString(record.type).toLowerCase();
+  const name = normalizeString(record.name);
+  if (name && (!type || type.includes("tool") || record.inputSchema)) {
+    names.add(name);
+  }
+  for (const nested of Object.values(record)) {
+    if (nested && typeof nested === "object") collectToolNames(nested, names);
+  }
+  return Array.from(names);
+}
+
+function objectContainsServerName(value: unknown, serverName: string): boolean {
+  if (Array.isArray(value)) {
+    return value.some((entry) => objectContainsServerName(entry, serverName));
+  }
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  for (const key of ["name", "serverName", "id"]) {
+    if (normalizeString(record[key]) === serverName) return true;
+  }
+  return Object.values(record).some((entry) =>
+    objectContainsServerName(entry, serverName),
+  );
+}
+
+function objectContainsServerUrl(value: unknown, serverUrl: string): boolean {
+  if (Array.isArray(value)) {
+    return value.some((entry) => objectContainsServerUrl(entry, serverUrl));
+  }
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  if (
+    Object.values(record).some((entry) => normalizeString(entry) === serverUrl)
+  ) {
+    return true;
+  }
+  return Object.values(record).some((entry) =>
+    objectContainsServerUrl(entry, serverUrl),
+  );
+}
+
+function resolveConnected(
+  mcpStatus: unknown,
+  serverName: string,
+): boolean | null {
+  if (!mcpStatus) return null;
+  if (!objectContainsServerName(mcpStatus, serverName)) return false;
+  const serialized = JSON.stringify(mcpStatus).toLowerCase();
+  if (
+    serialized.includes('"status":"failed"') ||
+    serialized.includes('"status":"error"') ||
+    serialized.includes('"authstatus":"error"')
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function getFetch(): typeof fetch {
+  const fetchFn = (globalThis as typeof globalThis & { fetch?: typeof fetch })
+    .fetch;
+  if (typeof fetchFn !== "function") {
+    throw new Error("fetch is unavailable for Zotero MCP preflight");
+  }
+  return fetchFn.bind(globalThis);
+}
+
+function getConfigHeaders(
+  configValue: Record<string, unknown>,
+): Record<string, string> {
+  const rawHeaders = configValue.http_headers;
+  if (
+    !rawHeaders ||
+    typeof rawHeaders !== "object" ||
+    Array.isArray(rawHeaders)
+  ) {
+    return {};
+  }
+  return Object.fromEntries(
+    Object.entries(rawHeaders as Record<string, unknown>).map(
+      ([key, value]) => [key, String(value || "")],
+    ),
+  );
+}
+
+function hashString(value: string): string {
+  return fnv1a32Raw(value).toString(16);
+}
+
+function buildPreflightConfigSignature(
+  configValue: Record<string, unknown>,
+): Record<string, unknown> {
+  const headers = getConfigHeaders(configValue);
+  const stableHeaders = Object.fromEntries(
+    Object.entries(headers)
+      .filter(
+        ([key]) => key.toLowerCase() !== ZOTERO_MCP_SCOPE_HEADER.toLowerCase(),
+      )
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, value]) => [key, hashString(value)]),
+  );
+  const toolApprovals =
+    configValue.tools && typeof configValue.tools === "object"
+      ? Object.fromEntries(
+          Object.entries(configValue.tools as Record<string, unknown>)
+            .sort(([a], [b]) => a.localeCompare(b))
+            .map(([name, value]) => [
+              name,
+              typeof value === "object" && value
+                ? (value as Record<string, unknown>).approval_mode
+                : value,
+            ]),
+        )
+      : {};
+  return {
+    required: Boolean(configValue.required),
+    defaultToolsApprovalMode: configValue.default_tools_approval_mode,
+    enabledTools: Array.isArray(configValue.enabled_tools)
+      ? [...configValue.enabled_tools].map(String).sort()
+      : [],
+    tools: toolApprovals,
+    headers: stableHeaders,
+  };
+}
+
+export function buildCodexZoteroMcpPreflightCacheKey(params: {
+  serverName: string;
+  serverUrl: string;
+  configValue: Record<string, unknown>;
+  rawPdfMode?: boolean;
+}): string {
+  return JSON.stringify({
+    serverName: params.serverName,
+    serverUrl: params.serverUrl,
+    rawPdfMode: Boolean(params.rawPdfMode),
+    config: buildPreflightConfigSignature(params.configValue),
+  });
+}
+
+function buildStatusConfig(
+  serverName: string,
+  configValue: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    mcp_servers: {
+      [serverName]: configValue,
+    },
+  };
+}
+
+function clonePreflightStatusForConfig(params: {
+  status: CodexNativeMcpSetupStatus;
+  serverName: string;
+  serverUrl: string;
+  configValue: Record<string, unknown>;
+}): CodexNativeMcpSetupStatus {
+  return {
+    ...params.status,
+    serverName: params.serverName,
+    serverUrl: params.serverUrl,
+    config: buildStatusConfig(params.serverName, params.configValue),
+    toolNames: [...params.status.toolNames],
+    errors: [...params.status.errors],
+  };
+}
+
+async function postMcpJson(params: {
+  url: string;
+  headers: Record<string, string>;
+  payload: Record<string, unknown>;
+}): Promise<unknown> {
+  const directResponse = await invokeRegisteredZoteroMcpEndpoint({
+    method: "POST",
+    data: params.payload,
+    headers: params.headers,
+  });
+  if (directResponse) {
+    const [status, , body] = directResponse;
+    return parseMcpJsonResponse({
+      ok: status >= 200 && status < 300,
+      status,
+      text: body,
+    });
+  }
+
+  const response = await getFetch()(params.url, {
+    method: "POST",
+    headers: {
+      Accept: "application/json, text/event-stream",
+      "Content-Type": "application/json",
+      ...params.headers,
+    },
+    body: JSON.stringify(params.payload),
+  });
+  return parseMcpJsonResponse({
+    ok: response.ok,
+    status: response.status,
+    text: await response.text().catch(() => ""),
+  });
+}
+
+function parseMcpJsonResponse(params: {
+  ok: boolean;
+  status: number;
+  text: string;
+}): unknown {
+  const text = params.text;
+  if (!params.ok) {
+    throw new Error(
+      `HTTP ${params.status}${text.trim() ? `: ${text.trim().slice(0, 240)}` : ""}`,
+    );
+  }
+  if (params.status === 202 || params.status === 204) {
+    return undefined;
+  }
+  if (!text.trim()) return undefined;
+  const parsed = JSON.parse(text) as {
+    result?: unknown;
+    error?: { message?: unknown };
+  };
+  if (parsed.error) {
+    throw new Error(
+      String(parsed.error.message || JSON.stringify(parsed.error)),
+    );
+  }
+  return parsed.result;
+}
+
+export async function preflightCodexZoteroMcpServer(
+  params: {
+    serverName?: string;
+    scopeToken?: string;
+    required?: boolean;
+    rawPdfMode?: boolean;
+  } = {},
+): Promise<CodexNativeMcpSetupStatus> {
+  const serverName = params.serverName || ZOTERO_MCP_SERVER_NAME;
+  const cacheConfigValue = buildZoteroMcpConfigValue({
+    required: params.required,
+    rawPdfMode: params.rawPdfMode,
+  });
+  const configValue = buildZoteroMcpConfigValue({
+    scopeToken: params.scopeToken,
+    required: params.required,
+    rawPdfMode: params.rawPdfMode,
+  });
+  const serverUrl =
+    typeof configValue.url === "string" && configValue.url.trim()
+      ? configValue.url.trim()
+      : getZoteroMcpServerUrl();
+  const headers = getConfigHeaders(configValue);
+  const cacheKey = buildCodexZoteroMcpPreflightCacheKey({
+    serverName,
+    serverUrl,
+    configValue: cacheConfigValue,
+    rawPdfMode: params.rawPdfMode,
+  });
+  const now = Date.now();
+  const cached = preflightCache.get(cacheKey);
+  if (cached && cached.expiresAt > now) {
+    if (!cached.ok) throw new Error(cached.error);
+    return clonePreflightStatusForConfig({
+      status: cached.status,
+      serverName,
+      serverUrl,
+      configValue,
+    });
+  }
+  if (cached) preflightCache.delete(cacheKey);
+
+  try {
+    await postMcpJson({
+      url: serverUrl,
+      headers,
+      payload: {
+        jsonrpc: "2.0",
+        id: 1,
+        method: MCP_METHODS.INITIALIZE,
+        params: {
+          protocolVersion: "2025-06-18",
+          capabilities: {},
+          clientInfo: {
+            name: "llm-for-zotero-codex-preflight",
+            version: "1.0.0",
+          },
+        },
+      },
+    });
+    await postMcpJson({
+      url: serverUrl,
+      headers,
+      payload: {
+        jsonrpc: "2.0",
+        method: MCP_METHODS.INITIALIZED,
+      },
+    });
+    const toolsResult = await postMcpJson({
+      url: serverUrl,
+      headers,
+      payload: {
+        jsonrpc: "2.0",
+        id: 2,
+        method: MCP_METHODS.TOOLS_LIST,
+        params: {},
+      },
+    });
+    const allToolNames = collectToolNames(toolsResult);
+    const allowedToolNames = params.rawPdfMode
+      ? getZoteroMcpDirectPdfToolNames()
+      : getZoteroMcpAllowedToolNames();
+    const unexpectedToolNames = allToolNames.filter(
+      (name) => !allowedToolNames.includes(name),
+    );
+    if (unexpectedToolNames.length) {
+      throw new Error(
+        `Zotero MCP exposed unexpected tools: ${unexpectedToolNames.join(", ")}`,
+      );
+    }
+    const status: CodexNativeMcpSetupStatus = {
+      enabled: true,
+      serverName,
+      serverUrl,
+      configured: true,
+      connected: true,
+      toolNames: allToolNames,
+      config: buildStatusConfig(serverName, configValue),
+      mcpStatus: toolsResult,
+      errors: [],
+    };
+    preflightCache.set(cacheKey, {
+      expiresAt: now + MCP_PREFLIGHT_SUCCESS_TTL_MS,
+      ok: true,
+      status,
+    });
+    return clonePreflightStatusForConfig({
+      status,
+      serverName,
+      serverUrl,
+      configValue,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    preflightCache.set(cacheKey, {
+      expiresAt: now + MCP_PREFLIGHT_FAILURE_TTL_MS,
+      ok: false,
+      error: message,
+    });
+    throw error;
+  }
+}
+
+export async function readCodexNativeMcpSetupStatus(
+  params: SetupParams = {},
+): Promise<CodexNativeMcpSetupStatus> {
+  const proc = await resolveProcess(params);
+  const errors: string[] = [];
+  const serverName = params.serverName || ZOTERO_MCP_SERVER_NAME;
+  const serverUrl = params.serverUrl || getZoteroMcpServerUrl();
+
+  const [configResult, statusResult, skillsResult, pluginsResult] =
+    await Promise.all([
+      sendOptional(proc, "config/read", {}),
+      sendOptional(proc, "mcpServerStatus/list", {
+        detail: "toolsAndAuthOnly",
+        limit: 100,
+      }),
+      sendOptional(proc, "skills/list", { cwds: [] }),
+      sendOptional(proc, "plugin/list", { limit: 100 }),
+    ]);
+
+  for (const result of [
+    configResult,
+    statusResult,
+    skillsResult,
+    pluginsResult,
+  ]) {
+    if (!result.ok) errors.push(result.error);
+  }
+
+  const configValue = configResult.ok ? configResult.value : undefined;
+  const mcpStatus = statusResult.ok ? statusResult.value : undefined;
+  return {
+    enabled: true,
+    serverName,
+    serverUrl,
+    configured:
+      objectContainsServerName(configValue, serverName) ||
+      objectContainsServerUrl(configValue, serverUrl),
+    connected: resolveConnected(mcpStatus, serverName),
+    toolNames: collectToolNames(mcpStatus).filter((name) =>
+      getZoteroMcpAllowedToolNames().includes(name),
+    ),
+    config: configValue,
+    mcpStatus,
+    skills: skillsResult.ok ? skillsResult.value : undefined,
+    plugins: pluginsResult.ok ? pluginsResult.value : undefined,
+    errors,
+  };
+}
+
+export async function probeCodexZoteroMcpThroughAppServer(
+  params: SetupParams = {},
+): Promise<void> {
+  const proc = await resolveProcess(params);
+  const cwd = resolveCodexNativeRuntimeCwd();
+  const permissionExecution =
+    params.permissionExecution ??
+    (await resolveCodexPermissionExecution({ proc, cwd }));
+  codexMcpProbeSequence += 1;
+  const profileSignature = `connection_probe_${Date.now().toString(36)}_${codexMcpProbeSequence}`;
+  const threadConfig = buildCodexZoteroMcpThreadConfig({
+    profileSignature,
+    required: true,
+  });
+  let threadId = "";
+  try {
+    const threadResult = await proc.sendRequest("thread/start", {
+      ephemeral: true,
+      ...permissionExecution.thread,
+      ...(cwd ? { cwd } : {}),
+      config: threadConfig.config,
+    });
+    threadId = extractCodexAppServerThreadId(threadResult);
+    if (!threadId) {
+      throw new Error(
+        `Zotero MCP probe did not return a Codex thread ID for ${threadConfig.serverName}`,
+      );
+    }
+  } finally {
+    if (threadId) {
+      try {
+        await proc.sendRequest("thread/archive", { threadId });
+      } catch (error) {
+        appLogger.debug(
+          "Codex app-server MCP probe: failed to archive disposable thread",
+          error,
+        );
+      }
+    }
+  }
+}
+
+export async function installOrUpdateCodexZoteroMcpConfig(
+  params: SetupParams = {},
+): Promise<CodexNativeMcpSetupStatus> {
+  clearCodexZoteroMcpPreflightCache();
+  const proc = await resolveProcess(params);
+  const serverName = params.serverName || ZOTERO_MCP_SERVER_NAME;
+  const value = buildZoteroMcpConfigValue({
+    scopeToken: params.scopeToken,
+    required: params.required,
+  });
+  const dottedKeyPath = `mcp_servers.${serverName}`;
+  const arrayKeyPath = ["mcp_servers", serverName];
+  const writeAttempts = [
+    { keyPath: dottedKeyPath, mergeStrategy: "upsert", value },
+    { keyPath: dottedKeyPath, mergeStrategy: "replace", value },
+    { keyPath: arrayKeyPath, value },
+    { key: dottedKeyPath, value },
+    { path: arrayKeyPath, value },
+  ];
+  const errors: string[] = [];
+  let wroteConfig = false;
+  for (const attempt of writeAttempts) {
+    const result = await sendOptional(proc, "config/value/write", attempt);
+    if (result.ok) {
+      wroteConfig = true;
+      break;
+    }
+    errors.push(result.error);
+  }
+  if (!wroteConfig) {
+    throw new Error(`Failed to write Codex MCP config: ${errors.join("; ")}`);
+  }
+
+  const reload = await sendOptional(proc, "config/mcpServer/reload", {});
+  if (!reload.ok) {
+    appLogger.warn("Codex app-server MCP reload failed", reload.error);
+  }
+
+  clearCodexZoteroMcpPreflightCache();
+  await probeCodexZoteroMcpThroughAppServer({ ...params, proc });
+  const status = await readCodexNativeMcpSetupStatus({ ...params, proc });
+  return { ...status, connected: true };
+}
+
+export async function ensureCodexZoteroMcpConfig(
+  params: SetupParams = {},
+): Promise<void> {
+  await installOrUpdateCodexZoteroMcpConfig(params);
+}
+
+/**
+ * The user-level Zotero MCP entry, turned off for one plugin thread.
+ *
+ * Installing the MCP config writes `mcp_servers.llm_for_zotero` into the
+ * user's own Codex config with writes run unasked, and Codex loads it into
+ * every thread. A plugin thread reaches Zotero through its own scoped
+ * server, so a write the user declined there could be retried through the
+ * user-level one without a prompt. The plugin turns that entry off in its
+ * threads and leaves the user's file alone. The entry names its URL:
+ * Codex refuses a thread whose override names a server with no transport
+ * when the user has no such entry (checked against Codex 0.164).
+ */
+export function buildDisabledUserLevelZoteroMcpServer(): Record<
+  string,
+  unknown
+> {
+  return {
+    [ZOTERO_MCP_SERVER_NAME]: {
+      url: getZoteroMcpServerUrl(),
+      enabled: false,
+    },
+  };
+}
+
+export function buildCodexZoteroMcpThreadConfig(params: {
+  profileSignature?: string;
+  scopeToken?: string;
+  required?: boolean;
+  enableShellTool?: boolean;
+  rawPdfMode?: boolean;
+  enabled?: boolean;
+  /** From the thread's permission chip (`codexZoteroMcpWriteApprovalMode`). */
+  writeApprovalMode?: CodexZoteroMcpWriteApprovalMode;
+}): { serverName: string; config: Record<string, unknown> } {
+  const serverName = getZoteroMcpServerName(params.profileSignature);
+  return {
+    serverName,
+    config: {
+      features: {
+        shell_tool: params.enableShellTool === true,
+      },
+      mcp_servers: {
+        ...(serverName !== ZOTERO_MCP_SERVER_NAME
+          ? buildDisabledUserLevelZoteroMcpServer()
+          : {}),
+        [serverName]: buildZoteroMcpConfigValue({
+          scopeToken: params.scopeToken,
+          required: params.required,
+          rawPdfMode: params.rawPdfMode,
+          enabled: params.enabled,
+          writeApprovalMode: params.writeApprovalMode,
+        }),
+      },
+    },
+  };
+}
+
+export function buildClaudeZoteroMcpServerConfig(params: {
+  profileSignature?: string;
+  scopeToken?: string;
+  required?: boolean;
+  rawPdfMode?: boolean;
+}): {
+  serverName: string;
+  mcpServers: Record<string, Record<string, unknown>>;
+  allowedTools: string[];
+} {
+  const serverName = getZoteroMcpServerName(params.profileSignature);
+  const configValue = buildZoteroMcpConfigValue({
+    scopeToken: params.scopeToken,
+    required: params.required,
+    rawPdfMode: params.rawPdfMode,
+  });
+  const serverUrl =
+    typeof configValue.url === "string" && configValue.url.trim()
+      ? configValue.url.trim()
+      : getZoteroMcpServerUrl();
+  return {
+    serverName,
+    mcpServers: {
+      [serverName]: {
+        type: "http",
+        url: serverUrl,
+        headers: getConfigHeaders(configValue),
+        // Claude Code's per-server tool-call timeout in milliseconds. Without
+        // it an HTTP tool call ends after 60 s, before a paper_digest or a
+        // paper_read full call can finish.
+        timeout: ZOTERO_MCP_TOOL_TIMEOUT_SEC * 1000,
+      },
+    },
+    allowedTools: buildClaudeZoteroMcpAllowedToolNames(
+      serverName,
+      params.rawPdfMode,
+    ),
+  };
+}
+
+/**
+ * The Zotero tools Claude Code runs without asking: the safe reads, in
+ * raw-PDF turns only those the raw-PDF surface exposes. Write tools stay on
+ * the server and go through the chip's permission mode, as in every turn.
+ */
+export function buildClaudeZoteroMcpAllowedToolNames(
+  serverName: string,
+  rawPdfMode = false,
+): string[] {
+  const directPdfToolNames = rawPdfMode
+    ? new Set(getZoteroMcpDirectPdfToolNames())
+    : null;
+  return ZOTERO_MCP_SAFE_READ_TOOL_NAMES.filter(
+    (toolName) => !directPdfToolNames || directPdfToolNames.has(toolName),
+  ).map((toolName) => qualifyZoteroMcpToolName(serverName, toolName));
+}
+
+export function assertRequiredCodexZoteroMcpToolsReady(
+  status: CodexNativeMcpSetupStatus,
+  requiredToolNames: readonly string[] = REQUIRED_CODEX_ZOTERO_MCP_TOOL_NAMES,
+): void {
+  const missing = requiredToolNames.filter(
+    (name) => !status.toolNames.includes(name),
+  );
+  if (status.connected !== true || missing.length > 0) {
+    const reason =
+      status.connected === false
+        ? "server is not connected"
+        : status.connected === null
+          ? "server status is unavailable"
+          : `missing required tools: ${missing.join(", ")}`;
+    throw new Error(
+      `Zotero MCP tools are not ready for ${status.serverName}: ${reason}`,
+    );
+  }
+}

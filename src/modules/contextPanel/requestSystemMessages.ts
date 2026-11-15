@@ -1,0 +1,65 @@
+import type { InputCapEffects } from "../../utils/modelInputCap";
+import type { ContextAssemblyStrategy } from "./types";
+
+export function buildContextPlanSystemMessages(params: {
+  strategy: ContextAssemblyStrategy;
+  assistantInstruction?: string;
+  coverageReceiptText?: string;
+  inputCapEffects?: InputCapEffects;
+}): string[] {
+  const messages: string[] = [];
+  if (params.strategy === "paper-followup-retrieval") {
+    messages.push(
+      [
+        "Paper chat has access to the paper's full text.",
+        "The retrieved snippets in this request are a focused grounding subset",
+        "chosen for this answer, not a statement about limited access.",
+        "Never say that you do not have full access to the paper or that you",
+        "only have the provided snippets.",
+        "If the user asks about access, say that you can access the full paper",
+        "and that this answer is grounded in the most relevant retrieved chunks.",
+      ].join(" "),
+    );
+  }
+  if (params.strategy === "paper-exhaustive-full") {
+    messages.push(
+      "This turn explicitly requested a full-text read. Use the full-text reading receipt as the authority for coverage and never claim complete coverage when the receipt is partial.",
+    );
+  }
+
+  const assistantInstruction = (params.assistantInstruction || "").trim();
+  if (assistantInstruction) {
+    messages.push(assistantInstruction);
+  }
+
+  const coverageReceiptText = (params.coverageReceiptText || "").trim();
+  if (coverageReceiptText) {
+    messages.push(
+      [
+        coverageReceiptText,
+        "Use this receipt to calibrate the answer's certainty and coverage.",
+        "If coverage is partial, say which parts are grounded and which would need closer reading.",
+      ].join("\n"),
+    );
+  }
+
+  const effects = params.inputCapEffects;
+  if (
+    (params.strategy === "paper-first-full" ||
+      params.strategy === "paper-cache-full" ||
+      params.strategy === "paper-manual-full" ||
+      params.strategy === "paper-exhaustive-full") &&
+    effects &&
+    (effects.documentContextTrimmed || effects.documentContextDropped)
+  ) {
+    messages.push(
+      [
+        "Before answering, briefly note that the paper text included for this",
+        "reply had to be truncated to fit the model input limit, so coverage",
+        "may be incomplete.",
+      ].join(" "),
+    );
+  }
+
+  return messages;
+}

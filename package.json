@@ -1,0 +1,92 @@
+{
+  "name": "llm-for-zotero",
+  "type": "module",
+  "version": "3.15.9-papers.1",
+  "description": "AI research agent rooted in your Zotero library",
+  "config": {
+    "addonName": "llm-for-zotero",
+    "addonID": "zotero-llm@github.com.yilewang",
+    "addonRef": "llmforzotero",
+    "addonInstance": "LLMForZotero",
+    "prefsPrefix": "extensions.zotero.llmforzotero"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Molaison/llm-for-zotero-papers.git"
+  },
+  "author": "Yile Wang",
+  "bugs": {
+    "url": "https://github.com/Molaison/llm-for-zotero-papers/issues"
+  },
+  "homepage": "https://github.com/Molaison/llm-for-zotero-papers",
+  "license": "AGPL-3.0-or-later",
+  "scripts": {
+    "start": "zotero-plugin serve",
+    "postinstall": "npm --prefix packages/claude-bridge ci --no-audit --no-fund",
+    "build": "zotero-plugin build",
+    "check:architecture": "node scripts/check-architecture-boundaries.cjs",
+    "check:cycles": "node scripts/check-import-cycles.cjs",
+    "validate:model-registry": "node scripts/validate-model-capability-registry.mjs",
+    "lint:check": "prettier --check . && eslint .",
+    "lint:fix": "prettier --write . && eslint . --fix",
+    "release": "npm run check:skill-hashes -- --skip-on-ci && zotero-plugin release",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.workflow.json && npm --prefix packages/claude-bridge run typecheck",
+    "test": "npm run typecheck && npm run check:tool-vocabulary && npm run check:skill-hashes && npm run test:unit && npm run test:unit:speed && npm run test:claude-bridge && npm run test:workflow",
+    "test:quick": "npm run typecheck && npm run test:unit",
+    "check:tool-vocabulary": "node scripts/check-retired-tool-names.cjs",
+    "check:skill-hashes": "tsx scripts/compute_obsolete_hashes.mjs",
+    "test:unit": "npx tsx node_modules/mocha/bin/mocha.js --parallel --timeout 10000 --require ./test/register.cjs --grep @speed --invert 'test/**/*.test.ts'",
+    "test:unit:speed": "npx tsx node_modules/mocha/bin/mocha.js --require ./test/register.cjs --grep @speed 'test/**/*.test.ts'",
+    "test:claude-bridge": "npm --prefix packages/claude-bridge test",
+    "test:mineru-restart": "node scripts/run-mineru-restart-tests.mjs",
+    "test:bulk-edit-restart": "node scripts/run-bulk-edit-restart-test.mjs && node scripts/run-bulk-edit-restart-test.mjs --crash",
+    "test:workflow": "node scripts/run-workflow-tests.mjs",
+    "test:workflow:parallel": "node scripts/run-workflow-tests.mjs --parallel 3",
+    "test:behavior": "node scripts/run-behavior-tests.mjs",
+    "test:behavior:smoke": "node scripts/run-behavior-tests.mjs --tier smoke",
+    "test:webchat:live": "node scripts/run-workflow-tests.mjs --webchat-live",
+    "update-deps": "npm update --save",
+    "test:agent:live": "node scripts/run-workflow-tests.mjs --agent-live"
+  },
+  "dependencies": {
+    "fflate": "^0.8.2",
+    "highlight.js": "^11.11.1",
+    "katex": "^0.16.28",
+    "marked": "^16.4.2",
+    "mermaid": "^11.15.0",
+    "parse5": "^8.0.0",
+    "pdf-lib": "1.17.1",
+    "zotero-plugin-toolkit": "^5.1.0-beta.13"
+  },
+  "devDependencies": {
+    "@types/chai": "^5.2.3",
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^24.10.0",
+    "@zotero-plugin/eslint-config": "^0.6.7",
+    "chai": "^6.2.1",
+    "esbuild": "0.25.12",
+    "eslint": "^9.39.2",
+    "mocha": "^11.7.5",
+    "prettier": "^3.7.4",
+    "ts-node": "^10.9.2",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "zotero-plugin-scaffold": "^0.8.2",
+    "zotero-types": "^4.1.0-beta.4"
+  },
+  "prettier": {
+    "printWidth": 80,
+    "tabWidth": 2,
+    "endOfLine": "lf",
+    "overrides": [
+      {
+        "files": [
+          "*.xhtml"
+        ],
+        "options": {
+          "htmlWhitespaceSensitivity": "css"
+        }
+      }
+    ]
+  }
+}

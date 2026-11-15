@@ -1,0 +1,6098 @@
+/**
+ * LLM API Client
+ *
+ * Provides streaming and non-streaming API calls to OpenAI-compatible endpoints.
+ */
+import { providerHttpError } from "./retryAfter";
+import { t } from "./i18n";
+import {
+  createResponsesPdfPreparation,
+  explainResponsesPdfRejection,
+  isPdfDataUrl,
+  isResponsesPdfAttachment,
+  type ResponsesInlineFilePart,
+} from "./responsesPdfInputs";
+
+import {
+  describeCprPapersHttpFailure,
+  encodeCprPapersRequestBody,
+  fetchCprPaperHistory,
+  prepareCprPaperRequest,
+} from "./cprPapers";
+import {
+  prepareCprDirectWebRequest,
+  CPR_DIRECT_WEB_UNCERTAIN_MESSAGE,
+} from "./cprDirectWeb";
+import { parseCprChartWidget, type CprChartWidget } from "./cprRichWidgets";
+import { appLogger } from "../core/logging";
+import { config } from "../../package.json";
+import {
+  DEFAULT_SYSTEM_PROMPT,
+  EMBEDDING_REQUEST_TIMEOUT_MS,
+} from "./llmDefaults";
+import {
+  getAnthropicReasoningProfileForModel,
+  getDeepseekReasoningProfileForModel,
+  getGeminiReasoningProfileForModel,
+  getGrokReasoningProfileForModel,
+  getMimoReasoningProfileForModel,
+  getOpenAIReasoningProfileForModel,
+  getQwenReasoningProfileForModel,
+  getReasoningDefaultLevelForModel,
+  getRuntimeReasoningOptionsForModel,
+  getThinkingSwitchProfileForModel,
+  supportsReasoningForModel,
+  withGeminiThoughtSummaries,
+} from "./reasoningProfiles";
+import type {
+  ReasoningProvider,
+  ReasoningLevel,
+  OpenAIReasoningEffort,
+  OpenAIReasoningProfile,
+  GeminiThinkingParam,
+  GeminiThinkingValue,
+  GeminiReasoningOption,
+  GeminiReasoningProfile,
+  AnthropicAdaptiveEffort,
+  AnthropicThinkingMode,
+  AnthropicReasoningProfile,
+  QwenReasoningProfile,
+  RuntimeReasoningOption,
+} from "./reasoningProfiles";
+import type {
+  ChatFileAttachment,
+  ChatMessage,
+  ImageContent,
+  MessageContent,
+  ReasoningConfig,
+  ReasoningEvent,
+  TextContent,
+  UsageStats,
+  ModelTurnCompletion,
+  ModelTurnOutcome,
+} from "../shared/llm";
+export type {
+  ChatFileAttachment,
+  ChatMessage,
+  ImageContent,
+  MessageContent,
+  ReasoningConfig,
+  ReasoningEvent,
+  TextContent,
+  UsageStats,
+  ModelTurnCompletion,
+  ModelTurnOutcome,
+} from "../shared/llm";
+import {
+  EMBEDDINGS_ENDPOINT,
+  FILES_ENDPOINT,
+  getAbortController,
+  resolveEndpoint,
+  usesMaxCompletionTokens,
+} from "./apiHelpers";
+import { pathToFileUrl } from "./localPath";
+import { fingerprintSecret } from "./secretFingerprint";
+import {
+  normalizeTemperature,
+  resolveGeminiTemperature,
+} from "./normalization";
+import {
+  getDefaultModelEntry,
+  getDefaultProviderGroup,
+  resolveConfiguredModelCapabilities,
+  getModelProviderGroups,
+  type ModelProviderAuthMode,
+} from "./modelProviders";
+import {
+  detectProviderPreset,
+  getProviderPreset,
+  isGrokApiBase,
+  providerSupportsFileUploads,
+  type SupportedProviderPresetId,
+} from "./providerPresets";
+import {
+  inferLegacyProviderProtocol,
+  type ProviderProtocol,
+} from "./providerProtocol";
+import {
+  buildProviderAuthHeaders,
+  sendProviderRequest,
+  createProviderRequestScope,
+  type ProviderRequestScope,
+  resolveAnthropicMessagesEndpoint,
+  resolveGeminiNativeEndpoint,
+  resolveOllamaNativeEndpoint,
+  resolveProviderTransportEndpoint,
+} from "./providerTransport";
+import { parseDataUrl } from "../shared/dataUrl";
+import { encodeBytesBase64, readFileRefAsBase64 } from "../agent/model/shared";
+import { buildMultipartRequest } from "./multipart";
+import {
+  applyModelInputTokenCap,
+  estimateConversationTokens,
+  estimateWirePayloadTokens,
+  resolveModelInputTokenLimit,
+  type InputCapResult,
+} from "./modelInputCap";
+import { resolveProviderCapabilities } from "../providers";
+import {
+  anthropicPromptTokens,
+  extractContextCacheUsage,
+  type ContextCachePlan,
+} from "../contextCache/manager";
+import type {
+  ModelInputMode,
+  OutputTokenLimitSetting,
+  PaperContextRef,
+} from "../shared/types";
+import {
+  compileReasoningControls,
+  ensureModelCapabilities,
+  getModelCapabilities,
+  resolveModelReasoningSelection,
+  isRecord,
+  isReservedRequestKey,
+  profileOverrideAppliesTo,
+  type ModelProfileOverride,
+  flattenToDotPaths,
+  toReasoningProvider,
+  type ResolvedModelCapabilities,
+} from "../modelCapabilities";
+import {
+  CODEX_DIRECT_RESPONSES_URL,
+  buildCodexAuthHeaders,
+  refreshCodexAuthSession,
+  resolveCodexAuthSession,
+} from "../codexAuth/auth";
+import {
+  assertCodexDirectModelAvailable,
+  sanitizeCodexDirectReasoningConfig,
+} from "../codexAuth/modelCatalog";
+import {
+  AUTO_REQUIRED_OUTPUT_TOKEN_SEED,
+  INPUT_ESTIMATE_SAFETY_RATIO,
+  resolveContextAllocation,
+  resolveOutputRequestPolicy,
+  resolveOutputReserve,
+  resolveTransmittedOutputPolicy,
+  type OutputRequestPolicy,
+} from "./outputTokenPolicy";
+
+// =============================================================================
+// Types
+// =============================================================================
+
+export type ChatParams = {
+  /** Zotero item and durable local conversation identity for paperRegistry. */
+  cprPaperItemId?: number;
+  cprPaperSessionId?: string;
+  /** Ordered PDF contexts for the explicit directWebPdf route. */
+  cprPaperContexts?: readonly PaperContextRef[];
+  paperRegistry?: boolean;
+  directWebPdf?: boolean;
+  modelEntryId?: string;
+  prompt: string;
+  context?: string;
+  history?: ChatMessage[];
+  signal?: AbortSignal;
+  /** Base64 data URL of an image to include with the prompt (legacy single-image field) */
+  image?: string;
+  /** Base64 data URLs to include with the prompt */
+  images?: string[];
+  /** Override model for this request */
+  model?: string;
+  /** Override API base for this request */
+  apiBase?: string;
+  /** Override API key for this request */
+  apiKey?: string;
+  /** Override auth mode for this request */
+  authMode?: ModelProviderAuthMode;
+  /** Optional reasoning control from UI */
+  reasoning?: ReasoningConfig;
+  /** Optional custom sampling temperature */
+  temperature?: number;
+  /** Per-response provider output policy. Missing is Auto. */
+  outputTokenLimit?: OutputTokenLimitSetting;
+  /** Optional override for input token cap. */
+  inputTokenCap?: number;
+  /** Optional per-model input capability override. Missing means auto. */
+  inputMode?: ModelInputMode;
+  /** Local files to attach when using Responses API (API-key PDFs are inline). */
+  attachments?: ChatFileAttachment[];
+  /** Extra system-only guidance added to the same request */
+  systemMessages?: string[];
+  /** Override provider protocol for this request */
+  providerProtocol?: ProviderProtocol;
+  /** Provider-side prompt/context cache plan resolved by the context planner. */
+  contextCache?: ContextCachePlan;
+  /** Session-only opaque state for resuming an incomplete provider response. */
+  continuationState?: unknown;
+  /** Conversation or standalone operation identity, preserved across retries. */
+  requestScope?: ProviderRequestScope;
+  /**
+   * User-authored capability overrides for the selected model. Threaded through
+   * so capability resolution, token clamping and the request body all see the
+   * same picture the preferences pane showed.
+   */
+  profileOverride?: ModelProfileOverride;
+};
+
+function resolveChatRouteCapabilities(params: ChatParams): {
+  paperRegistry: boolean;
+  directWebPdf: boolean;
+} {
+  const configured = resolveConfiguredModelCapabilities({
+    entryId: params.modelEntryId,
+    model: params.model,
+    apiBase: params.apiBase,
+  });
+  return {
+    paperRegistry: params.paperRegistry ?? configured.paperRegistry,
+    directWebPdf: params.directWebPdf ?? configured.directWebPdf,
+  };
+}
+
+export type ContextBudgetPlan = {
+  modelLimitTokens: number;
+  limitTokens: number;
+  softLimitTokens: number;
+  baseInputTokens: number;
+  outputReserveTokens: number;
+  reasoningReserveTokens: number;
+  contextBudgetTokens: number;
+};
+
+export type PreparedChatRequest = {
+  apiBase: string;
+  apiKey: string;
+  authMode: ModelProviderAuthMode;
+  model: string;
+  systemPrompt: string;
+  messages: ChatMessage[];
+  inputCap: InputCapResult;
+  providerProtocol: ProviderProtocol;
+  contextCache?: ContextCachePlan;
+};
+
+interface StreamChoice {
+  delta?: {
+    content?: unknown;
+    reasoning_content?: unknown;
+    reasoning?: unknown;
+    thinking?: unknown;
+    thought?: unknown;
+  };
+  message?: {
+    content?: unknown;
+    reasoning_content?: unknown;
+    reasoning?: unknown;
+    thinking?: unknown;
+    thought?: unknown;
+  };
+}
+
+interface CompletionResponse {
+  choices?: Array<{
+    message?: { content?: string };
+    text?: string;
+    finish_reason?: string | null;
+  }>;
+}
+
+const COMPLETE_MODEL_TURN = { status: "complete" } as const;
+
+function modelTurnOutcome(
+  text: string,
+  completion: ModelTurnCompletion = COMPLETE_MODEL_TURN,
+  continuationState?: unknown,
+): ModelTurnOutcome {
+  return {
+    text,
+    completion,
+    ...(continuationState === undefined ? {} : { continuationState }),
+  };
+}
+
+/** Normalize terminal metadata without inspecting or retaining model content. */
+export function normalizeProviderCompletion(
+  providerReason: unknown,
+  options?: { responseStatus?: unknown },
+): ModelTurnCompletion {
+  const rawReason =
+    typeof providerReason === "string" ? providerReason.trim() : "";
+  const reason = rawReason.toLowerCase();
+  const responseStatus =
+    typeof options?.responseStatus === "string"
+      ? options.responseStatus.trim().toLowerCase()
+      : "";
+
+  if (responseStatus === "incomplete" && !reason) {
+    return {
+      status: "blocked",
+      reason: "other",
+      providerReason: "incomplete",
+    };
+  }
+
+  if (
+    reason === "length" ||
+    reason === "max_tokens" ||
+    reason === "max_output_tokens" ||
+    reason === "max_tokens_exceeded" ||
+    reason === "max_completion_tokens"
+  ) {
+    return {
+      status: "incomplete",
+      reason: "output_limit",
+      ...(rawReason ? { providerReason: rawReason } : {}),
+    };
+  }
+  if (
+    reason === "model_context_window_exceeded" ||
+    reason === "context_length_exceeded" ||
+    reason === "context_window_exceeded" ||
+    reason === "max_context_length"
+  ) {
+    return {
+      status: "incomplete",
+      reason: "context_limit",
+      providerReason: rawReason,
+    };
+  }
+  if (reason === "pause_turn" || reason === "provider_pause") {
+    return {
+      status: "incomplete",
+      reason: "provider_pause",
+      providerReason: rawReason,
+    };
+  }
+  if (
+    reason === "content_filter" ||
+    reason === "safety" ||
+    reason === "blocked" ||
+    reason === "blocklist" ||
+    reason === "prohibited_content" ||
+    reason === "spii"
+  ) {
+    return {
+      status: "blocked",
+      reason: "safety",
+      providerReason: rawReason,
+    };
+  }
+  if (reason === "refusal" || reason === "refused") {
+    return {
+      status: "blocked",
+      reason: "refusal",
+      providerReason: rawReason,
+    };
+  }
+  if (
+    reason === "malformed_tool_call" ||
+    reason === "malformed_function_call" ||
+    reason === "unexpected_tool_call"
+  ) {
+    return {
+      status: "blocked",
+      reason: "malformed_tool_call",
+      providerReason: rawReason,
+    };
+  }
+  if (
+    (!reason && !responseStatus) ||
+    reason === "stop" ||
+    reason === "end_turn" ||
+    reason === "tool_use" ||
+    reason === "tool_calls" ||
+    reason === "completed" ||
+    responseStatus === "completed"
+  ) {
+    return COMPLETE_MODEL_TURN;
+  }
+  return {
+    status: "blocked",
+    reason: "other",
+    providerReason: rawReason || responseStatus || "unknown",
+  };
+}
+
+export function requireCompleteModelText(
+  outcome: ModelTurnOutcome,
+  operation = "Model utility call",
+): string {
+  if (outcome.completion.status !== "complete") {
+    const reason =
+      "reason" in outcome.completion ? outcome.completion.reason : "other";
+    throw new Error(`${operation} did not complete (${reason}).`);
+  }
+  if (!outcome.text.trim()) {
+    throw new Error(`${operation} returned no visible text.`);
+  }
+  return outcome.text;
+}
+
+interface EmbeddingResponse {
+  data?: Array<{ index?: number; embedding?: number[] }>;
+}
+
+type NativePdfPart = {
+  base64: string;
+};
+
+// =============================================================================
+// Constants
+// =============================================================================
+
+const DEFAULT_MODEL = "gpt-4o-mini";
+const DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small";
+export const DEFAULT_CODEX_API_BASE = CODEX_DIRECT_RESPONSES_URL;
+
+const COPILOT_GITHUB_CLIENT_ID = "Iv1.b507a08c87ecfe98";
+const COPILOT_DEVICE_CODE_URL = "https://github.com/login/device/code";
+const COPILOT_OAUTH_TOKEN_URL = "https://github.com/login/oauth/access_token";
+const COPILOT_TOKEN_URL = "https://api.github.com/copilot_internal/v2/token";
+const DEFAULT_COPILOT_API_BASE = "https://api.githubcopilot.com";
+
+// =============================================================================
+// Utilities
+// =============================================================================
+
+const prefKey = (key: string) => `${config.prefsPrefix}.${key}`;
+const getPref = (key: string) => Zotero.Prefs.get(prefKey(key), true) as string;
+
+function getApiConfig(overrides?: {
+  apiBase?: string;
+  apiKey?: string;
+  authMode?: ModelProviderAuthMode;
+  model?: string;
+  providerProtocol?: ProviderProtocol;
+}) {
+  const defaultEntry = getDefaultModelEntry();
+  const defaultProviderGroup = getDefaultProviderGroup();
+  const authMode = (overrides?.authMode ||
+    defaultEntry?.authMode ||
+    defaultProviderGroup?.authMode ||
+    "api_key") as ModelProviderAuthMode;
+  const prefApiBase =
+    defaultEntry?.apiBase ||
+    defaultProviderGroup?.apiBase ||
+    getPref("apiBasePrimary") ||
+    getPref("apiBase") ||
+    "";
+  const resolvedApiBase =
+    authMode === "codex_auth"
+      ? DEFAULT_CODEX_API_BASE
+      : overrides?.apiBase ||
+        prefApiBase ||
+        (authMode === "codex_app_server"
+          ? DEFAULT_CODEX_API_BASE
+          : authMode === "copilot_auth"
+            ? DEFAULT_COPILOT_API_BASE
+            : "");
+  const apiBase = resolvedApiBase.trim().replace(/\/$/, "");
+  const apiKey = (
+    overrides?.apiKey ||
+    defaultEntry?.apiKey ||
+    defaultProviderGroup?.apiKey ||
+    getPref("apiKeyPrimary") ||
+    getPref("apiKey") ||
+    ""
+  ).trim();
+  const modelPrimary =
+    defaultEntry?.model ||
+    getPref("modelPrimary") ||
+    getPref("model") ||
+    DEFAULT_MODEL;
+  const model = (overrides?.model || modelPrimary).trim();
+  const embeddingModel = getPref("embeddingModel") || DEFAULT_EMBEDDING_MODEL;
+  const customSystemPrompt = getPref("systemPrompt") || "";
+  const providerProtocol: ProviderProtocol = (() => {
+    if (authMode === "codex_auth") return "codex_responses";
+    if (overrides?.providerProtocol) return overrides.providerProtocol;
+    // Only inherit the configured group protocol when we are actually using that
+    // group's base URL. If the caller supplied their own apiBase override, derive
+    // the protocol from that URL instead so the correct transport is selected
+    // (e.g. a Grok /v1/responses URL should use responses_api, not the
+    // openai_chat_compat default from an unrelated legacy group entry).
+    if (!overrides?.apiBase) {
+      if (defaultEntry?.providerProtocol) return defaultEntry.providerProtocol;
+      if (defaultProviderGroup?.providerProtocol)
+        return defaultProviderGroup.providerProtocol;
+    }
+    return inferLegacyProviderProtocol({ authMode, apiBase });
+  })();
+
+  if (!apiBase) {
+    throw new Error("API URL is missing in preferences");
+  }
+
+  return {
+    apiBase,
+    apiKey,
+    authMode,
+    model,
+    embeddingModel,
+    systemPrompt: customSystemPrompt
+      ? `${DEFAULT_SYSTEM_PROMPT}\n\n${customSystemPrompt}`
+      : DEFAULT_SYSTEM_PROMPT,
+    providerProtocol,
+  };
+}
+
+export type ResolvedEmbeddingConfig = {
+  apiBase: string;
+  apiKey: string;
+  model: string;
+  providerKey: string;
+  cacheKey: string;
+  attemptKey: string;
+};
+
+function normalizeEmbeddingApiBase(apiBase: string): string {
+  return apiBase.trim().replace(/\/+$/, "");
+}
+
+const fingerprintEmbeddingSecret = fingerprintSecret;
+
+function resolveSeparateEmbeddingApiKey(embeddingProvider: string): string {
+  const explicitKey = (getPref("embeddingApiKey") || "").toString().trim();
+  if (explicitKey || embeddingProvider === "custom") return explicitKey;
+
+  const groups = getModelProviderGroups();
+  for (const group of groups) {
+    if (group.authMode !== "api_key" || !group.apiKey.trim()) continue;
+    if (detectProviderPreset(group.apiBase) === embeddingProvider) {
+      return group.apiKey.trim();
+    }
+  }
+  return "";
+}
+
+type AutoEmbeddingProvider = {
+  presetId: SupportedProviderPresetId;
+  apiBase: string;
+  apiKey: string;
+  defaultModel: string;
+};
+
+/**
+ * Reuse an already-configured chat provider for embeddings when the user never
+ * set up a dedicated embedding endpoint. Returns the first provider group, in
+ * the user's own order, that authenticates with an API key and whose preset
+ * serves an OpenAI-compatible /v1/embeddings endpoint. The group's key is used
+ * only for the embeddings request; it is never logged or shown in the UI.
+ */
+function resolveAutoEmbeddingProvider(): AutoEmbeddingProvider | null {
+  for (const group of getModelProviderGroups()) {
+    if (group.authMode !== "api_key") continue;
+    const apiKey = (group.apiKey || "").trim();
+    if (!apiKey) continue;
+    const presetId = detectProviderPreset(group.apiBase || "");
+    if (presetId === "customized") continue;
+    const preset = getProviderPreset(presetId);
+    if (!preset.supportsEmbeddings || !preset.defaultEmbeddingApiBase) continue;
+    return {
+      presetId,
+      apiBase: normalizeEmbeddingApiBase(preset.defaultEmbeddingApiBase),
+      apiKey,
+      defaultModel: preset.defaultEmbeddingModel || DEFAULT_EMBEDDING_MODEL,
+    };
+  }
+  return null;
+}
+
+/**
+ * Key-free view of the auto-resolved embedding provider, for UI that has to
+ * describe the effective configuration without touching the credential.
+ */
+export function getAutoEmbeddingProviderSummary(): {
+  providerId: SupportedProviderPresetId;
+  apiBase: string;
+  model: string;
+} | null {
+  const auto = resolveAutoEmbeddingProvider();
+  if (!auto) return null;
+  return {
+    providerId: auto.presetId,
+    apiBase: auto.apiBase,
+    model: auto.defaultModel,
+  };
+}
+
+export function getResolvedEmbeddingConfig(): ResolvedEmbeddingConfig {
+  const embeddingProvider = (getPref("embeddingProvider") || "")
+    .toString()
+    .trim();
+  const embeddingApiBase = normalizeEmbeddingApiBase(
+    (getPref("embeddingApiBase") || "").toString(),
+  );
+  const explicitEmbeddingModel = (getPref("embeddingModel") || "")
+    .toString()
+    .trim();
+
+  if (!embeddingApiBase) {
+    const auto = resolveAutoEmbeddingProvider();
+    if (!auto) {
+      throw new Error(
+        "No embedding provider configured. Enable semantic search and select a provider in Settings → Customization.",
+      );
+    }
+    const autoModel = explicitEmbeddingModel || auto.defaultModel;
+    const autoProviderKey = `${auto.presetId}:${auto.apiBase}`;
+    const autoCacheKey = `${autoProviderKey}:${autoModel}`;
+    return {
+      apiBase: auto.apiBase,
+      apiKey: auto.apiKey,
+      model: autoModel,
+      providerKey: autoProviderKey,
+      cacheKey: autoCacheKey,
+      attemptKey: `${autoCacheKey}:auth=${fingerprintEmbeddingSecret(auto.apiKey)}`,
+    };
+  }
+
+  const apiKey = resolveSeparateEmbeddingApiKey(embeddingProvider);
+  const model = explicitEmbeddingModel || DEFAULT_EMBEDDING_MODEL;
+  const providerKey = `${embeddingProvider}:${embeddingApiBase}`;
+  const cacheKey = `${providerKey}:${model}`;
+  return {
+    apiBase: embeddingApiBase,
+    apiKey,
+    model,
+    providerKey,
+    cacheKey,
+    attemptKey: `${cacheKey}:auth=${fingerprintEmbeddingSecret(apiKey)}`,
+  };
+}
+
+/**
+ * Returns the currently configured embedding model name.
+ */
+export function getEmbeddingModelName(): string {
+  const explicit = (getPref("embeddingModel") || "").toString().trim();
+  if (explicit) return explicit as string;
+
+  try {
+    return getResolvedEmbeddingConfig().model;
+  } catch {
+    // No embedding provider configured
+  }
+  return DEFAULT_EMBEDDING_MODEL;
+}
+
+type IOUtilsLike = {
+  exists?: (path: string) => Promise<boolean>;
+  read?: (path: string) => Promise<Uint8Array | ArrayBuffer>;
+  write?: (path: string, data: Uint8Array) => Promise<unknown>;
+  makeDirectory?: (
+    path: string,
+    options?: { createAncestors?: boolean; ignoreExisting?: boolean },
+  ) => Promise<void>;
+};
+
+type OSFileLike = {
+  exists?: (path: string) => Promise<boolean>;
+  read?: (path: string) => Promise<Uint8Array | ArrayBuffer>;
+  writeAtomic?: (path: string, data: Uint8Array) => Promise<void>;
+  makeDir?: (
+    path: string,
+    options?: { from?: string; ignoreExisting?: boolean },
+  ) => Promise<void>;
+};
+
+type ZoteroFileLike = {
+  getContentsAsync?: (
+    source: string | nsIFile,
+    charset?: string,
+    maxLength?: number,
+  ) => Promise<unknown> | unknown;
+  getBinaryContentsAsync?: (
+    source: string | nsIFile,
+    maxLength?: number,
+  ) => Promise<string> | string;
+};
+
+const uploadedResponseFileIdCache = new Map<string, string>();
+
+function getIOUtils(): IOUtilsLike | undefined {
+  const fromGlobal = (globalThis as unknown as { IOUtils?: IOUtilsLike })
+    .IOUtils;
+  if (fromGlobal?.read) return fromGlobal;
+  const fromToolkit = ztoolkit.getGlobal("IOUtils") as IOUtilsLike | undefined;
+  return fromToolkit?.read ? fromToolkit : undefined;
+}
+
+function getOSFile(): OSFileLike | undefined {
+  const fromGlobal = (globalThis as { OS?: { File?: OSFileLike } }).OS?.File;
+  if (fromGlobal?.read) return fromGlobal;
+  const toolkitOS = ztoolkit.getGlobal("OS") as
+    | { File?: OSFileLike }
+    | undefined;
+  const fromToolkit = toolkitOS?.File;
+  return fromToolkit?.read ? fromToolkit : undefined;
+}
+
+function getZoteroFile(): ZoteroFileLike | undefined {
+  const fromGlobal = (globalThis as { Zotero?: { File?: ZoteroFileLike } })
+    .Zotero?.File;
+  if (fromGlobal?.getContentsAsync || fromGlobal?.getBinaryContentsAsync) {
+    return fromGlobal;
+  }
+  const toolkitZotero = ztoolkit.getGlobal("Zotero") as
+    | { File?: ZoteroFileLike }
+    | undefined;
+  const fromToolkit = toolkitZotero?.File;
+  if (fromToolkit?.getContentsAsync || fromToolkit?.getBinaryContentsAsync) {
+    return fromToolkit;
+  }
+  return undefined;
+}
+
+function binaryStringToBytes(data: string): Uint8Array {
+  const out = new Uint8Array(data.length);
+  for (let i = 0; i < data.length; i++) {
+    out[i] = data.charCodeAt(i) & 0xff;
+  }
+  return out;
+}
+
+function coerceToBytes(data: unknown): Uint8Array | null {
+  if (data instanceof Uint8Array) return data;
+  if (data instanceof ArrayBuffer) return new Uint8Array(data);
+  if (ArrayBuffer.isView(data)) {
+    return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+  }
+  if (typeof data === "string") {
+    // Many Zotero/Gecko APIs return binary content as a byte-string.
+    return binaryStringToBytes(data);
+  }
+  return null;
+}
+
+// =============================================================================
+// GitHub Copilot Auth
+// =============================================================================
+
+let cachedCopilotJwt: { token: string; expiresAt: number } | null = null;
+
+function buildCopilotHeaders(token: string): Record<string, string> {
+  return {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${token}`,
+    "Copilot-Integration-Id": "vscode-chat",
+    "Editor-Version": "vscode/1.96.0",
+    "Editor-Plugin-Version": "copilot-chat/0.24.2",
+    "Openai-Intent": "conversation-panel",
+  };
+}
+
+export async function startCopilotDeviceFlow(signal?: AbortSignal): Promise<{
+  device_code: string;
+  user_code: string;
+  verification_uri: string;
+  interval: number;
+  expires_in: number;
+}> {
+  const response = await getFetch()(COPILOT_DEVICE_CODE_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    body: JSON.stringify({
+      client_id: COPILOT_GITHUB_CLIENT_ID,
+      scope: "read:user",
+    }),
+    signal,
+  });
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(
+      `GitHub device code request failed: ${response.status} ${response.statusText} - ${errorText}`,
+    );
+  }
+  return (await response.json()) as unknown as {
+    device_code: string;
+    user_code: string;
+    verification_uri: string;
+    interval: number;
+    expires_in: number;
+  };
+}
+
+export async function pollCopilotDeviceAuth(params: {
+  deviceCode: string;
+  interval: number;
+  expiresIn: number;
+  signal?: AbortSignal;
+}): Promise<string> {
+  const deadline = Date.now() + params.expiresIn * 1000;
+  let interval = params.interval * 1000;
+
+  while (Date.now() < deadline) {
+    if (params.signal?.aborted) {
+      throw new Error("Copilot device auth polling aborted");
+    }
+
+    let removeAbortListener: (() => void) | undefined;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(
+          resolve,
+          Math.min(interval, Math.max(0, deadline - Date.now())),
+        );
+        const onAbort = () => {
+          clearTimeout(timer);
+          reject(new Error("Copilot device auth polling aborted"));
+        };
+        params.signal?.addEventListener("abort", onAbort, { once: true });
+        removeAbortListener = () =>
+          params.signal?.removeEventListener("abort", onAbort);
+      });
+    } finally {
+      removeAbortListener?.();
+    }
+    if (params.signal?.aborted) {
+      throw new Error("Copilot device auth polling aborted");
+    }
+    if (Date.now() >= deadline) break;
+
+    const response = await getFetch()(COPILOT_OAUTH_TOKEN_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({
+        client_id: COPILOT_GITHUB_CLIENT_ID,
+        device_code: params.deviceCode,
+        grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+      }),
+      signal: params.signal,
+    });
+
+    const payload = (await response.json()) as {
+      access_token?: string;
+      error?: string;
+    };
+    if (params.signal?.aborted) {
+      throw new Error("Copilot device auth polling aborted");
+    }
+    if (Date.now() >= deadline) break;
+
+    if (payload.access_token) {
+      return payload.access_token;
+    }
+
+    if (payload.error === "authorization_pending") {
+      continue;
+    }
+    if (payload.error === "slow_down") {
+      interval += 5000;
+      continue;
+    }
+    if (payload.error === "expired_token") {
+      throw new Error("Login expired. Try again.");
+    }
+    if (payload.error === "access_denied") {
+      throw new Error("Login denied by user.");
+    }
+    throw new Error(`Unexpected device auth error: ${payload.error}`);
+  }
+
+  throw new Error("Login expired. Try again.");
+}
+
+async function fetchCopilotJwt(
+  githubToken: string,
+  signal?: AbortSignal,
+): Promise<{ token: string; expiresAt: number }> {
+  const response = await getFetch()(COPILOT_TOKEN_URL, {
+    method: "GET",
+    headers: {
+      Authorization: `token ${githubToken}`,
+      Accept: "application/json",
+      "Editor-Version": "vscode/1.96.0",
+      "Editor-Plugin-Version": "copilot-chat/0.24.2",
+      "User-Agent": "GithubCopilot/1.246.0",
+    },
+    signal,
+  });
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(
+      `Copilot token exchange failed: ${response.status} ${response.statusText} - ${errorText}`,
+    );
+  }
+  const payload = (await response.json()) as {
+    token?: string;
+    expires_at?: number;
+  };
+  const token = typeof payload.token === "string" ? payload.token.trim() : "";
+  if (!token) {
+    throw new Error("Copilot token exchange returned empty token");
+  }
+  const expiresAt =
+    typeof payload.expires_at === "number"
+      ? payload.expires_at * 1000
+      : Date.now() + 25 * 60 * 1000;
+  cachedCopilotJwt = { token, expiresAt };
+  return { token, expiresAt };
+}
+
+export async function resolveCopilotAccessToken(params: {
+  githubToken: string;
+  signal?: AbortSignal;
+}): Promise<string> {
+  if (cachedCopilotJwt && cachedCopilotJwt.expiresAt > Date.now() + 60_000) {
+    return cachedCopilotJwt.token;
+  }
+  const result = await fetchCopilotJwt(params.githubToken, params.signal);
+  return result.token;
+}
+
+type CopilotModelEntry = {
+  id?: string;
+  name?: string;
+  model_picker_enabled?: boolean;
+  model_picker_category?: string;
+  capabilities?: {
+    type?: string;
+    supports?: {
+      chat?: boolean;
+      tool_calls?: boolean;
+    };
+  };
+  policy?: {
+    state?: string;
+  };
+  supported_endpoints?: string[];
+};
+
+function isCopilotModelUsable(m: CopilotModelEntry): boolean {
+  // Exclude non-chat models (e.g. embeddings)
+  if (m.capabilities?.type && m.capabilities.type !== "chat") return false;
+  // Exclude models with disabled policy
+  if (m.policy?.state === "disabled") return false;
+  // Exclude models that support neither /chat/completions nor /responses
+  if (
+    Array.isArray(m.supported_endpoints) &&
+    !m.supported_endpoints.includes("/chat/completions") &&
+    !m.supported_endpoints.includes("/responses")
+  ) {
+    return false;
+  }
+  // Exclude internal/legacy duplicates (model_picker_enabled=false with no category)
+  if (m.model_picker_enabled === false && !m.model_picker_category)
+    return false;
+  // Exclude codex agent-only models (gated to VS Code agent, not usable via general API)
+  if (typeof m.id === "string" && /-codex($|-)/i.test(m.id)) return false;
+  // Exclude VS Code internal models (oswe = fine-tuned for VS Code Copilot)
+  if (typeof m.id === "string" && /^oswe-/i.test(m.id)) return false;
+  // Exclude grok-code models (gated to specific Copilot integrations)
+  if (typeof m.id === "string" && /^grok-code/i.test(m.id)) return false;
+  return true;
+}
+
+function resolveCopilotModelProtocol(
+  endpoints: string[] | undefined,
+): ProviderProtocol | undefined {
+  if (!Array.isArray(endpoints) || !endpoints.length) return undefined;
+  const hasChat = endpoints.includes("/chat/completions");
+  const hasResponses = endpoints.includes("/responses");
+  // Only override when the model doesn't support the default (chat/completions)
+  if (!hasChat && hasResponses) return "responses_api";
+  return undefined; // chat-compatible or both → inherit group default
+}
+
+export type CopilotModelInfo = {
+  id: string;
+  name: string;
+  protocol?: ProviderProtocol;
+};
+
+export async function fetchCopilotModelList(params: {
+  githubToken: string;
+  signal?: AbortSignal;
+}): Promise<CopilotModelInfo[]> {
+  const jwt = await resolveCopilotAccessToken(params);
+  const response = await getFetch()(`${DEFAULT_COPILOT_API_BASE}/models`, {
+    method: "GET",
+    headers: buildCopilotHeaders(jwt),
+    signal: params.signal,
+  });
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(
+      `Copilot model list fetch failed: ${response.status} ${response.statusText} - ${errorText}`,
+    );
+  }
+  const payload = (await response.json()) as {
+    data?: CopilotModelEntry[];
+  };
+  return (payload.data || [])
+    .filter(
+      (m) => typeof m.id === "string" && m.id.trim() && isCopilotModelUsable(m),
+    )
+    .map((m) => ({
+      id: m.id!.trim(),
+      name: (m.name || m.id || "").trim(),
+      protocol: resolveCopilotModelProtocol(m.supported_endpoints),
+    }));
+}
+
+export async function readLocalFileBytes(path: string): Promise<Uint8Array> {
+  const normalizedPath = (path || "").trim();
+  if (!normalizedPath) {
+    throw new Error("Attachment file path is empty");
+  }
+  const attempted: string[] = [];
+
+  const io = getIOUtils();
+  if (io?.read) {
+    attempted.push("IOUtils.read");
+    const data = await io.read(normalizedPath);
+    const bytes = coerceToBytes(data);
+    if (bytes) return bytes;
+  }
+
+  const osFile = getOSFile();
+  if (osFile?.read) {
+    attempted.push("OS.File.read");
+    const data = await osFile.read(normalizedPath);
+    const bytes = coerceToBytes(data);
+    if (bytes) return bytes;
+  }
+
+  const zoteroFile = getZoteroFile();
+  if (zoteroFile?.getContentsAsync) {
+    attempted.push("Zotero.File.getContentsAsync");
+    try {
+      const data = await zoteroFile.getContentsAsync(normalizedPath);
+      const bytes = coerceToBytes(data);
+      if (bytes) return bytes;
+    } catch (err) {
+      appLogger.warn("LLM: Zotero.File.getContentsAsync failed", err);
+    }
+  }
+  if (zoteroFile?.getBinaryContentsAsync) {
+    attempted.push("Zotero.File.getBinaryContentsAsync");
+    try {
+      const data = await zoteroFile.getBinaryContentsAsync(normalizedPath);
+      const bytes = coerceToBytes(data);
+      if (bytes) return bytes;
+    } catch (err) {
+      appLogger.warn("LLM: Zotero.File.getBinaryContentsAsync failed", err);
+    }
+  }
+
+  const fileUrl = pathToFileUrl(normalizedPath);
+  if (fileUrl) {
+    attempted.push("fetch(file://)");
+    try {
+      const res = await getFetch()(fileUrl);
+      if (res.ok) {
+        return new Uint8Array(await res.arrayBuffer());
+      }
+      appLogger.warn(
+        "LLM: fetch(file://) returned non-OK status",
+        res.status,
+        res.statusText,
+      );
+    } catch (err) {
+      appLogger.warn("LLM: fetch(file://) failed", err);
+    }
+  }
+
+  throw new Error(
+    `No binary file read API available (tried: ${attempted.join(", ") || "none"})`,
+  );
+}
+
+function createAbortError(): Error {
+  const err = new Error("Aborted");
+  (err as { name?: string }).name = "AbortError";
+  return err;
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw createAbortError();
+  }
+}
+
+type ResponsesPreparedFilePart =
+  | ResponsesInlineFilePart
+  | { type: "input_file"; file_id: string };
+
+async function prepareResponsesAttachments(
+  params: ChatParams & {
+    apiBase: string;
+    apiKey: string;
+    authMode: ModelProviderAuthMode;
+    model: string;
+    providerProtocol: ProviderProtocol;
+    messages: ChatMessage[];
+  },
+): Promise<{
+  responseFileIds: string[];
+  responseFilePartsByMessage: Map<number, ResponsesPreparedFilePart[]>;
+  allowAutomaticRetry: boolean;
+}> {
+  throwIfAborted(params.signal);
+  const responseFilePartsByMessage = new Map<
+    number,
+    ResponsesPreparedFilePart[]
+  >();
+  if (
+    params.providerProtocol !== "responses_api" ||
+    params.authMode !== "api_key"
+  ) {
+    const responseFileIds =
+      (params.providerProtocol === "responses_api" ||
+        params.providerProtocol === "codex_responses") &&
+      providerSupportsFileUploads(params.apiBase)
+        ? await uploadFilesForResponses({
+            apiBase: params.apiBase,
+            apiKey: params.apiKey,
+            attachments: params.attachments,
+            signal: params.signal,
+          })
+        : [];
+    return {
+      responseFileIds,
+      responseFilePartsByMessage,
+      allowAutomaticRetry: true,
+    };
+  }
+
+  const pdf = createResponsesPdfPreparation({
+    model: params.model,
+    apiBase: params.apiBase,
+    protocol: params.providerProtocol,
+    authMode: params.authMode,
+    inputMode: params.inputMode,
+    signal: params.signal,
+    readBytes: readLocalFileBytes,
+    encodeBase64: encodeBytesBase64,
+  });
+  // Only the retained, capped messages participate. No identity survives a request.
+  const seenPdfs = new Set<string>();
+  const latestUserIndex = params.messages
+    .map((message) => message.role)
+    .lastIndexOf("user");
+  for (let index = 0; index < params.messages.length; index++) {
+    const message = params.messages[index];
+    if (Array.isArray(message.content)) {
+      for (const part of message.content) {
+        if (part.type === "image_url" && isPdfDataUrl(part.image_url.url)) {
+          try {
+            pdf.includeDataUrl(part.image_url.url);
+          } catch (error) {
+            throw explainResponsesPdfRejection(error);
+          }
+        }
+      }
+    }
+    if (message.role !== "user") continue;
+    const attachments = [
+      ...(message.fileAttachments || []),
+      ...(index === latestUserIndex ? params.attachments || [] : []),
+    ];
+    const parts: ResponsesPreparedFilePart[] = [];
+    for (const attachment of attachments) {
+      if (isResponsesPdfAttachment(attachment)) {
+        // One content identity namespace; never equate files by a path alias.
+        const storedHash = attachment.contentHash?.trim().toLowerCase();
+        const hash =
+          storedHash && /^[a-f0-9]{64}$/.test(storedHash) ? storedHash : "";
+        const identity = (contentHash: string) =>
+          JSON.stringify([contentHash, attachment.name.trim()]);
+        if (hash && seenPdfs.has(identity(hash))) continue;
+        try {
+          const part = hash
+            ? await pdf.prepareFile(attachment)
+            : await pdf.prepareFile(attachment, async (bytes) => {
+                const subtle = globalThis.crypto?.subtle;
+                if (!subtle?.digest) {
+                  throw new Error("WebCrypto subtle.digest unavailable");
+                }
+                const digest = await subtle.digest(
+                  "SHA-256",
+                  bytes.buffer.slice(
+                    bytes.byteOffset,
+                    bytes.byteOffset + bytes.byteLength,
+                  ) as ArrayBuffer,
+                );
+                const contentHash = Array.from(
+                  new Uint8Array(digest),
+                  (value) => value.toString(16).padStart(2, "0"),
+                ).join("");
+                const key = identity(contentHash);
+                if (seenPdfs.has(key)) return false;
+                seenPdfs.add(key);
+                return true;
+              });
+          if (part) parts.push(part);
+        } catch (error) {
+          throw explainResponsesPdfRejection(error);
+        }
+        if (hash) seenPdfs.add(identity(hash));
+      } else if (!providerSupportsFileUploads(params.apiBase)) {
+        // Compatible Responses declares PDF support, not arbitrary /files.
+        parts.push(await pdf.prepareFile(attachment));
+      } else {
+        throwIfAborted(params.signal);
+        // Keep official non-PDF upload/cache behavior and mixed file order.
+        const fileIds = await uploadFilesForResponses({
+          apiBase: params.apiBase,
+          apiKey: params.apiKey,
+          attachments: [attachment],
+          signal: params.signal,
+        });
+        throwIfAborted(params.signal);
+        if (fileIds.length !== 1) {
+          throw new Error("File upload succeeded but no file ID was returned");
+        }
+        parts.push({ type: "input_file", file_id: fileIds[0] });
+      }
+    }
+    if (parts.length) responseFilePartsByMessage.set(index, parts);
+  }
+  throwIfAborted(params.signal);
+  return {
+    responseFileIds: [],
+    responseFilePartsByMessage,
+    allowAutomaticRetry: !pdf.hasPdf,
+  };
+}
+
+function normalizeUploadableAttachments(
+  attachments: ChatFileAttachment[] | undefined,
+): ChatFileAttachment[] {
+  if (!Array.isArray(attachments) || !attachments.length) return [];
+  const out: ChatFileAttachment[] = [];
+  const seen = new Set<string>();
+  for (const attachment of attachments) {
+    if (!attachment || typeof attachment !== "object") continue;
+    const storedPath =
+      typeof attachment.storedPath === "string"
+        ? attachment.storedPath.trim()
+        : "";
+    if (!storedPath) continue;
+    const name =
+      typeof attachment.name === "string" && attachment.name.trim()
+        ? attachment.name.trim()
+        : "attachment";
+    const mimeType =
+      typeof attachment.mimeType === "string" && attachment.mimeType.trim()
+        ? attachment.mimeType.trim()
+        : "application/octet-stream";
+    const contentHash =
+      typeof attachment.contentHash === "string" &&
+      /^[a-f0-9]{64}$/i.test(attachment.contentHash.trim())
+        ? attachment.contentHash.trim().toLowerCase()
+        : undefined;
+    const key = contentHash || storedPath;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({
+      name,
+      mimeType,
+      storedPath,
+      contentHash,
+    });
+  }
+  return out;
+}
+
+function extractUploadedFileId(data: unknown): string {
+  if (!data || typeof data !== "object") return "";
+  const typed = data as { id?: unknown; file_id?: unknown };
+  if (typeof typed.id === "string" && typed.id.trim()) {
+    return typed.id.trim();
+  }
+  if (typeof typed.file_id === "string" && typed.file_id.trim()) {
+    return typed.file_id.trim();
+  }
+  return "";
+}
+
+function isPurposeValidationError(status: number, bodyText: string): boolean {
+  if (status !== 400 && status !== 422) return false;
+  return /purpose/i.test(bodyText);
+}
+
+function buildUploadRequest(params: {
+  purpose: string;
+  fileName: string;
+  mimeType: string;
+  bytes: Uint8Array;
+}): { body: BodyInit; contentType?: string; mode: "formdata" | "manual" } {
+  const request = buildMultipartRequest(
+    [
+      { name: "purpose", value: params.purpose || "assistants" },
+      {
+        name: "file",
+        filename: params.fileName || "attachment",
+        contentType: params.mimeType || "application/octet-stream",
+        data: params.bytes,
+      },
+    ],
+    {
+      boundaryPrefix: "llmforzotero",
+      fallbackName: "attachment",
+      preferFormData: true,
+    },
+  );
+  return {
+    ...request,
+    body:
+      request.body instanceof Uint8Array
+        ? (request.body.buffer.slice(
+            request.body.byteOffset,
+            request.body.byteOffset + request.body.byteLength,
+          ) as ArrayBuffer)
+        : request.body,
+  };
+}
+
+async function uploadAttachmentForResponses(params: {
+  apiBase: string;
+  apiKey: string;
+  attachment: ChatFileAttachment;
+  signal?: AbortSignal;
+}): Promise<string> {
+  const filesUrl = resolveEndpoint(params.apiBase, FILES_ENDPOINT);
+  const storedPath = (params.attachment.storedPath || "").trim();
+  if (!storedPath) {
+    throw new Error("Attachment stored path is missing");
+  }
+  const cacheKey = [
+    filesUrl,
+    params.apiKey,
+    params.attachment.contentHash || storedPath,
+  ].join("::");
+  const cached = uploadedResponseFileIdCache.get(cacheKey);
+  if (cached) return cached;
+
+  throwIfAborted(params.signal);
+  const bytes = await readLocalFileBytes(storedPath);
+  throwIfAborted(params.signal);
+
+  const headers: Record<string, string> = {};
+  if (params.apiKey) {
+    headers.Authorization = `Bearer ${params.apiKey}`;
+  }
+  const uploadPurposes = ["assistants", "user_data"];
+  let lastError = "Unknown file upload error";
+  for (let index = 0; index < uploadPurposes.length; index++) {
+    const purpose = uploadPurposes[index];
+    const uploadRequest = buildUploadRequest({
+      purpose,
+      fileName: params.attachment.name || "attachment",
+      mimeType: params.attachment.mimeType || "application/octet-stream",
+      bytes,
+    });
+    const requestHeaders = uploadRequest.contentType
+      ? {
+          ...headers,
+          "Content-Type": uploadRequest.contentType,
+        }
+      : headers;
+    if (uploadRequest.mode === "manual") {
+      appLogger.debug(
+        "LLM: Uploading attachment via manual multipart fallback",
+        params.attachment.name,
+      );
+    }
+
+    const res = await getFetch()(filesUrl, {
+      method: "POST",
+      headers: requestHeaders,
+      body: uploadRequest.body,
+      signal: params.signal,
+    });
+    if (res.ok) {
+      const data = (await res.json()) as unknown;
+      const fileId = extractUploadedFileId(data);
+      if (!fileId) {
+        throw new Error("File upload succeeded but no file ID was returned");
+      }
+      uploadedResponseFileIdCache.set(cacheKey, fileId);
+      return fileId;
+    }
+
+    const errText = await res.text();
+    lastError = `${res.status} ${res.statusText} - ${errText}`;
+    if (
+      index === uploadPurposes.length - 1 ||
+      !isPurposeValidationError(res.status, errText)
+    ) {
+      break;
+    }
+  }
+
+  throw new Error(lastError);
+}
+
+export async function uploadFilesForResponses(params: {
+  apiBase: string;
+  apiKey: string;
+  attachments: ChatFileAttachment[] | undefined;
+  signal?: AbortSignal;
+}): Promise<string[]> {
+  const uploadable = normalizeUploadableAttachments(params.attachments);
+  if (!uploadable.length) return [];
+  const fileIds: string[] = [];
+  const seen = new Set<string>();
+  for (const attachment of uploadable) {
+    throwIfAborted(params.signal);
+    try {
+      const fileId = await uploadAttachmentForResponses({
+        apiBase: params.apiBase,
+        apiKey: params.apiKey,
+        attachment,
+        signal: params.signal,
+      });
+      if (!fileId || seen.has(fileId)) continue;
+      seen.add(fileId);
+      fileIds.push(fileId);
+    } catch (err) {
+      appLogger.warn(
+        "LLM: Failed to upload attachment to Responses API",
+        attachment.name,
+        err,
+      );
+    }
+  }
+  return fileIds;
+}
+
+/** Build messages array from params */
+function buildMessages(
+  params: ChatParams,
+  systemPrompt: string,
+): ChatMessage[] {
+  const messages: ChatMessage[] = [{ role: "system", content: systemPrompt }];
+
+  if (params.context) {
+    messages.push({
+      role: "system",
+      content: `Document Context:\n${params.context}`,
+    });
+  }
+
+  if (Array.isArray(params.systemMessages)) {
+    for (const systemMessage of params.systemMessages) {
+      if (typeof systemMessage !== "string" || !systemMessage.trim()) continue;
+      messages.push({
+        role: "system",
+        content: systemMessage.trim(),
+      });
+    }
+  }
+
+  if (params.history?.length) {
+    messages.push(...params.history);
+  }
+
+  const imageUrls: string[] = [];
+  if (Array.isArray(params.images)) {
+    for (const image of params.images) {
+      if (typeof image === "string" && image.trim()) {
+        imageUrls.push(image.trim());
+      }
+    }
+  }
+  if (typeof params.image === "string" && params.image.trim()) {
+    imageUrls.push(params.image.trim());
+  }
+
+  // Build user message - with image(s) if provided (vision API format)
+  if (imageUrls.length) {
+    const contentParts: (TextContent | ImageContent)[] = [
+      { type: "text", text: params.prompt },
+    ];
+    for (const url of imageUrls) {
+      contentParts.push({
+        type: "image_url",
+        image_url: {
+          url,
+          detail: "high",
+        },
+      });
+    }
+    messages.push({
+      role: "user",
+      content: contentParts,
+    });
+  } else {
+    messages.push({
+      role: "user",
+      content: params.prompt,
+    });
+  }
+
+  return messages;
+}
+
+function stripUnsupportedImageContent(
+  messages: ChatMessage[],
+  params: {
+    modelName: string;
+    apiBase?: string;
+    authMode?: ModelProviderAuthMode;
+    providerProtocol?: ProviderProtocol;
+    inputMode?: ModelInputMode;
+  },
+): ChatMessage[] {
+  const capabilities = resolveProviderCapabilities({
+    model: params.modelName,
+    apiBase: params.apiBase,
+    authMode: params.authMode,
+    protocol: params.providerProtocol,
+    inputMode: params.inputMode,
+  });
+  if (capabilities.images) return messages;
+  return messages.map((message) => {
+    if (typeof message.content === "string") return message;
+    const retainedPdfParts = message.content.filter(
+      (part) =>
+        part.type === "image_url" &&
+        isPdfDataUrl(part.image_url.url) &&
+        capabilities.pdf === "native",
+    );
+    const omittedImageCount = message.content.filter(
+      (part) => part.type === "image_url" && !retainedPdfParts.includes(part),
+    ).length;
+    const textParts = message.content
+      .filter((part): part is TextContent => part.type === "text")
+      .map((part) => part.text)
+      .filter((text) => text.trim());
+    const omittedNotice =
+      omittedImageCount > 0
+        ? `[${omittedImageCount} image input${
+            omittedImageCount === 1 ? "" : "s"
+          } omitted because ${params.modelName || "the selected model"} does not support image input.]`
+        : "";
+    if (retainedPdfParts.length) {
+      return {
+        ...message,
+        content: [
+          ...message.content.filter(
+            (part) => part.type === "text" || retainedPdfParts.includes(part),
+          ),
+          ...(omittedNotice
+            ? [{ type: "text" as const, text: omittedNotice }]
+            : []),
+        ],
+      };
+    }
+    const content = [...textParts, omittedNotice].filter(Boolean).join("\n\n");
+    return {
+      ...message,
+      content: content || omittedNotice || "",
+    };
+  });
+}
+
+export function prepareChatRequest(params: ChatParams): PreparedChatRequest {
+  const { apiBase, apiKey, authMode, model, systemPrompt, providerProtocol } =
+    getApiConfig({
+      apiBase: params.apiBase,
+      apiKey: params.apiKey,
+      authMode: params.authMode,
+      model: params.model,
+      providerProtocol: params.providerProtocol,
+    });
+  const builtMessages = buildMessages(params, systemPrompt).map((message) =>
+    providerProtocol === "responses_api" && authMode === "api_key"
+      ? message
+      : { role: message.role, content: message.content },
+  );
+  if (
+    providerProtocol === "responses_api" &&
+    authMode === "api_key" &&
+    builtMessages.some(
+      (message) =>
+        Array.isArray(message.content) &&
+        message.content.some(
+          (part) =>
+            part.type === "image_url" && isPdfDataUrl(part.image_url.url),
+        ),
+    ) &&
+    resolveProviderCapabilities({
+      model,
+      apiBase,
+      protocol: providerProtocol,
+      authMode,
+      inputMode: params.inputMode,
+    }).pdf !== "native"
+  ) {
+    throw new Error(
+      t(
+        "PDF input is not confirmed for this model and provider; no request was sent.",
+      ),
+    );
+  }
+  const rawMessages = stripUnsupportedImageContent(builtMessages, {
+    modelName: model,
+    apiBase,
+    authMode,
+    providerProtocol,
+    inputMode: params.inputMode,
+  });
+  const inputCap = applyModelInputTokenCap(
+    rawMessages,
+    model,
+    params.inputTokenCap,
+    {
+      provider: detectProviderPreset(apiBase).toString(),
+      apiBase,
+      protocol: providerProtocol,
+      authMode,
+      profileOverride: params.profileOverride,
+    },
+  );
+  return {
+    apiBase,
+    apiKey,
+    authMode,
+    model,
+    systemPrompt,
+    messages: inputCap.messages as ChatMessage[],
+    inputCap,
+    providerProtocol,
+    contextCache: params.contextCache,
+  };
+}
+
+export async function preflightRequestModelCapabilities(
+  params: ChatParams,
+): Promise<void> {
+  try {
+    const resolved = getApiConfig({
+      apiBase: params.apiBase,
+      apiKey: params.apiKey,
+      authMode: params.authMode,
+      model: params.model,
+      providerProtocol: params.providerProtocol,
+    });
+    await ensureModelCapabilities(
+      {
+        provider: detectProviderPreset(resolved.apiBase).toString(),
+        model: resolved.model,
+        apiBase: resolved.apiBase,
+        protocol: resolved.providerProtocol,
+        authMode: resolved.authMode,
+        apiKey: resolved.apiKey,
+      },
+      { timeoutMs: 5_000 },
+    );
+  } catch {
+    // Capability discovery is best effort. The request must retain its
+    // bundled/legacy fallback when a provider catalog is unavailable.
+  }
+}
+
+export function getReasoningReserveTokens(reasoning?: ReasoningConfig): number {
+  const level = reasoning?.level || "none";
+  switch (level) {
+    case "minimal":
+      return 512;
+    case "low":
+      return 1_024;
+    case "default":
+      return 1_024;
+    case "medium":
+      return 2_048;
+    case "high":
+      return 4_096;
+    case "xhigh":
+    case "ultra":
+    case "max":
+      return 8_192;
+    default:
+      return 256;
+  }
+}
+
+export function estimateAvailableContextBudget(params: {
+  prompt: string;
+  history?: ChatMessage[];
+  image?: string;
+  images?: string[];
+  model: string;
+  reasoning?: ReasoningConfig;
+  outputTokenLimit?: OutputTokenLimitSetting;
+  inputTokenCap?: number;
+  systemPrompt?: string;
+  apiBase?: string;
+  providerProtocol?: ProviderProtocol;
+  authMode?: ModelProviderAuthMode;
+  profileOverride?: ModelProfileOverride;
+}): ContextBudgetPlan {
+  const normalizedModel =
+    (params.model || DEFAULT_MODEL).trim() || DEFAULT_MODEL;
+  const resolvedInputLimit = resolveModelInputTokenLimit(
+    normalizedModel,
+    params.inputTokenCap,
+    {
+      provider: params.apiBase
+        ? detectProviderPreset(params.apiBase).toString()
+        : undefined,
+      apiBase: params.apiBase,
+      protocol: params.providerProtocol,
+      authMode: params.authMode,
+      profileOverride: params.profileOverride,
+    },
+  );
+  const limitTokens = resolvedInputLimit.limitTokens;
+  const modelLimitTokens = limitTokens;
+  // Same owner as the Agent prompt budget: the usable window and the answer
+  // reserve both come from the context allocation for the resolved policy.
+  const allocation = resolveContextAllocation({
+    contextWindow: limitTokens,
+    policy: resolveOutputRequestPolicy({
+      setting: params.outputTokenLimit,
+      model: normalizedModel,
+      apiBase: params.apiBase,
+      protocol: params.providerProtocol || "openai_chat_compat",
+      authMode: params.authMode,
+      profileOverride: params.profileOverride,
+    }),
+  });
+  const softLimitTokens = allocation.usableTokens;
+  const outputReserveTokens = allocation.answerReserveTokens;
+  const reasoningReserveTokens = getReasoningReserveTokens(params.reasoning);
+
+  const baseMessages = buildMessages(
+    {
+      prompt: params.prompt,
+      history: params.history,
+      image: params.image,
+      images: params.images,
+    },
+    params.systemPrompt
+      ? `${DEFAULT_SYSTEM_PROMPT}\n\n${params.systemPrompt}`
+      : DEFAULT_SYSTEM_PROMPT,
+  );
+  const baseInputTokens = estimateConversationTokens(baseMessages);
+  const contextBudgetTokens = Math.max(
+    0,
+    softLimitTokens -
+      baseInputTokens -
+      outputReserveTokens -
+      reasoningReserveTokens,
+  );
+
+  return {
+    modelLimitTokens,
+    limitTokens,
+    softLimitTokens,
+    baseInputTokens,
+    outputReserveTokens,
+    reasoningReserveTokens,
+    contextBudgetTokens,
+  };
+}
+
+/** Read-only registry history lookup, using the same transport as paper turns. */
+export function loadCprPaperHistory(
+  params: Omit<
+    Parameters<typeof fetchCprPaperHistory>[0],
+    "fetchFn" | "readBytes"
+  >,
+) {
+  return fetchCprPaperHistory({
+    ...params,
+    fetchFn: getFetch(),
+    readBytes: readLocalFileBytes,
+  });
+}
+
+/** Get fetch function from Zotero global */
+function getFetch(signal?: AbortSignal): typeof fetch {
+  const fetchFn = ztoolkit.getGlobal("fetch") as typeof fetch;
+  if (!signal) return fetchFn;
+  return (input, init) => {
+    // Session-header resolution may await before invoking fetch.
+    throwIfAborted(signal);
+    return fetchFn(input, init);
+  };
+}
+
+function normalizeStreamText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  if (Array.isArray(value)) {
+    return value
+      .map((entry) => normalizeStreamText(entry))
+      .filter(Boolean)
+      .join("");
+  }
+  if (value && typeof value === "object") {
+    const row = value as {
+      text?: unknown;
+      content?: unknown;
+      reasoning?: unknown;
+      summary?: unknown;
+      delta?: unknown;
+      thinking?: unknown;
+      thought?: unknown;
+    };
+    return (
+      normalizeStreamText(row.text) ||
+      normalizeStreamText(row.content) ||
+      normalizeStreamText(row.reasoning) ||
+      normalizeStreamText(row.summary) ||
+      normalizeStreamText(row.delta) ||
+      normalizeStreamText(row.thinking) ||
+      normalizeStreamText(row.thought)
+    );
+  }
+  return "";
+}
+
+type ThoughtTagState = {
+  inThought: boolean;
+  buffer: string;
+  /** Which tag opened the current block, so only its match can close it. */
+  openTagName?: string;
+  /**
+   * Whether any non-whitespace answer text has streamed yet. Once it has, a
+   * reasoning tag can no longer be a chat-template leak, so it is left in the
+   * answer as the ordinary text it is.
+   */
+  sawAnswerText: boolean;
+};
+
+function getPartialTagTailLength(text: string, tag: string): number {
+  const textLower = text.toLowerCase();
+  const tagLower = tag.toLowerCase();
+  const max = Math.min(textLower.length, tagLower.length - 1);
+  for (let len = max; len > 0; len--) {
+    if (tagLower.startsWith(textLower.slice(-len))) {
+      return len;
+    }
+  }
+  return 0;
+}
+
+/**
+ * Reasoning tags that arrive inline in the content stream instead of in a
+ * dedicated field. Every one of them is *leakage*, not a contract this plugin
+ * asked the model for: llama.cpp and vLLM without a reasoning parser pass the
+ * chat template's raw output straight through, and `<thought>` reaches us the
+ * same way from a Codex-side prompt we do not own.
+ *
+ * That distinction is why `thoughtBlockCanOpen` below exists. Nothing tells a
+ * leaked `<think>` apart from a model *writing about* `<think>` except where it
+ * sits: a template always emits its reasoning block first, so a leak opens the
+ * assistant message, while an answer that mentions the tag has already started
+ * talking. Without that rule, "how do I stop my model emitting <think> blocks?"
+ * loses its own answer into the Thinking panel.
+ */
+const THOUGHT_TAG_NAMES = ["thought", "think", "reasoning"] as const;
+
+type ThoughtTagMatch = { index: number; length: number; name: string };
+
+/**
+ * Whether a reasoning block may still open. False once the model has streamed
+ * any non-whitespace answer text — the leading newlines a chat template emits
+ * around its block (`<think>\n…\n</think>\n\n`) are part of the leak, so
+ * whitespace alone must not close the window.
+ */
+function thoughtBlockCanOpen(state: ThoughtTagState): boolean {
+  return !state.sawAnswerText;
+}
+
+/** Earliest opening tag at or after `from`, across every recognized name. */
+function findEarliestTag(
+  haystackLower: string,
+  from: number,
+  build: (name: string) => string,
+): ThoughtTagMatch | null {
+  let best: ThoughtTagMatch | null = null;
+  for (const name of THOUGHT_TAG_NAMES) {
+    const tag = build(name);
+    const index = haystackLower.indexOf(tag, from);
+    if (index === -1) continue;
+    if (!best || index < best.index) {
+      best = { index, length: tag.length, name };
+    }
+  }
+  return best;
+}
+
+/**
+ * Longest partial tag suffix across every recognized name, so a tag split
+ * across two stream chunks is held back rather than emitted as text.
+ */
+function longestPartialTagTail(
+  segment: string,
+  build: (name: string) => string,
+): number {
+  let longest = 0;
+  for (const name of THOUGHT_TAG_NAMES) {
+    const tail = getPartialTagTailLength(segment, build(name));
+    if (tail > longest) longest = tail;
+  }
+  return longest;
+}
+
+function splitThoughtTaggedText(
+  chunk: string,
+  state: ThoughtTagState,
+): { answer: string; thought: string } {
+  const openTag = (name: string) => `<${name}>`;
+  const closeTag = (name: string) => `</${name}>`;
+  const input = `${state.buffer}${chunk}`;
+  state.buffer = "";
+  if (!input) return { answer: "", thought: "" };
+
+  const inputLower = input.toLowerCase();
+  let answer = "";
+  let thought = "";
+  let cursor = 0;
+
+  while (cursor < input.length) {
+    if (state.inThought) {
+      // Only the tag that opened the block can close it, so a stray
+      // `</think>` inside a `<thought>` block does not end it early.
+      const closeName = state.openTagName || THOUGHT_TAG_NAMES[0];
+      const close = closeTag(closeName);
+      const closeIdx = inputLower.indexOf(close, cursor);
+      if (closeIdx === -1) {
+        const segment = input.slice(cursor);
+        const tailLen = getPartialTagTailLength(segment, close);
+        thought += segment.slice(0, segment.length - tailLen);
+        state.buffer = segment.slice(segment.length - tailLen);
+        break;
+      }
+      thought += input.slice(cursor, closeIdx);
+      cursor = closeIdx + close.length;
+      state.inThought = false;
+      state.openTagName = undefined;
+      continue;
+    }
+
+    const open = thoughtBlockCanOpen(state)
+      ? findEarliestTag(inputLower, cursor, openTag)
+      : null;
+    // Answer text ahead of the tag means the model is writing about it, not
+    // leaking it, so the tag and everything after stay in the answer.
+    const opensTheMessage = open
+      ? !input.slice(cursor, open.index).trim()
+      : false;
+    if (!open || !opensTheMessage) {
+      const segment = input.slice(cursor);
+      // Only hold back a partial tag while one could still open; afterwards a
+      // trailing `<thi` is ordinary text and must not be swallowed.
+      const tailLen = thoughtBlockCanOpen(state)
+        ? longestPartialTagTail(segment, openTag)
+        : 0;
+      const emitted = segment.slice(0, segment.length - tailLen);
+      answer += emitted;
+      if (emitted.trim()) state.sawAnswerText = true;
+      state.buffer = segment.slice(segment.length - tailLen);
+      break;
+    }
+    answer += input.slice(cursor, open.index);
+    cursor = open.index + open.length;
+    state.inThought = true;
+    state.openTagName = open.name;
+  }
+
+  return { answer, thought };
+}
+
+/**
+ * Flush whatever is left in the tag buffer when the stream ends.
+ *
+ * Only a partial tag suffix can be held back — text inside an open reasoning
+ * block is emitted as it arrives so the Thinking panel stays live. That means
+ * an unterminated block cannot be reclassified as the answer after the fact
+ * without showing the same text twice, so it is deliberately left as reasoning.
+ */
+function resolveUnterminatedThought(state: ThoughtTagState): {
+  asAnswer: boolean;
+  text: string;
+} {
+  const text = state.buffer;
+  if (!text) return { asAnswer: false, text: "" };
+  return { asAnswer: !state.inThought, text };
+}
+
+function buildTokenParam(model: string, policy: OutputRequestPolicy) {
+  if (policy.mode !== "numeric") return {};
+  return usesMaxCompletionTokens(model)
+    ? { max_completion_tokens: policy.tokens }
+    : { max_tokens: policy.tokens };
+}
+
+function buildResponsesTokenParam(policy: OutputRequestPolicy) {
+  return policy.mode === "numeric" ? { max_output_tokens: policy.tokens } : {};
+}
+
+const OPENAI_EFFORT_ORDER: OpenAIReasoningEffort[] = [
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+];
+
+const REASONING_LEVEL_ALIAS_MAP: Partial<
+  Record<ReasoningLevel, ReasoningLevel>
+> = {
+  minimal: "low",
+  xhigh: "high",
+};
+
+function getReasoningLevelAlias(level: ReasoningLevel): ReasoningLevel | null {
+  return REASONING_LEVEL_ALIAS_MAP[level] || null;
+}
+
+// Re-export reasoning profile helpers so consumers can import from llmClient
+// without coupling directly to reasoningProfiles.
+export type {
+  ReasoningProvider,
+  ReasoningLevel,
+  OpenAIReasoningEffort,
+  OpenAIReasoningProfile,
+  GeminiThinkingParam,
+  GeminiThinkingValue,
+  GeminiReasoningOption,
+  GeminiReasoningProfile,
+  AnthropicAdaptiveEffort,
+  AnthropicThinkingMode,
+  AnthropicReasoningProfile,
+  QwenReasoningProfile,
+  RuntimeReasoningOption,
+} from "./reasoningProfiles";
+
+export {
+  getRuntimeReasoningOptionsForModel as getRuntimeReasoningOptions,
+  getOpenAIReasoningProfileForModel as getOpenAIReasoningProfile,
+  getGrokReasoningProfileForModel as getGrokReasoningProfile,
+  getGeminiReasoningProfileForModel as getGeminiReasoningProfile,
+  getAnthropicReasoningProfileForModel as getAnthropicReasoningProfile,
+  getQwenReasoningProfileForModel as getQwenReasoningProfile,
+} from "./reasoningProfiles";
+
+// Local aliases for internal use (re-exports above don't create local bindings)
+const getOpenAIReasoningProfile = getOpenAIReasoningProfileForModel;
+const getGrokReasoningProfile = getGrokReasoningProfileForModel;
+const getGeminiReasoningProfile = getGeminiReasoningProfileForModel;
+const getAnthropicReasoningProfile = getAnthropicReasoningProfileForModel;
+const getQwenReasoningProfile = getQwenReasoningProfileForModel;
+
+function resolveOpenAIReasoningEffort(
+  provider: "openai" | "grok",
+  level: ReasoningLevel,
+  modelName?: string,
+  apiBase?: string,
+): OpenAIReasoningEffort | null {
+  const profile =
+    provider === "grok"
+      ? getGrokReasoningProfile(modelName)
+      : getOpenAIReasoningProfile(modelName);
+  const direct = profile.levelToEffort[level];
+  if (direct !== undefined) {
+    return direct;
+  }
+
+  const requestedAlias = getReasoningLevelAlias(level);
+  if (requestedAlias) {
+    const aliasValue = profile.levelToEffort[requestedAlias];
+    if (aliasValue !== undefined) {
+      return aliasValue;
+    }
+  }
+
+  for (const candidate of OPENAI_EFFORT_ORDER) {
+    if (profile.supportedEfforts.includes(candidate)) {
+      return candidate;
+    }
+  }
+
+  const defaultEffort = profile.levelToEffort[profile.defaultLevel];
+  if (defaultEffort !== undefined) {
+    return defaultEffort;
+  }
+
+  return null;
+}
+
+function resolveAnthropicThinkingBudget(
+  level: ReasoningLevel,
+  profile: AnthropicReasoningProfile,
+): number {
+  const direct = profile.levelToBudgetTokens[level];
+  if (Number.isFinite(direct)) {
+    return Number(direct);
+  }
+
+  const aliasLevel = getReasoningLevelAlias(level);
+  if (aliasLevel) {
+    const aliasBudget = profile.levelToBudgetTokens[aliasLevel];
+    if (Number.isFinite(aliasBudget)) {
+      return Number(aliasBudget);
+    }
+  }
+
+  const defaultBudget = profile.levelToBudgetTokens[profile.defaultLevel];
+  if (Number.isFinite(defaultBudget)) {
+    return Number(defaultBudget);
+  }
+
+  return profile.defaultBudgetTokens;
+}
+
+function resolveAnthropicAdaptiveEffort(
+  level: ReasoningLevel,
+  profile: AnthropicReasoningProfile,
+): AnthropicAdaptiveEffort | null {
+  const direct = profile.levelToEffort[level];
+  if (direct) return direct;
+
+  const aliasLevel = getReasoningLevelAlias(level);
+  if (aliasLevel) {
+    const aliasEffort = profile.levelToEffort[aliasLevel];
+    if (aliasEffort) return aliasEffort;
+  }
+
+  const defaultEffort = profile.levelToEffort[profile.defaultLevel];
+  return defaultEffort || null;
+}
+
+function resolveAnthropicThinkingMode(params: {
+  profile: AnthropicReasoningProfile;
+  override?: AnthropicReasoningModeOverride;
+}): AnthropicReasoningModeOverride | null {
+  if (
+    params.override === "adaptive" &&
+    params.profile.supportsAdaptiveThinking
+  ) {
+    return "adaptive";
+  }
+  if (params.override === "manual" && params.profile.supportsManualThinking) {
+    return "manual";
+  }
+  if (
+    params.profile.preferredMode === "adaptive" &&
+    params.profile.supportsAdaptiveThinking
+  ) {
+    return "adaptive";
+  }
+  if (
+    params.profile.preferredMode === "manual" &&
+    params.profile.supportsManualThinking
+  ) {
+    return "manual";
+  }
+  return null;
+}
+
+/** A local validation failure for a main request's selected reasoning mode. */
+export class ReasoningBudgetError extends Error {
+  readonly code = "reasoning_budget_too_small" as const;
+
+  constructor(message: string) {
+    super(message);
+    this.name = "ReasoningBudgetError";
+  }
+}
+
+function resolveAnthropicManualBudget(params: {
+  level: ReasoningLevel;
+  profile: AnthropicReasoningProfile;
+  maxTokens?: number;
+  modelName?: string;
+}): number {
+  const requested = Math.max(
+    1024,
+    Math.floor(resolveAnthropicThinkingBudget(params.level, params.profile)),
+  );
+  const maxTokens = Math.floor(Number(params.maxTokens));
+  if (!Number.isFinite(maxTokens) || maxTokens < 1) {
+    return requested;
+  }
+
+  const reservedAnswerTokens = 1024;
+  const maxBudgetTokens = maxTokens - reservedAnswerTokens;
+  if (maxBudgetTokens < 1024) {
+    const label = (params.modelName || "the selected Anthropic model").trim();
+    throw new ReasoningBudgetError(
+      `${label} extended thinking requires max_tokens of at least 2048 so budget_tokens can be less than max_tokens while leaving room for the answer. Increase max tokens or turn thinking off.`,
+    );
+  }
+  return Math.min(requested, maxBudgetTokens);
+}
+
+function resolveQwenEnableThinking(
+  level: ReasoningLevel,
+  profile: QwenReasoningProfile,
+): boolean | null {
+  const direct = profile.levelToEnableThinking[level];
+  if (typeof direct === "boolean" || direct === null) {
+    return direct;
+  }
+
+  const aliasLevel = getReasoningLevelAlias(level);
+  if (aliasLevel) {
+    const aliasValue = profile.levelToEnableThinking[aliasLevel];
+    if (typeof aliasValue === "boolean" || aliasValue === null) {
+      return aliasValue;
+    }
+  }
+
+  const defaultValue = profile.levelToEnableThinking[profile.defaultLevel];
+  if (typeof defaultValue === "boolean" || defaultValue === null) {
+    return defaultValue;
+  }
+
+  return profile.defaultEnableThinking;
+}
+
+function isDashScopeApiBase(apiBase?: string): boolean {
+  const normalized = (apiBase || "").trim().toLowerCase();
+  if (!normalized) return false;
+  return /dashscope(?:-intl)?\.aliyuncs\.com/.test(normalized);
+}
+
+function resolveGeminiReasoningOption(
+  level: ReasoningLevel,
+  profile: GeminiReasoningProfile,
+): GeminiReasoningOption {
+  const direct = profile.levelToValue[level];
+  if (direct !== undefined) {
+    return { level, value: direct };
+  }
+
+  const aliasLevel = getReasoningLevelAlias(level);
+  if (aliasLevel) {
+    const aliasValue = profile.levelToValue[aliasLevel];
+    if (aliasValue !== undefined) {
+      return { level: aliasLevel, value: aliasValue };
+    }
+  }
+
+  const defaultMapped = profile.levelToValue[profile.defaultLevel];
+  if (defaultMapped !== undefined) {
+    return { level: profile.defaultLevel, value: defaultMapped };
+  }
+
+  const byDefaultValue = profile.options.find(
+    (option) => option.value === profile.defaultValue,
+  );
+  if (byDefaultValue) return byDefaultValue;
+
+  return profile.options[0] || { level: "medium", value: profile.defaultValue };
+}
+
+function stringifyContent(content: MessageContent): string {
+  if (typeof content === "string") return content;
+  return content
+    .map((part) => (part.type === "text" ? part.text : ""))
+    .filter(Boolean)
+    .join("\n");
+}
+
+function mergeSystemMessagesForChatPayload(
+  messages: ChatMessage[],
+): ChatMessage[] {
+  if (!Array.isArray(messages) || !messages.length) return [];
+  const systemParts = messages
+    .filter((message) => message.role === "system")
+    .map((message) => stringifyContent(message.content).trim())
+    .filter(Boolean);
+  if (!systemParts.length) return messages;
+  return [
+    {
+      role: "system",
+      content: systemParts.join("\n\n"),
+    },
+    ...messages.filter((message) => message.role !== "system"),
+  ];
+}
+
+function buildResponsesInput(
+  messages: ChatMessage[],
+  responseFileIds?: string[],
+  options?: {
+    preserveSystemMessages?: boolean;
+    filePartsByMessage?: ReadonlyMap<number, ResponsesPreparedFilePart[]>;
+  },
+) {
+  const preserveSystemMessages = options?.preserveSystemMessages === true;
+  const instructionsParts: string[] = [];
+  type ResponsesContentPart =
+    | { type: "input_text"; text: string }
+    | { type: "input_image"; image_url: string; detail?: string }
+    | { type: "input_file"; file_id: string }
+    | { type: "input_file"; filename: string; file_data: string };
+  const input: Array<{
+    type: "message";
+    role: "system" | "user" | "assistant";
+    content: string | ResponsesContentPart[];
+  }> = [];
+  const normalizedFileIds = Array.isArray(responseFileIds)
+    ? responseFileIds
+        .filter((entry): entry is string => typeof entry === "string")
+        .map((entry) => entry.trim())
+        .filter(Boolean)
+    : [];
+  const currentFiles: ResponsesContentPart[] = [
+    ...normalizedFileIds.map((file_id) => ({
+      type: "input_file" as const,
+      file_id,
+    })),
+  ];
+  const latestUserIndex = messages
+    .map((message) => message.role)
+    .lastIndexOf("user");
+  if (currentFiles.length && latestUserIndex < 0) {
+    throw new Error(
+      t("Cannot attach PDF without a user input; no request was sent."),
+    );
+  }
+
+  for (let index = 0; index < messages.length; index++) {
+    const message = messages[index];
+    if (message.role === "system" && !preserveSystemMessages) {
+      const text = stringifyContent(message.content);
+      if (text) instructionsParts.push(text);
+      continue;
+    }
+    const messageFiles =
+      message.role === "user"
+        ? [
+            ...(index === latestUserIndex ? currentFiles : []),
+            ...(options?.filePartsByMessage?.get(index) || []),
+          ]
+        : [];
+    const appendFilesToMessage = messageFiles.length > 0;
+
+    if (typeof message.content === "string") {
+      if (appendFilesToMessage) {
+        const contentParts: ResponsesContentPart[] = [
+          { type: "input_text", text: message.content },
+        ];
+        contentParts.push(...messageFiles);
+        input.push({
+          type: "message",
+          role: message.role,
+          content: contentParts,
+        });
+        continue;
+      }
+      input.push({
+        type: "message",
+        role: message.role,
+        content: message.content,
+      });
+      continue;
+    }
+
+    let pdfCounter = 0;
+    const contentParts: ResponsesContentPart[] = message.content.map((part) => {
+      if (part.type === "text") {
+        return { type: "input_text" as const, text: part.text };
+      }
+      const url = part.image_url.url;
+      // Legacy PDF data URIs from older history entries should be sent as
+      // inline input_file, not input_image. Current attachments are appended
+      // separately below, retaining their original filenames.
+      if (isPdfDataUrl(url)) {
+        pdfCounter += 1;
+        return {
+          type: "input_file" as const,
+          filename: `document${pdfCounter > 1 ? `-${pdfCounter}` : ""}.pdf`,
+          file_data: url,
+        };
+      }
+      return {
+        type: "input_image" as const,
+        image_url: url,
+        detail: part.image_url.detail,
+      };
+    });
+    if (appendFilesToMessage) {
+      contentParts.push(...messageFiles);
+    }
+
+    input.push({
+      type: "message",
+      role: message.role,
+      content: contentParts,
+    });
+  }
+
+  return {
+    instructions: instructionsParts.length
+      ? instructionsParts.join("\n\n")
+      : undefined,
+    input,
+  };
+}
+
+function emptyReasoningPayload() {
+  return { extra: {}, omitTemperature: false } as const;
+}
+
+export type AnthropicReasoningModeOverride = Exclude<
+  AnthropicThinkingMode,
+  "none"
+>;
+
+export type ReasoningPayloadOptions = {
+  maxTokens?: number;
+  anthropicModeOverride?: AnthropicReasoningModeOverride;
+  /** User-authored capability overrides, including extra body parameters. */
+  profileOverride?: ModelProfileOverride;
+};
+
+export type ReasoningSelection = ReasoningConfig & {
+  anthropicModeOverride?: AnthropicReasoningModeOverride;
+};
+
+/**
+ * The request fragment one reasoning level actually contributes.
+ *
+ * The preferences editor asks this rather than describing the encoding a
+ * second time, so a level's row can never claim something the transport does
+ * not send. User-authored extra parameters are deliberately excluded: this
+ * describes the level, not the whole body.
+ */
+export function previewReasoningControls(
+  capabilities: ResolvedModelCapabilities,
+  level: string,
+): Record<string, unknown> {
+  const provider = toReasoningProvider(capabilities.provider);
+  if (!provider) return {};
+  const protocol = capabilities.identity.protocol as
+    | ProviderProtocol
+    | undefined;
+  return buildReasoningControlPayload(
+    { provider, level },
+    protocol === "responses_api" || protocol === "codex_responses",
+    capabilities.model,
+    capabilities.identity.apiBase,
+    protocol,
+  ).extra;
+}
+
+/**
+ * Whether a level actually leaves thinking on, judged by the request it sends.
+ *
+ * The chat's reasoning chip used to decide this from the level's display label
+ * — the words "off" and "disabled" meant inactive — which forced profiles to
+ * carry a synonym per level and made the menu and the model editor disagree
+ * about a level's name. The request is the only honest source: a level is
+ * inactive when what it sends switches thinking off, whatever it is called.
+ * An empty fragment is the provider default, which is active.
+ */
+export function isReasoningLevelActive(
+  capabilities: ResolvedModelCapabilities,
+  level: string,
+): boolean {
+  const fragment = previewReasoningControls(capabilities, level);
+  return !flattenToDotPaths(fragment).some(({ key, value }) => {
+    const leaf = key.split(".").pop() || "";
+    if (leaf === "type") return value === "disabled" || value === "none";
+    if (leaf === "think" || leaf === "enable_thinking") return value === false;
+    // thinkingBudget, thinking_budget, budget_tokens — a zero budget is off.
+    if (leaf.toLowerCase().includes("budget")) return value === 0;
+    if (leaf === "effort" || leaf === "reasoning_effort") {
+      return value === "none" || value === "disabled";
+    }
+    return false;
+  });
+}
+
+/**
+ * Reasoning controls plus any user-authored extra request parameters.
+ *
+ * `extraBody` is not reasoning-specific, but this function's result is already
+ * spread into every payload builder, so it is the one hook that reaches all
+ * protocols. Reasoning controls are layered on top: the reasoning selector is
+ * a live per-message control, and static configuration must not silently
+ * override what the user just picked.
+ */
+export function buildReasoningPayload(
+  reasoning: ReasoningConfig | undefined,
+  useResponses: boolean,
+  modelName?: string,
+  apiBase?: string,
+  providerProtocol?: ProviderProtocol,
+  options?: ReasoningPayloadOptions,
+): { extra: Record<string, unknown>; omitTemperature: boolean } {
+  const base = buildReasoningControlPayload(
+    reasoning,
+    useResponses,
+    modelName,
+    apiBase,
+    providerProtocol,
+    options,
+  );
+  const extraBody = resolveUserExtraBody(options?.profileOverride, modelName);
+  if (!extraBody) return base;
+  return {
+    extra: { ...extraBody, ...base.extra },
+    omitTemperature: base.omitTemperature,
+  };
+}
+
+/**
+ * The extra request parameters an override contributes to a request — after
+ * the reserved-key strip, and only when the override was authored for the
+ * model being called (a dormant override from a renamed entry contributes
+ * nothing; see `forModel`).
+ */
+export function resolveUserExtraBody(
+  profileOverride: ModelProfileOverride | undefined,
+  modelName: string | undefined,
+): Record<string, unknown> | undefined {
+  if (!profileOverrideAppliesTo(profileOverride, modelName || "")) {
+    return undefined;
+  }
+  return stripReservedRequestKeys(profileOverride?.extraBody);
+}
+
+/**
+ * Last line of defence against a user parameter occupying an envelope key.
+ *
+ * The editor rejects these at input time with a visible message, so reaching
+ * here means a hand-edited or imported config. Silent by design: every payload
+ * builder spreads the reasoning extras into the body, most of them after the
+ * envelope, so an unfiltered `messages` or `tools` key would replace the
+ * conversation or drop every tool definition.
+ */
+export function stripReservedRequestKeys(
+  extraBody: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  if (!extraBody) return undefined;
+  const kept: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(extraBody)) {
+    if (isReservedRequestKey(key)) continue;
+    kept[key] = value;
+  }
+  return Object.keys(kept).length ? kept : undefined;
+}
+
+function buildReasoningControlPayload(
+  reasoning: ReasoningConfig | undefined,
+  useResponses: boolean,
+  modelName?: string,
+  apiBase?: string,
+  providerProtocol?: ProviderProtocol,
+  options?: ReasoningPayloadOptions,
+): { extra: Record<string, unknown>; omitTemperature: boolean } {
+  const payload = buildProviderReasoningControlPayload(
+    reasoning,
+    useResponses,
+    modelName,
+    apiBase,
+    providerProtocol,
+    options,
+  );
+  // One owner: a model whose registry entry forbids a temperature never gets
+  // one, whichever provider branch built the reasoning controls.
+  if (payload.omitTemperature) return payload;
+  const capabilities = getModelCapabilities({
+    provider: reasoning?.provider,
+    model: modelName || "",
+    apiBase,
+    protocol:
+      providerProtocol ||
+      (useResponses ? "responses_api" : "openai_chat_compat"),
+    profileOverride: options?.profileOverride,
+  });
+  return capabilities.sampling.temperature !== "configurable"
+    ? { ...payload, omitTemperature: true }
+    : payload;
+}
+
+function buildProviderReasoningControlPayload(
+  reasoning: ReasoningConfig | undefined,
+  useResponses: boolean,
+  modelName?: string,
+  apiBase?: string,
+  providerProtocol?: ProviderProtocol,
+  options?: ReasoningPayloadOptions,
+): { extra: Record<string, unknown>; omitTemperature: boolean } {
+  const exactEffort = reasoning?.effort?.trim();
+  if (
+    exactEffort &&
+    reasoning &&
+    providerProtocol === "codex_responses" &&
+    (reasoning.provider === "openai" || reasoning.provider === "grok")
+  ) {
+    return {
+      extra: useResponses
+        ? { reasoning: { effort: exactEffort, summary: "detailed" } }
+        : { reasoning_effort: exactEffort },
+      omitTemperature: reasoning.provider === "openai",
+    };
+  }
+  const capabilities = getModelCapabilities({
+    provider: reasoning?.provider,
+    model: modelName || "",
+    apiBase,
+    protocol:
+      providerProtocol ||
+      (useResponses ? "responses_api" : "openai_chat_compat"),
+    profileOverride: options?.profileOverride,
+  });
+  const selected = resolveModelReasoningSelection(capabilities, reasoning);
+  const omitDefaultTemperature =
+    capabilities.sampling.temperature !== "configurable" ||
+    (capabilities.provider === "openai" &&
+      capabilities.reasoning.kind !== "none" &&
+      capabilities.reasoning.kind !== "unknown");
+  if (!reasoning || selected.kind === "auto") {
+    return { extra: {}, omitTemperature: omitDefaultTemperature };
+  }
+  reasoning = { provider: reasoning.provider, level: selected.option.id };
+  const declarativeControls = compileReasoningControls(capabilities, reasoning);
+  if (declarativeControls) return declarativeControls;
+  if (
+    capabilities.reasoning.kind === "none" &&
+    !supportsReasoningForModel(reasoning.provider, modelName)
+  ) {
+    return emptyReasoningPayload();
+  }
+
+  if (reasoning.provider === "openai" || reasoning.provider === "grok") {
+    const effort = resolveOpenAIReasoningEffort(
+      reasoning.provider,
+      reasoning.level,
+      modelName,
+      apiBase,
+    );
+    const omitTemperature = reasoning.provider === "openai";
+    if (useResponses) {
+      const responseReasoning: Record<string, unknown> = {
+        summary: "detailed",
+      };
+      if (effort) {
+        responseReasoning.effort = effort;
+      }
+      return {
+        extra: {
+          reasoning: responseReasoning,
+        },
+        // GPT-5 families may reject temperature when reasoning is configured.
+        omitTemperature,
+      };
+    }
+    return {
+      extra: effort ? { reasoning_effort: effort } : {},
+      omitTemperature,
+    };
+  }
+
+  if (reasoning.provider === "gemini") {
+    const profile = getGeminiReasoningProfile(modelName);
+    const resolvedOption = resolveGeminiReasoningOption(
+      reasoning.level,
+      profile,
+    );
+
+    // Keep request valid if a stale/unsupported level is selected.
+    const thinkingConfig: Record<string, unknown> = {
+      include_thoughts: true,
+    };
+    if (profile.param === "thinking_budget") {
+      thinkingConfig.thinking_budget =
+        typeof resolvedOption.value === "number" ? resolvedOption.value : 8192;
+    } else {
+      thinkingConfig.thinking_level =
+        resolvedOption.value === "minimal" ||
+        resolvedOption.value === "low" ||
+        resolvedOption.value === "medium" ||
+        resolvedOption.value === "high"
+          ? resolvedOption.value
+          : "medium";
+    }
+
+    return {
+      extra: {
+        extra_body: {
+          google: {
+            thinking_config: thinkingConfig,
+          },
+        },
+      },
+      omitTemperature: false,
+    };
+  }
+
+  if (reasoning.provider === "qwen") {
+    const profile = getQwenReasoningProfile(modelName);
+    const enableThinking = resolveQwenEnableThinking(reasoning.level, profile);
+    if (enableThinking === null) {
+      return emptyReasoningPayload();
+    }
+    if (isDashScopeApiBase(apiBase)) {
+      return {
+        extra: {
+          enable_thinking: enableThinking,
+        },
+        omitTemperature: false,
+      };
+    }
+    return {
+      extra: {
+        chat_template_kwargs: {
+          enable_thinking: enableThinking,
+        },
+      },
+      omitTemperature: false,
+    };
+  }
+
+  if (reasoning.provider === "deepseek") {
+    const profile = getDeepseekReasoningProfileForModel(modelName);
+    const thinkingType =
+      profile.levelToThinkingType[reasoning.level] ??
+      profile.defaultThinkingType;
+    if (!thinkingType) {
+      return emptyReasoningPayload();
+    }
+    const reasoningEffort =
+      profile.levelToReasoningEffort[reasoning.level] ??
+      profile.defaultReasoningEffort;
+    const extra: Record<string, unknown> = {
+      thinking: {
+        type: thinkingType,
+      },
+    };
+    if (thinkingType === "enabled" && reasoningEffort) {
+      if (providerProtocol === "anthropic_messages") {
+        extra.output_config = { effort: reasoningEffort };
+      } else {
+        extra.reasoning_effort = reasoningEffort;
+      }
+    }
+    return {
+      extra,
+      omitTemperature:
+        thinkingType === "enabled" && profile.omitTemperatureWhenThinking,
+    };
+  }
+
+  if (reasoning.provider === "mimo") {
+    const profile = getMimoReasoningProfileForModel(modelName);
+    const thinkingType =
+      profile.levelToThinkingType[reasoning.level] ??
+      profile.levelToThinkingType[profile.defaultLevel] ??
+      null;
+    if (!thinkingType) {
+      return emptyReasoningPayload();
+    }
+    return {
+      extra: { thinking: { type: thinkingType } },
+      omitTemperature: false,
+    };
+  }
+
+  if (
+    reasoning.provider === "minimax" ||
+    reasoning.provider === "glm" ||
+    reasoning.provider === "kimi"
+  ) {
+    const profile = getThinkingSwitchProfileForModel(
+      reasoning.provider,
+      modelName,
+    );
+    const thinkingType =
+      profile?.levelToThinkingType[reasoning.level] ??
+      profile?.levelToThinkingType[profile.defaultLevel];
+    if (!thinkingType) {
+      return emptyReasoningPayload();
+    }
+    return {
+      extra: { thinking: { type: thinkingType } },
+      omitTemperature: false,
+    };
+  }
+
+  if (reasoning.provider === "anthropic") {
+    if (providerProtocol !== "anthropic_messages") {
+      return emptyReasoningPayload();
+    }
+    const profile = getAnthropicReasoningProfile(modelName);
+    const mode = resolveAnthropicThinkingMode({
+      profile,
+      override: options?.anthropicModeOverride,
+    });
+    if (!mode) {
+      return emptyReasoningPayload();
+    }
+    if (mode === "adaptive") {
+      const effort = resolveAnthropicAdaptiveEffort(reasoning.level, profile);
+      return {
+        extra: {
+          thinking: {
+            type: "adaptive",
+          },
+          ...(effort ? { output_config: { effort } } : {}),
+        },
+        omitTemperature: true,
+      };
+    }
+
+    const budgetTokens = resolveAnthropicManualBudget({
+      level: reasoning.level,
+      profile,
+      maxTokens: options?.maxTokens,
+      modelName,
+    });
+    return {
+      extra: {
+        thinking: {
+          type: "enabled",
+          budget_tokens: budgetTokens,
+        },
+      },
+      omitTemperature: true,
+    };
+  }
+
+  return emptyReasoningPayload();
+}
+
+function buildAnthropicMessagesPayload(params: {
+  model: string;
+  messages: ChatMessage[];
+  effectiveMaxTokens: number;
+  effectiveTemperature: number;
+  stream: boolean;
+  reasoning?: ReasoningConfig;
+  apiBase?: string;
+  anthropicModeOverride?: AnthropicReasoningModeOverride;
+  pdfParts?: NativePdfPart[];
+  contextCache?: ContextCachePlan;
+  profileOverride?: ModelProfileOverride;
+}): Record<string, unknown> {
+  const systemParts = params.messages
+    .filter((m) => m.role === "system")
+    .map((m) =>
+      typeof m.content === "string"
+        ? m.content
+        : m.content.map((c) => ("text" in c ? c.text : "")).join(""),
+    )
+    .filter(Boolean);
+  const nonSystemSourceMessages = params.messages.filter(
+    (m) => m.role !== "system",
+  );
+  let lastUserMessageIndex = -1;
+  for (let index = nonSystemSourceMessages.length - 1; index >= 0; index--) {
+    if (nonSystemSourceMessages[index].role === "user") {
+      lastUserMessageIndex = index;
+      break;
+    }
+  }
+  const documentBlocks = (params.pdfParts || []).map((part) => ({
+    type: "document",
+    source: {
+      type: "base64",
+      media_type: "application/pdf",
+      data: part.base64,
+    },
+  }));
+  const nonSystemMessages = nonSystemSourceMessages.map((m, index) => {
+    const content =
+      typeof m.content === "string"
+        ? [{ type: "text", text: m.content }]
+        : m.content.map((c) => {
+            if (c.type !== "image_url") {
+              return { type: "text", text: (c as { text: string }).text };
+            }
+            const parsed = parseDataUrl(
+              (c as { image_url: { url: string } }).image_url.url,
+            );
+            if (parsed?.mimeType === "application/pdf") {
+              return {
+                type: "document",
+                source: {
+                  type: "base64",
+                  media_type: "application/pdf",
+                  data: parsed.data,
+                },
+              };
+            }
+            return {
+              type: "image",
+              source: {
+                type: "base64",
+                media_type: parsed?.mimeType || "image/jpeg",
+                data: parsed?.data || "",
+              },
+            };
+          });
+    if (index === lastUserMessageIndex && documentBlocks.length) {
+      content.push(...documentBlocks);
+    }
+    return {
+      role: m.role as "user" | "assistant",
+      content,
+    };
+  });
+  const payload: Record<string, unknown> = {
+    model: params.model,
+    max_tokens: params.effectiveMaxTokens,
+    messages: nonSystemMessages,
+  };
+  const reasoningPayload = buildReasoningPayload(
+    params.reasoning,
+    false,
+    params.model,
+    params.apiBase,
+    "anthropic_messages",
+    {
+      maxTokens: params.effectiveMaxTokens,
+      anthropicModeOverride: params.anthropicModeOverride,
+      profileOverride: params.profileOverride,
+    },
+  );
+  Object.assign(payload, reasoningPayload.extra);
+  if (systemParts.length > 0) {
+    const systemText = systemParts.join("\n\n");
+    const cacheControl =
+      params.contextCache?.enabled &&
+      params.contextCache.requestHints?.anthropicBlockCacheControl
+        ? params.contextCache.requestHints.anthropicBlockCacheControl
+        : undefined;
+    payload.system = cacheControl
+      ? [{ type: "text", text: systemText, cache_control: cacheControl }]
+      : systemText;
+  }
+  if (!reasoningPayload.omitTemperature) {
+    payload.temperature = params.effectiveTemperature;
+  }
+  if (params.stream) {
+    payload.stream = true;
+  }
+  return payload;
+}
+
+async function parseAnthropicStreamResponse(
+  body: ReadableStream<Uint8Array>,
+  onDelta: (delta: string) => void,
+  onReasoning?: (event: ReasoningEvent) => void,
+  onUsage?: (usage: UsageStats) => void,
+): Promise<ModelTurnOutcome> {
+  const reader = body.getReader() as ReadableStreamDefaultReader<Uint8Array>;
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
+  let fullText = "";
+  let completion: ModelTurnCompletion = COMPLETE_MODEL_TURN;
+
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith("data:")) continue;
+
+        const data = trimmed.slice(5).trim();
+        if (!data || data === "[DONE]") continue;
+
+        try {
+          const parsed = JSON.parse(data) as {
+            type?: string;
+            delta?: {
+              type?: string;
+              text?: string;
+              thinking?: string;
+              stop_reason?: string | null;
+            };
+            usage?: { output_tokens?: number };
+            message?: {
+              stop_reason?: string | null;
+              usage?: {
+                input_tokens?: number;
+                output_tokens?: number;
+                cache_creation_input_tokens?: number;
+                cache_read_input_tokens?: number;
+              };
+            };
+          };
+          const stopReason =
+            parsed.delta?.stop_reason ?? parsed.message?.stop_reason;
+          if (typeof stopReason === "string") {
+            completion = normalizeProviderCompletion(stopReason);
+          }
+          if (
+            parsed.type === "content_block_delta" &&
+            parsed.delta?.type === "text_delta" &&
+            parsed.delta.text
+          ) {
+            fullText += parsed.delta.text;
+            onDelta(parsed.delta.text);
+          }
+          if (
+            parsed.type === "content_block_delta" &&
+            parsed.delta?.type === "thinking_delta" &&
+            parsed.delta.thinking &&
+            onReasoning
+          ) {
+            onReasoning({ details: parsed.delta.thinking });
+          }
+          if (
+            parsed.type === "message_start" &&
+            parsed.message?.usage &&
+            onUsage
+          ) {
+            // input_tokens leaves out the cached tokens; the prompt is all three.
+            const inputTokens = anthropicPromptTokens(parsed.message.usage);
+            const outputTokens = parsed.message.usage.output_tokens ?? 0;
+            const totalTokens = inputTokens + outputTokens;
+            if (inputTokens > 0 || totalTokens > 0) {
+              const cacheUsage = extractContextCacheUsage(parsed.message.usage);
+              onUsage({
+                promptTokens: inputTokens,
+                completionTokens: outputTokens,
+                totalTokens,
+                ...cacheUsage,
+                contextTokens: inputTokens,
+                contextWindowIsAuthoritative: inputTokens > 0,
+              });
+            }
+          }
+          if (parsed.type === "message_delta" && parsed.usage && onUsage) {
+            const outputTokens = parsed.usage.output_tokens ?? 0;
+            if (outputTokens > 0) {
+              onUsage({
+                promptTokens: 0,
+                completionTokens: outputTokens,
+                totalTokens: outputTokens,
+              });
+            }
+          }
+        } catch (_err) {
+          // ignore parse errors
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  return modelTurnOutcome(fullText, completion);
+}
+
+function buildGeminiNativePayload(params: {
+  model: string;
+  apiBase?: string;
+  messages: ChatMessage[];
+  outputPolicy: OutputRequestPolicy;
+  /** Omitted from the payload when undefined (Gemini 3 server default). */
+  temperature: number | undefined;
+  reasoning?: ReasoningConfig;
+  pdfParts?: Array<{ base64: string }>;
+  profileOverride?: ModelProfileOverride;
+}): Record<string, unknown> {
+  const systemParts = params.messages
+    .filter((m) => m.role === "system")
+    .map((m) => ({
+      text:
+        typeof m.content === "string"
+          ? m.content
+          : m.content.map((c) => ("text" in c ? c.text : "")).join(""),
+    }))
+    .filter((p) => p.text);
+  const contents: Array<{ role: string; parts: unknown[] }> = params.messages
+    .filter((m) => m.role !== "system")
+    .map((m) => ({
+      role: m.role === "assistant" ? "model" : "user",
+      parts:
+        typeof m.content === "string"
+          ? [{ text: m.content }]
+          : m.content.map((c) =>
+              c.type === "image_url"
+                ? (() => {
+                    const parsed = parseDataUrl(
+                      (c as { image_url: { url: string } }).image_url.url,
+                    );
+                    return {
+                      inline_data: {
+                        mime_type: parsed?.mimeType || "image/jpeg",
+                        data: parsed?.data || "",
+                      },
+                    };
+                  })()
+                : { text: (c as { text: string }).text },
+            ),
+    }));
+  if (params.pdfParts?.length) {
+    let lastUserIdx = -1;
+    for (let i = contents.length - 1; i >= 0; i--) {
+      if (contents[i].role === "user") {
+        lastUserIdx = i;
+        break;
+      }
+    }
+    if (lastUserIdx >= 0) {
+      for (const p of params.pdfParts) {
+        contents[lastUserIdx].parts.push({
+          inlineData: { mimeType: "application/pdf", data: p.base64 },
+        });
+      }
+    }
+  }
+  // User extra parameters ride along here the same as on every other
+  // protocol; a user generationConfig is merged under the envelope so the
+  // dedicated temperature/max-token fields keep the last word on a collision.
+  const extraBody = resolveUserExtraBody(params.profileOverride, params.model);
+  const { generationConfig: extraGenerationConfig, ...extraTop } = (extraBody ||
+    {}) as { generationConfig?: unknown } & Record<string, unknown>;
+  const payload: Record<string, unknown> = {
+    ...extraTop,
+    contents,
+    generationConfig: {
+      ...(isRecord(extraGenerationConfig) ? extraGenerationConfig : {}),
+      ...(params.outputPolicy.mode === "numeric"
+        ? { maxOutputTokens: params.outputPolicy.tokens }
+        : {}),
+      ...(params.temperature !== undefined
+        ? { temperature: params.temperature }
+        : {}),
+    },
+  };
+  if (params.reasoning?.provider === "gemini") {
+    const capabilities = getModelCapabilities({
+      provider: "gemini",
+      model: params.model,
+      apiBase: params.apiBase,
+      protocol: "gemini_native",
+      profileOverride: params.profileOverride,
+    });
+    const selection = resolveModelReasoningSelection(
+      capabilities,
+      params.reasoning,
+    );
+    const declarative = compileReasoningControls(
+      capabilities,
+      params.reasoning,
+    );
+    const generationConfig = payload.generationConfig as Record<
+      string,
+      unknown
+    >;
+    const declaredGenerationConfig =
+      declarative?.extra.generationConfig ||
+      declarative?.extra.generation_config;
+    if (
+      declaredGenerationConfig &&
+      typeof declaredGenerationConfig === "object" &&
+      !Array.isArray(declaredGenerationConfig)
+    ) {
+      Object.assign(generationConfig, declaredGenerationConfig);
+    }
+    const declarativeConfig =
+      declarative?.extra.thinkingConfig ||
+      declarative?.extra.thinking_config ||
+      generationConfig.thinkingConfig;
+    if (isRecord(declarativeConfig)) {
+      generationConfig.thinkingConfig =
+        withGeminiThoughtSummaries(declarativeConfig);
+    } else if (selection.kind === "option") {
+      const profile = getGeminiReasoningProfile(params.model);
+      const value =
+        profile.levelToValue[selection.option.id] ??
+        profile.levelToValue[profile.defaultLevel] ??
+        profile.defaultValue;
+      (payload.generationConfig as Record<string, unknown>).thinkingConfig =
+        profile.param === "thinking_budget"
+          ? {
+              includeThoughts: true,
+              thinkingBudget: typeof value === "number" ? value : 8192,
+            }
+          : {
+              includeThoughts: true,
+              thinkingLevel:
+                value === "minimal" ||
+                value === "low" ||
+                value === "medium" ||
+                value === "high"
+                  ? value
+                  : "medium",
+            };
+    }
+    if (declarative?.omitTemperature) delete generationConfig.temperature;
+  }
+  if (systemParts.length > 0) {
+    payload.systemInstruction = { parts: systemParts };
+  }
+  return payload;
+}
+
+export function buildPromptCachePayloadHints(
+  contextCache: ContextCachePlan | undefined,
+): Record<string, unknown> {
+  if (!contextCache?.enabled || !contextCache.requestHints) return {};
+  const hints: Record<string, unknown> = {};
+  if (contextCache.requestHints.promptCacheKey) {
+    hints.prompt_cache_key = contextCache.requestHints.promptCacheKey;
+  }
+  if (contextCache.requestHints.promptCacheRetention) {
+    hints.prompt_cache_retention =
+      contextCache.requestHints.promptCacheRetention;
+  }
+  return hints;
+}
+
+function assertCodexAppServerUsesNativeRuntime(
+  authMode: ModelProviderAuthMode,
+): void {
+  if (authMode !== "codex_app_server") return;
+  throw new Error(
+    "Codex App Server is only supported through the native Codex conversation system. " +
+      "Use Codex Direct (Legacy) for the direct backend transport.",
+  );
+}
+
+/**
+ * Gemini marks thought-summary parts with `thought: true` when
+ * `includeThoughts` is requested.  A `thoughtSignature` alone does NOT make a
+ * part a thought: Gemini 3 attaches signatures to regular answer parts too.
+ */
+function isGeminiThoughtSummaryPart(part: { thought?: unknown }): boolean {
+  return part.thought === true;
+}
+
+async function parseGeminiNativeStreamResponse(
+  body: ReadableStream<Uint8Array>,
+  onDelta: (delta: string) => void,
+  onReasoning?: (event: ReasoningEvent) => void,
+  onUsage?: (usage: UsageStats) => void,
+): Promise<ModelTurnOutcome> {
+  const reader = body.getReader() as ReadableStreamDefaultReader<Uint8Array>;
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
+  let fullText = "";
+  let completion: ModelTurnCompletion = COMPLETE_MODEL_TURN;
+
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith("data:")) continue;
+        const data = trimmed.slice(5).trim();
+        if (!data || data === "[DONE]") continue;
+        try {
+          const parsed = JSON.parse(data) as {
+            candidates?: Array<{
+              finishReason?: string;
+              content?: {
+                parts?: Array<{ text?: string; thought?: unknown }>;
+              };
+            }>;
+            usageMetadata?: {
+              promptTokenCount?: number;
+              candidatesTokenCount?: number;
+              thoughtsTokenCount?: number;
+              totalTokenCount?: number;
+              cachedContentTokenCount?: number;
+            };
+          };
+          const finishReason = parsed.candidates?.[0]?.finishReason;
+          if (typeof finishReason === "string") {
+            completion = normalizeProviderCompletion(finishReason);
+          }
+          const parts = parsed.candidates?.[0]?.content?.parts || [];
+          const thoughtText = parts
+            .filter((p) => isGeminiThoughtSummaryPart(p))
+            .map((p) => p.text || "")
+            .join("");
+          if (thoughtText && onReasoning) {
+            onReasoning({ details: thoughtText });
+          }
+          const text = parts
+            .filter((p) => !isGeminiThoughtSummaryPart(p))
+            .map((p) => p.text || "")
+            .join("");
+          if (text) {
+            fullText += text;
+            onDelta(text);
+          }
+          if (parsed.usageMetadata && onUsage) {
+            const total = parsed.usageMetadata.totalTokenCount ?? 0;
+            if (total > 0) {
+              const cacheUsage = extractContextCacheUsage(parsed.usageMetadata);
+              onUsage({
+                promptTokens: parsed.usageMetadata.promptTokenCount ?? 0,
+                completionTokens:
+                  (parsed.usageMetadata.candidatesTokenCount ?? 0) +
+                  (parsed.usageMetadata.thoughtsTokenCount ?? 0),
+                totalTokens: total,
+                ...cacheUsage,
+                contextTokens: parsed.usageMetadata.promptTokenCount ?? 0,
+                contextWindowIsAuthoritative:
+                  (parsed.usageMetadata.promptTokenCount ?? 0) > 0,
+              });
+            }
+          }
+        } catch (_err) {
+          // ignore parse errors
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  return modelTurnOutcome(fullText, completion);
+}
+
+// ── Ollama native (/api/chat) ────────────────────────────────────────────────
+
+/**
+ * Ollama's chat message shape. Unlike OpenAI, images are not content parts:
+ * they ride alongside the text as an array of bare base64 strings.
+ */
+type OllamaChatMessage = {
+  role: string;
+  content: string;
+  images?: string[];
+};
+
+function toOllamaChatMessages(messages: ChatMessage[]): OllamaChatMessage[] {
+  return messages.map((message) => {
+    if (typeof message.content === "string") {
+      return { role: message.role, content: message.content };
+    }
+    const textParts: string[] = [];
+    const images: string[] = [];
+    for (const part of message.content) {
+      if (part.type === "text") {
+        textParts.push(part.text);
+        continue;
+      }
+      // Ollama wants raw base64 with no data: prefix; a plain URL cannot be
+      // forwarded, so drop it rather than sending something unfetchable.
+      const parsed = parseDataUrl(part.image_url?.url || "");
+      if (parsed?.data) images.push(parsed.data);
+    }
+    return {
+      role: message.role,
+      content: textParts.join("\n"),
+      ...(images.length ? { images } : {}),
+    };
+  });
+}
+
+/**
+ * The one Ollama `/api/chat` envelope builder, shared by chat mode and the
+ * agent adapter so the merge subtleties below exist in exactly one place.
+ */
+export function buildOllamaChatPayload(params: {
+  model: string;
+  /** Pre-converted messages (agent adapter) or ChatMessages (chat mode). */
+  messages: ChatMessage[] | Array<Record<string, unknown>>;
+  messagesAreConverted?: boolean;
+  stream: boolean;
+  temperature?: number;
+  /**
+   * Output cap. Ollama's own default is unlimited (-1); a thinking model that
+   * inherits the plugin's 8192 default can spend the whole budget reasoning and
+   * return empty content, so callers pass -1 unless the user set a value.
+   */
+  numPredict?: number;
+  /** Runtime context window, so what we claim and what Ollama allocates agree. */
+  numCtx?: number;
+  /** Tool definitions (agent mode). User extra params never occupy this key. */
+  tools?: unknown[];
+  reasoningExtra?: Record<string, unknown>;
+}): Record<string, unknown> {
+  const options: Record<string, unknown> = {};
+  if (params.temperature !== undefined)
+    options.temperature = params.temperature;
+  if (params.numPredict !== undefined) options.num_predict = params.numPredict;
+  if (params.numCtx !== undefined) options.num_ctx = params.numCtx;
+  const { options: extraOptions, ...extraTop } = (params.reasoningExtra ||
+    {}) as { options?: unknown } & Record<string, unknown>;
+  // `options` is merged rather than spread over: a user parameter such as
+  // `options.repeat_penalty` would otherwise replace the whole object and
+  // silently drop num_ctx, reinstating the context truncation this protocol
+  // exists to avoid. User keys win within the merge; the envelope does not.
+  const mergedOptions = isRecord(extraOptions)
+    ? { ...options, ...extraOptions }
+    : options;
+  return {
+    model: params.model,
+    messages: params.messagesAreConverted
+      ? params.messages
+      : toOllamaChatMessages(params.messages as ChatMessage[]),
+    stream: params.stream,
+    ...(params.tools?.length ? { tools: params.tools } : {}),
+    ...(Object.keys(mergedOptions).length ? { options: mergedOptions } : {}),
+    ...extraTop,
+  };
+}
+
+/** Ollama represents its runtime-managed/unlimited output policy as -1. */
+export function resolveOllamaNumPredict(
+  policy: OutputRequestPolicy,
+): number | undefined {
+  if (policy.mode === "numeric") return policy.tokens;
+  if (policy.mode === "unlimited") return -1;
+  return undefined;
+}
+
+export const OLLAMA_NUM_CTX_MIN_TIER = 4_096;
+/** Answer room reserved inside num_ctx when the user set no output limit. */
+export const OLLAMA_AUTO_OUTPUT_RESERVE_TOKENS = 4_096;
+
+/**
+ * Ollama allocates the KV cache for num_ctx up front and offloads layers to
+ * the CPU when it does not fit, so asking for the model's whole window makes
+ * small GPUs crawl. Ask for what this request needs, rounded up to a few
+ * stable power-of-two tiers so the runner is not reloaded on every turn, and
+ * never above the cap the prompt was trimmed to. Omitting num_ctx is not an
+ * option: Ollama's small default would silently truncate long prompts.
+ */
+export function resolveOllamaNumCtx(params: {
+  protocol: ProviderProtocol;
+  /** This request's prompt estimate: messages incl. system prompt, tools, images. */
+  estimatedPromptTokens: number;
+  outputPolicy: OutputRequestPolicy;
+  /** Resolved input limit: trained length, user cap, or the default. */
+  contextWindowTokens: number;
+}): number | undefined {
+  if (params.protocol !== "ollama_native") return undefined;
+  const promptTokens = Number.isFinite(params.estimatedPromptTokens)
+    ? Math.max(0, params.estimatedPromptTokens)
+    : 0;
+  const policy = params.outputPolicy;
+  const reserve =
+    policy.mode === "numeric" &&
+    policy.source === "custom" &&
+    Number.isFinite(policy.tokens) &&
+    policy.tokens > 0
+      ? policy.tokens
+      : OLLAMA_AUTO_OUTPUT_RESERVE_TOKENS;
+  const need = Math.ceil(promptTokens * INPUT_ESTIMATE_SAFETY_RATIO) + reserve;
+  let tier = OLLAMA_NUM_CTX_MIN_TIER;
+  while (tier < need && tier < Number.MAX_SAFE_INTEGER / 2) tier *= 2;
+  const cap = params.contextWindowTokens;
+  return Number.isSafeInteger(cap) && cap > 0 ? Math.min(tier, cap) : tier;
+}
+
+type OllamaChatChunk = {
+  message?: {
+    content?: unknown;
+    thinking?: unknown;
+    tool_calls?: Array<{
+      function?: { name?: string; arguments?: unknown };
+    }>;
+  };
+  done?: boolean;
+  done_reason?: string;
+  prompt_eval_count?: number;
+  eval_count?: number;
+  error?: string;
+};
+
+/** A tool call as Ollama frames it; the agent layer assigns ids itself. */
+export type OllamaRawToolCall = { name: string; arguments: unknown };
+
+/**
+ * Parse Ollama's `/api/chat` stream — the one NDJSON parser for both chat
+ * mode and the agent adapter, so a wire quirk is fixed in exactly one place.
+ *
+ * The framing is NDJSON — one complete JSON object per line, with no `data:`
+ * prefix — so `parseStreamResponse` cannot be reused: it skips every line that
+ * does not start with `data:` and would silently return "".
+ *
+ * `message.thinking` and `message.content` arrive as separate fields, which is
+ * the whole reason this protocol exists (see #363): over Ollama's
+ * OpenAI-compatible endpoint some models put the entire answer in the reasoning
+ * field and leave content empty.
+ *
+ * Ollama emits each tool call complete in a single chunk, so `onToolCall`
+ * fires once per call with no per-index accumulation.
+ */
+export async function parseOllamaChatStream(
+  body: ReadableStream<Uint8Array>,
+  onDelta: (delta: string) => void | Promise<void>,
+  onReasoning?: (event: ReasoningEvent) => void | Promise<void>,
+  onUsage?: (usage: UsageStats) => void | Promise<void>,
+  onToolCall?: (call: OllamaRawToolCall) => void,
+): Promise<ModelTurnOutcome> {
+  const reader = body.getReader() as ReadableStreamDefaultReader<Uint8Array>;
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
+  let fullText = "";
+  let completion: ModelTurnCompletion = COMPLETE_MODEL_TURN;
+
+  const handleLine = async (line: string) => {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+    let parsed: OllamaChatChunk;
+    try {
+      parsed = JSON.parse(trimmed) as OllamaChatChunk;
+    } catch (err) {
+      appLogger.warn("Ollama stream parse error:", err);
+      return;
+    }
+    if (parsed.error) {
+      throw new Error(`Ollama error: ${parsed.error}`);
+    }
+    if (parsed.done) {
+      completion = normalizeProviderCompletion(parsed.done_reason);
+    }
+    const thinking = normalizeStreamText(parsed.message?.thinking ?? "");
+    if (thinking && onReasoning) await onReasoning({ details: thinking });
+    const content = normalizeStreamText(parsed.message?.content ?? "");
+    if (content) {
+      fullText += content;
+      await onDelta(content);
+    }
+    if (onToolCall && Array.isArray(parsed.message?.tool_calls)) {
+      for (const call of parsed.message.tool_calls) {
+        const name = call?.function?.name?.trim();
+        if (!name) continue;
+        onToolCall({ name, arguments: call.function?.arguments });
+      }
+    }
+    if (parsed.done && onUsage) {
+      const promptTokens = parsed.prompt_eval_count ?? 0;
+      const completionTokens = parsed.eval_count ?? 0;
+      const totalTokens = promptTokens + completionTokens;
+      if (totalTokens > 0) {
+        await onUsage({
+          promptTokens,
+          completionTokens,
+          totalTokens,
+          contextTokens: promptTokens,
+          contextWindowIsAuthoritative: promptTokens > 0,
+        });
+      }
+    }
+  };
+
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+      for (const line of lines) await handleLine(line);
+    }
+    // Flush a trailing object that arrived without a closing newline.
+    if (buffer.trim()) await handleLine(buffer);
+  } finally {
+    reader.releaseLock();
+  }
+
+  return modelTurnOutcome(fullText, completion);
+}
+
+function createChatPayloadBuilder(params: {
+  model: string;
+  messages: ChatMessage[];
+  useResponses: boolean;
+  responseFileIds?: string[];
+  responseFilePartsByMessage?: ReadonlyMap<number, ResponsesPreparedFilePart[]>;
+  authMode: ModelProviderAuthMode;
+  apiBase: string;
+  providerProtocol?: ProviderProtocol;
+  effectiveTemperature: number;
+  outputPolicy: OutputRequestPolicy;
+  outputReserveTokens: number;
+  /** Model context window; the transmitted cap is clamped to the room left in it. */
+  contextWindow: number;
+  stream: boolean;
+  contextCache?: ContextCachePlan;
+  profileOverride?: ModelProfileOverride;
+  continuationState?: unknown;
+}) {
+  const {
+    model,
+    messages,
+    useResponses,
+    responseFileIds,
+    responseFilePartsByMessage,
+    authMode,
+    apiBase,
+    providerProtocol,
+    effectiveTemperature,
+    outputPolicy,
+    outputReserveTokens,
+    contextWindow,
+    stream,
+    contextCache,
+  } = params;
+  return (reasoningOverride: ReasoningConfig | undefined) => {
+    const isCodexAuth = authMode === "codex_auth";
+    const responsesInput = useResponses
+      ? buildResponsesInput(messages, responseFileIds, {
+          preserveSystemMessages: isGrokApiBase(apiBase),
+          filePartsByMessage: responseFilePartsByMessage,
+        })
+      : null;
+    const chatMessages = useResponses
+      ? messages
+      : mergeSystemMessagesForChatPayload(messages);
+    if (useResponses && isCodexAuth && responsesInput) {
+      const codexReasoningEffort = sanitizeCodexDirectReasoningConfig(
+        model,
+        reasoningOverride,
+      )?.effort;
+      const codexInstructionsParts = [
+        responsesInput.instructions || "You are a helpful assistant.",
+        codexReasoningEffort
+          ? "Before the final answer, output one concise high-level reasoning summary wrapped in <thought>...</thought>."
+          : "",
+      ]
+        .map((entry) => entry.trim())
+        .filter(Boolean);
+      const codexPayload = {
+        model,
+        ...responsesInput,
+        instructions: codexInstructionsParts.join("\n\n"),
+        ...(codexReasoningEffort
+          ? { reasoning: { effort: codexReasoningEffort, summary: "detailed" } }
+          : {}),
+        store: false,
+        stream: true,
+      };
+      return codexPayload as Record<string, unknown>;
+    }
+
+    const transmittedPolicy = resolveTransmittedOutputPolicy({
+      policy: outputPolicy,
+      contextWindow,
+      estimatedInputTokens: estimateWirePayloadTokens(
+        useResponses ? responsesInput : chatMessages,
+      ),
+    });
+    const reasoningPayload = buildReasoningPayload(
+      reasoningOverride,
+      useResponses,
+      model,
+      apiBase,
+      providerProtocol,
+      {
+        maxTokens:
+          transmittedPolicy.mode === "numeric"
+            ? transmittedPolicy.tokens
+            : outputReserveTokens,
+        profileOverride: params.profileOverride,
+      },
+    );
+    const temperatureParam = reasoningPayload.omitTemperature
+      ? {}
+      : { temperature: effectiveTemperature };
+    const cachePayloadHints = buildPromptCachePayloadHints(contextCache);
+
+    const payload = useResponses
+      ? {
+          model,
+          ...responsesInput,
+          ...(isRecord(params.continuationState) &&
+          typeof params.continuationState.responseId === "string"
+            ? { previous_response_id: params.continuationState.responseId }
+            : {}),
+          ...cachePayloadHints,
+          ...reasoningPayload.extra,
+          ...temperatureParam,
+          ...buildResponsesTokenParam(transmittedPolicy),
+        }
+      : {
+          model,
+          messages: chatMessages,
+          ...cachePayloadHints,
+          ...reasoningPayload.extra,
+          ...temperatureParam,
+          ...buildTokenParam(model, transmittedPolicy),
+        };
+
+    if (stream) {
+      return {
+        ...payload,
+        stream: true,
+        // Ask OpenAI-compatible endpoints to include usage in the final stream chunk
+        ...(useResponses ? {} : { stream_options: { include_usage: true } }),
+      } as Record<string, unknown>;
+    }
+    return payload as Record<string, unknown>;
+  };
+}
+
+function stripTemperature(payload: Record<string, unknown>) {
+  if (!Object.prototype.hasOwnProperty.call(payload, "temperature")) {
+    return payload;
+  }
+  const clone = { ...payload };
+  delete clone.temperature;
+  return clone;
+}
+
+type TemperaturePolicy =
+  | { mode: "default" }
+  | { mode: "omit" }
+  | { mode: "fixed"; value: number };
+
+const temperaturePolicyCache = new Map<string, TemperaturePolicy>();
+
+type OutputCapRecovery = (
+  | { mode: "omit" }
+  | { mode: "fixed"; value: number }
+) & {
+  /**
+   * "endpoint": the provider's limit for this model; remembered for later
+   * requests. "request": derived from this prompt's size; never cached.
+   */
+  scope: "endpoint" | "request";
+};
+
+const OUTPUT_CAP_KEYS = [
+  "max_tokens",
+  "max_completion_tokens",
+  "max_output_tokens",
+] as const;
+type OutputCapKey = (typeof OUTPUT_CAP_KEYS)[number];
+/** Below this a "maximum" mentioned in an error is not an output limit. */
+const MIN_PLAUSIBLE_OUTPUT_CAP = 256;
+const CONTEXT_LIMIT_RECOVERY_MARGIN = 1_024;
+
+const outputCapRecoveryCache = new Map<string, OutputCapRecovery>();
+
+function findOutputCapKey(
+  payload: Record<string, unknown>,
+): OutputCapKey | null {
+  for (const key of OUTPUT_CAP_KEYS) {
+    if (typeof payload[key] === "number") return key;
+  }
+  return null;
+}
+
+function isAnthropicMessagesUrl(url: string): boolean {
+  return /\/messages(?:\?|$)/.test(url);
+}
+
+function applyOutputCapRecovery(
+  payload: Record<string, unknown>,
+  key: OutputCapKey,
+  recovery: OutputCapRecovery,
+): Record<string, unknown> {
+  const next = { ...payload };
+  if (recovery.mode === "omit") {
+    delete next[key];
+    return next;
+  }
+  const current = Number(payload[key]);
+  next[key] = Number.isFinite(current)
+    ? Math.min(current, recovery.value)
+    : recovery.value;
+  return next;
+}
+
+/**
+ * One-shot recovery for a provider rejecting the transmitted output cap.
+ * A stated maximum is adopted; otherwise the cap is dropped (OpenAI-style
+ * providers fall back to their default) or, for Anthropic Messages where the
+ * field is required, lowered to the compatibility seed.
+ */
+export function getOutputCapRecovery(params: {
+  status: number;
+  message: string;
+  url: string;
+  requested: number;
+}): OutputCapRecovery | null {
+  if (params.status !== 400 && params.status !== 422) return null;
+  const text = params.message.toLowerCase();
+  const capMention = /max[_ ]?(?:completion[_ ]?|output[_ ]?)?tokens/;
+  if (!capMention.test(text)) return null;
+
+  // Anthropic: "input length and max_tokens exceed context limit: A + B > C"
+  const sum = text.match(/(\d[\d,]*)\s*\+\s*(\d[\d,]*)\s*>\s*(\d[\d,]*)/);
+  if (sum) {
+    const input = Number(sum[1].replace(/,/g, ""));
+    const window = Number(sum[3].replace(/,/g, ""));
+    const room = window - input - CONTEXT_LIMIT_RECOVERY_MARGIN;
+    return Number.isSafeInteger(room) && room >= MIN_PLAUSIBLE_OUTPUT_CAP
+      ? { mode: "fixed", value: room, scope: "request" }
+      : null;
+  }
+
+  // Only numbers in sentences that talk about tokens count; JSON envelopes
+  // carry status codes and ids that must not be mistaken for the limit.
+  const candidates: number[] = [];
+  for (const segment of text.split(/[.;\n"]/)) {
+    if (!/tokens/.test(segment)) continue;
+    for (const match of segment.matchAll(/\d[\d,]*/g)) {
+      const value = Number(match[0].replace(/,/g, ""));
+      if (
+        Number.isSafeInteger(value) &&
+        value >= MIN_PLAUSIBLE_OUTPUT_CAP &&
+        value < params.requested
+      ) {
+        candidates.push(value);
+      }
+    }
+  }
+  if (candidates.length) {
+    return { mode: "fixed", value: Math.max(...candidates), scope: "endpoint" };
+  }
+  if (isAnthropicMessagesUrl(params.url)) {
+    return params.requested > AUTO_REQUIRED_OUTPUT_TOKEN_SEED
+      ? {
+          mode: "fixed",
+          value: AUTO_REQUIRED_OUTPUT_TOKEN_SEED,
+          scope: "endpoint",
+        }
+      : null;
+  }
+  return { mode: "omit", scope: "endpoint" };
+}
+
+function getTemperaturePolicyKey(
+  url: string,
+  payload: Record<string, unknown>,
+) {
+  const model =
+    typeof payload.model === "string" ? payload.model.trim().toLowerCase() : "";
+  return `${url}::${model}`;
+}
+
+function applyTemperaturePolicy(
+  payload: Record<string, unknown>,
+  policy: TemperaturePolicy,
+) {
+  if (policy.mode === "omit") {
+    return stripTemperature(payload);
+  }
+  if (policy.mode === "fixed") {
+    return {
+      ...payload,
+      temperature: policy.value,
+    };
+  }
+  return payload;
+}
+
+function extractFixedTemperature(message: string): number | null {
+  const text = message.toLowerCase();
+  const patterns = [
+    /only\s+(-?\d+(?:\.\d+)?)\s+is\s+allowed/,
+    /temperature[^.\n]*must\s+be\s+(-?\d+(?:\.\d+)?)/,
+    /temperature[^.\n]*should\s+be\s+(-?\d+(?:\.\d+)?)/,
+    /allowed\s+temperature[^.\n]*:\s*(-?\d+(?:\.\d+)?)/,
+  ];
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (!match) continue;
+    const value = Number.parseFloat(match[1]);
+    if (Number.isFinite(value)) return value;
+  }
+  return null;
+}
+
+function getTemperatureRecoveryPolicy(
+  status: number,
+  message: string,
+): TemperaturePolicy | null {
+  if (status !== 400 && status !== 422) return null;
+  const text = message.toLowerCase();
+  if (!text.includes("temperature")) return null;
+
+  const fixedValue = extractFixedTemperature(text);
+  if (fixedValue !== null) {
+    return { mode: "fixed", value: fixedValue };
+  }
+
+  if (
+    text.includes("not supported") ||
+    text.includes("unsupported") ||
+    text.includes("not allowed") ||
+    text.includes("unknown parameter") ||
+    text.includes("invalid parameter") ||
+    text.includes("invalid temperature") ||
+    text.includes("deprecated")
+  ) {
+    return { mode: "omit" };
+  }
+
+  return null;
+}
+
+export type RequestAuthState = {
+  mode: ModelProviderAuthMode;
+  token: string;
+  codex?: {
+    authPath: string;
+    refreshToken: string;
+    accountId?: string;
+  };
+  copilot?: {
+    githubToken: string;
+  };
+};
+
+function buildAuthHeaders(
+  token: string,
+  mode?: ModelProviderAuthMode,
+  accountId?: string,
+): Record<string, string> {
+  if (mode === "copilot_auth") {
+    return buildCopilotHeaders(token);
+  }
+  if (mode === "codex_auth") {
+    return buildCodexAuthHeaders(
+      { token, accountId },
+      { "Content-Type": "application/json" },
+    );
+  }
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+  return headers;
+}
+
+async function refreshCodexAuthState(
+  state: RequestAuthState,
+  signal?: AbortSignal,
+): Promise<RequestAuthState> {
+  if (state.mode !== "codex_auth") return state;
+  const session =
+    state.codex?.authPath && state.codex.refreshToken
+      ? {
+          token: state.token,
+          authPath: state.codex.authPath,
+          refreshToken: state.codex.refreshToken,
+          accountId: state.codex.accountId,
+        }
+      : await resolveCodexAuthSession({ signal, fetchFn: getFetch() });
+  const refreshed = await refreshCodexAuthSession(session, {
+    signal,
+    fetchFn: getFetch(),
+  });
+  return {
+    mode: "codex_auth",
+    token: refreshed.token,
+    codex: {
+      authPath: refreshed.authPath,
+      refreshToken: refreshed.refreshToken,
+      ...(refreshed.accountId ? { accountId: refreshed.accountId } : {}),
+    },
+  };
+}
+
+async function refreshCopilotAuthState(
+  state: RequestAuthState,
+  signal?: AbortSignal,
+): Promise<RequestAuthState> {
+  if (state.mode !== "copilot_auth" || !state.copilot?.githubToken) {
+    return state;
+  }
+  cachedCopilotJwt = null;
+  const token = await resolveCopilotAccessToken({
+    githubToken: state.copilot.githubToken,
+    signal,
+  });
+  return {
+    mode: "copilot_auth",
+    token,
+    copilot: { githubToken: state.copilot.githubToken },
+  };
+}
+
+async function postWithTemperatureFallback(params: {
+  url: string;
+  auth: RequestAuthState;
+  payload: Record<string, unknown>;
+  signal?: AbortSignal;
+  headers?: Record<string, string>;
+  scope: ProviderRequestScope;
+  allowAutomaticRetry?: boolean;
+}) {
+  const policyKey = getTemperaturePolicyKey(params.url, params.payload);
+  const hasTemperature = Object.prototype.hasOwnProperty.call(
+    params.payload,
+    "temperature",
+  );
+  const send = (
+    bodyPayload: Record<string, unknown>,
+    auth: RequestAuthState,
+  ) => {
+    throwIfAborted(params.signal);
+    return sendProviderRequest({
+      url: params.url,
+      scope: params.scope,
+      fetchFn: getFetch(params.signal),
+      init: {
+        method: "POST",
+        headers:
+          params.headers ??
+          buildAuthHeaders(auth.token, auth.mode, auth.codex?.accountId),
+        body: JSON.stringify(bodyPayload),
+        signal: params.signal,
+      },
+    });
+  };
+
+  let requestPayload = params.payload;
+  const cachedPolicy = temperaturePolicyCache.get(policyKey);
+  if (hasTemperature && cachedPolicy) {
+    requestPayload = applyTemperaturePolicy(params.payload, cachedPolicy);
+  }
+  const outputCapKey = findOutputCapKey(requestPayload);
+  const cachedCapRecovery = outputCapRecoveryCache.get(policyKey);
+  if (outputCapKey && cachedCapRecovery) {
+    requestPayload = applyOutputCapRecovery(
+      requestPayload,
+      outputCapKey,
+      cachedCapRecovery,
+    );
+  }
+
+  let authState = params.auth;
+  let res = await send(requestPayload, authState);
+  if (res.status === 401) {
+    if (authState.mode === "codex_auth" && authState.codex?.refreshToken) {
+      authState = await refreshCodexAuthState(authState, params.signal);
+      res = await send(requestPayload, authState);
+    } else if (
+      authState.mode === "copilot_auth" &&
+      authState.copilot?.githubToken
+    ) {
+      authState = await refreshCopilotAuthState(authState, params.signal);
+      res = await send(requestPayload, authState);
+    }
+  }
+  if (res.ok) return res;
+
+  const firstErr = await res.text();
+  if (params.allowAutomaticRetry === false) {
+    throw providerHttpError(res, params.url, firstErr);
+  }
+  const recoveryPolicy = hasTemperature
+    ? getTemperatureRecoveryPolicy(res.status, firstErr)
+    : null;
+  if (recoveryPolicy) {
+    const fallbackPayload = applyTemperaturePolicy(
+      params.payload,
+      recoveryPolicy,
+    );
+    res = await send(fallbackPayload, authState);
+    if (res.status === 401) {
+      if (authState.mode === "codex_auth" && authState.codex?.refreshToken) {
+        authState = await refreshCodexAuthState(authState, params.signal);
+        res = await send(fallbackPayload, authState);
+      } else if (
+        authState.mode === "copilot_auth" &&
+        authState.copilot?.githubToken
+      ) {
+        authState = await refreshCopilotAuthState(authState, params.signal);
+        res = await send(fallbackPayload, authState);
+      }
+    }
+    if (res.ok) {
+      temperaturePolicyCache.set(policyKey, recoveryPolicy);
+      return res;
+    }
+    const secondErr = await res.text();
+    throw providerHttpError(res, params.url, secondErr);
+  }
+  const retryCapKey = findOutputCapKey(requestPayload);
+  const capRecovery = retryCapKey
+    ? getOutputCapRecovery({
+        status: res.status,
+        message: firstErr,
+        url: params.url,
+        requested: Number(requestPayload[retryCapKey]),
+      })
+    : null;
+  if (capRecovery && retryCapKey) {
+    const fallbackPayload = applyOutputCapRecovery(
+      requestPayload,
+      retryCapKey,
+      capRecovery,
+    );
+    appLogger.debug("LLM: Retrying after output cap rejection", {
+      url: params.url,
+      key: retryCapKey,
+      requested: requestPayload[retryCapKey],
+      recovery: capRecovery,
+      error: firstErr,
+    });
+    res = await send(fallbackPayload, authState);
+    if (res.ok) {
+      if (capRecovery.scope === "endpoint") {
+        outputCapRecoveryCache.set(policyKey, capRecovery);
+      }
+      return res;
+    }
+    const secondErr = await res.text();
+    throw providerHttpError(res, params.url, secondErr);
+  }
+
+  throw providerHttpError(res, params.url, firstErr);
+}
+
+export function parseStatusFromErrorMessage(message: string): number | null {
+  const match = message.trim().match(/^(\d{3})\b/);
+  if (!match) return null;
+  const value = Number.parseInt(match[1], 10);
+  return Number.isFinite(value) ? value : null;
+}
+
+function isReasoningErrorMessage(errorMessage: string): boolean {
+  const status = parseStatusFromErrorMessage(errorMessage);
+  if (status !== 400 && status !== 422) return false;
+  const text = errorMessage.toLowerCase();
+  return (
+    text.includes("reasoning") ||
+    text.includes("effort") ||
+    text.includes("thinking") ||
+    text.includes("enable_thinking") ||
+    text.includes("chat_template_kwargs") ||
+    text.includes("thinking_level") ||
+    text.includes("thinking_budget") ||
+    text.includes("budget_tokens") ||
+    // Ollama rejects an unsupported think level, e.g. a string level sent to a
+    // model that only accepts a boolean.
+    text.includes("think")
+  );
+}
+
+function getReasoningRecoverySelection(params: {
+  currentReasoning: ReasoningSelection | undefined;
+  modelName?: string;
+}): ReasoningSelection | undefined | null {
+  const { currentReasoning, modelName } = params;
+  if (!currentReasoning) return null;
+  const defaultLevel = getReasoningDefaultLevelForModel(
+    currentReasoning.provider,
+    modelName,
+  );
+  if (defaultLevel && currentReasoning.level !== defaultLevel) {
+    return {
+      provider: currentReasoning.provider,
+      level: defaultLevel,
+    };
+  }
+  return undefined;
+}
+
+function getReasoningSelectionKey(
+  reasoningSelection: ReasoningSelection | undefined,
+): string {
+  if (!reasoningSelection) return "none";
+  return [
+    reasoningSelection.provider,
+    reasoningSelection.level,
+    reasoningSelection.effort || "",
+    reasoningSelection.anthropicModeOverride || "",
+  ].join(":");
+}
+
+export function getAnthropicMessagesReasoningRecoverySelection(params: {
+  currentReasoning: ReasoningSelection | undefined;
+  modelName?: string;
+}): ReasoningSelection | undefined | null {
+  const { currentReasoning, modelName } = params;
+  if (!currentReasoning) return null;
+  if (currentReasoning.provider !== "anthropic") {
+    return getReasoningRecoverySelection(params);
+  }
+  const profile = getAnthropicReasoningProfile(modelName);
+  const currentMode = resolveAnthropicThinkingMode({
+    profile,
+    override: currentReasoning.anthropicModeOverride,
+  });
+  if (currentMode === "adaptive" && profile.supportsManualThinking) {
+    return {
+      provider: "anthropic",
+      level: currentReasoning.level,
+      anthropicModeOverride: "manual",
+    };
+  }
+  return undefined;
+}
+
+export async function postWithReasoningFallback(params: {
+  url: string;
+  scope: ProviderRequestScope;
+  auth: RequestAuthState;
+  modelName?: string;
+  initialReasoning: ReasoningSelection | undefined;
+  buildPayload: (
+    reasoningOverride: ReasoningSelection | undefined,
+  ) => Record<string, unknown>;
+  getRecoverySelection?: (params: {
+    currentReasoning: ReasoningSelection | undefined;
+    modelName?: string;
+  }) => ReasoningSelection | undefined | null;
+  signal?: AbortSignal;
+  headers?: Record<string, string>;
+  /** Raw PDF turns must fail visibly rather than silently resubmit. */
+  allowAutomaticRetry?: boolean;
+}) {
+  let reasoningSelection = params.initialReasoning;
+  let retries = 0;
+  const maxRetries = 2;
+  let lastError: unknown;
+  const attemptedSelections = new Set<string>([
+    getReasoningSelectionKey(reasoningSelection),
+  ]);
+
+  while (retries <= maxRetries) {
+    const payload = params.buildPayload(reasoningSelection);
+    try {
+      return await postWithTemperatureFallback({
+        url: params.url,
+        scope: params.scope,
+        auth: params.auth,
+        payload,
+        signal: params.signal,
+        headers: params.headers,
+        allowAutomaticRetry: params.allowAutomaticRetry,
+      });
+    } catch (err) {
+      if (params.allowAutomaticRetry === false)
+        throw explainResponsesPdfRejection(err);
+      lastError = err;
+      const message = err instanceof Error ? err.message : String(err);
+      if (!isReasoningErrorMessage(message)) {
+        throw err;
+      }
+      const recovered = (
+        params.getRecoverySelection || getReasoningRecoverySelection
+      )({
+        currentReasoning: reasoningSelection,
+        modelName: params.modelName,
+      });
+      if (recovered === null) {
+        throw err;
+      }
+      const nextKey = getReasoningSelectionKey(recovered);
+      if (attemptedSelections.has(nextKey)) {
+        throw err;
+      }
+      appLogger.debug("LLM: Retrying after reasoning payload rejection", {
+        model: params.modelName,
+        from: getReasoningSelectionKey(reasoningSelection),
+        to: nextKey,
+        error: message,
+      });
+      attemptedSelections.add(nextKey);
+      reasoningSelection = recovered;
+      retries += 1;
+    }
+  }
+
+  throw (lastError as Error) || new Error("Request failed after retries");
+}
+
+function extractResponsesOutputText(data: {
+  output_text?: string;
+  output?: Array<{
+    content?: Array<{ type?: string; text?: string }>;
+  }>;
+}): string {
+  if (data?.output_text) return data.output_text;
+  const firstText =
+    data?.output
+      ?.flatMap((item) => item.content || [])
+      .find((content) => content.type === "output_text" && content.text)
+      ?.text || "";
+  return firstText;
+}
+
+function extractResponsesOutcome(data: {
+  id?: string;
+  status?: string;
+  incomplete_details?: { reason?: string } | null;
+  output_text?: string;
+  output?: Array<{
+    content?: Array<{ type?: string; text?: string }>;
+  }>;
+}): ModelTurnOutcome {
+  let completion = normalizeProviderCompletion(
+    data.incomplete_details?.reason,
+    { responseStatus: data.status },
+  );
+  if (
+    data.status?.toLowerCase() === "incomplete" &&
+    completion.status === "complete"
+  ) {
+    completion = {
+      status: "blocked",
+      reason: "other",
+      providerReason: "incomplete",
+    };
+  }
+  return modelTurnOutcome(
+    extractResponsesOutputText(data),
+    completion,
+    completion.status === "incomplete" && data.id
+      ? { responseId: data.id }
+      : undefined,
+  );
+}
+
+export async function resolveRequestAuthState(params: {
+  authMode: ModelProviderAuthMode;
+  apiKey: string;
+  signal?: AbortSignal;
+}): Promise<RequestAuthState> {
+  if (params.authMode === "codex_auth") {
+    const resolved = await resolveCodexAuthSession({
+      signal: params.signal,
+      fetchFn: getFetch(),
+    });
+    return {
+      mode: "codex_auth",
+      token: resolved.token,
+      codex: {
+        authPath: resolved.authPath,
+        refreshToken: resolved.refreshToken,
+        ...(resolved.accountId ? { accountId: resolved.accountId } : {}),
+      },
+    };
+  }
+  if (params.authMode === "copilot_auth") {
+    const token = await resolveCopilotAccessToken({
+      githubToken: params.apiKey,
+      signal: params.signal,
+    });
+    return {
+      mode: "copilot_auth",
+      token,
+      copilot: { githubToken: params.apiKey },
+    };
+  }
+  return {
+    mode: "api_key",
+    token: params.apiKey,
+  };
+}
+
+// =============================================================================
+// API Functions
+// =============================================================================
+
+function resolveAndLogOutputPolicy(params: {
+  setting?: OutputTokenLimitSetting;
+  model: string;
+  apiBase: string;
+  protocol: ProviderProtocol;
+  authMode: ModelProviderAuthMode;
+  profileOverride?: ModelProfileOverride;
+}): OutputRequestPolicy {
+  const policy = resolveOutputRequestPolicy(params);
+  appLogger.debug("LLM: Resolved per-response output policy", {
+    model: params.model,
+    protocol: params.protocol,
+    settingMode: params.setting?.mode || "auto",
+    resolutionSource: policy.source,
+    transmittedPolicy:
+      policy.mode === "numeric"
+        ? { mode: "numeric", tokens: policy.tokens }
+        : { mode: policy.mode },
+  });
+  return policy;
+}
+
+/**
+ * Handles anthropic_messages, gemini_native and ollama_native protocols for
+ * both streaming and non-streaming calls. Passing onDelta enables streaming.
+ */
+async function callNativeProtocol(params: {
+  protocol: "anthropic_messages" | "gemini_native" | "ollama_native";
+  apiBase: string;
+  apiKey: string;
+  model: string;
+  messages: ChatMessage[];
+  outputPolicy: OutputRequestPolicy;
+  /** Model context window; a numeric cap is clamped to the room left in it. */
+  contextWindow: number;
+  /** Raw request temperature; protocol-specific defaults are applied here. */
+  rawTemperature?: number | string;
+  signal?: AbortSignal;
+  onDelta?: (delta: string) => void;
+  onReasoning?: (event: ReasoningEvent) => void;
+  onUsage?: (usage: UsageStats) => void;
+  attachments?: ChatFileAttachment[];
+  reasoning?: ReasoningConfig;
+  contextCache?: ContextCachePlan;
+  /** ollama_native only: runtime context window to allocate. */
+  numCtx?: number;
+  profileOverride?: ModelProfileOverride;
+  requestScope: ProviderRequestScope;
+}): Promise<ModelTurnOutcome> {
+  const {
+    protocol,
+    apiBase,
+    apiKey,
+    model,
+    messages,
+    outputPolicy,
+    rawTemperature,
+    signal,
+    onDelta,
+    onReasoning,
+    onUsage,
+  } = params;
+  const isStreaming = Boolean(onDelta);
+  const url =
+    protocol === "anthropic_messages"
+      ? resolveAnthropicMessagesEndpoint(apiBase)
+      : protocol === "ollama_native"
+        ? resolveOllamaNativeEndpoint(apiBase)
+        : resolveGeminiNativeEndpoint({ apiBase, model, stream: isStreaming });
+  const headers = buildProviderAuthHeaders({
+    protocol,
+    apiKey,
+  });
+  const pdfParts: Array<{ base64: string }> = [];
+  if (
+    (protocol === "anthropic_messages" || protocol === "gemini_native") &&
+    params.attachments?.length
+  ) {
+    for (const att of params.attachments) {
+      if (!att.storedPath) continue;
+      const mime = att.mimeType || "";
+      if (
+        mime !== "application/pdf" &&
+        !att.name?.toLowerCase().endsWith(".pdf")
+      )
+        continue;
+      try {
+        const base64 = await readFileRefAsBase64(att.storedPath);
+        pdfParts.push({ base64 });
+      } catch (err) {
+        appLogger.warn(
+          `LLM: Failed to read PDF attachment for ${protocol}`,
+          err,
+        );
+      }
+    }
+  }
+  const transmittedPolicy =
+    protocol === "anthropic_messages"
+      ? resolveTransmittedOutputPolicy({
+          policy: outputPolicy,
+          contextWindow: params.contextWindow,
+          estimatedInputTokens: estimateWirePayloadTokens({
+            messages,
+            pdfParts,
+          }),
+        })
+      : outputPolicy;
+  const buildBody = (reasoningOverride: ReasoningSelection | undefined) =>
+    protocol === "ollama_native"
+      ? buildOllamaChatPayload({
+          model,
+          messages,
+          stream: isStreaming,
+          temperature: normalizeTemperature(rawTemperature),
+          numPredict: resolveOllamaNumPredict(outputPolicy),
+          numCtx: params.numCtx,
+          reasoningExtra: buildReasoningPayload(
+            reasoningOverride,
+            false,
+            model,
+            apiBase,
+            "ollama_native",
+            { profileOverride: params.profileOverride },
+          ).extra,
+        })
+      : protocol === "anthropic_messages"
+        ? buildAnthropicMessagesPayload({
+            model,
+            messages,
+            effectiveMaxTokens:
+              transmittedPolicy.mode === "numeric"
+                ? transmittedPolicy.tokens
+                : AUTO_REQUIRED_OUTPUT_TOKEN_SEED,
+            effectiveTemperature: normalizeTemperature(rawTemperature),
+            stream: isStreaming,
+            reasoning: reasoningOverride,
+            apiBase,
+            anthropicModeOverride: reasoningOverride?.anthropicModeOverride,
+            pdfParts: pdfParts.length ? pdfParts : undefined,
+            contextCache: params.contextCache,
+            profileOverride: params.profileOverride,
+          })
+        : buildGeminiNativePayload({
+            model,
+            apiBase,
+            messages,
+            outputPolicy,
+            temperature: resolveGeminiTemperature(model, rawTemperature),
+            reasoning: reasoningOverride,
+            pdfParts: pdfParts.length ? pdfParts : undefined,
+            profileOverride: params.profileOverride,
+          });
+  const res = await postWithReasoningFallback({
+    url,
+    scope: params.requestScope,
+    auth: { mode: "api_key", token: apiKey },
+    headers,
+    modelName: model,
+    initialReasoning: params.reasoning,
+    buildPayload: buildBody,
+    signal,
+    getRecoverySelection:
+      protocol === "anthropic_messages"
+        ? getAnthropicMessagesReasoningRecoverySelection
+        : undefined,
+  });
+  if (!res.ok) {
+    throw new Error(`${res.status} (${url}) - ${await res.text()}`);
+  }
+  if (isStreaming) {
+    if (!res.body) return callNativeProtocol({ ...params, onDelta: undefined });
+    return protocol === "anthropic_messages"
+      ? parseAnthropicStreamResponse(res.body, onDelta!, onReasoning, onUsage)
+      : protocol === "ollama_native"
+        ? parseOllamaChatStream(res.body, onDelta!, onReasoning, onUsage)
+        : parseGeminiNativeStreamResponse(
+            res.body,
+            onDelta!,
+            onReasoning,
+            onUsage,
+          );
+  }
+  if (protocol === "ollama_native") {
+    const data = (await res.json()) as OllamaChatChunk;
+    const thinking = normalizeStreamText(data?.message?.thinking ?? "");
+    if (thinking && onReasoning) onReasoning({ details: thinking });
+    // Deliberately no fallback to `thinking` when content is empty: if the
+    // server put the answer in the reasoning field that is the server's bug,
+    // and silently promoting it would hide a misconfiguration (see #363).
+    return modelTurnOutcome(
+      normalizeStreamText(data?.message?.content ?? ""),
+      normalizeProviderCompletion(data.done_reason),
+    );
+  }
+  if (protocol === "anthropic_messages") {
+    const data = (await res.json()) as {
+      content?: Array<{ type?: string; text?: string }>;
+      stop_reason?: string | null;
+    };
+    return modelTurnOutcome(
+      data?.content?.find((c) => c.type === "text")?.text ?? "",
+      normalizeProviderCompletion(data.stop_reason),
+    );
+  }
+  const data = (await res.json()) as {
+    candidates?: Array<{
+      finishReason?: string;
+      content?: { parts?: Array<{ text?: string; thought?: unknown }> };
+    }>;
+  };
+  return modelTurnOutcome(
+    data.candidates?.[0]?.content?.parts
+      ?.filter((p) => !isGeminiThoughtSummaryPart(p))
+      .map((p) => p.text || "")
+      .join("") ?? "",
+    normalizeProviderCompletion(data.candidates?.[0]?.finishReason),
+  );
+}
+
+/**
+ * Call LLM API (non-streaming)
+ */
+export async function callLLM(params: ChatParams): Promise<ModelTurnOutcome> {
+  const route = resolveChatRouteCapabilities(params);
+  if (route.paperRegistry || route.directWebPdf) {
+    return callLLMStream(params, () => {});
+  }
+  const requestScope = params.requestScope ?? createProviderRequestScope();
+  params = { ...params, requestScope };
+  throwIfAborted(params.signal);
+  await preflightRequestModelCapabilities(params);
+  throwIfAborted(params.signal);
+  const prepared = prepareChatRequest(params);
+  const {
+    apiBase,
+    apiKey,
+    authMode,
+    model,
+    messages,
+    inputCap,
+    providerProtocol,
+  } = prepared;
+  if (authMode === "codex_auth") {
+    assertCodexDirectModelAvailable(model);
+  }
+  const outputPolicy = resolveAndLogOutputPolicy({
+    setting: params.outputTokenLimit,
+    model,
+    apiBase,
+    protocol: providerProtocol,
+    authMode,
+    profileOverride: params.profileOverride,
+  });
+  if (
+    providerProtocol === "anthropic_messages" ||
+    providerProtocol === "gemini_native" ||
+    providerProtocol === "ollama_native"
+  ) {
+    return callNativeProtocol({
+      protocol: providerProtocol,
+      apiBase,
+      apiKey,
+      requestScope,
+      model,
+      messages,
+      outputPolicy,
+      contextWindow: inputCap.limitTokens,
+      rawTemperature: params.temperature,
+      signal: params.signal,
+      attachments: params.attachments,
+      reasoning: params.reasoning,
+      contextCache: params.contextCache,
+      numCtx: resolveOllamaNumCtx({
+        protocol: providerProtocol,
+        estimatedPromptTokens: inputCap.estimatedAfterTokens,
+        outputPolicy,
+        contextWindowTokens: inputCap.limitTokens,
+      }),
+      profileOverride: params.profileOverride,
+    });
+  }
+  assertCodexAppServerUsesNativeRuntime(authMode);
+  if (authMode === "codex_auth") {
+    return callLLMStream(params, () => undefined, undefined, undefined);
+  }
+  const auth = await resolveRequestAuthState({
+    authMode,
+    apiKey,
+    signal: params.signal,
+  });
+  if (inputCap.capped) {
+    appLogger.debug("LLM: Applied model-aware input cap", {
+      model,
+      beforeTokens: inputCap.estimatedBeforeTokens,
+      afterTokens: inputCap.estimatedAfterTokens,
+      capTokens: inputCap.limitTokens,
+      softCapTokens: inputCap.softLimitTokens,
+      effects: inputCap.effects,
+    });
+  }
+  const useResponses =
+    providerProtocol === "responses_api" ||
+    providerProtocol === "codex_responses";
+  const { responseFileIds, responseFilePartsByMessage, allowAutomaticRetry } =
+    await prepareResponsesAttachments({
+      ...params,
+      apiBase,
+      apiKey: auth.token,
+      authMode,
+      model,
+      providerProtocol,
+      messages,
+    });
+  const effectiveTemperature = normalizeTemperature(params.temperature);
+  const outputReserveTokens = resolveOutputReserve(
+    params.outputTokenLimit,
+    model,
+    {
+      apiBase,
+      protocol: providerProtocol,
+      authMode,
+      profileOverride: params.profileOverride,
+    },
+  );
+
+  const url = resolveProviderTransportEndpoint({
+    protocol: providerProtocol,
+    apiBase,
+    model,
+    stream: false,
+    authMode,
+  });
+  const requestHeaders = buildProviderAuthHeaders({
+    protocol: providerProtocol,
+    apiKey: auth.token,
+    authMode,
+  });
+  const buildPayload = createChatPayloadBuilder({
+    model,
+    messages,
+    useResponses,
+    responseFileIds,
+    responseFilePartsByMessage,
+    authMode,
+    apiBase,
+    providerProtocol,
+    effectiveTemperature,
+    outputPolicy,
+    outputReserveTokens,
+    contextWindow: inputCap.limitTokens,
+    stream: false,
+    contextCache: params.contextCache,
+    profileOverride: params.profileOverride,
+    continuationState: params.continuationState,
+  });
+  const res = await postWithReasoningFallback({
+    url,
+    scope: requestScope,
+    auth,
+    headers: requestHeaders,
+    allowAutomaticRetry,
+    modelName: model,
+    initialReasoning: params.reasoning,
+    buildPayload,
+    signal: params.signal,
+  });
+
+  const data = (await res.json()) as CompletionResponse & {
+    id?: string;
+    status?: string;
+    incomplete_details?: { reason?: string } | null;
+    output_text?: string;
+    output?: Array<{ content?: Array<{ type?: string; text?: string }> }>;
+  };
+  if (useResponses) {
+    return extractResponsesOutcome(data);
+  }
+  return modelTurnOutcome(
+    data?.choices?.[0]?.message?.content ?? data?.choices?.[0]?.text ?? "",
+    normalizeProviderCompletion(data?.choices?.[0]?.finish_reason),
+  );
+}
+
+/**
+ * Call LLM API with streaming response
+ */
+async function callCprDirectWebStream(
+  params: ChatParams,
+  onDelta: (delta: string) => void,
+  onReasoning?: (event: ReasoningEvent) => void,
+  onUsage?: (usage: UsageStats) => void,
+): Promise<ModelTurnOutcome> {
+  if (!params.apiBase || !params.apiKey) {
+    throw new Error("请配置 CPR API 地址和密钥。");
+  }
+  const requestScope = params.requestScope ?? createProviderRequestScope();
+  const prepared = await prepareCprDirectWebRequest({
+    model: params.model || "",
+    apiBase: params.apiBase,
+    reasoning: params.reasoning,
+    profileOverride: params.profileOverride,
+    prompt: params.prompt,
+    refs: [...(params.cprPaperContexts || [])],
+    images: params.images || (params.image ? [params.image] : undefined),
+    requestScope,
+    signal: params.signal,
+    readBytes: readLocalFileBytes,
+  });
+  if (prepared.uncertain.length) {
+    const warning = prepared.uncertain
+      .map((entry) => `${CPR_DIRECT_WEB_UNCERTAIN_MESSAGE} (${entry.filename})`)
+      .join("\n");
+    const lastMessage =
+      prepared.payload.input[prepared.payload.input.length - 1];
+    const lastText = lastMessage?.content.find(
+      (part) => part.type === "input_text",
+    );
+    if (lastText?.type === "input_text") {
+      lastText.text = `${warning}\n\n${lastText.text}`;
+    }
+  }
+  let response: Response;
+  try {
+    const fetchFn = getFetch();
+    const endpoint = resolveEndpoint(params.apiBase, "/v1/responses");
+    const body = JSON.stringify(prepared.payload);
+    params.signal?.throwIfAborted();
+    prepared.markDispatched();
+    response = await sendProviderRequest({
+      url: endpoint,
+      scope: requestScope,
+      fetchFn,
+      init: {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${params.apiKey}`,
+        },
+        body,
+        signal: params.signal,
+      },
+    });
+    if (!response.ok) {
+      throw new Error(
+        `CPR ChatGPT Web HTTP ${response.status}: ${(await response.text()).slice(0, 600)}`,
+      );
+    }
+    if (!response.body)
+      throw new Error("CPR ChatGPT Web 未返回事件流；未自动重发。");
+    const outcome = await parseResponsesStream(
+      response.body,
+      onDelta,
+      onReasoning,
+      onUsage,
+      {
+        requireCompleted: true,
+        collectRichWidgets: true,
+      },
+    );
+    if (outcome.completion.status === "complete") {
+      prepared.accept();
+    } else {
+      prepared.markUncertain();
+    }
+    return outcome;
+  } catch (error) {
+    prepared.releaseUnsent();
+    prepared.markUncertain();
+    throw error;
+  }
+}
+
+export async function callLLMStream(
+  params: ChatParams,
+  onDelta: (delta: string) => void,
+  onReasoning?: (event: ReasoningEvent) => void,
+  onUsage?: (usage: UsageStats) => void,
+): Promise<ModelTurnOutcome> {
+  const routeCapabilities = resolveChatRouteCapabilities(params);
+  if (routeCapabilities.paperRegistry) {
+    if (params.inputMode === "text_only") {
+      throw new Error(
+        "当前论文会话需要 PDF 输入；仅文本设置下不会读取或上传 PDF。请切换模型或允许 PDF 输入。",
+      );
+    }
+    if (!params.apiBase || !params.apiKey)
+      throw new Error("请配置 CPR API 地址和密钥。");
+    if (!params.cprPaperSessionId?.trim()) {
+      throw new Error(
+        "论文请求缺少会话身份；请重新打开会话后发送，没有登记或上传 PDF。",
+      );
+    }
+    const paperRequest = await prepareCprPaperRequest({
+      itemId: params.cprPaperItemId,
+      apiBase: params.apiBase,
+      apiKey: params.apiKey,
+      paperSessionId: params.cprPaperSessionId,
+      model: params.model,
+      reasoning: params.reasoning,
+      profileOverride: params.profileOverride,
+      fetchFn: getFetch(),
+      signal: params.signal,
+      prompt: params.prompt,
+      images: params.images || (params.image ? [params.image] : undefined),
+      readBytes: readLocalFileBytes,
+    });
+    const encodedRequest = encodeCprPapersRequestBody(paperRequest.payload);
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${params.apiKey}`,
+    };
+    if (encodedRequest.contentEncoding === "gzip") {
+      headers["Content-Encoding"] = "gzip";
+    }
+    params.signal?.throwIfAborted();
+    const response = await sendProviderRequest({
+      url: resolveEndpoint(params.apiBase, "/v1/responses"),
+      scope: params.requestScope ?? { operationId: params.cprPaperSessionId },
+      fetchFn: getFetch(),
+      init: {
+        method: "POST",
+        headers,
+        body: encodedRequest.body,
+        signal: params.signal,
+      },
+    });
+    if (!response.ok) {
+      const failure = describeCprPapersHttpFailure({
+        status: response.status,
+        bodyText: await response.text(),
+        cfRay: response.headers.get("cf-ray"),
+        requestId: response.headers.get("x-request-id"),
+        wireBytes: encodedRequest.wireBytes,
+        contentEncoding: encodedRequest.contentEncoding,
+      });
+      appLogger.warn("CPR papers request failed", {
+        status: failure.status,
+        wireBytes: failure.wireBytes,
+        encoding: failure.contentEncoding,
+        cfRay: failure.cfRay || "",
+        requestId: failure.requestId || "",
+        model: params.model || "",
+        message: failure.responseMessage || "",
+      });
+      throw new Error(failure.error);
+    }
+    if (!response.body) {
+      throw new Error(
+        `CPR papers 未返回事件流（HTTP ${response.status}；wire=${encodedRequest.wireBytes} bytes；encoding=${encodedRequest.contentEncoding}）；未自动重发。`,
+      );
+    }
+    const outcome = await parseResponsesStream(
+      response.body,
+      onDelta,
+      onReasoning,
+      onUsage,
+      { requireCompleted: true, collectRichWidgets: true },
+    );
+    if (outcome.completion.status === "complete") paperRequest.accept();
+    return outcome;
+  }
+  if (routeCapabilities.directWebPdf) {
+    return callCprDirectWebStream(params, onDelta, onReasoning, onUsage);
+  }
+  const requestScope = params.requestScope ?? createProviderRequestScope();
+  params = { ...params, requestScope };
+  throwIfAborted(params.signal);
+  await preflightRequestModelCapabilities(params);
+  throwIfAborted(params.signal);
+  const prepared = prepareChatRequest(params);
+  const {
+    apiBase,
+    apiKey,
+    authMode,
+    model,
+    messages,
+    inputCap,
+    providerProtocol,
+  } = prepared;
+  if (authMode === "codex_auth") {
+    assertCodexDirectModelAvailable(model);
+  }
+  const outputPolicy = resolveAndLogOutputPolicy({
+    setting: params.outputTokenLimit,
+    model,
+    apiBase,
+    protocol: providerProtocol,
+    authMode,
+    profileOverride: params.profileOverride,
+  });
+  if (
+    providerProtocol === "anthropic_messages" ||
+    providerProtocol === "gemini_native" ||
+    providerProtocol === "ollama_native"
+  ) {
+    return callNativeProtocol({
+      protocol: providerProtocol,
+      apiBase,
+      apiKey,
+      requestScope,
+      model,
+      messages,
+      outputPolicy,
+      contextWindow: inputCap.limitTokens,
+      rawTemperature: params.temperature,
+      signal: params.signal,
+      onDelta,
+      onReasoning,
+      onUsage,
+      attachments: params.attachments,
+      reasoning: params.reasoning,
+      contextCache: params.contextCache,
+      numCtx: resolveOllamaNumCtx({
+        protocol: providerProtocol,
+        estimatedPromptTokens: inputCap.estimatedAfterTokens,
+        outputPolicy,
+        contextWindowTokens: inputCap.limitTokens,
+      }),
+      profileOverride: params.profileOverride,
+    });
+  }
+  assertCodexAppServerUsesNativeRuntime(authMode);
+  const auth = await resolveRequestAuthState({
+    authMode,
+    apiKey,
+    signal: params.signal,
+  });
+  if (inputCap.capped) {
+    appLogger.debug("LLM: Applied model-aware input cap", {
+      model,
+      beforeTokens: inputCap.estimatedBeforeTokens,
+      afterTokens: inputCap.estimatedAfterTokens,
+      capTokens: inputCap.limitTokens,
+      softCapTokens: inputCap.softLimitTokens,
+      effects: inputCap.effects,
+    });
+  }
+  if (
+    authMode === "codex_auth" &&
+    Array.isArray(params.attachments) &&
+    params.attachments.length
+  ) {
+    throw new Error(
+      "codex auth currently does not support file attachments in this plugin v1.",
+    );
+  }
+  const useResponses =
+    providerProtocol === "responses_api" ||
+    providerProtocol === "codex_responses";
+  const { responseFileIds, responseFilePartsByMessage, allowAutomaticRetry } =
+    await prepareResponsesAttachments({
+      ...params,
+      apiBase,
+      apiKey: auth.token,
+      authMode,
+      model,
+      providerProtocol,
+      messages,
+    });
+  const effectiveTemperature = normalizeTemperature(params.temperature);
+  const outputReserveTokens = resolveOutputReserve(
+    params.outputTokenLimit,
+    model,
+    {
+      apiBase,
+      protocol: providerProtocol,
+      authMode,
+      profileOverride: params.profileOverride,
+    },
+  );
+
+  const url = resolveProviderTransportEndpoint({
+    protocol: providerProtocol,
+    apiBase,
+    model,
+    stream: true,
+    authMode,
+  });
+  const requestHeaders = buildProviderAuthHeaders({
+    protocol: providerProtocol,
+    apiKey: auth.token,
+    authMode,
+  });
+  const buildPayload = createChatPayloadBuilder({
+    model,
+    messages,
+    useResponses,
+    responseFileIds,
+    responseFilePartsByMessage,
+    authMode,
+    apiBase,
+    providerProtocol,
+    effectiveTemperature,
+    outputPolicy,
+    outputReserveTokens,
+    contextWindow: inputCap.limitTokens,
+    stream: true,
+    contextCache: params.contextCache,
+    profileOverride: params.profileOverride,
+  });
+  const res = await postWithReasoningFallback({
+    url,
+    scope: requestScope,
+    auth,
+    ...(authMode === "codex_auth" ? {} : { headers: requestHeaders }),
+    allowAutomaticRetry,
+    modelName: model,
+    initialReasoning: params.reasoning,
+    buildPayload,
+    signal: params.signal,
+  });
+
+  // Fallback to non-streaming if body is not available
+  if (!res.body) {
+    if (useResponses) {
+      const data = (await res.json()) as {
+        id?: string;
+        status?: string;
+        incomplete_details?: { reason?: string } | null;
+        output_text?: string;
+        output?: Array<{ content?: Array<{ type?: string; text?: string }> }>;
+      };
+      return extractResponsesOutcome(data);
+    }
+    return callLLM(params);
+  }
+
+  return useResponses
+    ? parseResponsesStream(res.body, onDelta, onReasoning, onUsage)
+    : parseStreamResponse(res.body, onDelta, onReasoning, onUsage);
+}
+
+/**
+ * Lightweight pre-check: will `callEmbeddings` work with the current config?
+ * Returns `true` if a viable embedding endpoint is available (either a
+ * separate provider or a main provider that supports embeddings).
+ * Does NOT make any network calls.
+ */
+export function checkEmbeddingAvailability(): boolean {
+  const embeddingProvider = (getPref("embeddingProvider") || "").trim();
+  const embeddingApiBase = (getPref("embeddingApiBase") || "").trim();
+
+  // No dedicated endpoint: fall back to a configured provider that serves
+  // embeddings, so semantic search works without extra setup.
+  if (!embeddingApiBase) return Boolean(resolveAutoEmbeddingProvider());
+
+  // Custom/local providers may not need a key
+  if (embeddingProvider === "custom") return true;
+  return Boolean(resolveSeparateEmbeddingApiKey(embeddingProvider));
+}
+
+/**
+ * Diagnostic: returns a human-readable reason why embeddings are unavailable.
+ * Used by the preference UI to show actionable guidance.
+ */
+export function getEmbeddingUnavailableReason(): string | null {
+  const embeddingProvider = (getPref("embeddingProvider") || "").trim();
+  const embeddingApiBase = (getPref("embeddingApiBase") || "").trim();
+
+  if (!embeddingApiBase) {
+    if (resolveAutoEmbeddingProvider()) return null;
+    return "No embedding provider configured and no configured OpenAI or Gemini provider to reuse. Select a provider in Settings → Customization → Semantic Search.";
+  }
+
+  // Custom/local providers may not need a key
+  if (embeddingProvider === "custom") return null;
+  if (resolveSeparateEmbeddingApiKey(embeddingProvider)) return null;
+  return `No API key found for your ${embeddingProvider} embedding provider. Add a key in Settings → Customization → Semantic Search.`;
+}
+
+export type SemanticSearchState = {
+  enabled: boolean;
+  /**
+   * `pref` — the user turned semantic search on explicitly.
+   * `off` — the user turned it off explicitly; nothing may override that.
+   * `auto` — no explicit choice, so availability decides.
+   */
+  source: "pref" | "auto" | "off";
+};
+
+/**
+ * Effective semantic-search state. Semantic search is on by default whenever an
+ * embedding configuration resolves (dedicated endpoint or a reusable configured
+ * provider); an explicit `false` always wins.
+ */
+export function resolveSemanticSearchState(): SemanticSearchState {
+  const raw = getPref("enableSemanticSearch") as unknown;
+  if (raw === false || raw === "false") {
+    return { enabled: false, source: "off" };
+  }
+  if (raw === true || raw === "true") {
+    return { enabled: checkEmbeddingAvailability(), source: "pref" };
+  }
+  return { enabled: checkEmbeddingAvailability(), source: "auto" };
+}
+
+/**
+ * Error thrown when the configured provider does not support embeddings.
+ * Callers can check `instanceof EmbeddingUnsupportedError` to distinguish
+ * from network or API errors and show appropriate user guidance.
+ */
+export class EmbeddingUnsupportedError extends Error {
+  providerLabel: string;
+  constructor(providerLabel: string) {
+    super(
+      `Provider "${providerLabel}" does not support embeddings. ` +
+        "Configure a separate embedding provider in Settings → Customization.",
+    );
+    this.name = "EmbeddingUnsupportedError";
+    this.providerLabel = providerLabel;
+  }
+}
+
+export async function callEmbeddings(
+  input: string[],
+  options: { timeoutMs?: number; signal?: AbortSignal } = {},
+): Promise<number[][]> {
+  const timeoutMs = Number.isFinite(options.timeoutMs)
+    ? Math.max(1, Math.floor(options.timeoutMs as number))
+    : EMBEDDING_REQUEST_TIMEOUT_MS;
+  const resolvedEmbedding = getResolvedEmbeddingConfig();
+
+  const apiBase = resolvedEmbedding.apiBase;
+  const apiKey = resolvedEmbedding.apiKey;
+  const embeddingModel = resolvedEmbedding.model;
+  const embeddingProvider = (getPref("embeddingProvider") || "")
+    .toString()
+    .trim();
+
+  // Custom providers (local/ollama) may not need an API key
+  if (!apiKey && embeddingProvider !== "custom") {
+    throw new Error(
+      `Embedding provider "${embeddingProvider}" requires an API key. ` +
+        "Set it in Settings → Customization → Semantic Search.",
+    );
+  }
+
+  const payload = {
+    model: embeddingModel,
+    input,
+  };
+
+  const url = resolveEndpoint(apiBase, EMBEDDINGS_ENDPOINT);
+  // The race below enforces the deadline; the controller cancels the request
+  // so a slow provider stops computing. Chrome scope may lack a global
+  // AbortController, so resolve it the way `fetch` is resolved.
+  const Controller = getAbortController();
+  const controller = Controller ? new Controller() : null;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onCallerAbort: (() => void) | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      controller?.abort();
+      reject(new Error(`Embedding request timed out after ${timeoutMs} ms`));
+    }, timeoutMs);
+    if (options.signal) {
+      onCallerAbort = () => {
+        controller?.abort();
+        reject(new Error("Embedding request aborted"));
+      };
+      if (options.signal.aborted) onCallerAbort();
+      else options.signal.addEventListener("abort", onCallerAbort);
+    }
+  });
+  try {
+    const res = await Promise.race([
+      getFetch()(url, {
+        method: "POST",
+        headers: buildAuthHeaders(apiKey),
+        body: JSON.stringify(payload),
+        ...(controller ? { signal: controller.signal } : {}),
+      }),
+      deadline,
+    ]);
+
+    if (!res.ok) {
+      const text = await Promise.race([res.text(), deadline]);
+      throw new Error(`${res.status} ${res.statusText} - ${text}`);
+    }
+
+    const data = (await Promise.race([
+      res.json(),
+      deadline,
+    ])) as EmbeddingResponse;
+    return orderEmbeddingResponse(data);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    if (onCallerAbort) {
+      options.signal?.removeEventListener("abort", onCallerAbort);
+    }
+  }
+}
+
+function orderEmbeddingResponse(data: EmbeddingResponse): number[][] {
+  const embeddings = data?.data || [];
+  // Only sort by index when all items carry valid indices; otherwise
+  // preserve the original order to avoid misaligning embeddings with inputs.
+  const hasIndices =
+    embeddings.length > 0 &&
+    embeddings.every((item) => typeof item.index === "number");
+  const ordered = hasIndices
+    ? [...embeddings].sort((a, b) => a.index! - b.index!)
+    : embeddings;
+  return ordered.map((item) => item.embedding || []);
+}
+
+/**
+ * Parse SSE stream response
+ */
+export async function parseStreamResponse(
+  body: ReadableStream<Uint8Array>,
+  onDelta: (delta: string) => void,
+  onReasoning?: (event: ReasoningEvent) => void,
+  onUsage?: (usage: UsageStats) => void,
+): Promise<ModelTurnOutcome> {
+  const reader = body.getReader() as ReadableStreamDefaultReader<Uint8Array>;
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
+  let fullText = "";
+  let completion: ModelTurnCompletion = COMPLETE_MODEL_TURN;
+  const thoughtState: ThoughtTagState = {
+    inThought: false,
+    buffer: "",
+    sawAnswerText: false,
+  };
+
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith("data:")) continue;
+
+        const data = trimmed.slice(5).trim();
+        if (!data || data === "[DONE]") continue;
+
+        let parsed: {
+          error?: { message?: unknown; code?: unknown; type?: unknown };
+          choices?: Array<StreamChoice & { finish_reason?: string | null }>;
+          usage?: {
+            prompt_tokens?: number;
+            completion_tokens?: number;
+            total_tokens?: number;
+            prompt_tokens_details?: { cached_tokens?: number };
+            prompt_cache_hit_tokens?: number;
+            prompt_cache_miss_tokens?: number;
+            cached_tokens?: number;
+          };
+        };
+        try {
+          parsed = JSON.parse(data);
+        } catch (err) {
+          appLogger.warn("LLM stream parse error:", err);
+          continue;
+        }
+        // A valid SSE error is a failed turn, even after answer deltas.
+        // Include metadata in the message because the UI renders Error.message.
+        if (parsed?.error && typeof parsed.error === "object") {
+          const message =
+            typeof parsed.error.message === "string" &&
+            parsed.error.message.trim()
+              ? parsed.error.message
+              : "Chat Completions stream failed.";
+          const code =
+            typeof parsed.error.code === "string" ||
+            typeof parsed.error.code === "number"
+              ? parsed.error.code
+              : undefined;
+          const type =
+            typeof parsed.error.type === "string"
+              ? parsed.error.type
+              : undefined;
+          throw Object.assign(
+            new Error(
+              `Chat Completions stream error: ${message}${
+                code !== undefined ? `; code=${code}` : ""
+              }${type !== undefined ? `; type=${type}` : ""}`,
+            ),
+            { code, type },
+          );
+        }
+        try {
+          if (parsed.usage && onUsage) {
+            const totalTokens =
+              parsed.usage.total_tokens ??
+              (parsed.usage.prompt_tokens ?? 0) +
+                (parsed.usage.completion_tokens ?? 0);
+            if (totalTokens > 0) {
+              const cacheUsage = extractContextCacheUsage(parsed.usage);
+              onUsage({
+                promptTokens: parsed.usage.prompt_tokens ?? 0,
+                completionTokens: parsed.usage.completion_tokens ?? 0,
+                totalTokens,
+                ...cacheUsage,
+                contextTokens: parsed.usage.prompt_tokens ?? 0,
+                contextWindowIsAuthoritative:
+                  (parsed.usage.prompt_tokens ?? 0) > 0,
+              });
+            }
+          }
+          const choice = parsed?.choices?.[0];
+          if (typeof choice?.finish_reason === "string") {
+            completion = normalizeProviderCompletion(choice.finish_reason);
+          }
+          const reasoningDelta = normalizeStreamText(
+            choice?.delta?.reasoning_content ??
+              choice?.delta?.reasoning ??
+              choice?.delta?.thinking ??
+              choice?.delta?.thought ??
+              choice?.message?.reasoning_content ??
+              choice?.message?.reasoning ??
+              choice?.message?.thinking ??
+              choice?.message?.thought ??
+              "",
+          );
+          if (reasoningDelta && onReasoning) {
+            onReasoning({ details: reasoningDelta });
+          }
+
+          const deltaRaw = normalizeStreamText(
+            choice?.delta?.content ?? choice?.message?.content ?? "",
+          );
+          const { answer, thought } = splitThoughtTaggedText(
+            deltaRaw,
+            thoughtState,
+          );
+          if (thought && onReasoning) {
+            onReasoning({ details: thought });
+          }
+
+          if (answer) {
+            fullText += answer;
+            onDelta(answer);
+          }
+        } catch (err) {
+          appLogger.warn("LLM stream parse error:", err);
+        }
+      }
+    }
+  } finally {
+    const tail = resolveUnterminatedThought(thoughtState);
+    if (tail.text) {
+      if (tail.asAnswer) {
+        fullText += tail.text;
+        onDelta(tail.text);
+      } else if (onReasoning) {
+        onReasoning({ details: tail.text });
+      }
+    }
+    reader.releaseLock();
+  }
+
+  return modelTurnOutcome(fullText, completion);
+}
+
+export async function parseResponsesStream(
+  body: ReadableStream<Uint8Array>,
+  onDelta: (delta: string) => void,
+  onReasoning?: (event: ReasoningEvent) => void,
+  onUsage?: (usage: UsageStats) => void,
+  options: { requireCompleted?: boolean; collectRichWidgets?: boolean } = {},
+): Promise<ModelTurnOutcome> {
+  const reader = body.getReader() as ReadableStreamDefaultReader<Uint8Array>;
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
+  let fullText = "";
+  let completion: ModelTurnCompletion = COMPLETE_MODEL_TURN;
+  const thoughtState: ThoughtTagState = {
+    inThought: false,
+    buffer: "",
+    sawAnswerText: false,
+  };
+  let sawAnswerDelta = false;
+  let sawAnswerFinal = false;
+  let sawSummaryDelta = false;
+  let sawDetailsDelta = false;
+  let sawSummaryFinal = false;
+  let sawDetailsFinal = false;
+  let responseId: string | undefined;
+  let sawCompleted = false;
+  let sawTerminal = false;
+  let streamFailure: Error | undefined;
+  let tailCallbackFailed = false;
+  let tailCallbackError: unknown;
+  const richWidgets: CprChartWidget[] = [];
+  const receiveRichWidgets = (value: unknown): void => {
+    if (!options.collectRichWidgets) return;
+    for (const candidate of Array.isArray(value) ? value : [value]) {
+      if (richWidgets.length >= 4) break;
+      const widget = parseCprChartWidget(candidate);
+      if (
+        widget &&
+        !richWidgets.some((existing) => existing.id === widget.id)
+      ) {
+        richWidgets.push(widget);
+      }
+    }
+  };
+
+  const normalizeReasoningText = (value: unknown): string => {
+    if (typeof value === "string") return value;
+    if (Array.isArray(value)) {
+      return value
+        .map((entry) => {
+          if (typeof entry === "string") return entry;
+          if (entry && typeof entry === "object") {
+            const row = entry as { text?: unknown; summary?: unknown };
+            return (
+              normalizeStreamText(row.text) || normalizeStreamText(row.summary)
+            );
+          }
+          return "";
+        })
+        .filter(Boolean)
+        .join("\n");
+    }
+    if (value && typeof value === "object") {
+      const row = value as { text?: unknown; summary?: unknown };
+      return normalizeStreamText(row.text) || normalizeStreamText(row.summary);
+    }
+    return "";
+  };
+
+  const extractSummary = (value: unknown): string => {
+    if (!value) return "";
+    if (typeof value === "string") return value;
+    if (Array.isArray(value)) {
+      return value
+        .map((entry) => {
+          if (typeof entry === "string") return entry;
+          if (entry && typeof entry === "object") {
+            const row = entry as { text?: unknown; summary?: unknown };
+            return (
+              normalizeStreamText(row.text) || normalizeStreamText(row.summary)
+            );
+          }
+          return "";
+        })
+        .filter(Boolean)
+        .join("\n");
+    }
+    if (value && typeof value === "object") {
+      const row = value as { text?: unknown; summary?: unknown };
+      return normalizeStreamText(row.text) || normalizeStreamText(row.summary);
+    }
+    return "";
+  };
+
+  const emitReasoning = (event: ReasoningEvent) => {
+    if (!onReasoning) return;
+    const summary =
+      typeof event.summary === "string" && event.summary.length > 0
+        ? event.summary
+        : undefined;
+    const details =
+      typeof event.details === "string" && event.details.length > 0
+        ? event.details
+        : undefined;
+    if (!summary && !details) return;
+    onReasoning({ summary, details });
+  };
+
+  const emitAnswer = (value: unknown, mode: "delta" | "final"): void => {
+    const text = normalizeStreamText(value);
+    if (!text) return;
+    if (mode === "delta" && sawAnswerFinal) return;
+    if (mode === "final" && (sawAnswerDelta || sawAnswerFinal)) return;
+
+    const { answer, thought } = splitThoughtTaggedText(text, thoughtState);
+    if (thought && onReasoning) {
+      onReasoning({ details: thought });
+    }
+    if (!answer) return;
+
+    if (mode === "delta") {
+      sawAnswerDelta = true;
+    } else {
+      sawAnswerFinal = true;
+    }
+    fullText += answer;
+    onDelta(answer);
+  };
+
+  const extractOutputTextFromContent = (value: unknown): string => {
+    if (!value) return "";
+    if (typeof value === "string") return value;
+    if (Array.isArray(value)) {
+      return value
+        .map((entry) => extractOutputTextFromContent(entry))
+        .filter(Boolean)
+        .join("");
+    }
+    if (value && typeof value === "object") {
+      const row = value as {
+        type?: unknown;
+        text?: unknown;
+        delta?: unknown;
+        content?: unknown;
+      };
+      const typeValue =
+        typeof row.type === "string" ? row.type.toLowerCase() : "";
+      if (typeValue === "reasoning" || typeValue === "reasoning_summary") {
+        return "";
+      }
+      if (
+        typeValue === "output_text" ||
+        typeValue === "text" ||
+        typeValue === "message" ||
+        typeValue === ""
+      ) {
+        return (
+          normalizeStreamText(row.text) ||
+          normalizeStreamText(row.delta) ||
+          extractOutputTextFromContent(row.content)
+        );
+      }
+    }
+    return "";
+  };
+
+  const extractOutputTextFromOutputItem = (value: unknown): string => {
+    if (!value || typeof value !== "object") return "";
+    const row = value as {
+      type?: unknown;
+      text?: unknown;
+      content?: unknown;
+    };
+    const typeValue =
+      typeof row.type === "string" ? row.type.toLowerCase() : "";
+    if (
+      typeValue &&
+      typeValue !== "message" &&
+      typeValue !== "output_text" &&
+      typeValue !== "text"
+    ) {
+      return "";
+    }
+    return (
+      extractOutputTextFromContent(row.content) || normalizeStreamText(row.text)
+    );
+  };
+
+  const extractOutputTextFromOutputs = (outputs: unknown): string => {
+    if (!Array.isArray(outputs)) return "";
+    return outputs
+      .map((entry) => extractOutputTextFromOutputItem(entry))
+      .filter(Boolean)
+      .join("");
+  };
+
+  const emitReasoningFromOutputItem = (value: unknown): void => {
+    if (!value || typeof value !== "object") return;
+    const row = value as {
+      type?: unknown;
+      summary?: unknown;
+      content?: unknown;
+      text?: unknown;
+      reasoning?: unknown;
+    };
+    const typeValue =
+      typeof row.type === "string" ? row.type.toLowerCase() : "";
+    if (typeValue !== "reasoning") return;
+    if (!sawSummaryDelta && !sawSummaryFinal) {
+      emitReasoning({ summary: extractSummary(row.summary) });
+    }
+    if (!sawDetailsDelta && !sawDetailsFinal) {
+      emitReasoning({
+        details:
+          normalizeReasoningText(row.content) ||
+          normalizeReasoningText(row.reasoning) ||
+          normalizeReasoningText(row.text),
+      });
+    }
+  };
+
+  try {
+    readStream: while (true) {
+      const { value, done } = await reader.read();
+
+      buffer += decoder.decode(value, { stream: !done });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+      if (done && buffer) {
+        lines.push(buffer);
+        buffer = "";
+      }
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith("data:")) continue;
+
+        const data = trimmed.slice(5).trim();
+        if (!data) continue;
+        if (data === "[DONE]") {
+          if (options.requireCompleted) break readStream;
+          continue;
+        }
+
+        try {
+          const parsed = JSON.parse(data) as {
+            type?: string;
+            widget?: unknown;
+            code?: unknown;
+            error?: { message?: unknown; code?: unknown; type?: unknown };
+            delta?: unknown;
+            text?: unknown;
+            summary?: unknown;
+            reasoning?: unknown;
+            message?: string | { content?: unknown };
+            item?: {
+              type?: string;
+              summary?: unknown;
+              content?: unknown;
+              text?: unknown;
+            };
+            part?: {
+              type?: string;
+              summary?: unknown;
+              content?: unknown;
+              text?: unknown;
+            };
+            response?: {
+              id?: string;
+              error?: { message?: unknown; code?: unknown; type?: unknown };
+              rich_widgets?: unknown;
+              status?: string;
+              incomplete_details?: { reason?: string } | null;
+              output_text?: unknown;
+              output?: unknown;
+              usage?: {
+                input_tokens?: number;
+                output_tokens?: number;
+                total_tokens?: number;
+                input_tokens_details?: { cached_tokens?: number };
+                prompt_tokens_details?: { cached_tokens?: number };
+              };
+            };
+          };
+
+          const eventType =
+            typeof parsed.type === "string" ? parsed.type.toLowerCase() : "";
+          // Explicit provider failure is never a successful empty turn,
+          // regardless of whether this caller requires response.completed.
+          if (
+            eventType === "response.failed" ||
+            eventType === "error" ||
+            (parsed.error && typeof parsed.error === "object")
+          ) {
+            const error = parsed.response?.error || parsed.error || parsed;
+            const message =
+              typeof error.message === "string" && error.message.trim()
+                ? error.message
+                : "CPR Responses request failed; no automatic retry was attempted.";
+            const code =
+              typeof error.code === "string" || typeof error.code === "number"
+                ? error.code
+                : undefined;
+            const type =
+              error !== parsed && typeof error.type === "string"
+                ? error.type
+                : undefined;
+            // Reuse the Chat SSE error contract: the UI persists message,
+            // while callers can also inspect the allowlisted code/type.
+            streamFailure = Object.assign(
+              new Error(
+                `Responses stream error: ${message}${
+                  code !== undefined ? `; code=${code}` : ""
+                }${type !== undefined ? `; type=${type}` : ""}`,
+              ),
+              { code, type },
+            );
+            throw streamFailure;
+          }
+          // Check an unterminated EOF frame for failure above, but preserve
+          // legacy handling of successful EOF tails for non-strict callers.
+          if (done && !options.requireCompleted) continue;
+          const messageContent =
+            typeof parsed.message === "object"
+              ? parsed.message?.content
+              : undefined;
+          if (typeof parsed.response?.id === "string") {
+            responseId = parsed.response.id;
+          }
+
+          if (eventType === "response.rich_widget.done") {
+            receiveRichWidgets(parsed.widget);
+            continue;
+          }
+          if (eventType === "response.incomplete") {
+            sawTerminal = true;
+            completion = normalizeProviderCompletion(
+              parsed.response?.incomplete_details?.reason,
+              { responseStatus: parsed.response?.status || "incomplete" },
+            );
+            if (completion.status === "complete") {
+              completion = {
+                status: "blocked",
+                reason: "other",
+                providerReason: "incomplete",
+              };
+            }
+          }
+
+          if (eventType === "response.output_text.delta" && parsed.delta) {
+            emitAnswer(parsed.delta, "delta");
+            continue;
+          }
+
+          if (
+            eventType === "response.content_part.added" ||
+            eventType === "response.content_part.delta"
+          ) {
+            const partType =
+              typeof parsed.part?.type === "string"
+                ? parsed.part.type.toLowerCase()
+                : "";
+            if (
+              !partType ||
+              partType === "output_text" ||
+              partType === "text"
+            ) {
+              emitAnswer(
+                parsed.delta ??
+                  parsed.text ??
+                  parsed.part?.text ??
+                  parsed.part?.content,
+                "delta",
+              );
+            }
+            continue;
+          }
+
+          if (eventType === "response.output_text.done") {
+            // Some providers emit full text in `done` after streaming deltas.
+            emitAnswer(parsed.text ?? parsed.delta, "final");
+            continue;
+          }
+
+          if (eventType === "response.content_part.done") {
+            const partType =
+              typeof parsed.part?.type === "string"
+                ? parsed.part.type.toLowerCase()
+                : "";
+            if (
+              !partType ||
+              partType === "output_text" ||
+              partType === "text"
+            ) {
+              emitAnswer(
+                parsed.text ??
+                  parsed.delta ??
+                  parsed.part?.text ??
+                  parsed.part?.content,
+                "final",
+              );
+            }
+            continue;
+          }
+
+          if (
+            eventType === "response.message.delta" ||
+            eventType === "response.message.added"
+          ) {
+            emitAnswer(messageContent, "delta");
+            continue;
+          }
+
+          if (eventType === "response.message.done") {
+            emitAnswer(messageContent, "final");
+            continue;
+          }
+
+          if (
+            (eventType === "response.reasoning_summary.delta" ||
+              eventType === "response.reasoning_summary_text.delta") &&
+            parsed.delta
+          ) {
+            sawSummaryDelta = true;
+            emitReasoning({ summary: normalizeStreamText(parsed.delta) });
+            continue;
+          }
+
+          if (
+            (eventType === "response.reasoning_summary.done" ||
+              eventType === "response.reasoning_summary_text.done") &&
+            (parsed.text || parsed.delta)
+          ) {
+            sawSummaryFinal = true;
+            if (!sawSummaryDelta) {
+              emitReasoning({
+                summary: normalizeStreamText(parsed.text ?? parsed.delta),
+              });
+            }
+            continue;
+          }
+
+          if (
+            (eventType === "response.reasoning_summary_part.added" ||
+              eventType === "response.reasoning_summary_part.done") &&
+            parsed.part
+          ) {
+            const partType =
+              typeof parsed.part.type === "string"
+                ? parsed.part.type.toLowerCase()
+                : "";
+            if (
+              !partType ||
+              partType === "summary_text" ||
+              partType === "reasoning_summary"
+            ) {
+              const partSummary = normalizeStreamText(
+                parsed.part.text ?? parsed.part.content ?? parsed.part.summary,
+              );
+              if (partSummary) {
+                sawSummaryFinal = true;
+                emitReasoning({ summary: partSummary });
+              }
+            }
+            continue;
+          }
+
+          if (
+            (eventType === "response.reasoning.delta" ||
+              eventType === "response.reasoning_text.delta") &&
+            parsed.delta
+          ) {
+            sawDetailsDelta = true;
+            emitReasoning({ details: normalizeStreamText(parsed.delta) });
+            continue;
+          }
+
+          if (
+            (eventType === "response.reasoning.done" ||
+              eventType === "response.reasoning_text.done") &&
+            (parsed.text || parsed.delta)
+          ) {
+            sawDetailsFinal = true;
+            if (!sawDetailsDelta) {
+              emitReasoning({
+                details: normalizeStreamText(parsed.text ?? parsed.delta),
+              });
+            }
+            continue;
+          }
+
+          if (eventType === "response.reasoning" && parsed.reasoning) {
+            sawDetailsFinal = true;
+            if (!sawDetailsDelta) {
+              emitReasoning({
+                details: normalizeReasoningText(parsed.reasoning),
+              });
+            }
+            continue;
+          }
+
+          if (
+            eventType === "response.output_item.added" ||
+            eventType === "response.output_item.delta"
+          ) {
+            emitReasoningFromOutputItem(parsed.item);
+            emitAnswer(extractOutputTextFromOutputItem(parsed.item), "delta");
+            continue;
+          }
+
+          if (eventType === "response.output_item.done") {
+            emitReasoningFromOutputItem(parsed.item);
+            emitAnswer(extractOutputTextFromOutputItem(parsed.item), "final");
+            emitAnswer(
+              extractOutputTextFromOutputs(parsed.response?.output),
+              "final",
+            );
+            const outputs = Array.isArray(parsed.response?.output)
+              ? parsed.response.output
+              : [];
+            for (const out of outputs) {
+              emitReasoningFromOutputItem(out);
+            }
+            continue;
+          }
+
+          if (eventType === "response.completed") {
+            if (
+              options.requireCompleted &&
+              (!parsed.response ||
+                (parsed.response.status &&
+                  parsed.response.status !== "completed"))
+            ) {
+              throw new Error(
+                "Responses terminal event has an invalid response status.",
+              );
+            }
+            sawTerminal = true;
+            sawCompleted = true;
+            receiveRichWidgets(parsed.response?.rich_widgets);
+            completion = COMPLETE_MODEL_TURN;
+            emitAnswer(
+              parsed.response?.output_text ??
+                extractOutputTextFromOutputs(parsed.response?.output),
+              "final",
+            );
+            const u = parsed.response?.usage;
+            if (u && onUsage) {
+              const total =
+                u.total_tokens ??
+                (u.input_tokens ?? 0) + (u.output_tokens ?? 0);
+              if (total > 0) {
+                const cacheUsage = extractContextCacheUsage(u);
+                onUsage({
+                  promptTokens: u.input_tokens ?? 0,
+                  completionTokens: u.output_tokens ?? 0,
+                  totalTokens: total,
+                  ...cacheUsage,
+                  contextTokens: u.input_tokens ?? 0,
+                  contextWindowIsAuthoritative: (u.input_tokens ?? 0) > 0,
+                });
+              }
+            }
+          }
+
+          if (
+            eventType === "response.output_item.added" ||
+            eventType === "response.output_item.done" ||
+            eventType === "response.completed"
+          ) {
+            const outputs = Array.isArray(parsed.response?.output)
+              ? parsed.response.output
+              : [];
+            for (const out of outputs) {
+              emitReasoningFromOutputItem(out);
+            }
+          }
+          if (options.requireCompleted && sawTerminal) break readStream;
+        } catch (err) {
+          if (options.requireCompleted || streamFailure) throw err;
+          if (!done) appLogger.warn("LLM responses stream parse error:", err);
+        }
+      }
+      if (done) break;
+    }
+    if (options.requireCompleted && !sawCompleted) {
+      throw new Error(
+        "Responses connection ended before response.completed; no automatic retry was attempted.",
+      );
+    }
+  } finally {
+    try {
+      const tail = resolveUnterminatedThought(thoughtState);
+      if (tail.text) {
+        if (tail.asAnswer) {
+          fullText += tail.text;
+          onDelta(tail.text);
+        } else if (onReasoning) {
+          onReasoning({ details: tail.text });
+        }
+      }
+    } catch (error) {
+      tailCallbackFailed = true;
+      tailCallbackError = error;
+      // A consumer callback must not replace an explicit provider failure.
+      if (streamFailure) {
+        appLogger.warn("LLM responses stream tail callback error:", error);
+      }
+    } finally {
+      try {
+        if (options.requireCompleted || streamFailure || tailCallbackFailed) {
+          void reader.cancel().catch(() => {});
+        }
+      } finally {
+        reader.releaseLock();
+      }
+    }
+  }
+
+  // Propagate a genuine callback failure only after reader cleanup. A main
+  // error already in flight (including streamFailure) takes precedence.
+  if (tailCallbackFailed) throw tailCallbackError;
+
+  return {
+    ...modelTurnOutcome(
+      fullText,
+      completion,
+      completion.status === "incomplete" && responseId
+        ? { responseId }
+        : undefined,
+    ),
+    ...(sawCompleted && richWidgets.length ? { richWidgets } : {}),
+  };
+}
