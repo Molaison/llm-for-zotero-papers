@@ -5,9 +5,10 @@ import type {
 import {
   ANNOTATION_BATCH_MARKER,
   parseAnnotationReplies,
+  navigateAnnotationReplySource,
+  getAnnotationReplyBatch,
   type AnnotationReplyCandidate,
 } from "../../services/pdf/annotationReplyService";
-import { loadAnnotationReplyBatch } from "../../utils/annotationReplyStore";
 import { createElement } from "../../utils/domHelpers";
 
 export function annotationStatusLabel(
@@ -24,6 +25,10 @@ export function annotationStatusLabel(
       return "解析失败（未写回）";
     case "applied":
       return "已回答（不重发）";
+    case "corrupt":
+      return "记录损坏（保留占用）";
+    case "retry-allowed":
+      return "已允许重新选择（旧批次只读）";
     case "not-sent":
       return "未发送";
     default:
@@ -33,8 +38,44 @@ export function annotationStatusLabel(
 
 export const readableAnnotationComment = (text: string) =>
   text.replace(/<\/?(?:b|i|sub|sup)>/g, "");
-export const annotationSourceLabel = (target: AnnotationReplyTarget) =>
-  `${target.title}，第 ${target.position.pageIndex + 1} 页`;
+export const annotationSourceLabel = (
+  target: AnnotationReplyTarget,
+  pageIndex = target.position.pageIndex,
+) => `${target.title || "未命名 PDF"}，第 ${pageIndex + 1} 页`;
+export function createAnnotationSourceButton(
+  doc: Document,
+  target: AnnotationReplyTarget,
+  onMessage?: (message: string) => void,
+  pageIndex = target.position.pageIndex,
+): HTMLButtonElement {
+  const button = createElement(doc, "button", "llm-annotation-source", {
+    type: "button",
+    textContent: annotationSourceLabel(target, pageIndex),
+    title: "打开原 PDF 并定位便签来源",
+  });
+  let note: HTMLElement | undefined;
+  const message = (text: string) => {
+    if (onMessage) {
+      onMessage(text);
+      return;
+    }
+    if (!note) {
+      note = createElement(doc, "span", "llm-annotation-source-message");
+      note.setAttribute("role", "status");
+      button.parentElement?.append(note);
+    }
+    note.textContent = text;
+  };
+  button.addEventListener("click", () => {
+    void navigateAnnotationReplySource(target, pageIndex)
+      .then((notice) => {
+        if (notice) message(notice);
+        else if (note) note.textContent = "";
+      })
+      .catch((error) => message(String(error)));
+  });
+  return button;
+}
 export function annotationSelectionSummary(
   targets: AnnotationReplyTarget[],
 ): string {
@@ -110,7 +151,7 @@ export function annotationBatchPresentation(batch: AnnotationReplyBatch) {
     };
   } catch (error) {
     return {
-      label: "解析失败（未展示答案）",
+      label: `${annotationStatusLabel(batch.status)}，无法展示结构化答案`,
       applied: false,
       replies: [],
       error: String(error),
@@ -171,19 +212,7 @@ export function renderAnnotationBatchAnswers(
   for (const reply of view.replies) {
     const card = createElement(doc, "article", "llm-annotation-answer");
     card.dataset.annotationIdentity = reply.target.identity;
-    const source = createElement(
-      doc,
-      "details",
-      "llm-annotation-meta llm-annotation-answer-source",
-    );
-    source.append(
-      createElement(doc, "summary", undefined, {
-        textContent: annotationSourceLabel(reply.target),
-      }),
-      createElement(doc, "p", undefined, {
-        textContent: reply.target.identity,
-      }),
-    );
+    const source = createAnnotationSourceButton(doc, reply.target);
     card.append(
       createElement(doc, "p", "llm-annotation-question", {
         textContent: readableAnnotationComment(reply.target.comment),
@@ -195,6 +224,9 @@ export function renderAnnotationBatchAnswers(
     );
     host.append(card);
   }
+  if (!view.replies.length)
+    for (const target of batch.targets)
+      host.append(createAnnotationSourceButton(doc, target));
   if (view.error)
     host.append(
       createElement(doc, "p", "llm-annotation-error", {
@@ -239,7 +271,7 @@ export function renderAnnotationChatAnswer(
     streaming ? "正在回答批注，完整答案验证后写回。" : "正在读取已存批注答案…",
   );
   if (streaming) return true;
-  void loadAnnotationReplyBatch(id)
+  void getAnnotationReplyBatch(id)
     .then((batch) => {
       if (answerRenders.get(host) !== token) return;
       if (batch.rawAnswer === undefined || batch.rawAnswer !== answer) {

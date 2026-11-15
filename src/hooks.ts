@@ -1,3 +1,7 @@
+import {
+  initializeAnnotationReplies,
+  shutdownAnnotationReplies,
+} from "./services/pdf/annotationReplyService";
 import { appLogger } from "./core/logging";
 import {
   createStartupLifecycle,
@@ -574,6 +578,13 @@ async function runStartupSequence(): Promise<void> {
   );
   if (startupLifecycle.isStopped()) return;
 
+  try {
+    await initializeAnnotationReplies();
+  } catch (error) {
+    appLogger.error("便签恢复初始化失败；保留记录与占用。", error);
+  }
+  if (startupLifecycle.isStopped()) return;
+
   zoteroChangeDispatcher.registerNativeObserver();
 
   try {
@@ -791,6 +802,11 @@ async function onShutdown(reason: PluginLifecycleReason = {}): Promise<void> {
 
 async function finishShutdown(reason: PluginLifecycleReason): Promise<void> {
   try {
+    try {
+      await shutdownAnnotationReplies();
+    } catch (error) {
+      appLogger.error("便签停止状态保存失败；保留占用。", error);
+    }
     await shutdownPlugin(reason);
   } finally {
     // Always retire this object, even after a failed step. src/index.ts

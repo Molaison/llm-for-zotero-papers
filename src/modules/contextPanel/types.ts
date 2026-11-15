@@ -332,7 +332,7 @@ export type SendQuestionOptions = {
   onAnnotationReplyComplete?: (
     rawAnswer: string,
     complete: boolean,
-  ) => Promise<void>;
+  ) => Promise<"applied" | "stored-only">;
   /** Resolved panel/source context selected by compose UI. */
   contextSource?: ResolvedContextSource | null;
   question: string;

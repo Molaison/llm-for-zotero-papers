@@ -1,11 +1,13 @@
+import {
+  prepareAnnotationReplyFixture,
+  reparseAnnotationReplyFixture,
+} from "./helpers/annotationReplyDb";
 import { assert } from "chai";
 import {
   annotationReplyPrompt,
   normalizeAnnotationReplyPresentation,
   parseAnnotationReplies,
   listAnnotationReplyCandidates,
-  prepareAnnotationReplyBatch,
-  reparseAnnotationReplyBatch,
 } from "../src/services/pdf/annotationReplyService";
 import {
   loadAnnotationReplyBatch,
@@ -44,7 +46,7 @@ describe("annotation JSON Markdown presentation normalization", function () {
     const targets = (await listAnnotationReplyCandidates([1])).map(
       (c) => c.target!,
     );
-    batch = await prepareAnnotationReplyBatch(targets, 7, [
+    batch = await prepareAnnotationReplyFixture(targets, 7, [
       {
         attachmentID: 1,
         pageIndex: 0,
@@ -125,12 +127,12 @@ describe("annotation JSON Markdown presentation normalization", function () {
     batch.status = "invalid";
     batch.error = "original JSON.parse error";
     await saveAnnotationReplyBatch(batch);
-    const applied = await reparseAnnotationReplyBatch(batch.id);
+    const applied = await reparseAnnotationReplyFixture(batch.id);
     assert.equal(applied.id, batch.id);
     assert.equal(applied.status, "applied");
     assert.equal(applied.rawAnswer, raw);
     assert.equal(env.saves(), 2);
-    await reparseAnnotationReplyBatch(batch.id);
+    await reparseAnnotationReplyFixture(batch.id);
     assert.equal(env.saves(), 2);
     assert.equal((await loadAnnotationReplyBatch(batch.id)).rawAnswer, raw);
   });

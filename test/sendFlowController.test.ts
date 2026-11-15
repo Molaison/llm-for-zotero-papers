@@ -1,8 +1,12 @@
 import {
   listAnnotationReplyCandidates,
-  prepareAnnotationReplyBatch,
+  runAnnotationReplies,
 } from "../src/services/pdf/annotationReplyService";
-import { loadAnnotationReplyBatch } from "../src/utils/annotationReplyStore";
+import {
+  loadAnnotationReplyBatch,
+  loadAnnotationReplyBatches,
+  getAnnotationReplyClaims,
+} from "../src/utils/annotationReplyStore";
 import { installAnnotationReplyTestDB } from "./helpers/annotationReplyDb";
 import { createNoteConversationItem } from "../src/services/notes/conversationItem";
 import { getConversationKey } from "../src/modules/contextPanel/conversationIdentity";
@@ -93,21 +97,41 @@ describe("sendFlowController", function () {
     const targets = (await listAnnotationReplyCandidates([1])).map(
       (c) => c.target!,
     );
-    const batch = await prepareAnnotationReplyBatch(targets, 101, [
+    const pages = [
       {
         attachmentID: 1,
         pageIndex: 0,
         dataURL: "data:image/png;base64,AA==",
         context: "source page",
       },
-    ]);
+    ];
+    const batch = {
+      id: "",
+      protocol: "zotero-annotation-replies/v1",
+      targets,
+      pages,
+    } as any;
     return {
       env,
       batch,
       hooks: {
         hasSelection: () => true,
-        prepare: async () => batch,
-        settled: async () => {},
+        run: async (key, options, send) =>
+          runAnnotationReplies(
+            {
+              ...options,
+              selection: targets,
+              conversationKey: key,
+              preparedPages: pages,
+            },
+            async (packet) => {
+              Object.assign(
+                batch,
+                await loadAnnotationReplyBatch(packet.batchId),
+              );
+              return send(packet);
+            },
+          ),
       },
     };
   }
@@ -140,26 +164,28 @@ describe("sendFlowController", function () {
         "uncertain",
       );
     } finally {
-      env.restore();
+      await env.restore();
     }
   });
   for (const complete of [false, true]) {
     it(`annotation completion callback writes only a complete final answer: ${complete}`, async function () {
       const { env, batch, hooks } = await annotationFixture();
       try {
-        const raw = JSON.stringify({
-          protocol: batch.protocol,
-          batchId: batch.id,
-          replies: batch.targets.map((t) => ({
-            identity: t.identity,
-            version: t.version,
-            answer: "Final complete answer",
-          })),
-        });
+        let raw: string;
         const h = createBaseDeps({
           annotationReplies: hooks,
           sendQuestion: async (opts: any) => {
             opts.onProviderDispatch();
+            raw = JSON.stringify({
+              protocol: batch.protocol,
+              batchId: batch.id,
+              replies: batch.targets.map((t) => ({
+                identity: t.identity,
+                version: t.version,
+                answer: "Final complete answer",
+              })),
+            });
+
             await opts.onAnnotationReplyComplete(raw, complete);
           },
         });
@@ -180,16 +206,22 @@ describe("sendFlowController", function () {
           assert.isUndefined(saved.rawAnswer);
         }
       } finally {
-        env.restore();
+        await env.restore();
       }
     });
   }
-  it("annotation reserve is released when handoff fails before provider dispatch", async function () {
+  it("annotation armed handoff failure stays uncertain without provider notification and retains claims", async function () {
     const { env, batch, hooks } = await annotationFixture();
+    let providerNotifications = 0;
     try {
       const h = createBaseDeps({
         annotationReplies: hooks,
-        sendQuestion: async () => {
+        sendQuestion: async (opts) => {
+          const notify = opts.onProviderDispatch;
+          opts.onProviderDispatch = () => {
+            providerNotifications++;
+            notify();
+          };
           throw new Error("preflight failed");
         },
       });
@@ -199,13 +231,43 @@ describe("sendFlowController", function () {
       } catch (error) {
         assert.include(String(error), "preflight failed");
       }
+      assert.equal(providerNotifications, 0);
       assert.equal(
         (await loadAnnotationReplyBatch(batch.id)).status,
-        "not-sent",
+        "uncertain",
       );
-      assert.isUndefined((await listAnnotationReplyCandidates([1]))[0].blocked);
+      assert.isString((await listAnnotationReplyCandidates([1]))[0].blocked);
+      assert.deepEqual(
+        await getAnnotationReplyClaims(batch.targets[0].identity),
+        [
+          {
+            version: batch.targets[0].version,
+            batch_id: batch.id,
+            generated_block: null,
+          },
+        ],
+      );
+      let duplicateError: unknown;
+      try {
+        await runAnnotationReplies(
+          {
+            selection: batch.targets,
+            conversationKey: 102,
+            preparedPages: batch.pages,
+            signal: new AbortController().signal,
+            isActive: () => true,
+            imageBudget: 9,
+          },
+          async () => {
+            assert.fail("duplicate must not dispatch");
+          },
+        );
+      } catch (error) {
+        duplicateError = error;
+      }
+      assert.include(String(duplicateError), "不会重复发送");
     } finally {
-      env.restore();
+      await env.restore();
     }
   });
   for (const override of [
@@ -223,10 +285,9 @@ describe("sendFlowController", function () {
         ...override,
         annotationReplies: {
           hasSelection: () => true,
-          prepare: async () => {
+          run: async () => {
             prepared++;
           },
-          settled: async () => {},
         },
       });
       await h.controller.doSend();
@@ -249,16 +310,21 @@ describe("sendFlowController", function () {
       await h.controller.doSend();
       assert.equal(h.getCounts().sendCalled, 1);
     } finally {
-      env.restore();
+      await env.restore();
     }
   });
-  it("annotation Papers limit rejects combined images without truncation or dispatch", async function () {
+  it("annotation Papers limit rejects before reserve without truncation or dispatch", async function () {
     const { env, batch, hooks } = await annotationFixture();
     try {
+      const images = Array.from({ length: 9 }, (_, i) => `image-${i}`);
+      const selectedTargets = JSON.parse(JSON.stringify(batch.targets));
+      const beforeBatches = await loadAnnotationReplyBatches();
+      const beforeClaims = await getAnnotationReplyClaims(
+        batch.targets[0].identity,
+      );
       const h = createBaseDeps({
         annotationReplies: hooks,
-        getSelectedImages: () =>
-          Array.from({ length: 9 }, (_, i) => `image-${i}`),
+        getSelectedImages: () => images,
         getSelectedProfile: () => ({ paperRegistry: true, directWebPdf: true }),
       });
       let error: unknown;
@@ -269,12 +335,19 @@ describe("sendFlowController", function () {
       }
       assert.include(String(error), "不会静默裁剪");
       assert.equal(h.getCounts().sendCalled, 0);
-      assert.equal(
-        (await loadAnnotationReplyBatch(batch.id)).status,
-        "not-sent",
+      assert.deepEqual(await loadAnnotationReplyBatches(), beforeBatches);
+      assert.deepEqual(
+        await getAnnotationReplyClaims(batch.targets[0].identity),
+        beforeClaims,
       );
+      assert.deepEqual(
+        images,
+        Array.from({ length: 9 }, (_, i) => `image-${i}`),
+      );
+      assert.deepEqual(batch.targets, selectedTargets);
+      assert.isTrue(hooks.hasSelection());
     } finally {
-      env.restore();
+      await env.restore();
     }
   });
 

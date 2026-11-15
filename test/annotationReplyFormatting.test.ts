@@ -1,9 +1,11 @@
+import {
+  prepareAnnotationReplyFixture,
+  reparseAnnotationReplyFixture,
+} from "./helpers/annotationReplyDb";
 import { assert } from "chai";
 import {
   annotationReplyBlock,
   listAnnotationReplyCandidates,
-  prepareAnnotationReplyBatch,
-  reparseAnnotationReplyBatch,
 } from "../src/services/pdf/annotationReplyService";
 import {
   getAnnotationReplyClaims,
@@ -51,7 +53,7 @@ describe("native annotation per-line bold and applied-block repair", function ()
     const targets = (await listAnnotationReplyCandidates([1])).map(
       (c) => c.target!,
     );
-    batch = await prepareAnnotationReplyBatch(targets, 7, [
+    batch = await prepareAnnotationReplyFixture(targets, 7, [
       {
         attachmentID: 1,
         pageIndex: 0,
@@ -76,6 +78,7 @@ describe("native annotation per-line bold and applied-block repair", function ()
         target.identity,
         target.version,
         oldBlocks[index],
+        batch.id,
       );
     }
     await saveAnnotationReplyBatch(batch);
@@ -107,11 +110,15 @@ describe("native annotation per-line bold and applied-block repair", function ()
   it("repairs only registered blocks once while preserving batch, raw answer, user versions and comments", async function () {
     const beforeBatch = await loadAnnotationReplyBatch(batch.id);
     await Promise.all([
-      reparseAnnotationReplyBatch(batch.id),
-      reparseAnnotationReplyBatch(batch.id),
+      reparseAnnotationReplyFixture(batch.id),
+      reparseAnnotationReplyFixture(batch.id),
     ]);
     assert.equal(env.saves(), 2);
-    assert.deepEqual(await loadAnnotationReplyBatch(batch.id), beforeBatch);
+    const { revision: beforeRevision, ...beforeFields } = beforeBatch;
+    const { revision: repairedRevision, ...repairedFields } =
+      await loadAnnotationReplyBatch(batch.id);
+    assert.deepEqual(repairedFields, beforeFields);
+    assert.equal(repairedRevision, beforeRevision + 1);
     for (const target of batch.targets) {
       const block = annotationReplyBlock(target.identity, answer).replace(
         "AI 回答：",
@@ -126,8 +133,12 @@ describe("native annotation per-line bold and applied-block repair", function ()
         block,
       );
     }
-    await reparseAnnotationReplyBatch(batch.id);
+    await reparseAnnotationReplyFixture(batch.id);
     assert.equal(env.saves(), 2);
+    assert.equal(
+      (await loadAnnotationReplyBatch(batch.id)).revision,
+      repairedRevision,
+    );
     const candidates = await listAnnotationReplyCandidates([1]);
     assert.deepEqual(
       candidates.map((c) => c.target!.version),
@@ -144,12 +155,17 @@ describe("native annotation per-line bold and applied-block repair", function ()
       );
       env.items.get(target.annotationID).annotationComment =
         target.comment + block;
-      await recordAnnotationReplyBlock(target.identity, target.version, block);
+      await recordAnnotationReplyBlock(
+        target.identity,
+        target.version,
+        block,
+        batch.id,
+      );
     }
     const originals = batch.targets.map(
       (t) => env.items.get(t.annotationID).annotationComment,
     );
-    await reparseAnnotationReplyBatch(batch.id);
+    await reparseAnnotationReplyFixture(batch.id);
     assert.equal(env.saves(), 0);
     assert.deepEqual(
       batch.targets.map((t) => env.items.get(t.annotationID).annotationComment),
@@ -194,7 +210,7 @@ describe("native annotation per-line bold and applied-block repair", function ()
         const originals = batch.targets.map(
           (t) => env.items.get(t.annotationID).annotationComment,
         );
-        await rejection(() => reparseAnnotationReplyBatch(batch.id));
+        await rejection(() => reparseAnnotationReplyFixture(batch.id));
         assert.equal(env.saves(), 0);
         assert.deepEqual(
           batch.targets.map(
@@ -222,7 +238,9 @@ describe("native annotation per-line bold and applied-block repair", function ()
     const originals = batch.targets.map(
       (t) => env.items.get(t.annotationID).annotationComment,
     );
-    const error = await rejection(() => reparseAnnotationReplyBatch(batch.id));
+    const error = await rejection(() =>
+      reparseAnnotationReplyFixture(batch.id),
+    );
     assert.include(error.message, "native DB save failed");
     assert.deepEqual(
       batch.targets.map((t) => env.items.get(t.annotationID).annotationComment),

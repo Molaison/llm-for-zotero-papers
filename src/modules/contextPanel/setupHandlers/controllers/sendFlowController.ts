@@ -1,7 +1,6 @@
 import { appLogger } from "../../../../core/logging";
 import { MAX_SELECTED_IMAGES } from "../../constants";
 import type {
-  AnnotationReplyBatch,
   LocalDocumentResource,
   ModelInputMode,
 } from "../../../../shared/types";
@@ -40,9 +39,8 @@ import { readNoteSnapshot } from "../../../../services/notes/noteSnapshot";
 
 import {
   ANNOTATION_BATCH_MARKER,
-  annotationReplyPrompt,
-  completeAnnotationReplyBatch,
-  settleAnnotationReplyBatch,
+  type AnnotationReplyPacket,
+  type AnnotationReplyRunOptions,
 } from "../../../../services/pdf/annotationReplyService";
 
 type StatusLevel = "ready" | "warning" | "error";
@@ -92,10 +90,14 @@ export type SendFlowOptions =
 type SendFlowControllerDeps = {
   annotationReplies?: {
     hasSelection: () => boolean;
-    prepare: (
+    run: (
       conversationKey: number,
-    ) => Promise<AnnotationReplyBatch | undefined>;
-    settled: () => Promise<void>;
+      options: Pick<
+        AnnotationReplyRunOptions,
+        "signal" | "isActive" | "imageBudget"
+      >,
+      send: (packet: AnnotationReplyPacket) => Promise<unknown>,
+    ) => Promise<void>;
   };
   body: Element;
   inputBox: HTMLTextAreaElement;
@@ -372,7 +374,6 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
     const shouldClearDraft = !options?.preserveInputDraft;
     let submittedInputRestored = false;
     let providerDispatchStarted = false;
-    let annotationBatch: AnnotationReplyBatch | undefined;
     const hasAnnotationReplies =
       deps.annotationReplies?.hasSelection() || false;
     const restoreSubmittedInput = () => {
@@ -956,104 +957,99 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
         snapshot: readNoteSnapshot(item),
       }).activeNoteContext;
       if (!requestIsActive()) return;
-      if (hasAnnotationReplies) {
-        annotationBatch = await deps.annotationReplies!.prepare(
-          textContextConversationKey,
-        );
-        if (!requestIsActive()) return;
-        if (!annotationBatch) {
-          throw new Error("便签选择已变化；请重新选择后发送。");
-        }
-        images.push(...annotationBatch.pages.map((page) => page.dataURL));
-        if (
-          images.length > MAX_SELECTED_IMAGES ||
-          (images.length > 9 && selectedProfile?.paperRegistry === true)
-        ) {
-          throw new Error(
-            "便签批次图片超过输入上限（Papers 最多 9 张，为首次 PDF 留一个附件位）；请缩小选择，不会静默裁剪。没有发送模型。",
-          );
-        }
-        questionForSend += "\n\n" + annotationReplyPrompt(annotationBatch);
-      }
       let webchatSendOutcome: "success" | "failed" | "cancelled" | null = null;
-      const sendTask = deps.sendQuestion({
-        body: deps.body,
-        item,
-        requestId: request.requestId,
-        onProviderDispatch: () => {
-          providerDispatchStarted = true;
-        },
-        contextSource,
-        question: questionForSend,
-        annotationReplyBatchId: annotationBatch?.id,
-        onAnnotationReplyComplete: annotationBatch
-          ? async (raw, complete) => {
-              if (!complete) {
-                throw new Error("便签回答未完整结束；不回写、不自动重发。");
-              }
-              await completeAnnotationReplyBatch(annotationBatch!.id, raw);
-            }
-          : undefined,
-        images,
-        model: selectedProfile?.model,
-        apiBase: selectedProfile?.apiBase,
-        apiKey: selectedProfile?.apiKey,
-        authMode: selectedProfile?.authMode,
-        providerProtocol: selectedProfile?.providerProtocol,
-        modelEntryId: selectedProfile?.entryId,
-        modelProviderLabel: selectedProfile?.providerLabel,
-        reasoning: selectedReasoning,
-        advanced: advancedParams,
-        displayQuestion: annotationBatch
-          ? `${displayQuestion}\n${ANNOTATION_BATCH_MARKER}${annotationBatch.id}]`
-          : displayQuestion,
-        selectedTextContexts: selectedContexts.length
-          ? selectedContexts
-          : undefined,
-        resolvedSelectedTextAnchors: resolvedSelectedTextAnchors.length
-          ? resolvedSelectedTextAnchors
-          : undefined,
-        selectedTexts: selectedTexts.length ? selectedTexts : undefined,
-        selectedTextSources: selectedTexts.length
-          ? selectedTextSources
-          : undefined,
-        selectedTextPaperContexts: selectedTexts.length
-          ? selectedTextPaperContexts
-          : undefined,
-        selectedTextNoteContexts: selectedTexts.length
-          ? selectedTextNoteContexts
-          : undefined,
-        activeNoteContext,
-        conversationKey: textContextConversationKey,
-        conversationKind: activeNoteScope?.conversationKind,
-        paperContexts: selectedPaperContexts,
-        pdfPaperContexts: pdfModePaperContexts,
-        fullTextPaperContexts,
-        selectedCollectionContexts,
-        selectedTagContexts,
-        attachedConversations: attachedConversations.length
-          ? attachedConversations
-          : undefined,
-        attachments: selectedFiles.length ? selectedFiles : undefined,
-        modelAttachments: selectedFiles.length ? modelFiles : undefined,
-        localDocuments: localDocuments.length ? localDocuments : undefined,
-        runtimeMode,
-        forcedSkillIds: forcedSkillIds.length ? forcedSkillIds : undefined,
-        pdfUploadSystemMessages: pdfUploadSystemMessages.length
-          ? pdfUploadSystemMessages
-          : undefined,
-        webchatSendPdf,
-        webchatPdfPaperContexts: activeWebChatPdfPaperContexts,
-        webchatForceNewChat,
-        onWebChatSendOutcome: (outcome) => {
-          webchatSendOutcome = outcome;
-        },
-      });
-      if (hasPaperComposeState && !isWebChat) {
-        deps.consumePaperModeState(item.id);
-        deps.retainPaperState(item.id);
-        deps.updatePaperPreviewPreservingScroll();
-      }
+      const send = (packet?: AnnotationReplyPacket) => {
+        const task = deps.sendQuestion({
+          body: deps.body,
+          item,
+          requestId: request.requestId,
+          onProviderDispatch: () => {
+            providerDispatchStarted = true;
+          },
+          contextSource,
+          question: packet
+            ? questionForSend + "\n\n" + packet.prompt
+            : questionForSend,
+          annotationReplyBatchId: packet?.batchId,
+          onAnnotationReplyComplete: packet?.acceptAnswer,
+          images: packet ? [...images, ...packet.pageImages] : images,
+          model: selectedProfile?.model,
+          apiBase: selectedProfile?.apiBase,
+          apiKey: selectedProfile?.apiKey,
+          authMode: selectedProfile?.authMode,
+          providerProtocol: selectedProfile?.providerProtocol,
+          modelEntryId: selectedProfile?.entryId,
+          modelProviderLabel: selectedProfile?.providerLabel,
+          reasoning: selectedReasoning,
+          advanced: advancedParams,
+          displayQuestion: packet
+            ? `${displayQuestion}\n${ANNOTATION_BATCH_MARKER}${packet.batchId}]`
+            : displayQuestion,
+          selectedTextContexts: selectedContexts.length
+            ? selectedContexts
+            : undefined,
+          resolvedSelectedTextAnchors: resolvedSelectedTextAnchors.length
+            ? resolvedSelectedTextAnchors
+            : undefined,
+          selectedTexts: selectedTexts.length ? selectedTexts : undefined,
+          selectedTextSources: selectedTexts.length
+            ? selectedTextSources
+            : undefined,
+          selectedTextPaperContexts: selectedTexts.length
+            ? selectedTextPaperContexts
+            : undefined,
+          selectedTextNoteContexts: selectedTexts.length
+            ? selectedTextNoteContexts
+            : undefined,
+          activeNoteContext,
+          conversationKey: textContextConversationKey,
+          conversationKind: activeNoteScope?.conversationKind,
+          paperContexts: selectedPaperContexts,
+          pdfPaperContexts: pdfModePaperContexts,
+          fullTextPaperContexts,
+          selectedCollectionContexts,
+          selectedTagContexts,
+          attachedConversations: attachedConversations.length
+            ? attachedConversations
+            : undefined,
+          attachments: selectedFiles.length ? selectedFiles : undefined,
+          modelAttachments: selectedFiles.length ? modelFiles : undefined,
+          localDocuments: localDocuments.length ? localDocuments : undefined,
+          runtimeMode,
+          forcedSkillIds: forcedSkillIds.length ? forcedSkillIds : undefined,
+          pdfUploadSystemMessages: pdfUploadSystemMessages.length
+            ? pdfUploadSystemMessages
+            : undefined,
+          webchatSendPdf,
+          webchatPdfPaperContexts: activeWebChatPdfPaperContexts,
+          webchatForceNewChat,
+          onWebChatSendOutcome: (outcome) => {
+            webchatSendOutcome = outcome;
+          },
+        });
+        if (hasPaperComposeState && !isWebChat) {
+          deps.consumePaperModeState(item.id);
+          deps.retainPaperState(item.id);
+          deps.updatePaperPreviewPreservingScroll();
+        }
+        return task;
+      };
+      const sendTask = hasAnnotationReplies
+        ? deps.annotationReplies!.run(
+            textContextConversationKey,
+            {
+              signal: request.signal,
+              isActive: requestIsActive,
+              imageBudget: Math.min(
+                9,
+                (selectedProfile?.paperRegistry === true
+                  ? 9
+                  : MAX_SELECTED_IMAGES) - images.length,
+              ),
+            },
+            send,
+          )
+        : send();
       const win = deps.body.ownerDocument?.defaultView;
       if (win) {
         win.setTimeout(() => {
@@ -1089,20 +1085,6 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
       }
       deps.refreshGlobalHistoryHeader();
     } finally {
-      if (annotationBatch) {
-        try {
-          await settleAnnotationReplyBatch(
-            annotationBatch.id,
-            providerDispatchStarted,
-          );
-          await deps.annotationReplies?.settled();
-        } catch (error) {
-          deps.setStatusMessage?.(
-            `便签状态保存失败：${String(error)}；不要重发本批。`,
-            "error",
-          );
-        }
-      }
       if (request.signal.aborted && !providerDispatchStarted) {
         restoreSubmittedInput();
       }

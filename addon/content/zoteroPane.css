@@ -22118,7 +22118,9 @@ item-pane-sidenav .llm-persistent-rail-entry[hidden] {
   margin: 0;
   width: min(24rem, calc(100vw - 16px));
   max-height: min(34rem, 65vh);
-  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   box-sizing: border-box;
   padding: 12px;
   border: 1px solid var(--llm-popup-surface-border, var(--stroke-secondary));
@@ -22182,4 +22184,48 @@ item-pane-sidenav .llm-persistent-rail-entry[hidden] {
 .llm-annotation-row,
 .llm-annotation-answers {
   overflow-wrap: anywhere;
+}
+
+.llm-annotation-content {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.llm-annotation-tools,
+#llm-annotation-status,
+#llm-annotation-chosen {
+  flex-shrink: 0;
+}
+.llm-annotation-record {
+  border-top: 1px solid var(--stroke-secondary);
+  padding-block: 8px;
+}
+.llm-annotation-record-heading {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.llm-annotation-source,
+.llm-annotation-popover .llm-annotation-source {
+  appearance: none;
+  font: inherit;
+  color: var(--color-accent, LinkText);
+  background: none;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  text-align: start;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+.llm-annotation-source:focus-visible {
+  outline: 2px solid var(--fill-primary);
+  outline-offset: 2px;
+}
+.llm-annotation-source-message {
+  display: block;
 }

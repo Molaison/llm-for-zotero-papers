@@ -373,7 +373,12 @@ export type AnnotationReplyBatch = {
     | "answered"
     | "invalid"
     | "applied"
-    | "not-sent";
+    | "not-sent"
+    | "retry-allowed"
+    | "corrupt";
+  owner?: string;
+  stage?: "reserved" | "armed";
+  revision: number;
   targets: AnnotationReplyTarget[];
   pages: AnnotationReplyPage[];
   rawAnswer?: string;

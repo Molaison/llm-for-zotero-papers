@@ -1,11 +1,17 @@
+import {
+  reserveUnsentAnnotationReplyFixture,
+  settleUnsentAnnotationReplyFixture,
+} from "./helpers/annotationReplyDb";
+import {
+  prepareAnnotationReplyFixture,
+  completeAnnotationReplyFixture,
+  reparseAnnotationReplyFixture,
+  finishAnnotationReplyFixture,
+} from "./helpers/annotationReplyDb";
 import { assert } from "chai";
 import { installAnnotationReplyTestDB } from "./helpers/annotationReplyDb";
 import {
   listAnnotationReplyCandidates,
-  prepareAnnotationReplyBatch,
-  completeAnnotationReplyBatch,
-  reparseAnnotationReplyBatch,
-  settleAnnotationReplyBatch,
   parseAnnotationReplies,
   annotationReplyPrompt,
   userAnnotationComment,
@@ -55,7 +61,7 @@ describe("PDF annotation replies with real SQLite ledger", function () {
     return env.restore();
   });
   const prepare = async () =>
-    prepareAnnotationReplyBatch(
+    prepareAnnotationReplyFixture(
       (await listAnnotationReplyCandidates([1]))
         .filter((c) => !c.blocked)
         .map((c) => c.target!),
@@ -79,15 +85,17 @@ describe("PDF annotation replies with real SQLite ledger", function () {
     env.annotation(12, 1, "Question");
     const batch = await prepare();
     await rejects(
-      () => prepareAnnotationReplyBatch(batch.targets, 99, pages),
+      () => prepareAnnotationReplyFixture(batch.targets, 99, pages),
       "不会重复发送",
     );
-    await settleAnnotationReplyBatch(batch.id, true);
+    await finishAnnotationReplyFixture(batch.id);
     assert.equal(
       (await loadAnnotationReplyBatch(batch.id)).status,
       "uncertain",
     );
-    await rejects(() => prepareAnnotationReplyBatch(batch.targets, 99, pages));
+    await rejects(() =>
+      prepareAnnotationReplyFixture(batch.targets, 99, pages),
+    );
     assert.include(
       (await listAnnotationReplyCandidates([1]))[0].blocked!,
       "uncertain",
@@ -95,8 +103,12 @@ describe("PDF annotation replies with real SQLite ledger", function () {
   });
   it("releases only a provably undispatched reservation", async function () {
     env.annotation(12, 1, "Question");
-    const batch = await prepare();
-    await settleAnnotationReplyBatch(batch.id, false);
+    const batch = await reserveUnsentAnnotationReplyFixture(
+      (await listAnnotationReplyCandidates([1])).map((c) => c.target!),
+      7,
+      pages,
+    );
+    await settleUnsentAnnotationReplyFixture();
     assert.isUndefined((await listAnnotationReplyCandidates([1]))[0].blocked);
     assert.equal((await prepare()).status, "inflight");
   });
@@ -105,11 +117,11 @@ describe("PDF annotation replies with real SQLite ledger", function () {
     const original = item.annotationComment;
     const batch = await prepare();
     const raw = JSON.stringify(response(batch));
-    await completeAnnotationReplyBatch(batch.id, raw);
+    await completeAnnotationReplyFixture(batch.id, raw);
     const comment = item.annotationComment;
     await Promise.all([
-      reparseAnnotationReplyBatch(batch.id),
-      completeAnnotationReplyBatch(batch.id, raw),
+      reparseAnnotationReplyFixture(batch.id),
+      completeAnnotationReplyFixture(batch.id, raw),
     ]);
     assert.equal(env.saves(), 1);
     assert.equal(item.annotationComment, comment);
@@ -151,10 +163,10 @@ describe("PDF annotation replies with real SQLite ledger", function () {
       if (kind === "injection") value.replies[0].answer = "<b>injected</b>";
       if (kind === "missing") value.replies.pop();
       const raw = JSON.stringify(value);
-      await rejects(() => completeAnnotationReplyBatch(batch.id, raw));
+      await rejects(() => completeAnnotationReplyFixture(batch.id, raw));
       assert.equal(env.saves(), 0);
       assert.equal((await loadAnnotationReplyBatch(batch.id)).rawAnswer, raw);
-      await rejects(() => reparseAnnotationReplyBatch(batch.id));
+      await rejects(() => reparseAnnotationReplyFixture(batch.id));
       assert.equal(env.saves(), 0);
     });
   }
@@ -165,7 +177,10 @@ describe("PDF annotation replies with real SQLite ledger", function () {
     two.annotationComment = "Changed by user";
     await rejects(
       () =>
-        completeAnnotationReplyBatch(batch.id, JSON.stringify(response(batch))),
+        completeAnnotationReplyFixture(
+          batch.id,
+          JSON.stringify(response(batch)),
+        ),
       "旧版本",
     );
     assert.equal(env.saves(), 0);
@@ -175,9 +190,9 @@ describe("PDF annotation replies with real SQLite ledger", function () {
     env.annotation(12, 1, "Question");
     const batch = await prepare();
     const raw = "```json\n" + JSON.stringify(response(batch)) + "\n```";
-    await completeAnnotationReplyBatch(batch.id, raw);
+    await completeAnnotationReplyFixture(batch.id, raw);
     assert.equal(
-      (await reparseAnnotationReplyBatch(batch.id)).status,
+      (await reparseAnnotationReplyFixture(batch.id)).status,
       "applied",
     );
     assert.equal(env.saves(), 1);

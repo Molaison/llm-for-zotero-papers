@@ -1,3 +1,7 @@
+import {
+  prepareAnnotationReplyFixture,
+  completeAnnotationReplyFixture,
+} from "./helpers/annotationReplyDb";
 import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
@@ -18,8 +22,7 @@ import {
 } from "../src/modules/contextPanel/annotationReplyPresentation";
 import {
   listAnnotationReplyCandidates,
-  prepareAnnotationReplyBatch,
-  completeAnnotationReplyBatch,
+  runAnnotationReplies,
 } from "../src/services/pdf/annotationReplyService";
 import { loadAnnotationReplyBatch } from "../src/utils/annotationReplyStore";
 
@@ -175,7 +178,15 @@ describe("annotation minimal upstream composer tool", function () {
       f.setScope({ conversationKey: 8, attachmentIDs: [1] });
       let error: unknown;
       try {
-        await f.controller.prepare(7);
+        await f.controller.run(
+          7,
+          {
+            signal: new AbortController().signal,
+            isActive: () => true,
+            imageBudget: 9,
+          },
+          async () => {},
+        );
       } catch (caught) {
         error = caught;
       }
@@ -214,7 +225,7 @@ describe("annotation minimal upstream composer tool", function () {
     const targets = (await listAnnotationReplyCandidates([1])).map(
       (c) => c.target!,
     );
-    const batch = await prepareAnnotationReplyBatch(targets, 7, pages);
+    const batch = await prepareAnnotationReplyFixture(targets, 7, pages);
     const raw = JSON.stringify(
       {
         protocol: batch.protocol,
@@ -233,7 +244,7 @@ describe("annotation minimal upstream composer tool", function () {
     renderAnnotationChatAnswer(host as unknown as HTMLElement, user, raw, true);
     await tick();
     assert.notInclude(collectFakeText(host), "x < y");
-    await completeAnnotationReplyBatch(batch.id, raw);
+    await completeAnnotationReplyFixture(batch.id, raw);
     const saved = await loadAnnotationReplyBatch(batch.id);
     assert.isTrue(annotationBatchPresentation(saved).applied);
     renderAnnotationBatchAnswers(host as unknown as HTMLElement, saved);
@@ -257,9 +268,12 @@ describe("annotation minimal upstream composer tool", function () {
         renders++;
         return pages;
       },
-      prepareAnnotationReplyBatch: async (targets, key, prepared) => {
-        cached = prepared;
-        return prepareAnnotationReplyBatch(targets, key, prepared || pages);
+      runAnnotationReplies: async (options, send) => {
+        cached = options.preparedPages;
+        return runAnnotationReplies(
+          { ...options, preparedPages: options.preparedPages || pages },
+          send,
+        );
       },
     });
     const f = fixture(create);
@@ -274,7 +288,26 @@ describe("annotation minimal upstream composer tool", function () {
         .find((n) => n.textContent === "预览所选页面")!
         .dispatchFakeEvent("click");
       await waitFor(() => f.body.findAllByTag("img").length > 0);
-      const batch = await f.controller.prepare(7);
+      let batch:
+        | Awaited<ReturnType<typeof loadAnnotationReplyBatch>>
+        | undefined;
+      let finish!: () => void;
+      const pending = new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      const sending = f.controller.run(
+        7,
+        {
+          signal: new AbortController().signal,
+          isActive: () => true,
+          imageBudget: 9,
+        },
+        async (packet) => {
+          batch = await loadAnnotationReplyBatch(packet.batchId);
+          await pending;
+        },
+      );
+      await waitFor(() => Boolean(batch));
       assert.strictEqual(cached, pages);
       assert.equal(renders, 1);
       assert.equal(batch!.pages[0].dataURL, pages[0].dataURL);
@@ -287,6 +320,8 @@ describe("annotation minimal upstream composer tool", function () {
           .filter((n) => n.textContent === "本地重新解析"),
         "no local reparse without raw bytes",
       );
+      finish();
+      await sending;
     } finally {
       f.controller.dispose();
     }
@@ -299,9 +334,12 @@ describe("annotation minimal upstream composer tool", function () {
         new Promise((resolve) => {
           finish = resolve;
         }),
-      prepareAnnotationReplyBatch: async (targets, key, prepared) => {
-        cached = prepared;
-        return prepareAnnotationReplyBatch(targets, key, prepared || pages);
+      runAnnotationReplies: async (options, send) => {
+        cached = options.preparedPages;
+        return runAnnotationReplies(
+          { ...options, preparedPages: options.preparedPages || pages },
+          send,
+        );
       },
     });
     const f = fixture(create);
@@ -323,7 +361,15 @@ describe("annotation minimal upstream composer tool", function () {
       assert.isEmpty(f.body.findAllByTag("img"));
       check.checked = true;
       check.dispatchFakeEvent("change");
-      await f.controller.prepare(7);
+      await f.controller.run(
+        7,
+        {
+          signal: new AbortController().signal,
+          isActive: () => true,
+          imageBudget: 9,
+        },
+        async () => {},
+      );
       assert.isUndefined(cached);
     } finally {
       f.controller.dispose();

@@ -10381,6 +10381,27 @@ export async function sendQuestion(
           onReasoning: handleReasoning,
           onUsage: handleUsage,
         });
+    let annotationResult: { label: string; failed: boolean } | undefined;
+    if (opts.onAnnotationReplyComplete) {
+      try {
+        const receipt = await opts.onAnnotationReplyComplete(
+          modelOutcome.text,
+          modelOutcome.completion.status === "complete",
+        );
+        annotationResult = {
+          label:
+            receipt === "applied"
+              ? "便签已写回"
+              : "便签答案已保存，未自动写回；请查看回答记录。",
+          failed: false,
+        };
+      } catch (error) {
+        annotationResult = {
+          label: `便签未回写：${String(error)}`,
+          failed: true,
+        };
+      }
+    }
     if (assistantTurn.wasCancelled()) {
       assistantTurn.noteUsageOutcome("abort");
       await markCancelled();
@@ -10457,16 +10478,11 @@ export async function sendQuestion(
     }
 
     if (saved) setStatusSafely("Ready", "ready");
-    if (opts.onAnnotationReplyComplete) {
-      try {
-        await opts.onAnnotationReplyComplete(
-          modelOutcome.text,
-          modelOutcome.completion.status === "complete",
-        );
-        setStatusSafely("便签已写回", "ready");
-      } catch (error) {
-        setStatusSafely(`便签未回写：${String(error)}`, "error");
-      }
+    if (annotationResult) {
+      setStatusSafely(
+        annotationResult.label,
+        annotationResult.failed ? "error" : "ready",
+      );
       refreshChatSafely();
     }
   } catch (err) {

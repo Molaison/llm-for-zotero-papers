@@ -5,14 +5,18 @@ import type {
 import {
   listAnnotationReplyCandidates,
   loadAnnotationReplyBatches,
-  prepareAnnotationReplyBatch,
+  runAnnotationReplies,
+  type AnnotationReplyRunOptions,
+  type AnnotationReplyPacket,
   renderAnnotationReplyPages,
-  reparseAnnotationReplyBatch,
+  planAnnotationReplyPages,
+  annotationReplyActions,
+  recoverAnnotationReplyBatch,
   type AnnotationReplyCandidate,
 } from "../../../../services/pdf/annotationReplyService";
 import {
   annotationSelectionSummary,
-  annotationSourceLabel,
+  createAnnotationSourceButton,
   annotationStatusLabel,
   createAnnotationDrawerSelection,
   readableAnnotationComment,
@@ -87,6 +91,8 @@ export function createAnnotationReplyController(deps: ControllerDeps) {
     id: "llm-annotation-chosen",
   });
   const list = createElement(doc, "div", "llm-annotation-list");
+  const content = createElement(doc, "div", "llm-annotation-content");
+  const recordNodes = new Map<string, HTMLElement>();
   const preview = createElement(doc, "details", "llm-annotation-preview");
   preview.append(
     createElement(doc, "summary", undefined, { textContent: "来源与原生页图" }),
@@ -130,19 +136,35 @@ export function createAnnotationReplyController(deps: ControllerDeps) {
     images.replaceChildren();
   };
   const updateSelection = () => {
-    chosen.textContent = annotationSelectionSummary(selection.targets());
+    const targets = selection.targets();
+    const count = planAnnotationReplyPages(targets).length;
+    const eligible = candidates.filter((c) => c.target && !c.blocked).length;
+    chosen.textContent = `${annotationSelectionSummary(targets)}，${count} 页图；当前可处理 ${eligible} 条。${count > 9 ? "超过 9 页，已保留完整选择，但不能预览或提交。" : "最多 9 页图。"}`;
     trigger.textContent = selection.targets().length
       ? `便签 (${selection.targets().length})`
       : "便签";
   };
-  const showPages = (pages: AnnotationReplyPage[]) => {
+  const showPages = (
+    pages: AnnotationReplyPage[],
+    targets = selection.targets(),
+  ) => {
     images.replaceChildren();
     for (const page of pages) {
       const figure = createElement(doc, "figure");
+      const caption = createElement(doc, "figcaption");
+      const target = targets.find(
+        (t) =>
+          t.attachmentID === page.attachmentID &&
+          (t.position.pageIndex === page.pageIndex ||
+            (t.position.nextPageRects &&
+              t.position.pageIndex + 1 === page.pageIndex)),
+      );
+      if (target)
+        caption.append(
+          createAnnotationSourceButton(doc, target, setStatus, page.pageIndex),
+        );
       figure.append(
-        createElement(doc, "figcaption", undefined, {
-          textContent: `PDF ${page.attachmentID}，第 ${page.pageIndex + 1} 页`,
-        }),
+        caption,
         createElement(doc, "img", undefined, {
           src: page.dataURL,
           alt: `原生 PDF 第 ${page.pageIndex + 1} 页及所选便签位置`,
@@ -178,26 +200,22 @@ export function createAnnotationReplyController(deps: ControllerDeps) {
         }),
       );
       row.append(label);
-      const source = createElement(doc, "details");
-      source.append(
-        createElement(doc, "summary", undefined, {
-          textContent: candidate.target
-            ? annotationSourceLabel(candidate.target)
-            : candidate.pdfTitle || "来源不可用",
-        }),
-      );
-      source.append(
-        createElement(doc, "p", undefined, {
-          textContent: candidate.target?.identity || candidate.identity || "",
-        }),
-      );
+      if (candidate.target)
+        row.append(
+          createAnnotationSourceButton(doc, candidate.target, setStatus),
+        );
+      else
+        row.append(
+          createElement(doc, "p", undefined, {
+            textContent: candidate.pdfTitle || "来源不可用",
+          }),
+        );
       if (candidate.target?.quotedText)
-        source.append(
+        row.append(
           createElement(doc, "blockquote", undefined, {
             textContent: candidate.target.quotedText,
           }),
         );
-      row.append(source);
       if (candidate.blocked)
         row.append(
           createElement(doc, "p", undefined, {
@@ -206,45 +224,114 @@ export function createAnnotationReplyController(deps: ControllerDeps) {
               : candidate.blocked,
           }),
         );
+      if (candidate.batchId) {
+        const batchId = candidate.batchId;
+        row.append(
+          button("查看记录与恢复", async () => {
+            history.open = true;
+            const entry = recordNodes.get(batchId);
+            entry?.scrollIntoView?.({ block: "nearest" });
+            entry?.focus();
+          }),
+        );
+      }
       list.append(row);
     }
     updateSelection();
   };
   const renderHistory = (batches: AnnotationReplyBatch[]) => {
     records.replaceChildren();
+    recordNodes.clear();
     for (const batch of batches) {
-      const entry = createElement(doc, "details");
-      entry.append(
-        createElement(doc, "summary", undefined, {
+      const entry = createElement(doc, "article", "llm-annotation-record");
+      entry.tabIndex = -1;
+      recordNodes.set(batch.id, entry);
+      const heading = createElement(
+        doc,
+        "div",
+        "llm-annotation-record-heading",
+      );
+      heading.append(
+        createElement(doc, "p", undefined, {
           textContent: `${new Date(batch.createdAt).toLocaleString()} · ${annotationStatusLabel(batch.status)}`,
         }),
       );
+      const actions = annotationReplyActions(batch);
+      if (actions.parse)
+        heading.append(
+          button(
+            batch.status === "applied" ? "修复已登记答案格式" : "本地重新解析",
+            async () => {
+              await recoverAnnotationReplyBatch(batch.id, "parse");
+              await refresh();
+              deps.onRepliesChanged?.();
+            },
+          ),
+        );
+      if (actions.allowRetry)
+        heading.append(
+          button("允许重新选择", async () => {
+            const expectedRevision = batch.revision;
+            const confirm = doc.defaultView?.confirm;
+            if (!confirm) throw new Error("无法显示风险确认；未解除占用。");
+            if (
+              !confirm.call(
+                doc.defaultView,
+                "此请求可能已经发送。允许重新选择后，旧批次永远不会再写回，但旧答案仍保留。再次发送可能重复计费。是否允许重新选择？",
+              )
+            )
+              return;
+            await recoverAnnotationReplyBatch(
+              batch.id,
+              "allow-retry",
+              expectedRevision,
+            );
+            await refresh();
+            deps.onRepliesChanged?.();
+            setStatus(
+              "已允许重新选择。请自行勾选便签，再用聊天发送按钮提交；未自动发送。",
+            );
+          }),
+        );
+      entry.append(heading);
       const answers = createElement(doc, "div");
       renderAnnotationBatchAnswers(answers, batch);
       entry.append(answers);
-      // Stored pages belong to this batch, never the current reader or selection.
       const sources = createElement(doc, "details");
       sources.append(
         createElement(doc, "summary", undefined, {
           textContent: "已发送来源页图",
         }),
       );
-      for (const page of batch.pages)
-        sources.append(
+      for (const page of batch.pages) {
+        const figure = createElement(doc, "figure");
+        const caption = createElement(doc, "figcaption");
+        const target = batch.targets.find(
+          (t) =>
+            t.attachmentID === page.attachmentID &&
+            (t.position.pageIndex === page.pageIndex ||
+              (t.position.nextPageRects &&
+                t.position.pageIndex + 1 === page.pageIndex)),
+        );
+        if (target)
+          caption.append(
+            createAnnotationSourceButton(
+              doc,
+              target,
+              setStatus,
+              page.pageIndex,
+            ),
+          );
+        figure.append(
+          caption,
           createElement(doc, "img", undefined, {
             src: page.dataURL,
-            alt: `PDF ${page.attachmentID}，第 ${page.pageIndex + 1} 页（已发送）`,
+            alt: `${target?.title || "未命名 PDF"}，第 ${page.pageIndex + 1} 页（已发送）`,
           }),
         );
+        sources.append(figure);
+      }
       entry.append(sources);
-      if (batch.rawAnswer !== undefined)
-        entry.append(
-          button("本地重新解析", async () => {
-            await reparseAnnotationReplyBatch(batch.id);
-            await refresh();
-            deps.onRepliesChanged?.();
-          }),
-        );
       records.append(entry);
     }
     if (!batches.length)
@@ -256,10 +343,13 @@ export function createAnnotationReplyController(deps: ControllerDeps) {
     const current = ++revision;
     const scope = await deps.getScope();
     const key = scopeIdentity(scope);
-    const [nextCandidates, nextBatches] = await Promise.all([
-      listAnnotationReplyCandidates(scope.attachmentIDs),
-      loadAnnotationReplyBatches(scope.conversationKey),
-    ]);
+    const nextCandidates = await listAnnotationReplyCandidates(
+      scope.attachmentIDs,
+    );
+    const nextBatches = await loadAnnotationReplyBatches(
+      scope.conversationKey,
+      nextCandidates.flatMap((c) => (c.batchId ? [c.batchId] : [])),
+    );
     if (disposed || current !== revision) return;
     // Scope may move while PDF/DB reads await. Never display the old scope as current.
     if (
@@ -284,6 +374,11 @@ export function createAnnotationReplyController(deps: ControllerDeps) {
   const tools = createElement(doc, "div", "llm-annotation-tools");
   tools.append(
     button("刷新", refresh),
+    button("全选可用便签", async () => {
+      for (const candidate of candidates) selection.select(candidate, true);
+      invalidatePreview();
+      renderList();
+    }),
     button("清空选择", async () => {
       selection.clear();
       invalidatePreview();
@@ -316,7 +411,8 @@ export function createAnnotationReplyController(deps: ControllerDeps) {
     trigger.setAttribute("aria-expanded", "false");
   };
   tools.append(button("关闭", async () => close()));
-  root.append(tools, status, chosen, list, preview, history);
+  content.append(list, preview, history);
+  root.append(tools, status, chosen, content);
   (toolbar?.closest(".llm-panel") || deps.body).append(root);
   trigger.addEventListener("click", () => {
     if (!root.hidden) {
@@ -366,47 +462,82 @@ export function createAnnotationReplyController(deps: ControllerDeps) {
       root.remove();
     },
     hasSelection: () => !disposed && selection.targets().length > 0,
-    prepare: async (key: number): Promise<AnnotationReplyBatch | undefined> => {
+    run: async (
+      key: number,
+      options: Pick<
+        AnnotationReplyRunOptions,
+        "signal" | "isActive" | "imageBudget"
+      >,
+      send: (packet: AnnotationReplyPacket) => Promise<unknown>,
+    ): Promise<void> => {
       if (disposed) throw new Error("便签入口已关闭；未发送。");
+      const runScopeKey = scopeKey;
       const targets = selection.targets();
-      if (!targets.length) return undefined;
+      const preparedPages =
+        previewKey === selectionKey() ? cachedPages : undefined;
+      if (!targets.length)
+        throw new Error("便签选择已变化；请重新选择后发送。");
       const scope = await deps.getScope();
-      if (scope.conversationKey !== key || scopeIdentity(scope) !== scopeKey) {
-        selection.clear();
-        invalidatePreview();
-        renderList();
+      if (
+        scope.conversationKey !== key ||
+        scopeIdentity(scope) !== runScopeKey
+      ) {
+        if (!disposed && scopeKey === runScopeKey) {
+          selection.clear();
+          invalidatePreview();
+          renderList();
+        }
         throw new Error("对话或 PDF 已切换；请刷新并重新选择便签。");
       }
-      const batch = await prepareAnnotationReplyBatch(
-        targets,
-        key,
-        previewKey === selectionKey() ? cachedPages : undefined,
-      );
-      selection.clear();
-      invalidatePreview();
-      candidates = candidates.map((candidate) =>
-        targets.some(
-          (target) =>
-            target.identity === candidate.target?.identity &&
-            target.version === candidate.target.version,
-        )
-          ? {
-              ...candidate,
-              blocked: `inflight: ${batch.id}`,
-              batchStatus: "inflight",
-              batchId: batch.id,
+      try {
+        await runAnnotationReplies(
+          {
+            ...options,
+            selection: targets,
+            conversationKey: key,
+            preparedPages,
+          },
+          async (packet) => {
+            if (!disposed && scopeKey === runScopeKey) {
+              for (const target of targets) {
+                if (selection.has(target))
+                  selection.select(
+                    {
+                      target,
+                      annotationID: target.annotationID,
+                      label: target.comment,
+                    },
+                    false,
+                  );
+              }
+              invalidatePreview();
+              candidates = candidates.map((candidate) =>
+                targets.some(
+                  (target) =>
+                    target.identity === candidate.target?.identity &&
+                    target.version === candidate.target.version,
+                )
+                  ? {
+                      ...candidate,
+                      blocked: `inflight: ${packet.batchId}`,
+                      batchStatus: "inflight",
+                      batchId: packet.batchId,
+                    }
+                  : candidate,
+              );
+              renderList();
+              setStatus("正在处理便签；派发后的未确认版本不会重发。");
             }
-          : candidate,
-      );
-      batches = [batch, ...batches];
-      renderList();
-      renderHistory(batches);
-      setStatus("正在处理便签；派发后的未确认版本不会重发。");
-      return batch;
-    },
-    settled: async () => {
-      if (!disposed) await refresh();
-      deps.onRepliesChanged?.();
+            return send(packet);
+          },
+        );
+      } finally {
+        if (!disposed && scopeKey === runScopeKey) {
+          setStatus("便签运行已结束，正在读取保存状态。");
+          void run(refresh);
+        }
+        if (!disposed) deps.onRepliesChanged?.();
+      }
     },
   };
 }
